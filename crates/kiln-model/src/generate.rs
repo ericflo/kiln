@@ -1132,6 +1132,7 @@ pub struct PagedBatchedPrefillState {
     block_size: usize,
     allocated_blocks: Vec<u32>,
     split_pos: Option<usize>,
+    prefix_cache_registration_allowed: bool,
     prefill_split_snapshot: Option<LinearAttentionState>,
     streaming: bool,
     prefill_duration: std::time::Duration,
@@ -4199,7 +4200,7 @@ impl ModelRunner {
         block_manager: &Mutex<BlockManager>,
         paged_cache: &PagedKvCache,
         cached_prefix: Option<PagedPrefixReuse>,
-        capture_prefix_split: bool,
+        prefix_cache_registration_allowed: bool,
         cancel: Option<&CancelHandle>,
     ) -> Result<PagedBatchedDecodeState> {
         let start = self.begin_paged_batched_decode_with_prefix_cache(
@@ -4208,7 +4209,7 @@ impl ModelRunner {
             block_manager,
             paged_cache,
             cached_prefix,
-            capture_prefix_split,
+            prefix_cache_registration_allowed,
             cancel,
         )?;
         let state = match start {
@@ -4268,7 +4269,7 @@ impl ModelRunner {
         block_manager: &Mutex<BlockManager>,
         _paged_cache: &PagedKvCache,
         cached_prefix: Option<PagedPrefixReuse>,
-        capture_prefix_split: bool,
+        prefix_cache_registration_allowed: bool,
         cancel: Option<&CancelHandle>,
     ) -> Result<PagedBatchedPrefillStart> {
         self.begin_paged_batched_decode_with_prefix_cache_and_behavior_logprobs(
@@ -4277,7 +4278,7 @@ impl ModelRunner {
             block_manager,
             _paged_cache,
             cached_prefix,
-            capture_prefix_split,
+            prefix_cache_registration_allowed,
             false,
             cancel,
         )
@@ -4294,7 +4295,7 @@ impl ModelRunner {
         block_manager: &Mutex<BlockManager>,
         _paged_cache: &PagedKvCache,
         cached_prefix: Option<PagedPrefixReuse>,
-        capture_prefix_split: bool,
+        prefix_cache_registration_allowed: bool,
         capture_behavior_logprobs: bool,
         cancel: Option<&CancelHandle>,
     ) -> Result<PagedBatchedPrefillStart> {
@@ -4336,7 +4337,7 @@ impl ModelRunner {
             cached_prefix,
             block_size,
             allocated_blocks.clone(),
-            capture_prefix_split,
+            prefix_cache_registration_allowed,
             capture_behavior_logprobs,
             cancel,
         );
@@ -4894,7 +4895,7 @@ impl ModelRunner {
         cached_prefix: Option<PagedPrefixReuse>,
         block_size: usize,
         allocated_blocks: Vec<u32>,
-        capture_prefix_split: bool,
+        prefix_cache_registration_allowed: bool,
         capture_behavior_logprobs: bool,
         cancel: Option<&CancelHandle>,
     ) -> Result<PagedBatchedPrefillStart> {
@@ -4944,7 +4945,7 @@ impl ModelRunner {
                 block_size,
                 prefill_split_snapshot: None,
                 rolling_snapshot: None,
-                prefix_cache_registration_allowed: true,
+                prefix_cache_registration_allowed,
                 id: next_decode_row_id(),
             }));
         }
@@ -4954,9 +4955,12 @@ impl ModelRunner {
             "prefix cache hit must leave at least one suffix token"
         );
         check_cancelled(cancel)?;
-        let capture_prefix_split =
-            capture_prefix_split && prefix_cache_split_snapshot_allowed(self.backend.as_ref());
-        let split_pos = capture_prefix_split
+        // Keep prefill geometry invariant when cache storage is disabled. The
+        // final block-aligned split changes the recurrent-state precision
+        // boundary on GDN models, so coupling it to cache admission can change
+        // greedy output even on a cache miss. Registration policy controls
+        // only snapshot/publication work.
+        let split_pos = prefix_cache_split_snapshot_allowed(self.backend.as_ref())
             .then(|| strict_prompt_prefix_split_pos(prompt_tokens.len(), cached_tokens, block_size))
             .flatten();
         let streaming = self
@@ -4973,6 +4977,7 @@ impl ModelRunner {
                 block_size,
                 allocated_blocks,
                 split_pos,
+                prefix_cache_registration_allowed,
                 prefill_split_snapshot: None,
                 streaming,
                 prefill_duration: std::time::Duration::ZERO,
@@ -5158,7 +5163,10 @@ impl ModelRunner {
         {
             cancel.report_prefill_tokens_completed(state.processed_tokens() as u64);
         }
-        if state.split_pos == Some(chunk_end) && state.prefill_split_snapshot.is_none() {
+        if state.prefix_cache_registration_allowed
+            && state.split_pos == Some(chunk_end)
+            && state.prefill_split_snapshot.is_none()
+        {
             state.prefill_split_snapshot = self
                 .authoritative_prefix_snapshot(
                     &state.linear_state,
@@ -5196,13 +5204,17 @@ impl ModelRunner {
         } else {
             (sample_first_decode_token(logits, params)?, None)
         };
-        let registration = self.completed_prompt_registration(
-            &state.prompt_tokens,
-            &state.block_table,
-            &state.linear_state,
-            state.block_size,
-            Some(PagedPrefixNextToken::Logits(logits.clone())),
-        )?;
+        let registration = if state.prefix_cache_registration_allowed {
+            self.completed_prompt_registration(
+                &state.prompt_tokens,
+                &state.block_table,
+                &state.linear_state,
+                state.block_size,
+                Some(PagedPrefixNextToken::Logits(logits.clone())),
+            )?
+        } else {
+            None
+        };
 
         let mut state = prefill
             .take()
@@ -5235,7 +5247,7 @@ impl ModelRunner {
                 block_size: state.block_size,
                 prefill_split_snapshot,
                 rolling_snapshot: None,
-                prefix_cache_registration_allowed: true,
+                prefix_cache_registration_allowed: state.prefix_cache_registration_allowed,
                 id: state.id,
             }),
         })

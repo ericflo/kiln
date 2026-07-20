@@ -209,6 +209,15 @@ When multiple requests share a common prompt prefix (e.g., a system prompt), the
 
 Both caches use the same block-aligned hash scheme (each block hash mixes the parent block's hash with its own 16 tokens, so identical token runs at different positions still produce different hashes). Cached blocks are reference-counted and LRU-evicted when the budget is full. Future work consolidates the two paths so the radix tree backs production as well.
 
+The batching actor keeps cache admission separate from numerical prefill
+geometry. Backends that support block-aligned prefix snapshots always preserve
+the same final prompt split on an enabled miss and on a disabled-cache fresh
+prefill. Disabling the cache suppresses lookup, snapshot, registration,
+retention, and rolling-snapshot work, but it cannot silently change token or
+layer quanta. This is required for hybrid GDN models: a resumable chunk boundary
+is also a recurrent-state precision boundary, so coupling it to a storage
+toggle can change greedy output without any cache hit.
+
 ### VRAM Budget
 
 At startup, Kiln detects GPU memory via the active backend (overridable with

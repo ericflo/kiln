@@ -1678,6 +1678,23 @@ attribute the divergence to cached reuse: the failed arm proves the cache was
 inactive, while the enabled arms may still differ in initialization,
 registration, snapshot, or numerical routing before any cache hit.
 
+The immediate source audit found that numerical-routing difference. The model
+API's `capture_prefix_split` boolean did more than its name promised: it also
+created the last block-aligned prompt chunk. For `normal-07`, the enabled miss
+split the 2,432-token prompt at token 2,416, while disabled mode retained the
+ordinary 128-token final quantum. Each completed GDN prefill chunk applies a
+recurrent-state precision boundary, so a cache storage toggle changed model
+numerics without serving a hit. Corrected source gives the prefill state an
+explicit registration capability, preserves the canonical block-aligned split
+regardless of that capability, and gates snapshotting, completed-prompt
+registration, rolling snapshots, and publication on the capability alone. A
+portable tiny-GDN integration runs both arms through 17-token/one-layer quanta
+and requires identical chunk schedules, first tokens, recurrent states, and
+following decode tokens while also requiring no disabled-arm registration or
+snapshot. This closes the source-level coupling only. The prefix-cache-off arm
+must pass again on ROCm from the clean pushed corrective source before stable
+or soak execution resumes.
+
 Five measured-window metrics close the cooperative-idle evidence. The configured
 gauge is `batching_actor_cycle_idle_ms_configured`. The monotonic count and
 elapsed-time deltas are `batching_actor_cycle_idle_count` and

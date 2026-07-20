@@ -1207,6 +1207,20 @@ kiln_rocm_graph_fallback_duration_seconds_max</code></pre>
           buffers; host-visible staging checks its exact bucket first and then the smallest sufficient idle larger
           bucket on the same device and memory type. A borrowed, undersized, or cross-device buffer is never reused.
         </p>
+        <h3 id="prefix-cache-route-invariance" class="text-lg font-semibold mt-6 mb-2">Prefix-cache route invariance</h3>
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          On the batching actor, cache admission changes storage and reuse, not numerical prefill geometry. A
+          cache-enabled miss and a cache-disabled fresh prefill keep the same block-aligned final prompt boundary
+          and the same configured token and layer quanta. With caching disabled, Kiln performs no lookup,
+          recurrent-state snapshot, prompt registration, rolling snapshot, retained-block publication, or lease.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          The distinction is correctness-critical for hybrid GDN models. Every resumable prompt-chunk boundary
+          materializes recurrent state at the configured precision; changing the boundary can change greedy output
+          even when the cache has never served a hit. Route-equivalence coverage therefore compares the first token,
+          recurrent state, and following decode token with registration enabled and disabled. Accelerator
+          qualification remains required before a corrected source checkpoint can replace a failed device receipt.
+        </p>
         <h3 id="vulkan-prefix-cache" class="text-lg font-semibold mt-6 mb-2">Vulkan cross-request prefix reuse</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           Production currently correctness-quarantines the complete Vulkan prefix cache. A guarded fresh-process

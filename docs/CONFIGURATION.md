@@ -1631,6 +1631,17 @@ publishes the same two views. Prometheus publishes
 `kiln_batching_engine_prefix_cache_enabled` for the actor capability plus the
 existing `kiln_prefix_cache_*` activity and residency series.
 
+For batching-actor requests, `enabled` changes storage and reuse only. Cache
+admission does not change the canonical block-aligned final prefill boundary:
+an enabled cache miss and a disabled-cache fresh prefill execute the same token
+and layer quanta. With the cache disabled, Kiln skips lookup, recurrent-state
+snapshotting, prompt registration, rolling snapshots, retained blocks, and
+leases; it does not select a numerically different prompt partition. This
+invariant matters for hybrid GDN models because each resumable chunk boundary
+materializes recurrent state at the configured precision. Qualification must
+compare tokens, recurrent state, and the following decode token before treating
+the cache-off arm as a storage-only diagnostic.
+
 While Vulkan is quarantined, all prefix-cache lookup, hit, miss, retained-block,
 retained-entry, recurrent-state, lease, and pending-release values must remain
 zero. Requests use fresh generic prefill, including exact repeats. There is no

@@ -4650,7 +4650,7 @@ fn assert_resumable_paged_prefill_matches_monolithic(
         PREFIX_TEST_NUM_BLOCKS,
         PREFIX_TEST_BLOCK_SIZE,
     ));
-    let chunked_cache = prefix_test_paged_cache_on(&config, cache_device);
+    let chunked_cache = prefix_test_paged_cache_on(&config, cache_device.clone());
     let start = runner
         .begin_paged_batched_decode_with_prefix_cache_and_behavior_logprobs(
             &prompt,
@@ -4751,6 +4751,72 @@ fn assert_resumable_paged_prefill_matches_monolithic(
         "block-aligned split snapshot",
     );
 
+    let registration_disabled_blocks = Mutex::new(BlockManager::new(
+        PREFIX_TEST_NUM_BLOCKS,
+        PREFIX_TEST_BLOCK_SIZE,
+    ));
+    let registration_disabled_cache = prefix_test_paged_cache_on(&config, cache_device);
+    let start = runner
+        .begin_paged_batched_decode_with_prefix_cache_and_behavior_logprobs(
+            &prompt,
+            &sampling,
+            &registration_disabled_blocks,
+            &registration_disabled_cache,
+            None,
+            false,
+            true,
+            None,
+        )
+        .expect("begin registration-disabled resumable prefill");
+    let PagedBatchedPrefillStart::Prefilling(prefill) = start else {
+        panic!("an uncached prompt must require registration-disabled prefill")
+    };
+    let mut prefill = Some(prefill);
+    let mut registration_disabled_chunks = Vec::new();
+    let mut registration_disabled_scheduled = Vec::new();
+    let mut registration_disabled = loop {
+        let progress = runner
+            .advance_paged_batched_prefill_with_layer_budget(
+                &mut prefill,
+                &sampling,
+                &registration_disabled_cache,
+                17,
+                1,
+                None,
+            )
+            .expect("advance registration-disabled resumable prefill");
+        runner
+            .synchronize_external_yield("registration-disabled prefill parity quantum")
+            .unwrap();
+        if progress.tokens_scheduled > 0 {
+            registration_disabled_scheduled.push(progress.tokens_scheduled);
+        }
+        if progress.tokens_processed > 0 {
+            registration_disabled_chunks.push(progress.tokens_processed);
+        }
+        if let Some(state) = progress.decode_state {
+            break state;
+        }
+    };
+
+    assert_eq!(registration_disabled_chunks, chunks);
+    assert_eq!(registration_disabled_scheduled, scheduled_chunks);
+    assert_eq!(registration_disabled.next_token, chunked.next_token);
+    assert_eq!(
+        registration_disabled.next_token_logprob,
+        chunked.next_token_logprob
+    );
+    assert_eq!(registration_disabled.seq_len, chunked.seq_len);
+    assert!(registration_disabled.registration.is_none());
+    assert!(registration_disabled.prefill_split_snapshot.is_none());
+    assert!(!registration_disabled.prefix_cache_registration_allowed);
+    assert_linear_attention_state_close(
+        &registration_disabled.linear_state,
+        &chunked.linear_state,
+        1e-4,
+        "registration-disabled completed prefill state",
+    );
+
     let control_decode = runner
         .paged_batched_decode_step(
             &mut [&mut control],
@@ -4773,6 +4839,17 @@ fn assert_resumable_paged_prefill_matches_monolithic(
         .unwrap();
     assert_eq!(chunked_decode[0].token_id, control_decode[0]);
     assert_eq!(chunked_decode[0].logprob, 0.0);
+    let registration_disabled_decode = runner
+        .paged_batched_decode_step_with_behavior_logprobs(
+            &mut [&mut registration_disabled],
+            std::slice::from_ref(&sampling),
+            &registration_disabled_cache,
+        )
+        .expect("decode after registration-disabled resumable prefill");
+    runner
+        .synchronize_external_yield("registration-disabled post-prefill decode")
+        .unwrap();
+    assert_eq!(registration_disabled_decode, chunked_decode);
     assert_eq!(chunked.seq_len, control.seq_len);
     assert_linear_attention_state_close(
         &chunked.linear_state,
@@ -4794,8 +4871,13 @@ fn assert_resumable_paged_prefill_matches_monolithic(
         .lock()
         .unwrap()
         .free_all(&chunked.allocated_blocks);
+    registration_disabled_blocks
+        .lock()
+        .unwrap()
+        .free_all(&registration_disabled.allocated_blocks);
     assert_eq!(control_blocks.lock().unwrap().num_used(), 0);
     assert_eq!(chunked_blocks.lock().unwrap().num_used(), 0);
+    assert_eq!(registration_disabled_blocks.lock().unwrap().num_used(), 0);
 }
 
 #[test]

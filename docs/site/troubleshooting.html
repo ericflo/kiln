@@ -708,8 +708,13 @@ kiln serve --config rocm-stream-ordered.toml</code></pre>
           environment override. It must report a false batching capability and zero cache capacity, lookup,
           hit, lease, pending-release, retained-block, entry, and recurrent-state-byte evidence at every
           attested boundary. Its receipt retains the enabled bit, baseline residency, lookup/hit deltas, and
-          final residency. A semantic pass with cache disabled localizes the defect to prefix/recurrent-state
-          reuse; another failure rules that axis out without changing graph or KV-resize policy.
+          final residency. Do not interpret a failure as proof against the cache axis unless the tested source also
+          proves route invariance. Before the July 20 correction, this toggle changed the final long-prompt chunk
+          boundary on GDN models even on an enabled-cache miss, so the storage A/B also changed recurrent-state
+          numerics. Current source keeps the block-aligned boundary and configured token/layer quanta identical,
+          suppresses only lookup/snapshot/registration/retention work, and has portable first-token, recurrent-state,
+          and following-token parity coverage. A clean source-bound accelerator rerun is still required before that
+          correction closes an earlier failed receipt.
         </p>
 
         <h3 class="font-semibold mt-6 mb-3">Run graph lifecycle and byte-budget A/Bs separately</h3>
