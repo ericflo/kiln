@@ -2713,34 +2713,37 @@ python3 scripts/qualification/run.py \
   qualification/workloads/serving-rocm-development-soak-v1.json
 ```
 
-The driver builds once and starts one server process with 12 active-request
-slots. Its source-bound TOML pins the route-invariant 256-token ROCm prefill
-boundary and a 512-token combined scheduling budget, leaving room for the full
-prefill chunk beside the effective eight-row decode width. Health and trusted
-debug must report both values with `config_file` provenance. Its graph-required
-operating point reserves one protected geometry for
-each declared active owner and pre-reserves zero transition entries, so the
-checked 12-entry ceiling is `12 * 1 + 0` and matches the product default. Runtime
+The driver builds once and starts one server process with eight active-request
+slots: four ordinary decode rows plus four staged prefill slots. Its
+source-bound TOML pins the route-invariant 256-token ROCm prefill boundary, a
+32-layer prefill quantum, a 512-token combined scheduling budget, effective
+decode width four, and a 50 ms cooperative actor-cycle idle. Health and trusted
+debug must report every value with `config_file` provenance. Its graph-required
+operating point reserves one protected geometry for each declared active owner
+and pre-reserves zero transition entries, so the checked eight-entry ceiling is
+`8 * 1 + 0`. Runtime
 admission consumes unused global headroom freely. Only at entry or byte
 saturation does it reclaim idle owners, followed by the minimum deterministic
 fair-LRU active entries; the incoming candidate counts toward its owner's share
 and one graph remains protected for every active owner. This settled relief
-creates transition room only when needed instead of retaining twelve additional
+creates transition room only when needed instead of retaining additional
 native graph objects continuously. Every narrow retirement preserves recurrent-
 state slots and continuity. The driver warms ROCm graphs and fills the bounded
 prefix cache to its declared entry/state capacity before recording the post-
 warmup memory baseline or starting the 30-minute measurement clock.
 
-The smaller operating point is evidence-based. With the same Strix Halo binary,
-model, seed, workload, and 120-second minimum measurement, 12 entries completed
+The preceding twelve-request operating point was evidence-based. With the same
+Strix Halo binary, model, seed, workload, and 120-second minimum measurement, 12 entries completed
 the identical first seven-wave sequence in 115.461 seconds versus 144.617
 seconds at 24 entries, a 25.3 percent improvement. The 12-entry arm performed
 seven settled measured capacity transactions and twelve captures with zero
 fallback, graph failure, or live-slot loss. Its active SCLK was lower, not
 higher, so the result isolates excessive retained native graph population on
-this host rather than a graphics-clock advantage. This does not establish 12 as
-an optimal cache size for every device; it binds the qualified Strix Halo
-operating point and keeps larger deployments subject to their own receipts.
+this host rather than a graphics-clock advantage. It does not prove that eight
+entries are safe, sufficient, or optimal. The current eight-entry value follows
+the candidate's smaller active-request capacity and must earn its own
+source-bound mixed-load and soak receipts; larger deployments remain subject to
+their own qualification.
 It then exercises complete fixed-prompt concurrency cycles, including periodic
 cancellation, until GPU-used and server-RSS deltas remain within 64 MiB and 16
 MiB respectively for two consecutive cycles. This convergence requires at
@@ -2749,17 +2752,21 @@ allocator into the baseline. The result retains completed cycle, request,
 cancellation, final-delta, and maximum-delta metrics even when convergence
 fails before the measured phase begins.
 
-The measured phase keeps that process under the same fixed-output waves at
-concurrency 1, 8, and 12 with prompt lengths spanning multiple sequence
-buckets. Every fifth wave also cancels a longer request using a unique marker.
+The measured phase keeps that process under the same fixed-output client waves
+at concurrency 1, 8, and 12 with prompt lengths spanning multiple sequence
+buckets. The 12-way client wave is deliberate admission pressure; at most eight
+requests may be active and the remainder wait outside the active set. Every
+fifth wave also cancels a longer request using a unique marker.
 Slot prompts repeat across waves so prefix hits and cached-block reuse are
 measured. After each wave, the driver requires the engine to drain, every used
 KV block to be owned by the prefix cache, zero active cache leases or pending
 releases, stable cache residency, zero active graph slots or row timelines,
-at most 12 retained graphs and slots, the process to remain alive, and
+at most eight retained graphs and slots, the process to remain alive, and
 runtime/debug policy attestations to remain consistent. Idle slots and their
 native graphs remain resident for reuse. The final drain requires every
-retained slot to be idle, and the measured phase must exercise slot reuse.
+retained slot to be idle, the measured phase must exercise slot reuse, and the
+cooperative actor wait must remain source-attested rather than being treated as
+thermal-sensor pacing.
 
 Every response in graph warmup, prefix-cache warmup, stabilization, and
 measurement must also satisfy the declared ascending-sequence oracle. A

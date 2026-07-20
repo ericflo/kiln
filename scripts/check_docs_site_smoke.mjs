@@ -1306,9 +1306,13 @@ function validateSftLossRouteDocumentationSourceContract() {
     'selected owner may differ from the candidate owner',
     'no unused global headroom',
     'reusable exact geometries without forced recapture',
-    'product-default 12 entries for 12 declared active owners',
+    'uses eight entries for eight declared active owners',
     'pre-reserves zero transition entries',
+    'four ordinary decode rows',
+    '256-token/32-layer prefill quantum',
+    '50 ms cooperative actor-cycle idle',
     'identical first seven-wave sequence 25.3 percent faster',
+    'does not qualify eight entries or the new duty cycle',
   ]);
   if (missingRocmGraphTerms.length > 0) {
     fail(`docs/site/architecture.html: ROCm owner-geometry contract missing terms: ${missingRocmGraphTerms.join(', ')}`);
@@ -1328,10 +1332,15 @@ function validateSftLossRouteDocumentationSourceContract() {
   const troubleshootingHtml = readFileSync(resolve(repoRoot, 'docs/site/troubleshooting.html'), 'utf8');
   const troubleshootingText = normalizedHtmlText(troubleshootingHtml);
   const missingRocmSafetyTerms = missingNormalizedTerms(troubleshootingText, [
-    '12 entries, matching the product default',
-    '12 declared active owners and zero pre-reserved transition entries',
+    'candidate provisions eight entries',
+    'eight declared active owners and zero pre-reserved transition entries',
+    'four ordinary decode rows',
+    '256-token/32-layer prefill quantum',
+    'batching.actor_cycle_idle_ms=50',
     'identical first seven-wave sequence 25.3 percent faster',
     'safely settled seven measured capacity transactions with zero fallback',
+    'does not qualify the new eight-entry candidate',
+    'guarded mixed-load receipt and then its 30-minute soak',
     'minimum fair-LRU active relief',
     'unused global headroom remains shared',
     '8 GiB MemAvailable',
