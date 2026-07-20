@@ -1521,6 +1521,25 @@ fn generated_capability_report_lists_training_loss_policy() {
 }
 
 #[test]
+fn generated_capability_report_exposes_no_decode_fallback_override() {
+    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(&report_path).expect("capability report json should be readable"),
+    )
+    .expect("capability report json should parse");
+
+    let policies = report["decode_hot_path_policy"]
+        .as_object()
+        .expect("decode_hot_path_policy should be an object");
+    for backend in ["cpu", "cuda", "rocm", "metal", "vulkan"] {
+        assert!(
+            policies[backend].get("debug_opt_in").is_none(),
+            "{backend} decode policy must not advertise a mutable fallback override"
+        );
+    }
+}
+
+#[test]
 fn generated_capability_report_lists_optimizer_dispatch_policy() {
     let report_path = workspace_root().join("docs/backend-capability-report.json");
     let report: Value = serde_json::from_str(

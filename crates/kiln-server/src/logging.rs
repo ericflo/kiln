@@ -94,7 +94,14 @@ fn apply_logging_table(logging: &mut LoggingConfig, contents: &str) {
 
 /// Build an `EnvFilter` from `RUST_LOG` (if set) or the provided level string.
 pub fn build_filter(level: &str) -> Result<EnvFilter> {
-    match std::env::var("RUST_LOG") {
+    build_filter_with_rust_log(level, std::env::var("RUST_LOG"))
+}
+
+fn build_filter_with_rust_log(
+    level: &str,
+    rust_log: std::result::Result<String, std::env::VarError>,
+) -> Result<EnvFilter> {
+    match rust_log {
         Ok(raw) => {
             return EnvFilter::try_new(&raw)
                 .with_context(|| format!("RUST_LOG contains an invalid filter, got {raw:?}"));
@@ -221,21 +228,10 @@ format = "json"
         assert_eq!(retired_only.format, defaults.format);
     }
 
-    // NOTE: env var manipulation is unsafe in Rust 1.78+ because it is not
-    // thread-safe. We wrap each call in an unsafe block. These tests are
-    // serialized by cargo test's default single-threaded test runner for
-    // the lib target, so this is safe in practice.
-
     #[test]
     fn test_build_filter_default() {
-        let _env_guard = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        // Ensure RUST_LOG is not set for this test
-        unsafe {
-            std::env::remove_var("RUST_LOG");
-        }
-        let filter = build_filter("info").unwrap();
+        let filter =
+            build_filter_with_rust_log("info", Err(std::env::VarError::NotPresent)).unwrap();
         let s = format!("{filter}");
         assert!(
             s.contains("info"),
@@ -245,26 +241,19 @@ format = "json"
 
     #[test]
     fn test_build_filter_custom_level() {
-        let _env_guard = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        unsafe {
-            std::env::remove_var("RUST_LOG");
-        }
-        let filter = build_filter("debug").unwrap();
+        let filter =
+            build_filter_with_rust_log("debug", Err(std::env::VarError::NotPresent)).unwrap();
         let s = format!("{filter}");
         assert!(s.contains("debug"), "filter should contain debug: {s}");
     }
 
     #[test]
     fn test_build_filter_custom_directive() {
-        let _env_guard = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        unsafe {
-            std::env::remove_var("RUST_LOG");
-        }
-        let filter = build_filter("kiln=trace,tower_http=warn").unwrap();
+        let filter = build_filter_with_rust_log(
+            "kiln=trace,tower_http=warn",
+            Err(std::env::VarError::NotPresent),
+        )
+        .unwrap();
         let s = format!("{filter}");
         // Custom directive is parsed as-is (not expanded to the standard triple)
         assert!(
@@ -275,24 +264,18 @@ format = "json"
 
     #[test]
     fn malformed_filter_inputs_are_fatal_and_identify_the_value() {
-        let _env_guard = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        unsafe {
-            std::env::remove_var("RUST_LOG");
-        }
-        let error = build_filter("kiln=definitely-not-a-level").unwrap_err();
+        let error = build_filter_with_rust_log(
+            "kiln=definitely-not-a-level",
+            Err(std::env::VarError::NotPresent),
+        )
+        .unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("logging.level"), "{message}");
         assert!(message.contains("kiln=definitely-not-a-level"), "{message}");
 
-        unsafe {
-            std::env::set_var("RUST_LOG", "kiln=definitely-not-a-level");
-        }
-        let error = build_filter("info").unwrap_err();
-        unsafe {
-            std::env::remove_var("RUST_LOG");
-        }
+        let error =
+            build_filter_with_rust_log("info", Ok("kiln=definitely-not-a-level".to_owned()))
+                .unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("RUST_LOG"), "{message}");
         assert!(message.contains("kiln=definitely-not-a-level"), "{message}");

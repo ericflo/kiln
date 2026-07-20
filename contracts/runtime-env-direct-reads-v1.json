@@ -66,19 +66,6 @@
       "surface": "build-script"
     },
     {
-      "api": "remove_var",
-      "argument": "KILN_DISABLE_WEIGHTED_LM_HEAD_PREP",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
       "api": "set_var",
       "argument": "NVCC",
       "argument_kind": "literal",
@@ -103,32 +90,6 @@
       "path": "crates/kiln-rmsnorm-kernel/build.rs",
       "phase": "build-time",
       "surface": "build-script"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_DISABLE_RMSNORM_BACKWARD",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "example source surface",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/examples/phase10_rmsnorm_bench.rs",
-      "phase": "runtime",
-      "surface": "example"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_DISABLE_RMSNORM_BACKWARD",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "example source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/examples/phase10_rmsnorm_bench.rs",
-      "phase": "runtime",
-      "surface": "example"
     },
     {
       "api": "remove_var",
@@ -171,33 +132,7 @@
     },
     {
       "api": "remove_var",
-      "argument": "RUST_LOG",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 5,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/src/logging.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "RUST_LOG",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-server/src/logging.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "self . 0",
+      "argument": "name",
       "argument_kind": "expression",
       "classification": "test_only",
       "classification_basis": "integration-test source surface",
@@ -210,16 +145,16 @@
     },
     {
       "api": "set_var",
-      "argument": "KILN_TEST_REMOTE_TEACHER_HANDLE_SECRET_716D3C",
-      "argument_kind": "literal",
+      "argument": "name",
+      "argument_kind": "expression",
       "classification": "test_only",
-      "classification_basis": "unit-test source surface",
+      "classification_basis": "integration-test source surface",
       "count": 1,
       "language": "rust",
       "operation": "set",
       "path": "crates/kiln-server/tests/remote_teacher_identity.rs",
       "phase": "runtime",
-      "surface": "unit-test"
+      "surface": "integration-test"
     },
     {
       "api": "set_var",
@@ -249,7 +184,7 @@
     },
     {
       "api": "remove_var",
-      "argument": "& env_name",
+      "argument": "name",
       "argument_kind": "expression",
       "classification": "test_only",
       "classification_basis": "unit-test source surface",
@@ -262,7 +197,7 @@
     },
     {
       "api": "set_var",
-      "argument": "& env_name",
+      "argument": "name",
       "argument_kind": "expression",
       "classification": "test_only",
       "classification_basis": "unit-test source surface",
@@ -2031,6 +1966,19 @@
       "surface": "integration-test"
     },
     {
+      "api": "var_os",
+      "argument": "name",
+      "argument_kind": "expression",
+      "classification": "test_only",
+      "classification_basis": "integration-test source surface",
+      "count": 1,
+      "language": "rust",
+      "operation": "read",
+      "path": "crates/kiln-server/tests/remote_teacher_identity.rs",
+      "phase": "runtime",
+      "surface": "integration-test"
+    },
+    {
       "api": "var",
       "argument": "var",
       "argument_kind": "expression",
@@ -2538,6 +2486,19 @@
       "surface": "unit-test"
     },
     {
+      "api": "var_os",
+      "argument": "& name",
+      "argument_kind": "expression",
+      "classification": "test_only",
+      "classification_basis": "unit-test source surface",
+      "count": 1,
+      "language": "rust",
+      "operation": "read",
+      "path": "crates/kiln-train/src/remote_teacher.rs",
+      "phase": "runtime",
+      "surface": "unit-test"
+    },
+    {
       "api": "env!",
       "argument": "CARGO_PKG_VERSION",
       "argument_kind": "literal",
@@ -2925,25 +2886,25 @@
       "startup_safety": 0,
       "test_only": 25
     },
-    "process_mutation_call_sites": 29,
+    "process_mutation_call_sites": 19,
     "process_mutation_call_sites_by_classification": {
       "build_time": 8,
       "credential_provider": 0,
       "experimental_debug": 0,
       "public_stable": 0,
       "startup_safety": 0,
-      "test_only": 21
+      "test_only": 11
     },
-    "process_mutation_entries": 21,
-    "read_call_sites": 431,
+    "process_mutation_entries": 16,
+    "read_call_sites": 433,
     "read_call_sites_by_classification": {
       "build_time": 326,
       "credential_provider": 1,
       "experimental_debug": 0,
       "public_stable": 6,
       "startup_safety": 1,
-      "test_only": 97
+      "test_only": 99
     },
-    "read_entries": 202
+    "read_entries": 204
   }
 }

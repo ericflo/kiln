@@ -1315,12 +1315,53 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::mpsc;
+    use std::sync::{Mutex, MutexGuard, mpsc};
     use std::thread;
 
     const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const HASH_C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    static TEST_CREDENTIAL_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct ScopedTestCredentialEnvironment {
+        name: String,
+        previous: Option<std::ffi::OsString>,
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    unsafe fn write_test_environment(name: &str, value: Option<&std::ffi::OsStr>) {
+        if let Some(value) = value {
+            unsafe { std::env::set_var(name, value) };
+        } else {
+            unsafe { std::env::remove_var(name) };
+        }
+    }
+
+    impl ScopedTestCredentialEnvironment {
+        fn set(name: String, value: Option<&str>) -> Self {
+            let guard = TEST_CREDENTIAL_ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let previous = std::env::var_os(&name);
+            unsafe {
+                write_test_environment(&name, value.map(std::ffi::OsStr::new));
+            }
+            Self {
+                name,
+                previous,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for ScopedTestCredentialEnvironment {
+        fn drop(&mut self) {
+            unsafe {
+                write_test_environment(&self.name, self.previous.as_deref());
+            }
+        }
+    }
 
     fn teacher_identity(model: &str, max_top_k: u32) -> TeacherIdentityV1 {
         TeacherIdentityV1::new(
@@ -2035,6 +2076,7 @@ mod tests {
             "KILN_TEST_REMOTE_TEACHER_KEY_MUST_BE_UNSET_{}",
             std::process::id()
         );
+        let _environment = ScopedTestCredentialEnvironment::set(env_name.clone(), None);
         assert!(std::env::var_os(&env_name).is_none());
         cfg.api_key_env = Some(env_name.clone());
         let teacher = RemoteTeacher::new(cfg).unwrap();
@@ -2050,8 +2092,7 @@ mod tests {
     fn authenticated_error_never_reflects_response_body_or_env_name() {
         let secret = "kiln-test-secret-must-not-escape";
         let env_name = format!("KILN_TEST_REMOTE_TEACHER_REFLECTION_{}", std::process::id());
-        // SAFETY: the unique process-scoped test name is removed before return.
-        unsafe { std::env::set_var(&env_name, secret) };
+        let _environment = ScopedTestCredentialEnvironment::set(env_name.clone(), Some(secret));
         let (url, _requests, server) = spawn_http_sequence(vec![TestHttpResponse {
             status: "401 Unauthorized",
             headers: vec![("Content-Type".into(), "text/plain".into())],
@@ -2065,7 +2106,6 @@ mod tests {
             .unwrap_err()
             .to_string();
         server.join().unwrap();
-        unsafe { std::env::remove_var(&env_name) };
 
         assert!(
             error.contains("authenticated response body redacted"),

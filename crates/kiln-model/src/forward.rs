@@ -33826,10 +33826,6 @@ mod tests {
             return Ok(());
         };
 
-        unsafe {
-            std::env::remove_var("KILN_DISABLE_WEIGHTED_LM_HEAD_PREP");
-        }
-
         let hidden = 128usize;
         let vocab = 257usize;
         let best = 42usize;

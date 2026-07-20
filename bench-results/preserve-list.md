@@ -3,7 +3,7 @@
 Sources of truth:
 
 - `bench-results/preserve-list-nvtx.csv` (243 call sites, 156 distinct range names)
-- `bench-results/preserve-list-env.csv` (909 call sites, 236 distinct `KILN_*` vars; 0 go through `env_flag` / `env_tristate`)
+- `bench-results/preserve-list-env.csv` (689 call sites, 236 distinct `KILN_*` vars; 0 go through `env_flag` / `env_tristate`)
 - `bench-results/preserve-list-backend-runtime.csv` (0 trait methods whose signature still mentions a candle type)
 
 Regenerate: `scripts/audit-preserve-list.sh`.
@@ -113,24 +113,24 @@ Grouped by `kiln/<prefix>/...`; counts are total call sites.
 |---|---:|---:|---|
 | `KILN_QUALIFICATION` | 26 | no | kiln-model;kiln-server;kiln-tensor;kiln-train;kiln-vulkan-kernel |
 | `KILN_TENSOR_VULKAN_TEST` | 25 | no | kiln-model;kiln-tensor;kiln-train |
-| `KILN_STREAMING_PREFILL` | 10 | no | kiln-server |
-| `KILN_STREAMING_TILE_TOKENS` | 10 | no | kiln-server |
-| `KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES` | 9 | no | kiln-server |
-| `KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES` | 9 | no | kiln-server |
-| `KILN_ADAPTERS_MAX_DISK_BYTES` | 9 | no | kiln-server |
-| `KILN_MODEL_PATH` | 9 | no | kiln-server;kiln-train |
-| `KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES` | 9 | no | kiln-server |
-| `KILN_STREAMING_LAST_TOKEN_LM_HEAD` | 9 | no | kiln-server |
-| `KILN_STREAMING_PREFILL_MODE` | 9 | no | kiln-server |
-| `KILN_ACCELERATOR_ROCM_GRAPH_MODE` | 8 | no | kiln-server |
-| `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH` | 8 | no | kiln-server |
-| `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS` | 8 | no | kiln-server |
-| `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE` | 8 | no | kiln-server |
-| `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US` | 8 | no | kiln-server |
-| `KILN_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE` | 8 | no | kiln-server |
-| `KILN_CHECKPOINT_BOUNDARY_CACHE_GB` | 8 | no | kiln-server |
-| `KILN_CONFIG` | 8 | no | kiln-server |
+| `KILN_STREAMING_PREFILL_MODE` | 12 | no | kiln-server |
+| `KILN_SERVER_PORT` | 10 | no | kiln-server |
+| `KILN_STREAMING_PREFILL_TILE_TOKENS` | 10 | no | kiln-server |
+| `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH` | 9 | no | kiln-server |
+| `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS` | 9 | no | kiln-server |
+| `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE` | 9 | no | kiln-server |
+| `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US` | 9 | no | kiln-server |
+| `KILN_STREAMING_PREFILL_DETACHED_FULL_ATTN_TILE_TOKENS` | 9 | no | kiln-server |
+| `KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD` | 9 | no | kiln-server |
+| `KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS` | 9 | no | kiln-server |
 | `KILN_CUDA_ARCHS` | 8 | no | kiln-blas;kiln-conv1d-kernel;kiln-flash-attn;kiln-gdn-kernel;kiln-marlin-gemm;kiln-opd-loss-kernel;kiln-rmsnorm-kernel;kiln-tensor |
+| `KILN_ROCM_ARCHS` | 8 | no | kiln-conv1d-kernel;kiln-flash-attn;kiln-gdn-kernel;kiln-opd-loss-kernel;kiln-rmsnorm-kernel;kiln-rocblas;kiln-server;kiln-tensor |
+| `KILN_ACCELERATOR_ROCM_KERNEL_PROFILE` | 7 | no | kiln-server |
+| `KILN_ADAPTERS_MAX_DISK_BYTES` | 7 | no | kiln-server |
+| `KILN_BATCHING_MODE` | 7 | no | kiln-server |
+| `KILN_BATCHING_PREFILL_ADMISSION_QUANTUM` | 7 | no | kiln-server |
+| `KILN_SERVER_EVAL_MODE` | 7 | no | kiln-server |
+| `KILN_STREAMING_PREFILL_THRESHOLD_TOKENS` | 7 | no | kiln-server |
 
 ## `BackendRuntime` candle-typed methods
 

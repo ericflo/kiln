@@ -817,27 +817,22 @@ def decode_hot_path_policy_report() -> dict[str, Any]:
     return {
         "cpu": {
             "default_policy": "CorrectnessAllowed",
-            "debug_opt_in": "not required",
             "enforcement": "CPU is the reference path",
         },
         "cuda": {
             "default_policy": "CorrectnessAllowed",
-            "debug_opt_in": "not required",
             "enforcement": "CUDA native misses remain device-visible/errors rather than silent host staging",
         },
         "rocm": {
             "default_policy": "NativeRequired",
-            "debug_opt_in": "KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 or KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK=1",
             "enforcement": "batched decode errors before generic fallback when no ROCm native path produced tokens",
         },
         "metal": {
             "default_policy": "NativeRequired",
-            "debug_opt_in": "KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 or KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK=1",
             "enforcement": "batched/sample decode errors before generic fallback when no Metal native path produced tokens",
         },
         "vulkan": {
             "default_policy": "NativeRequired",
-            "debug_opt_in": "KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 or KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1",
             "enforcement": (
                 "ordinary batched decode errors before generic fallback; active LoRA may use the "
                 "capability-gated portable paged-attention route, with sparse "
@@ -2876,11 +2871,11 @@ def markdown(data: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Decode Hot-Path Fallback")
     lines.append("")
-    lines.append("| Backend | Default Policy | Debug Opt-In | Enforcement |")
+    lines.append("| Backend | Default Policy | Mutable Override | Enforcement |")
     lines.append("|---|---|---|---|")
     for backend, info in data["decode_hot_path_policy"].items():
         lines.append(
-            f"| `{backend}` | `{info['default_policy']}` | `{info['debug_opt_in']}` | "
+            f"| `{backend}` | `{info['default_policy']}` | `none` | "
             f"{info['enforcement']} |"
         )
     lines.append("")

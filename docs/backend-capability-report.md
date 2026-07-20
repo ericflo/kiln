@@ -229,13 +229,13 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 
 ## Decode Hot-Path Fallback
 
-| Backend | Default Policy | Debug Opt-In | Enforcement |
+| Backend | Default Policy | Mutable Override | Enforcement |
 |---|---|---|---|
-| `cpu` | `CorrectnessAllowed` | `not required` | CPU is the reference path |
-| `cuda` | `CorrectnessAllowed` | `not required` | CUDA native misses remain device-visible/errors rather than silent host staging |
-| `rocm` | `NativeRequired` | `KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 or KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK=1` | batched decode errors before generic fallback when no ROCm native path produced tokens |
-| `metal` | `NativeRequired` | `KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 or KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK=1` | batched/sample decode errors before generic fallback when no Metal native path produced tokens |
-| `vulkan` | `NativeRequired` | `KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 or KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1` | ordinary batched decode errors before generic fallback; active LoRA may use the capability-gated portable paged-attention route, with sparse vulkan_lora_paged_decode_fallback warnings |
+| `cpu` | `CorrectnessAllowed` | `none` | CPU is the reference path |
+| `cuda` | `CorrectnessAllowed` | `none` | CUDA native misses remain device-visible/errors rather than silent host staging |
+| `rocm` | `NativeRequired` | `none` | batched decode errors before generic fallback when no ROCm native path produced tokens |
+| `metal` | `NativeRequired` | `none` | batched/sample decode errors before generic fallback when no Metal native path produced tokens |
+| `vulkan` | `NativeRequired` | `none` | ordinary batched decode errors before generic fallback; active LoRA may use the capability-gated portable paged-attention route, with sparse vulkan_lora_paged_decode_fallback warnings |
 
 ## Training Optimizer Product Resolution and Fallback
 

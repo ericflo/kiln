@@ -107,7 +107,7 @@ with open(raw_out, "w", encoding="utf-8") as f:
                 f.write(f"{api}\t{crate}\t{rel}:{lineno}\t{snippet}\n")
 
 with open(csv_out, "w", encoding="utf-8", newline="") as f:
-    w = csv.writer(f)
+    w = csv.writer(f, lineterminator="\n")
     w.writerow(["api_path", "call_site_count", "first_crate", "first_seen"])
     for api in sorted(buckets, key=lambda a: (-buckets[a]["count"], a)):
         b = buckets[api]

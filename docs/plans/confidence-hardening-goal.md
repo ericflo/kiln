@@ -1348,7 +1348,7 @@ Current audit findings and migration order (initial audit 2026-07-12, updated
 - The initial tree did not treat environment as a startup boundary: more than
   250 model/tensor/memory/kernel knobs and at least 32 training knobs were read
   below startup. Production migration is now complete. The generated inventory
-  reports 431 direct reads, 29 process mutations, and zero runtime-migration
+  reports 433 direct reads, 19 process mutations, and zero runtime-migration
   reads; the remaining reads are typed-loader/logging, startup safety,
   credential-provider, build/provenance, or test-only boundaries.
 - Strict TOML fields are now authorities rather than mirrors. GPU-memory sizing,
@@ -1425,7 +1425,7 @@ Current audit findings and migration order (initial audit 2026-07-12, updated
   scheduling, training, eval, UI, and request handlers via a repository check.
 - [ ] Put experimental/debug knobs behind one explicit namespace and profile.
 - [ ] Delete dead, duplicate, contradictory, and undocumented knobs.
-- [ ] Ensure tests use scoped configuration rather than process-global env
+- [x] Ensure tests use scoped configuration rather than process-global env
   mutation wherever possible; use one global serialization helper where env is
   unavoidable.
 
@@ -1457,8 +1457,28 @@ is unique, disjoint, inert, source-neutral, hash-neutral, and exactly equal to
 the schema index. Desktop writes and atomically promotes a typed TOML document,
 launches the managed child with only `KILN_CONFIG`, and scrubs ambient
 configuration. The runtime inventory falls from 150 to 29 direct process
-mutations, 21 of them test-only. Experimental/debug profile consolidation,
-broader dead-control deletion, and remaining test mutation cleanup stay open.
+mutations, 21 of them test-only. The scoped-test checkpoint below supersedes
+those mutation counts. Experimental/debug profile consolidation and broader
+dead-control deletion stay open.
+
+Scoped-test and obsolete-harness checkpoint (2026-07-20): logging filter tests
+inject an explicit `RUST_LOG` result instead of mutating the process. The two
+remote-teacher credential test surfaces now serialize unavoidable environment
+changes, preserve any pre-existing value, and restore it on drop. All remaining
+unit/integration test mutations are owned by scoped helpers under explicit
+serialization. The generated inventory reports 433 direct reads, 19 total
+process mutations, 11 test-surface mutations, eight build-time mutations, and
+zero runtime-migration reads; one test-surface mutation is the CUDA GRPO example's
+child-process model-path provenance handoff rather than a test. The current-build
+RMSNorm backward and fused MLP gate/up A/B harnesses
+are deleted because their environment arms had already been retired and the
+purported comparisons were therefore inert. The generated decode capability
+report no longer advertises the already deleted generic fallback variables and
+a Rust contract prevents mutable fallback overrides from reappearing. This
+closes the scoped-test checklist item; the repository-wide experimental profile
+and dead-control audits remain open. The legacy preserve-list and Candle API
+surface inventories are regenerated against the current tree; their CSV
+generator now emits canonical LF output so regeneration passes diff hygiene.
 
 Environment-inventory checkpoint (2026-07-13): the lexical ratchet now resolves
 simple named environment constants, recognizes colocated `#[cfg(test)]` modules
@@ -3321,6 +3341,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-20 | Complete source-aware effective configuration | this source | this portable configuration checkpoint | authoritative loader, machine-readable CLI, config API, generated schema, complete operator reference, and permanent website; no accelerator execution or performance claim | 1,098/1,098 server library tests; default, ROCm `gfx1151`, and Vulkan all-target checks; real CLI JSON parse with 118 fixed fields; exact 118-fixed/2-dynamic/113-environment/76-alias configuration contract; 176-definition observability and 102-path/114-operation/133-complete-payload HTTP contracts; every compact qualification receipt, detailed benchmark receipt, and pinned oracle result; 663/663 qualification-tooling tests; 10/10 documentation-builder tests; 55-document/5-asset assembled static site; desktop UI smoke; release, thinking-budget, runtime-environment, source-parsing, repository-artifact, formatting, and diff gates | portable source/configuration checkpoint passed; Phase 8.1 typed parser, provenance, and whole-object dump item closed; experimental-profile/dead-control audit, alias deletion, and test mutation remain open | The loader parses TOML once, materializes optional-section defaults, records file/environment/serve-CLI precedence, and exposes one deterministic `kiln.effective-configuration.v1` map through `kiln config --json` and `GET /v1/config` under `effective_configuration`. Every fixed typed leaf and dynamic teacher-credential leaf carries its post-precedence value, authority, supported environment spellings, redaction state, and restart requirement. Sensitive structured requests, webhook URLs, and credential-provider names remain source-visible but value-redacted; the bearer secret never enters the object. The typed config hash excludes provenance metadata and remains the identity of the effective value. Backend-derived and live capacity fields stay separate and authoritative. The public schema and website ratchet the exact field count and dynamic templates. Local static rendering passed; browser rendering remains unavailable on this Chromium-free machine. |
 
 | 2026-07-20 | Canonical-only configuration and Desktop typed launch | this source | this portable configuration checkpoint | server loader and bootstrap logging, effective-config API, JSON Schema, complete reference and migration index, CLI/API/architecture/troubleshooting/demo website surfaces, Desktop managed-child launch, operational scripts, and runtime-environment ratchet; no accelerator execution or performance claim | 1,087/1,087 server library tests including 115 focused configuration/API tests; 24/24 Desktop settings tests; exact 117-fixed/2-dynamic/112-environment/5-config-only/0-alias contract; all 77 retired public environment spellings unique, disjoint, schema-matched, and inert across both authoritative loading and early logging bootstrap; two removed TOML toggles rejected; runtime inventory 431 reads/29 mutations/zero migration reads with 21 test-only mutations; focused qualification environment/sanitizer tests; 10/10 documentation-builder tests; 55-document/5-asset assembled site and static smoke; Python/JSON/shell syntax; root and Desktop formatting; diff hygiene | portable canonical-only checkpoint passed; broader experimental/debug consolidation, dead-control deletion, and remaining test mutation cleanup stay open; hosted follow-up pending | Every supported field environment override is exactly `KILN_<SECTION>_<FIELD>`. Non-canonical public spellings no longer warn, conflict, or change values: they are ignored and published with exact replacements plus value-migration rules in the schema and website. `speculative.method` is the single speculative authority and `streaming_prefill.mode` the single streaming-prefill authority. Desktop serializes its exposed settings as private typed TOML, atomically stages/syncs/promotes with rollback and prior-version recovery, scrubs ambient `KILN_*`, and passes only `KILN_CONFIG` to the managed server. Current demos, workflows, issue templates, and current-tree server launch scripts use canonical names; exact-revision historical harnesses retain their original commands and are not valid against current main. Static website rendering passed; rendered browser smoke remains unavailable on this Chromium-free machine. |
+
+| 2026-07-20 | Scoped test configuration and obsolete environment harness removal | this source | this portable Phase 8.1 checkpoint | logging and remote-teacher test isolation, generated runtime-environment inventory, decode fallback capability report, obsolete current-build RMSNorm/MLP A/B harnesses, legacy preserve/Candle audit inventories, and generated website; no accelerator execution or performance claim | 11/11 logging tests; 43/43 remote-teacher tests; focused remote-teacher registration integration; focused backend capability contract; runtime inventory at 433 reads/19 mutations/zero migration reads with 11 test-surface and eight build-time mutations; backend report self-test and drift check; deterministic audit regeneration at 236 environment names/689 call sites and 59 Candle APIs/131 call sites; 55-document/5-asset assembled static site and smoke; repository/release/runtime-default/thinking-budget/source-parsing checks; formatting and diff hygiene | portable scoped-test checkpoint passed; Phase 8.1 scoped-test item closed; experimental-profile and repository-wide dead-control audits remain open | Logging tests inject `RUST_LOG` values without process mutation. Credential tests serialize their unavoidable environment boundary and restore the prior value on every exit. One scanner-classified test-surface mutation is a CUDA GRPO example's child-process provenance handoff, not test-global configuration. The deleted RMSNorm backward and fused MLP gate/up A/B harnesses toggled controls already absent from current runtime, so their purported comparisons were inert. The generated decode report no longer advertises deleted debug fallback variables, and a Rust contract rejects their return. Legacy current-tree audits are refreshed and the Candle CSV generator now emits canonical LF. No GPU workload ran. |
 
 ## Known Starting Defects
 

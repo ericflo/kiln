@@ -198,12 +198,33 @@ fn spawn_teacher_with_auth(
     (format!("http://{address}"), handle)
 }
 
-struct RemoveEnvOnDrop(&'static str);
+struct ScopedTestEnvironment {
+    name: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
 
-impl Drop for RemoveEnvOnDrop {
+unsafe fn write_test_environment(name: &str, value: Option<&std::ffi::OsStr>) {
+    if let Some(value) = value {
+        unsafe { std::env::set_var(name, value) };
+    } else {
+        unsafe { std::env::remove_var(name) };
+    }
+}
+
+impl ScopedTestEnvironment {
+    fn set(name: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(name);
+        unsafe {
+            write_test_environment(name, Some(std::ffi::OsStr::new(value)));
+        }
+        Self { name, previous }
+    }
+}
+
+impl Drop for ScopedTestEnvironment {
     fn drop(&mut self) {
         unsafe {
-            std::env::remove_var(self.0);
+            write_test_environment(self.name, self.previous.as_deref());
         }
     }
 }
@@ -337,10 +358,7 @@ async fn registration_uses_scoped_credential_without_persisting_secret_metadata(
     let _registration_guard = remote_registration_test_guard();
     const ENV: &str = "KILN_TEST_REMOTE_TEACHER_HANDLE_SECRET_716D3C";
     const SECRET: &str = "credential-value-that-must-not-be-persisted";
-    unsafe {
-        std::env::set_var(ENV, SECRET);
-    }
-    let _remove_env = RemoveEnvOnDrop(ENV);
+    let _environment = ScopedTestEnvironment::set(ENV, SECRET);
 
     let tokenizer = tokenizer();
     let identity = identity(&tokenizer, None);
