@@ -202,18 +202,22 @@ local receipt validator runs in cheap CI.
   physical memory operations and concurrent training.
 - [x] Expose the effective profile, every resolved setting, and its source
   (default, file, environment, request) in startup diagnostics and health.
-- [ ] Make malformed configuration fatal with the variable/field name and
+- [x] Make malformed configuration fatal with the variable/field name and
   invalid value. Do not fail open.
-  - Progress: the authoritative TOML loader now denies unknown fields in every
-    public section, and every environment override owned by `KilnConfig` and
-    `RequestLogConfig` rejects malformed/non-Unicode input with the variable
-    and raw value. Semantic validation now rejects empty identifiers/paths,
-    zero capacities that runtime code would clamp, non-finite memory values,
-    invalid logging filters/formats, invalid webhook URLs, inconsistent queue
-    bounds, and invalid request-log limits with the field and value. A real CLI
-    process rejects `KILN_PORT=definitely-invalid` before model initialization.
-    The repo-wide gate remains open until the actor/model/training tuning
-    variables still read outside this loader are centralized in Phase 8.1.
+  - Completion (2026-07-20): the closed authoritative TOML loader denies unknown
+    fields at every public object level, and all 112 canonical fixed-field
+    environment overrides reject malformed or non-Unicode input with the
+    variable and raw value. Semantic validation rejects empty identifiers and
+    paths, zero capacities that execution would otherwise clamp, non-finite
+    memory values, invalid logging filters/formats and webhook URLs,
+    inconsistent queue bounds, invalid request-log limits, and profile-gated
+    values with the field and value. All 115 configuration tests pass. A real
+    `kiln config --json` process with
+    `KILN_SERVER_PORT=definitely-invalid` exits 1 before model initialization
+    and names both the canonical variable and invalid value. Phase 8.1 now
+    proves that actor, model, kernel, scheduler, and training execution have no
+    lower runtime configuration authority, so there is no remaining fail-open
+    tuning path outside this loader.
 
 **Acceptance:** A stable-profile mixed-load trace contains no physical KV
 resize, pool trim, live graph capture, training write lock, or unexplained
@@ -3384,6 +3388,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-20 | Executable configuration profile-gate contract | this source | this portable Phase 8.1 checkpoint | runtime validation parity, canonical JSON Schema, complete configuration reference, generated schema website, and static smoke; no accelerator execution or performance claim | exact nine-field profile-gate metadata/conditional-rule equality; configuration-schema mutation self-tests; 10/10 documentation-builder tests; 55-document/5-asset assembled static site and smoke; JSON/Python/JavaScript syntax; formatting and diff hygiene | portable profile-gate checkpoint passed; Phase 8.1 experimental/debug item closed; repository-wide dead-control audit remains open | Eight accelerator value sets require the single `experimental` serving profile and positive forced-KV sizing requires `maintenance` plus autoscaling. The audit caught and fixed the public schema's missing CUDA Marlin condition: non-disabled layouts now fail schema validation without the same experimental profile runtime already required. Generated schema tables show a dedicated Profile gate column. Trusted debug state and debug logging remain non-semantic observability controls rather than execution experiments. No GPU workload ran. |
 
 | 2026-07-20 | Retired-control operational source ratchet | this source | this portable Phase 8.1 checkpoint | current workflow/script/capability/Desktop source, model parity tests, generated runtime-environment inventory, configuration reference, and generated website; no accelerator execution or performance claim | exact 77-name retirement-index scan across nine operational source suffixes and four roots; three explicit historical/assertion exceptions with stale-entry rejection; configuration-schema mutation self-test; runtime inventory at 427 reads/19 mutations/zero migration reads and zero experimental/debug reads or mutations; shell and Python syntax; 358/358 portable model library tests; bounded training-library check; 10/10 documentation-builder tests; 55-document/5-asset assembled static site and smoke; formatting and diff hygiene | portable dead-control checkpoint passed; final Phase 8.1 item closed | Twenty current operational references were migrated to canonical model-adapter, memory-graph, thinking, speculative, and streaming-prefill names with enum values where required. Six model parity tests no longer honor an ambient retired paged-decode skip switch, and two stale comments no longer advertise deleted execution controls. Exact-revision archives remain historical evidence; two smoke checks and one benchmark-methodology generator are the only current-source mention exceptions and cannot become runtime configuration. The checker fails any new retired spelling elsewhere and rejects stale exception entries. Together with the prior reachability, single-authority, profile-gate, and scoped-test checkpoints, no production execution knob remains outside typed startup configuration. |
+
+| 2026-07-20 | Canonical malformed-configuration fail-closed gate | `201040a2f92052bd2e845247c10e3cb8d2a03c4b` | this checklist-closure checkpoint | portable typed configuration loader and real CLI startup; no accelerator execution or performance claim | 115/115 server configuration tests; 117-field/112-canonical-environment/zero-alias schema self-test; real bounded `kiln config --json` process with `KILN_SERVER_PORT=definitely-invalid`; status 1 with canonical variable and raw invalid value in the structured log and operator error; runtime inventory at zero migration reads; diff hygiene | Phase 1.1 malformed-configuration item passed | Closed TOML objects reject unknown fields, canonical environment overrides reject malformed and non-Unicode values, cross-field semantics reject invalid typed combinations, and serving-profile gates fail closed. The real process fails before model initialization. The prior plan text named retired `KILN_PORT`; this checkpoint replaces that stale proof with the canonical mechanically derived field. Phase 8.1 proves no actor, model, kernel, scheduler, or trainer can bypass the loader with a lower runtime environment read. |
 
 ## Known Starting Defects
 
