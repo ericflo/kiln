@@ -291,6 +291,18 @@ shape/stride descriptor as a captured kernel value. It does not allocate or
 upload device metadata per broadcast. A transfer event naming
 `rocm_ops/index_select.rs` metadata construction therefore identifies a stale
 binary or a regression, not expected cold-cache behavior.
+Each new batched graph also emits one
+`event=rocm_graph_capture_parity_check` after its settled first launch. Read its
+`outcome`, `comparison_complete`, `duration_ms`, and `compared_bytes` with
+`hidden_match` and the first recurrent, convolution, K-cache, or V-cache
+mismatch layer for a completed comparison, or `error` when the comparison
+kernel itself fails. The check compares against the candidate's own eager warm
+execution, uses device-side exact equality with scalar readback, and is part of
+`native_capture` time. A failed or errored check is a capture failure followed
+by settled rollback and contained eager retry, never a successful admission.
+Its snapshot, current-row gather, and equality-mask reservation is included in
+the transient-candidate high-water mark rather than hidden as unattributed
+allocator activity.
 When computing `unexplained_ms`, Kiln conservatively subtracts the larger of
 serial actor work, response delivery, and the largest backend candidate rather
 than their sum, so overlap cannot falsely erase missing wall time.

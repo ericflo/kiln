@@ -608,7 +608,12 @@ device-selector mismatch fails closed rather than consuming another
 accelerator's headroom. The Record pass necessarily allocates the candidate
 before its exact size is knowable. Phase telemetry independent of the model and
 graph-runner locks plus last/peak transient-candidate bytes make that residual
-exposure observable. A candidate that alone exceeds the byte budget or cannot
+exposure observable. Before any capture-parity snapshot allocation, a separate
+matching-device reservation covers two GDN state snapshots, the eager hidden
+copy, all current K/V rows, one current-row gather, and the largest exact U8
+comparison mask. The later exact candidate reservation overlaps it through
+native capture, so the transient high-water mark includes both working sets. A
+candidate that alone exceeds the byte budget or cannot
 be accounted exactly makes its geometry non-capture-safe for this runner.
 Aggregate byte-budget suppression clears after ownership or budget relief;
 global-reservation denial retries after the matching device reports enough
@@ -680,10 +685,11 @@ phase is active. `native_capture` remains active through capture, the settled
 first launch, defensive cache admission/publication, and the blocking committed
 governor debit. `rejected_candidate_cleanup` begins only when an unretained
 candidate enters destruction and settlement. `last_transient_candidate_bytes` and
-`peak_transient_candidate_bytes` measure the exact deduplicated queryable bytes
-allocated by the measured pre-admission candidate, excluding already-owned
-recurrent slot state and opaque native objects. They are not retained-cache
-bytes and are not governed as if they were already published.
+`peak_transient_candidate_bytes` measure the peak matching-device reservation
+for the exact deduplicated pre-admission candidate plus the capture-parity
+snapshot/gather/mask working set. Already-owned recurrent slot state and opaque
+native objects remain excluded. These values are not retained-cache bytes; only
+the candidate subset is committed when admission retains the graph.
 
 Native ROCm HIP-graph capture supports both single-row decode and the contiguous
 BF16 multi-row route. Batched graphs are keyed by row count and bucketed
@@ -695,6 +701,18 @@ active graph slot across changing request cohorts; it is not an idle single-row
 owner. `multi_row_batch_unsupported` remains in the closed schema so historical
 receipts stay valid, but a supported current batched route must leave it zero
 and show real capture/replay activity instead.
+
+Before a new batched graph becomes replayable, its first launch is compared
+exactly with the already-required eager warm pass. The comparison covers hidden
+output, every recurrent and convolution state tensor, and the current K/V rows
+for every full-attention layer. Native same-dtype equality produces one bounded
+U8 mask at a time and reads back only the reduced scalar. Structured event
+`rocm_graph_capture_parity_check` reports `passed`, `failed`, or `error`, whether
+comparison completed, compared bytes, duration, hidden equality and the first
+recurrent, convolution, K, and V layer mismatch, or the comparison error.
+Comparison failure follows the capture rollback/settlement contract, counts as
+`capture_failure`, disables further graph execution for the runner, and reaches
+eager only after state restoration and containment succeed.
 
 The eager-fallback reasons are exactly `multi_row_batch_unsupported`,
 `cold_cache_host_round_trip`,

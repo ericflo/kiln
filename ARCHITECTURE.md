@@ -817,6 +817,20 @@ default-stream input refresh into the private graph stream with an event, then
 orders graph completion back to eager work without a host wait. The paged-KV
 allocation identity and generation must still match before launch.
 
+Every new multi-row graph must also pass an automatic first-launch oracle before
+cache admission. The runner retains the eager warm pass's hidden output, all GDN
+recurrent and convolution state, and only the current rows from every K/V pool;
+it restores the pre-warm GDN state, launches the new graph once, and compares all
+of those values exactly on device. The snapshots, current-row gathers, and
+single U8 equality mask are reserved from the matching device's memory governor
+before the first snapshot allocation. A mismatch or comparison error settles
+device work, restores the pre-capture GDN state, discards the graph, disables
+graphs for that runner, and permits only the existing contained eager retry.
+`event="rocm_graph_capture_parity_check"` reports a `passed`, `failed`, or
+`error` outcome, whether comparison completed, compared bytes, duration, and
+the first mismatching state/K/V layer or comparison error. This guard is
+unconditional; there is no tuning or environment switch that can bypass it.
+
 Health counts a retained width graph as an active slot even though it is shared
 across request cohorts. `multi_row_batch_unsupported` remains a closed legacy
 fallback reason so old receipts remain valid; supported current batch graphs

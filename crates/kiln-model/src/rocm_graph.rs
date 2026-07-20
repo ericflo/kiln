@@ -5319,6 +5319,199 @@ impl RocmGraphRunner {
         )
     }
 
+    fn exact_tensor_values_match(left: &Tensor, right: &Tensor) -> Result<bool> {
+        anyhow::ensure!(
+            left.dims() == right.dims(),
+            "ROCm graph parity tensor shape mismatch ({:?} vs {:?})",
+            left.dims(),
+            right.dims()
+        );
+        anyhow::ensure!(
+            left.dtype() == right.dtype(),
+            "ROCm graph parity tensor dtype mismatch ({} vs {})",
+            left.dtype(),
+            right.dtype()
+        );
+        if left.element_count() == 0 {
+            return Ok(true);
+        }
+        let equal =
+            kiln_tensor::ops::eq(left, right).context("compare ROCm graph parity tensor values")?;
+        let all_equal = kiln_tensor::ops::all_axis(
+            &equal
+                .flatten_all()
+                .context("flatten ROCm graph parity equality mask")?,
+            0,
+        )
+        .context("reduce ROCm graph parity equality mask")?;
+        Ok(all_equal
+            .to_scalar::<u8>()
+            .context("read ROCm graph parity equality scalar")?
+            != 0)
+    }
+
+    fn capture_parity_tensor_temporary_bytes(
+        output_hidden: &Tensor,
+        linear_state: &LinearAttentionState,
+    ) -> (u64, u64) {
+        let state_tensors = linear_state
+            .recurrent_states
+            .iter()
+            .chain(linear_state.conv_states.iter());
+        let state_snapshot_bytes = graph_tensor_bytes(state_tensors.clone());
+        let largest_comparison_mask = std::iter::once(output_hidden)
+            .chain(state_tensors)
+            .map(|tensor| tensor.element_count() as u64)
+            .max()
+            .unwrap_or(0);
+
+        let retained_copies = state_snapshot_bytes
+            .saturating_mul(2)
+            .saturating_add(graph_tensor_bytes([output_hidden]));
+        (retained_copies, largest_comparison_mask.saturating_add(1))
+    }
+
+    fn capture_parity_kv_temporary_bytes(
+        paged_cache: &PagedKvCacheKt,
+        batch_size: usize,
+    ) -> Result<(u64, u64)> {
+        let mut retained_copies = 0u64;
+        let mut largest_comparison_scratch = 0u64;
+        for layer_idx in 0..paged_cache.num_layers() {
+            let (key_pool, value_pool) = paged_cache
+                .pool_tensors(layer_idx)
+                .with_context(|| format!("missing ROCm graph parity KV layer {layer_idx}"))?;
+            anyhow::ensure!(
+                key_pool.dims() == value_pool.dims()
+                    && key_pool.dtype() == value_pool.dtype()
+                    && key_pool.dims().len() == 3,
+                "ROCm graph parity KV pool mismatch at layer {layer_idx}"
+            );
+            let row_elements = key_pool.dims()[1]
+                .saturating_mul(key_pool.dims()[2])
+                .saturating_mul(batch_size) as u64;
+            let row_bytes = row_elements.saturating_mul(key_pool.dtype().size_in_bytes() as u64);
+            retained_copies = retained_copies.saturating_add(row_bytes.saturating_mul(2));
+            // Comparing a saved row set with the live pool requires one
+            // gathered candidate tensor, one U8 equality mask, and one scalar.
+            largest_comparison_scratch = largest_comparison_scratch
+                .max(row_bytes.saturating_add(row_elements).saturating_add(1));
+        }
+        Ok((retained_copies, largest_comparison_scratch))
+    }
+
+    fn capture_parity_temporary_bytes(
+        output_hidden: &Tensor,
+        linear_state: &LinearAttentionState,
+        paged_cache: &PagedKvCacheKt,
+        batch_size: usize,
+    ) -> Result<u64> {
+        let (tensor_copies, tensor_scratch) =
+            Self::capture_parity_tensor_temporary_bytes(output_hidden, linear_state);
+        let (kv_copies, kv_scratch) =
+            Self::capture_parity_kv_temporary_bytes(paged_cache, batch_size)?;
+        Ok(tensor_copies
+            .saturating_add(kv_copies)
+            .saturating_add(tensor_scratch.max(kv_scratch)))
+    }
+
+    fn snapshot_paged_kv_slots(
+        paged_cache: &PagedKvCacheKt,
+        slots: &Tensor,
+    ) -> Result<Vec<(Tensor, Tensor)>> {
+        let mut snapshots = Vec::with_capacity(paged_cache.num_layers());
+        for layer_idx in 0..paged_cache.num_layers() {
+            let (key_pool, value_pool) = paged_cache
+                .pool_tensors(layer_idx)
+                .with_context(|| format!("missing ROCm graph parity KV layer {layer_idx}"))?;
+            let key = key_pool.index_select(slots, 0).with_context(|| {
+                format!("snapshot ROCm graph parity K slots at layer {layer_idx}")
+            })?;
+            let value = value_pool.index_select(slots, 0).with_context(|| {
+                format!("snapshot ROCm graph parity V slots at layer {layer_idx}")
+            })?;
+            snapshots.push((key, value));
+        }
+        Ok(snapshots)
+    }
+
+    fn exact_paged_kv_slots_match(
+        expected: &[(Tensor, Tensor)],
+        paged_cache: &PagedKvCacheKt,
+        slots: &Tensor,
+    ) -> Result<(Option<usize>, Option<usize>)> {
+        anyhow::ensure!(
+            expected.len() == paged_cache.num_layers(),
+            "ROCm graph capture parity KV layer-count mismatch"
+        );
+        let mut key_mismatch = None;
+        let mut value_mismatch = None;
+        for (layer_idx, (expected_key, expected_value)) in expected.iter().enumerate() {
+            let (key_pool, value_pool) = paged_cache
+                .pool_tensors(layer_idx)
+                .with_context(|| format!("missing ROCm graph parity KV layer {layer_idx}"))?;
+            if key_mismatch.is_none() {
+                let actual_key = key_pool.index_select(slots, 0).with_context(|| {
+                    format!("gather ROCm graph parity K slots at layer {layer_idx}")
+                })?;
+                if !Self::exact_tensor_values_match(expected_key, &actual_key)? {
+                    key_mismatch = Some(layer_idx);
+                }
+            }
+            if value_mismatch.is_none() {
+                let actual_value = value_pool.index_select(slots, 0).with_context(|| {
+                    format!("gather ROCm graph parity V slots at layer {layer_idx}")
+                })?;
+                if !Self::exact_tensor_values_match(expected_value, &actual_value)? {
+                    value_mismatch = Some(layer_idx);
+                }
+            }
+            if key_mismatch.is_some() && value_mismatch.is_some() {
+                break;
+            }
+        }
+        Ok((key_mismatch, value_mismatch))
+    }
+
+    fn exact_capture_outputs_match(
+        expected_hidden: &Tensor,
+        actual_hidden: &Tensor,
+        expected_state: &LinearAttentionState,
+        actual_state: &LinearAttentionState,
+    ) -> Result<(bool, Option<usize>, Option<usize>)> {
+        anyhow::ensure!(
+            expected_state.recurrent_states.len() == actual_state.recurrent_states.len()
+                && expected_state.conv_states.len() == actual_state.conv_states.len(),
+            "ROCm graph capture parity state layer-count mismatch"
+        );
+        let hidden_match = Self::exact_tensor_values_match(expected_hidden, actual_hidden)?;
+        let mut recurrent_mismatch = None;
+        for (layer_idx, (expected, actual)) in expected_state
+            .recurrent_states
+            .iter()
+            .zip(&actual_state.recurrent_states)
+            .enumerate()
+        {
+            if !Self::exact_tensor_values_match(expected, actual)? {
+                recurrent_mismatch = Some(layer_idx);
+                break;
+            }
+        }
+        let mut conv_mismatch = None;
+        for (layer_idx, (expected, actual)) in expected_state
+            .conv_states
+            .iter()
+            .zip(&actual_state.conv_states)
+            .enumerate()
+        {
+            if !Self::exact_tensor_values_match(expected, actual)? {
+                conv_mismatch = Some(layer_idx);
+                break;
+            }
+        }
+        Ok((hidden_match, recurrent_mismatch, conv_mismatch))
+    }
+
     // --- per-replay in-place buffer refresh (frozen device pointers) ---
 
     fn update_token_buffer(token_buffer: &Tensor, token_id: u32) -> Result<()> {
@@ -5882,6 +6075,26 @@ impl RocmGraphRunner {
             .chain(paged_decode_lse.iter())
             .chain(gdn_decode_outputs.iter()),
         );
+        let capture_parity_temporary_bytes = Self::capture_parity_temporary_bytes(
+            &output_hidden,
+            linear_state,
+            paged_cache,
+            batch_size,
+        )?;
+        let Some(_capture_parity_reservation) =
+            kiln_memory::MemoryGovernor::try_global_cached_reserve(capture_parity_temporary_bytes)
+        else {
+            self.remember_reservation_denial(&key, capture_parity_temporary_bytes);
+            self.counters.pre_capture_memory_reservation_denied_skips = self
+                .counters
+                .pre_capture_memory_reservation_denied_skips
+                .saturating_add(1);
+            drop(candidate_warm_timer);
+            return Ok(RocmCaptureStep::fallback_after_candidate(
+                RocmGraphFallbackReason::MemoryReservationDenied,
+                &self.phase_telemetry,
+            ));
+        };
 
         let arena_context = kiln_tensor::primary_rocm_context(device_idx)
             .context("batched ROCm capture arena context")?;
@@ -5953,7 +6166,14 @@ impl RocmGraphRunner {
             },
         );
         if let Err(error) = warm_result {
-            warm_sync_result.context("settle failed batched ROCm warm pass")?;
+            if let Err(sync_error) = warm_sync_result {
+                return fail_closed_after_rocm_warmup(
+                    weights,
+                    sync_error.context(format!(
+                        "capture stream synchronization failed after batched warm-forward failure ({error:#})"
+                    )),
+                );
+            }
             Self::restore_linear_state_after_execution(
                 &context,
                 linear_state,
@@ -5971,14 +6191,44 @@ impl RocmGraphRunner {
             }
             return Err(error).context("batched frozen-pointer warm pass failed");
         }
-        warm_sync_result?;
-        Self::restore_linear_state_after_execution(
+        if let Err(sync_error) = warm_sync_result {
+            return fail_closed_after_rocm_warmup(
+                weights,
+                sync_error
+                    .context("capture stream synchronization failed after batched warm forward"),
+            );
+        }
+        let parity_snapshots = (|| {
+            let warm_hidden = output_hidden
+                .copy()
+                .context("retain batched ROCm eager warm hidden for capture parity")?;
+            let warm_gdn_state = linear_state
+                .snapshot()
+                .context("retain batched ROCm eager warm state for capture parity")?;
+            let warm_kv_slots = Self::snapshot_paged_kv_slots(
+                paged_cache,
+                kv_slot_buffer.as_ref().expect("batched KV slots allocated"),
+            )
+            .context("retain batched ROCm eager warm KV slots for capture parity")?;
+            Ok::<_, anyhow::Error>((warm_hidden, warm_gdn_state, warm_kv_slots))
+        })();
+        let restore_result = Self::restore_linear_state_after_execution(
             &context,
             linear_state,
             &gdn_snapshot,
             "restore batched GDN state after warm pass",
-        )?;
-        drop(gdn_snapshot);
+        );
+        let (warm_hidden, warm_gdn_state, warm_kv_slots) = match parity_snapshots {
+            Ok(snapshots) => {
+                restore_result?;
+                snapshots
+            }
+            Err(error) => {
+                restore_result
+                    .context("restore batched GDN state after capture-parity snapshot failure")?;
+                return Err(error).context("snapshot batched ROCm eager capture parity");
+            }
+        };
         drop(candidate_warm_timer);
         let pre_native_reservation_timer = self
             .phase_telemetry
@@ -6029,8 +6279,10 @@ impl RocmGraphRunner {
             blaslt_workspace: reserved_workspace,
         };
         let transient_candidate_bytes = reserved_accounting.retained_bytes_excluding_slot();
+        let peak_transient_candidate_bytes =
+            transient_candidate_bytes.saturating_add(capture_parity_temporary_bytes);
         self.phase_telemetry
-            .record_transient_candidate_bytes(transient_candidate_bytes);
+            .record_transient_candidate_bytes(peak_transient_candidate_bytes);
         if warm_htod.copy_count > 0 {
             let attempts = self.capture_retry.entry(key.clone()).or_insert(0);
             *attempts += 1;
@@ -6091,7 +6343,7 @@ impl RocmGraphRunner {
         let Some(governor_candidate_reservation) =
             kiln_memory::MemoryGovernor::try_global_cached_reserve(transient_candidate_bytes)
         else {
-            self.remember_reservation_denial(&key, transient_candidate_bytes);
+            self.remember_reservation_denial(&key, peak_transient_candidate_bytes);
             self.counters.pre_capture_memory_reservation_denied_skips = self
                 .counters
                 .pre_capture_memory_reservation_denied_skips
@@ -6116,9 +6368,7 @@ impl RocmGraphRunner {
         let mut native_capture_timer =
             Some(self.phase_telemetry.timer(RocmGraphPhase::NativeCapture));
         arena.borrow_mut().begin_replay();
-        let capture_snapshot = linear_state
-            .snapshot()
-            .context("snapshot batched GDN state before native capture")?;
+        let capture_snapshot = gdn_snapshot;
         let mut capture_failure_guard = RocmCaptureFailureGuard::new(context.clone());
         attributed_rocm_graph_synchronize(
             "batched_default_inputs_before_capture",
@@ -6254,6 +6504,109 @@ impl RocmGraphRunner {
                 "restore batched GDN state after first-launch wait failure",
             ))?;
             return Err(error).context("settle first batched ROCm graph launch");
+        }
+
+        let parity_started = std::time::Instant::now();
+        let parity_bytes = graph_tensor_bytes(
+            [&warm_hidden, &output_hidden]
+                .into_iter()
+                .chain(warm_gdn_state.recurrent_states.iter())
+                .chain(warm_gdn_state.conv_states.iter())
+                .chain(linear_state.recurrent_states.iter())
+                .chain(linear_state.conv_states.iter()),
+        )
+        .saturating_add(
+            graph_tensor_bytes(warm_kv_slots.iter().flat_map(|(key, value)| [key, value]))
+                .saturating_mul(2),
+        );
+        let parity = Self::exact_capture_outputs_match(
+            &warm_hidden,
+            &output_hidden,
+            &warm_gdn_state,
+            linear_state,
+        )
+        .and_then(|(hidden_match, recurrent_mismatch, conv_mismatch)| {
+            let (kv_key_mismatch, kv_value_mismatch) = Self::exact_paged_kv_slots_match(
+                &warm_kv_slots,
+                paged_cache,
+                kv_slot_buffer.as_ref().expect("batched KV slots allocated"),
+            )?;
+            Ok((
+                hidden_match,
+                recurrent_mismatch,
+                conv_mismatch,
+                kv_key_mismatch,
+                kv_value_mismatch,
+            ))
+        });
+        let parity_duration = parity_started.elapsed();
+        let (hidden_match, recurrent_mismatch, conv_mismatch, kv_key_mismatch, kv_value_mismatch) =
+            match parity {
+                Ok(parity) => parity,
+                Err(error) => {
+                    tracing::error!(
+                        event = "rocm_graph_capture_parity_check",
+                        batch_size,
+                        outcome = "error",
+                        comparison_complete = false,
+                        compared_bytes = parity_bytes,
+                        duration_ms = parity_duration.as_secs_f64() * 1000.0,
+                        error = %format!("{error:#}"),
+                        "ROCm batched graph first-launch comparison failed"
+                    );
+                    capture_failure_guard.settle_before_rollback()?;
+                    capture_failure_guard.complete_rollback(
+                        Self::restore_linear_state_in_place(
+                            linear_state,
+                            &capture_snapshot,
+                            "restore batched GDN state after capture parity-check failure",
+                        ),
+                    )?;
+                    return Err(error).context("compare batched ROCm graph capture parity");
+                }
+            };
+        tracing::info!(
+            event = "rocm_graph_capture_parity_check",
+            batch_size,
+            outcome = if hidden_match
+                && recurrent_mismatch.is_none()
+                && conv_mismatch.is_none()
+                && kv_key_mismatch.is_none()
+                && kv_value_mismatch.is_none()
+            {
+                "passed"
+            } else {
+                "failed"
+            },
+            comparison_complete = true,
+            compared_bytes = parity_bytes,
+            duration_ms = parity_duration.as_secs_f64() * 1000.0,
+            hidden_match,
+            recurrent_mismatch_layer = recurrent_mismatch.map(|layer| layer as u64),
+            conv_mismatch_layer = conv_mismatch.map(|layer| layer as u64),
+            kv_key_mismatch_layer = kv_key_mismatch.map(|layer| layer as u64),
+            kv_value_mismatch_layer = kv_value_mismatch.map(|layer| layer as u64),
+            "ROCm batched graph first launch compared with its eager warm pass"
+        );
+        if !hidden_match
+            || recurrent_mismatch.is_some()
+            || conv_mismatch.is_some()
+            || kv_key_mismatch.is_some()
+            || kv_value_mismatch.is_some()
+        {
+            capture_failure_guard.settle_before_rollback()?;
+            capture_failure_guard.complete_rollback(Self::restore_linear_state_in_place(
+                linear_state,
+                &capture_snapshot,
+                "restore batched GDN state after capture parity failure",
+            ))?;
+            anyhow::bail!(
+                "batched ROCm graph capture parity failed: hidden_match={hidden_match}, \
+                 recurrent_mismatch_layer={recurrent_mismatch:?}, \
+                 conv_mismatch_layer={conv_mismatch:?}, \
+                 kv_key_mismatch_layer={kv_key_mismatch:?}, \
+                 kv_value_mismatch_layer={kv_value_mismatch:?}"
+            );
         }
 
         let captured_hidden = output_hidden.clone();
@@ -6712,9 +7065,12 @@ impl RocmGraphRunner {
         );
         if let Err(err) = warm_result {
             if let Err(sync_err) = warm_sync_result {
-                tracing::warn!("post-warm-failure capture stream sync failed: {sync_err:#}");
-                return Err(sync_err)
-                    .context("capture stream synchronization failed after warm-forward failure");
+                return fail_closed_after_rocm_warmup(
+                    weights,
+                    sync_err.context(format!(
+                        "capture stream synchronization failed after warm-forward failure ({err:#})"
+                    )),
+                );
             }
             Self::restore_linear_state_after_execution(
                 &context,
@@ -6734,7 +7090,10 @@ impl RocmGraphRunner {
             return Err(err).context("freeze-pointers warm (Record) pass failed");
         }
         if let Err(sync_err) = warm_sync_result {
-            return Err(sync_err);
+            return fail_closed_after_rocm_warmup(
+                weights,
+                sync_err.context("capture stream synchronization failed after warm forward"),
+            );
         }
         // Restore values without replacing the graph slot's tensor handles.
         // Captured graphs retain these exact addresses across request reuse.
@@ -7716,6 +8075,70 @@ mod tests {
     }
 
     #[cfg(feature = "rocm")]
+    fn rocm_graph_qwen_depth_test_fixture(device: &Device) -> (ModelConfig, GpuWeights) {
+        let (mut config, mut weights) = rocm_graph_hybrid_test_fixture(device);
+
+        config.num_layers = 32;
+        config.num_full_attention_layers = 8;
+        config.full_attention_interval = 4;
+        let mut layers = Vec::with_capacity(config.num_layers);
+        for layer_idx in 0..config.num_layers {
+            // Real checkpoint layers have distinct allocations. Building each
+            // small synthetic layer independently makes capture preserve 32
+            // different weight-pointer sets instead of replaying aliases of
+            // one GDN and one full-attention layer.
+            let (_, mut source) = rocm_graph_hybrid_test_fixture(device);
+            let mut layer = if config.is_full_attention_layer(layer_idx) {
+                source.layers.remove(1)
+            } else {
+                source.layers.remove(0)
+            };
+
+            let gate_up_rows = Tensor::cat(&[&layer.mlp.gate_proj, &layer.mlp.up_proj], 0)
+                .expect("concatenate ROCm graph fixture MLP rows")
+                .contiguous()
+                .expect("materialize ROCm graph fixture MLP rows");
+            layer.mlp.gate_up_proj_w8 = crate::rocm_w8_proj::pack_from_bf16_rows(&gate_up_rows)
+                .expect("pack ROCm graph fixture gate/up rows");
+            layer.mlp.down_proj_w8 = crate::rocm_w8_proj::pack_from_bf16_rows(&layer.mlp.down_proj)
+                .expect("pack ROCm graph fixture down rows");
+
+            match &mut layer.attention {
+                crate::forward::GpuAttentionWeights::Full(full) => {
+                    let qkv_rows = Tensor::cat(&[&full.q_proj, &full.k_proj, &full.v_proj], 0)
+                        .expect("concatenate ROCm graph fixture QKV rows")
+                        .contiguous()
+                        .expect("materialize ROCm graph fixture QKV rows");
+                    full.qkv_proj_w8 = crate::rocm_w8_proj::pack_from_bf16_rows(&qkv_rows)
+                        .expect("pack ROCm graph fixture QKV rows");
+                    full.o_proj_w8 = crate::rocm_w8_proj::pack_from_bf16_rows(&full.o_proj)
+                        .expect("pack ROCm graph fixture attention output rows");
+                }
+                crate::forward::GpuAttentionWeights::Linear(linear) => {
+                    let rows = Tensor::cat(
+                        &[
+                            &linear.in_proj_qkv,
+                            &linear.in_proj_z,
+                            &linear.in_proj_a,
+                            &linear.in_proj_b,
+                        ],
+                        0,
+                    )
+                    .expect("concatenate ROCm graph fixture GDN rows")
+                    .contiguous()
+                    .expect("materialize ROCm graph fixture GDN rows");
+                    linear.in_proj_qkvzab_w8 = crate::rocm_w8_proj::pack_from_bf16_rows(&rows)
+                        .expect("pack ROCm graph fixture GDN rows");
+                }
+            }
+            layers.push(layer);
+        }
+        weights.layers = layers;
+
+        (config, weights)
+    }
+
+    #[cfg(feature = "rocm")]
     fn hidden_f32(tensor: &Tensor) -> Vec<f32> {
         tensor
             .to_device(Device::Cpu)
@@ -7753,6 +8176,126 @@ mod tests {
             Some("1"),
             "set KILN_QUALIFICATION=1 for the explicit hardware run"
         );
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn capture_parity_check_is_exact_and_attributes_state_layer() -> Result<()> {
+        let device = Device::Cpu;
+        let tensor = |values: &[f32]| {
+            Tensor::from_vec_on(device, values.to_vec(), vec![1, values.len()])
+                .expect("build ROCm capture parity fixture tensor")
+        };
+        let expected_hidden = tensor(&[1.0, 2.0]);
+        let expected_state = LinearAttentionState {
+            recurrent_states: vec![tensor(&[3.0, 4.0]), tensor(&[5.0, 6.0])],
+            conv_states: vec![tensor(&[7.0, 8.0]), tensor(&[9.0, 10.0])],
+        };
+        let matching_state = expected_state.snapshot()?;
+        let (tensor_copies, tensor_scratch) =
+            RocmGraphRunner::capture_parity_tensor_temporary_bytes(
+                &expected_hidden,
+                &expected_state,
+            );
+        assert_eq!(
+            tensor_copies.saturating_add(tensor_scratch),
+            75,
+            "two state snapshots, one hidden copy, and the largest U8 comparison mask must be reserved",
+        );
+        let paged_cache = PagedKvCacheKt::new(2, 1, 8, 2, 3, kiln_tensor::DType::F32, device)?;
+        assert_eq!(
+            RocmGraphRunner::capture_parity_temporary_bytes(
+                &expected_hidden,
+                &expected_state,
+                &paged_cache,
+                4,
+            )?,
+            577,
+            "KV reference rows and one gathered candidate row must share the parity reservation",
+        );
+        let kv_slots = Tensor::from_vec_on(device, vec![0u32, 2, 4, 6], vec![4])?;
+        for layer_idx in 0usize..2 {
+            let values = (0usize..48)
+                .map(|index| (layer_idx * 100 + index) as f32)
+                .collect::<Vec<_>>();
+            let keys = Tensor::from_vec_on(device, values.clone(), vec![8, 2, 3])?;
+            let values = Tensor::from_vec_on(
+                device,
+                values.into_iter().map(|value| value + 50.0).collect(),
+                vec![8, 2, 3],
+            )?;
+            let (key_pool, value_pool) = paged_cache
+                .pool_tensors(layer_idx)
+                .expect("capture parity KV fixture layer");
+            key_pool.slice_set(&keys, 0, 0)?;
+            value_pool.slice_set(&values, 0, 0)?;
+        }
+        let expected_kv = RocmGraphRunner::snapshot_paged_kv_slots(&paged_cache, &kv_slots)?;
+        assert_eq!(
+            RocmGraphRunner::exact_paged_kv_slots_match(&expected_kv, &paged_cache, &kv_slots,)?,
+            (None, None),
+        );
+        let changed_row = Tensor::from_vec_on(device, vec![-1.0f32; 6], vec![1, 2, 3])?;
+        let (layer_one_keys, _) = paged_cache
+            .pool_tensors(1)
+            .expect("capture parity KV fixture layer one");
+        layer_one_keys.slice_set(&changed_row, 0, 2)?;
+        assert_eq!(
+            RocmGraphRunner::exact_paged_kv_slots_match(&expected_kv, &paged_cache, &kv_slots,)?,
+            (Some(1), None),
+        );
+        let (_, layer_zero_values) = paged_cache
+            .pool_tensors(0)
+            .expect("capture parity KV fixture layer zero");
+        layer_zero_values.slice_set(&changed_row, 0, 0)?;
+        assert_eq!(
+            RocmGraphRunner::exact_paged_kv_slots_match(&expected_kv, &paged_cache, &kv_slots,)?,
+            (Some(1), Some(0)),
+        );
+
+        assert_eq!(
+            RocmGraphRunner::exact_capture_outputs_match(
+                &expected_hidden,
+                &expected_hidden.copy()?,
+                &expected_state,
+                &matching_state,
+            )?,
+            (true, None, None)
+        );
+
+        let recurrent_mismatch = LinearAttentionState {
+            recurrent_states: vec![tensor(&[3.0, 4.0]), tensor(&[5.0, 6.5])],
+            conv_states: vec![tensor(&[7.0, 8.0]), tensor(&[9.0, 10.0])],
+        };
+        assert_eq!(
+            RocmGraphRunner::exact_capture_outputs_match(
+                &expected_hidden,
+                &tensor(&[1.0, 2.5]),
+                &expected_state,
+                &recurrent_mismatch,
+            )?,
+            (false, Some(1), None)
+        );
+        assert!(
+            !RocmGraphRunner::exact_tensor_values_match(
+                &tensor(&[f32::NAN]),
+                &tensor(&[f32::NAN]),
+            )?,
+            "NaN parity must fail closed",
+        );
+        assert!(
+            RocmGraphRunner::exact_tensor_values_match(&tensor(&[]), &tensor(&[]))?,
+            "empty tensor parity is vacuously true",
+        );
+        assert!(
+            RocmGraphRunner::exact_tensor_values_match(
+                &tensor(&[1.0]),
+                &tensor(&[1.0]).to_dtype(kiln_tensor::DType::BF16)?,
+            )
+            .is_err(),
+            "dtype drift must not be normalized away",
+        );
+        Ok(())
     }
 
     #[test]
@@ -8955,9 +9498,10 @@ mod tests {
     }
 
     /// Real gfx1151 proof that one persistent width slot can alternate between
-    /// unrelated GDN cohorts without leaking or staling either cohort's state.
-    /// This matches continuous batching more closely than advancing one fixed
-    /// set of rows through every replay.
+    /// unrelated, nonzero GDN cohorts without leaking or staling either
+    /// cohort's state. The small tensors retain Qwen's production 32-layer
+    /// topology (three GDN layers followed by full attention, repeated eight
+    /// times), so capture covers every production state and KV layer index.
     #[cfg(feature = "rocm")]
     #[test]
     #[ignore = "requires an explicit real-ROCm qualification run"]
@@ -8971,7 +9515,7 @@ mod tests {
         let device = Device::Rocm(0);
         configure_rocm_graph_test_memory_governor(&device);
         let backend = crate::backend::for_device_kt(&device);
-        let (config, weights) = rocm_graph_hybrid_test_fixture(&device);
+        let (config, weights) = rocm_graph_qwen_depth_test_fixture(&device);
         let graph_cache = PagedKvCacheKt::new(
             config.num_full_attention_layers,
             32,
@@ -9033,7 +9577,62 @@ mod tests {
         let mut graph_runner =
             RocmGraphRunner::new(&device, RocmGraphExecutionPolicy::lazy_capture_replay());
 
+        // Production rows enter decode with prompt-derived recurrent and
+        // convolution state. Seed both independent cohorts through the eager
+        // path before capture so a zero-state fixture cannot hide a stale-copy
+        // or layer-index error.
+        for cohort in 0usize..2 {
+            let offset = cohort * 29;
+            let token_ids = [
+                (offset % config.vocab_size) as u32,
+                ((offset + 5) % config.vocab_size) as u32,
+                ((offset + 11) % config.vocab_size) as u32,
+                ((offset + 17) % config.vocab_size) as u32,
+            ];
+            let sequence_lengths = [16usize; 4];
+            let table_refs: Vec<&BlockTable> = tables[cohort].iter().collect();
+            let graph_row_refs: Vec<&LinearAttentionState> = graph_rows[cohort].iter().collect();
+            let eager_row_refs: Vec<&LinearAttentionState> = eager_rows[cohort].iter().collect();
+            let mut graph_state = LinearAttentionState::from_batch_rows(&graph_row_refs)?;
+            let mut eager_state = LinearAttentionState::from_batch_rows(&eager_row_refs)?;
+            model_forward_paged_decode_contiguous_batch_hidden_with_ids(
+                backend.as_ref(),
+                &token_ids,
+                &weights,
+                &config,
+                &graph_cache,
+                &table_refs,
+                &sequence_lengths,
+                Some(&mut graph_state),
+                None,
+                Some(&row_ids[cohort]),
+            )?;
+            model_forward_paged_decode_contiguous_batch_hidden_with_ids(
+                backend.as_ref(),
+                &token_ids,
+                &weights,
+                &config,
+                &eager_cache,
+                &table_refs,
+                &sequence_lengths,
+                Some(&mut eager_state),
+                None,
+                Some(&row_ids[cohort]),
+            )?;
+            graph_rows[cohort] = graph_state.split_batch_rows()?;
+            eager_rows[cohort] = eager_state.split_batch_rows()?;
+        }
+
         for turn in 0usize..16 {
+            // The production server owns a background memory sampler. This
+            // standalone hardware test does not, so publish a fresh live probe
+            // before each turn rather than letting the 500 ms cached-sample
+            // freshness guard force an unrelated eager fallback.
+            let memory_snapshot = kiln_memory::MemoryGovernor::global().refresh();
+            anyhow::ensure!(
+                !memory_snapshot.observations.probe_failed,
+                "ROCm graph depth test memory probe failed before turn {turn}"
+            );
             let cohort = turn % 2;
             let step = turn / 2 + 1;
             let offset = cohort * 29;
@@ -9043,7 +9642,7 @@ mod tests {
                 ((step + offset + 11) % config.vocab_size) as u32,
                 ((step + offset + 17) % config.vocab_size) as u32,
             ];
-            let sequence_lengths = [step, step + 1, step + 2, step + 3];
+            let sequence_lengths = [16 + step; 4];
             let table_refs: Vec<&BlockTable> = tables[cohort].iter().collect();
             let graph_row_refs: Vec<&LinearAttentionState> = graph_rows[cohort].iter().collect();
             let eager_row_refs: Vec<&LinearAttentionState> = eager_rows[cohort].iter().collect();

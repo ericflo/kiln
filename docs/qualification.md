@@ -1783,6 +1783,44 @@ was unforced, and no process or listener residue remained. This receipt is the
 bitwise output oracle for the fixed-source graph arm; it is not a throughput or
 latency promotion by itself.
 
+The paired graph arm is retained as the strict-valid failed receipt
+`benchmarks/receipts/rocm/strix-halo/20260720t000300-rocm-strix-halo-fixed-source-state-copy-graphs-v16-c8.kiln.json`.
+All route and lifecycle gates passed: 8/8 requests completed 32 tokens at width
+four, one capture led to 61 replays with no fallback or graph failure, decode
+service wall was 6.658 seconds, aggregate output was 16.559 tokens/second, and
+thermally sustainable output was 10.007 tokens/second. P50/p99 ITL was
+412.821/1,020.318 ms, p99 TTFT was 2.855 seconds, measured/lifecycle temperature
+peaked at 77.625/90.5 C without a trip, memory peaked at 35,434,250,240 bytes,
+and shutdown was unforced with no residue. Exact output still differed at seven
+request indices, so none of those candidate performance values is promoted.
+Every graph-arm output hash recurs in earlier retained receipts, including
+eager profiles, and its vector closely follows earlier process trajectories.
+That recurrence proves the cross-process hash mismatch is not by itself a novel
+graph-corruption signature; it does not waive the failed comparison.
+
+Current source therefore gates graph admission with an in-process oracle. It
+retains the candidate's eager warm hidden output, every recurrent/conv state,
+and only the current K/V rows, restores the input state, launches the graph once,
+and compares all values exactly before admission. Temporary copies, one live
+K/V gather, and one U8 comparison mask are reserved before allocation and are
+included with the exact candidate bytes in transient high-water telemetry. A
+comparison error or mismatch settles and rolls state back, discards the graph,
+disables graph execution for that runner, and enters the existing
+`capture_failure` eager fallback only after containment succeeds. The structured
+`rocm_graph_capture_parity_check` event attributes bytes, duration, hidden
+equality, and the first recurrent, convolution, K, or V mismatch layer.
+
+The corresponding explicit gfx1151 oracle now uses the real 32-layer Qwen
+topology (24 GDN plus eight full-attention layers), distinct synthetic
+allocations for every layer, and production W8 packed projection routes. Two
+disjoint width-four cohorts are seeded eagerly and alternate through one slot.
+One capture plus 15 replays matched eager hidden, all recurrent/conv state, and
+the complete K/V pools exactly, with zero fallback or failure. The run retained
+11,854,304 graph/slot bytes, reserved a measured 18,885,089-byte peak transient
+working set, and completed native capture plus first-launch parity in 74.899 ms.
+A new committed-source paired production run is still required; this guard and
+focused oracle do not retroactively promote the failed receipt.
+
 Serving benchmark driver v15 closes the next attribution gap before another
 ROCm arm. Each successful Kiln stream now retains its exact terminal
 `metadata.performance` object, including the request-local latency phases and

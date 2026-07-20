@@ -439,6 +439,12 @@ every successful multi-row eager forward, so those receipts remain
 evidence-valid but fail `rocm_graph_execution_accounted`. The current runner
 keys retained batch graphs by width and attention bucket, keeps LM head and
 sampling eager, and reports the shared width slot as active.
+Capture success in current source occurs only after the automatic first-launch
+parity oracle compares hidden output, all GDN recurrent/conv state, and the
+current K/V rows with that candidate's own eager warm pass. The structured
+`rocm_graph_capture_parity_check` event is the detailed attribution record; a
+mismatch or comparison error increments capture failure, disables graphs for the
+runner, and cannot satisfy this gate through its later contained eager retry.
 
 ### Cooperative actor-cycle idle evidence
 

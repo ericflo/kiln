@@ -886,7 +886,8 @@ curl -s http://localhost:8420/metrics \
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
           The warm Record pass must allocate the candidate before its exact size exists. Treat
           <code>last_transient_candidate_bytes</code> and <code>peak_transient_candidate_bytes</code> as that
-          residual exposure, not as retained cache bytes. For every phase require
+          residual exposure plus the separately reserved first-launch parity snapshots, current-row gather, and
+          exact-equality mask, not as retained cache bytes. For every phase require
           <code>slow &lt;= calls</code>, <code>max_duration_micros &lt;= total_duration_micros</code>, and all duration
           fields zero when <code>calls</code> is zero. A rising <code>current_phase_elapsed_micros</code> while the
           full graph snapshot is busy is direct phase attribution, not telemetry loss. The five completed phase
@@ -918,6 +919,17 @@ curl -s http://localhost:8420/metrics \
           <code>kiln_rocm_graph_fallbacks_total{reason="multi_row_batch_unsupported"}</code> delta. A positive value
           identifies a historical binary or a route outside the supported graph contract; it is not proof of VRAM
           rebalancing, and a graph-performance qualification must still fail.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          For every new batch geometry, find exactly one
+          <code>event=rocm_graph_capture_parity_check</code>. A passed event means the first graph launch matched its
+          own eager warm hidden output, every recurrent and convolution tensor, and the current K/V rows. Inspect
+          <code>comparison_complete</code>, <code>compared_bytes</code>, and <code>duration_ms</code>. A completed check
+          also reports <code>hidden_match</code> and the four first-mismatch layer fields; an error reports the
+          comparison failure instead. A failed, errored, or missing check on a claimed current-source capture is
+          failure evidence. The runner must settle and restore state, discard the graph, disable graph execution,
+          and report <code>capture_failure</code> before any contained eager retry; do not treat the eager completion
+          as graph correctness.
         </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
           For <code>cold_cache_host_round_trip</code> or <code>persistent_host_round_trip</code>, inspect the paired
