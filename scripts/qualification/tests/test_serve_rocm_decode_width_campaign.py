@@ -209,10 +209,16 @@ class DecodeWidthCampaignTests(unittest.TestCase):
         ), mock.patch.object(
             campaign.mixed, "execute", side_effect=fake_execute
         ) as execute:
-            with self.assertRaisesRegex(campaign.CampaignError, "not every"):
+            with self.assertRaisesRegex(
+                campaign.CampaignRunError, "not every"
+            ) as raised:
                 campaign.run_campaign(ROOT, 17)
 
         self.assertEqual(execute.call_count, 2)
+        self.assertEqual(
+            [item.width for item in raised.exception.outcomes], [2, 4, 8]
+        )
+        self.assertTrue(raised.exception.outcomes[2].not_run)
 
     def test_workload_matches_script_contract(self) -> None:
         workload = json.loads(

@@ -87,6 +87,20 @@ class CampaignError(RuntimeError):
     """Raised when a width campaign cannot produce promotable evidence."""
 
 
+class CampaignRunError(CampaignError):
+    """Preserve every completed arm when the campaign cannot select a width."""
+
+    def __init__(
+        self,
+        message: str,
+        outcomes: list[CandidateOutcome],
+        build_seconds: float,
+    ) -> None:
+        super().__init__(message)
+        self.outcomes = outcomes
+        self.build_seconds = build_seconds
+
+
 @dataclass
 class CandidateOutcome:
     width: int
@@ -489,7 +503,11 @@ def run_campaign(
                     )
                 )
             break
-    return outcomes, select_candidate(outcomes), build_seconds
+    try:
+        selected = select_candidate(outcomes)
+    except CampaignError as exc:
+        raise CampaignRunError(str(exc), outcomes, build_seconds) from exc
+    return outcomes, selected, build_seconds
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -515,6 +533,11 @@ def main(argv: list[str] | None = None) -> int:
             raise CampaignError("--model-path must be a directory")
         outcomes, selected, build_seconds = run_campaign(model_path, args.seed)
         status = "passed"
+    except CampaignRunError as exc:
+        outcomes = exc.outcomes
+        build_seconds = exc.build_seconds
+        failure = f"{type(exc).__name__}: {exc}"
+        mixed.trace("decode_width_campaign_error", details=failure)
     except Exception as exc:
         failure = f"{type(exc).__name__}: {exc}"
         mixed.trace("decode_width_campaign_error", details=failure)
