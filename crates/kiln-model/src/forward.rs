@@ -9644,7 +9644,7 @@ fn rocm_w8_lm_head_argmax_rows(
     normed: &Tensor,
     weights: &GpuWeights,
 ) -> Result<Option<Vec<u32>>> {
-    if !matches!(BackendIdentity::runtime_device(backend), Device::Rocm(_))
+    if !SamplingBackend::runtime_supports_quantized_lm_head_argmax_batch(backend)
         || normed.dtype() != DType::BF16
         || normed.track_op()
     {
@@ -9686,24 +9686,11 @@ pub(crate) fn rocm_w8_batch_sample_supported(
 ) -> bool {
     #[cfg(feature = "rocm")]
     {
-        matches!(BackendIdentity::runtime_device(backend), Device::Rocm(_))
-            && crate::rocm_policy::current_rocm_kernel_policy().w8_sampled_lm_head
-            && weights.lm_head_w8.is_some()
-            && temperatures.len() == top_k.len()
-            && !temperatures.is_empty()
-            && temperatures
-                .iter()
-                .zip(top_k.iter())
-                .all(|(&temperature, &k)| {
-                    let greedy = kiln_core::sampling::SamplingParams::values_are_effectively_greedy(
-                        temperature,
-                        k,
-                    );
-                    greedy
-                        || (temperature.is_finite()
-                            && temperature > 0.0
-                            && (1..=crate::rocm_w8_proj::BATCH_SAMPLE_TOP_K_MAX).contains(&k))
-                })
+        SamplingBackend::runtime_supports_quantized_lm_head_sample_batch(
+            backend,
+            top_k,
+            temperatures,
+        ) && weights.lm_head_w8.is_some()
     }
     #[cfg(not(feature = "rocm"))]
     {

@@ -147,6 +147,10 @@ pub struct RocmBackend {
     /// variant is bit-exact, but slower on gfx1151 long-context prefill, so
     /// only the typed experimental profile enables it.
     gdn_full_chunk_forward_multiblock_enabled: bool,
+    /// Packed W8 LM-head projection and token-only greedy selection.
+    w8_lm_head_enabled: bool,
+    /// Packed W8 LM-head sampling with bounded top-k selection.
+    w8_sampled_lm_head_enabled: bool,
 }
 
 impl RocmBackend {
@@ -193,6 +197,8 @@ impl RocmBackend {
             fused_conv1d_enabled,
             lora_decode_add_enabled: policy.lora_decode_add,
             gdn_full_chunk_forward_multiblock_enabled,
+            w8_lm_head_enabled: policy.w8_projection,
+            w8_sampled_lm_head_enabled: policy.w8_sampled_lm_head,
         }
     }
 
@@ -2242,7 +2248,34 @@ impl ConvBackend for RocmBackend {
     }
 }
 
-impl SamplingBackend for RocmBackend {}
+impl SamplingBackend for RocmBackend {
+    fn runtime_supports_quantized_lm_head_argmax_batch(&self) -> bool {
+        self.w8_lm_head_enabled
+    }
+
+    fn runtime_supports_quantized_lm_head_sample_batch(
+        &self,
+        top_k: &[u32],
+        temperatures: &[f32],
+    ) -> bool {
+        self.w8_sampled_lm_head_enabled
+            && temperatures.len() == top_k.len()
+            && !temperatures.is_empty()
+            && temperatures
+                .iter()
+                .zip(top_k.iter())
+                .all(|(&temperature, &k)| {
+                    let greedy = kiln_core::sampling::SamplingParams::values_are_effectively_greedy(
+                        temperature,
+                        k,
+                    );
+                    greedy
+                        || (temperature.is_finite()
+                            && temperature > 0.0
+                            && (1..=kiln_tensor::ROCM_W8_BATCH_SAMPLE_TOP_K_MAX).contains(&k))
+                })
+    }
+}
 
 impl PagedKvBackend for RocmBackend {}
 
@@ -2273,6 +2306,8 @@ mod tests {
             fused_conv1d_enabled: false,
             lora_decode_add_enabled: false,
             gdn_full_chunk_forward_multiblock_enabled: false,
+            w8_lm_head_enabled: false,
+            w8_sampled_lm_head_enabled: false,
         }
     }
 
@@ -2295,6 +2330,8 @@ mod tests {
                 backend.fused_conv1d_enabled,
                 backend.lora_decode_add_enabled,
                 backend.gdn_full_chunk_forward_multiblock_enabled,
+                backend.w8_lm_head_enabled,
+                backend.w8_sampled_lm_head_enabled,
             ]
         };
         let qualified = RocmBackend::new_with_kernel_policy(
@@ -2305,7 +2342,7 @@ mod tests {
             routes(&qualified),
             [
                 true, true, true, true, true, true, true, true, true, true, true, true, true, true,
-                false,
+                false, true, true,
             ]
         );
 
@@ -2313,13 +2350,33 @@ mod tests {
             kiln_tensor::Device::Rocm(0),
             RocmKernelPolicy::portable_fallback(),
         );
-        assert_eq!(routes(&fallback), [false; 15]);
+        assert_eq!(routes(&fallback), [false; 17]);
 
         let experimental = RocmBackend::new_with_kernel_policy(
             kiln_tensor::Device::Rocm(0),
             RocmKernelPolicy::experimental_multiblock(),
         );
-        assert_eq!(routes(&experimental), [true; 15]);
+        assert_eq!(routes(&experimental), [true; 17]);
+    }
+
+    #[test]
+    fn quantized_lm_head_sampling_support_is_typed_and_bounded() {
+        let qualified = RocmBackend::new_with_kernel_policy(
+            kiln_tensor::Device::Rocm(0),
+            RocmKernelPolicy::qualified(),
+        );
+        assert!(qualified.runtime_supports_quantized_lm_head_argmax_batch());
+        assert!(qualified.runtime_supports_quantized_lm_head_sample_batch(&[0], &[0.0]));
+        assert!(qualified.runtime_supports_quantized_lm_head_sample_batch(&[40], &[0.7]));
+        assert!(!qualified.runtime_supports_quantized_lm_head_sample_batch(&[65], &[0.7]));
+        assert!(!qualified.runtime_supports_quantized_lm_head_sample_batch(&[40, 40], &[0.7]));
+
+        let fallback = RocmBackend::new_with_kernel_policy(
+            kiln_tensor::Device::Rocm(0),
+            RocmKernelPolicy::portable_fallback(),
+        );
+        assert!(!fallback.runtime_supports_quantized_lm_head_argmax_batch());
+        assert!(!fallback.runtime_supports_quantized_lm_head_sample_batch(&[40], &[0.7]));
     }
 
     #[test]

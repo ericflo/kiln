@@ -699,10 +699,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 2193,
+          "line": 2199,
           "paired_method": "runtime_causal_conv1d_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 2223,
+          "paired_method_line": 2229,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -714,10 +714,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 2189,
+          "line": 2195,
           "paired_method": "runtime_causal_conv1d_update",
           "paired_method_always_declines": false,
-          "paired_method_line": 2197,
+          "paired_method_line": 2203,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -729,10 +729,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 267,
+          "line": 273,
           "paired_method": "runtime_flash_attn_paged_decode",
           "paired_method_always_declines": false,
-          "paired_method_line": 367,
+          "paired_method_line": 373,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -744,10 +744,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 259,
+          "line": 265,
           "paired_method": "runtime_flash_attn_prefill",
           "paired_method_always_declines": false,
-          "paired_method_line": 283,
+          "paired_method_line": 289,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -759,10 +759,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 263,
+          "line": 269,
           "paired_method": "runtime_flash_attn_prefill_head_major",
           "paired_method_always_declines": false,
-          "paired_method_line": 331,
+          "paired_method_line": 337,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -774,10 +774,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 638,
+          "line": 644,
           "paired_method": "runtime_gdn_chunk_prep",
           "paired_method_always_declines": false,
-          "paired_method_line": 723,
+          "paired_method_line": 729,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -789,10 +789,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 642,
+          "line": 648,
           "paired_method": "runtime_gdn_chunk_scan",
           "paired_method_always_declines": false,
-          "paired_method_line": 756,
+          "paired_method_line": 762,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -804,7 +804,7 @@
             "layout": false,
             "shape": false
           },
-          "line": 650,
+          "line": 656,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -819,10 +819,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 655,
+          "line": 661,
           "paired_method": "runtime_gdn_decode_qk_norm_gates_recurrent",
           "paired_method_always_declines": false,
-          "paired_method_line": 1064,
+          "paired_method_line": 1070,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -834,10 +834,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 629,
+          "line": 635,
           "paired_method": "runtime_gdn_forward_substitution",
           "paired_method_always_declines": false,
-          "paired_method_line": 660,
+          "paired_method_line": 666,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -849,10 +849,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 646,
+          "line": 652,
           "paired_method": "runtime_gdn_full_chunk_forward",
           "paired_method_always_declines": false,
-          "paired_method_line": 790,
+          "paired_method_line": 796,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -864,10 +864,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1589,
+          "line": 1595,
           "paired_method": "runtime_gdn_gated_rms_norm",
           "paired_method_always_declines": false,
-          "paired_method_line": 1593,
+          "paired_method_line": 1599,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -879,10 +879,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 1525,
+          "line": 1531,
           "paired_method": "runtime_gdn_gates",
           "paired_method_always_declines": false,
-          "paired_method_line": 1529,
+          "paired_method_line": 1535,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -894,10 +894,10 @@
             "layout": false,
             "shape": false
           },
-          "line": 634,
+          "line": 640,
           "paired_method": "runtime_gdn_recurrent_step",
           "paired_method_always_declines": false,
-          "paired_method_line": 701,
+          "paired_method_line": 707,
           "status": "dynamic",
           "support_state": "NativeWithConstraints"
         },
@@ -909,7 +909,37 @@
             "layout": false,
             "shape": false
           },
-          "line": 1867,
+          "line": 1873,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_quantized_lm_head_argmax_batch": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 2252,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "dynamic",
+          "support_state": "NativeWithConstraints"
+        },
+        "runtime_supports_quantized_lm_head_sample_batch": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 2256,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -924,7 +954,7 @@
             "layout": false,
             "shape": false
           },
-          "line": 1752,
+          "line": 1758,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -939,7 +969,7 @@
             "layout": true,
             "shape": false
           },
-          "line": 278,
+          "line": 284,
           "paired_method": null,
           "paired_method_always_declines": false,
           "paired_method_line": null,
@@ -2952,7 +2982,7 @@
         "VulkanBackend"
       ],
       "forwarding_impl": "concrete_authoritative",
-      "method_count": 8,
+      "method_count": 10,
       "methods": [
         "runtime_linear_decode_argmax",
         "runtime_linear_decode_argmax_batch",
@@ -2961,7 +2991,9 @@
         "runtime_supports_linear_decode_argmax",
         "runtime_supports_linear_decode_argmax_batch",
         "runtime_supports_linear_decode_sample",
-        "runtime_supports_linear_decode_sample_batch"
+        "runtime_supports_linear_decode_sample_batch",
+        "runtime_supports_quantized_lm_head_argmax_batch",
+        "runtime_supports_quantized_lm_head_sample_batch"
       ],
       "source": "crates/kiln-model/src/backend/mod.rs"
     },

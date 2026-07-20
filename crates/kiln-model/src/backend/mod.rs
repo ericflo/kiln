@@ -1436,6 +1436,22 @@ pub trait LinearBackend: Send + Sync + std::fmt::Debug {
 /// Focused `SamplingBackend` facet for fused LM-head token selection.
 #[allow(clippy::too_many_arguments)]
 pub trait SamplingBackend: Send + Sync + std::fmt::Debug {
+    /// Whether this backend can select greedy tokens directly from its
+    /// quantized LM-head representation without materializing logits.
+    fn runtime_supports_quantized_lm_head_argmax_batch(&self) -> bool {
+        false
+    }
+
+    /// Whether this backend can select a batch of tokens directly from its
+    /// quantized LM-head representation for the supplied sampling controls.
+    fn runtime_supports_quantized_lm_head_sample_batch(
+        &self,
+        _top_k: &[u32],
+        _temperatures: &[f32],
+    ) -> bool {
+        false
+    }
+
     fn runtime_supports_linear_decode_argmax(&self) -> bool {
         false
     }
