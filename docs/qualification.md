@@ -1622,6 +1622,16 @@ without a trip or pacing event. This passes the declared discriminator but does
 not promote the operating point: the remaining policy arms and the 30-minute
 development soak still have to pass from committed source.
 
+The source-bound `default` arm also passed from the receipt checkpoint commit:
+`qualification/receipts/rocm/strix-halo/20260720t073015406855z-rocm-strix-halo-serving-mixed-rocm-v1-f2e983b84c-v1.json`.
+It attested requested and effective KV autoscaling with graphs enabled. The
+bounded workload did not trigger a physical resize or reclaim: KV capacity
+remained exactly 4,096 blocks and resize/reclaim latency stayed zero. All three
+ITL outlier populations remained zero, aggregate output was 12.935
+tokens/second, and the package peaked at 89.75 C without pacing or a trip. This
+closes the autoscaling-enabled arm for this workload; it is not evidence that a
+separate forced-resize workload is unnecessary.
+
 Five measured-window metrics close the cooperative-idle evidence. The configured
 gauge is `batching_actor_cycle_idle_ms_configured`. The monotonic count and
 elapsed-time deltas are `batching_actor_cycle_idle_count` and
