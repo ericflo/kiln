@@ -1272,6 +1272,7 @@ class ServeRocmSoakTests(unittest.TestCase):
                     "active_resident_prefill": 0,
                     "active_staged_requests": 0,
                     "queue_depth": 0,
+                    "actor_cycle_idle_active": False,
                 }
             }
         }

@@ -71,7 +71,7 @@
           "max_active_requests": 8,
           "max_prefill_staging_priority_burst": 4,
           "max_prefill_tokens_per_cycle": 256,
-          "max_prefill_layers_per_cycle": 32
+          "max_prefill_layers_per_cycle": 8
         },
         "soak": {
           "cancellation_after_semantic_deltas": 4,

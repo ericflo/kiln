@@ -576,6 +576,15 @@ state as `kiln_rocm_w8_lm_head_dispatches_total{operation}`,
 `kiln_rocm_w8_lm_head_max_sample_top_k`. Reading either surface only loads host
 atomics. It does not probe or synchronize the accelerator.
 
+These counters describe route ownership, not total response ownership. Prefill
+emits the first completion token for each admitted request before the request
+becomes a decode-continuation row. Consequently an eight-request sampled wave
+with 32 completions per request has 256 response tokens but exactly 248 fused
+sample rows. Qualification requires both exact counts: the response oracle and
+usage fields cover all 256 tokens, while the LM-head counter covers the 248
+decode-continuation tokens. Treating the eight prefill-owned tokens as missing
+fused work is a contract error.
+
 The primary ROCm context stores the immutable policy. A second caller asking
 for a different policy on the same device receives a startup error naming the
 already-installed and requested policies. This prevents two model/runtime

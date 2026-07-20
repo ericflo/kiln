@@ -83,6 +83,7 @@ PRESSURE_PEER_PROMPT_WORDS = 64
 PRESSURE_PEER_MAX_TOKENS = 256
 PRESSURE_PEER_SEED_OFFSET = 103
 PRESSURE_PEER_DISPATCH = "before_slow_start_after_first_token"
+DELIVERY_PRESSURE_TIMEOUT_SECONDS = 90.0
 WARMUP_MAX_TOKENS = 32
 MAX_WARMUP_REQUESTS = 4
 SAMPLED_PROFILE_REQUESTS = 8
@@ -108,7 +109,7 @@ HTTP_SEND_BUFFER_BYTES = 4096
 STREAM_STALL_GRACE_MS = 2000
 MAX_BATCH_TOKENS = 512
 MAX_PREFILL_TOKENS_PER_CYCLE = 256
-MAX_PREFILL_LAYERS_PER_CYCLE = 32
+MAX_PREFILL_LAYERS_PER_CYCLE = 8
 MAX_DECODE_BATCH = 4
 MAX_PREFILL_STAGING_SLOTS = 4
 MAX_ACTIVE_REQUESTS = MAX_DECODE_BATCH + MAX_PREFILL_STAGING_SLOTS
@@ -373,6 +374,9 @@ def _variant_config(
             "outlier_history_size": OUTLIER_HISTORY_SIZE,
             "outlier_multiplier": int(OUTLIER_MULTIPLIER),
             "overall_timeout_seconds": int(OVERALL_TIMEOUT_SECONDS),
+            "delivery_pressure_timeout_seconds": int(
+                DELIVERY_PRESSURE_TIMEOUT_SECONDS
+            ),
             "pressure_peer_dispatch": PRESSURE_PEER_DISPATCH,
             "pressure_peer_max_tokens": PRESSURE_PEER_MAX_TOKENS,
             "pressure_peer_prompt_words": PRESSURE_PEER_PROMPT_WORDS,
@@ -4304,8 +4308,10 @@ def wait_for_delivery_pressure(
     observed_since: float,
     absolute_deadline: float,
     evidence: MixedLoadRunEvidence | None = None,
+    *,
+    timeout_seconds: float = DELIVERY_PRESSURE_TIMEOUT_SECONDS,
 ) -> tuple[DeliveryPressureWindow | None, bool, dict[str, Any]]:
-    deadline = min(time.monotonic() + 45.0, absolute_deadline)
+    deadline = min(time.monotonic() + timeout_seconds, absolute_deadline)
     latest: dict[str, Any] = {}
     pressure: DeliveryPressureWindow | None = None
     while time.monotonic() < deadline:
@@ -4369,7 +4375,13 @@ def batching_engine_drained(batching: Any) -> bool:
                 f"got {value!r}"
             )
         values[field] = value
-    return all(value == 0 for value in values.values())
+    actor_cycle_idle_active = batching.get("actor_cycle_idle_active")
+    if not isinstance(actor_cycle_idle_active, bool):
+        raise QualificationError(
+            "batching-engine drain field actor_cycle_idle_active must be a boolean, "
+            f"got {actor_cycle_idle_active!r}"
+        )
+    return all(value == 0 for value in values.values()) and not actor_cycle_idle_active
 
 
 def wait_for_batching_drain(
@@ -4391,6 +4403,7 @@ def wait_for_batching_drain(
                     "active_resident_prefill",
                     "active_staged_requests",
                     "queue_depth",
+                    "actor_cycle_idle_active",
                 )
             }
         graph_stable = not isinstance(graph, dict) or graph.get("state") != "busy"
@@ -4593,6 +4606,9 @@ def sampled_profile_contract_failures(
 ) -> list[str]:
     failures: list[str] = []
     expected_tokens = SAMPLED_PROFILE_REQUESTS * SAMPLED_PROFILE_MAX_TOKENS
+    # Prefill emits each request's first token before decode-continuation rows
+    # enter the fused sampled LM-head route.
+    expected_fused_decode_tokens = expected_tokens - SAMPLED_PROFILE_REQUESTS
     exact_expectations = {
         "sampled_profile_request_count": SAMPLED_PROFILE_REQUESTS,
         "sampled_profile_request_failure_count": 0,
@@ -4613,7 +4629,9 @@ def sampled_profile_contract_failures(
             SAMPLED_PROFILE_TOP_K
         ),
         "sampled_profile_rocm_w8_lm_head_sample_history_entry_count": 0,
-        "sampled_profile_rocm_w8_lm_head_sample_row_count": expected_tokens,
+        "sampled_profile_rocm_w8_lm_head_sample_row_count": (
+            expected_fused_decode_tokens
+        ),
         "sampled_profile_rocm_w8_lm_head_sample_w8a16_dispatch_count": 0,
         "sampled_profile_zero_token_response_count": 0,
     }
@@ -5773,6 +5791,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 pressure_observed_since,
                 overall_deadline,
                 evidence,
+                timeout_seconds=DELIVERY_PRESSURE_TIMEOUT_SECONDS,
             )
             evidence.pressure_window = pressure_window
             futures = [*normal_futures, long_future, pressure_peer_future]

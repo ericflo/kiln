@@ -758,7 +758,7 @@ kiln serve --config rocm-graph-eager.toml
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
           The committed Strix Halo ROCm candidate provisions eight entries: one protected geometry for each of
           eight declared active owners and zero pre-reserved transition entries. Its typed launch file pins four
-          ordinary decode rows, four staged-prefill slots, a 256-token/32-layer prefill quantum, a 512-token
+          ordinary decode rows, four staged-prefill slots, a 256-token/8-layer prefill quantum, a 512-token
           combined budget, and <code>batching.actor_cycle_idle_ms=50</code>. Health and trusted debug must
           attribute every field to the config file, and startup fails before model loading if the route-invariant
           prefill boundary no longer fits beside the effective decode width.
@@ -767,7 +767,9 @@ kiln serve --config rocm-graph-eager.toml
           owner and every live recurrent-state slot. A same-binary A/B completed the identical first seven-wave
           sequence 25.3 percent faster at 12 than 24 entries despite lower active p50 SCLK; the smaller arm safely
           settled seven measured capacity transactions with zero fallback. That historical comparison supports a
-          smaller graph population; it does not qualify the new eight-entry candidate. Require its guarded
+          smaller graph population; it does not qualify the new eight-entry candidate. The rejected 32-layer
+          mixed-load row stayed thermally contained but recorded fourteen nonthermal ITL outliers, so the current
+          eight-layer quantum restores three scheduler turns inside each Qwen prefill. Require its guarded
           mixed-load receipt and then its 30-minute soak before promotion, and require local evidence before
           changing it on another device. The soak terminates below
           8 GiB <code>MemAvailable</code> and fails above 512 MiB swap growth. The soak, shorter ROCm mixed-load
@@ -776,7 +778,8 @@ kiln serve --config rocm-graph-eager.toml
           millicelsius. Two exact ROCm serving rows proved that process-stop pacing can leave the device at
           100-percent busy while the package cannot reach its resume gate, so any nonzero
           <code>host_thermal_pacing_event_count</code> now fails source-bound serving qualification. The
-          mixed-load client and server share a 180-second request bound and separately count thermal-paced,
+          mixed-load client and server share a 180-second request bound, expose a typed 90-second
+          delivery-pressure observation window, and separately count thermal-paced,
           non-thermal attributed, and unexplained ITL gaps; all three populations must be zero under the current
           policy. Driver v11 requires a typed stable cooldown at a live-server idle boundary before and after
           every warmup or measured row and charges both waits to thermally sustainable phase time. Teardown

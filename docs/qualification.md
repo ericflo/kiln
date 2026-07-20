@@ -1547,11 +1547,14 @@ For the ordinary deterministic window,
 `rocm_w8_lm_head_argmax_dispatch_count` must be positive and
 `rocm_w8_lm_head_argmax_row_count` must cover every accepted completion token.
 Both ordinary sample counters and the dispatch-failure counter must remain
-zero. For the sampled window, all 256 completion rows must appear in
-`sampled_profile_rocm_w8_lm_head_sample_row_count`; sample dispatches must be
-positive and fewer than rows, proving multi-row execution. Every sample
-dispatch must be W8A8, with zero W8A16, argmax, sparse-history, or failed
-dispatches. The process-lifetime maximum top-k must advance from exactly zero
+zero. Each sampled request's first completion token is emitted by prefill
+before the request enters decode-continuation scheduling. The eight-request,
+32-token sampled window must therefore report exactly 248 fused decode rows in
+`sampled_profile_rocm_w8_lm_head_sample_row_count`, while the response oracle
+and usage accounting independently require all 256 completion tokens. Sample
+dispatches must be positive and fewer than rows, proving multi-row execution.
+Every sample dispatch must be W8A8, with zero W8A16, argmax, sparse-history,
+or failed dispatches. The process-lifetime maximum top-k must advance from exactly zero
 to exactly 40, and maximum token-only batch width must be at least two. These
 counters prove route selection; request usage, semantic validation, phase
 accounting, the post-sampled replay canary, and the exact output/reference gates
@@ -1581,8 +1584,9 @@ operating point across all six policy arms. `server.max_decode_batch = 4`,
 `server.max_prefill_staging_slots = 4`, and
 `server.max_active_requests = 8` separate ordinary decode width from admitted
 prefill capacity. `server.max_prefill_tokens_per_cycle = 256` and
-`server.max_prefill_layers_per_cycle = 32` amortize each admitted prefill over
-the complete Qwen layer stack. `batching.actor_cycle_idle_ms = 50` inserts one
+`server.max_prefill_layers_per_cycle = 8` bound each admitted prefill to one
+quarter of the Qwen layer stack before another scheduling opportunity.
+`batching.actor_cycle_idle_ms = 50` inserts one
 cooperative wait after an actor cycle advances model work. The server receives
 that policy through the private TOML launch file; both health and trusted debug
 state must report the exact value with `config_file` provenance. The 97 C hard
@@ -1591,16 +1595,17 @@ cache policies, and correctness gates are unchanged.
 
 This is a qualification-profile candidate, not a new product-wide default or
 an accepted performance result. The former width-eight, four-layer, zero-idle
-profile reached the independent 97 C limit during real mixed inference. A
-separate width-four direct-serving row with a 100 ms wait and a 32-layer prefill
-quantum stayed contained and reduced prefill forwards from 128 to 17, but its
-fixed wait materially reduced goodput. The 50 ms profile is the single declared
-midpoint discriminator: it preserves the known useful width and prefill
-geometry while testing a higher work duty cycle under the unchanged safety
-limit. It must be committed and pushed before hardware execution, and only its
-own source-bound receipt may establish thermal containment, fused-LM-head route
-coverage, throughput, or latency. Do not compare it as though it were a rerun
-of either historical workload.
+profile reached the independent 97 C limit during real mixed inference. The
+width-four, 32-layer, 50 ms profile stayed contained at 89.75 C and completed
+all deterministic and sampled requests, but fourteen nonthermal ITL outliers
+coincided with long prefill, decode, and graph work; p99/p99.9 ITL reached
+972.672/1,849.384 ms. That source-bound receipt rejects a full-stack prefill
+quantum rather than accepting explained pauses. The eight-layer successor is
+the single declared correction: it retains the contained decode duty cycle but
+adds three inter-layer scheduling opportunities per Qwen prefill. It must be
+committed and pushed before hardware execution, and only its own source-bound
+receipt may establish thermal containment, fused-LM-head route coverage,
+throughput, or latency.
 
 Five measured-window metrics close the cooperative-idle evidence. The configured
 gauge is `batching_actor_cycle_idle_ms_configured`. The monotonic count and
@@ -1613,9 +1618,11 @@ case requires the configured value to equal 50, positive count, total, and
 maximum evidence, and an inactive terminal state. The start and end gauges must
 also agree exactly. Counter regression, missing fields, non-finite values,
 wrong provenance, a silently unexercised wait, or an active wait after drain
-fails the case. On an interrupted run the latest valid deltas remain explicit
-lower-bound diagnostics, but they cannot turn the failed run into an accepted
-thermal or performance result.
+fails the case. Drain polling treats the actor's cooperative-idle gauge as
+active work, so a final response cannot race the terminal snapshot while the
+last 50 ms wait is still in progress. On an interrupted run the latest valid
+deltas remain explicit lower-bound diagnostics, but they cannot turn the failed
+run into an accepted thermal or performance result.
 
 The ROCm 30-minute development-soak contract inherits the same width, prefill,
 and 50 ms actor-idle candidate, so a later soak cannot silently test a different
@@ -2538,9 +2545,9 @@ unstarted arm from a partial one. Request failures count actual HTTP/stream
 failures only; dirty shutdown and snapshot residue derive from teardown rather
 than being invented for every failed case.
 
-The stable serving run also attests the default 256-token prompt-work ceiling
+The mixed serving run also attests the 256-token prompt-work ceiling
 (`server.max_prefill_tokens_per_cycle`), the 512-token combined scheduling
-budget (`server.max_batch_tokens`), the default four-layer yield ceiling
+budget (`server.max_batch_tokens`), the candidate eight-layer yield ceiling
 (`server.max_prefill_layers_per_cycle`), and both startup provenances. Admission
 and resumable prefill share the token ceiling after ready decode rows reserve
 their tokens. A retained token chunk then yields between transformer-layer
@@ -2548,24 +2555,26 @@ groups without replaying completed layers. The receipt records both effective
 values, processed-layer and layer-yield counts, plus cumulative/max actor-phase
 times; a run that exercises no inter-layer yield fails. A chunk is charged to
 the new-token ceiling exactly once when selected, not again when its retained
-final layer completes. Every third prefill dispatch remains round-robin; the
-other two may accelerate the shortest tail of at most four token chunks.
+final layer completes. After at most four staged-priority prefill dispatches,
+the next prefill turn is global round-robin; priority may accelerate only the
+shortest tail of at most four token chunks.
 The receipt records this bounded-priority count and fails when the mixed
 workload does not exercise it. Any ITL outlier remains a failure even when its
 phase is explained unless it overlaps the required named-host thermal pacing
 controller. Thermal-attributed counts must reconcile exactly; non-thermal
 attributed and unexplained counts remain disqualifying.
-The same run attests an effective decode width of eight, four bounded
-short-prefill staging slots, and a total active-request ceiling of twelve in
+The same run attests an effective decode width of four, four bounded
+short-prefill staging slots, and a total active-request ceiling of eight in
 both health and debug state. It also requires a maximum staged-priority burst
 of four before the mandatory global prefill turn. Measurement must record at
 least one staging admission, at least one rotating staged-priority forward, and
-an observed active width above eight without ever exceeding twelve.
+an observed active width above four without ever exceeding eight.
 Staged-priority forwards must remain a subset of the bounded short-priority
 count. The final cancellation drain requires ordinary decode, prefill, staged
-occupancy, and the waiting queue all to reach zero. This proves that the latency
-path ran without treating the staging capacity as a wider backend decode batch
-or accepting an active prefill as drained.
+occupancy, the waiting queue, and the actor-cycle-idle gauge all to reach zero.
+This proves that the latency path ran without treating the staging capacity as
+a wider backend decode batch, accepting an active prefill as drained, or racing
+the final cooperative wait.
 The pressure peer also requires terminal request-scoped performance metadata.
 The 256-token peer is twice the ordinary response length. The driver dispatches
 it before the slow consumer and waits for its first
@@ -2574,6 +2583,11 @@ then requires further producer-ready tokens during and after the slow
 consumer's request-attributed backpressure interval. This ordering proves
 continuity of an already-decoding peer instead of falsely requiring a queued
 request to have emitted before a pressure window that already started.
+The effective workload records a 90-second delivery-pressure observation
+window. It remains bounded by the case deadline but is long enough for the
+declared 2-second stall grace to complete after a pressure onset delayed by the
+contained scheduler; a hidden fixed 45-second observer timeout is not part of
+the contract.
 Its actor queue, slot-admission, and admission-to-first-ready wall durations are
 recorded separately and must fit inside TTFT; accumulated model prefill must fit
 inside admission plus admitted-prefill wall time. Missing, duplicate,
@@ -2716,7 +2730,7 @@ python3 scripts/qualification/run.py \
 The driver builds once and starts one server process with eight active-request
 slots: four ordinary decode rows plus four staged prefill slots. Its
 source-bound TOML pins the route-invariant 256-token ROCm prefill boundary, a
-32-layer prefill quantum, a 512-token combined scheduling budget, effective
+8-layer prefill quantum, a 512-token combined scheduling budget, effective
 decode width four, and a 50 ms cooperative actor-cycle idle. Health and trusted
 debug must report every value with `config_file` provenance. Its graph-required
 operating point reserves one protected geometry for each declared active owner

@@ -1180,6 +1180,9 @@ class ServeMixedLoadTests(unittest.TestCase):
             "outlier_history_size": serve.OUTLIER_HISTORY_SIZE,
             "outlier_multiplier": int(serve.OUTLIER_MULTIPLIER),
             "overall_timeout_seconds": int(serve.OVERALL_TIMEOUT_SECONDS),
+            "delivery_pressure_timeout_seconds": int(
+                serve.DELIVERY_PRESSURE_TIMEOUT_SECONDS
+            ),
             "pressure_peer_dispatch": serve.PRESSURE_PEER_DISPATCH,
             "pressure_peer_max_tokens": serve.PRESSURE_PEER_MAX_TOKENS,
             "pressure_peer_prompt_words": serve.PRESSURE_PEER_PROMPT_WORDS,
@@ -1938,7 +1941,7 @@ class ServeMixedLoadTests(unittest.TestCase):
         after_lm_head.update(
             {
                 "sample_dispatches": 32,
-                "sample_rows": 256,
+                "sample_rows": 248,
                 "sample_w8a8_dispatches": 32,
                 "max_batch_rows": 8,
                 "max_sample_top_k": serve.SAMPLED_PROFILE_TOP_K,
@@ -1959,11 +1962,19 @@ class ServeMixedLoadTests(unittest.TestCase):
             values["sampled_profile_rocm_w8_lm_head_sample_dispatch_count"], 32
         )
         self.assertEqual(
-            values["sampled_profile_rocm_w8_lm_head_sample_row_count"], 256
+            values["sampled_profile_rocm_w8_lm_head_sample_row_count"], 248
         )
         self.assertEqual(
             serve.sampled_profile_contract_failures(values), []
         )
+
+        for invalid_rows in (247, 249, 256):
+            with self.subTest(invalid_rows=invalid_rows):
+                invalid = dict(values)
+                invalid[
+                    "sampled_profile_rocm_w8_lm_head_sample_row_count"
+                ] = invalid_rows
+                self.assertTrue(serve.sampled_profile_contract_failures(invalid))
 
         w8a16 = dict(values)
         w8a16[
@@ -3011,6 +3022,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             "active_resident_prefill": 0,
             "active_staged_requests": 0,
             "queue_depth": 0,
+            "actor_cycle_idle_active": False,
         }
         self.assertFalse(
             serve.batching_engine_drained({**drained, "active_decode": 1})
@@ -3025,6 +3037,11 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             serve.batching_engine_drained({**drained, "active_staged_requests": 1})
         )
         self.assertFalse(serve.batching_engine_drained({**drained, "queue_depth": 1}))
+        self.assertFalse(
+            serve.batching_engine_drained(
+                {**drained, "actor_cycle_idle_active": True}
+            )
+        )
         self.assertTrue(serve.batching_engine_drained(drained))
         for malformed in (
             None,

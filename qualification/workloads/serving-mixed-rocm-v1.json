@@ -93,7 +93,7 @@
           "max_active_requests": 8,
           "max_prefill_staging_priority_burst": 4,
           "max_prefill_tokens_per_cycle": 256,
-          "max_prefill_layers_per_cycle": 32
+          "max_prefill_layers_per_cycle": 8
         },
         "workload": {
           "cancellation_after_semantic_deltas": 4,
@@ -111,6 +111,7 @@
           "outlier_history_size": 64,
           "outlier_multiplier": 5,
           "overall_timeout_seconds": 1200,
+          "delivery_pressure_timeout_seconds": 90,
           "pressure_peer_dispatch": "before_slow_start_after_first_token",
           "pressure_peer_max_tokens": 256,
           "pressure_peer_prompt_words": 64,
@@ -502,7 +503,7 @@
           "max_active_requests": 8,
           "max_prefill_staging_priority_burst": 4,
           "max_prefill_tokens_per_cycle": 256,
-          "max_prefill_layers_per_cycle": 32
+          "max_prefill_layers_per_cycle": 8
         },
         "workload": {
           "cancellation_after_semantic_deltas": 4,
@@ -520,6 +521,7 @@
           "outlier_history_size": 64,
           "outlier_multiplier": 5,
           "overall_timeout_seconds": 1200,
+          "delivery_pressure_timeout_seconds": 90,
           "pressure_peer_dispatch": "before_slow_start_after_first_token",
           "pressure_peer_max_tokens": 256,
           "pressure_peer_prompt_words": 64,
@@ -911,7 +913,7 @@
           "max_active_requests": 8,
           "max_prefill_staging_priority_burst": 4,
           "max_prefill_tokens_per_cycle": 256,
-          "max_prefill_layers_per_cycle": 32
+          "max_prefill_layers_per_cycle": 8
         },
         "workload": {
           "cancellation_after_semantic_deltas": 4,
@@ -929,6 +931,7 @@
           "outlier_history_size": 64,
           "outlier_multiplier": 5,
           "overall_timeout_seconds": 1200,
+          "delivery_pressure_timeout_seconds": 90,
           "pressure_peer_dispatch": "before_slow_start_after_first_token",
           "pressure_peer_max_tokens": 256,
           "pressure_peer_prompt_words": 64,
@@ -1320,7 +1323,7 @@
           "max_active_requests": 8,
           "max_prefill_staging_priority_burst": 4,
           "max_prefill_tokens_per_cycle": 256,
-          "max_prefill_layers_per_cycle": 32
+          "max_prefill_layers_per_cycle": 8
         },
         "workload": {
           "cancellation_after_semantic_deltas": 4,
@@ -1338,6 +1341,7 @@
           "outlier_history_size": 64,
           "outlier_multiplier": 5,
           "overall_timeout_seconds": 1200,
+          "delivery_pressure_timeout_seconds": 90,
           "pressure_peer_dispatch": "before_slow_start_after_first_token",
           "pressure_peer_max_tokens": 256,
           "pressure_peer_prompt_words": 64,
@@ -1729,7 +1733,7 @@
           "max_active_requests": 8,
           "max_prefill_staging_priority_burst": 4,
           "max_prefill_tokens_per_cycle": 256,
-          "max_prefill_layers_per_cycle": 32
+          "max_prefill_layers_per_cycle": 8
         },
         "workload": {
           "cancellation_after_semantic_deltas": 4,
@@ -1747,6 +1751,7 @@
           "outlier_history_size": 64,
           "outlier_multiplier": 5,
           "overall_timeout_seconds": 1200,
+          "delivery_pressure_timeout_seconds": 90,
           "pressure_peer_dispatch": "before_slow_start_after_first_token",
           "pressure_peer_max_tokens": 256,
           "pressure_peer_prompt_words": 64,
@@ -2138,7 +2143,7 @@
           "max_active_requests": 8,
           "max_prefill_staging_priority_burst": 4,
           "max_prefill_tokens_per_cycle": 256,
-          "max_prefill_layers_per_cycle": 32
+          "max_prefill_layers_per_cycle": 8
         },
         "workload": {
           "cancellation_after_semantic_deltas": 4,
@@ -2156,6 +2161,7 @@
           "outlier_history_size": 64,
           "outlier_multiplier": 5,
           "overall_timeout_seconds": 1200,
+          "delivery_pressure_timeout_seconds": 90,
           "pressure_peer_dispatch": "before_slow_start_after_first_token",
           "pressure_peer_max_tokens": 256,
           "pressure_peer_prompt_words": 64,
