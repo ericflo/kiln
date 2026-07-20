@@ -1858,8 +1858,29 @@ and first-launch-parity gates. Cross-process mismatches remain structured
 `evidence_only` reproducibility evidence only in that case. Any other role,
 artifact, reference execution, missing comparison, or parity edit fails strict
 validation. Campaign v7 forwards and records the role and reference directory
-for all five profiles. A rebuilt source-bound v17 eager/graph pair is still
-required before the performance ranking can change.
+for all five profiles.
+
+The required source-bound v17 pair now exists. Ordinary eager reference
+`20260720t030727-rocm-strix-halo-parity-eager-v17-c8.kiln.json` and discriminator
+candidate `20260720t031650-rocm-strix-halo-parity-graphs-v17-c8.kiln.json` use
+the same source-tree hash, workload fingerprint, prompt-set hash, runtime
+identity, and exact release binary
+`sha256:ddf2b627965710156e1df28f85a88b5ec2ce47a2427acfe8025611b2ace35d2a`.
+The eager warmup and measured row observed graph-disabled execution with every
+graph and parity counter zero. The candidate measured row recorded one batched
+capture, one passed first-launch parity check over 220,504,064 bytes in
+11.569 ms, and 61 successful replays with zero fallback, capture/replay failure,
+parity mismatch, or comparison error. Both receipts pass strict validation.
+
+The comparison remains `matched=false`: candidate outputs differ from the eager
+reference at request indices 0 and 3. Driver v17 retains those structured rows
+with `verdict_effect=evidence_only`; they are not waived or presented as equal.
+The candidate passes because same-process graph correctness is independently
+proved. At this exact c8 point, graph execution reduced route decode wall from
+7.590 to 6.704 seconds, raised aggregate output from 15.619 to 16.491
+tokens/second, and raised thermally sustainable output from 9.940 to 10.177
+tokens/second. This closes the graph-attribution blocker for this pair, not the
+remaining repeated-profile, mixed-load, 30-minute, or endurance gates.
 
 Serving benchmark driver v15 closes the next attribution gap before another
 ROCm arm. Each successful Kiln stream now retains its exact terminal
