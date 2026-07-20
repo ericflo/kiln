@@ -769,8 +769,10 @@ kiln serve --config rocm-graph-eager.toml
           settled seven measured capacity transactions with zero fallback. That historical comparison supports a
           smaller graph population; it does not qualify the new eight-entry candidate. The rejected 32-layer
           mixed-load row stayed thermally contained but recorded fourteen nonthermal ITL outliers, so the current
-          eight-layer quantum restores three scheduler turns inside each Qwen prefill. Require its guarded
-          mixed-load receipt and then its 30-minute soak before promotion, and require local evidence before
+          eight-layer quantum restores three scheduler turns inside each Qwen prefill. The guarded
+          <code>autoscale-off</code> discriminator eliminated all fourteen classified ITL outliers and peaked at
+          88.75 C, but aggregate output fell to 12.748 tokens/second and p99 TTFT rose to 88.748 seconds. Require
+          the remaining policy arms and its 30-minute soak before promotion, and require local evidence before
           changing it on another device. The soak terminates below
           8 GiB <code>MemAvailable</code> and fails above 512 MiB swap growth. The soak, shorter ROCm mixed-load
           gate, and Vulkan soak share the independent 250 ms hard-limit-only thermal controller. It never sends

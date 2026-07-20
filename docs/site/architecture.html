@@ -877,9 +877,12 @@ training request
           loss; its active p50 SCLK was lower. That result motivates bounded graph residency but does not qualify
           eight entries or the new duty cycle. A later 32-layer mixed-load row remained thermally contained but
           produced fourteen nonthermal ITL outliers, so the current eight-layer quantum restores three
-          inter-layer scheduling opportunities instead of accepting explained inference pauses. The candidate
-          requires its own guarded mixed-load receipt and then
-          its 30-minute soak, and it is not a universal optimum or a reason to silently clamp an operator&rsquo;s
+          inter-layer scheduling opportunities instead of accepting explained inference pauses. Its source-bound
+          <code>autoscale-off</code> discriminator then eliminated all fourteen classified ITL outliers, reduced
+          p99.9 ITL from 1,849.384 to 961.994 ms, and peaked at 88.75 C without a trip. Aggregate output fell from
+          13.885 to 12.748 tokens/second and p99 TTFT rose to 88.748 seconds, so that tradeoff remains explicit.
+          The remaining policy arms and 30-minute soak are still required, and the profile is not a universal
+          optimum or a reason to silently clamp an operator&rsquo;s
           explicit configuration on another device.
         </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">

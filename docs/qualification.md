@@ -1607,6 +1607,21 @@ committed and pushed before hardware execution, and only its own source-bound
 receipt may establish thermal containment, fused-LM-head route coverage,
 throughput, or latency.
 
+The first source-bound eight-layer `autoscale-off` discriminator passed. Its
+strict receipt is
+`qualification/receipts/rocm/strix-halo/20260720t071927133129z-rocm-strix-halo-serving-mixed-rocm-v1-184c082f9e-v1.json`.
+All ten deterministic requests produced 1,312 tokens at 12.748 tokens/second;
+all eight sampled requests produced 256 tokens at 8.055 tokens/second. The
+prefill path executed 260 forwards, 2,080 layers, and 195 inter-layer yields,
+with a 203.229 ms maximum prefill forward. No thermal-attributed,
+nonthermal-attributed, or unexplained ITL outlier remained; p99/p99.9 ITL fell
+to 821.918/961.994 ms. The cost is visible rather than hidden: aggregate output
+fell 8.2 percent relative to the rejected 32-layer row, p99 TTFT rose to 88.748
+seconds, and p99 E2E rose to 102.676 seconds. The package peaked at 88.75 C
+without a trip or pacing event. This passes the declared discriminator but does
+not promote the operating point: the remaining policy arms and the 30-minute
+development soak still have to pass from committed source.
+
 Five measured-window metrics close the cooperative-idle evidence. The configured
 gauge is `batching_actor_cycle_idle_ms_configured`. The monotonic count and
 elapsed-time deltas are `batching_actor_cycle_idle_count` and
