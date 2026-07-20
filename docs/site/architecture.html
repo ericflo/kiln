@@ -1220,6 +1220,9 @@ kiln_rocm_graph_fallback_duration_seconds_max</code></pre>
           even when the cache has never served a hit. Route-equivalence coverage therefore compares the first token,
           recurrent state, and following decode token with registration enabled and disabled. Accelerator
           qualification remains required before a corrected source checkpoint can replace a failed device receipt.
+          On Strix Halo ROCm, the clean-source production replacement arm passed all ten deterministic and eight
+          sampled requests while every cache metric stayed zero; the historical failed receipt remains published
+          so the correction is auditable rather than overwritten.
         </p>
         <h3 id="vulkan-prefix-cache" class="text-lg font-semibold mt-6 mb-2">Vulkan cross-request prefix reuse</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">

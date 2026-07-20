@@ -1707,6 +1707,25 @@ source-bound `both-off-prefix-cache-off` arm must still reproduce the formerly
 failing 2,432-token request and every cache-zero, thermal, latency, and teardown
 gate.
 
+The full production-model replacement arm then passed from exact clean pushed
+source `f818f4f25e0a8ef5e695ee75413f0183d2dd5f74`; retain its strict receipt at
+`qualification/receipts/rocm/strix-halo/20260720t083646672237z-rocm-strix-halo-serving-mixed-rocm-v1-66daf29769-v1.json`.
+The formerly failing 2,432-token `normal-07` request emitted the required
+ascending sequence for all 128 tokens. All ten deterministic requests produced
+1,312 tokens at 13.867 tokens/second, all eight sampled requests produced 256
+tokens at 14.585 tokens/second, and the post-determinism canary matched. Every
+prefix-cache lookup, hit, miss, token, block, entry, state-byte, lease, pending
+release, and capacity observation was exactly zero, as were all graph counters
+and all three ITL-outlier populations. p99/p99.9 ITL was 470.415/486.035 ms,
+p99 TTFT was 80.715 seconds, and p99 E2E was 94.315 seconds. The package peaked
+at 89.75 C without pacing or a guard trip; cooldown completed, the server exited
+zero without force in 213.800 ms, and no process or snapshot residue remained.
+The 848.187-second owned lifecycle does not describe inference latency:
+562.251 seconds were the clean release rebuild, while the deterministic
+measurement window was 94.616 seconds. This closes the prefix-cache-disabled
+ROCm arm and unblocks the stable arm; it does not qualify a soak or promote the
+operating point by itself.
+
 Five measured-window metrics close the cooperative-idle evidence. The configured
 gauge is `batching_actor_cycle_idle_ms_configured`. The monotonic count and
 elapsed-time deltas are `batching_actor_cycle_idle_count` and

@@ -713,8 +713,10 @@ kiln serve --config rocm-stream-ordered.toml</code></pre>
           boundary on GDN models even on an enabled-cache miss, so the storage A/B also changed recurrent-state
           numerics. Current source keeps the block-aligned boundary and configured token/layer quanta identical,
           suppresses only lookup/snapshot/registration/retention work, and has portable first-token, recurrent-state,
-          and following-token parity coverage. A clean source-bound accelerator rerun is still required before that
-          correction closes an earlier failed receipt.
+          and following-token parity coverage. The clean source-bound Strix Halo ROCm replacement arm subsequently
+          passed all ten deterministic and eight sampled requests, including the formerly failing 2,432-token prompt,
+          while every cache metric remained zero. Preserve both receipts: the pass closes this specific ROCm
+          discriminator, while another backend or source revision still requires its own accelerator evidence.
         </p>
 
         <h3 class="font-semibold mt-6 mb-3">Run graph lifecycle and byte-budget A/Bs separately</h3>
