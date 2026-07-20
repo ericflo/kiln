@@ -67,6 +67,19 @@ const SLOW_ACTOR_PHASE_THRESHOLD: Duration = Duration::from_millis(100);
 /// Fair worker retry cadence while a response lane is inside its grace window.
 const RESPONSE_DELIVERY_POLL_CADENCE: Duration = Duration::from_millis(10);
 
+fn observe_profiled_decode_phases(
+    phases: &mut BackendPhaseDurations,
+    sampling: Option<Duration>,
+    readback: Option<Duration>,
+) {
+    if let Some(duration) = sampling {
+        phases.observe_sampling(duration);
+    }
+    if let Some(duration) = readback {
+        phases.observe_readback(duration);
+    }
+}
+
 /// Delivery settings resolved and validated before the batching actor starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResponseDeliveryPolicy {
@@ -1383,9 +1396,11 @@ impl DecodeForward for RealDecodeForward {
                             single_params,
                             self.paged_cache.as_ref(),
                         )?;
-                        if let Some(duration) = next.sampling_duration {
-                            backend_phases.observe_sampling(duration);
-                        }
+                        observe_profiled_decode_phases(
+                            &mut backend_phases,
+                            next.sampling_duration,
+                            next.readback_duration,
+                        );
                         anyhow::ensure!(
                             next.tokens.len() == 1,
                             "rowwise decode returned {} tokens for a 1-row step",
@@ -1400,9 +1415,11 @@ impl DecodeForward for RealDecodeForward {
                         &ordinary_params,
                         self.paged_cache.as_ref(),
                     )?;
-                    if let Some(duration) = step.sampling_duration {
-                        backend_phases.observe_sampling(duration);
-                    }
+                    observe_profiled_decode_phases(
+                        &mut backend_phases,
+                        step.sampling_duration,
+                        step.readback_duration,
+                    );
                     step.tokens
                 };
                 for ((output_idx, row), token) in ordinary_output_indices
@@ -1428,9 +1445,11 @@ impl DecodeForward for RealDecodeForward {
                                 single_params,
                                 self.paged_cache.as_ref(),
                             )?;
-                        if let Some(duration) = next.sampling_duration {
-                            backend_phases.observe_sampling(duration);
-                        }
+                        observe_profiled_decode_phases(
+                            &mut backend_phases,
+                            next.sampling_duration,
+                            next.readback_duration,
+                        );
                         anyhow::ensure!(
                             next.tokens.len() == 1,
                             "rowwise behavior-logprob decode returned {} tokens for a 1-row step",
@@ -1446,9 +1465,11 @@ impl DecodeForward for RealDecodeForward {
                             &traced_params,
                             self.paged_cache.as_ref(),
                         )?;
-                    if let Some(duration) = step.sampling_duration {
-                        backend_phases.observe_sampling(duration);
-                    }
+                    observe_profiled_decode_phases(
+                        &mut backend_phases,
+                        step.sampling_duration,
+                        step.readback_duration,
+                    );
                     step.tokens
                 };
                 for ((output_idx, row), sampled) in traced_output_indices
@@ -4589,6 +4610,19 @@ mod tests {
     use kiln_model::LinearAttentionState;
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
+
+    #[test]
+    fn profiled_decode_phases_preserve_sampling_and_readback_separately() {
+        let mut phases = BackendPhaseDurations::default();
+        observe_profiled_decode_phases(
+            &mut phases,
+            Some(Duration::from_millis(18)),
+            Some(Duration::from_millis(7)),
+        );
+        observe_profiled_decode_phases(&mut phases, Some(Duration::from_millis(4)), None);
+        assert_eq!(phases.sampling, Some(Duration::from_millis(22)));
+        assert_eq!(phases.readback, Some(Duration::from_millis(7)));
+    }
 
     #[derive(Default)]
     struct MockForward {

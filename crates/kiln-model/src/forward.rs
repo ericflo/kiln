@@ -14,6 +14,7 @@ use kiln_core::model_provenance::BaseWeightShardManifest;
 use kiln_tensor::{D, DType, Device, Tensor};
 use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use crate::backend::BackendIdentity;
 use crate::backend::capability::{
@@ -9397,6 +9398,28 @@ pub fn lm_head_sample_backend_decode_if(
     step_seed: Option<u64>,
     history: &[u32],
 ) -> Result<Option<u32>> {
+    lm_head_sample_backend_decode_profiled_if(
+        backend, hidden, weights, config, params, step_seed, history,
+    )
+    .map(|sample| sample.map(|profiled| profiled.value))
+}
+
+#[derive(Debug)]
+pub(crate) struct ProfiledBackendSample<T> {
+    pub value: T,
+    pub readback_duration: Option<Duration>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn lm_head_sample_backend_decode_profiled_if(
+    backend: Option<&dyn BackendRuntime>,
+    hidden: &Tensor,
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    params: &kiln_core::sampling::SamplingParams,
+    step_seed: Option<u64>,
+    history: &[u32],
+) -> Result<Option<ProfiledBackendSample<u32>>> {
     let Some(backend) = backend else {
         return Ok(None);
     };
@@ -9428,7 +9451,7 @@ pub fn lm_head_sample_backend_decode_if(
         let top_k = [params.top_k];
         if rocm_w8_batch_sample_supported(backend, weights, &temperatures, &top_k) {
             let history_rows = vec![0u32; history_indices.len()];
-            if let Some(tokens) = rocm_w8_lm_head_sample_batch(
+            if let Some(profiled) = rocm_w8_lm_head_sample_batch_profiled(
                 backend,
                 hidden,
                 weights,
@@ -9445,10 +9468,16 @@ pub fn lm_head_sample_backend_decode_if(
                 &[params.min_p],
                 &[seed],
             )? {
-                return tokens
+                return profiled
+                    .value
                     .into_iter()
                     .next()
-                    .map(Some)
+                    .map(|value| {
+                        Some(ProfiledBackendSample {
+                            value,
+                            readback_duration: profiled.readback_duration,
+                        })
+                    })
                     .context("ROCm W8 single-row sampler returned no token");
             }
         }
@@ -9472,7 +9501,7 @@ pub fn lm_head_sample_backend_decode_if(
                     let normed = normed
                         .contiguous()
                         .context("rocm w8 sampled lm_head normed contiguous")?;
-                    let token = crate::rocm_w8_proj::gumbel_sample_bf16(
+                    let profiled = crate::rocm_w8_proj::gumbel_sample_bf16_profiled(
                         &normed,
                         lm_head_w8,
                         &history_indices,
@@ -9484,7 +9513,10 @@ pub fn lm_head_sample_backend_decode_if(
                         seed,
                     )
                     .context("rocm w8 sampled lm_head gumbel sample")?;
-                    return Ok(Some(token));
+                    return Ok(Some(ProfiledBackendSample {
+                        value: profiled.value,
+                        readback_duration: Some(profiled.readback_duration),
+                    }));
                 }
             }
         }
@@ -9509,6 +9541,12 @@ pub fn lm_head_sample_backend_decode_if(
         params.min_p,
         seed,
     )
+    .map(|sample| {
+        sample.map(|value| ProfiledBackendSample {
+            value,
+            readback_duration: None,
+        })
+    })
 }
 
 fn lm_head_argmax_rows_with_backend(
@@ -9615,7 +9653,7 @@ pub(crate) fn rocm_w8_batch_sample_supported(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn rocm_w8_lm_head_sample_batch(
+pub(crate) fn rocm_w8_lm_head_sample_batch_profiled(
     backend: &dyn BackendRuntime,
     hidden: &Tensor,
     weights: &GpuWeights,
@@ -9631,7 +9669,7 @@ pub(crate) fn rocm_w8_lm_head_sample_batch(
     top_p: &[f32],
     min_p: &[f32],
     seeds: &[u64],
-) -> Result<Option<Vec<u32>>> {
+) -> Result<Option<ProfiledBackendSample<Vec<u32>>>> {
     if !rocm_w8_batch_sample_supported(backend, weights, temperatures, top_k) {
         return Ok(None);
     }
@@ -9656,7 +9694,7 @@ pub(crate) fn rocm_w8_lm_head_sample_batch(
         let normed = normed
             .contiguous()
             .context("rocm w8 batched sample normed contiguous")?;
-        return crate::rocm_w8_proj::sample_batch_bf16(
+        return crate::rocm_w8_proj::sample_batch_bf16_profiled(
             &normed,
             lm_head_w8,
             history_rows,
@@ -9671,7 +9709,12 @@ pub(crate) fn rocm_w8_lm_head_sample_batch(
             min_p,
             seeds,
         )
-        .map(Some)
+        .map(|profiled| {
+            Some(ProfiledBackendSample {
+                value: profiled.value,
+                readback_duration: Some(profiled.readback_duration),
+            })
+        })
         .context("rocm w8 batched lm_head sample");
     }
     #[cfg(not(feature = "rocm"))]

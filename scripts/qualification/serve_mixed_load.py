@@ -4616,7 +4616,7 @@ def sampled_profile_contract_failures(
         "sampled_profile_latency_phase_metadata_missing_count": 0,
         "sampled_profile_decode_request_count": SAMPLED_PROFILE_REQUESTS,
         "sampled_profile_sampling_request_count": SAMPLED_PROFILE_REQUESTS,
-        "sampled_profile_readback_request_count": 0,
+        "sampled_profile_readback_request_count": SAMPLED_PROFILE_REQUESTS,
         "sampled_profile_batching_total_error_count": 0,
         "sampled_profile_rocm_w8_lm_head_argmax_dispatch_count": 0,
         "sampled_profile_rocm_w8_lm_head_argmax_row_count": 0,
@@ -4639,6 +4639,8 @@ def sampled_profile_contract_failures(
             )
     if values.get("sampled_profile_sampling_ms_total", 0) <= 0:
         failures.append("sampled profile reported no positive sampling-tail duration")
+    if values.get("sampled_profile_readback_ms_total", 0) <= 0:
+        failures.append("sampled profile reported no positive token-readback duration")
     if values.get("sampled_profile_decode_ms_total", 0) <= 0:
         failures.append("sampled profile reported no positive actor-decode duration")
     if values.get("sampled_profile_batching_batched_decode_forward_count", 0) < 1:

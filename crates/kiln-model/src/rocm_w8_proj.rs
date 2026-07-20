@@ -9,6 +9,8 @@
 
 use anyhow::{Context, Result};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "rocm")]
+use std::time::{Duration, Instant};
 
 static ARGMAX_DISPATCHES: AtomicU64 = AtomicU64::new(0);
 static ARGMAX_ROWS: AtomicU64 = AtomicU64::new(0);
@@ -60,6 +62,13 @@ pub struct RocmW8Proj {
     pub scales: kiln_tensor::Tensor,
     pub k: usize,
     pub n: usize,
+}
+
+#[derive(Debug)]
+#[cfg(feature = "rocm")]
+pub(crate) struct ProfiledRocmW8Sample<T> {
+    pub value: T,
+    pub readback_duration: Duration,
 }
 
 #[cfg(feature = "rocm")]
@@ -259,6 +268,41 @@ pub fn sample_batch_bf16(
     min_p: &[f32],
     seeds: &[u64],
 ) -> Result<Vec<u32>> {
+    sample_batch_bf16_profiled(
+        x,
+        w,
+        history_rows,
+        history_indices,
+        history_counts,
+        repetition_penalties,
+        presence_penalties,
+        frequency_penalties,
+        temperatures,
+        top_k,
+        top_p,
+        min_p,
+        seeds,
+    )
+    .map(|profiled| profiled.value)
+}
+
+#[cfg(feature = "rocm")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sample_batch_bf16_profiled(
+    x: &kiln_tensor::Tensor,
+    w: &RocmW8Proj,
+    history_rows: &[u32],
+    history_indices: &[u32],
+    history_counts: &[u32],
+    repetition_penalties: &[f32],
+    presence_penalties: &[f32],
+    frequency_penalties: &[f32],
+    temperatures: &[f32],
+    top_k: &[u32],
+    top_p: &[f32],
+    min_p: &[f32],
+    seeds: &[u64],
+) -> Result<ProfiledRocmW8Sample<Vec<u32>>> {
     let rows = temperatures.len();
     let use_w8a8 = a8_sample_enabled();
     let result = (|| {
@@ -299,7 +343,7 @@ pub fn sample_batch_bf16(
             )
             .map_err(|error| anyhow::anyhow!("rocm_w8_proj: W8A16 batched sample: {error}"))?
         };
-        read_batch_tokens(indices, rows, w.n, "batched sample")
+        read_batch_tokens_profiled(indices, rows, w.n, "batched sample")
     })();
     match result {
         Ok(tokens) => {
@@ -331,15 +375,28 @@ fn read_batch_tokens(
     vocab_size: usize,
     operation: &str,
 ) -> Result<Vec<u32>> {
+    read_batch_tokens_profiled(indices, expected_rows, vocab_size, operation)
+        .map(|profiled| profiled.value)
+}
+
+#[cfg(feature = "rocm")]
+fn read_batch_tokens_profiled(
+    indices: kiln_tensor::Tensor,
+    expected_rows: usize,
+    vocab_size: usize,
+    operation: &str,
+) -> Result<ProfiledRocmW8Sample<Vec<u32>>> {
+    let readback_started = Instant::now();
     let values = indices
         .to_vec1::<i64>()
         .with_context(|| format!("rocm_w8_proj: read {operation}"))?;
+    let readback_duration = readback_started.elapsed();
     anyhow::ensure!(
         values.len() == expected_rows,
         "rocm w8 {operation} returned {} rows, expected {expected_rows}",
         values.len()
     );
-    values
+    let tokens = values
         .into_iter()
         .enumerate()
         .map(|(row, value)| {
@@ -349,7 +406,11 @@ fn read_batch_tokens(
             );
             Ok(value as u32)
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    Ok(ProfiledRocmW8Sample {
+        value: tokens,
+        readback_duration,
+    })
 }
 
 #[cfg(not(feature = "rocm"))]
@@ -385,6 +446,33 @@ pub fn gumbel_sample_bf16(
     temperature: f32,
     seed: u64,
 ) -> Result<u32> {
+    gumbel_sample_bf16_profiled(
+        x,
+        w,
+        history_indices,
+        history_counts,
+        repetition_penalty,
+        presence_penalty,
+        frequency_penalty,
+        temperature,
+        seed,
+    )
+    .map(|profiled| profiled.value)
+}
+
+#[cfg(feature = "rocm")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gumbel_sample_bf16_profiled(
+    x: &kiln_tensor::Tensor,
+    w: &RocmW8Proj,
+    history_indices: &[u32],
+    history_counts: &[u32],
+    repetition_penalty: f32,
+    presence_penalty: f32,
+    frequency_penalty: f32,
+    temperature: f32,
+    seed: u64,
+) -> Result<ProfiledRocmW8Sample<u32>> {
     let idx = if a8_sample_enabled() {
         kiln_tensor::rocm_w8a8_gemv_gumbel_sample_bf16(
             x,
@@ -414,12 +502,18 @@ pub fn gumbel_sample_bf16(
         )
         .map_err(|e| anyhow::anyhow!("rocm_w8_proj: gemv_gumbel_sample: {e}"))?
     };
-    let values = idx
+    let flattened = idx
         .flatten_all()
-        .context("rocm_w8_proj: flatten gumbel sample")?
+        .context("rocm_w8_proj: flatten gumbel sample")?;
+    let readback_started = Instant::now();
+    let values = flattened
         .to_vec1::<i64>()
         .context("rocm_w8_proj: read gumbel sample")?;
-    Ok(values[0] as u32)
+    let readback_duration = readback_started.elapsed();
+    Ok(ProfiledRocmW8Sample {
+        value: values[0] as u32,
+        readback_duration,
+    })
 }
 
 #[cfg(not(feature = "rocm"))]
@@ -460,5 +554,26 @@ impl RocmW8Proj {
             k: self.k,
             n: self.n,
         })
+    }
+}
+
+#[cfg(all(test, feature = "rocm"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profiled_token_reader_preserves_rocm_batch_values() -> Result<()> {
+        if !kiln_tensor::rocm_is_available() {
+            eprintln!("no ROCm device available; skipping profiled W8 readback test");
+            return Ok(());
+        }
+        let indices = kiln_tensor::Tensor::from_vec_on(
+            kiln_tensor::Device::Rocm(0),
+            vec![3_i64, 1, 4, 1],
+            vec![4],
+        )?;
+        let profiled = read_batch_tokens_profiled(indices, 4, 8, "profile test")?;
+        assert_eq!(profiled.value, vec![3, 1, 4, 1]);
+        Ok(())
     }
 }

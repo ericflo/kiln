@@ -34,7 +34,6 @@ use crate::backend::{
 use crate::cancel::CancelHandle;
 use crate::cuda_graph::{CudaGraphExecutionPolicy, CudaGraphRunner};
 use crate::decode_buffers::{DecodeBufferConfig, DecodeBuffers, DecodeElementType};
-use crate::forward::lm_head_sample_backend_decode_if;
 use crate::forward::{
     GpuWeights, LinearAttentionState, PagedLayerForwardState, StreamingPrefillExecutionPolicy,
     model_forward_kt_with_policy, model_forward_paged, model_forward_paged_batched_decode_hidden,
@@ -47,6 +46,10 @@ use crate::forward::{
     model_forward_paged_streaming_with_policy,
     model_forward_paged_streaming_with_progress_and_policy,
     model_forward_paged_streaming_with_progress_offset_and_policy,
+};
+use crate::forward::{
+    ProfiledBackendSample, lm_head_sample_backend_decode_if,
+    lm_head_sample_backend_decode_profiled_if,
 };
 use crate::metal_graph::MetalGraphRunner;
 use crate::rocm_graph::{
@@ -1002,10 +1005,25 @@ pub struct PagedBatchedDecodeState {
 pub struct ProfiledPagedDecodeStep<T> {
     pub tokens: Vec<T>,
     pub sampling_duration: Option<Duration>,
+    pub readback_duration: Option<Duration>,
 }
 
 fn add_profiled_duration(total: &mut Option<Duration>, duration: Duration) {
     *total = Some(total.unwrap_or(Duration::ZERO).saturating_add(duration));
+}
+
+fn add_profiled_sampling_tail(
+    sampling_total: &mut Option<Duration>,
+    readback_total: &mut Option<Duration>,
+    total: Duration,
+    readback: Option<Duration>,
+) {
+    if let Some(readback) = readback {
+        add_profiled_duration(sampling_total, total.saturating_sub(readback));
+        add_profiled_duration(readback_total, readback);
+    } else {
+        add_profiled_duration(sampling_total, total);
+    }
 }
 
 fn capture_authoritative_prefix_snapshot(
@@ -2531,7 +2549,7 @@ fn run_lm_head_sample_batch_with_contexts(
     params: &[SamplingParams],
     step_seeds: &[Option<u64>],
     generated_tokens: &[Vec<TokenId>],
-) -> Result<Vec<TokenId>> {
+) -> Result<ProfiledBackendSample<Vec<TokenId>>> {
     anyhow::ensure!(
         params.len() == step_seeds.len() && params.len() == generated_tokens.len(),
         "batched decode sampling context length mismatch"
@@ -2582,7 +2600,7 @@ fn run_lm_head_sample_batch_with_contexts(
             }
         }
         if rocm_w8_supported {
-            if let Some(tokens) = crate::forward::rocm_w8_lm_head_sample_batch(
+            if let Some(profiled) = crate::forward::rocm_w8_lm_head_sample_batch_profiled(
                 backend,
                 hidden,
                 weights,
@@ -2601,7 +2619,7 @@ fn run_lm_head_sample_batch_with_contexts(
             )
             .context("fused ROCm W8 batched lm_head sample failed")?
             {
-                return Ok(tokens);
+                return Ok(profiled);
             }
         }
         if backend_fused_supported {
@@ -2625,7 +2643,10 @@ fn run_lm_head_sample_batch_with_contexts(
             )
             .context("fused batched linear_decode_sample failed")?
             {
-                return Ok(tokens);
+                return Ok(ProfiledBackendSample {
+                    value: tokens,
+                    readback_duration: None,
+                });
             }
         }
     }
@@ -2650,7 +2671,10 @@ fn run_lm_head_sample_batch_with_contexts(
         };
         sampled.push(token);
     }
-    Ok(sampled)
+    Ok(ProfiledBackendSample {
+        value: sampled,
+        readback_duration: None,
+    })
 }
 
 fn sample_first_decode_token(
@@ -5532,6 +5556,7 @@ impl ModelRunner {
 
         let mut sampled: Option<Vec<TokenId>> = None;
         let mut sampling_duration = None;
+        let mut readback_duration = None;
         // Multi-batch CUDA graph fast path.
         if row_count > 1 && try_contiguous_batched && has_linear_layers {
             let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
@@ -5807,7 +5832,7 @@ impl ModelRunner {
                             generated_tokens,
                         )
                         .context("sample Vulkan resident multi-row hidden batch")?;
-                        sampled = Some(tokens);
+                        sampled = Some(tokens.value);
                     }
                     Err(err)
                         if !decode_hot_path_generic_fallback_enabled_for_backend(
@@ -5963,9 +5988,14 @@ impl ModelRunner {
                 step_seeds,
                 generated_tokens,
             )
-            .context("sample ROCm hidden batch");
-            add_profiled_duration(&mut sampling_duration, sampling_started.elapsed());
-            sampled = Some(sampled_result?);
+            .context("sample ROCm hidden batch")?;
+            add_profiled_sampling_tail(
+                &mut sampling_duration,
+                &mut readback_duration,
+                sampling_started.elapsed(),
+                sampled_result.readback_duration,
+            );
+            sampled = Some(sampled_result.value);
         }
 
         // R.9: ROCm HIP-graph single-row decode for the batched/batching-engine
@@ -6016,8 +6046,8 @@ impl ModelRunner {
                     )
                     .context("batched decode ROCm graph hidden row failed")?;
                 let sampling_started = Instant::now();
-                let token_result = (|| -> Result<TokenId> {
-                    if let Some(token) = lm_head_sample_backend_decode_if(
+                let token_result = (|| -> Result<ProfiledBackendSample<TokenId>> {
+                    if let Some(profiled) = lm_head_sample_backend_decode_profiled_if(
                         Some(&*self.backend),
                         &hidden,
                         &self.weights,
@@ -6028,9 +6058,9 @@ impl ModelRunner {
                     )
                     .context("fused ROCm graph linear_decode_sample failed")?
                     {
-                        Ok(token)
+                        Ok(profiled)
                     } else {
-                        Ok(run_lm_head_sample_batch_with_contexts(
+                        let mut profiled = run_lm_head_sample_batch_with_contexts(
                             &*self.backend,
                             &hidden,
                             &self.weights,
@@ -6038,12 +6068,25 @@ impl ModelRunner {
                             params,
                             step_seeds,
                             generated_tokens,
-                        )?[0])
+                        )?;
+                        anyhow::ensure!(
+                            profiled.value.len() == 1,
+                            "ROCm graph sampled decode returned {} tokens",
+                            profiled.value.len()
+                        );
+                        Ok(ProfiledBackendSample {
+                            value: profiled.value.remove(0),
+                            readback_duration: profiled.readback_duration,
+                        })
                     }
-                })();
-                add_profiled_duration(&mut sampling_duration, sampling_started.elapsed());
-                let token = token_result?;
-                sampled = Some(vec![token]);
+                })()?;
+                add_profiled_sampling_tail(
+                    &mut sampling_duration,
+                    &mut readback_duration,
+                    sampling_started.elapsed(),
+                    token_result.readback_duration,
+                );
+                sampled = Some(vec![token_result.value]);
             }
         }
 
@@ -6154,6 +6197,7 @@ impl ModelRunner {
                         &step_seeds,
                         &generated_tokens,
                     )?
+                    .value
                 }
             }
         };
@@ -6171,6 +6215,7 @@ impl ModelRunner {
         Ok(ProfiledPagedDecodeStep {
             tokens: sampled,
             sampling_duration,
+            readback_duration,
         })
     }
 
@@ -6310,6 +6355,7 @@ impl ModelRunner {
         Ok(ProfiledPagedDecodeStep {
             tokens: sampled,
             sampling_duration: Some(sampling_duration),
+            readback_duration: None,
         })
     }
 
@@ -11263,6 +11309,37 @@ mod tests {
         add_profiled_duration(&mut duration, Duration::from_millis(7));
         add_profiled_duration(&mut duration, Duration::from_millis(11));
         assert_eq!(duration, Some(Duration::from_millis(18)));
+    }
+
+    #[test]
+    fn profiled_sampling_tail_separates_existing_readback_without_double_counting() {
+        let mut sampling = None;
+        let mut readback = None;
+        add_profiled_sampling_tail(
+            &mut sampling,
+            &mut readback,
+            Duration::from_millis(25),
+            Some(Duration::from_millis(7)),
+        );
+        add_profiled_sampling_tail(
+            &mut sampling,
+            &mut readback,
+            Duration::from_millis(10),
+            None,
+        );
+        assert_eq!(sampling, Some(Duration::from_millis(28)));
+        assert_eq!(readback, Some(Duration::from_millis(7)));
+
+        let mut zero_sampling = None;
+        let mut zero_readback = None;
+        add_profiled_sampling_tail(
+            &mut zero_sampling,
+            &mut zero_readback,
+            Duration::ZERO,
+            Some(Duration::ZERO),
+        );
+        assert_eq!(zero_sampling, Some(Duration::ZERO));
+        assert_eq!(zero_readback, Some(Duration::ZERO));
     }
 
     #[test]

@@ -1932,6 +1932,7 @@ class ServeMixedLoadTests(unittest.TestCase):
             )
             result.latency_phases["decode_ms"] = 100.0 + index
             result.latency_phases["sampling_ms"] = 20.0 + index
+            result.latency_phases["readback_ms"] = 2.0 + index
             results.append(result)
 
         before = health_fixture(kv_autoscale=False, rocm_graphs=True)
@@ -1962,7 +1963,8 @@ class ServeMixedLoadTests(unittest.TestCase):
         self.assertEqual(values["sampled_profile_completion_token_count"], 256)
         self.assertEqual(values["sampled_profile_sampling_ms_total"], 188.0)
         self.assertEqual(values["sampled_profile_sampling_request_count"], 8)
-        self.assertEqual(values["sampled_profile_readback_request_count"], 0)
+        self.assertEqual(values["sampled_profile_readback_ms_total"], 44.0)
+        self.assertEqual(values["sampled_profile_readback_request_count"], 8)
         self.assertEqual(
             values["sampled_profile_batching_batched_decode_forward_count"], 31
         )
@@ -1983,6 +1985,13 @@ class ServeMixedLoadTests(unittest.TestCase):
                     "sampled_profile_rocm_w8_lm_head_sample_row_count"
                 ] = invalid_rows
                 self.assertTrue(serve.sampled_profile_contract_failures(invalid))
+
+        missing_readback = dict(values)
+        missing_readback["sampled_profile_readback_request_count"] = 7
+        self.assertTrue(serve.sampled_profile_contract_failures(missing_readback))
+        zero_readback = dict(values)
+        zero_readback["sampled_profile_readback_ms_total"] = 0.0
+        self.assertTrue(serve.sampled_profile_contract_failures(zero_readback))
 
         w8a16 = dict(values)
         w8a16[
