@@ -1800,8 +1800,27 @@ enabled ROCm-feature model tests, 1,091 server tests, and 652 qualification test
 pass; the ROCm/gfx1151 and Vulkan all-target server feature graphs compile.
 Dashboard, architecture, API, qualification, and troubleshooting references use
 the same live-ownership definition. This removes a fail-closed telemetry false
-positive; a clean pushed-source hardware rerun is still required to qualify the
-30-minute measurement.
+positive.
+
+The exact clean pushed-source hardware rerun then passed from
+`a130e975f42e7c98a689bc309cea5f1d6eaa9a28`; retain its strict receipt at
+`qualification/receipts/rocm/strix-halo/20260720t095657771585z-rocm-strix-halo-serving-rocm-development-053e89eca9-v1.json`.
+After 29 warmup requests and six stabilization cycles, it completed 804 valid
+requests, 25,728 output tokens, 111 waves, and 22 confirmed cancellations over
+1,803.201 measured seconds at 14.268 aggregate output tokens/second. All 135
+ITL outliers were attributed and none were unexplained; p50/p99/p99.9 ITL was
+189.397/660.015/884.196 ms and p50/p99 TTFT was 5.060/21.534 seconds. The run
+captured 1,164 graphs, replayed 7,458, reused retained slots 197 times, and ended
+drained with zero active and three idle slots. It recorded zero request,
+batching, graph, device, synchronization, non-finite, KV-ownership, cache-lease,
+or residue failures. GPU allocation grew 1,372,160 bytes with a 61,463,376-byte
+peak delta; RSS grew 59,527,168 bytes; host swap did not grow; and available
+host memory stayed above 21,756,338,176 bytes. Active accelerator samples had
+57-percent median busy and 2.389 GHz median SCLK, with no sample below half the
+advertised maximum. Package temperature peaked at 90.75 C below the 97 C hard
+guard, cooldown completed, and shutdown was unforced and zero. This closes the
+current material-change 30-minute ROCm development gate. It does not replace
+the final 24-hour soak or establish competitive large-batch performance.
 
 Five measured-window metrics close the cooperative-idle evidence. The configured
 gauge is `batching_actor_cycle_idle_ms_configured`. The monotonic count and

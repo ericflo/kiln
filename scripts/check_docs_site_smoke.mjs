@@ -1390,6 +1390,10 @@ function validateSftLossRouteDocumentationSourceContract() {
     'Driver v13 adds closed accounting for an explicit cooperative actor duty cycle',
     'actor_cycle_idle_ms',
     'actor_cycle_idle_accounted',
+    'Across 1,803.201 measured seconds',
+    '14.268 aggregate output tokens/second',
+    'drained to zero active and three reusable idle slots',
+    'not the final 24-hour endurance gate or evidence of vLLM large-batch parity',
   ]);
   if (missingRocmSafetyTerms.length > 0) {
     fail(`docs/site/troubleshooting.html: Strix Halo qualification safety contract missing terms: ${missingRocmSafetyTerms.join(', ')}`);
