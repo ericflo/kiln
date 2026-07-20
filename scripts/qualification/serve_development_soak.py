@@ -33,6 +33,7 @@ VULKAN_MAX_PREFILL_TOKENS_PER_CYCLE = 128
 VULKAN_QUALIFIED_ACTIVE_REQUESTS = 4
 VULKAN_QUALIFIED_DECODE_BATCH = 2
 VULKAN_QUALIFIED_PREFILL_ADMISSION_QUANTUM = 2
+VULKAN_MAX_PREFILL_LAYERS_PER_CYCLE = 4
 VULKAN_QUALIFIED_BUFFER_POOL_GB = 3.5
 VULKAN_QUALIFIED_WAVE_CONCURRENCY = (1, 4)
 VULKAN_QUALIFIED_PROMPT_WORDS = (16, 32, 64, 96)
@@ -121,6 +122,9 @@ def _vulkan_variant_config() -> dict[str, Any]:
     config["server"]["max_prefill_tokens_per_cycle"] = (
         VULKAN_MAX_PREFILL_TOKENS_PER_CYCLE
     )
+    config["server"]["max_prefill_layers_per_cycle"] = (
+        VULKAN_MAX_PREFILL_LAYERS_PER_CYCLE
+    )
     config["server"].update(
         {
             "max_decode_batch": VULKAN_QUALIFIED_DECODE_BATCH,
@@ -131,6 +135,7 @@ def _vulkan_variant_config() -> dict[str, Any]:
         }
     )
     config["batching"] = {
+        "actor_cycle_idle_ms": 0,
         "prefill_admission_quantum": VULKAN_QUALIFIED_PREFILL_ADMISSION_QUANTUM,
     }
     config["model"] = {

@@ -301,10 +301,22 @@ class ServeRocmSoakTests(unittest.TestCase):
             soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
             soak.ROCM_RUNTIME,
         )
-        self.assertEqual(rocm["server"]["max_active_requests"], 12)
+        self.assertEqual(
+            rocm["server"]["max_active_requests"], soak.mixed.MAX_ACTIVE_REQUESTS
+        )
         self.assertEqual(rocm["server"]["max_batch_tokens"], 512)
         self.assertEqual(rocm["server"]["max_prefill_tokens_per_cycle"], 256)
-        self.assertEqual(rocm["soak"]["rocm_graph_cache_entries"], 12)
+        self.assertEqual(
+            rocm["server"]["max_prefill_layers_per_cycle"],
+            soak.mixed.MAX_PREFILL_LAYERS_PER_CYCLE,
+        )
+        self.assertEqual(
+            rocm["batching"]["actor_cycle_idle_ms"],
+            soak.mixed.ACTOR_CYCLE_IDLE_MS,
+        )
+        self.assertEqual(
+            rocm["soak"]["rocm_graph_cache_entries"], soak.ROCM_GRAPH_CACHE_MAX
+        )
         self.assertEqual(
             rocm["soak"]["rocm_graph_admission_policy"],
             "idle_owner_lru_then_active_fair_lru",
@@ -376,6 +388,11 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(vulkan["server"]["max_active_requests"], 4)
         self.assertEqual(vulkan["server"]["max_prefill_staging_slots"], 2)
         self.assertEqual(vulkan["server"]["max_decode_batch"], 2)
+        self.assertEqual(
+            vulkan["server"]["max_prefill_layers_per_cycle"],
+            soak.VULKAN_MAX_PREFILL_LAYERS_PER_CYCLE,
+        )
+        self.assertEqual(vulkan["batching"]["actor_cycle_idle_ms"], 0)
         self.assertEqual(vulkan["batching"]["prefill_admission_quantum"], 2)
         self.assertEqual(vulkan["runtime"]["vulkan_buffer_pool_gb"], 3.5)
         self.assertEqual(vulkan["soak"]["vulkan_buffer_pool_gb"], 3.5)

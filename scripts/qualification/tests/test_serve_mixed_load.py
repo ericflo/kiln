@@ -354,6 +354,12 @@ def health_fixture(
                 "max_prefill_tokens_per_cycle_source": "config_file",
                 "max_prefill_layers_per_cycle": serve.MAX_PREFILL_LAYERS_PER_CYCLE,
                 "max_prefill_layers_per_cycle_source": "config_file",
+                "actor_cycle_idle_ms": serve.ACTOR_CYCLE_IDLE_MS,
+                "actor_cycle_idle_source": "config_file",
+                "actor_cycle_idle_active": False,
+                "actor_cycle_idle_count": 0,
+                "total_actor_cycle_idle_ms": 0.0,
+                "max_actor_cycle_idle_ms": 0.0,
                 "active_decode": 0,
                 "active_prefill": 0,
                 "prefix_cache_enabled": prefix_cache_enabled,
@@ -368,7 +374,7 @@ def health_fixture(
                     serve.MAX_PREFILL_STAGING_PRIORITY_BURST
                 ),
                 "max_observed_active_requests": serve.MAX_DECODE_BATCH,
-                "max_observed_batch_size": 8,
+                "max_observed_batch_size": serve.MAX_DECODE_BATCH,
                 "total_errors": 0,
                 "total_decode_forwards": 0,
                 "total_batched_decode_forwards": 0,
@@ -558,6 +564,8 @@ def debug_fixture(
                 "max_prefill_tokens_per_cycle_source": "config_file",
                 "max_prefill_layers_per_cycle": serve.MAX_PREFILL_LAYERS_PER_CYCLE,
                 "max_prefill_layers_per_cycle_source": "config_file",
+                "actor_cycle_idle_ms": serve.ACTOR_CYCLE_IDLE_MS,
+                "actor_cycle_idle_source": "config_file",
                 "max_decode_batch": serve.MAX_DECODE_BATCH,
                 "max_prefill_staging_slots": serve.MAX_PREFILL_STAGING_SLOTS,
                 "max_active_requests": serve.MAX_ACTIVE_REQUESTS,
@@ -1309,6 +1317,38 @@ class ServeMixedLoadTests(unittest.TestCase):
                 ("both-off", "both-off-prefix-cache-off"),
             },
         )
+
+    def test_mixed_profile_is_explicit_not_a_neutral_factory_default(self) -> None:
+        neutral = serve._variant_config(
+            serving_profile="experimental",
+            kv_autoscale_requested=False,
+            kv_autoscale_enabled=False,
+            memory_reclaim_requested_mode="off",
+            memory_reclaim_mode="off",
+            rocm_graphs_requested=False,
+            rocm_graphs_enabled=False,
+        )
+        self.assertEqual(
+            neutral["server"]["max_decode_batch"],
+            serve.BASELINE_MAX_DECODE_BATCH,
+        )
+        self.assertEqual(
+            neutral["server"]["max_prefill_layers_per_cycle"],
+            serve.BASELINE_MAX_PREFILL_LAYERS_PER_CYCLE,
+        )
+        self.assertNotIn("batching", neutral)
+        for config in serve.VARIANT_CONFIGS.values():
+            self.assertEqual(
+                config["server"]["max_decode_batch"], serve.MAX_DECODE_BATCH
+            )
+            self.assertEqual(
+                config["server"]["max_prefill_layers_per_cycle"],
+                serve.MAX_PREFILL_LAYERS_PER_CYCLE,
+            )
+            self.assertEqual(
+                config["batching"]["actor_cycle_idle_ms"],
+                serve.ACTOR_CYCLE_IDLE_MS,
+            )
 
     def test_startup_failure_retains_final_thermal_guard_evidence(self) -> None:
         process = mock.Mock(pid=4321)
@@ -2373,6 +2413,10 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                         config["server"]["max_prefill_tokens_per_cycle"],
                     )
                     self.assertEqual(
+                        parsed["batching"]["actor_cycle_idle_ms"],
+                        config["batching"]["actor_cycle_idle_ms"],
+                    )
+                    self.assertEqual(
                         parsed["server"]["http_send_buffer_bytes"],
                         serve.HTTP_SEND_BUFFER_BYTES,
                     )
@@ -2727,6 +2771,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             memory_reclaim_mode="automatic",
             rocm_graphs_requested=False,
             rocm_graphs_enabled=False,
+            max_decode_batch=serve.MAX_DECODE_BATCH,
+            max_prefill_layers_per_cycle=serve.MAX_PREFILL_LAYERS_PER_CYCLE,
+            actor_cycle_idle_ms=serve.ACTOR_CYCLE_IDLE_MS,
         )
         try:
             failures = serve.attest_runtime(
@@ -3213,6 +3260,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 "total_prefill_staging_admissions": 4,
                 "total_prefill_staging_priority_forwards": 5,
                 "max_observed_active_requests": serve.MAX_ACTIVE_REQUESTS - 1,
+                "actor_cycle_idle_count": 7,
+                "total_actor_cycle_idle_ms": 350.0,
+                "max_actor_cycle_idle_ms": 50.1,
             }
         )
         end["decode_runtime"]["rocm_w8_lm_head"].update(
@@ -3220,6 +3270,14 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 "argmax_dispatches": 5,
                 "argmax_rows": 15,
                 "max_batch_rows": 8,
+            }
+        )
+        final = json.loads(json.dumps(end))
+        final["decode_runtime"]["batching_engine"].update(
+            {
+                "actor_cycle_idle_count": 9,
+                "total_actor_cycle_idle_ms": 450.0,
+                "max_actor_cycle_idle_ms": 50.2,
             }
         )
 
@@ -3243,7 +3301,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             health_after_warmup=before,
             health_before_sampled_profile=before,
             health_after_sampled_profile=before,
-            health_final=end,
+            health_final=final,
             health_measurement_start=measurement_start,
             health_end=end,
             events=[],
@@ -3274,6 +3332,14 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             values["pressure_window_start_after_peer_dispatch_ms"], 150.0
         )
         self.assertEqual(values["batching_total_errors"], 1)
+        self.assertEqual(values["batching_actor_cycle_idle_active_end"], 0)
+        self.assertEqual(values["batching_actor_cycle_idle_count"], 7)
+        self.assertEqual(
+            values["batching_actor_cycle_idle_ms_configured"],
+            serve.ACTOR_CYCLE_IDLE_MS,
+        )
+        self.assertEqual(values["batching_actor_cycle_idle_ms_total"], 350.0)
+        self.assertEqual(values["batching_actor_cycle_idle_ms_max_end"], 50.2)
         self.assertEqual(values["batching_decode_forward_count"], 5)
         self.assertEqual(values["batching_batched_decode_forward_count"], 4)
         self.assertEqual(values["batching_decode_row_count"], 15)
@@ -3483,6 +3549,12 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             "batching_prefill_staging_admission_count": 1,
             "batching_prefill_staging_priority_forward_count": 1,
             "batching_short_prefill_priority_forward_count": 2,
+            "batching_max_prefill_tokens_per_cycle": (
+                serve.MAX_PREFILL_TOKENS_PER_CYCLE
+            ),
+            "batching_max_prefill_layers_per_cycle": (
+                serve.MAX_PREFILL_LAYERS_PER_CYCLE
+            ),
         }
         self.assertEqual(serve.batching_staging_contract_failures(good), [])
 
@@ -3494,6 +3566,8 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             "batching_max_observed_active_requests": serve.MAX_DECODE_BATCH,
             "batching_prefill_staging_admission_count": 0,
             "batching_prefill_staging_priority_forward_count": 0,
+            "batching_max_prefill_tokens_per_cycle": 0,
+            "batching_max_prefill_layers_per_cycle": 0,
         }
         for name, value in mutations.items():
             with self.subTest(name=name):
@@ -3513,6 +3587,27 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             "batching_short_prefill_priority_forward_count": 2,
         }
         self.assertTrue(serve.batching_staging_contract_failures(invalid_subset))
+
+    def test_actor_cycle_idle_contract_requires_configured_measured_drain(self) -> None:
+        good = {
+            "batching_actor_cycle_idle_active_end": 0,
+            "batching_actor_cycle_idle_count": 7,
+            "batching_actor_cycle_idle_ms_configured": serve.ACTOR_CYCLE_IDLE_MS,
+            "batching_actor_cycle_idle_ms_max_end": 50.1,
+            "batching_actor_cycle_idle_ms_total": 350.0,
+        }
+        self.assertEqual(serve.actor_cycle_idle_contract_failures(good), [])
+        for name, value in (
+            ("batching_actor_cycle_idle_active_end", 1),
+            ("batching_actor_cycle_idle_count", 0),
+            ("batching_actor_cycle_idle_ms_configured", 0),
+            ("batching_actor_cycle_idle_ms_max_end", 0),
+            ("batching_actor_cycle_idle_ms_total", 0),
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(
+                    serve.actor_cycle_idle_contract_failures({**good, name: value})
+                )
 
     def test_metric_contract_is_sorted_closed_and_finite(self) -> None:
         metrics = serve.zero_metrics()

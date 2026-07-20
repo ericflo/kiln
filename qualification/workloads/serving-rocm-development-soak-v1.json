@@ -45,10 +45,6 @@
           "rocm_archs": "gfx1151",
           "rocm_path": "/opt/rocm"
         },
-        "model": {
-          "checkpoint_read_mib_per_second": 256,
-          "accelerator_weight_upload_mib_per_second": 256
-        },
         "runtime": {
           "serving_profile": "experimental",
           "kv_autoscale_requested": false,
@@ -70,12 +66,12 @@
           "request_timeout_seconds": 180,
           "stream_stall_grace_ms": 2000,
           "max_batch_tokens": 512,
-          "max_decode_batch": 8,
+          "max_decode_batch": 4,
           "max_prefill_staging_slots": 4,
-          "max_active_requests": 12,
+          "max_active_requests": 8,
           "max_prefill_staging_priority_burst": 4,
           "max_prefill_tokens_per_cycle": 256,
-          "max_prefill_layers_per_cycle": 4
+          "max_prefill_layers_per_cycle": 32
         },
         "soak": {
           "cancellation_after_semantic_deltas": 4,
@@ -100,7 +96,7 @@
           },
           "active_gpu_peak_growth_limit_bytes": 536870912,
           "max_tokens": 32,
-          "rocm_graph_cache_entries": 12,
+          "rocm_graph_cache_entries": 8,
           "memory_growth_limit_bytes": 536870912,
           "minimum_duration_seconds": 1800.0,
           "outlier_absolute_ms": 250,
@@ -168,6 +164,13 @@
             "target_millicelsius": 75000,
             "timeout_seconds": 180.0
           }
+        },
+        "batching": {
+          "actor_cycle_idle_ms": 50
+        },
+        "model": {
+          "checkpoint_read_mib_per_second": 256,
+          "accelerator_weight_upload_mib_per_second": 256
         }
       },
       "cases": [

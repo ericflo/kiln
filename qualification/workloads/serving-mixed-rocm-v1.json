@@ -88,12 +88,12 @@
           "request_timeout_seconds": 180,
           "stream_stall_grace_ms": 2000,
           "max_batch_tokens": 512,
-          "max_decode_batch": 8,
+          "max_decode_batch": 4,
           "max_prefill_staging_slots": 4,
-          "max_active_requests": 12,
+          "max_active_requests": 8,
           "max_prefill_staging_priority_burst": 4,
           "max_prefill_tokens_per_cycle": 256,
-          "max_prefill_layers_per_cycle": 4
+          "max_prefill_layers_per_cycle": 32
         },
         "workload": {
           "cancellation_after_semantic_deltas": 4,
@@ -121,11 +121,11 @@
           "response_oracle_integer_width": 6,
           "response_oracle_target_integer_count": 64,
           "request_timeout_seconds": 180,
-          "rocm_w8_lm_head_route_evidence": "health_counter_delta_v1",
           "sampled_profile_max_tokens": 32,
           "sampled_profile_min_p": 0.0,
           "sampled_profile_order": "after_measured_deterministic_window",
           "sampled_profile_post_determinism_canary": "exact_replay_of_normal_00_v1",
+          "rocm_w8_lm_head_route_evidence": "health_counter_delta_v1",
           "sampled_profile_prompt_words": 64,
           "sampled_profile_requests": 8,
           "sampled_profile_seed_offset": 1000,
@@ -137,6 +137,9 @@
           "slow_response_target_integer_count": 1024,
           "startup_timeout_seconds": 240,
           "warmup_max_tokens": 32
+        },
+        "batching": {
+          "actor_cycle_idle_ms": 50
         }
       },
       "cases": [
@@ -175,6 +178,11 @@
             "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
             "declared_metrics": [
               "attributed_itl_outlier_count",
+              "batching_actor_cycle_idle_active_end",
+              "batching_actor_cycle_idle_count",
+              "batching_actor_cycle_idle_ms_configured",
+              "batching_actor_cycle_idle_ms_max_end",
+              "batching_actor_cycle_idle_ms_total",
               "batching_admission_call_count",
               "batching_admission_ms_max",
               "batching_admission_ms_total",
@@ -489,12 +497,12 @@
           "request_timeout_seconds": 180,
           "stream_stall_grace_ms": 2000,
           "max_batch_tokens": 512,
-          "max_decode_batch": 8,
+          "max_decode_batch": 4,
           "max_prefill_staging_slots": 4,
-          "max_active_requests": 12,
+          "max_active_requests": 8,
           "max_prefill_staging_priority_burst": 4,
           "max_prefill_tokens_per_cycle": 256,
-          "max_prefill_layers_per_cycle": 4
+          "max_prefill_layers_per_cycle": 32
         },
         "workload": {
           "cancellation_after_semantic_deltas": 4,
@@ -522,11 +530,11 @@
           "response_oracle_integer_width": 6,
           "response_oracle_target_integer_count": 64,
           "request_timeout_seconds": 180,
-          "rocm_w8_lm_head_route_evidence": "health_counter_delta_v1",
           "sampled_profile_max_tokens": 32,
           "sampled_profile_min_p": 0.0,
           "sampled_profile_order": "after_measured_deterministic_window",
           "sampled_profile_post_determinism_canary": "exact_replay_of_normal_00_v1",
+          "rocm_w8_lm_head_route_evidence": "health_counter_delta_v1",
           "sampled_profile_prompt_words": 64,
           "sampled_profile_requests": 8,
           "sampled_profile_seed_offset": 1000,
@@ -538,6 +546,9 @@
           "slow_response_target_integer_count": 1024,
           "startup_timeout_seconds": 240,
           "warmup_max_tokens": 32
+        },
+        "batching": {
+          "actor_cycle_idle_ms": 50
         }
       },
       "cases": [
@@ -576,6 +587,11 @@
             "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
             "declared_metrics": [
               "attributed_itl_outlier_count",
+              "batching_actor_cycle_idle_active_end",
+              "batching_actor_cycle_idle_count",
+              "batching_actor_cycle_idle_ms_configured",
+              "batching_actor_cycle_idle_ms_max_end",
+              "batching_actor_cycle_idle_ms_total",
               "batching_admission_call_count",
               "batching_admission_ms_max",
               "batching_admission_ms_total",
@@ -890,12 +906,12 @@
           "request_timeout_seconds": 180,
           "stream_stall_grace_ms": 2000,
           "max_batch_tokens": 512,
-          "max_decode_batch": 8,
+          "max_decode_batch": 4,
           "max_prefill_staging_slots": 4,
-          "max_active_requests": 12,
+          "max_active_requests": 8,
           "max_prefill_staging_priority_burst": 4,
           "max_prefill_tokens_per_cycle": 256,
-          "max_prefill_layers_per_cycle": 4
+          "max_prefill_layers_per_cycle": 32
         },
         "workload": {
           "cancellation_after_semantic_deltas": 4,
@@ -923,11 +939,11 @@
           "response_oracle_integer_width": 6,
           "response_oracle_target_integer_count": 64,
           "request_timeout_seconds": 180,
-          "rocm_w8_lm_head_route_evidence": "health_counter_delta_v1",
           "sampled_profile_max_tokens": 32,
           "sampled_profile_min_p": 0.0,
           "sampled_profile_order": "after_measured_deterministic_window",
           "sampled_profile_post_determinism_canary": "exact_replay_of_normal_00_v1",
+          "rocm_w8_lm_head_route_evidence": "health_counter_delta_v1",
           "sampled_profile_prompt_words": 64,
           "sampled_profile_requests": 8,
           "sampled_profile_seed_offset": 1000,
@@ -939,6 +955,9 @@
           "slow_response_target_integer_count": 1024,
           "startup_timeout_seconds": 240,
           "warmup_max_tokens": 32
+        },
+        "batching": {
+          "actor_cycle_idle_ms": 50
         }
       },
       "cases": [
@@ -977,6 +996,11 @@
             "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
             "declared_metrics": [
               "attributed_itl_outlier_count",
+              "batching_actor_cycle_idle_active_end",
+              "batching_actor_cycle_idle_count",
+              "batching_actor_cycle_idle_ms_configured",
+              "batching_actor_cycle_idle_ms_max_end",
+              "batching_actor_cycle_idle_ms_total",
               "batching_admission_call_count",
               "batching_admission_ms_max",
               "batching_admission_ms_total",
@@ -1291,12 +1315,12 @@
           "request_timeout_seconds": 180,
           "stream_stall_grace_ms": 2000,
           "max_batch_tokens": 512,
-          "max_decode_batch": 8,
+          "max_decode_batch": 4,
           "max_prefill_staging_slots": 4,
-          "max_active_requests": 12,
+          "max_active_requests": 8,
           "max_prefill_staging_priority_burst": 4,
           "max_prefill_tokens_per_cycle": 256,
-          "max_prefill_layers_per_cycle": 4
+          "max_prefill_layers_per_cycle": 32
         },
         "workload": {
           "cancellation_after_semantic_deltas": 4,
@@ -1324,11 +1348,11 @@
           "response_oracle_integer_width": 6,
           "response_oracle_target_integer_count": 64,
           "request_timeout_seconds": 180,
-          "rocm_w8_lm_head_route_evidence": "health_counter_delta_v1",
           "sampled_profile_max_tokens": 32,
           "sampled_profile_min_p": 0.0,
           "sampled_profile_order": "after_measured_deterministic_window",
           "sampled_profile_post_determinism_canary": "exact_replay_of_normal_00_v1",
+          "rocm_w8_lm_head_route_evidence": "health_counter_delta_v1",
           "sampled_profile_prompt_words": 64,
           "sampled_profile_requests": 8,
           "sampled_profile_seed_offset": 1000,
@@ -1340,6 +1364,9 @@
           "slow_response_target_integer_count": 1024,
           "startup_timeout_seconds": 240,
           "warmup_max_tokens": 32
+        },
+        "batching": {
+          "actor_cycle_idle_ms": 50
         }
       },
       "cases": [
@@ -1378,6 +1405,11 @@
             "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
             "declared_metrics": [
               "attributed_itl_outlier_count",
+              "batching_actor_cycle_idle_active_end",
+              "batching_actor_cycle_idle_count",
+              "batching_actor_cycle_idle_ms_configured",
+              "batching_actor_cycle_idle_ms_max_end",
+              "batching_actor_cycle_idle_ms_total",
               "batching_admission_call_count",
               "batching_admission_ms_max",
               "batching_admission_ms_total",
@@ -1692,12 +1724,12 @@
           "request_timeout_seconds": 180,
           "stream_stall_grace_ms": 2000,
           "max_batch_tokens": 512,
-          "max_decode_batch": 8,
+          "max_decode_batch": 4,
           "max_prefill_staging_slots": 4,
-          "max_active_requests": 12,
+          "max_active_requests": 8,
           "max_prefill_staging_priority_burst": 4,
           "max_prefill_tokens_per_cycle": 256,
-          "max_prefill_layers_per_cycle": 4
+          "max_prefill_layers_per_cycle": 32
         },
         "workload": {
           "cancellation_after_semantic_deltas": 4,
@@ -1725,11 +1757,11 @@
           "response_oracle_integer_width": 6,
           "response_oracle_target_integer_count": 64,
           "request_timeout_seconds": 180,
-          "rocm_w8_lm_head_route_evidence": "health_counter_delta_v1",
           "sampled_profile_max_tokens": 32,
           "sampled_profile_min_p": 0.0,
           "sampled_profile_order": "after_measured_deterministic_window",
           "sampled_profile_post_determinism_canary": "exact_replay_of_normal_00_v1",
+          "rocm_w8_lm_head_route_evidence": "health_counter_delta_v1",
           "sampled_profile_prompt_words": 64,
           "sampled_profile_requests": 8,
           "sampled_profile_seed_offset": 1000,
@@ -1741,6 +1773,9 @@
           "slow_response_target_integer_count": 1024,
           "startup_timeout_seconds": 240,
           "warmup_max_tokens": 32
+        },
+        "batching": {
+          "actor_cycle_idle_ms": 50
         }
       },
       "cases": [
@@ -1779,6 +1814,11 @@
             "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
             "declared_metrics": [
               "attributed_itl_outlier_count",
+              "batching_actor_cycle_idle_active_end",
+              "batching_actor_cycle_idle_count",
+              "batching_actor_cycle_idle_ms_configured",
+              "batching_actor_cycle_idle_ms_max_end",
+              "batching_actor_cycle_idle_ms_total",
               "batching_admission_call_count",
               "batching_admission_ms_max",
               "batching_admission_ms_total",
@@ -2093,12 +2133,12 @@
           "request_timeout_seconds": 180,
           "stream_stall_grace_ms": 2000,
           "max_batch_tokens": 512,
-          "max_decode_batch": 8,
+          "max_decode_batch": 4,
           "max_prefill_staging_slots": 4,
-          "max_active_requests": 12,
+          "max_active_requests": 8,
           "max_prefill_staging_priority_burst": 4,
           "max_prefill_tokens_per_cycle": 256,
-          "max_prefill_layers_per_cycle": 4
+          "max_prefill_layers_per_cycle": 32
         },
         "workload": {
           "cancellation_after_semantic_deltas": 4,
@@ -2126,11 +2166,11 @@
           "response_oracle_integer_width": 6,
           "response_oracle_target_integer_count": 64,
           "request_timeout_seconds": 180,
-          "rocm_w8_lm_head_route_evidence": "health_counter_delta_v1",
           "sampled_profile_max_tokens": 32,
           "sampled_profile_min_p": 0.0,
           "sampled_profile_order": "after_measured_deterministic_window",
           "sampled_profile_post_determinism_canary": "exact_replay_of_normal_00_v1",
+          "rocm_w8_lm_head_route_evidence": "health_counter_delta_v1",
           "sampled_profile_prompt_words": 64,
           "sampled_profile_requests": 8,
           "sampled_profile_seed_offset": 1000,
@@ -2142,6 +2182,9 @@
           "slow_response_target_integer_count": 1024,
           "startup_timeout_seconds": 240,
           "warmup_max_tokens": 32
+        },
+        "batching": {
+          "actor_cycle_idle_ms": 50
         }
       },
       "cases": [
@@ -2180,6 +2223,11 @@
             "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
             "declared_metrics": [
               "attributed_itl_outlier_count",
+              "batching_actor_cycle_idle_active_end",
+              "batching_actor_cycle_idle_count",
+              "batching_actor_cycle_idle_ms_configured",
+              "batching_actor_cycle_idle_ms_max_end",
+              "batching_actor_cycle_idle_ms_total",
               "batching_admission_call_count",
               "batching_admission_ms_max",
               "batching_admission_ms_total",

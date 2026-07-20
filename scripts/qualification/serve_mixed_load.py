@@ -108,11 +108,14 @@ HTTP_SEND_BUFFER_BYTES = 4096
 STREAM_STALL_GRACE_MS = 2000
 MAX_BATCH_TOKENS = 512
 MAX_PREFILL_TOKENS_PER_CYCLE = 256
-MAX_PREFILL_LAYERS_PER_CYCLE = 4
-MAX_DECODE_BATCH = 8
+MAX_PREFILL_LAYERS_PER_CYCLE = 32
+MAX_DECODE_BATCH = 4
 MAX_PREFILL_STAGING_SLOTS = 4
 MAX_ACTIVE_REQUESTS = MAX_DECODE_BATCH + MAX_PREFILL_STAGING_SLOTS
 MAX_PREFILL_STAGING_PRIORITY_BURST = 4
+ACTOR_CYCLE_IDLE_MS = 50
+BASELINE_MAX_PREFILL_LAYERS_PER_CYCLE = 4
+BASELINE_MAX_DECODE_BATCH = 8
 CUDA_GRAPH_CACHE_ENTRIES = 8
 SLO_TTFT_MS = 30_000.0
 SLO_E2E_MS = 120_000.0
@@ -315,8 +318,11 @@ def _variant_config(
     rocm_graphs_requested: bool,
     rocm_graphs_enabled: bool,
     request_timeout_seconds: int = 180,
+    max_decode_batch: int = BASELINE_MAX_DECODE_BATCH,
+    max_prefill_layers_per_cycle: int = BASELINE_MAX_PREFILL_LAYERS_PER_CYCLE,
+    actor_cycle_idle_ms: int | None = None,
 ) -> dict[str, Any]:
-    return {
+    config = {
         "build": ROCM_BUILD_SPEC.effective_config(),
         "model": {
             "checkpoint_read_mib_per_second": CHECKPOINT_READ_MIB_PER_SECOND,
@@ -342,14 +348,14 @@ def _variant_config(
             "request_timeout_seconds": request_timeout_seconds,
             "stream_stall_grace_ms": STREAM_STALL_GRACE_MS,
             "max_batch_tokens": MAX_BATCH_TOKENS,
-            "max_decode_batch": MAX_DECODE_BATCH,
+            "max_decode_batch": max_decode_batch,
             "max_prefill_staging_slots": MAX_PREFILL_STAGING_SLOTS,
-            "max_active_requests": MAX_ACTIVE_REQUESTS,
+            "max_active_requests": max_decode_batch + MAX_PREFILL_STAGING_SLOTS,
             "max_prefill_staging_priority_burst": (
                 MAX_PREFILL_STAGING_PRIORITY_BURST
             ),
             "max_prefill_tokens_per_cycle": MAX_PREFILL_TOKENS_PER_CYCLE,
-            "max_prefill_layers_per_cycle": MAX_PREFILL_LAYERS_PER_CYCLE,
+            "max_prefill_layers_per_cycle": max_prefill_layers_per_cycle,
         },
         "workload": {
             "cancellation_after_semantic_deltas": CANCELLATION_AFTER_DELTAS,
@@ -401,10 +407,22 @@ def _variant_config(
             "warmup_max_tokens": WARMUP_MAX_TOKENS,
         },
     }
+    if actor_cycle_idle_ms is not None:
+        config["batching"] = {"actor_cycle_idle_ms": actor_cycle_idle_ms}
+    return config
+
+
+def _mixed_variant_config(**kwargs: Any) -> dict[str, Any]:
+    return _variant_config(
+        **kwargs,
+        max_decode_batch=MAX_DECODE_BATCH,
+        max_prefill_layers_per_cycle=MAX_PREFILL_LAYERS_PER_CYCLE,
+        actor_cycle_idle_ms=ACTOR_CYCLE_IDLE_MS,
+    )
 
 
 def _mixed_load_host_safety(config: dict[str, Any]) -> dict[str, Any]:
-    return {
+    result = {
         "build": config["build"],
         "model": config["model"],
         "runtime": config["runtime"],
@@ -412,10 +430,13 @@ def _mixed_load_host_safety(config: dict[str, Any]) -> dict[str, Any]:
         "server": config["server"],
         "workload": config["workload"],
     }
+    if "batching" in config:
+        result["batching"] = config["batching"]
+    return result
 
 
 VARIANT_CONFIGS: dict[str, dict[str, Any]] = {
-    "default": _variant_config(
+    "default": _mixed_variant_config(
         serving_profile="experimental",
         kv_autoscale_requested=True,
         kv_autoscale_enabled=True,
@@ -424,7 +445,7 @@ VARIANT_CONFIGS: dict[str, dict[str, Any]] = {
         rocm_graphs_requested=True,
         rocm_graphs_enabled=True,
     ),
-    "autoscale-off": _variant_config(
+    "autoscale-off": _mixed_variant_config(
         serving_profile="experimental",
         kv_autoscale_requested=False,
         kv_autoscale_enabled=False,
@@ -433,7 +454,7 @@ VARIANT_CONFIGS: dict[str, dict[str, Any]] = {
         rocm_graphs_requested=True,
         rocm_graphs_enabled=True,
     ),
-    "graphs-off": _variant_config(
+    "graphs-off": _mixed_variant_config(
         serving_profile="experimental",
         kv_autoscale_requested=True,
         kv_autoscale_enabled=True,
@@ -442,7 +463,7 @@ VARIANT_CONFIGS: dict[str, dict[str, Any]] = {
         rocm_graphs_requested=False,
         rocm_graphs_enabled=False,
     ),
-    "both-off": _variant_config(
+    "both-off": _mixed_variant_config(
         serving_profile="experimental",
         kv_autoscale_requested=False,
         kv_autoscale_enabled=False,
@@ -451,7 +472,7 @@ VARIANT_CONFIGS: dict[str, dict[str, Any]] = {
         rocm_graphs_requested=False,
         rocm_graphs_enabled=False,
     ),
-    "both-off-prefix-cache-off": _variant_config(
+    "both-off-prefix-cache-off": _mixed_variant_config(
         serving_profile="experimental",
         kv_autoscale_requested=False,
         kv_autoscale_enabled=False,
@@ -460,7 +481,7 @@ VARIANT_CONFIGS: dict[str, dict[str, Any]] = {
         rocm_graphs_requested=False,
         rocm_graphs_enabled=False,
     ),
-    "stable": _variant_config(
+    "stable": _mixed_variant_config(
         serving_profile="stable",
         kv_autoscale_requested=True,
         kv_autoscale_enabled=False,
@@ -548,6 +569,11 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "batching_admission_call_count": ("count", "sum", False),
     "batching_admission_ms_max": ("ms", "max", True),
     "batching_admission_ms_total": ("ms", "sum", True),
+    "batching_actor_cycle_idle_active_end": ("bool", "exact", True),
+    "batching_actor_cycle_idle_count": ("count", "sum", False),
+    "batching_actor_cycle_idle_ms_configured": ("ms", "exact", True),
+    "batching_actor_cycle_idle_ms_max_end": ("ms", "max", True),
+    "batching_actor_cycle_idle_ms_total": ("ms", "sum", True),
     "batching_batched_decode_forward_count": ("count", "sum", False),
     "batching_decode_forward_count": ("count", "sum", False),
     "batching_decode_forward_ms_max": ("ms", "max", True),
@@ -2909,14 +2935,17 @@ def write_server_config(
         "",
     ]
     if batching is not None:
-        lines.extend(
-            [
-                "[batching]",
+        lines.append("[batching]")
+        if "prefill_admission_quantum" in batching:
+            lines.append(
                 "prefill_admission_quantum = "
-                + str(batching["prefill_admission_quantum"]),
-                "",
-            ]
-        )
+                + str(batching["prefill_admission_quantum"])
+            )
+        if "actor_cycle_idle_ms" in batching:
+            lines.append(
+                "actor_cycle_idle_ms = " + str(batching["actor_cycle_idle_ms"])
+            )
+        lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -3604,6 +3633,19 @@ def attest_runtime(
             failures.append("health batching prefill-layer ceiling does not match config")
         if batching.get("max_prefill_layers_per_cycle_source") != "config_file":
             failures.append("health batching prefill-layer ceiling source is not file")
+        configured_batching = VARIANT_CONFIGS[variant].get("batching")
+        expected_actor_cycle_idle_ms = (
+            configured_batching["actor_cycle_idle_ms"]
+            if isinstance(configured_batching, dict)
+            else 0
+        )
+        expected_actor_cycle_idle_source = (
+            "config_file" if isinstance(configured_batching, dict) else "default"
+        )
+        if batching.get("actor_cycle_idle_ms") != expected_actor_cycle_idle_ms:
+            failures.append("health batching actor-cycle idle does not match config")
+        if batching.get("actor_cycle_idle_source") != expected_actor_cycle_idle_source:
+            failures.append("health batching actor-cycle idle source does not match config")
 
         debug_batching = debug.get("batching_engine")
         debug_snapshot = (
@@ -3642,6 +3684,13 @@ def attest_runtime(
                 or debug_snapshot.get("max_prefill_layers_per_cycle_source") != "config_file"
             ):
                 failures.append("debug batching prefill-layer ceiling does not match file")
+            if (
+                debug_snapshot.get("actor_cycle_idle_ms")
+                != expected_actor_cycle_idle_ms
+                or debug_snapshot.get("actor_cycle_idle_source")
+                != expected_actor_cycle_idle_source
+            ):
+                failures.append("debug batching actor-cycle idle does not match config")
 
     flags = debug.get("env_flags")
     if not isinstance(flags, dict):
@@ -3760,7 +3809,11 @@ def batching_snapshot(health: dict[str, Any]) -> dict[str, float | int | bool]:
     if not isinstance(scheduler, dict):
         raise QualificationError("health scheduler snapshot is missing")
     snapshot: dict[str, float | int | bool] = {}
-    for field in ("prefix_cache_enabled", "resident_prefill_enabled"):
+    for field in (
+        "actor_cycle_idle_active",
+        "prefix_cache_enabled",
+        "resident_prefill_enabled",
+    ):
         value = batching.get(field)
         if not isinstance(value, bool):
             raise QualificationError(
@@ -3778,6 +3831,8 @@ def batching_snapshot(health: dict[str, Any]) -> dict[str, float | int | bool]:
         "max_observed_batch_size",
         "max_prefill_tokens_per_cycle",
         "max_prefill_layers_per_cycle",
+        "actor_cycle_idle_ms",
+        "actor_cycle_idle_count",
         "total_errors",
         "total_decode_forwards",
         "total_batched_decode_forwards",
@@ -3818,6 +3873,8 @@ def batching_snapshot(health: dict[str, Any]) -> dict[str, float | int | bool]:
         "max_prefill_forward_ms",
         "total_decode_forward_ms",
         "max_decode_forward_ms",
+        "total_actor_cycle_idle_ms",
+        "max_actor_cycle_idle_ms",
     ):
         value = batching.get(field)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -3830,6 +3887,15 @@ def batching_snapshot(health: dict[str, Any]) -> dict[str, float | int | bool]:
                 f"batching-engine field {field} must be finite and nonnegative, got {value!r}"
             )
         snapshot[field] = value
+    actor_cycle_idle_source = batching.get("actor_cycle_idle_source")
+    if actor_cycle_idle_source not in ("config_file", "default"):
+        raise QualificationError(
+            "batching-engine actor-cycle idle policy has unknown provenance"
+        )
+    if actor_cycle_idle_source == "default" and snapshot["actor_cycle_idle_ms"] != 0:
+        raise QualificationError(
+            "default batching-engine actor-cycle idle policy is not zero"
+        )
     for source, field in ((scheduler, "blocks_total"), (scheduler, "blocks_used")):
         value = source.get(field)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -4958,6 +5024,20 @@ def runtime_snapshot_metric_values(
         }
     )
     batching_end = batching_snapshot(health_end)
+    batching_terminal = (
+        batching_end
+        if health_final is None
+        else batching_snapshot(health_final)
+    )
+    if (
+        batching_start["actor_cycle_idle_ms"]
+        != batching_end["actor_cycle_idle_ms"]
+        or batching_end["actor_cycle_idle_ms"]
+        != batching_terminal["actor_cycle_idle_ms"]
+    ):
+        raise QualificationError(
+            "batching-engine actor-cycle idle policy changed during mixed load"
+        )
     decode_forwards = counter_delta(
         batching_start, batching_end, "total_decode_forwards"
     )
@@ -4970,6 +5050,21 @@ def runtime_snapshot_metric_values(
             "batching_admission_ms_max": batching_end["max_admission_ms"],
             "batching_admission_ms_total": counter_delta(
                 batching_start, batching_end, "total_admission_ms"
+            ),
+            "batching_actor_cycle_idle_active_end": int(
+                batching_terminal["actor_cycle_idle_active"]
+            ),
+            "batching_actor_cycle_idle_count": counter_delta(
+                batching_start, batching_end, "actor_cycle_idle_count"
+            ),
+            "batching_actor_cycle_idle_ms_configured": batching_terminal[
+                "actor_cycle_idle_ms"
+            ],
+            "batching_actor_cycle_idle_ms_max_end": batching_terminal[
+                "max_actor_cycle_idle_ms"
+            ],
+            "batching_actor_cycle_idle_ms_total": counter_delta(
+                batching_start, batching_end, "total_actor_cycle_idle_ms"
             ),
             "batching_batched_decode_forward_count": counter_delta(
                 batching_start, batching_end, "total_batched_decode_forwards"
@@ -5300,6 +5395,8 @@ def batching_staging_contract_failures(
         "batching_prefill_staging_priority_burst": (
             MAX_PREFILL_STAGING_PRIORITY_BURST
         ),
+        "batching_max_prefill_tokens_per_cycle": MAX_PREFILL_TOKENS_PER_CYCLE,
+        "batching_max_prefill_layers_per_cycle": MAX_PREFILL_LAYERS_PER_CYCLE,
     }
     for name, expected_value in expected.items():
         if values.get(name) != expected_value:
@@ -5341,6 +5438,36 @@ def batching_staging_contract_failures(
             failures.append(
                 f"measured active-request width {observed} exceeded bound {MAX_ACTIVE_REQUESTS}"
             )
+    return failures
+
+
+def actor_cycle_idle_contract_failures(
+    values: dict[str, float | int],
+) -> list[str]:
+    failures: list[str] = []
+    configured = values.get("batching_actor_cycle_idle_ms_configured")
+    if configured != ACTOR_CYCLE_IDLE_MS:
+        failures.append(
+            "batching_actor_cycle_idle_ms_configured="
+            f"{configured!r}, expected exact value {ACTOR_CYCLE_IDLE_MS}"
+        )
+    active_end = values.get("batching_actor_cycle_idle_active_end")
+    if active_end != 0:
+        failures.append(
+            f"batching_actor_cycle_idle_active_end={active_end!r} after final drain"
+        )
+    for name in (
+        "batching_actor_cycle_idle_count",
+        "batching_actor_cycle_idle_ms_total",
+        "batching_actor_cycle_idle_ms_max_end",
+    ):
+        value = values.get(name)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            failures.append(f"{name}={value!r} is not numeric")
+        elif ACTOR_CYCLE_IDLE_MS > 0 and value <= 0:
+            failures.append(f"{name}={value!r}; configured idle policy was not exercised")
+        elif ACTOR_CYCLE_IDLE_MS == 0 and value != 0:
+            failures.append(f"{name}={value!r} while actor-cycle idle was disabled")
     return failures
 
 
@@ -5873,6 +6000,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 "measured load exercised no bounded short-prefill service opportunity"
             )
         status_failures.extend(batching_staging_contract_failures(values))
+        status_failures.extend(actor_cycle_idle_contract_failures(values))
         expected_prefix_cache_enabled = int(
             VARIANT_CONFIGS[variant]["runtime"]["prefix_cache_effective_enabled"]
         )

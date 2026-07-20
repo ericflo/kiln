@@ -1576,6 +1576,57 @@ malformed input, controller error, or termination error fails closed and
 terminates the server group. It never sends `SIGSTOP` while accelerator work
 may be outstanding.
 
+The checked Strix Halo mixed-load profile uses one source-bound cooperative
+operating point across all six policy arms. `server.max_decode_batch = 4`,
+`server.max_prefill_staging_slots = 4`, and
+`server.max_active_requests = 8` separate ordinary decode width from admitted
+prefill capacity. `server.max_prefill_tokens_per_cycle = 256` and
+`server.max_prefill_layers_per_cycle = 32` amortize each admitted prefill over
+the complete Qwen layer stack. `batching.actor_cycle_idle_ms = 50` inserts one
+cooperative wait after an actor cycle advances model work. The server receives
+that policy through the private TOML launch file; both health and trusted debug
+state must report the exact value with `config_file` provenance. The 97 C hard
+limit, request set, token counts, model-startup pacing, memory bounds, graph and
+cache policies, and correctness gates are unchanged.
+
+This is a qualification-profile candidate, not a new product-wide default or
+an accepted performance result. The former width-eight, four-layer, zero-idle
+profile reached the independent 97 C limit during real mixed inference. A
+separate width-four direct-serving row with a 100 ms wait and a 32-layer prefill
+quantum stayed contained and reduced prefill forwards from 128 to 17, but its
+fixed wait materially reduced goodput. The 50 ms profile is the single declared
+midpoint discriminator: it preserves the known useful width and prefill
+geometry while testing a higher work duty cycle under the unchanged safety
+limit. It must be committed and pushed before hardware execution, and only its
+own source-bound receipt may establish thermal containment, fused-LM-head route
+coverage, throughput, or latency. Do not compare it as though it were a rerun
+of either historical workload.
+
+Five measured-window metrics close the cooperative-idle evidence. The configured
+gauge is `batching_actor_cycle_idle_ms_configured`. The monotonic count and
+elapsed-time deltas are `batching_actor_cycle_idle_count` and
+`batching_actor_cycle_idle_ms_total`.
+`batching_actor_cycle_idle_ms_max_end` is the process-lifetime maximum observed
+at the terminal snapshot, while `batching_actor_cycle_idle_active_end` records
+whether a wait remained active after final drain. A passing ROCm mixed-load
+case requires the configured value to equal 50, positive count, total, and
+maximum evidence, and an inactive terminal state. The start and end gauges must
+also agree exactly. Counter regression, missing fields, non-finite values,
+wrong provenance, a silently unexercised wait, or an active wait after drain
+fails the case. On an interrupted run the latest valid deltas remain explicit
+lower-bound diagnostics, but they cannot turn the failed run into an accepted
+thermal or performance result.
+
+The ROCm 30-minute development-soak contract inherits the same width, prefill,
+and 50 ms actor-idle candidate, so a later soak cannot silently test a different
+operating point. Its protected graph-cache entry count correspondingly moves
+from 12 to 8, preserving exactly one protected geometry per declared active
+request rather than retaining four unreachable entries. Vulkan remains a separate phase and is pinned explicitly to
+decode width two, four active requests, four prefill layers per cycle, and
+`batching.actor_cycle_idle_ms = 0`; adding the typed zero does not change its
+runtime behavior. Vulkan development and endurance manifests record that zero
+so future shared-default changes cannot contaminate their source-bound identity.
+
 This replaces the earlier 88/86 C process-group stop policy. Two exact Strix
 Halo ROCm serving rows showed that stopping the host process can leave queued
 GPU work reporting 100-percent busy while package temperature remains above
