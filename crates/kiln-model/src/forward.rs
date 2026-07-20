@@ -29178,17 +29178,7 @@ mod tests {
             return Ok(());
         }
 
-        let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev_graphs = std::env::var("KILN_METAL_GRAPHS").ok();
-        let prev_force_eager = std::env::var("KILN_FORCE_EAGER_DECODE").ok();
-        let prev_stable_meta = std::env::var("KILN_METAL_GRAPH_STABLE_PAGED_METADATA").ok();
-        unsafe {
-            std::env::set_var("KILN_METAL_GRAPHS", "1");
-            std::env::remove_var("KILN_FORCE_EAGER_DECODE");
-            std::env::set_var("KILN_METAL_GRAPH_STABLE_PAGED_METADATA", "1");
-        }
-
-        let result = (|| -> Result<()> {
+        (|| -> Result<()> {
             let backend = crate::backend::for_device_kt(&device);
             let vocab = 64usize;
             let hidden = 512usize;
@@ -29434,21 +29424,7 @@ mod tests {
                 "third long bs=1 step should replay the second bucket's captured graph"
             );
             Ok(())
-        })();
-
-        match prev_graphs {
-            Some(v) => unsafe { std::env::set_var("KILN_METAL_GRAPHS", v) },
-            None => unsafe { std::env::remove_var("KILN_METAL_GRAPHS") },
-        }
-        match prev_force_eager {
-            Some(v) => unsafe { std::env::set_var("KILN_FORCE_EAGER_DECODE", v) },
-            None => unsafe { std::env::remove_var("KILN_FORCE_EAGER_DECODE") },
-        }
-        match prev_stable_meta {
-            Some(v) => unsafe { std::env::set_var("KILN_METAL_GRAPH_STABLE_PAGED_METADATA", v) },
-            None => unsafe { std::env::remove_var("KILN_METAL_GRAPH_STABLE_PAGED_METADATA") },
-        }
-        result
+        })()
     }
 
     #[cfg(feature = "metal")]
@@ -29465,17 +29441,7 @@ mod tests {
             return Ok(());
         }
 
-        let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev_graphs = std::env::var("KILN_METAL_GRAPHS").ok();
-        let prev_force_eager = std::env::var("KILN_FORCE_EAGER_DECODE").ok();
-        let prev_stable_meta = std::env::var("KILN_METAL_GRAPH_STABLE_PAGED_METADATA").ok();
-        unsafe {
-            std::env::set_var("KILN_METAL_GRAPHS", "1");
-            std::env::remove_var("KILN_FORCE_EAGER_DECODE");
-            std::env::set_var("KILN_METAL_GRAPH_STABLE_PAGED_METADATA", "1");
-        }
-
-        let result = (|| -> Result<()> {
+        (|| -> Result<()> {
             let backend = crate::backend::for_device_kt(&device);
             let vocab = 64usize;
             let hidden = 512usize;
@@ -29684,21 +29650,7 @@ mod tests {
                 "third long batched step should replay the second long bucket"
             );
             Ok(())
-        })();
-
-        match prev_graphs {
-            Some(v) => unsafe { std::env::set_var("KILN_METAL_GRAPHS", v) },
-            None => unsafe { std::env::remove_var("KILN_METAL_GRAPHS") },
-        }
-        match prev_force_eager {
-            Some(v) => unsafe { std::env::set_var("KILN_FORCE_EAGER_DECODE", v) },
-            None => unsafe { std::env::remove_var("KILN_FORCE_EAGER_DECODE") },
-        }
-        match prev_stable_meta {
-            Some(v) => unsafe { std::env::set_var("KILN_METAL_GRAPH_STABLE_PAGED_METADATA", v) },
-            None => unsafe { std::env::remove_var("KILN_METAL_GRAPH_STABLE_PAGED_METADATA") },
-        }
-        result
+        })()
     }
 
     /// bs=1 CUDA-graph-capture+replay vs. eager decode parity.

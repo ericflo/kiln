@@ -2240,7 +2240,7 @@ kernel void {entry}(
 /// threadgroup-memory combine. Empirically (M1, Hq=32/Hkv=8/D=128, GF=4) W=4
 /// wins at `Sk<=512` and W=8 at `Sk>=2048` (crossover ~1K keys); `W` is then
 /// clamped by occupancy headroom and the [1,32] pow2 + threadgroup-memory
-/// budget. `KILN_SDPA_SPLIT` forces a fixed `W` for A/B + tuning.
+/// budget. The heuristic is fixed for the process lifetime.
 fn sdpa_split_w(q_seq: usize, k_seq: usize, hkv: usize, b: usize, gf: usize, d: usize) -> usize {
     // Threadgroup-memory cap: the split combine stages W*GF*D + 2*W*GF floats.
     // Keep it under ~28 KiB (M1 limit is 32 KiB; leave slack). Floor to the
@@ -2255,11 +2255,6 @@ fn sdpa_split_w(q_seq: usize, k_seq: usize, hkv: usize, b: usize, gf: usize, d: 
         }
         w
     };
-    if let Ok(s) = std::env::var("KILN_SDPA_SPLIT") {
-        if let Ok(w) = s.parse::<usize>() {
-            return w.clamp(1, 32).next_power_of_two().min(mem_cap_w);
-        }
-    }
     // Many query-threadgroups (prefill-ish multi-query) or short context →
     // no split; the grid already has enough work or the keys are too few.
     if q_seq > 8 || k_seq < 256 {
@@ -2328,13 +2323,8 @@ fn sdpa_steel_cfg(head_dim: usize, dtype_bytes: usize) -> Option<(usize, usize, 
 
 /// Threshold (in `q_seq`) at/above which the compute-bound **matrix-core
 /// tiled** prefill path is used; below it the memory-bound simd_sum/split-K
-/// decode path. Overridable via `KILN_SDPA_PREFILL_MIN` (for A/B + tuning).
+/// decode path. This threshold is part of the qualified Metal kernel policy.
 fn sdpa_prefill_threshold() -> usize {
-    if let Ok(s) = std::env::var("KILN_SDPA_PREFILL_MIN") {
-        if let Ok(t) = s.parse::<usize>() {
-            return t;
-        }
-    }
     16
 }
 

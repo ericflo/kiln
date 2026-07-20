@@ -16,19 +16,19 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **487 direct read call sites** and
-**181 process-mutation call sites**. It can
-statically name **51 distinct literal `KILN_*`
-read names** across **145 call sites**.
+The scanner records **470 direct read call sites** and
+**163 process-mutation call sites**. It can
+statically name **43 distinct literal `KILN_*`
+read names** across **129 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 34 | 14 | 0 |
+| Experimental/debug migration | 23 | 6 | 0 |
 | Build time/provenance | 325 | 6 | 8 |
-| Test only | 119 | 33 | 173 |
+| Test only | 113 | 30 | 155 |
 
 The counts are call sites, not configuration-field counts. The central typed
 loader deliberately uses a small number of dynamic reads to resolve all public
@@ -56,14 +56,11 @@ boundary. This table is the prioritized deletion/migration queue.
 
 | Owner | Read call sites | Literal `KILN_*` names |
 |---|---:|---:|
-| `crates/kiln-model/src/metal_graph.rs` | 5 | 3 |
 | `crates/kiln-model/src/marlin_proj.rs` | 3 | 3 |
-| `crates/kiln-model/src/tape_forward.rs` | 3 | 3 |
 | `crates/kiln-core/src/env_flag.rs` | 2 | 0 |
 | `crates/kiln-model/src/backend/metal_config.rs` | 2 | 0 |
 | `crates/kiln-model/src/transposed_weight_cache.rs` | 2 | 0 |
 | `crates/kiln-server/src/cli.rs` | 2 | 0 |
-| `crates/kiln-tensor/src/metal_kernels.rs` | 2 | 2 |
 | `crates/kiln-blas/src/algo_cache.rs` | 1 | 0 |
 | `crates/kiln-core/src/config_hashes.rs` | 1 | 0 |
 | `crates/kiln-eval/src/scorers/python_doctest.rs` | 1 | 1 |
@@ -74,7 +71,6 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-opd-loss-kernel/src/lib.rs` | 1 | 1 |
 | `crates/kiln-rocblas/src/algo_cache.rs` | 1 | 0 |
 | `crates/kiln-server/src/api/debug_model_state.rs` | 1 | 0 |
-| `crates/kiln-tensor/src/metal_rt/commands.rs` | 1 | 0 |
 | `crates/kiln-train/src/remote_teacher.rs` | 1 | 0 |
 | `crates/kiln-vulkan-blas/src/pipeline_cache.rs` | 1 | 0 |
 
@@ -98,9 +94,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_DOCTEST_PYTHON` | Experimental/debug migration | 1 | `crates/kiln-eval/src/scorers/python_doctest.rs` |
 | `KILN_EVAL_MODE` | Test only | 1 | `crates/kiln-server/src/config.rs` |
 | `KILN_FLASH_ATTN_BWD_DETERMINISTIC` | Experimental/debug migration | 1 | `crates/kiln-flash-attn/src/kt_api.rs` |
-| `KILN_FORCE_EAGER_DECODE` | Experimental/debug migration, Test only | 5 | `crates/kiln-model/src/forward.rs`, `crates/kiln-model/src/metal_graph.rs` |
-| `KILN_METAL_GRAPHS` | Experimental/debug migration, Test only | 3 | `crates/kiln-model/src/forward.rs`, `crates/kiln-model/src/metal_graph.rs` |
-| `KILN_METAL_GRAPH_STABLE_PAGED_METADATA` | Experimental/debug migration, Test only | 3 | `crates/kiln-model/src/forward.rs`, `crates/kiln-model/src/metal_graph.rs` |
 | `KILN_METAL_LORA_LINEAR_BENCH_ITERS` | Test only | 2 | `crates/kiln-model/src/forward.rs` |
 | `KILN_METAL_LORA_LINEAR_BENCH_WARMUP` | Test only | 2 | `crates/kiln-model/src/forward.rs` |
 | `KILN_METAL_LORA_QKV_LINEAR_BENCH_ITERS` | Test only | 1 | `crates/kiln-model/src/forward.rs` |
@@ -120,13 +113,8 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_ROCM_FLASH_BENCH_SEQ` | Test only | 1 | `crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs` |
 | `KILN_ROCM_WAVE64` | Build time/provenance | 6 | `crates/kiln-conv1d-kernel/build.rs`, `crates/kiln-flash-attn/build.rs`, `crates/kiln-gdn-kernel/build.rs`, `crates/kiln-opd-loss-kernel/build.rs`, `crates/kiln-rmsnorm-kernel/build.rs`, `crates/kiln-tensor/build.rs` |
 | `KILN_RUN_LONG_ROCM_RMSNORM` | Test only | 1 | `crates/kiln-rmsnorm-kernel/tests/rocm_rmsnorm_parity.rs` |
-| `KILN_SDPA_PREFILL_MIN` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/metal_kernels.rs` |
-| `KILN_SDPA_SPLIT` | Experimental/debug migration | 1 | `crates/kiln-tensor/src/metal_kernels.rs` |
 | `KILN_SERVED_MODEL_ID` | Test only | 1 | `crates/kiln-server/src/config.rs` |
 | `KILN_SOURCE_TREE_HASH` | Build time/provenance | 1 | `crates/kiln-server/src/execution_provenance.rs` |
-| `KILN_TAPE_GDN_OFFLOAD_SAVED_TENSORS` | Experimental/debug migration | 1 | `crates/kiln-model/src/tape_forward.rs` |
-| `KILN_TAPE_OFFLOAD_MATMUL_A` | Experimental/debug migration | 1 | `crates/kiln-model/src/tape_forward.rs` |
-| `KILN_TAPE_OFFLOAD_MIN_BYTES` | Experimental/debug migration | 1 | `crates/kiln-model/src/tape_forward.rs` |
 | `KILN_TENSOR_CUDA_TEST` | Test only | 2 | `crates/kiln-tensor/src/cuda_allocator.rs`, `crates/kiln-tensor/src/cuda_storage.rs` |
 | `KILN_TENSOR_METAL_TEST` | Test only | 2 | `crates/kiln-tensor/src/metal_allocator.rs`, `crates/kiln-tensor/src/metal_storage.rs` |
 | `KILN_TENSOR_ROCM_TEST` | Test only | 1 | `crates/kiln-tensor/src/rocm_allocator.rs` |
@@ -250,7 +238,6 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-tensor/build.rs` | `var` | `HIPCC` | Build time/provenance | 1 |
 | `crates/kiln-tensor/build.rs` | `var` | `OUT_DIR` | Build time/provenance | 2 |
 | `crates/kiln-tensor/build.rs` | `var_os` | `NVCC` | Build time/provenance | 1 |
-| `crates/kiln-tensor/src/metal_rt/commands.rs` | `var` | `CANDLE_METAL_COMPUTE_PER_BUFFER` | Experimental/debug migration | 1 |
 | `crates/kiln-tensor/src/vk_shaders.rs` | `env!` | `OUT_DIR` | Build time/provenance | 1 |
 | `crates/kiln-train/src/opd.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
 | `crates/kiln-train/src/receipt.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 2 |

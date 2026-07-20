@@ -270,9 +270,8 @@ pub struct ModelRunner {
     /// Capture-phase telemetry deliberately lives outside `rocm_graph`, so a
     /// slow native capture cannot make health reporting look unavailable.
     rocm_graph_telemetry: RocmGraphTelemetryHandle,
-    /// Metal ICB graph runner for accelerated decode steps. Active only on a
-    /// Metal device with `KILN_METAL_GRAPHS` set; otherwise eager Metal decode
-    /// is preserved.
+    /// Metal ICB graph runner for accelerated decode steps. Eligibility is
+    /// resolved by the owning runtime options before construction.
     metal_graph: Mutex<MetalGraphRunner>,
     /// Phase A explicit decode weight registry. Decode kernels address weights
     /// by enum keys instead of safetensors/Candle names.

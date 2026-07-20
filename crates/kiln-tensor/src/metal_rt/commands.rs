@@ -63,7 +63,7 @@ use std::sync::{Arc, Mutex};
 // https://docs.rs/objc2/latest/objc2/rc/struct.Retained.html
 pub type CommandQueue = Retained<ProtocolObject<dyn MTLCommandQueue>>;
 
-const DEFAULT_CANDLE_METAL_COMPUTE_PER_BUFFER: usize = 50;
+const METAL_COMPUTE_PER_BUFFER: usize = 50;
 
 /// Creates a new command buffer from the queue with an attached semaphore for tracking its state.
 pub fn create_command_buffer(
@@ -123,17 +123,10 @@ unsafe impl Sync for Commands {}
 
 impl Commands {
     pub fn new(command_queue: CommandQueue) -> Result<Self, MetalRtError> {
-        let compute_per_buffer = match std::env::var("CANDLE_METAL_COMPUTE_PER_BUFFER") {
-            Ok(val) => val
-                .parse()
-                .unwrap_or(DEFAULT_CANDLE_METAL_COMPUTE_PER_BUFFER),
-            _ => DEFAULT_CANDLE_METAL_COMPUTE_PER_BUFFER,
-        };
-        // NOTE: `CANDLE_METAL_COMMAND_POOL_SIZE` is intentionally ignored —
-        // a multi-buffer pool re-introduces the cross-thread out-of-order
-        // commit data race this module was re-architected to fix (a single
-        // ordered stream is required for correctness on a single queue). The
-        // env var is kept readable for back-compat but has no effect.
+        let compute_per_buffer = METAL_COMPUTE_PER_BUFFER;
+        // A multi-buffer pool re-introduces the cross-thread out-of-order
+        // commit race this module was re-architected to fix. One ordered
+        // stream and one fixed commit cadence are correctness policy.
 
         let semaphore = Arc::new(CommandSemaphore::new());
         let current = create_command_buffer(&command_queue, Arc::clone(&semaphore))?;

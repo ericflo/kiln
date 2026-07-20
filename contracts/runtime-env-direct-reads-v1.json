@@ -196,84 +196,6 @@
       "surface": "unit-test"
     },
     {
-      "api": "remove_var",
-      "argument": "KILN_FORCE_EAGER_DECODE",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 4,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_METAL_GRAPHS",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_METAL_GRAPH_STABLE_PAGED_METADATA",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_FORCE_EAGER_DECODE",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 2,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_METAL_GRAPHS",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 4,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "set_var",
-      "argument": "KILN_METAL_GRAPH_STABLE_PAGED_METADATA",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 4,
-      "language": "rust",
-      "operation": "set",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
       "api": "set_var",
       "argument": "NVCC",
       "argument_kind": "literal",
@@ -2448,45 +2370,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_FORCE_EAGER_DECODE",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 2,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_METAL_GRAPHS",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 2,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_METAL_GRAPH_STABLE_PAGED_METADATA",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 2,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "var",
       "argument": "KILN_METAL_LORA_LINEAR_BENCH_ITERS",
       "argument_kind": "literal",
       "classification": "test_only",
@@ -2604,45 +2487,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_FORCE_EAGER_DECODE",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 3,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/metal_graph.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_METAL_GRAPHS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/metal_graph.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_METAL_GRAPH_STABLE_PAGED_METADATA",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/metal_graph.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "KILN_QUALIFICATION",
       "argument_kind": "literal",
       "classification": "test_only",
@@ -2653,45 +2497,6 @@
       "path": "crates/kiln-model/src/rocm_graph.rs",
       "phase": "runtime",
       "surface": "unit-test"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_TAPE_GDN_OFFLOAD_SAVED_TENSORS",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/tape_forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_TAPE_OFFLOAD_MATMUL_A",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/tape_forward.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_TAPE_OFFLOAD_MIN_BYTES",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/tape_forward.rs",
-      "phase": "runtime",
-      "surface": "source"
     },
     {
       "api": "var_os",
@@ -3891,45 +3696,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_SDPA_PREFILL_MIN",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-tensor/src/metal_kernels.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_SDPA_SPLIT",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-tensor/src/metal_kernels.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "CANDLE_METAL_COMPUTE_PER_BUFFER",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-tensor/src/metal_rt/commands.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "KILN_TENSOR_METAL_TEST",
       "argument_kind": "literal",
       "classification": "test_only",
@@ -4631,27 +4397,27 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 145,
-    "literal_kiln_read_names": 51,
+    "literal_kiln_read_call_sites": 129,
+    "literal_kiln_read_names": 43,
     "literal_kiln_read_names_by_classification": {
       "build_time": 6,
-      "experimental_debug": 14,
+      "experimental_debug": 6,
       "public_stable": 1,
-      "test_only": 33
+      "test_only": 30
     },
-    "process_mutation_call_sites": 181,
+    "process_mutation_call_sites": 163,
     "process_mutation_call_sites_by_classification": {
       "build_time": 8,
-      "test_only": 173
+      "test_only": 155
     },
-    "process_mutation_entries": 114,
-    "read_call_sites": 487,
+    "process_mutation_entries": 108,
+    "read_call_sites": 470,
     "read_call_sites_by_classification": {
       "build_time": 325,
-      "experimental_debug": 34,
+      "experimental_debug": 23,
       "public_stable": 9,
-      "test_only": 119
+      "test_only": 113
     },
-    "read_entries": 241
+    "read_entries": 229
   }
 }

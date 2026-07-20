@@ -1850,18 +1850,6 @@ pub fn try_tape_flash_attn_kt(
 /// are moved off the accelerator and uploaded back one node at a time during
 /// backward. This trades bandwidth for much lower long-context tape residency.
 fn tape_gdn_saved_tensor_offload_enabled(device: &kiln_tensor::Device) -> bool {
-    static OVERRIDE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
-    if let Some(value) = *OVERRIDE.get_or_init(|| {
-        std::env::var("KILN_TAPE_GDN_OFFLOAD_SAVED_TENSORS")
-            .ok()
-            .map(|v| {
-                let v = v.trim().to_lowercase();
-                !(v.is_empty() || v == "0" || v == "false" || v == "no")
-            })
-    }) {
-        return value;
-    }
-
     let _ = device;
     false
 }
@@ -1889,13 +1877,7 @@ fn saved_tensor_for_device(
 }
 
 fn tape_saved_tensor_offload_min_bytes() -> usize {
-    static MIN_BYTES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *MIN_BYTES.get_or_init(|| {
-        std::env::var("KILN_TAPE_OFFLOAD_MIN_BYTES")
-            .ok()
-            .and_then(|s| s.trim().parse::<usize>().ok())
-            .unwrap_or(1 << 20)
-    })
+    1 << 20
 }
 
 fn saved_tensor_bytes(t: &kiln_tensor::Tensor) -> usize {
@@ -1908,16 +1890,6 @@ fn should_offload_saved_tensor(t: &kiln_tensor::Tensor) -> bool {
 }
 
 fn tape_matmul_a_offload_enabled(device: &kiln_tensor::Device) -> bool {
-    static OVERRIDE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
-    if let Some(value) = *OVERRIDE.get_or_init(|| {
-        std::env::var("KILN_TAPE_OFFLOAD_MATMUL_A").ok().map(|v| {
-            let v = v.trim().to_lowercase();
-            !(v.is_empty() || v == "0" || v == "false" || v == "no")
-        })
-    }) {
-        return value;
-    }
-
     let _ = device;
     false
 }

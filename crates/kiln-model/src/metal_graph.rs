@@ -30,14 +30,6 @@ use crate::forward::{
 };
 use crate::lora_loader::LoraWeights;
 
-/// Whether Metal ICB decode replay is requested. Default ON for Metal decode;
-/// set `KILN_METAL_GRAPHS=0`/`false`/`off` to force eager decode.
-fn metal_graphs_env_on() -> bool {
-    std::env::var("KILN_METAL_GRAPHS")
-        .map(|v| !matches!(v.trim(), "0" | "false" | "FALSE" | "no" | "off" | "OFF"))
-        .unwrap_or(true)
-}
-
 #[cfg(feature = "metal")]
 pub(crate) fn replay_paged_decode_icb_graph_through_replay_plan(
     graph: &crate::backend::metal::MetalPagedDecodeIcbGraph,
@@ -74,7 +66,7 @@ impl MetalGraphKey {
         paged_cache: &PagedKvCacheKt,
         seq_lens: &[usize],
     ) -> Self {
-        let stable_metadata = Self::stable_paged_metadata_enabled();
+        let stable_metadata = true;
         let batch_size = seq_lens.len();
         let max_seq_len = seq_lens.iter().copied().max().unwrap_or(0);
         let attention_len = max_seq_len + 1;
@@ -97,12 +89,6 @@ impl MetalGraphKey {
             max_seqlen_k,
             max_blocks_per_seq,
         }
-    }
-
-    fn stable_paged_metadata_enabled() -> bool {
-        std::env::var("KILN_METAL_GRAPH_STABLE_PAGED_METADATA")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on" | "ON"))
-            .unwrap_or(true)
     }
 }
 
@@ -148,13 +134,9 @@ struct MetalStableDecodeBuffers {
 impl MetalGraphRunner {
     pub fn new(device: &kiln_tensor::Device, enabled: bool) -> Self {
         let is_metal = matches!(device, kiln_tensor::Device::Metal(_));
-        let actually_enabled = enabled && is_metal && metal_graphs_env_on();
+        let actually_enabled = enabled && is_metal;
         if actually_enabled {
             tracing::info!("Metal ICB graphs enabled for decode");
-        } else if enabled && is_metal {
-            tracing::debug!(
-                "Metal device present but Metal ICB graphs are disabled by KILN_METAL_GRAPHS"
-            );
         }
         Self {
             enabled: actually_enabled,
@@ -251,19 +233,6 @@ impl MetalGraphRunner {
 
         #[cfg(feature = "metal")]
         {
-            if std::env::var("KILN_FORCE_EAGER_DECODE").ok().as_deref() == Some("1") {
-                return Self::eager_greedy(
-                    backend,
-                    token_id,
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
-                    seq_len,
-                    linear_state,
-                    lora,
-                );
-            }
             self.invalidate_if_weights_changed(weights);
 
             if let Some(token) = self.try_decode_step_paged_greedy_stable(
@@ -320,9 +289,6 @@ impl MetalGraphRunner {
 
         #[cfg(feature = "metal")]
         {
-            if std::env::var("KILN_FORCE_EAGER_DECODE").ok().as_deref() == Some("1") {
-                return Ok(None);
-            }
             self.invalidate_if_weights_changed(weights);
             return self.try_decode_step_paged_greedy_batch_stable(
                 backend,
@@ -384,9 +350,6 @@ impl MetalGraphRunner {
 
         #[cfg(feature = "metal")]
         {
-            if std::env::var("KILN_FORCE_EAGER_DECODE").ok().as_deref() == Some("1") {
-                return Ok(None);
-            }
             self.invalidate_if_weights_changed(weights);
             return self.try_decode_step_paged_sample_batch_stable(
                 backend,

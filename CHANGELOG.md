@@ -9,6 +9,13 @@
   normalization, dynamic-length paged decode, and GDN pre-permute. Runtime
   policy schema v13 exposes the expanded authority everywhere the resolved
   policy is reported.
+- Metal graph, tape, and tensor runtime policy no longer reads late-bound
+  debug environment variables. Runtime options own graph eligibility, stable
+  paged metadata remains mandatory, saved training tensors remain resident,
+  SDPA uses its fixed shape heuristic and 16-token prefill threshold, and the
+  ordered Metal command stream keeps a 50-encode commit cadence. The retired
+  names and exact replacement behavior are published in the configuration
+  reference and website.
 - The original fourteen-route CUDA profile remains source-tracked in CLI, API,
   health, trusted debug, dashboard, qualification fixtures, schemas, examples,
   and website. `native_default` preserves existing accelerated dispatch
