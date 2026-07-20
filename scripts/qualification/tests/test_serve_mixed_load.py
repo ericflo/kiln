@@ -1723,6 +1723,12 @@ class ServeMixedLoadTests(unittest.TestCase):
             serve.parse_token_timing(timing, 2, previous_ready_ms=12.0),
             (4242, 20.0, 5.0),
         )
+        timing["blocking_phase"] = "actor_cycle_idle"
+        self.assertEqual(
+            serve.parse_token_timing(timing, 2, previous_ready_ms=12.0),
+            (4242, 20.0, 5.0),
+        )
+        timing["blocking_phase"] = "actor_decode"
         with self.assertRaises(serve.QualificationError):
             serve.parse_token_timing(timing, 2, previous_ready_ms=21.0)
         timing["source"] = "unbounded"

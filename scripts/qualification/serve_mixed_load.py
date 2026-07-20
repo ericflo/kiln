@@ -1126,12 +1126,7 @@ def parse_token_timing(
         raise QualificationError("token timing client delivery is internally inconsistent")
     blocking_phase = value["blocking_phase"]
     blocking_phase_ms = value["blocking_phase_ms"]
-    valid_phases = {
-        "actor_queue", "actor_admission", "actor_prefill", "actor_decode",
-        "response_delivery", "handler_queue", "client_delivery", "unexplained",
-        "sampling", "readback", "gpu_lock_wait", "graph_capture", "graph_replay",
-        "synchronization", "resize", "trim", "adapter", "training",
-    }
+    valid_phases = frozenset(LATENCY_STALL_REASON_FIELDS)
     if blocking_phase is None:
         if blocking_phase_ms is not None:
             raise QualificationError("token timing null blocking phase has a duration")

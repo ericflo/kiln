@@ -1053,7 +1053,7 @@ rocm_graph_cache_max_bytes = 1073741824</code></pre>
             <ul class="list-disc pl-5">
               <li>Inspect <code>/v1/config.streaming_prefill</code> and health <code>prefill_runtime.streaming_prefill</code>; require identical dispatch, tiles, sources, and restart flags.</li>
               <li>On ROCm defaults, expect auto dispatch at <code>&gt;=256</code>, base/tape tiles of 256, and detached/boundary/replay tiles of 8192.</li>
-              <li>With the batching actor effective, require <code>server.max_prefill_tokens_per_cycle=256</code>, direct streaming no later than the first split, and enough <code>server.max_batch_tokens</code> for that tile plus the effective decode width. Startup rejects a mismatched route before loading model weights.</li>
+              <li>With the batching actor effective, require <code>server.max_prefill_tokens_per_cycle=256</code>, direct streaming no later than the first split, and <code>server.max_batch_tokens=512</code> for that tile plus the effective decode width. Startup rejects a mismatched route before loading model weights.</li>
               <li>Separate ordinary inference/base tiles, tape-authoritative training tiles, and detached materialized full-attention routes. Tuning the wrong field cannot explain that path.</li>
               <li>Correlate the gap with actor phase timing, model segment/tile timing, external-yield synchronization, allocator reclaim, physical KV resize, live memory samples, and primary versus host-backed peak memory.</li>
             </ul>
