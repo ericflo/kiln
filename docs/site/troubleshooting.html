@@ -925,8 +925,8 @@ curl -s http://localhost:8420/metrics \
           <code>event=rocm_graph_capture_parity_check</code>. A passed event means the first graph launch matched its
           own eager warm hidden output, every recurrent and convolution tensor, and the current K/V rows. Inspect
           <code>comparison_complete</code>, <code>compared_bytes</code>, and <code>duration_ms</code>. A completed check
-          also reports <code>hidden_match</code> and the four first-mismatch layer fields; an error reports the
-          comparison failure instead. A failed, errored, or missing check on a claimed current-source capture is
+          also reports <code>hidden_match</code>; each first-mismatch layer field appears when that state family
+          differs. An error reports the comparison failure instead. A failed, errored, or missing check on a claimed current-source capture is
           failure evidence. The runner must settle and restore state, discard the graph, disable graph execution,
           and report <code>capture_failure</code> before any contained eager retry; do not treat the eager completion
           as graph correctness.

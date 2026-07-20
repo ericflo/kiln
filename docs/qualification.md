@@ -1821,6 +1821,33 @@ working set, and completed native capture plus first-launch parity in 74.899 ms.
 A new committed-source paired production run is still required; this guard and
 focused oracle do not retroactively promote the failed receipt.
 
+That committed-source pair now exists. Eager reference
+`20260720t012200-rocm-strix-halo-guarded-parity-eager-v16-c8.kiln.json`
+passed from source `e4e45e276bf74c2181bf279ac3ca724be7d23673` and binary
+`sha256:98fd03c6ac9535cdf464ad6b604e17f816868fbeb1cc69897d7a721b7eba916a`.
+Its same-binary graph arm
+`20260720t013300-rocm-strix-halo-guarded-parity-graphs-v16-c8.kiln.json`
+passed every route, request, graph, thermal, memory, shutdown, and finalization
+gate. The exclusive log contains exactly one multi-row
+`rocm_graph_capture_parity_check`: width four, `outcome=passed`,
+`comparison_complete=true`, 220,504,064 exact bytes, 11.558 ms, and equal
+hidden output with no state/K/V mismatch field. The measured row then recorded
+one capture and 61 replays with no fallback or graph failure, 16.502 aggregate
+and 10.290 thermally sustainable output tokens/second, a 77.0 C measured peak,
+and a 90.0 C lifecycle peak without a trip.
+
+The receipt remains correctly failed because the separate-process output
+trajectory differed from its eager reference at indices 4 and 6. Both actual
+hashes recur in older retained trajectories, and one is present in an earlier
+eager receipt. This does not overturn the strict comparison result. It does
+establish that two different claims are currently coupled: the graph candidate
+passed exact same-process admission, while whole-process deterministic replay
+did not. Do not repeat cross-process exact-output pairs as if they isolated
+graph correctness. The serving qualification contract must preserve the
+cross-process reproducibility failure separately and require the current-source
+parity event for graph-correctness promotion before any performance ranking is
+updated.
+
 Serving benchmark driver v15 closes the next attribution gap before another
 ROCm arm. Each successful Kiln stream now retains its exact terminal
 `metadata.performance` object, including the request-local latency phases and

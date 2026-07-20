@@ -294,9 +294,9 @@ binary or a regression, not expected cold-cache behavior.
 Each new batched graph also emits one
 `event=rocm_graph_capture_parity_check` after its settled first launch. Read its
 `outcome`, `comparison_complete`, `duration_ms`, and `compared_bytes` with
-`hidden_match` and the first recurrent, convolution, K-cache, or V-cache
-mismatch layer for a completed comparison, or `error` when the comparison
-kernel itself fails. The check compares against the candidate's own eager warm
+`hidden_match` for a completed comparison, plus the first recurrent,
+convolution, K-cache, or V-cache mismatch layer when one exists, or `error` when
+the comparison kernel itself fails. The check compares against the candidate's own eager warm
 execution, uses device-side exact equality with scalar readback, and is part of
 `native_capture` time. A failed or errored check is a capture failure followed
 by settled rollback and contained eager retry, never a successful admission.
