@@ -16,7 +16,7 @@
 /// Examples:
 /// ```ignore
 /// // Default-off flag, opt-in via env:
-/// let on = env_flag("KILN_W4A16", false);
+/// let on = env_flag("KILN_EXPERIMENTAL_ROUTE", false);
 ///
 /// // Default-on flag, opt-out via env:
 /// let on = env_flag("KILN_ROCM_W8A16", true);

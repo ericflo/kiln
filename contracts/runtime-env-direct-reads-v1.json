@@ -1915,19 +1915,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_FLASH_ATTN_BWD_DETERMINISTIC",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-flash-attn/src/kt_api.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "KILN_ROCM_FLASH_BENCH_COLLAPSED_BWD",
       "argument_kind": "literal",
       "classification": "test_only",
@@ -2003,19 +1990,6 @@
       "path": "crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs",
       "phase": "runtime",
       "surface": "unit-test"
-    },
-    {
-      "api": "var",
-      "argument": "name",
-      "argument_kind": "expression",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-flce-kernel/src/kt_api.rs",
-      "phase": "runtime",
-      "surface": "source"
     },
     {
       "api": "var",
@@ -2367,45 +2341,6 @@
       "path": "crates/kiln-model/src/lora_loader.rs",
       "phase": "runtime",
       "surface": "unit-test"
-    },
-    {
-      "api": "env_flag",
-      "argument": "KILN_W4A16",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/marlin_proj.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "env_flag",
-      "argument": "KILN_W4A16_GDN_OUT_PROJ",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/marlin_proj.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DISABLE_PARALLEL_PACK",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/marlin_proj.rs",
-      "phase": "runtime",
-      "surface": "source"
     },
     {
       "api": "var",
@@ -2796,19 +2731,6 @@
       "path": "crates/kiln-opd-loss-kernel/build.rs",
       "phase": "build-time",
       "surface": "build-script"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DISABLE_OPD_LOSS_KERNEL",
-      "argument_kind": "literal",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-opd-loss-kernel/src/lib.rs",
-      "phase": "runtime",
-      "surface": "source"
     },
     {
       "api": "var",
@@ -4319,11 +4241,11 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 123,
-    "literal_kiln_read_names": 41,
+    "literal_kiln_read_call_sites": 118,
+    "literal_kiln_read_names": 36,
     "literal_kiln_read_names_by_classification": {
       "build_time": 6,
-      "experimental_debug": 6,
+      "experimental_debug": 1,
       "public_stable": 1,
       "test_only": 28
     },
@@ -4333,13 +4255,13 @@
       "test_only": 153
     },
     "process_mutation_entries": 106,
-    "read_call_sites": 461,
+    "read_call_sites": 455,
     "read_call_sites_by_classification": {
       "build_time": 325,
-      "experimental_debug": 20,
+      "experimental_debug": 14,
       "public_stable": 9,
       "test_only": 107
     },
-    "read_entries": 225
+    "read_entries": 219
   }
 }

@@ -3,7 +3,7 @@
 //!
 //! Compares the `RmsNormCustomOp` (default) path against the
 //! `KILN_DISABLE_RMSNORM_BACKWARD=1` fallback (pre-Phase-10 candle-op
-//! chain) at three SFT lengths on Qwen3.5-4B + KILN_W4A16=1:
+//! chain) at three SFT lengths on Qwen3.5-4B with a Marlin-packed model:
 //!
 //!   1. T=2048, custom op ON  — baseline final loss + peak VRAM.
 //!   2. T=2048, custom op OFF — final loss must match (1) within 1e-3

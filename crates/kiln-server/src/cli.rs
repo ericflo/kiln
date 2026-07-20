@@ -2003,6 +2003,18 @@ pub fn run_config_check(
             );
             println!(
                 "  {} {} (source: {})",
+                style("CUDA Marlin profile:").dim(),
+                accelerator_runtime.cuda_marlin_profile.effective,
+                accelerator_runtime.cuda_marlin_profile.source,
+            );
+            println!(
+                "  {} {} (source: {})",
+                style("CUDA FlashAttention backward:").dim(),
+                accelerator_runtime.cuda_flash_backward_mode.effective,
+                accelerator_runtime.cuda_flash_backward_mode.source,
+            );
+            println!(
+                "  {} {} (source: {})",
                 style("Metal kernel profile:").dim(),
                 accelerator_runtime.metal_kernel_profile.effective,
                 accelerator_runtime.metal_kernel_profile.source,

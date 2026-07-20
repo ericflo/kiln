@@ -193,8 +193,8 @@ def health_fixture(
         },
     }
     accelerator_runtime = {
-        "schema_id": "kiln.accelerator-runtime-policy.v14",
-        "version": 14,
+        "schema_id": "kiln.accelerator-runtime-policy.v15",
+        "version": 15,
         "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v3",
         "vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1",
         "serving_profile": serving_profile,
@@ -222,6 +222,16 @@ def health_fixture(
         "cuda_kernel_profile": {
             "configured": "native_default",
             "effective": "native_default",
+            "source": "config_file",
+        },
+        "cuda_marlin_profile": {
+            "configured": "disabled",
+            "effective": "disabled",
+            "source": "config_file",
+        },
+        "cuda_flash_backward_mode": {
+            "configured": "fast",
+            "effective": "fast",
             "source": "config_file",
         },
         "metal_kernel_profile": {
@@ -458,8 +468,8 @@ def debug_fixture(
 
     return {
         "accelerator_runtime": {
-            "schema_id": "kiln.accelerator-runtime-policy.v14",
-            "version": 14,
+            "schema_id": "kiln.accelerator-runtime-policy.v15",
+            "version": 15,
             "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v3",
             "vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1",
             "serving_profile": serving_profile,
@@ -487,6 +497,16 @@ def debug_fixture(
             "cuda_kernel_profile": {
                 "configured": "native_default",
                 "effective": "native_default",
+                "source": "config_file",
+            },
+            "cuda_marlin_profile": {
+                "configured": "disabled",
+                "effective": "disabled",
+                "source": "config_file",
+            },
+            "cuda_flash_backward_mode": {
+                "configured": "fast",
+                "effective": "fast",
                 "source": "config_file",
             },
             "metal_kernel_profile": {
@@ -613,9 +633,9 @@ class ServeMixedLoadTests(unittest.TestCase):
     def test_accelerator_policy_version_is_derived_from_schema_identity(self) -> None:
         self.assertEqual(
             serve.ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID,
-            "kiln.accelerator-runtime-policy.v14",
+            "kiln.accelerator-runtime-policy.v15",
         )
-        self.assertEqual(serve.ACCELERATOR_RUNTIME_POLICY_VERSION, 14)
+        self.assertEqual(serve.ACCELERATOR_RUNTIME_POLICY_VERSION, 15)
         self.assertEqual(
             serve.ACCELERATOR_RUNTIME_POLICY_VERSION,
             int(serve.ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID.rsplit(".v", 1)[1]),

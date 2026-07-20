@@ -3,7 +3,9 @@ pub mod backend;
 pub mod cancel;
 mod checkpoint_read;
 pub mod cuda_graph;
+mod cuda_marlin_policy;
 mod cuda_policy;
+mod cuda_training_policy;
 // (#1082 Wave F2) `cuda_train` deleted — the hand-rolled candle-autograd
 // CUDA training engine (`CudaTrainTensor`/`CudaBackwardOp`/`cuda_backward`)
 // is gone; the kt tape is the sole gradient producer.
@@ -93,7 +95,11 @@ pub use checkpoint_read::{
 };
 pub use cuda_graph::CudaGraphExecutionPolicy;
 #[cfg(feature = "cuda")]
+pub use cuda_marlin_policy::{CudaMarlinPolicy, install_cuda_marlin_policy};
+#[cfg(feature = "cuda")]
 pub use cuda_policy::{CudaKernelPolicy, install_cuda_kernel_policy};
+#[cfg(feature = "cuda")]
+pub use cuda_training_policy::{CudaTrainingPolicy, install_cuda_training_policy};
 pub use engine::Engine;
 pub use forward::{LinearAttentionState, StreamingPrefillExecutionPolicy, StreamingPrefillMode};
 pub use full_attention_policy::{

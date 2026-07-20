@@ -313,17 +313,6 @@ fn alloc_cuda_tensor(
     )?)
 }
 
-#[cfg(feature = "cuda")]
-fn flash_attn_bwd_deterministic() -> bool {
-    let raw = std::env::var("KILN_FLASH_ATTN_BWD_DETERMINISTIC").ok();
-    let lower = raw.as_deref().map(str::trim).map(str::to_ascii_lowercase);
-    match lower.as_deref() {
-        Some("1") | Some("true") | Some("yes") => true,
-        Some("0") | Some("false") | Some("no") => false,
-        _ => false,
-    }
-}
-
 // ============================================================================
 // flash_attn_paged_decode_kt
 // ============================================================================
@@ -1117,17 +1106,36 @@ pub fn paged_kv_write_token_major_bf16_batch_slot_kt(
 // flash_attn_bwd_kt
 // ============================================================================
 
+/// CUDA FlashAttention backward accumulation strategy.
+///
+/// ROCm uses its native exact/composite backward implementation and accepts
+/// this value only to keep the cross-backend call contract explicit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FlashAttnBackwardMode {
+    /// Historical, faster CUDA accumulation path.
+    #[default]
+    Fast,
+    /// CUDA split accumulation for deterministic replay and diagnosis.
+    Deterministic,
+}
+
+impl FlashAttnBackwardMode {
+    #[cfg(feature = "cuda")]
+    const fn is_deterministic(self) -> bool {
+        matches!(self, Self::Deterministic)
+    }
+}
+
 /// `flash_attn_bwd` over `kiln_tensor::Tensor` operands.
 /// Returns `(dq, dk, dv)`. GQA expansion to num_heads happens
 /// upstream (caller sums dk/dv across groups if needed); this
 /// function only allocates expanded buffers matching the FFI's
 /// shape contract.
 ///
-/// CUDA defaults to the fast non-deterministic FA2 backward accumulation path.
-/// Set `KILN_FLASH_ATTN_BWD_DETERMINISTIC=1` to opt into the deterministic
-/// split-accumulation path for exact replay/debug runs.
+/// This source-compatible entry point preserves the historical fast CUDA
+/// accumulation path. Call [`flash_attn_bwd_kt_with_mode`] when the owner has
+/// an explicit process-lifetime backward policy.
 #[allow(clippy::too_many_arguments)]
-#[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
 pub fn flash_attn_bwd_kt(
     dout: &KtTensor,
     q: &KtTensor,
@@ -1137,6 +1145,33 @@ pub fn flash_attn_bwd_kt(
     softmax_lse: &KtTensor,
     softmax_scale: f32,
     causal: bool,
+) -> Result<(KtTensor, KtTensor, KtTensor), FlashAttnError> {
+    flash_attn_bwd_kt_with_mode(
+        dout,
+        q,
+        k,
+        v,
+        out,
+        softmax_lse,
+        softmax_scale,
+        causal,
+        FlashAttnBackwardMode::Fast,
+    )
+}
+
+/// `flash_attn_bwd` with an explicit CUDA accumulation mode.
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
+pub fn flash_attn_bwd_kt_with_mode(
+    dout: &KtTensor,
+    q: &KtTensor,
+    k: &KtTensor,
+    v: &KtTensor,
+    out: &KtTensor,
+    softmax_lse: &KtTensor,
+    softmax_scale: f32,
+    causal: bool,
+    mode: FlashAttnBackwardMode,
 ) -> Result<(KtTensor, KtTensor, KtTensor), FlashAttnError> {
     let q_shape = q.shape();
     if q_shape.len() != 4 {
@@ -1205,8 +1240,6 @@ pub fn flash_attn_bwd_kt(
         let da_ptr = kiln_kt_bridge::cuda_output_device_ptr(&dq_accum);
 
         let raw_stream = q_st.cuda_stream_raw();
-        let deterministic = flash_attn_bwd_deterministic();
-
         let status = unsafe {
             kiln_flash_attn_bwd(
                 dout_ptr as *const _,
@@ -1228,7 +1261,7 @@ pub fn flash_attn_bwd_kt(
                 head_dim as i32,
                 softmax_scale,
                 if causal { 1 } else { 0 },
-                if deterministic { 1 } else { 0 },
+                if mode.is_deterministic() { 1 } else { 0 },
                 raw_stream,
             )
         };
@@ -1268,6 +1301,32 @@ pub fn flash_attn_bwd_collapsed_gqa_kt(
     softmax_scale: f32,
     causal: bool,
 ) -> Result<(KtTensor, KtTensor, KtTensor), FlashAttnError> {
+    flash_attn_bwd_collapsed_gqa_kt_with_mode(
+        dout,
+        q,
+        k,
+        v,
+        out,
+        softmax_lse,
+        softmax_scale,
+        causal,
+        FlashAttnBackwardMode::Fast,
+    )
+}
+
+/// Grouped-K/V backward with an explicit CUDA accumulation mode.
+#[allow(clippy::too_many_arguments)]
+pub fn flash_attn_bwd_collapsed_gqa_kt_with_mode(
+    dout: &KtTensor,
+    q: &KtTensor,
+    k: &KtTensor,
+    v: &KtTensor,
+    out: &KtTensor,
+    softmax_lse: &KtTensor,
+    softmax_scale: f32,
+    causal: bool,
+    mode: FlashAttnBackwardMode,
+) -> Result<(KtTensor, KtTensor, KtTensor), FlashAttnError> {
     let q_shape = q.shape();
     if q_shape.len() != 4 {
         return Err(FlashAttnError::Msg(format!(
@@ -1304,7 +1363,7 @@ pub fn flash_attn_bwd_collapsed_gqa_kt(
     }
 
     let (dq, dk_exp, dv_exp) =
-        flash_attn_bwd_kt(dout, q, k, v, out, softmax_lse, softmax_scale, causal)?;
+        flash_attn_bwd_kt_with_mode(dout, q, k, v, out, softmax_lse, softmax_scale, causal, mode)?;
     let dk = collapse_expanded_gqa_grad_kt(&dk_exp, b, seqlen_k, num_heads, num_heads_k, head_dim)?;
     let dv = collapse_expanded_gqa_grad_kt(&dv_exp, b, seqlen_k, num_heads, num_heads_k, head_dim)?;
     Ok((dq, dk, dv))

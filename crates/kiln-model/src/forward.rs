@@ -2279,9 +2279,9 @@ pub struct GpuFullAttentionWeights {
     /// Enabled by the qualified immutable ROCm kernel profile for decode.
     pub qkv_proj_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
     pub o_proj_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
-    /// Optional Marlin W4A16-packed q_proj. Populated at load time when the
-    /// `KILN_W4A16=1` env var is set on a CUDA build whose q_proj shape fits
-    /// Marlin's tile constraints (k%128 && n%256). When present, the forward
+    /// Optional Marlin W4A16-packed q_proj. Populated when the installed CUDA
+    /// Marlin profile includes attention Q and the shape fits Marlin's tile
+    /// constraints (k%128 && n%256). When present, the forward
     /// path routes q_proj through the Marlin kernel instead of the BF16
     /// `broadcast_matmul` via `q_proj_t`. LoRA deltas are still applied on top.
     pub q_proj_marlin: Option<crate::marlin_proj::MarlinPackedProj>,
@@ -2367,13 +2367,12 @@ pub struct GpuLinearAttentionWeights {
     /// prefill/decode A/B projections into one matmul on backend fast paths.
     pub in_proj_ab_t: Option<Tensor>,
     pub out_proj_t: Tensor,
-    /// Optional Marlin W4A16-packed GDN out_proj. Populated at load time
-    /// when `KILN_W4A16_GDN_OUT_PROJ=1` is set on a CUDA build whose
-    /// out_proj shape fits Marlin's tile constraints (`k%128 && n%256`).
+    /// Optional Marlin W4A16-packed GDN out_proj. Populated when the expanded
+    /// CUDA Marlin profile includes it and its shape fits Marlin's tile
+    /// constraints (`k%128 && n%256`).
     /// When present, the GDN forward path uses Marlin for the projection
-    /// instead of `broadcast_matmul` via `out_proj_t`. This is gated
-    /// behind a separate opt-in from the existing `KILN_W4A16` because the
-    /// GDN out_proj is the last linear layer in the GDN block before the
+    /// instead of `broadcast_matmul` via `out_proj_t`. The GDN out_proj is
+    /// the last linear layer in the GDN block before the
     /// residual add — int4 quantization there is more sensitive to
     /// quality drift than the in-projections or the MLP, so deployments
     /// opt in only after their own quality A/B passes.
@@ -2539,9 +2538,9 @@ pub struct GpuFfnWeights {
     /// fast path. Skipped when LoRA or Marlin are configured for either of
     /// the gate/up projections (those paths need the standalone transposes).
     pub gate_up_proj_t: Option<Tensor>,
-    /// Optional Marlin W4A16-packed MLP projections. Populated at load time
-    /// when the `KILN_W4A16=1` env var is set on a CUDA build whose projection
-    /// shape fits Marlin's tile constraints (k%128 && n%256). When present,
+    /// Optional Marlin W4A16-packed MLP projections. Populated when the CUDA
+    /// Marlin profile includes them and their shapes fit Marlin's tile
+    /// constraints (k%128 && n%256). When present,
     /// the forward path routes the corresponding projection through the
     /// Marlin kernel instead of the BF16 `broadcast_matmul` via `*_t`. LoRA
     /// deltas are still applied on top. Mirrors the q_proj_marlin wire-in
@@ -5063,7 +5062,6 @@ fn flush_marlin_pack_inputs(
         "marlin packed result and metadata counts disagree"
     );
     let pack_elapsed_ms = pack_start.elapsed().as_millis();
-    let parallel = !crate::marlin_proj::parallel_pack_disabled();
     let n_inputs = inputs.len();
     let n_packed = packed.iter().filter(|p| p.is_some()).count();
     tracing::info!(
@@ -5071,12 +5069,12 @@ fn flush_marlin_pack_inputs(
         n_inputs,
         n_packed,
         pack_elapsed_ms = pack_elapsed_ms as u64,
-        parallel,
+        parallel = true,
         "marlin batch pack complete"
     );
     eprintln!(
         "[kiln] marlin {scope} batch pack: {n_packed}/{n_inputs} projections in {pack_elapsed_ms} ms ({})",
-        if parallel { "parallel" } else { "serial" }
+        "parallel"
     );
 
     for (entry, maybe_packed) in metadata.into_iter().zip(packed.into_iter()) {
@@ -5419,7 +5417,7 @@ impl GpuWeights {
         // install results into the per-layer slots. A configured upload pace
         // instead flushes each layer before its cooperative checkpoint so a
         // CUDA W4A16 load cannot hide a whole-model upload in finalization.
-        let w4a16_enabled = crate::marlin_proj::env_enabled();
+        let w4a16_enabled = crate::marlin_proj::enabled();
         let mut marlin_pack_inputs: Vec<(Tensor, i32)> = Vec::new();
         let mut marlin_pack_meta: Vec<MarlinPackEntry> = Vec::new();
 
@@ -5485,8 +5483,8 @@ impl GpuWeights {
                             None
                         }
                     };
-                    // KILN_W4A16=1 opt-in: queue q_proj for the post-loop
-                    // Marlin batch pack. The packed weight (and the BF16
+                    // The active Marlin profile queues q_proj for the post-loop
+                    // batch pack. The packed weight (and the BF16
                     // drop) are installed after the layer loop via
                     // `install_marlin_packed`, so `q_proj_marlin` starts as
                     // None and `q_proj_t` keeps the BF16 copy until then.
@@ -5589,8 +5587,8 @@ impl GpuWeights {
                         attn_proj.next().context(ctx("in_proj_z missing"))?;
                     let (out_proj, out_proj_t) =
                         attn_proj.next().context(ctx("out_proj missing"))?;
-                    // KILN_W4A16=1 + KILN_W4A16_GDN_OUT_PROJ=1 opt-in: queue
-                    // the GDN out_proj for Marlin batch pack. Gated separately
+                    // The expanded Marlin profile also queues the GDN out_proj.
+                    // This projection is gated separately
                     // from the rest because it's the last linear in the GDN
                     // block before the residual add, so int4 here is more
                     // quality-sensitive than the in-projections or the MLP.
@@ -5685,11 +5683,11 @@ impl GpuWeights {
             let (gate_proj, gate_proj_t) = mlp_proj.next().context(ctx("gate_proj missing"))?;
             let (up_proj, up_proj_t) = mlp_proj.next().context(ctx("up_proj missing"))?;
             let (down_proj, down_proj_t) = mlp_proj.next().context(ctx("down_proj missing"))?;
-            // KILN_W4A16=1 opt-in: queue each MLP projection for the
+            // The active Marlin profile queues each MLP projection for the
             // post-loop Marlin batch pack. See the q_proj comment above —
             // the `*_proj_marlin` fields start as None, and
             // `install_marlin_packed` drops `*_proj_t` after the batch runs
-            // (unless `KILN_DISABLE_MARLIN_BF16_DROP=1`).
+            // according to the fixed projection-load policy.
             if w4a16_enabled {
                 marlin_pack_inputs.push((gate_proj_t.clone(), 128));
                 marlin_pack_meta.push(MarlinPackEntry {
@@ -5710,7 +5708,7 @@ impl GpuWeights {
             // Cache gate/up concatenated along the output dim for GPU prefill:
             // one [B*T, hidden] @ [hidden, 2*intermediate] GEMM replaces two
             // [B*T, hidden] @ [hidden, intermediate] matmuls. Skipped when
-            // KILN_W4A16 is going to Marlin-pack gate/up (the packed path
+            // Marlin is going to pack gate/up (the packed path
             // needs the separate projections).
             let gate_up_proj_t = {
                 #[cfg(any(feature = "cuda", feature = "rocm"))]
@@ -5795,8 +5793,7 @@ impl GpuWeights {
         // CPU-bound `quantize_and_pack` work now runs across every
         // available worker thread (rayon's default pool) while the
         // GPU↔CPU copies stay sequential inside
-        // `pack_from_bf16_batch`. Set `KILN_DISABLE_PARALLEL_PACK=1` to
-        // force the legacy serial pack for A/B measurements or rollback.
+        // `pack_from_bf16_batch`; its CPU phase uses the fixed parallel path.
         if w4a16_enabled {
             // (#1082) `pack_from_bf16_batch` is kt-native now: the kt weights
             // go straight in, with no kt-to-candle bridge.

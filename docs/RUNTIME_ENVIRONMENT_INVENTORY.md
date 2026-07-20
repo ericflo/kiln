@@ -16,17 +16,17 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **461 direct read call sites** and
+The scanner records **455 direct read call sites** and
 **161 process-mutation call sites**. It can
-statically name **41 distinct literal `KILN_*`
-read names** across **123 call sites**.
+statically name **36 distinct literal `KILN_*`
+read names** across **118 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 20 | 6 | 0 |
+| Experimental/debug migration | 14 | 1 | 0 |
 | Build time/provenance | 325 | 6 | 8 |
 | Test only | 107 | 28 | 153 |
 
@@ -56,17 +56,13 @@ boundary. This table is the prioritized deletion/migration queue.
 
 | Owner | Read call sites | Literal `KILN_*` names |
 |---|---:|---:|
-| `crates/kiln-model/src/marlin_proj.rs` | 3 | 3 |
 | `crates/kiln-core/src/env_flag.rs` | 2 | 0 |
 | `crates/kiln-model/src/transposed_weight_cache.rs` | 2 | 0 |
 | `crates/kiln-server/src/cli.rs` | 2 | 0 |
 | `crates/kiln-blas/src/algo_cache.rs` | 1 | 0 |
 | `crates/kiln-core/src/config_hashes.rs` | 1 | 0 |
 | `crates/kiln-eval/src/scorers/python_doctest.rs` | 1 | 1 |
-| `crates/kiln-flash-attn/src/kt_api.rs` | 1 | 1 |
-| `crates/kiln-flce-kernel/src/kt_api.rs` | 1 | 0 |
 | `crates/kiln-memory/src/vram.rs` | 1 | 0 |
-| `crates/kiln-opd-loss-kernel/src/lib.rs` | 1 | 1 |
 | `crates/kiln-rocblas/src/algo_cache.rs` | 1 | 0 |
 | `crates/kiln-server/src/api/debug_model_state.rs` | 1 | 0 |
 | `crates/kiln-train/src/remote_teacher.rs` | 1 | 0 |
@@ -85,11 +81,8 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_CONFIG` | Public stable | 2 | `crates/kiln-server/src/config.rs`, `crates/kiln-server/src/logging.rs` |
 | `KILN_CUDA_ARCHS` | Build time/provenance | 8 | `crates/kiln-blas/build.rs`, `crates/kiln-conv1d-kernel/build.rs`, `crates/kiln-flash-attn/build.rs`, `crates/kiln-gdn-kernel/build.rs`, `crates/kiln-marlin-gemm/build.rs`, `crates/kiln-opd-loss-kernel/build.rs`, `crates/kiln-rmsnorm-kernel/build.rs`, `crates/kiln-tensor/build.rs` |
 | `KILN_DISABLE_FUSED_PAGED_DECODE` | Test only | 6 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_OPD_LOSS_KERNEL` | Experimental/debug migration | 1 | `crates/kiln-opd-loss-kernel/src/lib.rs` |
-| `KILN_DISABLE_PARALLEL_PACK` | Experimental/debug migration | 1 | `crates/kiln-model/src/marlin_proj.rs` |
 | `KILN_DOCTEST_PYTHON` | Experimental/debug migration | 1 | `crates/kiln-eval/src/scorers/python_doctest.rs` |
 | `KILN_EVAL_MODE` | Test only | 1 | `crates/kiln-server/src/config.rs` |
-| `KILN_FLASH_ATTN_BWD_DETERMINISTIC` | Experimental/debug migration | 1 | `crates/kiln-flash-attn/src/kt_api.rs` |
 | `KILN_METAL_LORA_LINEAR_BENCH_ITERS` | Test only | 2 | `crates/kiln-model/src/forward.rs` |
 | `KILN_METAL_LORA_LINEAR_BENCH_WARMUP` | Test only | 2 | `crates/kiln-model/src/forward.rs` |
 | `KILN_METAL_LORA_QKV_LINEAR_BENCH_ITERS` | Test only | 1 | `crates/kiln-model/src/forward.rs` |
@@ -118,8 +111,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_TEST_FLAG_FALSY` | Test only | 1 | `crates/kiln-core/src/env_flag.rs` |
 | `KILN_TEST_FLAG_GIBBERISH` | Test only | 2 | `crates/kiln-core/src/env_flag.rs` |
 | `KILN_TEST_FLAG_TRUTHY` | Test only | 1 | `crates/kiln-core/src/env_flag.rs` |
-| `KILN_W4A16` | Experimental/debug migration | 1 | `crates/kiln-model/src/marlin_proj.rs` |
-| `KILN_W4A16_GDN_OUT_PROJ` | Experimental/debug migration | 1 | `crates/kiln-model/src/marlin_proj.rs` |
 
 ## Dynamic read catalog
 
@@ -160,7 +151,6 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-flash-attn/build.rs` | `var_os` | `CARGO_FEATURE_CUDA` | Build time/provenance | 1 |
 | `crates/kiln-flash-attn/build.rs` | `var_os` | `CARGO_FEATURE_ROCM` | Build time/provenance | 1 |
 | `crates/kiln-flash-attn/build.rs` | `var_os` | `NVCC` | Build time/provenance | 1 |
-| `crates/kiln-flce-kernel/src/kt_api.rs` | `var` | `name` | Experimental/debug migration | 1 |
 | `crates/kiln-gdn-kernel/build.rs` | `var` | `var` | Build time/provenance | 2 |
 | `crates/kiln-gdn-kernel/build.rs` | `var` | `CARGO_FEATURE_CUDA` | Build time/provenance | 1 |
 | `crates/kiln-gdn-kernel/build.rs` | `var` | `CARGO_FEATURE_ROCM` | Build time/provenance | 1 |

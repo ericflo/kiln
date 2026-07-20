@@ -1134,9 +1134,9 @@ mod tests {
         assert_eq!(json["cuda_graphs"]["restart_required_to_change"], true);
         assert_eq!(
             json["accelerator_runtime"]["schema_id"],
-            "kiln.accelerator-runtime-policy.v14"
+            "kiln.accelerator-runtime-policy.v15"
         );
-        assert_eq!(json["accelerator_runtime"]["version"], 14);
+        assert_eq!(json["accelerator_runtime"]["version"], 15);
         assert_eq!(
             json["accelerator_runtime"]["vulkan_kernel_policy_schema_id"],
             "kiln.vulkan-kernel-policy.v3"
@@ -1161,6 +1161,14 @@ mod tests {
         assert_eq!(
             json["accelerator_runtime"]["cuda_kernel_profile"]["effective"],
             "native_default"
+        );
+        assert_eq!(
+            json["accelerator_runtime"]["cuda_marlin_profile"]["effective"],
+            "disabled"
+        );
+        assert_eq!(
+            json["accelerator_runtime"]["cuda_flash_backward_mode"]["effective"],
+            "fast"
         );
         assert_eq!(
             json["accelerator_runtime"]["metal_kernel_profile"]["effective"],

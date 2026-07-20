@@ -482,12 +482,15 @@ curl -s http://localhost:8420/metrics \
           after startup and its source identifies TOML, canonical environment override, or default ownership.
         </p>
         <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config \
-  | jq '.accelerator_runtime | {schema_id, version, cuda_kernel_profile}'</code></pre>
+  | jq '.accelerator_runtime | {schema_id, version, cuda_kernel_profile, cuda_marlin_profile, cuda_flash_backward_mode}'</code></pre>
         <ul class="list-disc pl-5 mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
           <li>Use <code>accelerator.cuda_kernel_profile = "portable_fallback"</code> only as a whole-profile comparison, restart, and preserve both resolved config objects with the same model, request, seed, batch, and memory policy.</li>
           <li>Do not use former CUDA-specific per-kernel environment switches. They are not aliases and cannot establish which route ran.</li>
           <li>A difference between profiles localizes the problem to one of the twenty-five documented model/backend routes; it does not identify a particular route. Use route counters, profiler evidence, and a focused reproduction before drawing that conclusion.</li>
           <li>The profile includes the documented forward and training routes, but is not a complete CUDA qualification and makes no claim about graph or Marlin behavior outside the architecture table.</li>
+          <li>For weight-layout regressions, use <code>server.serving_profile = "experimental"</code> and compare <code>cuda_marlin_profile = "disabled"</code> against <code>"attention_mlp"</code> before testing <code>"attention_mlp_gdn"</code>. Restart between arms, record load time and resident memory, and include task-quality evaluation because W4A16 changes model weights.</li>
+          <li>For training backward replay, compare <code>cuda_flash_backward_mode = "fast"</code> and <code>"deterministic"</code> with identical source, shapes, seed, and optimizer state. This field does not make unrelated CUDA kernels deterministic.</li>
+          <li>Do not restore <code>KILN_W4A16</code>, <code>KILN_W4A16_GDN_OUT_PROJ</code>, <code>KILN_DISABLE_PARALLEL_PACK</code>, or <code>KILN_FLASH_ATTN_BWD_DETERMINISTIC</code>; they are not aliases.</li>
         </ul>
         <h3 id="metal-kernel-profile-diagnosis" class="text-lg font-semibold mt-6 mb-2">Metal backend-profile diagnosis</h3>
         <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">

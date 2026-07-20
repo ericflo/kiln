@@ -3,10 +3,10 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-#[cfg(feature = "cuda")]
-use crate::config::CudaKernelProfile;
 #[cfg(feature = "metal")]
 use crate::config::MetalKernelProfile;
+#[cfg(feature = "cuda")]
+use crate::config::{CudaFlashBackwardMode, CudaKernelProfile, CudaMarlinProfile};
 use crate::config::{KtApiMode, ResolvedAcceleratorRuntimePolicy, RocmGraphMode};
 #[cfg(feature = "rocm")]
 use crate::config::{RocmKernelProfile, RocmSynchronizationMode};
@@ -142,6 +142,27 @@ fn model_cuda_kernel_policy(
     }
 }
 
+#[cfg(feature = "cuda")]
+fn model_cuda_marlin_policy(
+    policy: ResolvedAcceleratorRuntimePolicy,
+) -> kiln_model::CudaMarlinPolicy {
+    match policy.cuda_marlin_profile.effective {
+        CudaMarlinProfile::Disabled => kiln_model::CudaMarlinPolicy::disabled(),
+        CudaMarlinProfile::AttentionMlp => kiln_model::CudaMarlinPolicy::attention_mlp(),
+        CudaMarlinProfile::AttentionMlpGdn => kiln_model::CudaMarlinPolicy::attention_mlp_gdn(),
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn model_cuda_training_policy(
+    policy: ResolvedAcceleratorRuntimePolicy,
+) -> kiln_model::CudaTrainingPolicy {
+    match policy.cuda_flash_backward_mode.effective {
+        CudaFlashBackwardMode::Fast => kiln_model::CudaTrainingPolicy::fast(),
+        CudaFlashBackwardMode::Deterministic => kiln_model::CudaTrainingPolicy::deterministic(),
+    }
+}
+
 #[cfg(feature = "metal")]
 fn model_metal_kernel_policy(
     policy: ResolvedAcceleratorRuntimePolicy,
@@ -224,6 +245,10 @@ pub fn install_startup_policy(
         {
             kiln_model::install_cuda_kernel_policy(model_cuda_kernel_policy(policy))
                 .context("failed to install immutable CUDA backend-kernel policy")?;
+            kiln_model::install_cuda_marlin_policy(model_cuda_marlin_policy(policy))
+                .context("failed to install immutable CUDA Marlin policy")?;
+            kiln_model::install_cuda_training_policy(model_cuda_training_policy(policy))
+                .context("failed to install immutable CUDA training policy")?;
             return Ok(());
         }
 
@@ -365,7 +390,10 @@ mod tests {
         ServingProfileSetting,
     };
     #[cfg(feature = "cuda")]
-    use crate::config::{CudaKernelProfile, CudaKernelProfileSetting};
+    use crate::config::{
+        CudaFlashBackwardMode, CudaFlashBackwardModeSetting, CudaKernelProfile,
+        CudaKernelProfileSetting, CudaMarlinProfile, CudaMarlinProfileSetting,
+    };
     #[cfg(feature = "metal")]
     use crate::config::{MetalKernelProfile, MetalKernelProfileSetting};
     #[cfg(feature = "rocm")]
@@ -409,6 +437,56 @@ mod tests {
                 }
             };
             assert_eq!(model_cuda_kernel_policy(policy), expected);
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_marlin_profiles_map_exactly_to_the_model_policy() {
+        for configured in [
+            CudaMarlinProfile::Disabled,
+            CudaMarlinProfile::AttentionMlp,
+            CudaMarlinProfile::AttentionMlpGdn,
+        ] {
+            let mut config = AcceleratorRuntimeConfig::default();
+            config.cuda_marlin_profile =
+                CudaMarlinProfileSetting::new(configured, ConfigValueSource::ConfigFile);
+            let policy = config.resolved_policy(ServingProfileSetting::new(
+                ServingProfile::Stable,
+                ConfigValueSource::Default,
+            ));
+            let expected = match configured {
+                CudaMarlinProfile::Disabled => kiln_model::CudaMarlinPolicy::disabled(),
+                CudaMarlinProfile::AttentionMlp => kiln_model::CudaMarlinPolicy::attention_mlp(),
+                CudaMarlinProfile::AttentionMlpGdn => {
+                    kiln_model::CudaMarlinPolicy::attention_mlp_gdn()
+                }
+            };
+            assert_eq!(model_cuda_marlin_policy(policy), expected);
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_flash_backward_modes_map_exactly_to_the_model_policy() {
+        for configured in [
+            CudaFlashBackwardMode::Fast,
+            CudaFlashBackwardMode::Deterministic,
+        ] {
+            let mut config = AcceleratorRuntimeConfig::default();
+            config.cuda_flash_backward_mode =
+                CudaFlashBackwardModeSetting::new(configured, ConfigValueSource::ConfigFile);
+            let policy = config.resolved_policy(ServingProfileSetting::new(
+                ServingProfile::Stable,
+                ConfigValueSource::Default,
+            ));
+            let expected = match configured {
+                CudaFlashBackwardMode::Fast => kiln_model::CudaTrainingPolicy::fast(),
+                CudaFlashBackwardMode::Deterministic => {
+                    kiln_model::CudaTrainingPolicy::deterministic()
+                }
+            };
+            assert_eq!(model_cuda_training_policy(policy), expected);
         }
     }
 

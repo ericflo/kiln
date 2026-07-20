@@ -151,8 +151,8 @@
     '/v1/config': () => ({
       serving_profile: { profile: 'stable', source: 'default' },
       accelerator_runtime: {
-        schema_id: 'kiln.accelerator-runtime-policy.v14',
-        version: 14,
+        schema_id: 'kiln.accelerator-runtime-policy.v15',
+        version: 15,
         vulkan_kernel_policy_schema_id: 'kiln.vulkan-kernel-policy.v3',
         vulkan_device_policy_schema_id: 'kiln.vulkan-device-policy.v1',
         serving_profile: 'stable',
@@ -162,6 +162,8 @@
         vulkan_device_index: { configured: null, effective: null, source: 'default' },
         vulkan_validation: { configured: false, effective: false, source: 'default' },
         cuda_kernel_profile: { configured: 'native_default', effective: 'native_default', source: 'default' },
+        cuda_marlin_profile: { configured: 'disabled', effective: 'disabled', source: 'default' },
+        cuda_flash_backward_mode: { configured: 'fast', effective: 'fast', source: 'default' },
         metal_kernel_profile: { configured: 'native_default', effective: 'native_default', source: 'default' },
         rocm_synchronization_mode: { configured: 'legacy_host_barriers', effective: 'legacy_host_barriers', source: 'default' },
         rocm_strided_batched_matmul_mode: { configured: 'auto', effective: 'auto', source: 'default' },

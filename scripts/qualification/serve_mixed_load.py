@@ -136,7 +136,7 @@ RESPONSE_ORACLE_TARGET_INTEGER_COUNT = 64
 SLOW_RESPONSE_TARGET_INTEGER_COUNT = 1_024
 RESPONSE_DIAGNOSTIC_MAX_CHARACTERS = 256
 TOKEN_ID_DIAGNOSTIC_MAX_COUNT = 256
-ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID = "kiln.accelerator-runtime-policy.v14"
+ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID = "kiln.accelerator-runtime-policy.v15"
 ACCELERATOR_RUNTIME_POLICY_VERSION = int(
     ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID.rsplit(".v", 1)[1]
 )
@@ -2828,6 +2828,8 @@ def write_server_config(
     rocm_strided_batched_matmul_mode: str = "auto",
     rocm_bf16_matmul_output_mode: str = "auto",
     cuda_kernel_profile: str = "native_default",
+    cuda_marlin_profile: str = "disabled",
+    cuda_flash_backward_mode: str = "fast",
     metal_kernel_profile: str = "native_default",
     rocm_kernel_profile: str = "qualified",
     rocm_graph_mode: str | None = None,
@@ -2877,6 +2879,8 @@ def write_server_config(
         'vulkan_device_index = "auto"',
         "vulkan_validation = false",
         "cuda_kernel_profile = " + _toml_string(cuda_kernel_profile),
+        "cuda_marlin_profile = " + _toml_string(cuda_marlin_profile),
+        "cuda_flash_backward_mode = " + _toml_string(cuda_flash_backward_mode),
         "metal_kernel_profile = " + _toml_string(metal_kernel_profile),
         f"rocm_synchronization_mode = {_toml_string(rocm_synchronization_mode)}",
         "rocm_strided_batched_matmul_mode = "
@@ -3226,6 +3230,16 @@ def accelerator_policy_attestation_failures(
         "cuda_kernel_profile": {
             "configured": "native_default",
             "effective": "native_default",
+            "source": "config_file",
+        },
+        "cuda_marlin_profile": {
+            "configured": "disabled",
+            "effective": "disabled",
+            "source": "config_file",
+        },
+        "cuda_flash_backward_mode": {
+            "configured": "fast",
+            "effective": "fast",
             "source": "config_file",
         },
         "metal_kernel_profile": {

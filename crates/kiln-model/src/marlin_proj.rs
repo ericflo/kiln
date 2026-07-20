@@ -1,9 +1,9 @@
 //! Marlin W4A16 quantized projection helpers (forward-only).
 //!
 //! This module packages the `kiln-marlin-gemm` kernel for use as a drop-in
-//! replacement for a BF16 `Linear` layer in the model forward path. Today it
-//! is wired into `q_proj` behind the `KILN_W4A16` env flag. Other projections
-//! (`k_proj`, `v_proj`, `o_proj`, MLP) stay on the existing BF16 matmul path.
+//! replacement for a BF16 `Linear` layer in the model forward path. A closed
+//! process-lifetime policy selects the supported projection set before model
+//! weights are uploaded.
 //!
 //! # Storage
 //!
@@ -211,9 +211,8 @@ pub fn upload_packed(packed: PackedHost, device: &kiln_tensor::Device) -> Result
 /// 2. Parallel CPU pack across all queued jobs (rayon `par_iter`).
 /// 3. Serial CPU→GPU upload of the packed buffers.
 ///
-/// Setting `KILN_DISABLE_PARALLEL_PACK=1` forces phase 2 to run
-/// sequentially, reproducing the pre-change wall-clock (useful for A/B
-/// measurements or rollback).
+/// The CPU pack phase is always parallel. Route experiments belong in an
+/// explicit benchmark harness rather than process-global production state.
 #[cfg(feature = "cuda")]
 pub fn pack_from_bf16_batch(
     inputs: &[(kiln_tensor::Tensor, i32)],
@@ -234,12 +233,11 @@ pub fn pack_from_bf16_batch(
 
     // Phase 2: parallel CPU pack. Rayon `par_iter` over `Option` skips
     // None entries cheaply and preserves input order in the output.
-    let packed: Vec<Option<PackedHost>> = if parallel_pack_disabled() {
-        jobs.iter().map(|j| j.as_ref().map(pack_host)).collect()
-    } else {
-        use rayon::prelude::*;
-        jobs.par_iter().map(|j| j.as_ref().map(pack_host)).collect()
-    };
+    use rayon::prelude::*;
+    let packed: Vec<Option<PackedHost>> = jobs
+        .par_iter()
+        .map(|job| job.as_ref().map(pack_host))
+        .collect();
 
     // Phase 3: serial CPU→GPU upload.
     let mut out = Vec::with_capacity(packed.len());
@@ -363,40 +361,14 @@ pub fn matmul_bf16_kt(
     anyhow::bail!("marlin_proj::matmul_bf16_kt requires the `cuda` feature")
 }
 
-/// Check the `KILN_W4A16` env var.
-///
-/// `KILN_W4A16=1` (or `true`, case-insensitive) enables the Marlin path. Any
-/// other value, or the var being unset, keeps the BF16 baseline.
-pub fn env_enabled() -> bool {
-    kiln_core::env_flag::env_flag("KILN_W4A16", false)
+/// Whether the installed profile packs full-attention Q and MLP projections.
+pub fn enabled() -> bool {
+    crate::cuda_marlin_policy::current_cuda_marlin_policy().attention_q_and_mlp
 }
 
-/// Check the `KILN_W4A16_GDN_OUT_PROJ` env var.
-///
-/// Gates the experimental Marlin W4A16 path for the GDN out-projection. This
-/// is split from the main `KILN_W4A16` flag because the GDN out_proj is the
-/// last linear before the residual add and is the most quality-sensitive
-/// projection inside the GDN block. Requires `KILN_W4A16=1` to do anything.
+/// Whether the installed profile also packs the GDN output projection.
 pub fn gdn_out_proj_enabled() -> bool {
-    kiln_core::env_flag::env_flag("KILN_W4A16_GDN_OUT_PROJ", false)
-}
-
-/// Check the `KILN_DISABLE_PARALLEL_PACK` env var.
-///
-/// `KILN_DISABLE_PARALLEL_PACK=1` (or `true`/`yes`, case-insensitive) forces
-/// [`pack_from_bf16_batch`] to run the CPU pack phase sequentially, matching
-/// the pre-parallelisation wall-clock. Intended for A/B measurements and as
-/// a rollback in case the parallel path ever disagrees with the serial one.
-pub fn parallel_pack_disabled() -> bool {
-    matches!(
-        std::env::var("KILN_DISABLE_PARALLEL_PACK")
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    )
+    crate::cuda_marlin_policy::current_cuda_marlin_policy().gdn_out_proj
 }
 
 impl MarlinPackedProj {

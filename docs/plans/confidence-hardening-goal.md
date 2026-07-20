@@ -2035,6 +2035,47 @@ Metal-machine handoff work; this checkpoint makes no Metal hardware claim.
 The broad Phase 8.1 checkboxes remain open for the twenty remaining migration
 reads and other process-state owners.
 
+CUDA Marlin and training-backward policy checkpoint (completed 2026-07-20):
+`accelerator.cuda_marlin_profile = "disabled" | "attention_mlp" |
+"attention_mlp_gdn"` now selects one immutable projection representation
+before weight upload. `disabled` preserves BF16 weights, `attention_mlp` packs
+full-attention Q and every MLP projection as Marlin W4A16, and
+`attention_mlp_gdn` additionally packs the quality-sensitive GDN output
+projection. Both W4A16 profiles require the experimental serving profile.
+Packing always uses the established parallel implementation; no runtime
+switch can serialize it.
+
+`accelerator.cuda_flash_backward_mode = "fast" | "deterministic"` installs
+one process-lifetime training policy before model construction. The model tape
+passes a typed mode to FlashAttention backward, while the public kernel crate
+retains its source-compatible fast-default entry points and adds explicit
+typed-mode variants for embedded callers. The old permissive environment
+parser is gone. The unused OPD loss-kernel disable probe is deleted, and FLCE
+active-row tiling is fixed at its established 4,096-row value rather than
+being reparsed during execution.
+
+Accelerator policy advances to v15. Strict TOML, mechanically derived
+environment names, CLI and config/health/debug APIs, dashboard, qualification
+fixtures, the 117-field/112-canonical-environment configuration schema,
+174-definition observability schema, example configuration, operator
+reference, architecture, troubleshooting guide, and permanent website expose
+the same source-tracked values. `KILN_W4A16`,
+`KILN_W4A16_GDN_OUT_PROJ`, `KILN_DISABLE_PARALLEL_PACK`,
+`KILN_FLASH_ATTN_BWD_DETERMINISTIC`, `KILN_DISABLE_OPD_LOSS_KERNEL`, and
+`KILN_FLCE_ACTIVE_ROW_TILE` are retired without aliases.
+
+Verification passes 358 model and 1,096 server library tests, 661 qualification
+tests, all schema and API generators, 10 docs-builder tests, the
+55-document/5-asset assembled-site static smoke, and all-target default, ROCm
+`gfx1151`, Vulkan, and toolkit-free CUDA checks. Seventeen real-device ROCm
+FlashAttention tests, including both backward paths, pass on the Strix Halo.
+The runtime ratchet falls from 461 to 455 reads and from 20 to 14 migration
+reads, with 161 process mutations unchanged. This checkpoint makes no NVIDIA
+runtime, parity, quality, performance, or promotion claim; the Marlin and
+deterministic-backward matrix remains explicit CUDA-machine handoff work. The
+broad Phase 8.1 checkboxes remain open for the fourteen remaining migration
+reads and other process-state owners.
+
 ### 8.2 One scheduling model
 
 - [ ] Map ownership and production/test use of batching engine, legacy decode
@@ -3128,6 +3169,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-20 | Metal graph, tape, SDPA, and command-cadence environment retirement | this source | this fixed-policy checkpoint | Metal ICB graph selection/stable metadata, shared training-tape saved-tensor residency, Metal SDPA dispatch geometry, ordered command-buffer cadence, generated environment contract, configuration reference, and permanent website; no Metal device execution, route parity, correctness, or performance claim | 355/355 model tests; 990/990 tensor tests; all-target ROCm `gfx1151`, Vulkan, and toolkit-free CUDA checks; runtime-environment generator at 470 reads/163 mutations/23 migration reads; docs-builder, generated-site, static-smoke, formatting, and diff gates | portable fixed-policy checkpoint passed; eleven production reads and eighteen process mutations removed; M1 execution remains required | Runtime options are the sole Metal graph eligibility owner; eligible runners always use stable paged metadata. Tape GDN/matmul saved tensors retain the prior default device residency. Metal SDPA retains its shape/occupancy split-K heuristic and 16-token prefill threshold, and the ordered stream retains its 50-encode commit cadence. `KILN_METAL_GRAPHS`, `KILN_FORCE_EAGER_DECODE`, `KILN_METAL_GRAPH_STABLE_PAGED_METADATA`, `KILN_TAPE_GDN_OFFLOAD_SAVED_TENSORS`, `KILN_TAPE_OFFLOAD_MATMUL_A`, `KILN_TAPE_OFFLOAD_MIN_BYTES`, `KILN_SDPA_SPLIT`, `KILN_SDPA_PREFILL_MIN`, and `CANDLE_METAL_COMPUTE_PER_BUFFER` are retired without aliases. This preserves unset behavior and does not qualify Metal hardware; the M1 handoff must run graph/SDPA parity and performance evidence. |
 
 | 2026-07-20 | Immutable typed Metal backend-kernel profile and accelerator policy v14 | this source | this configuration checkpoint | complete 46-leaf Metal backend route authority, typed config/API/CLI/UI/qualification/schema/documentation integration, and portable backend compile matrix; no Apple framework compilation, Metal device execution, parity, memory, pause, throughput, lifecycle, or promotion claim | 356/356 model and 1,094/1,094 server library tests; 83/83 focused mixed-load qualification tests; 115-field/110-canonical-environment/76-alias configuration schema; 170-definition observability schema; current capability and runtime-environment generators; 10/10 docs-builder tests; 55-document/5-asset generated website and assembled static smoke; all-target default, ROCm `gfx1151`, Vulkan, and toolkit-free CUDA checks; formatting and diff hygiene | portable source/configuration checkpoint passed; direct reads 470 -> 461, process mutations 163 -> 161, migration reads 23 -> 20; M1 execution remains required | `accelerator.metal_kernel_profile` is the only public authority for all SDPA, convolution, GDN, RMSNorm, MLP, attention-gate, QKV, LoRA, LM-head, paged-attention/KV, and transposed cooperative-GEMV routes. `native_default` preserves forty-five enabled routes and the historically opt-in custom LM-head argmax as disabled; `portable_fallback` declines all forty-six. The server installs the source-tracked policy before Metal backend construction, same-value installation is idempotent, conflicts fail, and standalone users retain historical defaults. More than fifty former generic/Metal per-kernel spellings are removed rather than aliases, and Metal graph parity tests cannot silently skip from process state. Config schema, resolved diagnostics, qualification fixtures, complete route/retired-name reference, API/architecture/troubleshooting website, and static ratchets agree on policy v14. Actual Metal feature compilation and native/fallback qualification must be performed on the M1 handoff. |
+
+| 2026-07-20 | Immutable CUDA Marlin and FlashAttention backward policy v15 | this source | this configuration checkpoint | CUDA projection representation, pack implementation, training-backward accumulation, typed config/API/CLI/UI/qualification/schema/documentation integration, portable backend compile matrix, and real ROCm regression parity; no NVIDIA device execution, Marlin quality/performance, deterministic CUDA replay, or promotion claim | 358/358 model and 1,096/1,096 server library tests; 17/17 real-device Strix Halo ROCm FlashAttention parity tests; 661/661 qualification tests; 117-field/112-canonical-environment/76-alias config schema; 174-definition observability and complete HTTP/artifact/eval/control-plane schemas; current runtime-environment and backend-capability reports; 10/10 docs-builder tests; 55-document/5-asset assembled static site; all-target default, ROCm `gfx1151`, Vulkan, and toolkit-free CUDA checks; formatting and diff hygiene | portable source/configuration checkpoint passed; direct reads 461 -> 455, process mutations remain 161, migration reads 20 -> 14; NVIDIA execution remains required | `accelerator.cuda_marlin_profile` is the sole process-lifetime projection-layout authority: BF16 remains the default, and experimental-only W4A16 profiles add full-attention Q/MLP then quality-sensitive GDN output packing. The packer always uses its established parallel implementation. `accelerator.cuda_flash_backward_mode` selects fast or deterministic split accumulation once; the public FlashAttention crate preserves old fast-default signatures and exposes typed explicit-mode variants. The dead OPD kernel-disable probe is removed and FLCE row tiling is fixed at 4,096. Six former environment spellings are retired without aliases. Config, diagnostics, qualification, example, complete website reference, and generated ratchets agree on policy v15. The ROCm backward regression run passes because ROCm ignores the CUDA accumulation selector and retains its native exact/composite implementation; CUDA route execution, quality, reproducibility, and performance remain NVIDIA handoff work. |
 
 ## Known Starting Defects
 

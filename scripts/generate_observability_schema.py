@@ -182,6 +182,18 @@ def build_definitions() -> None:
         "The process-lifetime CUDA backend-kernel route set.",
     )
     add_enum(
+        "CudaMarlinProfile",
+        "CudaMarlinProfile",
+        ["disabled", "attention_mlp", "attention_mlp_gdn"],
+        "The process-lifetime CUDA Marlin projection layout.",
+    )
+    add_enum(
+        "CudaFlashBackwardMode",
+        "CudaFlashBackwardMode",
+        ["fast", "deterministic"],
+        "The process-lifetime CUDA FlashAttention backward accumulation mode.",
+    )
+    add_enum(
         "MetalKernelProfile",
         "MetalKernelProfile",
         ["native_default", "portable_fallback"],
@@ -458,6 +470,16 @@ def build_definitions() -> None:
             ref("CudaKernelProfile"),
         ),
         (
+            "ResolvedCudaMarlinProfile",
+            "CudaMarlinProfile",
+            ref("CudaMarlinProfile"),
+        ),
+        (
+            "ResolvedCudaFlashBackwardMode",
+            "CudaFlashBackwardMode",
+            ref("CudaFlashBackwardMode"),
+        ),
+        (
             "ResolvedMetalKernelProfile",
             "MetalKernelProfile",
             ref("MetalKernelProfile"),
@@ -508,6 +530,8 @@ def build_definitions() -> None:
             "vulkan_device_index": ref("ResolvedAcceleratorOptionalInteger"),
             "vulkan_validation": ref("ResolvedAcceleratorBoolean"),
             "cuda_kernel_profile": ref("ResolvedCudaKernelProfile"),
+            "cuda_marlin_profile": ref("ResolvedCudaMarlinProfile"),
+            "cuda_flash_backward_mode": ref("ResolvedCudaFlashBackwardMode"),
             "metal_kernel_profile": ref("ResolvedMetalKernelProfile"),
             "rocm_synchronization_mode": ref("ResolvedRocmSynchronizationMode"),
             "rocm_strided_batched_matmul_mode": ref(

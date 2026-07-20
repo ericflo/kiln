@@ -35,7 +35,8 @@ pub use score_policy::{
 #[cfg(feature = "rocm")]
 mod rocm_sdpa;
 pub use kt_api::{
-    FlashAttnError, flash_attn_bwd_collapsed_gqa_kt, flash_attn_bwd_kt,
+    FlashAttnBackwardMode, FlashAttnError, flash_attn_bwd_collapsed_gqa_kt,
+    flash_attn_bwd_collapsed_gqa_kt_with_mode, flash_attn_bwd_kt, flash_attn_bwd_kt_with_mode,
     flash_attn_fwd_head_major_kt, flash_attn_fwd_kt, flash_attn_fwd_no_lse_kt,
     flash_attn_paged_decode_dyn_seqlen_kt,
     flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs, flash_attn_paged_decode_kt,

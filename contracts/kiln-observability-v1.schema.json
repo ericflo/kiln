@@ -79,6 +79,16 @@
             "effective": "native_default",
             "source": "default"
           },
+          "cuda_marlin_profile": {
+            "configured": "disabled",
+            "effective": "disabled",
+            "source": "default"
+          },
+          "cuda_flash_backward_mode": {
+            "configured": "fast",
+            "effective": "fast",
+            "source": "default"
+          },
           "metal_kernel_profile": {
             "configured": "native_default",
             "effective": "native_default",
@@ -947,6 +957,16 @@
               "effective": "native_default",
               "source": "default"
             },
+            "cuda_marlin_profile": {
+              "configured": "disabled",
+              "effective": "disabled",
+              "source": "default"
+            },
+            "cuda_flash_backward_mode": {
+              "configured": "fast",
+              "effective": "fast",
+              "source": "default"
+            },
             "metal_kernel_profile": {
               "configured": "native_default",
               "effective": "native_default",
@@ -1583,6 +1603,16 @@
           "cuda_kernel_profile": {
             "configured": "native_default",
             "effective": "native_default",
+            "source": "default"
+          },
+          "cuda_marlin_profile": {
+            "configured": "disabled",
+            "effective": "disabled",
+            "source": "default"
+          },
+          "cuda_flash_backward_mode": {
+            "configured": "fast",
+            "effective": "fast",
             "source": "default"
           },
           "metal_kernel_profile": {
@@ -3796,6 +3826,16 @@
       "x-kiln-rust-type": "ConfigValueSource",
       "x-kiln-field-schema-status": "complete"
     },
+    "CudaFlashBackwardMode": {
+      "type": "string",
+      "enum": [
+        "fast",
+        "deterministic"
+      ],
+      "description": "The process-lifetime CUDA FlashAttention backward accumulation mode.",
+      "x-kiln-rust-type": "CudaFlashBackwardMode",
+      "x-kiln-field-schema-status": "complete"
+    },
     "CudaGraphConfigResponse": {
       "type": "object",
       "additionalProperties": false,
@@ -3898,6 +3938,17 @@
       ],
       "description": "The process-lifetime CUDA backend-kernel route set.",
       "x-kiln-rust-type": "CudaKernelProfile",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CudaMarlinProfile": {
+      "type": "string",
+      "enum": [
+        "disabled",
+        "attention_mlp",
+        "attention_mlp_gdn"
+      ],
+      "description": "The process-lifetime CUDA Marlin projection layout.",
+      "x-kiln-rust-type": "CudaMarlinProfile",
       "x-kiln-field-schema-status": "complete"
     },
     "DebugDisabledResponse": {
@@ -7554,6 +7605,8 @@
         "vulkan_device_index",
         "vulkan_validation",
         "cuda_kernel_profile",
+        "cuda_marlin_profile",
+        "cuda_flash_backward_mode",
         "metal_kernel_profile",
         "rocm_synchronization_mode",
         "rocm_strided_batched_matmul_mode",
@@ -7597,6 +7650,12 @@
         "cuda_kernel_profile": {
           "$ref": "#/$defs/ResolvedCudaKernelProfile"
         },
+        "cuda_marlin_profile": {
+          "$ref": "#/$defs/ResolvedCudaMarlinProfile"
+        },
+        "cuda_flash_backward_mode": {
+          "$ref": "#/$defs/ResolvedCudaFlashBackwardMode"
+        },
         "metal_kernel_profile": {
           "$ref": "#/$defs/ResolvedMetalKernelProfile"
         },
@@ -7626,6 +7685,29 @@
       "x-kiln-rust-type": "ResolvedAcceleratorRuntimePolicy",
       "x-kiln-field-schema-status": "complete"
     },
+    "ResolvedCudaFlashBackwardMode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configured",
+        "effective",
+        "source"
+      ],
+      "properties": {
+        "configured": {
+          "$ref": "#/$defs/CudaFlashBackwardMode"
+        },
+        "effective": {
+          "$ref": "#/$defs/CudaFlashBackwardMode"
+        },
+        "source": {
+          "$ref": "#/$defs/ConfigValueSource"
+        }
+      },
+      "description": "One configured/effective accelerator policy leaf and its startup source.",
+      "x-kiln-rust-type": "ResolvedAcceleratorValue<CudaFlashBackwardMode>",
+      "x-kiln-field-schema-status": "complete"
+    },
     "ResolvedCudaKernelProfile": {
       "type": "object",
       "additionalProperties": false,
@@ -7647,6 +7729,29 @@
       },
       "description": "One configured/effective accelerator policy leaf and its startup source.",
       "x-kiln-rust-type": "ResolvedAcceleratorValue<CudaKernelProfile>",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ResolvedCudaMarlinProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configured",
+        "effective",
+        "source"
+      ],
+      "properties": {
+        "configured": {
+          "$ref": "#/$defs/CudaMarlinProfile"
+        },
+        "effective": {
+          "$ref": "#/$defs/CudaMarlinProfile"
+        },
+        "source": {
+          "$ref": "#/$defs/ConfigValueSource"
+        }
+      },
+      "description": "One configured/effective accelerator policy leaf and its startup source.",
+      "x-kiln-rust-type": "ResolvedAcceleratorValue<CudaMarlinProfile>",
       "x-kiln-field-schema-status": "complete"
     },
     "ResolvedKtApiMode": {

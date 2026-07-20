@@ -133,8 +133,8 @@ pub const DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 pub const ROCM_GRAPH_CACHE_MAX_BYTES_MIN: u64 = 64 * 1024 * 1024;
 pub const ROCM_GRAPH_CACHE_MAX_BYTES_MAX: u64 = 16 * 1024 * 1024 * 1024;
 /// Versioned schema identity shared by config, health, and debug diagnostics.
-pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v14";
-pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 14;
+pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v15";
+pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 15;
 
 /// Stable operator-facing default for sparse SFT checkpoint-boundary anchors.
 pub const DEFAULT_CHECKPOINT_BOUNDARY_CACHE_GB: f64 = 6.0;
@@ -1895,6 +1895,190 @@ impl<'de> Deserialize<'de> for CudaKernelProfileSetting {
     }
 }
 
+/// Closed process-lifetime CUDA Marlin projection layout.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CudaMarlinProfile {
+    /// Preserve BF16 projections; historical default.
+    #[default]
+    Disabled,
+    /// Pack full-attention Q and every MLP projection as Marlin W4A16.
+    AttentionMlp,
+    /// Also pack the quality-sensitive GDN output projection.
+    AttentionMlpGdn,
+}
+
+impl CudaMarlinProfile {
+    fn parse(raw: &str, label: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "disabled" => Ok(Self::Disabled),
+            "attention_mlp" => Ok(Self::AttentionMlp),
+            "attention_mlp_gdn" => Ok(Self::AttentionMlpGdn),
+            _ => anyhow::bail!(
+                "{label} must be one of disabled, attention_mlp, or attention_mlp_gdn; got {raw:?}"
+            ),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::AttentionMlp => "attention_mlp",
+            Self::AttentionMlpGdn => "attention_mlp_gdn",
+        }
+    }
+}
+
+impl fmt::Display for CudaMarlinProfile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Source-tracked CUDA Marlin projection profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CudaMarlinProfileSetting {
+    profile: CudaMarlinProfile,
+    source: ConfigValueSource,
+}
+
+impl CudaMarlinProfileSetting {
+    pub const fn new(profile: CudaMarlinProfile, source: ConfigValueSource) -> Self {
+        Self { profile, source }
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        Ok(Self::new(
+            CudaMarlinProfile::parse(raw, name)?,
+            ConfigValueSource::Environment,
+        ))
+    }
+
+    pub const fn profile(self) -> CudaMarlinProfile {
+        self.profile
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for CudaMarlinProfileSetting {
+    fn default() -> Self {
+        Self::new(CudaMarlinProfile::Disabled, ConfigValueSource::Default)
+    }
+}
+
+impl Serialize for CudaMarlinProfileSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.profile.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for CudaMarlinProfileSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let profile = CudaMarlinProfile::parse(&raw, "accelerator.cuda_marlin_profile")
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self::new(profile, ConfigValueSource::ConfigFile))
+    }
+}
+
+/// CUDA FlashAttention backward accumulation mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CudaFlashBackwardMode {
+    /// Historical fast accumulation path.
+    #[default]
+    Fast,
+    /// Deterministic split accumulation for exact replay and diagnosis.
+    Deterministic,
+}
+
+impl CudaFlashBackwardMode {
+    fn parse(raw: &str, label: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "fast" => Ok(Self::Fast),
+            "deterministic" => Ok(Self::Deterministic),
+            _ => anyhow::bail!("{label} must be one of fast or deterministic; got {raw:?}"),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Deterministic => "deterministic",
+        }
+    }
+}
+
+impl fmt::Display for CudaFlashBackwardMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Source-tracked CUDA FlashAttention backward mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CudaFlashBackwardModeSetting {
+    mode: CudaFlashBackwardMode,
+    source: ConfigValueSource,
+}
+
+impl CudaFlashBackwardModeSetting {
+    pub const fn new(mode: CudaFlashBackwardMode, source: ConfigValueSource) -> Self {
+        Self { mode, source }
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        Ok(Self::new(
+            CudaFlashBackwardMode::parse(raw, name)?,
+            ConfigValueSource::Environment,
+        ))
+    }
+
+    pub const fn mode(self) -> CudaFlashBackwardMode {
+        self.mode
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for CudaFlashBackwardModeSetting {
+    fn default() -> Self {
+        Self::new(CudaFlashBackwardMode::Fast, ConfigValueSource::Default)
+    }
+}
+
+impl Serialize for CudaFlashBackwardModeSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.mode.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for CudaFlashBackwardModeSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let mode = CudaFlashBackwardMode::parse(&raw, "accelerator.cuda_flash_backward_mode")
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self::new(mode, ConfigValueSource::ConfigFile))
+    }
+}
+
 /// Closed process-lifetime Metal backend-kernel route set.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -2524,6 +2708,8 @@ pub struct ResolvedAcceleratorRuntimePolicy {
     pub vulkan_device_index: ResolvedAcceleratorValue<Option<usize>>,
     pub vulkan_validation: ResolvedAcceleratorValue<bool>,
     pub cuda_kernel_profile: ResolvedAcceleratorValue<CudaKernelProfile>,
+    pub cuda_marlin_profile: ResolvedAcceleratorValue<CudaMarlinProfile>,
+    pub cuda_flash_backward_mode: ResolvedAcceleratorValue<CudaFlashBackwardMode>,
     pub metal_kernel_profile: ResolvedAcceleratorValue<MetalKernelProfile>,
     pub rocm_synchronization_mode: ResolvedAcceleratorValue<RocmSynchronizationMode>,
     pub rocm_strided_batched_matmul_mode: ResolvedAcceleratorValue<RocmStridedBatchedMatmulMode>,
@@ -2544,6 +2730,8 @@ pub struct AcceleratorRuntimeConfig {
     pub vulkan_device_index: VulkanDeviceIndexSetting,
     pub vulkan_validation: VulkanValidationSetting,
     pub cuda_kernel_profile: CudaKernelProfileSetting,
+    pub cuda_marlin_profile: CudaMarlinProfileSetting,
+    pub cuda_flash_backward_mode: CudaFlashBackwardModeSetting,
     pub metal_kernel_profile: MetalKernelProfileSetting,
     pub rocm_synchronization_mode: RocmSynchronizationModeSetting,
     pub rocm_strided_batched_matmul_mode: RocmStridedBatchedMatmulModeSetting,
@@ -2600,6 +2788,16 @@ impl AcceleratorRuntimeConfig {
                 effective: self.cuda_kernel_profile.profile(),
                 source: self.cuda_kernel_profile.source(),
             },
+            cuda_marlin_profile: ResolvedAcceleratorValue {
+                configured: self.cuda_marlin_profile.profile(),
+                effective: self.cuda_marlin_profile.profile(),
+                source: self.cuda_marlin_profile.source(),
+            },
+            cuda_flash_backward_mode: ResolvedAcceleratorValue {
+                configured: self.cuda_flash_backward_mode.mode(),
+                effective: self.cuda_flash_backward_mode.mode(),
+                source: self.cuda_flash_backward_mode.source(),
+            },
             metal_kernel_profile: ResolvedAcceleratorValue {
                 configured: self.metal_kernel_profile.profile(),
                 effective: self.metal_kernel_profile.profile(),
@@ -2643,8 +2841,8 @@ impl AcceleratorRuntimeConfig {
         }
     }
 
-    /// Fail closed when an experimental ROCm behavior is requested under a
-    /// profile that does not permit live accelerator experiments.
+    /// Fail closed when an experimental accelerator behavior is requested
+    /// under a profile that does not permit live accelerator experiments.
     pub fn validate_for_serving_profile(&self, profile: ServingProfile) -> Result<()> {
         if self.kt_api_mode.mode() != KtApiMode::Auto && profile != ServingProfile::Experimental {
             anyhow::bail!(
@@ -2655,6 +2853,14 @@ impl AcceleratorRuntimeConfig {
         if self.vulkan_validation.enabled() && profile != ServingProfile::Experimental {
             anyhow::bail!(
                 "accelerator.vulkan_validation=true requires server.serving_profile=experimental; got {profile}"
+            );
+        }
+        if self.cuda_marlin_profile.profile() != CudaMarlinProfile::Disabled
+            && profile != ServingProfile::Experimental
+        {
+            anyhow::bail!(
+                "accelerator.cuda_marlin_profile={} requires server.serving_profile=experimental; got {profile}",
+                self.cuda_marlin_profile.profile()
             );
         }
         if self.rocm_synchronization_mode.mode() == RocmSynchronizationMode::StreamOrdered
@@ -2713,6 +2919,8 @@ impl Default for AcceleratorRuntimeConfig {
             vulkan_device_index: VulkanDeviceIndexSetting::default(),
             vulkan_validation: VulkanValidationSetting::default(),
             cuda_kernel_profile: CudaKernelProfileSetting::default(),
+            cuda_marlin_profile: CudaMarlinProfileSetting::default(),
+            cuda_flash_backward_mode: CudaFlashBackwardModeSetting::default(),
             metal_kernel_profile: MetalKernelProfileSetting::default(),
             rocm_synchronization_mode: RocmSynchronizationModeSetting::default(),
             rocm_strided_batched_matmul_mode: RocmStridedBatchedMatmulModeSetting::default(),
@@ -5484,6 +5692,18 @@ impl NormalizedEnvValue for CudaKernelProfileSetting {
     }
 }
 
+impl NormalizedEnvValue for CudaMarlinProfileSetting {
+    fn normalized_env_value(&self) -> String {
+        self.profile().as_str().to_owned()
+    }
+}
+
+impl NormalizedEnvValue for CudaFlashBackwardModeSetting {
+    fn normalized_env_value(&self) -> String {
+        self.mode().as_str().to_owned()
+    }
+}
+
 impl NormalizedEnvValue for MetalKernelProfileSetting {
     fn normalized_env_value(&self) -> String {
         self.profile().as_str().to_owned()
@@ -5835,6 +6055,12 @@ macro_rules! public_env_parser {
     (cuda_kernel_profile) => {
         CudaKernelProfileSetting::from_named_environment_value
     };
+    (cuda_marlin_profile) => {
+        CudaMarlinProfileSetting::from_named_environment_value
+    };
+    (cuda_flash_backward_mode) => {
+        CudaFlashBackwardModeSetting::from_named_environment_value
+    };
     (metal_kernel_profile) => {
         MetalKernelProfileSetting::from_named_environment_value
     };
@@ -6075,6 +6301,11 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
         "KILN_VULKAN_VALIDATION"
     ),
     public_env_field!(cuda_kernel_profile, accelerator.cuda_kernel_profile),
+    public_env_field!(cuda_marlin_profile, accelerator.cuda_marlin_profile),
+    public_env_field!(
+        cuda_flash_backward_mode,
+        accelerator.cuda_flash_backward_mode
+    ),
     public_env_field!(metal_kernel_profile, accelerator.metal_kernel_profile),
     public_env_field!(
         rocm_synchronization_mode,
@@ -7512,7 +7743,9 @@ mod tests {
     const EXPECTED_PUBLIC_ENV_NAMES: &[&str] = &[
         "KILN_ACCELERATOR_FULL_ATTENTION_SCORE_BUDGET_MIB",
         "KILN_ACCELERATOR_KT_API_MODE",
+        "KILN_ACCELERATOR_CUDA_FLASH_BACKWARD_MODE",
         "KILN_ACCELERATOR_CUDA_KERNEL_PROFILE",
+        "KILN_ACCELERATOR_CUDA_MARLIN_PROFILE",
         "KILN_ACCELERATOR_METAL_KERNEL_PROFILE",
         "KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE",
         "KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES",
@@ -7816,6 +8049,14 @@ mod tests {
             CudaKernelProfile::NativeDefault
         );
         assert_eq!(
+            config.accelerator.cuda_marlin_profile.profile(),
+            CudaMarlinProfile::Disabled
+        );
+        assert_eq!(
+            config.accelerator.cuda_flash_backward_mode.mode(),
+            CudaFlashBackwardMode::Fast
+        );
+        assert_eq!(
             config.accelerator.metal_kernel_profile.profile(),
             MetalKernelProfile::NativeDefault
         );
@@ -7861,6 +8102,8 @@ mod tests {
             config.accelerator.vulkan_device_index.source(),
             config.accelerator.vulkan_validation.source(),
             config.accelerator.cuda_kernel_profile.source(),
+            config.accelerator.cuda_marlin_profile.source(),
+            config.accelerator.cuda_flash_backward_mode.source(),
             config.accelerator.metal_kernel_profile.source(),
             config.accelerator.rocm_synchronization_mode.source(),
             config.accelerator.rocm_strided_batched_matmul_mode.source(),
@@ -8134,6 +8377,22 @@ mod tests {
                 }
             );
             assert_eq!(
+                resolved.cuda_marlin_profile,
+                ResolvedAcceleratorValue {
+                    configured: CudaMarlinProfile::Disabled,
+                    effective: CudaMarlinProfile::Disabled,
+                    source: ConfigValueSource::Default,
+                }
+            );
+            assert_eq!(
+                resolved.cuda_flash_backward_mode,
+                ResolvedAcceleratorValue {
+                    configured: CudaFlashBackwardMode::Fast,
+                    effective: CudaFlashBackwardMode::Fast,
+                    source: ConfigValueSource::Default,
+                }
+            );
+            assert_eq!(
                 resolved.metal_kernel_profile,
                 ResolvedAcceleratorValue {
                     configured: MetalKernelProfile::NativeDefault,
@@ -8204,8 +8463,8 @@ mod tests {
             ConfigValueSource::Environment,
         )))
         .unwrap();
-        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v14");
-        assert_eq!(json["version"], 14);
+        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v15");
+        assert_eq!(json["version"], 15);
         assert_eq!(
             json["vulkan_kernel_policy_schema_id"],
             "kiln.vulkan-kernel-policy.v3"
@@ -8225,6 +8484,12 @@ mod tests {
         assert_eq!(json["cuda_kernel_profile"]["configured"], "native_default");
         assert_eq!(json["cuda_kernel_profile"]["effective"], "native_default");
         assert_eq!(json["cuda_kernel_profile"]["source"], "default");
+        assert_eq!(json["cuda_marlin_profile"]["configured"], "disabled");
+        assert_eq!(json["cuda_marlin_profile"]["effective"], "disabled");
+        assert_eq!(json["cuda_marlin_profile"]["source"], "default");
+        assert_eq!(json["cuda_flash_backward_mode"]["configured"], "fast");
+        assert_eq!(json["cuda_flash_backward_mode"]["effective"], "fast");
+        assert_eq!(json["cuda_flash_backward_mode"]["source"], "default");
         assert_eq!(json["metal_kernel_profile"]["configured"], "native_default");
         assert_eq!(json["metal_kernel_profile"]["effective"], "native_default");
         assert_eq!(json["metal_kernel_profile"]["source"], "default");
@@ -8249,6 +8514,8 @@ full_attention_score_budget_mib = 64
 vulkan_device_index = 2
 vulkan_validation = true
 cuda_kernel_profile = "portable_fallback"
+cuda_marlin_profile = "attention_mlp_gdn"
+cuda_flash_backward_mode = "deterministic"
 metal_kernel_profile = "portable_fallback"
 rocm_synchronization_mode = "stream_ordered"
 rocm_strided_batched_matmul_mode = "disabled"
@@ -8268,6 +8535,14 @@ rocm_graph_cache_max_bytes = 17179869184
         assert_eq!(
             config.accelerator.cuda_kernel_profile.profile(),
             CudaKernelProfile::PortableFallback
+        );
+        assert_eq!(
+            config.accelerator.cuda_marlin_profile.profile(),
+            CudaMarlinProfile::AttentionMlpGdn
+        );
+        assert_eq!(
+            config.accelerator.cuda_flash_backward_mode.mode(),
+            CudaFlashBackwardMode::Deterministic
         );
         assert_eq!(
             config.accelerator.metal_kernel_profile.profile(),
@@ -8307,6 +8582,8 @@ rocm_graph_cache_max_bytes = 17179869184
             config.accelerator.vulkan_device_index.source(),
             config.accelerator.vulkan_validation.source(),
             config.accelerator.cuda_kernel_profile.source(),
+            config.accelerator.cuda_marlin_profile.source(),
+            config.accelerator.cuda_flash_backward_mode.source(),
             config.accelerator.metal_kernel_profile.source(),
             config.accelerator.rocm_synchronization_mode.source(),
             config.accelerator.rocm_strided_batched_matmul_mode.source(),
@@ -8365,6 +8642,10 @@ rocm_graph_cache_max_bytes = 17179869184
             "[accelerator]\nvulkan_validation = \"true\"\n".to_owned(),
             "[accelerator]\ncuda_kernel_profile = \"individual_switches\"\n".to_owned(),
             "[accelerator]\ncuda_kernel_profile = true\n".to_owned(),
+            "[accelerator]\ncuda_marlin_profile = \"everything\"\n".to_owned(),
+            "[accelerator]\ncuda_marlin_profile = true\n".to_owned(),
+            "[accelerator]\ncuda_flash_backward_mode = \"auto\"\n".to_owned(),
+            "[accelerator]\ncuda_flash_backward_mode = true\n".to_owned(),
             "[accelerator]\nmetal_kernel_profile = \"individual_switches\"\n".to_owned(),
             "[accelerator]\nmetal_kernel_profile = true\n".to_owned(),
             "[accelerator]\nrocm_synchronization_mode = \"eventually\"\n".to_owned(),
@@ -8430,6 +8711,20 @@ rocm_graph_cache_max_bytes = 17179869184
                 assert!(detail.contains("accelerator.rocm_graph_mode"), "{detail}");
                 assert!(detail.contains("experimental"), "{detail}");
             }
+
+            let mut gated = KilnConfig::default();
+            gated.server.serving_profile =
+                ServingProfileSetting::new(profile, ConfigValueSource::ConfigFile);
+            gated.accelerator.cuda_marlin_profile = CudaMarlinProfileSetting::new(
+                CudaMarlinProfile::AttentionMlp,
+                ConfigValueSource::ConfigFile,
+            );
+            let detail = gated.validate().unwrap_err().to_string();
+            assert!(
+                detail.contains("accelerator.cuda_marlin_profile"),
+                "{detail}"
+            );
+            assert!(detail.contains("experimental"), "{detail}");
 
             let mut gated = KilnConfig::default();
             gated.server.serving_profile =
@@ -8510,6 +8805,10 @@ rocm_graph_cache_max_bytes = 17179869184
                     RocmKernelProfile::PortableFallback,
                     ConfigValueSource::ConfigFile,
                 );
+                allowed.accelerator.cuda_flash_backward_mode = CudaFlashBackwardModeSetting::new(
+                    CudaFlashBackwardMode::Deterministic,
+                    ConfigValueSource::ConfigFile,
+                );
                 allowed.validate().unwrap();
             }
         }
@@ -8545,6 +8844,71 @@ rocm_graph_cache_max_bytes = 17179869184
             "{detail}"
         );
         assert!(detail.contains("native_default"), "{detail}");
+    }
+
+    #[test]
+    fn cuda_marlin_profile_environment_is_canonical_strict_and_source_tracked() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+
+        for (raw, expected) in [
+            ("disabled", CudaMarlinProfile::Disabled),
+            ("attention_mlp", CudaMarlinProfile::AttentionMlp),
+            ("attention_mlp_gdn", CudaMarlinProfile::AttentionMlpGdn),
+        ] {
+            environment.set("KILN_ACCELERATOR_CUDA_MARLIN_PROFILE", raw);
+            let mut config = KilnConfig::default();
+            config.apply_env_overrides().unwrap();
+            assert_eq!(config.accelerator.cuda_marlin_profile.profile(), expected);
+            assert_eq!(
+                config.accelerator.cuda_marlin_profile.source(),
+                ConfigValueSource::Environment
+            );
+            environment.remove("KILN_ACCELERATOR_CUDA_MARLIN_PROFILE");
+        }
+
+        environment.set("KILN_ACCELERATOR_CUDA_MARLIN_PROFILE", "custom");
+        let detail = KilnConfig::default()
+            .apply_env_overrides()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            detail.contains("KILN_ACCELERATOR_CUDA_MARLIN_PROFILE"),
+            "{detail}"
+        );
+        assert!(detail.contains("attention_mlp_gdn"), "{detail}");
+    }
+
+    #[test]
+    fn cuda_flash_backward_mode_environment_is_canonical_strict_and_source_tracked() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+
+        for (raw, expected) in [
+            ("fast", CudaFlashBackwardMode::Fast),
+            ("deterministic", CudaFlashBackwardMode::Deterministic),
+        ] {
+            environment.set("KILN_ACCELERATOR_CUDA_FLASH_BACKWARD_MODE", raw);
+            let mut config = KilnConfig::default();
+            config.apply_env_overrides().unwrap();
+            assert_eq!(config.accelerator.cuda_flash_backward_mode.mode(), expected);
+            assert_eq!(
+                config.accelerator.cuda_flash_backward_mode.source(),
+                ConfigValueSource::Environment
+            );
+            environment.remove("KILN_ACCELERATOR_CUDA_FLASH_BACKWARD_MODE");
+        }
+
+        environment.set("KILN_ACCELERATOR_CUDA_FLASH_BACKWARD_MODE", "custom");
+        let detail = KilnConfig::default()
+            .apply_env_overrides()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            detail.contains("KILN_ACCELERATOR_CUDA_FLASH_BACKWARD_MODE"),
+            "{detail}"
+        );
+        assert!(detail.contains("deterministic"), "{detail}");
     }
 
     #[test]
@@ -8910,7 +9274,7 @@ rocm_graph_cache_max_bytes = 17179869184
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 110);
+        assert_eq!(original_len, 112);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -8981,7 +9345,7 @@ rocm_graph_cache_max_bytes = 17179869184
                 .len(),
             15
         );
-        assert_eq!(serialized_leaves.len(), 115);
+        assert_eq!(serialized_leaves.len(), 117);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 5);
 
         let mut classified = PUBLIC_ENV_FIELDS

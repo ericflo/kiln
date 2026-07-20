@@ -149,21 +149,6 @@ pub use kt_tape::{
 /// one chunk, but very-long-context training keeps the option open.
 pub const DEFAULT_CHUNK_SIZE: usize = 4096;
 
-/// Read the `KILN_DISABLE_OPD_LOSS_KERNEL` env var. When set (`1` / `true`
-/// / `yes`), the kernel-dispatch path in `phase_b` forces the candle-on-CUDA
-/// reference fallback even when the caller passes parameters that would
-/// otherwise activate the raw-CUDA Phase B kernel. Mirrors the
-/// `KILN_DISABLE_*` kill-switch convention used elsewhere in kiln (PR #92,
-/// #133, #158, #166).
-pub fn kernel_disabled() -> bool {
-    std::env::var("KILN_DISABLE_OPD_LOSS_KERNEL")
-        .map(|v| {
-            let v = v.to_lowercase();
-            v == "1" || v == "true" || v == "yes"
-        })
-        .unwrap_or(false)
-}
-
 // (#1082) candle-drop: the pure-candle Phase A reference path
 // (`validate_inputs`, `opd_top_k_reverse_kl_phase_a_per_position`,
 // `per_position_phase_a`, `gather_head_columns`, `log_softmax_last`)

@@ -317,6 +317,36 @@ def run_self_tests(schema: dict[str, Any]) -> list[str]:
             "invalid CUDA backend profile",
         ),
         (
+            {"accelerator": {"cuda_marlin_profile": "disabled"}},
+            True,
+            "disabled CUDA Marlin layout",
+        ),
+        (
+            {"accelerator": {"cuda_marlin_profile": "attention_mlp_gdn"}},
+            True,
+            "expanded CUDA Marlin layout",
+        ),
+        (
+            {"accelerator": {"cuda_marlin_profile": "everything"}},
+            False,
+            "invalid CUDA Marlin layout",
+        ),
+        (
+            {"accelerator": {"cuda_flash_backward_mode": "fast"}},
+            True,
+            "fast CUDA FlashAttention backward",
+        ),
+        (
+            {"accelerator": {"cuda_flash_backward_mode": "deterministic"}},
+            True,
+            "deterministic CUDA FlashAttention backward",
+        ),
+        (
+            {"accelerator": {"cuda_flash_backward_mode": "auto"}},
+            False,
+            "invalid CUDA FlashAttention backward mode",
+        ),
+        (
             {"accelerator": {"metal_kernel_profile": "native_default"}},
             True,
             "native-default Metal backend profile",

@@ -1975,6 +1975,8 @@ function renderRuntimeConfigBody(cfg) {
   const vulkanDeviceIndex = acceleratorRuntime.vulkan_device_index || {};
   const vulkanValidation = acceleratorRuntime.vulkan_validation || {};
   const cudaKernelProfile = acceleratorRuntime.cuda_kernel_profile || {};
+  const cudaMarlinProfile = acceleratorRuntime.cuda_marlin_profile || {};
+  const cudaFlashBackwardMode = acceleratorRuntime.cuda_flash_backward_mode || {};
   const metalKernelProfile = acceleratorRuntime.metal_kernel_profile || {};
   const rocmSynchronization = acceleratorRuntime.rocm_synchronization_mode || {};
   const rocmStridedBatchedMatmul = acceleratorRuntime.rocm_strided_batched_matmul_mode || {};
@@ -2262,6 +2264,8 @@ function renderRuntimeConfigBody(cfg) {
         ${runtimeConfigRow('Kiln-tensor API routes', `<strong>${escapeHtml(ktApiMode.effective || '—')}</strong>${srcChip(ktApiMode.source)}`, 'Immutable adapter route set. Auto uses qualified defaults, all includes experimental matmul and paged-KV routes, and disabled uses legacy fallbacks.')}
         ${runtimeConfigRow('Full-attention score ceiling', `<strong>${Number.isFinite(fullAttentionScoreBudget.effective) ? num(fullAttentionScoreBudget.effective) + ' MiB' : '—'}</strong>${srcChip(fullAttentionScoreBudget.source)}`, 'Immutable exact-attention scratch ceiling. ROCm online attention uses at most 1024 MiB and live pressure rejects admission instead of changing tile geometry.')}
         ${runtimeConfigRow('CUDA kernel profile', `<strong>${escapeHtml(cudaKernelProfile.effective || '—')}</strong>${srcChip(cudaKernelProfile.source)}`, 'Immutable twenty-five-route CUDA model and backend policy. Native default preserves established accelerated dispatch without making a hardware-qualification claim; portable fallback declines every owned route.')}
+        ${runtimeConfigRow('CUDA Marlin layout', `<strong>${escapeHtml(cudaMarlinProfile.effective || '—')}</strong>${srcChip(cudaMarlinProfile.source)}`, 'Immutable projection layout. Disabled preserves BF16 weights; attention MLP adds W4A16 full-attention Q and MLP projections; attention MLP GDN also packs the quality-sensitive GDN output projection.')}
+        ${runtimeConfigRow('CUDA FlashAttention backward', `<strong>${escapeHtml(cudaFlashBackwardMode.effective || '—')}</strong>${srcChip(cudaFlashBackwardMode.source)}`, 'Startup-owned training backward mode. Fast preserves the established accumulation path; deterministic selects split accumulation for exact replay and diagnosis.')}
         ${runtimeConfigRow('Metal kernel profile', `<strong>${escapeHtml(metalKernelProfile.effective || '—')}</strong>${srcChip(metalKernelProfile.source)}`, 'Immutable forty-six-route Metal backend policy. Native default preserves forty-five established native routes while leaving custom LM-head argmax disabled; portable fallback declines every owned route.')}
         ${runtimeConfigRow('CUDA graph policy', `<strong>${cudaGraphs.effective_policy_enabled === true ? 'enabled' : cudaGraphs.effective_policy_enabled === false ? 'disabled' : '—'}</strong>${cudaGraphs.requested === true && cudaGraphs.capture_allowed_by_serving_profile === false ? flagChip('profile blocked', 'The serving profile disables live graph capture.') : ''}`, 'Configured CUDA graph request after immutable serving-profile resolution.')}
         ${runtimeConfigRow('CUDA graph cache', `<strong>${Number.isFinite(cudaGraphs.max_cached_graphs) ? num(cudaGraphs.max_cached_graphs) : '—'}</strong>`, 'Startup-fixed retained single-row CUDA graph entry limit; valid range 1 through 64.')}

@@ -2,6 +2,19 @@
 
 ## Unreleased — bounded thinking by tokens or decode time
 
+- CUDA projection and training-backward configuration: replaced the Marlin
+  layout, pack implementation, and FlashAttention backward environment probes
+  with immutable typed `accelerator.cuda_marlin_profile` and
+  `accelerator.cuda_flash_backward_mode` policy. Non-default W4A16 layouts
+  require the experimental serving profile; packing uses the established
+  parallel implementation; standalone FlashAttention callers retain the
+  source-compatible fast default and may choose a typed explicit mode. Policy
+  v15 is reported consistently through TOML, mechanical environment
+  overrides, CLI/API/health/debug, dashboard, qualification, schemas, example
+  configuration, and the website. The dead OPD loss-kernel disable switch is
+  removed and FLCE active-row tiling is fixed at its established 4,096-row
+  value. Former Marlin, packing, FlashAttention, OPD, and FLCE names are not
+  aliases.
 - Metal backend configuration: replaced forty-six Metal kernel-route decisions
   and more than fifty legacy environment spellings with one immutable typed
   `accelerator.metal_kernel_profile`. `native_default` preserves the prior

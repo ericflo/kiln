@@ -184,7 +184,7 @@ disabled.
 
 This section owns process-lifetime accelerator execution behavior that must be
 fixed before the primary device context or model runner is created. The
-resolved object uses schema `kiln.accelerator-runtime-policy.v14`. Startup,
+resolved object uses schema `kiln.accelerator-runtime-policy.v15`. Startup,
 `kiln config`, `GET /v1/config`, `/health`, trusted debug state, and the
 dashboard all report the same configured/effective/source values, plus the
 compiled Vulkan kernel-policy schema ID; lower model, tensor, and kernel paths
@@ -197,6 +197,8 @@ do not re-read these public environment names.
 | `accelerator.vulkan_device_index` | `"auto"` or unsigned integer; `"auto"` | `KILN_ACCELERATOR_VULKAN_DEVICE_INDEX` (implemented) | `KILN_VULKAN_DEVICE` (deprecated compatibility) | `auto` preserves automatic discrete-GPU preference and otherwise chooses the first enumerated Vulkan physical device. An integer strictly selects that zero-based Vulkan enumeration index. An unavailable index fails logical-device startup; it is never ignored or replaced with another device. The immutable selection is installed before Vulkan device creation and reported with source attribution. Restart required. |
 | `accelerator.vulkan_validation` | boolean; `false` | `KILN_ACCELERATOR_VULKAN_VALIDATION` (implemented) | `KILN_VULKAN_VALIDATION` (deprecated compatibility) | `true` requires `server.serving_profile = "experimental"` and enables `VK_LAYER_KHRONOS_validation` when the Vulkan instance is created. Startup fails if the layer is not installed. This is not mutable per request or dispatch. Restart required. |
 | `accelerator.cuda_kernel_profile` | string enum; `"native_default"` | `KILN_ACCELERATOR_CUDA_KERNEL_PROFILE` (implemented) | none | `native_default` or `portable_fallback`, case-insensitive. `native_default` preserves the twenty-five CUDA model/backend routes that were enabled by default before consolidation; this name deliberately makes no current-hardware qualification claim. `portable_fallback` declines every owned route. The complete route set is installed before CUDA backend construction, immutable for the process lifetime, and reported with source attribution. Restart required. |
+| `accelerator.cuda_marlin_profile` | string enum; `"disabled"` | `KILN_ACCELERATOR_CUDA_MARLIN_PROFILE` (implemented) | none | `disabled`, `attention_mlp`, or `attention_mlp_gdn`, case-insensitive. `disabled` preserves BF16 projections. `attention_mlp` packs full-attention Q and every MLP projection as Marlin W4A16. `attention_mlp_gdn` also packs the quality-sensitive GDN output projection. Both non-default profiles require `server.serving_profile = "experimental"`. The selected weight layout is immutable after upload. Packing always uses the established parallel implementation. Restart required. |
+| `accelerator.cuda_flash_backward_mode` | string enum; `"fast"` | `KILN_ACCELERATOR_CUDA_FLASH_BACKWARD_MODE` (implemented) | none | `fast` or `deterministic`, case-insensitive. `fast` preserves the established CUDA FlashAttention backward accumulation. `deterministic` selects split accumulation for exact replay and diagnosis. The mode is installed before model construction and cannot change between training jobs. Restart required. |
 | `accelerator.metal_kernel_profile` | string enum; `"native_default"` | `KILN_ACCELERATOR_METAL_KERNEL_PROFILE` (implemented) | none | `native_default` or `portable_fallback`, case-insensitive. `native_default` preserves forty-five of the forty-six Metal backend routes active before consolidation; custom LM-head argmax remains disabled by default. `portable_fallback` declines every owned route. The complete route set is installed before Metal backend construction, immutable for the process lifetime, and reported with source attribution. Restart required. |
 | `accelerator.rocm_synchronization_mode` | string enum; `"legacy_host_barriers"` | `KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE` (implemented) | none | `legacy_host_barriers` or `stream_ordered`, case-insensitive. `stream_ordered` requires `server.serving_profile = "experimental"`; other profiles fail startup rather than silently weakening the request. Restart required. |
 | `accelerator.rocm_strided_batched_matmul_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE` (implemented) | `KILN_FORCE_ROCM_STRIDED_BATCHED_MATMUL` and `KILN_DISABLE_ROCM_STRIDED_BATCHED_MATMUL` (deprecated compatibility) | `auto`, `enabled`, or `disabled`, case-insensitive. `auto` applies the qualified gfx115x large-attention guard; `enabled` always permits the strided-batched route and `disabled` always uses per-row GEMMs. Either explicit route requires the experimental profile. Conflicting aliases, malformed values, and canonical-plus-alias inputs fail startup. Restart required. |
@@ -258,6 +260,35 @@ sigmoid fusion, RMSNorm forward/backward, L2 QK normalization, dynamic-length
 paged decode, GDN pre-permute, training MLP chunking, and split Q/gate
 training. Use the complete profile; individual route combinations are not a
 supported product configuration.
+
+`accelerator.cuda_marlin_profile` owns the complete CUDA Marlin weight-layout
+choice. Both W4A16 profiles require `server.serving_profile = "experimental"`:
+
+| Profile | Full-attention Q | MLP gate/up/down | GDN output | Packing |
+|---|---:|---:|---:|---:|
+| `disabled` | BF16 | BF16 | BF16 | none |
+| `attention_mlp` | W4A16 | W4A16 | BF16 | parallel |
+| `attention_mlp_gdn` | W4A16 | W4A16 | W4A16 | parallel |
+
+The former `KILN_W4A16` and `KILN_W4A16_GDN_OUT_PROJ` switches are removed,
+not aliases. `KILN_DISABLE_PARALLEL_PACK` is also removed: production packing
+always uses the established parallel path, while serial comparisons belong in
+an explicit benchmark harness. Marlin remains CUDA-only; selecting a profile
+does not itself claim model-quality, correctness, memory, or performance
+qualification for a particular NVIDIA system.
+
+`accelerator.cuda_flash_backward_mode` is the sole CUDA FlashAttention
+backward accumulation authority. `fast` is the historical default;
+`deterministic` selects split accumulation. The former
+`KILN_FLASH_ATTN_BWD_DETERMINISTIC` spelling is removed rather than retained as
+an alias. This setting concerns CUDA training backward only and does not imply
+that `server.deterministic` makes every accelerator kernel bitwise
+deterministic.
+
+Two unused or unsafe-to-retune training-kernel controls are deleted without
+replacement. `KILN_DISABLE_OPD_LOSS_KERNEL` had no live caller.
+`KILN_FLCE_ACTIVE_ROW_TILE` is fixed at the established bounded 4,096 active
+rows; unsupported shapes continue through the existing backend fallback.
 
 `accelerator.metal_kernel_profile` owns these forty-six Metal backend decisions:
 
@@ -478,7 +509,7 @@ decisions remain leaves of the complete typed policy.
 aliases. Previously, model and ROCm flash paths parsed different permissive
 values during execution and recomputed score budgets from changing free-memory
 snapshots, permitting route geometry to change between layers or requests.
-Policy v14 fixes one bounded ceiling before execution; the ROCm allocator
+Policy v15 fixes one bounded ceiling before execution; the ROCm allocator
 governor may still reject a planned operation when its exact working set is no
 longer admissible, but it cannot silently shrink or expand that plan.
 

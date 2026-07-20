@@ -388,6 +388,35 @@
           "x-kiln-environment": "none",
           "x-kiln-validation": "native_default or portable_fallback, case-insensitive. native_default preserves the twenty-five CUDA model/backend routes that were enabled by default before consolidation; this name deliberately makes no current-hardware qualification claim. portable_fallback declines every owned route. The complete route set is installed before CUDA backend construction, immutable for the process lifetime, and reported with source attribution. Restart required."
         },
+        "cuda_marlin_profile": {
+          "type": "string",
+          "enum": [
+            "disabled",
+            "attention_mlp",
+            "attention_mlp_gdn"
+          ],
+          "default": "disabled",
+          "description": "disabled, attention_mlp, or attention_mlp_gdn, case-insensitive. disabled preserves BF16 projections. attention_mlp packs full-attention Q and every MLP projection as Marlin W4A16. attention_mlp_gdn also packs the quality-sensitive GDN output projection. Both non-default profiles require server.serving_profile = \"experimental\". The selected weight layout is immutable after upload. Packing always uses the established parallel implementation. Restart required.",
+          "x-kiln-path": "accelerator.cuda_marlin_profile",
+          "x-kiln-type-and-default": "string enum; \"disabled\"",
+          "x-kiln-canonical-env": "KILN_ACCELERATOR_CUDA_MARLIN_PROFILE (implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "disabled, attention_mlp, or attention_mlp_gdn, case-insensitive. disabled preserves BF16 projections. attention_mlp packs full-attention Q and every MLP projection as Marlin W4A16. attention_mlp_gdn also packs the quality-sensitive GDN output projection. Both non-default profiles require server.serving_profile = \"experimental\". The selected weight layout is immutable after upload. Packing always uses the established parallel implementation. Restart required."
+        },
+        "cuda_flash_backward_mode": {
+          "type": "string",
+          "enum": [
+            "fast",
+            "deterministic"
+          ],
+          "default": "fast",
+          "description": "fast or deterministic, case-insensitive. fast preserves the established CUDA FlashAttention backward accumulation. deterministic selects split accumulation for exact replay and diagnosis. The mode is installed before model construction and cannot change between training jobs. Restart required.",
+          "x-kiln-path": "accelerator.cuda_flash_backward_mode",
+          "x-kiln-type-and-default": "string enum; \"fast\"",
+          "x-kiln-canonical-env": "KILN_ACCELERATOR_CUDA_FLASH_BACKWARD_MODE (implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "fast or deterministic, case-insensitive. fast preserves the established CUDA FlashAttention backward accumulation. deterministic selects split accumulation for exact replay and diagnosis. The mode is installed before model construction and cannot change between training jobs. Restart required."
+        },
         "metal_kernel_profile": {
           "type": "string",
           "enum": [
@@ -1950,9 +1979,9 @@
       }
     }
   ],
-  "x-kiln-field-count": 115,
+  "x-kiln-field-count": 117,
   "x-kiln-dynamic-field-template-count": 2,
-  "x-kiln-canonical-environment-count": 110,
+  "x-kiln-canonical-environment-count": 112,
   "x-kiln-config-file-only-count": 5,
   "x-kiln-compatibility-field-count": 71,
   "x-kiln-compatibility-alias-count": 76,

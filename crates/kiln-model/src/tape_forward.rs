@@ -1652,7 +1652,7 @@ fn try_tape_lora_linear_impl_kt(
 ///
 /// # Backward
 ///
-/// `flash_attn_bwd_collapsed_gqa_kt(dout, q, k, v, out, lse, scale, causal)`
+/// `flash_attn_bwd_collapsed_gqa_kt_with_mode(dout, q, k, v, out, lse, scale, causal, mode)`
 /// returns `(dq, dk, dv)` where `dk`/`dv` are already collapsed to the grouped
 /// K/V head count. The collapse runs in F32 (cast/sum/cast, or the backend's
 /// equivalent) so the group reduction doesn't lose precision in BF16.
@@ -1695,7 +1695,17 @@ impl BackwardOp for FlashAttnBackward {
             dout.contiguous()?
         };
 
-        let (dq, dk, dv) = kiln_flash_attn::flash_attn_bwd_collapsed_gqa_kt(
+        let backward_mode = match crate::cuda_training_policy::current_cuda_training_policy()
+            .flash_attention_backward_mode
+        {
+            crate::cuda_training_policy::FlashAttentionBackwardMode::Fast => {
+                kiln_flash_attn::FlashAttnBackwardMode::Fast
+            }
+            crate::cuda_training_policy::FlashAttentionBackwardMode::Deterministic => {
+                kiln_flash_attn::FlashAttnBackwardMode::Deterministic
+            }
+        };
+        let (dq, dk, dv) = kiln_flash_attn::flash_attn_bwd_collapsed_gqa_kt_with_mode(
             &dout,
             &self.q,
             &self.k,
@@ -1704,6 +1714,7 @@ impl BackwardOp for FlashAttnBackward {
             &self.softmax_lse,
             self.scale,
             self.causal,
+            backward_mode,
         )
         .map_err(|e| {
             kiln_tensor::Error::Msg(format!(

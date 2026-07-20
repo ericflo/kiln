@@ -1009,7 +1009,7 @@ mod tests {
         assert_eq!(json["decode_runtime"]["max_decode_batch"]["effective"], 8);
         assert_eq!(
             json["accelerator_runtime"]["schema_id"],
-            "kiln.accelerator-runtime-policy.v14"
+            "kiln.accelerator-runtime-policy.v15"
         );
         assert_eq!(
             json["accelerator_runtime"]["vulkan_kernel_policy_schema_id"],
@@ -1030,6 +1030,14 @@ mod tests {
         assert_eq!(
             json["accelerator_runtime"]["cuda_kernel_profile"]["effective"],
             "native_default"
+        );
+        assert_eq!(
+            json["accelerator_runtime"]["cuda_marlin_profile"]["effective"],
+            "disabled"
+        );
+        assert_eq!(
+            json["accelerator_runtime"]["cuda_flash_backward_mode"]["effective"],
+            "fast"
         );
         assert_eq!(
             json["accelerator_runtime"]["metal_kernel_profile"]["effective"],

@@ -372,18 +372,8 @@ fn synchronize_flce_reduction_tensor(label: &str, tensor: &KtTensor) -> Result<(
     }
 }
 
-fn flce_env_usize(name: &str) -> Option<usize> {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|&value| value > 0)
-}
-
 fn flce_active_row_tile_len(device: KtDevice, rows: usize) -> Option<usize> {
-    let tile = flce_env_usize("KILN_FLCE_ACTIVE_ROW_TILE")
-        .unwrap_or(DEFAULT_FLCE_ACTIVE_ROW_TILE)
-        .min(rows)
-        .max(1);
+    let tile = DEFAULT_FLCE_ACTIVE_ROW_TILE.min(rows).max(1);
     if device.is_gpu() && rows > tile {
         return Some(tile);
     }

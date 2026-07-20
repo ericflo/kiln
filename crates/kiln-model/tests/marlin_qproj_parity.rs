@@ -183,7 +183,7 @@ fn run_parity(device: &Device, m: usize, k: usize, n: usize) {
         o_proj_t: q_proj_t_kt.clone(),
         qkv_proj_w8: None,
         o_proj_w8: None,
-        q_proj_marlin: None, // KILN_W4A16 unset path
+        q_proj_marlin: None, // BF16 policy path
     };
     let marlin_weights = kiln_model::forward::GpuFullAttentionWeights {
         q_proj: q_proj_kt.clone(),
@@ -199,16 +199,16 @@ fn run_parity(device: &Device, m: usize, k: usize, n: usize) {
         o_proj_t: q_proj_t_kt.clone(),
         qkv_proj_w8: None,
         o_proj_w8: None,
-        q_proj_marlin: Some(packed), // KILN_W4A16 set path
+        q_proj_marlin: Some(packed), // Marlin policy path
     };
 
     // Activation input is kt too.
     let x_kt = kt_in(&x);
 
-    // --- Baseline (KILN_W4A16 unset): BF16 broadcast_matmul via q_proj_t.
+    // --- Baseline: BF16 broadcast_matmul via q_proj_t.
     let baseline =
         q_proj_forward(&x_kt, &baseline_weights, None, 0.0).expect("baseline q_proj_forward");
-    // --- Marlin (KILN_W4A16 set): W4A16 kernel + (optional) LoRA delta.
+    // --- Marlin: W4A16 kernel + (optional) LoRA delta.
     let marlin = q_proj_forward(&x_kt, &marlin_weights, None, 0.0).expect("marlin q_proj_forward");
 
     // Outputs are kt; candle_out is identity post-candle (kept for readability).

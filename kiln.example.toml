@@ -147,6 +147,15 @@ cuda_kernel_profile = "native_default" # native_default | portable_fallback. One
                                       # existing accelerated dispatch without claiming hardware
                                       # qualification. Override mechanically with
                                       # KILN_ACCELERATOR_CUDA_KERNEL_PROFILE.
+cuda_marlin_profile = "disabled"     # disabled | attention_mlp | attention_mlp_gdn. Selects
+                                      # one immutable CUDA projection layout before upload;
+                                      # non-default profiles require serving_profile=experimental;
+                                      # packing uses the fixed parallel implementation. Override
+                                      # mechanically with KILN_ACCELERATOR_CUDA_MARLIN_PROFILE.
+cuda_flash_backward_mode = "fast"    # fast | deterministic. CUDA training FlashAttention
+                                      # backward accumulation, fixed before model construction.
+                                      # Override mechanically with
+                                      # KILN_ACCELERATOR_CUDA_FLASH_BACKWARD_MODE.
 metal_kernel_profile = "native_default" # native_default | portable_fallback. One immutable
                                       # forty-six-route Metal backend policy. Native default keeps
                                       # custom LM-head argmax off and the other forty-five routes on.
