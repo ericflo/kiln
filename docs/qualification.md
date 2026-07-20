@@ -1632,6 +1632,20 @@ tokens/second, and the package peaked at 89.75 C without pacing or a trip. This
 closes the autoscaling-enabled arm for this workload; it is not evidence that a
 separate forced-resize workload is unnecessary.
 
+The paired source-bound `graphs-off` arm passed at
+`qualification/receipts/rocm/strix-halo/20260720t073935606283z-rocm-strix-halo-serving-mixed-rocm-v1-c5256e3c8c-v1.json`.
+All graph counters were exactly zero. Relative to `default`, deterministic
+output rose from 12.935 to 13.710 tokens/second, sampled output rose from 8.319
+to 14.247 tokens/second, and p99/p99.9 ITL fell from 797.113/1,037.370 to
+474.283/508.025 ms. The maximum decode forward fell from 681.762 to 151.756 ms.
+The graph-on arm had spent 3.698 seconds warming 21 candidates and 1.532
+seconds in native capture; successful replay did not repay those costs in this
+short dynamic-shape workload. Peak device memory fell by 455,360,020 bytes and
+the package peak fell from 89.75 to 89.0 C. This is evidence against assuming
+graphs help this workload, not a cross-device or universal graph-disable claim;
+the graph-specific correctness and resilience gates remain independently
+required.
+
 Five measured-window metrics close the cooperative-idle evidence. The configured
 gauge is `batching_actor_cycle_idle_ms_configured`. The monotonic count and
 elapsed-time deltas are `batching_actor_cycle_idle_count` and

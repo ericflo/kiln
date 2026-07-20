@@ -891,6 +891,15 @@ training request
           sample rows and independently requires all 256 response tokens through usage and semantic-oracle gates.
         </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          The first source-bound eight-layer graph-off arm outperformed its graph-on <code>default</code> peer for
+          this short dynamic-shape workload: deterministic output rose from 12.935 to 13.710 tokens/second,
+          sampled output rose from 8.319 to 14.247 tokens/second, and p99.9 ITL fell from 1,037.370 to 508.025 ms.
+          The graph-on arm spent 3.698 seconds warming 21 candidates plus 1.532 seconds in native capture, while
+          its maximum decode forward reached 681.762 ms versus 151.756 ms eager. That result rejects an assumption
+          that live capture is automatically faster here; it does not replace graph correctness/resilience gates
+          or establish a universal graph-off policy on another device or workload.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
           Capture and cache admission are deliberately separate outcomes. <code>capture_successes</code> means
           the native graph instantiated and its first launch succeeded. A defensive exact recheck can still
           reject and safely destroy that candidate if concurrent state changed before publication.
