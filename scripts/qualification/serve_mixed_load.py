@@ -90,6 +90,8 @@ SAMPLED_PROFILE_TOP_K = 40
 SAMPLED_PROFILE_MIN_P = 0.0
 SAMPLED_PROFILE_ORDER = "after_measured_deterministic_window"
 SAMPLED_PROFILE_POST_DETERMINISM_CANARY = "exact_replay_of_normal_00_v1"
+ROCM_W8_LM_HEAD_ROUTE_EVIDENCE = "health_counter_delta_v1"
+ROCM_W8_LM_HEAD_TOP_K_MAX = 64
 SLOW_MAX_TOKENS = 4096
 CANCELLATION_AFTER_DELTAS = 4
 MEMORY_POLL_INTERVAL_SECONDS = 0.5
@@ -378,6 +380,7 @@ def _variant_config(
             "sampled_profile_post_determinism_canary": (
                 SAMPLED_PROFILE_POST_DETERMINISM_CANARY
             ),
+            "rocm_w8_lm_head_route_evidence": ROCM_W8_LM_HEAD_ROUTE_EVIDENCE,
             "sampled_profile_prompt_words": SAMPLED_PROFILE_PROMPT_WORDS,
             "sampled_profile_requests": SAMPLED_PROFILE_REQUESTS,
             "sampled_profile_seed_offset": SAMPLED_PROFILE_SEED_OFFSET,
@@ -675,6 +678,11 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "response_queue_delay_ms_p50": ("ms", "p50", True),
     "response_queue_delay_ms_p99": ("ms", "p99", True),
     "response_queue_delay_ms_p999": ("ms", "p99.9", True),
+    "rocm_w8_lm_head_argmax_dispatch_count": ("count", "sum", False),
+    "rocm_w8_lm_head_argmax_row_count": ("rows", "sum", False),
+    "rocm_w8_lm_head_dispatch_failure_count": ("count", "sum", True),
+    "rocm_w8_lm_head_sample_dispatch_count": ("count", "sum", True),
+    "rocm_w8_lm_head_sample_row_count": ("rows", "sum", True),
     "sampled_profile_batching_batched_decode_forward_count": ("count", "sum", False),
     "sampled_profile_batching_decode_forward_count": ("count", "sum", False),
     "sampled_profile_batching_decode_row_count": ("rows", "sum", False),
@@ -717,6 +725,62 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "sampled_profile_request_count": ("count", "sum", False),
     "sampled_profile_request_failure_count": ("count", "sum", True),
     "sampled_profile_response_oracle_failure_count": ("count", "sum", True),
+    "sampled_profile_rocm_w8_lm_head_argmax_dispatch_count": (
+        "count",
+        "sum",
+        True,
+    ),
+    "sampled_profile_rocm_w8_lm_head_argmax_row_count": ("rows", "sum", True),
+    "sampled_profile_rocm_w8_lm_head_dispatch_failure_count": (
+        "count",
+        "sum",
+        True,
+    ),
+    "sampled_profile_rocm_w8_lm_head_max_batch_rows_end": (
+        "rows",
+        "max",
+        False,
+    ),
+    "sampled_profile_rocm_w8_lm_head_max_batch_rows_start": (
+        "rows",
+        "exact",
+        False,
+    ),
+    "sampled_profile_rocm_w8_lm_head_max_sample_top_k_end": (
+        "tokens",
+        "max",
+        False,
+    ),
+    "sampled_profile_rocm_w8_lm_head_max_sample_top_k_start": (
+        "tokens",
+        "exact",
+        True,
+    ),
+    "sampled_profile_rocm_w8_lm_head_sample_dispatch_count": (
+        "count",
+        "sum",
+        False,
+    ),
+    "sampled_profile_rocm_w8_lm_head_sample_history_entry_count": (
+        "entries",
+        "sum",
+        True,
+    ),
+    "sampled_profile_rocm_w8_lm_head_sample_row_count": (
+        "rows",
+        "sum",
+        False,
+    ),
+    "sampled_profile_rocm_w8_lm_head_sample_w8a16_dispatch_count": (
+        "count",
+        "sum",
+        True,
+    ),
+    "sampled_profile_rocm_w8_lm_head_sample_w8a8_dispatch_count": (
+        "count",
+        "sum",
+        False,
+    ),
     "sampled_profile_sampling_ms_p50": ("ms", "p50", True),
     "sampled_profile_sampling_ms_p99": ("ms", "p99", True),
     "sampled_profile_sampling_ms_total": ("ms", "sum", True),
@@ -3674,6 +3738,99 @@ def batching_snapshot(health: dict[str, Any]) -> dict[str, float | int | bool]:
     return snapshot
 
 
+ROCM_W8_LM_HEAD_COUNTER_FIELDS = (
+    "argmax_dispatches",
+    "argmax_rows",
+    "sample_dispatches",
+    "sample_rows",
+    "sample_history_entries",
+    "sample_w8a16_dispatches",
+    "sample_w8a8_dispatches",
+    "dispatch_failures",
+)
+ROCM_W8_LM_HEAD_GAUGE_FIELDS = ("max_batch_rows", "max_sample_top_k")
+
+
+def rocm_w8_lm_head_snapshot(health: dict[str, Any]) -> dict[str, int]:
+    runtime = health.get("decode_runtime")
+    raw = runtime.get("rocm_w8_lm_head") if isinstance(runtime, dict) else None
+    if not isinstance(raw, dict):
+        raise QualificationError("health.decode_runtime.rocm_w8_lm_head is missing")
+    expected_fields = set(
+        (*ROCM_W8_LM_HEAD_COUNTER_FIELDS, *ROCM_W8_LM_HEAD_GAUGE_FIELDS)
+    )
+    if set(raw) != expected_fields:
+        missing = sorted(expected_fields - set(raw))
+        extra = sorted(set(raw) - expected_fields)
+        raise QualificationError(
+            "health.decode_runtime.rocm_w8_lm_head has unexpected shape: "
+            f"missing={missing}, extra={extra}"
+        )
+    snapshot: dict[str, int] = {}
+    for field in expected_fields:
+        value = raw[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise QualificationError(
+                f"ROCm W8 LM-head field {field} must be a nonnegative integer, "
+                f"got {value!r}"
+            )
+        snapshot[field] = value
+    if snapshot["sample_dispatches"] != (
+        snapshot["sample_w8a16_dispatches"]
+        + snapshot["sample_w8a8_dispatches"]
+    ):
+        raise QualificationError(
+            "ROCm W8 LM-head sampled activation dispatches do not sum to total"
+        )
+    for operation in ("argmax", "sample"):
+        if snapshot[f"{operation}_rows"] < snapshot[f"{operation}_dispatches"]:
+            raise QualificationError(
+                f"ROCm W8 LM-head {operation} rows are below dispatches"
+            )
+        if (
+            snapshot[f"{operation}_dispatches"] == 0
+            and snapshot[f"{operation}_rows"] != 0
+        ):
+            raise QualificationError(
+                f"zero-dispatch ROCm W8 LM-head {operation} snapshot carries rows"
+            )
+    if (
+        snapshot["sample_dispatches"] == 0
+        and snapshot["sample_history_entries"] != 0
+    ):
+        raise QualificationError(
+            "zero-sample ROCm W8 LM-head snapshot carries history entries"
+        )
+    successful_dispatches = (
+        snapshot["argmax_dispatches"] + snapshot["sample_dispatches"]
+    )
+    if successful_dispatches == 0:
+        if snapshot["max_batch_rows"] != 0 or snapshot["max_sample_top_k"] != 0:
+            raise QualificationError(
+                "zero-dispatch ROCm W8 LM-head snapshot carries nonzero maxima"
+            )
+    else:
+        if snapshot["max_batch_rows"] == 0:
+            raise QualificationError(
+                "successful ROCm W8 LM-head snapshot has zero maximum batch rows"
+            )
+        if snapshot["max_batch_rows"] > max(
+            snapshot["argmax_rows"], snapshot["sample_rows"]
+        ):
+            raise QualificationError(
+                "ROCm W8 LM-head maximum batch rows exceed cumulative operation rows"
+            )
+    if snapshot["sample_dispatches"] == 0 and snapshot["max_sample_top_k"] != 0:
+        raise QualificationError(
+            "zero-sample ROCm W8 LM-head snapshot carries nonzero maximum top-k"
+        )
+    if snapshot["max_sample_top_k"] > ROCM_W8_LM_HEAD_TOP_K_MAX:
+        raise QualificationError(
+            "ROCm W8 LM-head maximum sampled top-k exceeds the kernel contract"
+        )
+    return snapshot
+
+
 def graph_snapshot(health: dict[str, Any]) -> dict[str, int]:
     runtime = health.get("decode_runtime")
     if not isinstance(runtime, dict):
@@ -4166,6 +4323,10 @@ def sampled_profile_metric_values(
     readback = phase_observations("readback")
     batching_start = batching_snapshot(health_start)
     batching_end = batching_snapshot(health_end)
+    lm_head_start = rocm_w8_lm_head_snapshot(health_start)
+    lm_head_end = rocm_w8_lm_head_snapshot(health_end)
+    for field in ROCM_W8_LM_HEAD_GAUGE_FIELDS:
+        counter_delta(lm_head_start, lm_head_end, field)
     return {
         "sampled_profile_batching_batched_decode_forward_count": counter_delta(
             batching_start, batching_end, "total_batched_decode_forwards"
@@ -4213,6 +4374,42 @@ def sampled_profile_metric_values(
         "sampled_profile_response_oracle_failure_count": sum(
             sampled_response_oracle_failure(result) is not None for result in results
         ),
+        "sampled_profile_rocm_w8_lm_head_argmax_dispatch_count": counter_delta(
+            lm_head_start, lm_head_end, "argmax_dispatches"
+        ),
+        "sampled_profile_rocm_w8_lm_head_argmax_row_count": counter_delta(
+            lm_head_start, lm_head_end, "argmax_rows"
+        ),
+        "sampled_profile_rocm_w8_lm_head_dispatch_failure_count": counter_delta(
+            lm_head_start, lm_head_end, "dispatch_failures"
+        ),
+        "sampled_profile_rocm_w8_lm_head_max_batch_rows_end": lm_head_end[
+            "max_batch_rows"
+        ],
+        "sampled_profile_rocm_w8_lm_head_max_batch_rows_start": lm_head_start[
+            "max_batch_rows"
+        ],
+        "sampled_profile_rocm_w8_lm_head_max_sample_top_k_end": lm_head_end[
+            "max_sample_top_k"
+        ],
+        "sampled_profile_rocm_w8_lm_head_max_sample_top_k_start": lm_head_start[
+            "max_sample_top_k"
+        ],
+        "sampled_profile_rocm_w8_lm_head_sample_dispatch_count": counter_delta(
+            lm_head_start, lm_head_end, "sample_dispatches"
+        ),
+        "sampled_profile_rocm_w8_lm_head_sample_history_entry_count": counter_delta(
+            lm_head_start, lm_head_end, "sample_history_entries"
+        ),
+        "sampled_profile_rocm_w8_lm_head_sample_row_count": counter_delta(
+            lm_head_start, lm_head_end, "sample_rows"
+        ),
+        "sampled_profile_rocm_w8_lm_head_sample_w8a16_dispatch_count": counter_delta(
+            lm_head_start, lm_head_end, "sample_w8a16_dispatches"
+        ),
+        "sampled_profile_rocm_w8_lm_head_sample_w8a8_dispatch_count": counter_delta(
+            lm_head_start, lm_head_end, "sample_w8a8_dispatches"
+        ),
         "sampled_profile_sampling_ms_p50": percentile_r7(sampling, 0.5),
         "sampled_profile_sampling_ms_p99": percentile_r7(sampling, 0.99),
         "sampled_profile_sampling_ms_total": sum(sampling),
@@ -4242,6 +4439,16 @@ def sampled_profile_contract_failures(
         "sampled_profile_sampling_request_count": SAMPLED_PROFILE_REQUESTS,
         "sampled_profile_readback_request_count": 0,
         "sampled_profile_batching_total_error_count": 0,
+        "sampled_profile_rocm_w8_lm_head_argmax_dispatch_count": 0,
+        "sampled_profile_rocm_w8_lm_head_argmax_row_count": 0,
+        "sampled_profile_rocm_w8_lm_head_dispatch_failure_count": 0,
+        "sampled_profile_rocm_w8_lm_head_max_sample_top_k_start": 0,
+        "sampled_profile_rocm_w8_lm_head_max_sample_top_k_end": (
+            SAMPLED_PROFILE_TOP_K
+        ),
+        "sampled_profile_rocm_w8_lm_head_sample_history_entry_count": 0,
+        "sampled_profile_rocm_w8_lm_head_sample_row_count": expected_tokens,
+        "sampled_profile_rocm_w8_lm_head_sample_w8a16_dispatch_count": 0,
         "sampled_profile_zero_token_response_count": 0,
     }
     for name, expected in exact_expectations.items():
@@ -4261,6 +4468,51 @@ def sampled_profile_contract_failures(
         failures.append("sampled profile decode rows do not prove multi-row batching")
     if values.get("sampled_profile_batching_max_observed_batch_size_end", 0) < 2:
         failures.append("sampled profile never observed a multi-row decode batch")
+    sample_dispatches = values.get(
+        "sampled_profile_rocm_w8_lm_head_sample_dispatch_count", 0
+    )
+    sample_rows = values.get("sampled_profile_rocm_w8_lm_head_sample_row_count", 0)
+    sample_w8a8_dispatches = values.get(
+        "sampled_profile_rocm_w8_lm_head_sample_w8a8_dispatch_count", 0
+    )
+    if sample_dispatches <= 0:
+        failures.append("sampled profile executed no ROCm W8 LM-head sample dispatch")
+    if sample_rows <= sample_dispatches:
+        failures.append(
+            "sampled profile ROCm W8 LM-head rows do not prove multi-row dispatch"
+        )
+    if sample_w8a8_dispatches != sample_dispatches:
+        failures.append(
+            "sampled profile did not route every ROCm W8 LM-head sample through W8A8"
+        )
+    if values.get("sampled_profile_rocm_w8_lm_head_max_batch_rows_end", 0) < 2:
+        failures.append("ROCm W8 LM-head route never observed a multi-row batch")
+    return failures
+
+
+def rocm_w8_lm_head_contract_failures(
+    values: dict[str, float | int],
+) -> list[str]:
+    failures: list[str] = []
+    for name in (
+        "rocm_w8_lm_head_sample_dispatch_count",
+        "rocm_w8_lm_head_sample_row_count",
+        "rocm_w8_lm_head_dispatch_failure_count",
+    ):
+        if values.get(name) != 0:
+            failures.append(f"deterministic measurement requires {name}=0")
+    argmax_dispatches = values.get("rocm_w8_lm_head_argmax_dispatch_count", 0)
+    argmax_rows = values.get("rocm_w8_lm_head_argmax_row_count", 0)
+    if argmax_dispatches <= 0:
+        failures.append(
+            "deterministic measurement executed no ROCm W8 LM-head argmax dispatch"
+        )
+    if argmax_rows < values.get("completion_token_count", 0):
+        failures.append(
+            "ROCm W8 LM-head argmax rows do not cover all accepted deterministic tokens"
+        )
+    if argmax_rows < argmax_dispatches:
+        failures.append("ROCm W8 LM-head argmax rows are below dispatches")
     return failures
 
 
@@ -4468,6 +4720,13 @@ def metric_values(
     outliers = classify_itl_outliers(warmup.itl_ms, successes, events)
     batching_start = batching_snapshot(health_measurement_start)
     batching_end = batching_snapshot(health_end)
+    lm_head_start = rocm_w8_lm_head_snapshot(health_measurement_start)
+    lm_head_end = rocm_w8_lm_head_snapshot(health_end)
+    for field in (
+        *ROCM_W8_LM_HEAD_COUNTER_FIELDS,
+        *ROCM_W8_LM_HEAD_GAUGE_FIELDS,
+    ):
+        counter_delta(lm_head_start, lm_head_end, field)
     prefix_start = prefix_cache_snapshot(health_measurement_start)
     prefix_end = prefix_cache_snapshot(health_final)
     if prefix_start["enabled"] is not prefix_end["enabled"]:
@@ -4647,6 +4906,21 @@ def metric_values(
         "response_queue_delay_ms_p50": percentile_r7(queue_delays, 0.5),
         "response_queue_delay_ms_p99": percentile_r7(queue_delays, 0.99),
         "response_queue_delay_ms_p999": percentile_r7(queue_delays, 0.999),
+        "rocm_w8_lm_head_argmax_dispatch_count": counter_delta(
+            lm_head_start, lm_head_end, "argmax_dispatches"
+        ),
+        "rocm_w8_lm_head_argmax_row_count": counter_delta(
+            lm_head_start, lm_head_end, "argmax_rows"
+        ),
+        "rocm_w8_lm_head_dispatch_failure_count": counter_delta(
+            lm_head_start, lm_head_end, "dispatch_failures"
+        ),
+        "rocm_w8_lm_head_sample_dispatch_count": counter_delta(
+            lm_head_start, lm_head_end, "sample_dispatches"
+        ),
+        "rocm_w8_lm_head_sample_row_count": counter_delta(
+            lm_head_start, lm_head_end, "sample_rows"
+        ),
         "sampled_profile_post_determinism_canary_completion_token_count": (
             post_sampled_determinism_canary.completion_tokens
         ),
@@ -5202,6 +5476,7 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
                 )["blocks_total"],
             ),
         ]
+        status_failures.extend(rocm_w8_lm_head_contract_failures(values))
         status_failures.extend(sampled_profile_contract_failures(values))
         status_failures.extend(
             post_sampled_determinism_canary_failures(

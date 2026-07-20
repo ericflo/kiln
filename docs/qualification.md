@@ -1461,17 +1461,20 @@ does not weaken. Every arm records the prompt identity,
 paths therefore tokenize the same named long request; a wording, denominator,
 fill target, or marker-role change invalidates direct A/B configuration identity.
 
-Before the ordinary mixed-load measurement window, every ROCm arm also runs a
+After the ordinary mixed-load measurement window, every ROCm arm also runs a
 separate fixed-seed sampled profile at concurrency eight: 32 tokens per request,
 temperature 0.7, top-p 0.9, top-k 40, and min-p 0.0. Those requests disable
 thinking, ignore EOS, and retain terminal performance metadata, but use a
 sampling-appropriate semantic oracle: exactly one nonempty plain-text choice,
 with no reasoning content or tool calls. Random output is not compared with the
-greedy ascending-integer sequence. The driver waits for all eight streams and
-the batching engine to drain, reattests runtime policy, and captures a fresh
-health baseline before starting the original workload. Sampled counters and
-latencies therefore remain dedicated evidence rather than silently changing
-the long-standing deterministic mixed-load denominator.
+greedy ascending-integer sequence. The driver drains the deterministic work and
+captures its terminal health snapshot before dispatching the sampled wave, then
+waits for all eight sampled streams and the batching engine to drain and
+reattests runtime policy. It finally replays `normal-00` with the exact original
+prompt and seed and requires the same token vector. Sampled counters and
+latencies therefore remain dedicated evidence without contaminating the
+long-standing deterministic denominator, while the replay canary detects any
+process-state corruption caused by randomized sampling.
 
 The mixed-load client and server each use the same 180-second per-request
 containment bound. Cooling remains inside that wall clock. The alignment lets
@@ -1505,16 +1508,26 @@ wall time. Neither is a transformer-only kernel rate, and the narrower sampling
 phase remains contained by the broad actor `decode_ms` interval.
 
 The ROCm token-only LM-head candidate requires a second, independent route
-proof. Driver v18 must snapshot
-`/health.decode_runtime.rocm_w8_lm_head` before and after the sampled wave. A
-qualified window must show positive
-sample-dispatch and sample-row deltas, W8A8 sampled dispatches equal to all
-sample dispatches under the qualified profile, a maximum sampled top-k of at
-least 40, an observed batch width of at least two, and zero dispatch-failure
-delta. The ordinary greedy row must separately show positive argmax-dispatch
-and argmax-row deltas. These counters prove route selection; request usage,
-semantic validation, phase accounting, and the exact output/reference gates
-remain authoritative for results.
+proof identified in effective workload configuration as
+`rocm_w8_lm_head_route_evidence = "health_counter_delta_v1"`. The mixed-load
+driver strictly parses all ten fields in
+`/health.decode_runtime.rocm_w8_lm_head` and snapshots them at both measurement
+boundaries. Missing, additional, negative, non-integral, regressing, or
+internally inconsistent fields fail the case.
+
+For the ordinary deterministic window,
+`rocm_w8_lm_head_argmax_dispatch_count` must be positive and
+`rocm_w8_lm_head_argmax_row_count` must cover every accepted completion token.
+Both ordinary sample counters and the dispatch-failure counter must remain
+zero. For the sampled window, all 256 completion rows must appear in
+`sampled_profile_rocm_w8_lm_head_sample_row_count`; sample dispatches must be
+positive and fewer than rows, proving multi-row execution. Every sample
+dispatch must be W8A8, with zero W8A16, argmax, sparse-history, or failed
+dispatches. The process-lifetime maximum top-k must advance from exactly zero
+to exactly 40, and maximum token-only batch width must be at least two. These
+counters prove route selection; request usage, semantic validation, phase
+accounting, the post-sampled replay canary, and the exact output/reference gates
+remain independently authoritative for results.
 
 The focused gfx1151 kernel test is an independent mathematical discriminator,
 not a serving substitute. It projects an identity-shaped 64-token fixture

@@ -294,6 +294,18 @@ def health_fixture(
         },
         "decode_runtime": {
             "accelerator_runtime": accelerator_runtime,
+            "rocm_w8_lm_head": {
+                "argmax_dispatches": 0,
+                "argmax_rows": 0,
+                "sample_dispatches": 0,
+                "sample_rows": 0,
+                "sample_history_entries": 0,
+                "sample_w8a16_dispatches": 0,
+                "sample_w8a8_dispatches": 0,
+                "dispatch_failures": 0,
+                "max_batch_rows": 0,
+                "max_sample_top_k": 0,
+            },
             "cuda_graphs": {
                 "requested": False,
                 "capture_allowed_by_serving_profile": serve.PROFILE_POLICIES[
@@ -1176,6 +1188,9 @@ class ServeMixedLoadTests(unittest.TestCase):
             "sampled_profile_post_determinism_canary": (
                 serve.SAMPLED_PROFILE_POST_DETERMINISM_CANARY
             ),
+            "rocm_w8_lm_head_route_evidence": (
+                serve.ROCM_W8_LM_HEAD_ROUTE_EVIDENCE
+            ),
             "sampled_profile_prompt_words": serve.SAMPLED_PROFILE_PROMPT_WORDS,
             "sampled_profile_requests": serve.SAMPLED_PROFILE_REQUESTS,
             "sampled_profile_seed_offset": serve.SAMPLED_PROFILE_SEED_OFFSET,
@@ -1849,6 +1864,16 @@ class ServeMixedLoadTests(unittest.TestCase):
                 "max_observed_batch_size": 8,
             }
         )
+        after_lm_head = after["decode_runtime"]["rocm_w8_lm_head"]
+        after_lm_head.update(
+            {
+                "sample_dispatches": 32,
+                "sample_rows": 256,
+                "sample_w8a8_dispatches": 32,
+                "max_batch_rows": 8,
+                "max_sample_top_k": serve.SAMPLED_PROFILE_TOP_K,
+            }
+        )
 
         values = serve.sampled_profile_metric_values(results, before, after)
 
@@ -1861,8 +1886,60 @@ class ServeMixedLoadTests(unittest.TestCase):
             values["sampled_profile_batching_batched_decode_forward_count"], 31
         )
         self.assertEqual(
+            values["sampled_profile_rocm_w8_lm_head_sample_dispatch_count"], 32
+        )
+        self.assertEqual(
+            values["sampled_profile_rocm_w8_lm_head_sample_row_count"], 256
+        )
+        self.assertEqual(
             serve.sampled_profile_contract_failures(values), []
         )
+
+        w8a16 = dict(values)
+        w8a16[
+            "sampled_profile_rocm_w8_lm_head_sample_w8a16_dispatch_count"
+        ] = 1
+        w8a16[
+            "sampled_profile_rocm_w8_lm_head_sample_w8a8_dispatch_count"
+        ] = 31
+        self.assertTrue(serve.sampled_profile_contract_failures(w8a16))
+
+    def test_rocm_w8_lm_head_snapshot_and_deterministic_contract_fail_closed(self) -> None:
+        health = health_fixture(kv_autoscale=False, rocm_graphs=True)
+        self.assertEqual(
+            serve.rocm_w8_lm_head_snapshot(health),
+            health["decode_runtime"]["rocm_w8_lm_head"],
+        )
+
+        malformed = json.loads(json.dumps(health))
+        malformed["decode_runtime"]["rocm_w8_lm_head"]["unexpected"] = 1
+        with self.assertRaisesRegex(serve.QualificationError, "unexpected shape"):
+            serve.rocm_w8_lm_head_snapshot(malformed)
+
+        inconsistent = json.loads(json.dumps(health))
+        inconsistent_lm_head = inconsistent["decode_runtime"]["rocm_w8_lm_head"]
+        inconsistent_lm_head.update(
+            {
+                "sample_dispatches": 2,
+                "sample_rows": 2,
+                "sample_w8a8_dispatches": 1,
+                "max_batch_rows": 1,
+            }
+        )
+        with self.assertRaisesRegex(serve.QualificationError, "do not sum"):
+            serve.rocm_w8_lm_head_snapshot(inconsistent)
+
+        values = {
+            "completion_token_count": 256,
+            "rocm_w8_lm_head_argmax_dispatch_count": 40,
+            "rocm_w8_lm_head_argmax_row_count": 256,
+            "rocm_w8_lm_head_sample_dispatch_count": 0,
+            "rocm_w8_lm_head_sample_row_count": 0,
+            "rocm_w8_lm_head_dispatch_failure_count": 0,
+        }
+        self.assertEqual(serve.rocm_w8_lm_head_contract_failures(values), [])
+        values["rocm_w8_lm_head_argmax_row_count"] = 255
+        self.assertTrue(serve.rocm_w8_lm_head_contract_failures(values))
 
     def test_percentile_uses_r7_linear_interpolation(self) -> None:
         self.assertEqual(serve.percentile_r7([], 0.99), 0.0)
@@ -3114,6 +3191,13 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 "max_observed_active_requests": serve.MAX_ACTIVE_REQUESTS - 1,
             }
         )
+        end["decode_runtime"]["rocm_w8_lm_head"].update(
+            {
+                "argmax_dispatches": 5,
+                "argmax_rows": 15,
+                "max_batch_rows": 8,
+            }
+        )
 
         values = serve.metric_values(
             measured=[result],
@@ -3170,6 +3254,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(values["batching_batched_decode_forward_count"], 4)
         self.assertEqual(values["batching_decode_row_count"], 15)
         self.assertEqual(values["batching_mean_rows_per_forward"], 3.0)
+        self.assertEqual(values["rocm_w8_lm_head_argmax_dispatch_count"], 5)
+        self.assertEqual(values["rocm_w8_lm_head_argmax_row_count"], 15)
+        self.assertEqual(values["rocm_w8_lm_head_sample_dispatch_count"], 0)
         self.assertEqual(values["batching_max_decode_batch"], serve.MAX_DECODE_BATCH)
         self.assertEqual(
             values["batching_prefill_staging_slot_count"],
@@ -3231,6 +3318,18 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(values["external_yield_sync_failure_count"], 0)
         self.assertEqual(values["external_yield_sync_total_ms"], 75.0)
         self.assertEqual(values["external_yield_sync_max_ms"], 25.0)
+        missing = set(serve.METRIC_DEFINITIONS) - set(values)
+        self.assertTrue(missing)
+        self.assertTrue(
+            all(
+                name.startswith(("host_temperature_", "host_thermal_"))
+                for name in missing
+            )
+        )
+        values.update({name: 0 for name in missing})
+        self.assertEqual(
+            len(serve.metrics_from_values(values)), len(serve.METRIC_DEFINITIONS)
+        )
 
         with self.assertRaises(serve.QualificationError):
             serve.counter_delta({"counter": 2}, {"counter": 1}, "counter")
