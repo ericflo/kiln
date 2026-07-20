@@ -3850,15 +3850,13 @@ impl AppState {
         };
 
         // Backend storage policy owns whether requested FP8 KV cache storage is
-        // allowed by default. Some backends can still expose an explicit env
-        // opt-in when the default is disabled for performance reasons.
+        // allowed.
         let fp8_enabled = {
             let requested = memory_cfg.kv_cache_fp8;
             let policy = storage_capabilities.kv_cache_fp8_policy;
             let enabled = policy.enabled(requested);
             if requested && !enabled {
                 tracing::warn!(
-                    override_env = policy.explicit_enable_env,
                     reason = policy.disabled_reason,
                     "FP8 KV cache disabled by backend storage policy"
                 );

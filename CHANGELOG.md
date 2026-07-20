@@ -2,13 +2,18 @@
 
 ## Unreleased — bounded thinking by tokens or decode time
 
-- CUDA backend configuration: replaced fourteen backend hot-path environment
-  reads with immutable typed `accelerator.cuda_kernel_profile` policy.
-  `native_default` preserves existing accelerated dispatch without making a
-  hardware-qualification claim; `portable_fallback` declines all fourteen
-  owned routes. The v12 policy is source-tracked in CLI, API, health, trusted
-  debug, dashboard, qualification fixtures, schemas, examples, and website.
-  CUDA-specific retired per-kernel spellings are not aliases.
+- CUDA model/backend configuration: expanded the immutable profile from
+  fourteen to twenty-five hot-path route decisions and removed their direct
+  environment reads. The policy now also owns paged decode, rotary, decode QKV
+  preparation, MLP and attention fusion, RMSNorm forward/backward, L2 QK
+  normalization, dynamic-length paged decode, and GDN pre-permute. Runtime
+  policy schema v13 exposes the expanded authority everywhere the resolved
+  policy is reported.
+- The original fourteen-route CUDA profile remains source-tracked in CLI, API,
+  health, trusted debug, dashboard, qualification fixtures, schemas, examples,
+  and website. `native_default` preserves existing accelerated dispatch
+  without making a hardware-qualification claim; `portable_fallback` declines
+  every owned route. Retired per-kernel spellings are not aliases.
 - ROCm kernel policy consolidation: replaced the independent production
   model-kernel environment gates with the immutable typed
   `accelerator.rocm_kernel_profile`. `qualified` installs the complete

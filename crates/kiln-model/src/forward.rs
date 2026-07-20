@@ -19,8 +19,6 @@ use crate::backend::BackendIdentity;
 use crate::backend::capability::{
     BackendCapabilityQueries, InferenceRecurrentStatePolicy, MatmulRequest, ProjectionLoadPolicy,
     StreamingPrefillAutoDispatch, StreamingPrefillBackendPolicy, Support,
-    decode_hot_path_debug_fallback_enabled_for_backend,
-    decode_hot_path_debug_fallback_env_for_backend,
 };
 use crate::backend::{
     AttentionBackend, BackendRuntime, ConvBackend, GdnBackend, LinearBackend, PagedKvBackend,
@@ -244,8 +242,10 @@ fn fused_paged_decode_disabled(device: Device) -> bool {
     if matches!(device, Device::Rocm(_)) {
         return !crate::rocm_policy::current_rocm_kernel_policy().fused_paged_decode;
     }
-    static DISABLED: OnceLock<bool> = OnceLock::new();
-    *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok())
+    if matches!(device, Device::Cuda(_)) {
+        return !crate::cuda_policy::current_cuda_kernel_policy().fused_paged_decode;
+    }
+    false
 }
 
 /// ROCm device-resident KV pools + the native sq=1 O(n) paged-decode path
@@ -328,8 +328,7 @@ fn gdn_recurrent_step_supports_dtype(backend: &dyn BackendRuntime, dtype: DType)
 
 #[cfg(feature = "cuda")]
 fn cuda_fused_rotary_qk_disabled() -> bool {
-    static DISABLED: OnceLock<bool> = OnceLock::new();
-    *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_CUDA_ROTARY_QK").is_ok())
+    !crate::cuda_policy::current_cuda_kernel_policy().fused_rotary_qk
 }
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
@@ -337,8 +336,7 @@ fn gpu_fused_attn_decode_qkv_prep_disabled(device: &Device) -> bool {
     if matches!(device, Device::Rocm(_)) {
         return !crate::rocm_policy::current_rocm_kernel_policy().attn_decode_qkv_prep;
     }
-    static CUDA_DISABLED: OnceLock<bool> = OnceLock::new();
-    *CUDA_DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_ATTN_DECODE_QKV_PREP").is_ok())
+    !crate::cuda_policy::current_cuda_kernel_policy().attn_decode_qkv_prep
 }
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
@@ -346,8 +344,7 @@ fn gpu_fused_mlp_silu_mul_disabled(device: Device) -> bool {
     if matches!(device, Device::Rocm(_)) {
         return !crate::rocm_policy::current_rocm_kernel_policy().fused_mlp_silu_mul;
     }
-    static CUDA_DISABLED: OnceLock<bool> = OnceLock::new();
-    *CUDA_DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_CUDA_MLP_SILU_MUL").is_ok())
+    !crate::cuda_policy::current_cuda_kernel_policy().fused_mlp_silu_mul
 }
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
@@ -355,14 +352,21 @@ fn gpu_fused_mlp_gate_up_prefill_disabled(device: Device) -> bool {
     if matches!(device, Device::Rocm(_)) {
         return !crate::rocm_policy::current_rocm_kernel_policy().fused_mlp_gate_up_prefill;
     }
-    static CUDA_DISABLED: OnceLock<bool> = OnceLock::new();
-    *CUDA_DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_MLP_GATE_UP_PREFILL").is_ok())
+    !crate::cuda_policy::current_cuda_kernel_policy().fused_mlp_gate_up_prefill
 }
 
 #[cfg(feature = "cuda")]
 fn cuda_fused_attn_sigmoid_mul_disabled() -> bool {
-    static DISABLED: OnceLock<bool> = OnceLock::new();
-    *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_CUDA_ATTN_SIGMOID_MUL").is_ok())
+    !crate::cuda_policy::current_cuda_kernel_policy().fused_attn_sigmoid_mul
+}
+
+fn gdn_chunk_pre_permute_policy_enabled(device: &Device) -> bool {
+    #[cfg(feature = "cuda")]
+    if matches!(device, Device::Cuda(_)) {
+        return crate::cuda_policy::current_cuda_kernel_policy().gdn_chunk_pre_permute;
+    }
+    let _ = device;
+    true
 }
 
 /// Constructor stub for the Phase 7 `PagedKvCacheKt` migration (#1082).
@@ -903,23 +907,9 @@ fn any_kt_tensor_tracks_op(tensors: &[&kiln_tensor::Tensor]) -> bool {
     tensors.iter().any(|tensor| tensor.track_op())
 }
 
-fn env_truthy_for_profile(name: &str) -> bool {
-    env_truthy(name)
-}
-
-fn env_truthy(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            !matches!(value.as_str(), "" | "0" | "false" | "off" | "no")
-        })
-        .unwrap_or(false)
-}
-
 #[cfg(feature = "metal")]
 fn metal_streaming_gdn_forward_only_fastpaths_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_truthy("KILN_ENABLE_METAL_GDN_STREAMING_FASTPATHS"))
+    false
 }
 
 #[cfg(feature = "rocm")]
@@ -945,8 +935,7 @@ fn streaming_gdn_forward_only_fastpaths_allowed(device: &Device) -> bool {
 }
 
 fn weighted_lm_head_prep_disabled() -> bool {
-    static DISABLED: OnceLock<bool> = OnceLock::new();
-    *DISABLED.get_or_init(|| env_truthy_for_profile("KILN_DISABLE_WEIGHTED_LM_HEAD_PREP"))
+    false
 }
 
 fn synchronize_for_profile(device: &Device) -> Result<()> {
@@ -4292,23 +4281,6 @@ fn dropped_bf16_stub(device: &Device) -> Result<Tensor> {
     )?)
 }
 
-/// Kill switch for the Marlin BF16 residency cleanup. Setting
-/// `KILN_DISABLE_MARLIN_BF16_DROP=1` keeps the full-size `*_proj_t`
-/// contiguous copies resident alongside the packed Marlin weights so the
-/// previous behaviour can be reproduced for A/B measurements or parity
-/// debugging. Any unset value leaves the drop enabled.
-fn marlin_bf16_drop_disabled() -> bool {
-    matches!(
-        std::env::var("KILN_DISABLE_MARLIN_BF16_DROP")
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    )
-}
-
 // ---------------------------------------------------------------------------
 // Phase 7: streaming/tiled GDN prefill execution policy.
 //
@@ -5029,49 +5001,37 @@ struct MarlinPackEntry {
     kind: MarlinPackKind,
 }
 
-/// Install a successfully packed projection into its target layer slot,
-/// and drop the corresponding pre-transposed BF16 copy unless
-/// `KILN_DISABLE_MARLIN_BF16_DROP=1` has preserved it.
+/// Install a successfully packed projection into its target layer slot and
+/// drop the corresponding pre-transposed BF16 copy.
 fn install_marlin_packed(
     layer: &mut GpuLayerWeights,
     kind: MarlinPackKind,
     packed: crate::marlin_proj::MarlinPackedProj,
     device: &Device,
-    drop_disabled: bool,
 ) -> Result<()> {
     match kind {
         MarlinPackKind::QProj => {
             if let GpuAttentionWeights::Full(ref mut full) = layer.attention {
                 full.q_proj_marlin = Some(packed);
-                if !drop_disabled {
-                    full.q_proj_t = dropped_bf16_stub(device)?;
-                }
+                full.q_proj_t = dropped_bf16_stub(device)?;
             }
         }
         MarlinPackKind::GateProj => {
             layer.mlp.gate_proj_marlin = Some(packed);
-            if !drop_disabled {
-                layer.mlp.gate_proj_t = dropped_bf16_stub(device)?;
-            }
+            layer.mlp.gate_proj_t = dropped_bf16_stub(device)?;
         }
         MarlinPackKind::UpProj => {
             layer.mlp.up_proj_marlin = Some(packed);
-            if !drop_disabled {
-                layer.mlp.up_proj_t = dropped_bf16_stub(device)?;
-            }
+            layer.mlp.up_proj_t = dropped_bf16_stub(device)?;
         }
         MarlinPackKind::DownProj => {
             layer.mlp.down_proj_marlin = Some(packed);
-            if !drop_disabled {
-                layer.mlp.down_proj_t = dropped_bf16_stub(device)?;
-            }
+            layer.mlp.down_proj_t = dropped_bf16_stub(device)?;
         }
         MarlinPackKind::GdnOutProj => {
             if let GpuAttentionWeights::Linear(ref mut lin) = layer.attention {
                 lin.out_proj_marlin = Some(packed);
-                if !drop_disabled {
-                    lin.out_proj_t = dropped_bf16_stub(device)?;
-                }
+                lin.out_proj_t = dropped_bf16_stub(device)?;
             }
         }
     }
@@ -5119,22 +5079,15 @@ fn flush_marlin_pack_inputs(
         if parallel { "parallel" } else { "serial" }
     );
 
-    let drop_disabled = marlin_bf16_drop_disabled();
     for (entry, maybe_packed) in metadata.into_iter().zip(packed.into_iter()) {
         if let Some(packed) = maybe_packed {
-            install_marlin_packed(
-                &mut layers[entry.layer_idx],
-                entry.kind,
-                packed,
-                device,
-                drop_disabled,
-            )
-            .with_context(|| {
-                format!(
-                    "install marlin {:?} on layer {}",
-                    entry.kind, entry.layer_idx
-                )
-            })?;
+            install_marlin_packed(&mut layers[entry.layer_idx], entry.kind, packed, device)
+                .with_context(|| {
+                    format!(
+                        "install marlin {:?} on layer {}",
+                        entry.kind, entry.layer_idx
+                    )
+                })?;
         }
     }
     Ok(())
@@ -6294,9 +6247,8 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
 
     #[cfg(feature = "cuda")]
     {
-        let kernel_disabled = std::env::var("KILN_DISABLE_RMSNORM_KERNEL").is_ok();
-        let bwd_disabled = std::env::var("KILN_DISABLE_RMSNORM_BACKWARD").is_ok();
-        if !kernel_disabled && !bwd_disabled {
+        let cuda_policy = crate::cuda_policy::current_cuda_kernel_policy();
+        if cuda_policy.fused_rmsnorm && cuda_policy.rmsnorm_backward {
             if !x.track_op() && !weight.track_op() {
                 if let (Some(x_kt), Some(w_kt)) =
                     (try_borrow_kt_cuda(x), try_borrow_kt_cuda(weight))
@@ -8006,33 +7958,15 @@ fn gpu_training_mlp_chunking_disabled(device: &Device) -> bool {
     if matches!(device, Device::Rocm(_)) {
         return !crate::rocm_policy::current_rocm_kernel_policy().training_mlp_chunking;
     }
-    static CUDA_DISABLED: OnceLock<bool> = OnceLock::new();
-    *CUDA_DISABLED.get_or_init(|| {
-        env_truthy("KILN_DISABLE_CUDA_TRAINING_MLP_CHUNKING")
-            || env_truthy("KILN_DISABLE_GPU_TRAINING_MLP_CHUNKING")
-    })
+    false
 }
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 fn gpu_training_mlp_chunk_tokens(device: &Device) -> usize {
     match device {
         Device::Rocm(_) => rocm_training_mlp_chunk_tokens(),
-        _ => generic_cuda_training_mlp_chunk_tokens(),
+        _ => 1024,
     }
-}
-
-#[cfg(any(feature = "cuda", feature = "rocm"))]
-fn generic_cuda_training_mlp_chunk_tokens() -> usize {
-    static CHUNK_TOKENS: OnceLock<usize> = OnceLock::new();
-    *CHUNK_TOKENS.get_or_init(|| {
-        training_mlp_chunk_tokens_from_env()
-            .or_else(|| {
-                std::env::var("KILN_CUDA_TRAINING_MLP_CHUNK_TOKENS")
-                    .ok()
-                    .and_then(parse_positive_usize)
-            })
-            .unwrap_or(1024)
-    })
 }
 
 #[cfg(feature = "rocm")]
@@ -8042,23 +7976,7 @@ fn rocm_training_mlp_chunk_tokens() -> usize {
 
 #[cfg(all(any(feature = "cuda", feature = "rocm"), not(feature = "rocm")))]
 fn rocm_training_mlp_chunk_tokens() -> usize {
-    generic_cuda_training_mlp_chunk_tokens()
-}
-
-#[cfg(any(feature = "cuda", feature = "rocm"))]
-fn training_mlp_chunk_tokens_from_env() -> Option<usize> {
-    std::env::var("KILN_GPU_TRAINING_MLP_CHUNK_TOKENS")
-        .ok()
-        .and_then(parse_positive_usize)
-}
-
-#[cfg(any(feature = "cuda", feature = "rocm"))]
-fn parse_positive_usize(value: String) -> Option<usize> {
-    value
-        .trim()
-        .parse::<usize>()
-        .ok()
-        .filter(|&value| value > 0)
+    1024
 }
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
@@ -10025,8 +9943,10 @@ fn gdn_qk_norm_forward(
 
     #[cfg(feature = "cuda")]
     {
-        let disabled = std::env::var("KILN_DISABLE_FUSED_L2_QK_NORM").is_ok();
-        if !disabled && fused_forward_only_allowed && input_dtype == DType::BF16 {
+        if crate::cuda_policy::current_cuda_kernel_policy().fused_l2_qk_norm
+            && fused_forward_only_allowed
+            && input_dtype == DType::BF16
+        {
             if let (Some(q_kt), Some(k_kt)) = (try_borrow_kt_cuda(q), try_borrow_kt_cuda(k)) {
                 if kiln_rmsnorm_kernel::supports_l2_qk_norm_kt(&q_kt, &k_kt) {
                     // Phase 7 (#1082): kt-only. Same closeout pattern as
@@ -10993,7 +10913,7 @@ fn gdn_chunkwise_recurrence(
         && dtype == DType::BF16
         && full_chunks > 0
         && !any_kt_tensor_tracks_op(&[q, k, v, beta, g])
-        && std::env::var("KILN_DISABLE_GDN_CHUNK_PRE_PERMUTE").is_err();
+        && gdn_chunk_pre_permute_policy_enabled(&q.device());
 
     let pre_permuted: Option<(Tensor, Tensor, Tensor, Tensor, Tensor, Option<Tensor>)> =
         if pre_permute_chunks {
@@ -14265,10 +14185,9 @@ fn gated_deltanet_forward_decode_if_inner(
                 let fused_gqa = {
                     #[cfg(feature = "cuda")]
                     {
-                        let disabled = std::env::var("KILN_DISABLE_FUSED_L2_QK_NORM").is_ok();
                         if !fused_decode_unexpanded_qk
                             && gdn_forward_only_fastpaths
-                            && !disabled
+                            && crate::cuda_policy::current_cuda_kernel_policy().fused_l2_qk_norm
                             && input_dtype == DType::BF16
                             && gqa_ratio > 1
                         {
@@ -15311,16 +15230,7 @@ fn split_q_gate_training_disabled(device: &Device) -> bool {
     if matches!(device, Device::Rocm(_)) {
         return !crate::rocm_policy::current_rocm_kernel_policy().split_q_gate_training;
     }
-    static DISABLED: OnceLock<bool> = OnceLock::new();
-    if *DISABLED.get_or_init(|| env_truthy("KILN_DISABLE_SPLIT_Q_GATE_TRAINING")) {
-        return true;
-    }
-    match device {
-        Device::Cuda(_) => env_truthy("KILN_DISABLE_CUDA_SPLIT_Q_GATE_TRAINING"),
-        Device::Rocm(_) => unreachable!("ROCm policy returned above"),
-        Device::Vulkan(_) => env_truthy("KILN_DISABLE_VULKAN_SPLIT_Q_GATE_TRAINING"),
-        _ => false,
-    }
+    false
 }
 
 fn split_q_gate_output_chunk_features_for_device(device: &Device, full_dim: usize) -> usize {
@@ -15329,13 +15239,6 @@ fn split_q_gate_output_chunk_features_for_device(device: &Device, full_dim: usiz
             .split_q_gate_output_chunk_features
             .min(full_dim)
             .max(1);
-    }
-    let env_override = std::env::var("KILN_SPLIT_Q_GATE_OUTPUT_CHUNK_FEATURES")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|&v| v > 0);
-    if let Some(v) = env_override {
-        return v.min(full_dim).max(1);
     }
     match device {
         // gfx115x hipBLASLt can return non-finite BF16 output for the giant
@@ -18702,25 +18605,17 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         // (the pre-12-B-prime working path) and only fall through to
         // dyn_seqlen when rows actually diverge.
         //
-        // CUDA/Metal migration switches; ROCm uses immutable profile policy:
-        //   KILN_DISABLE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH=1
-        //     Force strict path everywhere (debug). Will fail loudly if a
-        //     batch arrives with divergent start_pos because the strict
-        //     kernel cannot handle that shape.
-        //   KILN_FORCE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH=1
-        //     Force dyn_seqlen everywhere (A/B). Useful to reproduce the
-        //     pre-fix throughput number or to validate dyn_seqlen
-        //     correctness under uniform load.
-        // KILN_DISABLE_* takes precedence over KILN_FORCE_* if both set.
+        // ROCm and CUDA use immutable profile policy. Other backends retain
+        // automatic strict-versus-dynamic selection from request geometry.
         let rocm_policy = BackendIdentity::runtime_name(backend) == "rocm";
         let kill_dyn_seqlen = if rocm_policy {
             !crate::rocm_policy::current_rocm_kernel_policy().paged_decode_dyn_seqlen_batch
+        } else if BackendIdentity::runtime_name(backend) == "cuda" {
+            !crate::cuda_policy::current_cuda_kernel_policy().paged_decode_dyn_seqlen_batch
         } else {
-            std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH").is_ok()
+            false
         };
-        let force_dyn_seqlen = !kill_dyn_seqlen
-            && !rocm_policy
-            && std::env::var("KILN_FORCE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH").is_ok();
+        let force_dyn_seqlen = false;
         // Short-circuit the strict probe on backends that have no
         // strict_paged_decode_contiguous_batch kernel impl. The probe
         // would `Tensor::from_slice` build a `[batch] u32 start_slots`
@@ -19519,14 +19414,10 @@ fn gqa_attention_paged_with_rope_tables(
             return Ok(out);
         }
         let portable_lora_fallback = lora_layer.is_some() && portable_lora_decode_allowed(backend);
-        if native_decode_attention_required(backend)
-            && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
-            && !portable_lora_fallback
-        {
-            let fallback_env = decode_hot_path_debug_fallback_env_for_backend(backend);
+        if native_decode_attention_required(backend) && !portable_lora_fallback {
             anyhow::bail!(
                 "native paged decode declined native paged-attention path; \
-                 generic fallback disabled (set {fallback_env}=1 to opt in)"
+                 generic fallback disabled by backend policy"
             );
         }
         #[cfg(feature = "vulkan")]
@@ -21253,13 +21144,10 @@ pub fn model_forward_paged_decode_contiguous_batch_hidden_with_ids(
             return Ok(hidden);
         }
 
-        if native_resident_decode_required(backend, token_ids, start_positions, config, lora)
-            && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
-        {
-            let fallback_env = decode_hot_path_debug_fallback_env_for_backend(backend);
+        if native_resident_decode_required(backend, token_ids, start_positions, config, lora) {
             anyhow::bail!(
                 "batched hidden decode declined native resident path; \
-                 generic fallback disabled (set {fallback_env}=1 to opt in)"
+                 generic fallback disabled by backend policy"
             );
         }
     }
@@ -21926,9 +21814,6 @@ fn try_vulkan_resident_batched_decode_argmax(
         .any(|layer| matches!(layer.attention, GpuAttentionWeights::Linear(_)));
     let empty_states: &[Tensor] = &[];
     let (recurrent_states, conv_states): (&[Tensor], &[Tensor]) = if has_linear_layers {
-        if std::env::var("KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER").is_ok() {
-            return Ok(None);
-        }
         let Some(state) = linear_state else {
             return Ok(None);
         };
@@ -22057,9 +21942,6 @@ fn try_vulkan_resident_batched_decode_hidden(
         .any(|layer| matches!(layer.attention, GpuAttentionWeights::Linear(_)));
     let empty_states: &[Tensor] = &[];
     let (recurrent_states, conv_states): (&[Tensor], &[Tensor]) = if has_linear_layers {
-        if std::env::var("KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER").is_ok() {
-            return Ok(None);
-        }
         let Some(state) = linear_state else {
             return Ok(None);
         };
@@ -22206,9 +22088,6 @@ fn try_vulkan_resident_batched_decode_sample(
         .any(|layer| matches!(layer.attention, GpuAttentionWeights::Linear(_)));
     let empty_states: &[Tensor] = &[];
     let (recurrent_states, conv_states): (&[Tensor], &[Tensor]) = if has_linear_layers {
-        if std::env::var("KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER").is_ok() {
-            return Ok(None);
-        }
         let Some(state) = linear_state else {
             return Ok(None);
         };
@@ -22371,13 +22250,10 @@ pub fn model_forward_paged_decode_contiguous_batch_greedy_with_ids(
             return Ok(next_tokens);
         }
 
-        if native_resident_decode_required(backend, token_ids, start_positions, config, lora)
-            && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
-        {
-            let fallback_env = decode_hot_path_debug_fallback_env_for_backend(backend);
+        if native_resident_decode_required(backend, token_ids, start_positions, config, lora) {
             anyhow::bail!(
                 "greedy decode declined native resident path; \
-                 generic fallback disabled (set {fallback_env}=1 to opt in)"
+                 generic fallback disabled by backend policy"
             );
         }
     }
@@ -23057,13 +22933,10 @@ pub fn model_forward_paged(
             }
         }
 
-        if native_resident_decode_required(backend, token_ids, &[start_pos], config, lora)
-            && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
-        {
-            let fallback_env = decode_hot_path_debug_fallback_env_for_backend(backend);
+        if native_resident_decode_required(backend, token_ids, &[start_pos], config, lora) {
             anyhow::bail!(
                 "decode declined native resident path; \
-                 generic fallback disabled (set {fallback_env}=1 to opt in)"
+                 generic fallback disabled by backend policy"
             );
         }
     }
@@ -23304,13 +23177,10 @@ pub fn model_forward_paged_last_token(
             }
         }
 
-        if native_resident_decode_required(backend, token_ids, &[start_pos], config, lora)
-            && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
-        {
-            let fallback_env = decode_hot_path_debug_fallback_env_for_backend(backend);
+        if native_resident_decode_required(backend, token_ids, &[start_pos], config, lora) {
             anyhow::bail!(
                 "last-token decode declined native resident path; \
-                 generic fallback disabled (set {fallback_env}=1 to opt in)"
+                 generic fallback disabled by backend policy"
             );
         }
     }
@@ -23979,13 +23849,10 @@ pub fn model_forward_paged_last_token_greedy(
             }
         }
 
-        if native_resident_decode_required(backend, token_ids, &start_positions, config, lora)
-            && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
-        {
-            let fallback_env = decode_hot_path_debug_fallback_env_for_backend(backend);
+        if native_resident_decode_required(backend, token_ids, &start_positions, config, lora) {
             anyhow::bail!(
                 "greedy decode declined native resident path; \
-                 generic fallback disabled (set {fallback_env}=1 to opt in)"
+                 generic fallback disabled by backend policy"
             );
         }
     }
@@ -24606,15 +24473,11 @@ pub fn model_forward_paged_batched_decode_hidden(
                 ) {
                     Ok(out) => hidden = out,
                     Err(err) => {
-                        if native_decode_attention_required(backend)
-                            && !decode_hot_path_debug_fallback_enabled_for_backend(backend)
-                        {
-                            let fallback_env =
-                                decode_hot_path_debug_fallback_env_for_backend(backend);
+                        if native_decode_attention_required(backend) {
                             return Err(err).with_context(|| {
                                 format!(
                                     "batched full-attention decode layer {layer_idx} declined; \
-                                     rowwise fallback disabled (set {fallback_env}=1 to opt in)"
+                                     rowwise fallback disabled by backend policy"
                                 )
                             });
                         }
@@ -26102,16 +25965,6 @@ mod tests {
     use super::*;
     use crate::backend::cpu::CpuBackend;
 
-    /// Module-local mutex for tests that mutate process-wide env vars
-    /// (residency kill-switches, projection drop overrides). Serialises
-    /// those tests against each other so `nextest`'s parallel execution
-    /// doesn't observe a half-mutated environment.
-    ///
-    /// Module-local because `kiln_core::env_flag::TEST_ENV_LOCK` is
-    /// `cfg(test)`-gated and only visible inside kiln-core's own test
-    /// build — from another crate's tests it appears unresolved.
-    static RESIDENCY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn graph_stable_paged_metadata_keeps_bucketed_kernel_bound() -> Result<()> {
         let cache = crate::PagedKvCacheKt::new(0, 8, 64, 1, 8, DType::BF16, Device::Cpu)?;
@@ -26612,45 +26465,27 @@ mod tests {
 
     /// Regression test for the 2026-05-12 → 2026-05-14 silent inference
     /// outage. Commit 997a608f widened the projection-load transpose drop
-    /// decision from "training is engaged" to "Vulkan is the active backend OR
-    /// training is engaged", which silently replaced every projection
+    /// decision when Vulkan was active, which silently replaced every projection
     /// transpose tensor (`in_proj_qkv_t`, `in_proj_z_t`, `out_proj_t`,
     /// `q_proj_t`, etc.) with `Tensor::zeros((1,), DType::BF16, ...)` at
     /// load time. Inference reads those caches directly via
     /// `LinearBackend::runtime_linear_prefill_apply`, and the GDN prefill
     /// kernel then bailed out with `only 2d matrixes are supported [1, T, hidden] [1]`
     /// on every single /v1/chat/completions request. The fix narrowed the gate
-    /// back to "training is engaged" (KILN_VK_NATIVE_TRAINING set);
-    /// `ProjectionLoadPolicy` stays Vulkan-aware for originals because the
-    /// trainer needs them later.
+    /// back to retaining transposes. `ProjectionLoadPolicy` stays Vulkan-aware
+    /// for originals because the trainer needs them later.
     ///
     /// This test pins the contract: turning Vulkan on must NOT drop
     /// transposes by itself.
     #[test]
     fn vulkan_active_alone_does_not_drop_projection_transposes() {
-        let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: env mutation serialized by RESIDENCY_ENV_LOCK.
-        unsafe {
-            std::env::remove_var("KILN_VK_NATIVE_TRAINING");
-            std::env::remove_var("KILN_KEEP_PROJECTION_TRANSPOSES");
-        }
         let _vk = crate::backend::test_only_set_vulkan_active(true);
         assert!(
             !ProjectionLoadPolicy::for_model_loader_device(Device::Cpu).drop_projection_transposes,
             "ProjectionLoadPolicy must NOT drop projection transposes just \
              because Vulkan is active — that breaks every chat completion on \
-             Vulkan with `only 2d matrixes are supported [..., hidden] [1]`. \
-             Only KILN_VK_NATIVE_TRAINING should opt in to dropping transposes."
+             Vulkan with `only 2d matrixes are supported [..., hidden] [1]`."
         );
-        // Sanity: enabling training mode flips it on.
-        // SAFETY: env mutation serialized by RESIDENCY_ENV_LOCK.
-        unsafe { std::env::set_var("KILN_VK_NATIVE_TRAINING", "1") };
-        assert!(
-            ProjectionLoadPolicy::for_model_loader_device(Device::Cpu).drop_projection_transposes,
-            "KILN_VK_NATIVE_TRAINING=1 should still enable transpose drop"
-        );
-        // SAFETY: env cleanup serialized by RESIDENCY_ENV_LOCK.
-        unsafe { std::env::remove_var("KILN_VK_NATIVE_TRAINING") };
     }
 
     /// Tests all run on `Device::Cpu`, so the `CpuBackend` (all kernel methods
@@ -27214,121 +27049,23 @@ mod tests {
         // builds, which is what the negative assertion above covers.
     }
 
-    /// `marlin_bf16_drop_disabled()` must default to `false` (i.e.,
-    /// drop *enabled*) — that's the contract on the Vulkan training
-    /// path. The kill-switch `KILN_DISABLE_MARLIN_BF16_DROP=1` is the
-    /// only thing that should re-enable the duplicate BF16 residency.
-    ///
-    /// Pins the residency-audit claim that Marlin-absorbed BF16
-    /// weights are stubbed by default. A regression that flips the
-    /// default would silently double base-model footprint on the
-    /// candle CPU side.
-    #[test]
-    fn test_marlin_bf16_drop_default_is_enabled() {
-        let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Save & clear the env var so the test reads the pure default.
-        let prior = std::env::var("KILN_DISABLE_MARLIN_BF16_DROP").ok();
-        unsafe {
-            std::env::remove_var("KILN_DISABLE_MARLIN_BF16_DROP");
-        }
-        let result = marlin_bf16_drop_disabled();
-        // Restore the prior env state for any later test in this process.
-        if let Some(prev) = prior {
-            unsafe {
-                std::env::set_var("KILN_DISABLE_MARLIN_BF16_DROP", prev);
-            }
-        }
-        assert!(!result, "marlin BF16 drop must be enabled by default");
-    }
-
-    /// Kill-switch must actually fire — `KILN_DISABLE_MARLIN_BF16_DROP=1`
-    /// disables the drop. Exercises the parsing logic so a typo in the
-    /// matcher (e.g. lower-casing missing) would be caught.
-    #[test]
-    fn test_marlin_bf16_drop_kill_switch_fires() {
-        let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prior = std::env::var("KILN_DISABLE_MARLIN_BF16_DROP").ok();
-        for value in &["1", "true", "TRUE", "yes", "Yes"] {
-            unsafe {
-                std::env::set_var("KILN_DISABLE_MARLIN_BF16_DROP", value);
-            }
-            assert!(
-                marlin_bf16_drop_disabled(),
-                "KILN_DISABLE_MARLIN_BF16_DROP={value} must disable the drop"
-            );
-        }
-        if let Some(prev) = prior {
-            unsafe {
-                std::env::set_var("KILN_DISABLE_MARLIN_BF16_DROP", prev);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("KILN_DISABLE_MARLIN_BF16_DROP");
-            }
-        }
-    }
-
-    /// `KILN_KEEP_PROJECTION_ORIGINALS` must default to off: projection
-    /// originals remain eligible for the drop on the backends that ask for it.
+    /// Projection originals remain eligible for the drop on backends whose
+    /// immutable storage policy asks for it.
     #[test]
     fn test_keep_projection_originals_default_off() {
-        let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prior = std::env::var("KILN_KEEP_PROJECTION_ORIGINALS").ok();
-        unsafe {
-            std::env::remove_var("KILN_KEEP_PROJECTION_ORIGINALS");
-        }
         let result =
             ProjectionLoadPolicy::for_backend("cuda", Device::Cpu).drop_projection_originals;
-        if let Some(prev) = prior {
-            unsafe {
-                std::env::set_var("KILN_KEEP_PROJECTION_ORIGINALS", prev);
-            }
-        }
         assert!(
             result,
-            "KILN_KEEP_PROJECTION_ORIGINALS must default to off (drop allowed on CUDA)"
+            "CUDA policy must drop redundant projection originals"
         );
     }
 
-    /// `KILN_KEEP_PROJECTION_ORIGINALS=1` must override the default
-    /// and keep the originals resident — required for A/B parity
-    /// debugging.
-    #[test]
-    fn test_keep_projection_originals_kill_switch_fires() {
-        let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prior = std::env::var("KILN_KEEP_PROJECTION_ORIGINALS").ok();
-        for value in &["1", "true", "yes"] {
-            unsafe {
-                std::env::set_var("KILN_KEEP_PROJECTION_ORIGINALS", value);
-            }
-            assert!(
-                !ProjectionLoadPolicy::for_backend("cuda", Device::Cpu).drop_projection_originals,
-                "KILN_KEEP_PROJECTION_ORIGINALS={value} must keep the originals"
-            );
-        }
-        if let Some(prev) = prior {
-            unsafe {
-                std::env::set_var("KILN_KEEP_PROJECTION_ORIGINALS", prev);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("KILN_KEEP_PROJECTION_ORIGINALS");
-            }
-        }
-    }
-
     /// Projection original drop is `false` on plain CPU absent any overrides.
-    /// The Vulkan-active and KILN_DROP_PROJECTION_ORIGINALS branches are
-    /// exercised by integration runs, but the CPU baseline is what this pins.
+    /// The Vulkan-active branch is exercised by integration runs, but the CPU
+    /// baseline is what this pins.
     #[test]
     fn test_projection_drop_cpu_default_off() {
-        let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prior_keep = std::env::var("KILN_KEEP_PROJECTION_ORIGINALS").ok();
-        let prior_drop = std::env::var("KILN_DROP_PROJECTION_ORIGINALS").ok();
-        unsafe {
-            std::env::remove_var("KILN_KEEP_PROJECTION_ORIGINALS");
-            std::env::remove_var("KILN_DROP_PROJECTION_ORIGINALS");
-        }
         let result = if !crate::backend::vulkan_active() {
             // Safe to assert: vulkan_active=false makes the device
             // pattern-match the only deciding factor for Device::Cpu.
@@ -27339,16 +27076,6 @@ mod tests {
         } else {
             None
         };
-        if let Some(prev) = prior_keep {
-            unsafe {
-                std::env::set_var("KILN_KEEP_PROJECTION_ORIGINALS", prev);
-            }
-        }
-        if let Some(prev) = prior_drop {
-            unsafe {
-                std::env::set_var("KILN_DROP_PROJECTION_ORIGINALS", prev);
-            }
-        }
         if let Some(res) = result {
             assert!(
                 !res,

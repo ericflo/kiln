@@ -23,10 +23,9 @@
 //! (Var→`kiln_param::Parameter`, optimizer→`kiln_optim::AdamW`), so these
 //! wrappers pick up the kt path transparently once E1 lands.
 //!
-//! The symbols stay so the server's `KILN_CUDA_NATIVE_TRAINING=1`
-//! routing (`kiln-server::training_queue` / `bench`) keeps a stable
-//! function to call without needing to know that the CUDA-native step no
-//! longer has a hand-rolled engine of its own.
+//! The symbols stay as stable typed entry points for callers that explicitly
+//! select the legacy CUDA-native route. Kiln's server policy does not select
+//! that route by default because it no longer has a distinct engine.
 
 use anyhow::Result;
 

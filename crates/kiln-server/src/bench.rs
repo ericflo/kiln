@@ -2714,11 +2714,8 @@ fn bench_training(
     #[cfg(not(feature = "cuda"))]
     let result = {
         if native_route_enabled {
-            let native_route_env = server_training_dispatch
-                .native_training_env
-                .unwrap_or("backend_native_training_policy");
             eprintln!(
-                "    Native training route enabled via {native_route_env}, but kiln-bench was \
+                "    Native training route enabled by backend policy, but kiln-bench was \
                  built without --features cuda; falling back to kt-tape SFT"
             );
         }

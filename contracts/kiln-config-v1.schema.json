@@ -381,12 +381,12 @@
             "portable_fallback"
           ],
           "default": "native_default",
-          "description": "native_default or portable_fallback, case-insensitive. native_default preserves the fourteen CUDA backend routes that were enabled by default before consolidation; this name deliberately makes no current-hardware qualification claim. portable_fallback declines every owned route. The complete route set is installed before CUDA backend construction, immutable for the process lifetime, and reported with source attribution. Restart required.",
+          "description": "native_default or portable_fallback, case-insensitive. native_default preserves the twenty-five CUDA model/backend routes that were enabled by default before consolidation; this name deliberately makes no current-hardware qualification claim. portable_fallback declines every owned route. The complete route set is installed before CUDA backend construction, immutable for the process lifetime, and reported with source attribution. Restart required.",
           "x-kiln-path": "accelerator.cuda_kernel_profile",
           "x-kiln-type-and-default": "string enum; \"native_default\"",
           "x-kiln-canonical-env": "KILN_ACCELERATOR_CUDA_KERNEL_PROFILE (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-validation": "native_default or portable_fallback, case-insensitive. native_default preserves the fourteen CUDA backend routes that were enabled by default before consolidation; this name deliberately makes no current-hardware qualification claim. portable_fallback declines every owned route. The complete route set is installed before CUDA backend construction, immutable for the process lifetime, and reported with source attribution. Restart required."
+          "x-kiln-validation": "native_default or portable_fallback, case-insensitive. native_default preserves the twenty-five CUDA model/backend routes that were enabled by default before consolidation; this name deliberately makes no current-hardware qualification claim. portable_fallback declines every owned route. The complete route set is installed before CUDA backend construction, immutable for the process lifetime, and reported with source attribution. Restart required."
         },
         "rocm_synchronization_mode": {
           "type": "string",

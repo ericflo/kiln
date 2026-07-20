@@ -1134,9 +1134,9 @@ mod tests {
         assert_eq!(json["cuda_graphs"]["restart_required_to_change"], true);
         assert_eq!(
             json["accelerator_runtime"]["schema_id"],
-            "kiln.accelerator-runtime-policy.v12"
+            "kiln.accelerator-runtime-policy.v13"
         );
-        assert_eq!(json["accelerator_runtime"]["version"], 12);
+        assert_eq!(json["accelerator_runtime"]["version"], 13);
         assert_eq!(
             json["accelerator_runtime"]["vulkan_kernel_policy_schema_id"],
             "kiln.vulkan-kernel-policy.v3"

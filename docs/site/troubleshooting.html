@@ -477,8 +477,8 @@ curl -s http://localhost:8420/metrics \
         <h3 id="cuda-kernel-profile-diagnosis" class="text-lg font-semibold mt-6 mb-2">CUDA backend-profile diagnosis</h3>
         <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
           Inspect <code>accelerator_runtime.cuda_kernel_profile</code> before attributing a CUDA route change.
-          <code>native_default</code> preserves the fourteen established backend routes but is not itself a
-          qualification claim; <code>portable_fallback</code> declines all fourteen. The policy is immutable
+          <code>native_default</code> preserves the twenty-five established model/backend routes but is not itself a
+          qualification claim; <code>portable_fallback</code> declines all twenty-five. The policy is immutable
           after startup and its source identifies TOML, canonical environment override, or default ownership.
         </p>
         <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config \
@@ -486,8 +486,8 @@ curl -s http://localhost:8420/metrics \
         <ul class="list-disc pl-5 mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
           <li>Use <code>accelerator.cuda_kernel_profile = "portable_fallback"</code> only as a whole-profile comparison, restart, and preserve both resolved config objects with the same model, request, seed, batch, and memory policy.</li>
           <li>Do not use former CUDA-specific per-kernel environment switches. They are not aliases and cannot establish which route ran.</li>
-          <li>A difference between profiles localizes the problem to one of the fourteen documented backend routes; it does not identify a particular route. Use route counters, profiler evidence, and a focused reproduction before drawing that conclusion.</li>
-          <li>Controls outside the fourteen backend-owned routes remain separate migration work. The profile must not be interpreted as a complete CUDA qualification or as authority over graph, forward, training, or Marlin controls not listed in the architecture table.</li>
+          <li>A difference between profiles localizes the problem to one of the twenty-five documented model/backend routes; it does not identify a particular route. Use route counters, profiler evidence, and a focused reproduction before drawing that conclusion.</li>
+          <li>The profile includes the documented forward and training routes, but is not a complete CUDA qualification and makes no claim about graph or Marlin behavior outside the architecture table.</li>
         </ul>
         <h3 id="vulkan-kernel-policy-diagnosis" class="text-lg font-semibold mt-6 mb-2">Vulkan kernel-policy diagnosis</h3>
         <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">

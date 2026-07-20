@@ -152,15 +152,7 @@ impl RocmCaptureArena {
                 }
                 let storage = buf.storage.clone();
                 let view = self.borrow_view(dtype, &storage)?;
-                // KILN_ARENA_FORCE_ZERO=1 forces a captured per-replay memset on
-                // EVERY arena buffer (not just `zero=true` ones) — the same
-                // box-102 BUG2 diagnostic as the CUDA path: if it un-freezes
-                // late layers on replay, an uninitialized (`zero=false`) arena
-                // buffer is being read stale by a kernel that doesn't fully
-                // overwrite it. Off by default; zero production cost.
-                let force_zero =
-                    std::env::var("KILN_ARENA_FORCE_ZERO").ok().as_deref() == Some("1");
-                if zero || force_zero {
+                if zero {
                     // Captured memset on the active (capture) stream — recorded
                     // into the graph so every replay re-zeros the buffer.
                     self.memset_zero(&storage)?;

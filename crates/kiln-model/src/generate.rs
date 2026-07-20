@@ -127,12 +127,6 @@ fn paged_cache_device(
     }
 }
 
-fn fast_batched_linear_state_scatter_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER").is_err())
-}
-
 fn skip_final_gdn_state_readback_enabled() -> bool {
     #[cfg(feature = "vulkan")]
     {
@@ -255,38 +249,6 @@ pub(crate) fn row_has_noncontiguous_kv_tiles(
         c += pages_per_chunk;
     }
     false
-}
-
-fn gdn_batched_decode_row_loop_debug_enabled() -> bool {
-    // Flipped to false-by-default after the matmul broadcast-copy fix made
-    // the true-batched contiguous-batch path strictly faster than the
-    // row-loop at every bs > 1. nsys profile (May 2026) showed candle's
-    // `broadcast_matmul` materializing a 168 MB BF16 weight copy across the
-    // batch dim before every GDN in-proj matmul, which made the batched
-    // path slower than just running N row-loop iterations sequentially.
-    // With that copy removed, bs=16 jumped from a flat ~100 tok/s ceiling
-    // to 790 tok/s (7.8×) on L40S + Qwen3.5-4B. Opt back into the row-loop
-    // with `KILN_ENABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP=1` (the old
-    // `KILN_DISABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP` env var is still
-    // honored for symmetry with prior docs / rollback runbooks — when set
-    // to anything other than "0"/"false"/"off" it keeps the row-loop off).
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        // Legacy disable knob: when set to a truthy value, row-loop stays off
-        // (i.e. continues to use the new true-batched path).
-        if std::env::var("KILN_DISABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP").is_ok() {
-            return false;
-        }
-        // New opt-in knob to re-enable the row-loop fallback for debug /
-        // rollback. Recognizes the common truthy spellings.
-        match std::env::var("KILN_ENABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP")
-            .ok()
-            .as_deref()
-        {
-            Some("1" | "true" | "TRUE" | "yes" | "on" | "ON") => true,
-            _ => false,
-        }
-    })
 }
 
 /// Holds loaded model weights and tokenizer, provides text generation.
@@ -1628,26 +1590,7 @@ pub struct DecodeBatcherConfig {
     pub allow_mixed_seq_lens: bool,
 }
 
-fn env_flag_value(name: &str) -> Option<bool> {
-    let value = std::env::var(name).ok()?;
-    match value.trim().to_ascii_lowercase().as_str() {
-        "0" | "false" | "off" | "no" => Some(false),
-        "1" | "true" | "on" | "yes" => Some(true),
-        _ => None,
-    }
-}
-
-fn env_flag_enabled(name: &str, default: bool) -> bool {
-    env_flag_value(name).unwrap_or(default)
-}
-
 fn decode_batcher_rowwise_retry_enabled(backend: &dyn BackendRuntime) -> bool {
-    let policy = BackendCapabilityQueries::backend_capabilities(backend).decode_batcher;
-    if let Some(env_var) = policy.rowwise_retry_env
-        && env_flag_enabled(env_var, false)
-    {
-        return true;
-    }
     decode_hot_path_fallback_policy_for_backend(backend).allows_fallback()
 }
 
@@ -1724,7 +1667,7 @@ fn decode_hot_path_fallback_disabled_context(
 ) -> String {
     format!(
         "{operation}; fallback policy {:?} for {} decode hot path \
-         (set KILN_DECODE_HOT_PATH_DEBUG_FALLBACK=1 to opt in)",
+         forbids a generic retry",
         decode_hot_path_fallback_policy_for_backend(backend),
         BackendIdentity::runtime_name(backend)
     )
@@ -6806,23 +6749,20 @@ impl ModelRunner {
         let decode_policy =
             BackendCapabilityQueries::backend_capabilities(self.backend.as_ref()).decode_batcher;
         if decode_policy.partition_noncontiguous_gdn_kv_tiles && has_linear_layers {
-            let row_loop_all = gdn_batched_decode_row_loop_debug_enabled();
             let block_size = paged_cache.block_size();
             let noncontig: Vec<bool> = (0..batch)
                 .map(|row| {
-                    row_loop_all
-                        || row_has_noncontiguous_kv_tiles(
-                            block_tables[row].blocks.as_slice(),
-                            seq_lens[row],
-                            block_size,
-                        )
+                    row_has_noncontiguous_kv_tiles(
+                        block_tables[row].blocks.as_slice(),
+                        seq_lens[row],
+                        block_size,
+                    )
                 })
                 .collect();
             let n_noncontig = noncontig.iter().filter(|&&x| x).count();
 
             if n_noncontig == batch {
-                // Every row fragmented (or debug row-loop-all): the original
-                // contiguity-safe per-row loop, unchanged.
+                // Every row fragmented: use the contiguity-safe per-row loop.
                 let mut tokens = Vec::with_capacity(batch);
                 for row in 0..batch {
                     let linear_state =
@@ -7058,12 +6998,8 @@ impl ModelRunner {
             }
         };
         if let Some(state) = batch_state.as_ref() {
-            if fast_batched_linear_state_scatter_enabled() {
-                if !state.scatter_gdn_state_resident_batch_rows_kt(&*self.backend, linear_states)? {
-                    state.scatter_batch_rows_replace(linear_states)?;
-                }
-            } else {
-                state.scatter_batch_rows(linear_states)?;
+            if !state.scatter_gdn_state_resident_batch_rows_kt(&*self.backend, linear_states)? {
+                state.scatter_batch_rows_replace(linear_states)?;
             }
         }
         // Park the (now updated) batched state back in the cache so the
@@ -7309,12 +7245,8 @@ impl ModelRunner {
         };
 
         if let Some(state) = batch_state.as_ref() {
-            if fast_batched_linear_state_scatter_enabled() {
-                if !state.scatter_gdn_state_resident_batch_rows_kt(&*self.backend, linear_states)? {
-                    state.scatter_batch_rows_replace(linear_states)?;
-                }
-            } else {
-                state.scatter_batch_rows(linear_states)?;
+            if !state.scatter_gdn_state_resident_batch_rows_kt(&*self.backend, linear_states)? {
+                state.scatter_batch_rows_replace(linear_states)?;
             }
         }
 
@@ -7462,12 +7394,8 @@ impl ModelRunner {
             }
         };
         if let Some(state) = batch_state.as_ref() {
-            if fast_batched_linear_state_scatter_enabled() {
-                if !state.scatter_gdn_state_resident_batch_rows_kt(&*self.backend, linear_states)? {
-                    state.scatter_batch_rows_replace(linear_states)?;
-                }
-            } else {
-                state.scatter_batch_rows(linear_states)?;
+            if !state.scatter_gdn_state_resident_batch_rows_kt(&*self.backend, linear_states)? {
+                state.scatter_batch_rows_replace(linear_states)?;
             }
         }
 
@@ -11329,14 +11257,6 @@ mod tests {
     use super::*;
     use crate::backend::FallbackPolicy;
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    const DECODE_FALLBACK_ENV: &[&str] = &[
-        "KILN_DECODE_HOT_PATH_DEBUG_FALLBACK",
-        "KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK",
-        "KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK",
-        "KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK",
-    ];
-
     #[test]
     fn profiled_decode_duration_preserves_unavailable_and_accumulates_observations() {
         let mut duration = None;
@@ -11952,39 +11872,6 @@ mod tests {
         );
         assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
-    const DECODE_BATCHER_ROWWISE_ENV: &[&str] = &["KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"];
-
-    struct EnvRestore(Vec<(&'static str, Option<String>)>);
-
-    impl EnvRestore {
-        fn clear(keys: &[&'static str]) -> Self {
-            let prior = keys
-                .iter()
-                .map(|&key| (key, std::env::var(key).ok()))
-                .collect::<Vec<_>>();
-            unsafe {
-                for &key in keys {
-                    std::env::remove_var(key);
-                }
-            }
-            Self(prior)
-        }
-    }
-
-    impl Drop for EnvRestore {
-        fn drop(&mut self) {
-            unsafe {
-                for (key, value) in &self.0 {
-                    if let Some(value) = value {
-                        std::env::set_var(key, value);
-                    } else {
-                        std::env::remove_var(key);
-                    }
-                }
-            }
-        }
-    }
-
     #[test]
     fn single_row_hip_graph_preempts_generic_greedy_batch_route() {
         assert_eq!(
@@ -12122,7 +12009,6 @@ mod tests {
             max_batch,
             wait_micros,
             allow_mixed_seq_lens,
-            rowwise_retry_env,
             use_native_sampled_contiguous_decode,
             sampled_contiguous_decode_requires_resident_decode,
             partition_noncontiguous_gdn_kv_tiles,
@@ -12133,7 +12019,6 @@ mod tests {
                 8,
                 0,
                 false,
-                None,
                 false,
                 false,
                 false,
@@ -12144,7 +12029,6 @@ mod tests {
                 1,
                 0,
                 false,
-                None,
                 false,
                 false,
                 true,
@@ -12155,7 +12039,6 @@ mod tests {
                 1,
                 0,
                 false,
-                None,
                 false,
                 false,
                 true,
@@ -12166,7 +12049,6 @@ mod tests {
                 8,
                 100,
                 true,
-                None,
                 true,
                 false,
                 false,
@@ -12177,7 +12059,6 @@ mod tests {
                 64,
                 5_000,
                 true,
-                Some("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"),
                 true,
                 true,
                 false,
@@ -12188,7 +12069,6 @@ mod tests {
                 64,
                 5_000,
                 true,
-                Some("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"),
                 true,
                 true,
                 false,
@@ -12199,7 +12079,6 @@ mod tests {
                 8,
                 0,
                 false,
-                None,
                 false,
                 false,
                 false,
@@ -12221,10 +12100,6 @@ mod tests {
             assert_eq!(
                 policy.allow_mixed_seq_lens, allow_mixed_seq_lens,
                 "{backend_name} mixed-seq policy drifted"
-            );
-            assert_eq!(
-                policy.rowwise_retry_env, rowwise_retry_env,
-                "{backend_name} rowwise retry policy drifted"
             );
             assert_eq!(
                 policy.use_native_sampled_contiguous_decode, use_native_sampled_contiguous_decode,
@@ -12271,10 +12146,6 @@ mod tests {
 
     #[test]
     fn test_decode_batcher_rowwise_retry_uses_backend_policy() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _fallback_env = EnvRestore::clear(DECODE_FALLBACK_ENV);
-        let _rowwise_env = EnvRestore::clear(DECODE_BATCHER_ROWWISE_ENV);
-
         let vulkan_cpu_sentinel = NamedTestBackend {
             name: "vulkan",
             device: kiln_tensor::Device::Cpu,
@@ -12290,60 +12161,40 @@ mod tests {
 
         assert!(!decode_batcher_rowwise_retry_enabled(&vulkan_cpu_sentinel));
         assert!(!decode_batcher_rowwise_retry_enabled(&metal));
-
-        unsafe {
-            std::env::set_var("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY", "1");
-        }
-        assert!(decode_batcher_rowwise_retry_enabled(&vulkan_cpu_sentinel));
-        assert!(
-            !decode_batcher_rowwise_retry_enabled(&metal),
-            "Vulkan rowwise retry env should not apply to Metal policy"
-        );
     }
 
     #[test]
     fn test_decode_hot_path_fallback_policy_defaults() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _env = EnvRestore::clear(DECODE_FALLBACK_ENV);
-        for (backend_name, device, expected, debug_env) in [
+        for (backend_name, device, expected) in [
             (
                 "cpu",
                 kiln_tensor::Device::Cpu,
                 FallbackPolicy::CorrectnessAllowed,
-                None,
             ),
             (
                 "cuda",
                 kiln_tensor::Device::Cuda(0),
                 FallbackPolicy::CorrectnessAllowed,
-                None,
             ),
             (
                 "metal",
                 kiln_tensor::Device::Metal(0),
                 FallbackPolicy::NativeRequired,
-                Some("KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK"),
             ),
             (
                 "vulkan",
                 kiln_tensor::Device::Vulkan(0),
                 FallbackPolicy::NativeRequired,
-                Some("KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK"),
             ),
             (
                 "rocm",
                 kiln_tensor::Device::Rocm(0),
                 FallbackPolicy::NativeRequired,
-                Some("KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK"),
             ),
         ] {
             let fallback =
                 backend::capability::BackendFallbackCapabilities::for_backend(backend_name, device);
             assert_eq!(fallback.decode_hot_path, expected);
-            assert_eq!(
-                fallback.decode_hot_path_debug_env, debug_env,
-                "{backend_name} decode debug fallback env drifted"
-            );
             let backend = NamedTestBackend {
                 name: backend_name,
                 device,
@@ -12365,85 +12216,6 @@ mod tests {
         assert_eq!(
             decode_hot_path_fallback_policy_for_backend(&vulkan_cpu_sentinel),
             FallbackPolicy::NativeRequired
-        );
-        assert_eq!(
-            backend::capability::BackendFallbackCapabilities::for_backend(
-                "vulkan",
-                kiln_tensor::Device::Cpu,
-            )
-            .decode_hot_path_debug_env,
-            Some("KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK")
-        );
-    }
-
-    #[test]
-    fn test_decode_hot_path_debug_fallback_opt_in_warns_and_counts() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _env = EnvRestore::clear(DECODE_FALLBACK_ENV);
-        unsafe {
-            std::env::set_var("KILN_DECODE_HOT_PATH_DEBUG_FALLBACK", "1");
-        }
-        for (backend_name, device) in [
-            ("metal", kiln_tensor::Device::Metal(0)),
-            ("vulkan", kiln_tensor::Device::Vulkan(0)),
-            ("rocm", kiln_tensor::Device::Rocm(0)),
-        ] {
-            let backend = NamedTestBackend {
-                name: backend_name,
-                device,
-                resident_linear_state: false,
-                resident_recurrent_state: false,
-            };
-            let policy = decode_hot_path_fallback_policy_for_backend(&backend);
-            assert_eq!(policy, FallbackPolicy::WarnAndCount);
-            assert!(policy.allows_fallback());
-        }
-    }
-
-    #[test]
-    fn test_decode_hot_path_backend_debug_fallback_uses_policy_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _env = EnvRestore::clear(DECODE_FALLBACK_ENV);
-
-        let metal = NamedTestBackend {
-            name: "metal",
-            device: kiln_tensor::Device::Metal(0),
-            resident_linear_state: false,
-            resident_recurrent_state: false,
-        };
-        let vulkan = NamedTestBackend {
-            name: "vulkan",
-            device: kiln_tensor::Device::Cpu,
-            resident_linear_state: false,
-            resident_recurrent_state: false,
-        };
-        let rocm = NamedTestBackend {
-            name: "rocm",
-            device: kiln_tensor::Device::Rocm(0),
-            resident_linear_state: false,
-            resident_recurrent_state: false,
-        };
-
-        assert_eq!(
-            decode_hot_path_fallback_policy_for_backend(&metal),
-            FallbackPolicy::NativeRequired
-        );
-        unsafe {
-            std::env::set_var("KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK", "1");
-        }
-        assert_eq!(
-            decode_hot_path_fallback_policy_for_backend(&vulkan),
-            FallbackPolicy::WarnAndCount
-        );
-        assert_eq!(
-            decode_hot_path_fallback_policy_for_backend(&metal),
-            FallbackPolicy::NativeRequired,
-            "Vulkan decode fallback env should not apply to Metal policy"
-        );
-        assert_eq!(
-            decode_hot_path_fallback_policy_for_backend(&rocm),
-            FallbackPolicy::NativeRequired,
-            "Vulkan decode fallback env should not apply to ROCm policy"
         );
     }
 

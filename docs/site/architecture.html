@@ -383,7 +383,7 @@ training request
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           ROCm execution is process-lifetime policy, resolved once before the primary HIP context or model
           runner exists. Typed <code>[accelerator]</code> intent combines with the immutable serving profile
-          to produce <code>kiln.accelerator-runtime-policy.v12</code>. The same resolved object is installed in
+          to produce <code>kiln.accelerator-runtime-policy.v13</code>. The same resolved object is installed in
           the tensor context, projected into the model graph runner, stored in server state, and returned by
           product diagnostics. Tensor, model, and kernel code do not re-read the public graph,
           synchronization, or matmul-route environment names during inference.
@@ -494,7 +494,7 @@ training request
           tile size or route between layers or requests.
         </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Policy v12 retains the deletion of eight permissive materialized-score, online-score, and tile environment controls
+          Policy v13 retains the deletion of eight permissive materialized-score, online-score, and tile environment controls
           rather than retaining aliases. The former planners could independently parse different values during
           execution and derive a materialized ceiling as high as 32 GiB from changing free memory. Real-device
           parity tests now force small multi-tile geometry with a scoped programmatic hook, so test coverage no
@@ -503,9 +503,9 @@ training request
 
         <h3 class="font-semibold mt-6 mb-3">CUDA backend routes are one typed profile</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
-          <code>accelerator.cuda_kernel_profile</code> replaces fourteen CUDA backend hot-path
+          <code>accelerator.cuda_kernel_profile</code> replaces twenty-five CUDA model/backend hot-path
           environment decisions with one process-lifetime policy installed before backend construction.
-          <code>native_default</code> preserves the fourteen established backend routes that were
+          <code>native_default</code> preserves the twenty-five established model/backend routes that were
           previously enabled by default; the name deliberately does not claim qualification on the
           current source tree or hardware.
           <code>portable_fallback</code> declines every owned accelerated route for explicit reference
@@ -530,15 +530,54 @@ training request
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_conv1d</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>lora_decode_add</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_full_chunk_forward_multiblock</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_paged_decode</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_rotary_qk</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>attn_decode_qkv_prep</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_mlp_silu_mul</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_mlp_gate_up_prefill</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_attn_sigmoid_mul</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_rmsnorm</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rmsnorm_backward</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_l2_qk_norm</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>paged_decode_dyn_seqlen_batch</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_chunk_pre_permute</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
             </tbody>
           </table>
         </div>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
           The canonical environment override is mechanically derived as
           <code>KILN_ACCELERATOR_CUDA_KERNEL_PROFILE</code>. Former CUDA-specific per-kernel names are not
-          aliases. Generic GDN and convolution switches are likewise no longer read by the CUDA backend,
-          though other backends still await their own configuration migration. This profile does not absorb
-          CUDA controls outside these fourteen backend-owned routes and therefore makes no broader claim.
+          aliases. Generic switches governing the same routes are likewise no longer read by CUDA model code.
+          Route selection, training chunk geometry, and direct paged-decode preference now come from the same
+          installed policy rather than request-time process state. The profile does not claim CUDA hardware
+          qualification, graph support, or Marlin correctness beyond the routes enumerated above.
+        </p>
+
+        <h3 class="font-semibold mt-6 mb-3">Fixed model, loader, and fallback policy</h3>
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          Unsectioned debug and rollback variables that could change routes after typed startup validation are
+          removed without aliases. The table records the complete replacement behavior; these independent
+          combinations are deliberately not product configuration.
+        </p>
+        <div class="overflow-x-auto mt-4">
+          <table class="w-full text-sm" style="color: var(--fg-dim);">
+            <thead style="color: var(--fg);"><tr><th class="text-left p-2">Policy family</th><th class="text-left p-2">Retired names</th><th class="text-left p-2">Product behavior</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Decode fallback</td><td class="p-2"><code>KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE</code>, <code>KILN_ROCM_PAGED_DECODE</code>, <code>KILN_DECODE_HOT_PATH_DEBUG_FALLBACK</code>, <code>KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK</code>, <code>KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK</code>, <code>KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK</code>, and <code>KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY</code></td><td class="p-2">CUDA and ROCm follow their installed profiles; Vulkan keeps its qualified native and LoRA-specific counted routes; unsupported fallbacks fail closed.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">CUDA model routes</td><td class="p-2"><code>KILN_DISABLE_FUSED_PAGED_DECODE</code>, <code>KILN_DISABLE_FUSED_CUDA_ROTARY_QK</code>, <code>KILN_DISABLE_CUDA_ATTN_DECODE_QKV_PREP</code>, fused MLP/attention/RMSNorm/L2-QK switches, dynamic-length paged-decode force/disable switches, and <code>KILN_DISABLE_GDN_CHUNK_PRE_PERMUTE</code></td><td class="p-2">All twenty-five decisions come from <code>accelerator.cuda_kernel_profile</code>.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Training geometry</td><td class="p-2"><code>KILN_DISABLE_GPU_TRAINING_MLP_CHUNKING</code>, CUDA variants and token counts, split-Q/gate disable variants, and <code>KILN_SPLIT_Q_GATE_OUTPUT_CHUNK_FEATURES</code></td><td class="p-2">ROCm follows its typed profile; CUDA uses 1,024-token MLP chunks; Vulkan uses at most 1,024 output features per split slice.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Projection loading</td><td class="p-2"><code>KILN_KEEP_PROJECTION_ORIGINALS</code>, <code>KILN_DROP_PROJECTION_ORIGINALS</code>, <code>KILN_KEEP_PROJECTION_TRANSPOSES</code>, parallel-load disable switches, and <code>KILN_VK_NATIVE_TRAINING</code></td><td class="p-2">CUDA/Metal drop redundant originals; CPU/ROCm/Vulkan retain them; every backend retains cached transposes; Metal parallel uploads remain enabled.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">State and precision</td><td class="p-2"><code>KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER</code>, backend BF16-state disable switches, and <code>KILN_ALLOW_FP8_ON_METAL</code></td><td class="p-2">Qualified state scatter and native-with-constraints BF16/F16 state remain enabled. Metal FP8 KV remains declined.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Optimized paths</td><td class="p-2"><code>KILN_DISABLE_WEIGHTED_LM_HEAD_PREP</code>, <code>KILN_DISABLE_MARLIN_BF16_DROP</code>, CUDA GDN row-loop switches, and <code>KILN_ENABLE_METAL_GDN_STREAMING_FASTPATHS</code></td><td class="p-2">Qualified preparation and redundant transpose release stay on; CUDA rows loop only when noncontiguous; the unqualified Metal experiment stays off.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Diagnostics/training</td><td class="p-2"><code>KILN_ARENA_FORCE_ZERO</code> and <code>KILN_CUDA_NATIVE_TRAINING</code></td><td class="p-2">Only contractually zeroed arena buffers are cleared. Server training uses the authoritative shared tensor tape.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          <code>server.deterministic</code> remains typed configuration. Its canonical environment target is
+          <code>KILN_SERVER_DETERMINISTIC</code>, and <code>KILN_DETERMINISTIC</code> remains only a deprecated
+          server compatibility alias. Standalone tensor-library use defaults to nondeterministic execution
+          unless its owning application installs the process-lifetime policy.
         </p>
 
         <h3 class="font-semibold mt-6 mb-3">ROCm kernels use one complete route profile</h3>

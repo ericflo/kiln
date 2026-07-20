@@ -142,7 +142,7 @@ vulkan_validation = false             # Enable VK_LAYER_KHRONOS_validation at in
                                       # Override with KILN_ACCELERATOR_VULKAN_VALIDATION;
                                       # KILN_VULKAN_VALIDATION is a deprecated startup alias.
 cuda_kernel_profile = "native_default" # native_default | portable_fallback. One immutable
-                                      # fourteen-route CUDA backend policy replaces retired
+                                      # twenty-five-route CUDA model/backend policy replaces retired
                                       # per-kernel environment switches. Native default preserves
                                       # existing accelerated dispatch without claiming hardware
                                       # qualification. Override mechanically with

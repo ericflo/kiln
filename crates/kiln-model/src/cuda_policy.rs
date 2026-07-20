@@ -24,6 +24,17 @@ pub struct CudaKernelPolicy {
     pub(crate) fused_conv1d: bool,
     pub(crate) lora_decode_add: bool,
     pub(crate) gdn_full_chunk_forward_multiblock: bool,
+    pub(crate) fused_paged_decode: bool,
+    pub(crate) fused_rotary_qk: bool,
+    pub(crate) attn_decode_qkv_prep: bool,
+    pub(crate) fused_mlp_silu_mul: bool,
+    pub(crate) fused_mlp_gate_up_prefill: bool,
+    pub(crate) fused_attn_sigmoid_mul: bool,
+    pub(crate) fused_rmsnorm: bool,
+    pub(crate) rmsnorm_backward: bool,
+    pub(crate) fused_l2_qk_norm: bool,
+    pub(crate) paged_decode_dyn_seqlen_batch: bool,
+    pub(crate) gdn_chunk_pre_permute: bool,
 }
 
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
@@ -45,6 +56,17 @@ impl CudaKernelPolicy {
             fused_conv1d: true,
             lora_decode_add: true,
             gdn_full_chunk_forward_multiblock: true,
+            fused_paged_decode: true,
+            fused_rotary_qk: true,
+            attn_decode_qkv_prep: true,
+            fused_mlp_silu_mul: true,
+            fused_mlp_gate_up_prefill: true,
+            fused_attn_sigmoid_mul: true,
+            fused_rmsnorm: true,
+            rmsnorm_backward: true,
+            fused_l2_qk_norm: true,
+            paged_decode_dyn_seqlen_batch: true,
+            gdn_chunk_pre_permute: true,
         }
     }
 
@@ -65,11 +87,22 @@ impl CudaKernelPolicy {
             fused_conv1d: false,
             lora_decode_add: false,
             gdn_full_chunk_forward_multiblock: false,
+            fused_paged_decode: false,
+            fused_rotary_qk: false,
+            attn_decode_qkv_prep: false,
+            fused_mlp_silu_mul: false,
+            fused_mlp_gate_up_prefill: false,
+            fused_attn_sigmoid_mul: false,
+            fused_rmsnorm: false,
+            rmsnorm_backward: false,
+            fused_l2_qk_norm: false,
+            paged_decode_dyn_seqlen_batch: false,
+            gdn_chunk_pre_permute: false,
         }
     }
 
     #[cfg(test)]
-    const fn routes(self) -> [bool; 14] {
+    const fn routes(self) -> [bool; 25] {
         [
             self.full_attn_qkv_in_proj,
             self.gdn_ab_in_proj,
@@ -85,6 +118,17 @@ impl CudaKernelPolicy {
             self.fused_conv1d,
             self.lora_decode_add,
             self.gdn_full_chunk_forward_multiblock,
+            self.fused_paged_decode,
+            self.fused_rotary_qk,
+            self.attn_decode_qkv_prep,
+            self.fused_mlp_silu_mul,
+            self.fused_mlp_gate_up_prefill,
+            self.fused_attn_sigmoid_mul,
+            self.fused_rmsnorm,
+            self.rmsnorm_backward,
+            self.fused_l2_qk_norm,
+            self.paged_decode_dyn_seqlen_batch,
+            self.gdn_chunk_pre_permute,
         ]
     }
 }
@@ -117,7 +161,7 @@ mod tests {
 
     #[test]
     fn profiles_cover_every_backend_route() {
-        assert_eq!(CudaKernelPolicy::native_default().routes(), [true; 14]);
-        assert_eq!(CudaKernelPolicy::portable_fallback().routes(), [false; 14]);
+        assert_eq!(CudaKernelPolicy::native_default().routes(), [true; 25]);
+        assert_eq!(CudaKernelPolicy::portable_fallback().routes(), [false; 25]);
     }
 }

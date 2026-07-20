@@ -833,9 +833,7 @@ pub struct ProjectionLoadPolicy {
     pub backend: kiln_tensor::Backend,
     pub direct_transposed_upload_for_cached_weights: bool,
     pub parallel_transposed_projection_upload: bool,
-    pub parallel_transposed_projection_upload_disable_env: Option<&'static str>,
     pub parallel_auxiliary_weight_upload: bool,
-    pub parallel_auxiliary_weight_upload_disable_env: Option<&'static str>,
     pub cache_full_attention_qkv_transpose_concat: bool,
     pub cache_linear_attention_ab_transpose_concat: bool,
     pub cache_mlp_gate_up_transpose_concat: bool,
@@ -844,10 +842,6 @@ pub struct ProjectionLoadPolicy {
     pub drop_projection_originals: bool,
     pub drop_projection_transposes: bool,
     pub synchronize_after_dropping_originals: bool,
-    pub keep_projection_originals_env: Option<&'static str>,
-    pub drop_projection_originals_env: Option<&'static str>,
-    pub native_training_env: Option<&'static str>,
-    pub keep_projection_transposes_env: Option<&'static str>,
 }
 
 /// Backend-owned policy for interpreting server GPU-memory detection.
@@ -920,7 +914,6 @@ pub struct KvCacheMemoryTierBlockCap {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KvCacheFp8Policy {
     pub allow_when_requested_by_default: bool,
-    pub explicit_enable_env: Option<&'static str>,
     pub disabled_reason: Option<&'static str>,
 }
 
@@ -931,7 +924,6 @@ pub struct StartupCapabilities {
     pub require_inference_prewarm_for_health: bool,
     pub precompile_custom_kernels: bool,
     pub native_training_default_enabled: bool,
-    pub native_training_env: Option<&'static str>,
     pub decode_weight_prewarm_when_native_training: bool,
 }
 
@@ -1055,7 +1047,6 @@ pub struct DecodeBatcherPolicy {
     pub engine_max_decode_batch: Option<usize>,
     pub wait_micros: u64,
     pub allow_mixed_seq_lens: bool,
-    pub rowwise_retry_env: Option<&'static str>,
     pub require_native_decode_attention: bool,
     /// Permit the portable paged-attention route while a LoRA adapter is
     /// active. This is separate from the general hot-path fallback policy:
@@ -1063,7 +1054,6 @@ pub struct DecodeBatcherPolicy {
     /// correctness-qualified adapter route that is warned and counted.
     pub allow_portable_lora_decode: bool,
     pub prefer_direct_paged_decode_attention: bool,
-    pub direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate,
     pub allow_prefix_cache_split_snapshot: bool,
     pub paged_decode_requires_contiguous_kv_chunks: bool,
     pub use_greedy_token_decode: bool,
@@ -1079,29 +1069,6 @@ pub struct DecodeBatcherPolicy {
     /// deterministic output.
     pub actor_prefill_tile_alignment_required: bool,
     pub warm_resident_decode_pool_on_startup: bool,
-}
-
-/// Environment gate attached to backend decode-attention routing policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DecodeAttentionEnvGate {
-    None,
-    DisabledWhenSet(&'static str),
-    EnabledUnlessOff(&'static str),
-}
-
-impl DecodeAttentionEnvGate {
-    pub fn allows(self) -> bool {
-        match self {
-            Self::None => true,
-            Self::DisabledWhenSet(name) => std::env::var(name).is_err(),
-            Self::EnabledUnlessOff(name) => std::env::var(name)
-                .map(|value| {
-                    let value = value.trim().to_ascii_lowercase();
-                    !(value == "0" || value == "false" || value == "no" || value == "off")
-                })
-                .unwrap_or(true),
-        }
-    }
 }
 
 /// Replay capability probes backed by [`ReplayRequest`].
@@ -1235,7 +1202,6 @@ impl ReplayAuthority {
 pub struct BackendFallbackCapabilities {
     pub generic_device_op: FallbackPolicy,
     pub decode_hot_path: FallbackPolicy,
-    pub decode_hot_path_debug_env: Option<&'static str>,
     pub training_optimizer: FallbackPolicy,
 }
 
@@ -1528,7 +1494,6 @@ impl ServerTrainingNativeRoute {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ServerTrainingDispatchPolicy {
     pub native_route: ServerTrainingNativeRoute,
-    pub native_training_env: Option<&'static str>,
     pub native_training_default_enabled: bool,
 }
 
@@ -1789,14 +1754,6 @@ impl BackendCapabilities {
 }
 
 impl ProjectionLoadPolicy {
-    pub const KEEP_PROJECTION_ORIGINALS_ENV: &'static str = "KILN_KEEP_PROJECTION_ORIGINALS";
-    pub const DROP_PROJECTION_ORIGINALS_ENV: &'static str = "KILN_DROP_PROJECTION_ORIGINALS";
-    pub const NATIVE_VULKAN_TRAINING_ENV: &'static str = "KILN_VK_NATIVE_TRAINING";
-    pub const KEEP_PROJECTION_TRANSPOSES_ENV: &'static str = "KILN_KEEP_PROJECTION_TRANSPOSES";
-    pub const DISABLE_PARALLEL_PROJECTION_LOAD_ENV: &'static str =
-        "KILN_DISABLE_PARALLEL_PROJECTION_LOAD";
-    pub const DISABLE_PARALLEL_AUXILIARY_LOAD_ENV: &'static str = "KILN_DISABLE_PARALLEL_AUX_LOAD";
-
     pub fn for_model_loader_device(device: kiln_tensor::Device) -> Self {
         if crate::backend::vulkan_active() {
             Self::for_backend("vulkan", device)
@@ -1807,17 +1764,10 @@ impl ProjectionLoadPolicy {
 
     pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
         let backend = backend_kind_for_runtime(name, device);
-        let native_vulkan_training = env_enabled(Self::NATIVE_VULKAN_TRAINING_ENV);
-        let keep_projection_originals = matches!(backend, kiln_tensor::Backend::Vulkan)
-            || native_vulkan_training
-            || env_truthy(Self::KEEP_PROJECTION_ORIGINALS_ENV);
-        let drop_projection_transposes =
-            native_vulkan_training && !env_enabled(Self::KEEP_PROJECTION_TRANSPOSES_ENV);
-        let drop_projection_originals = !keep_projection_originals
-            && (matches!(
-                backend,
-                kiln_tensor::Backend::Cuda | kiln_tensor::Backend::Metal
-            ) || env_truthy(Self::DROP_PROJECTION_ORIGINALS_ENV));
+        let drop_projection_originals = matches!(
+            backend,
+            kiln_tensor::Backend::Cuda | kiln_tensor::Backend::Metal
+        );
 
         Self {
             backend,
@@ -1827,13 +1777,7 @@ impl ProjectionLoadPolicy {
             ),
             parallel_transposed_projection_upload: matches!(backend, kiln_tensor::Backend::Metal)
                 && drop_projection_originals,
-            parallel_transposed_projection_upload_disable_env: Some(
-                Self::DISABLE_PARALLEL_PROJECTION_LOAD_ENV,
-            ),
             parallel_auxiliary_weight_upload: matches!(backend, kiln_tensor::Backend::Metal),
-            parallel_auxiliary_weight_upload_disable_env: Some(
-                Self::DISABLE_PARALLEL_AUXILIARY_LOAD_ENV,
-            ),
             cache_full_attention_qkv_transpose_concat: matches!(
                 backend,
                 kiln_tensor::Backend::Cuda | kiln_tensor::Backend::Rocm
@@ -1854,29 +1798,17 @@ impl ProjectionLoadPolicy {
                 kiln_tensor::Backend::Metal | kiln_tensor::Backend::Vulkan
             ),
             drop_projection_originals,
-            drop_projection_transposes: !drop_projection_originals && drop_projection_transposes,
+            drop_projection_transposes: false,
             synchronize_after_dropping_originals: matches!(backend, kiln_tensor::Backend::Metal),
-            keep_projection_originals_env: Some(Self::KEEP_PROJECTION_ORIGINALS_ENV),
-            drop_projection_originals_env: Some(Self::DROP_PROJECTION_ORIGINALS_ENV),
-            native_training_env: Some(Self::NATIVE_VULKAN_TRAINING_ENV),
-            keep_projection_transposes_env: Some(Self::KEEP_PROJECTION_TRANSPOSES_ENV),
         }
     }
 
     pub fn parallel_transposed_projection_upload_enabled(self) -> bool {
         self.parallel_transposed_projection_upload
-            && !self
-                .parallel_transposed_projection_upload_disable_env
-                .map(env_truthy)
-                .unwrap_or(false)
     }
 
     pub fn parallel_auxiliary_weight_upload_enabled(self) -> bool {
         self.parallel_auxiliary_weight_upload
-            && !self
-                .parallel_auxiliary_weight_upload_disable_env
-                .map(env_truthy)
-                .unwrap_or(false)
     }
 }
 
@@ -1888,7 +1820,6 @@ impl StartupCapabilities {
                 require_inference_prewarm_for_health: true,
                 precompile_custom_kernels: true,
                 native_training_default_enabled: false,
-                native_training_env: None,
                 decode_weight_prewarm_when_native_training: false,
             },
             kiln_tensor::Backend::Vulkan => Self {
@@ -1896,7 +1827,6 @@ impl StartupCapabilities {
                 require_inference_prewarm_for_health: true,
                 precompile_custom_kernels: true,
                 native_training_default_enabled: true,
-                native_training_env: Some("KILN_VK_NATIVE_TRAINING"),
                 decode_weight_prewarm_when_native_training: true,
             },
             kiln_tensor::Backend::Rocm => Self {
@@ -1904,7 +1834,6 @@ impl StartupCapabilities {
                 require_inference_prewarm_for_health: false,
                 precompile_custom_kernels: false,
                 native_training_default_enabled: false,
-                native_training_env: None,
                 decode_weight_prewarm_when_native_training: false,
             },
             _ => Self {
@@ -1912,7 +1841,6 @@ impl StartupCapabilities {
                 require_inference_prewarm_for_health: false,
                 precompile_custom_kernels: false,
                 native_training_default_enabled: false,
-                native_training_env: None,
                 decode_weight_prewarm_when_native_training: false,
             },
         }
@@ -1998,12 +1926,10 @@ impl ServerTrainingDispatchPolicy {
         match backend_kind_for_runtime(name, device) {
             kiln_tensor::Backend::Cuda => Self {
                 native_route: ServerTrainingNativeRoute::LegacyCudaNative,
-                native_training_env: Some("KILN_CUDA_NATIVE_TRAINING"),
                 native_training_default_enabled: false,
             },
             _ => Self {
                 native_route: ServerTrainingNativeRoute::SharedKtTape,
-                native_training_env: None,
                 native_training_default_enabled: false,
             },
         }
@@ -2011,10 +1937,7 @@ impl ServerTrainingDispatchPolicy {
 
     pub fn native_route_enabled(self) -> bool {
         match self.native_route {
-            ServerTrainingNativeRoute::LegacyCudaNative => self
-                .native_training_env
-                .map(|env| kiln_core::env_flag::env_flag(env, self.native_training_default_enabled))
-                .unwrap_or(self.native_training_default_enabled),
+            ServerTrainingNativeRoute::LegacyCudaNative => self.native_training_default_enabled,
             ServerTrainingNativeRoute::SharedKtTape => false,
         }
     }
@@ -2092,13 +2015,10 @@ impl DecodeBatcherPolicy {
                 engine_max_decode_batch: Some(Self::DEFAULT_MAX_BATCH),
                 wait_micros: 0,
                 allow_mixed_seq_lens: false,
-                rowwise_retry_env: None,
                 require_native_decode_attention: false,
                 allow_portable_lora_decode: false,
-                prefer_direct_paged_decode_attention: true,
-                direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::DisabledWhenSet(
-                    "KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE",
-                ),
+                prefer_direct_paged_decode_attention:
+                    crate::cuda_policy::current_cuda_kernel_policy().fused_paged_decode,
                 allow_prefix_cache_split_snapshot: true,
                 paged_decode_requires_contiguous_kv_chunks: true,
                 use_greedy_token_decode: false,
@@ -2117,11 +2037,9 @@ impl DecodeBatcherPolicy {
                 engine_max_decode_batch: None,
                 wait_micros: Self::METAL_WAIT_MICROS,
                 allow_mixed_seq_lens: true,
-                rowwise_retry_env: None,
                 require_native_decode_attention: false,
                 allow_portable_lora_decode: false,
                 prefer_direct_paged_decode_attention: false,
-                direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::None,
                 allow_prefix_cache_split_snapshot: true,
                 paged_decode_requires_contiguous_kv_chunks: true,
                 use_greedy_token_decode: true,
@@ -2140,11 +2058,9 @@ impl DecodeBatcherPolicy {
                 engine_max_decode_batch: None,
                 wait_micros: Self::VULKAN_WAIT_MICROS,
                 allow_mixed_seq_lens: true,
-                rowwise_retry_env: Some("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY"),
                 require_native_decode_attention: true,
                 allow_portable_lora_decode: true,
                 prefer_direct_paged_decode_attention: true,
-                direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::None,
                 allow_prefix_cache_split_snapshot: true,
                 paged_decode_requires_contiguous_kv_chunks: false,
                 use_greedy_token_decode: false,
@@ -2163,13 +2079,10 @@ impl DecodeBatcherPolicy {
                 engine_max_decode_batch: None,
                 wait_micros: 0,
                 allow_mixed_seq_lens: false,
-                rowwise_retry_env: None,
                 require_native_decode_attention: false,
                 allow_portable_lora_decode: false,
-                prefer_direct_paged_decode_attention: true,
-                direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::EnabledUnlessOff(
-                    "KILN_ROCM_PAGED_DECODE",
-                ),
+                prefer_direct_paged_decode_attention:
+                    crate::rocm_policy::current_rocm_kernel_policy().fused_paged_decode,
                 // Must stay true on every backend that serves chat traffic:
                 // without the prefill-split snapshot no block-aligned prefix
                 // entry ever registers, and RealPrefixCache strict-prefix
@@ -2197,11 +2110,9 @@ impl DecodeBatcherPolicy {
                 engine_max_decode_batch: None,
                 wait_micros: 0,
                 allow_mixed_seq_lens: false,
-                rowwise_retry_env: None,
                 require_native_decode_attention: false,
                 allow_portable_lora_decode: false,
                 prefer_direct_paged_decode_attention: false,
-                direct_paged_decode_attention_env_gate: DecodeAttentionEnvGate::None,
                 allow_prefix_cache_split_snapshot: true,
                 paged_decode_requires_contiguous_kv_chunks: true,
                 use_greedy_token_decode: false,
@@ -2219,7 +2130,6 @@ impl DecodeBatcherPolicy {
 
     pub fn direct_paged_decode_attention_enabled(self) -> bool {
         self.prefer_direct_paged_decode_attention
-            && self.direct_paged_decode_attention_env_gate.allows()
     }
 }
 
@@ -2443,7 +2353,6 @@ impl KvCacheMemoryTierBlockCap {
 impl KvCacheFp8Policy {
     pub const ALLOW_WHEN_REQUESTED: Self = Self {
         allow_when_requested_by_default: true,
-        explicit_enable_env: None,
         disabled_reason: None,
     };
 
@@ -2451,7 +2360,6 @@ impl KvCacheFp8Policy {
         match backend_kind_for_runtime(name, device) {
             kiln_tensor::Backend::Metal => Self {
                 allow_when_requested_by_default: false,
-                explicit_enable_env: Some("KILN_ALLOW_FP8_ON_METAL"),
                 disabled_reason: Some("CPU round-trip cost"),
             },
             _ => Self::ALLOW_WHEN_REQUESTED,
@@ -2462,17 +2370,7 @@ impl KvCacheFp8Policy {
         if !requested {
             return false;
         }
-        self.allow_when_requested_by_default || self.explicit_enable_env_is_truthy()
-    }
-
-    pub fn explicit_enable_env_is_truthy(self) -> bool {
-        let Some(name) = self.explicit_enable_env else {
-            return false;
-        };
-        matches!(
-            std::env::var(name).as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE")
-        )
+        self.allow_when_requested_by_default
     }
 }
 
@@ -2495,31 +2393,13 @@ fn gdn_chunk_pre_permute_bf16_support(name: &str, device: kiln_tensor::Device) -
 impl InferenceRecurrentStatePolicy {
     pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
         match backend_kind_for_runtime(name, device) {
-            kiln_tensor::Backend::Cuda => {
-                let support = support_unless_env_set("KILN_DISABLE_CUDA_BF16_INFERENCE_STATE");
-                Self {
-                    bf16: support,
-                    f16: support,
-                }
-            }
-            kiln_tensor::Backend::Rocm => {
-                let support = support_unless_env_set("KILN_DISABLE_ROCM_BF16_INFERENCE_STATE");
-                Self {
-                    bf16: support,
-                    f16: support,
-                }
-            }
-            kiln_tensor::Backend::Metal => Self {
+            kiln_tensor::Backend::Cuda
+            | kiln_tensor::Backend::Rocm
+            | kiln_tensor::Backend::Metal
+            | kiln_tensor::Backend::Vulkan => Self {
                 bf16: Support::NativeWithConstraints,
                 f16: Support::NativeWithConstraints,
             },
-            kiln_tensor::Backend::Vulkan => {
-                let support = support_unless_env_set("KILN_DISABLE_VULKAN_BF16_INFERENCE_STATE");
-                Self {
-                    bf16: support,
-                    f16: support,
-                }
-            }
             _ => Self {
                 bf16: Support::Declined,
                 f16: Support::Declined,
@@ -2536,14 +2416,6 @@ impl InferenceRecurrentStatePolicy {
     }
 }
 
-fn support_unless_env_set(env_var: &'static str) -> Support {
-    if std::env::var(env_var).is_ok() {
-        Support::DisabledByEnv
-    } else {
-        Support::NativeWithConstraints
-    }
-}
-
 fn gdn_recurrent_step_f32_support(name: &str, recurrent_step_supported: bool) -> Support {
     match name {
         "vulkan" if recurrent_step_supported => Support::NativeWithConstraints,
@@ -2556,45 +2428,17 @@ impl BackendFallbackCapabilities {
         Self {
             generic_device_op: generic_device_op_fallback_policy(name, device),
             decode_hot_path: decode_hot_path_fallback_policy(name, device),
-            decode_hot_path_debug_env: decode_hot_path_debug_fallback_env(name, device),
             training_optimizer: training_optimizer_fallback_policy(name, device),
         }
     }
-
-    pub fn decode_hot_path_debug_fallback_enabled(self) -> bool {
-        kiln_core::env_flag::env_flag("KILN_DECODE_HOT_PATH_DEBUG_FALLBACK", false)
-            || self
-                .decode_hot_path_debug_env
-                .map(|env_var| kiln_core::env_flag::env_flag(env_var, false))
-                .unwrap_or(false)
-    }
-}
-
-pub(crate) fn decode_hot_path_debug_fallback_enabled_for_backend(
-    backend: &dyn BackendRuntime,
-) -> bool {
-    BackendCapabilities::from_backend(backend)
-        .fallback
-        .decode_hot_path_debug_fallback_enabled()
-}
-
-pub(crate) fn decode_hot_path_debug_fallback_env_for_backend(
-    backend: &dyn BackendRuntime,
-) -> &'static str {
-    BackendCapabilities::from_backend(backend)
-        .fallback
-        .decode_hot_path_debug_env
-        .unwrap_or("KILN_DECODE_HOT_PATH_DEBUG_FALLBACK")
 }
 
 pub(crate) fn decode_hot_path_fallback_policy_for_backend(
     backend: &dyn BackendRuntime,
 ) -> FallbackPolicy {
-    let fallback = BackendCapabilities::from_backend(backend).fallback;
-    if fallback.decode_hot_path_debug_fallback_enabled() {
-        return FallbackPolicy::WarnAndCount;
-    }
-    fallback.decode_hot_path
+    BackendCapabilities::from_backend(backend)
+        .fallback
+        .decode_hot_path
 }
 
 pub(crate) fn decode_hot_path_generic_fallback_enabled_for_backend(
@@ -2620,18 +2464,6 @@ fn decode_hot_path_fallback_policy(name: &str, _device: kiln_tensor::Device) -> 
     }
 }
 
-fn decode_hot_path_debug_fallback_env(
-    name: &str,
-    _device: kiln_tensor::Device,
-) -> Option<&'static str> {
-    match name {
-        "metal" => Some("KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK"),
-        "vulkan" => Some("KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK"),
-        "rocm" => Some("KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK"),
-        _ => None,
-    }
-}
-
 fn training_optimizer_fallback_policy(name: &str, device: kiln_tensor::Device) -> FallbackPolicy {
     match (name, device) {
         ("cpu", kiln_tensor::Device::Cpu) => FallbackPolicy::CorrectnessAllowed,
@@ -2641,28 +2473,6 @@ fn training_optimizer_fallback_policy(name: &str, device: kiln_tensor::Device) -
         | ("vulkan", kiln_tensor::Device::Vulkan(_)) => FallbackPolicy::NativeRequired,
         _ => FallbackPolicy::ErrorInHotPath,
     }
-}
-
-fn env_enabled(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            !v.is_empty() && !matches!(v.as_str(), "0" | "false" | "no")
-        })
-        .unwrap_or(false)
-}
-
-fn env_truthy(name: &str) -> bool {
-    matches!(
-        std::env::var(name)
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    )
 }
 
 fn backend_kind_for_runtime(name: &str, device: kiln_tensor::Device) -> kiln_tensor::Backend {
@@ -2894,6 +2704,79 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn fixed_loader_policy_is_backend_owned_and_complete() {
+        for (name, device, drop_originals, parallel_projection, parallel_auxiliary) in [
+            ("cpu", kiln_tensor::Device::Cpu, false, false, false),
+            ("cuda", kiln_tensor::Device::Cuda(0), true, false, false),
+            ("rocm", kiln_tensor::Device::Rocm(0), false, false, false),
+            ("metal", kiln_tensor::Device::Metal(0), true, true, true),
+            (
+                "vulkan",
+                kiln_tensor::Device::Vulkan(0),
+                false,
+                false,
+                false,
+            ),
+        ] {
+            let policy = ProjectionLoadPolicy::for_backend(name, device);
+            assert_eq!(policy.drop_projection_originals, drop_originals, "{name}");
+            assert!(!policy.drop_projection_transposes, "{name}");
+            assert_eq!(
+                policy.parallel_transposed_projection_upload_enabled(),
+                parallel_projection,
+                "{name}"
+            );
+            assert_eq!(
+                policy.parallel_auxiliary_weight_upload_enabled(),
+                parallel_auxiliary,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_state_fp8_and_legacy_training_policy_is_backend_owned() {
+        for (name, device) in [
+            ("cuda", kiln_tensor::Device::Cuda(0)),
+            ("rocm", kiln_tensor::Device::Rocm(0)),
+            ("metal", kiln_tensor::Device::Metal(0)),
+            ("vulkan", kiln_tensor::Device::Vulkan(0)),
+        ] {
+            assert_eq!(
+                InferenceRecurrentStatePolicy::for_backend(name, device),
+                InferenceRecurrentStatePolicy {
+                    bf16: Support::NativeWithConstraints,
+                    f16: Support::NativeWithConstraints,
+                },
+                "{name}"
+            );
+        }
+
+        assert!(
+            !KvCacheFp8Policy::for_backend("metal", kiln_tensor::Device::Metal(0)).enabled(true)
+        );
+        assert!(KvCacheFp8Policy::for_backend("cuda", kiln_tensor::Device::Cuda(0)).enabled(true));
+        assert!(KvCacheFp8Policy::for_backend("rocm", kiln_tensor::Device::Rocm(0)).enabled(true));
+        assert!(
+            KvCacheFp8Policy::for_backend("vulkan", kiln_tensor::Device::Vulkan(0)).enabled(true)
+        );
+
+        assert!(matches!(
+            ServerTrainingDispatchPolicy::for_backend("cuda", kiln_tensor::Device::Cuda(0))
+                .native_route,
+            ServerTrainingNativeRoute::LegacyCudaNative
+        ));
+        assert!(
+            !ServerTrainingDispatchPolicy::for_backend("cuda", kiln_tensor::Device::Cuda(0))
+                .native_route_enabled()
+        );
+        assert!(
+            !ServerTrainingDispatchPolicy::for_backend("vulkan", kiln_tensor::Device::Vulkan(0))
+                .native_route_enabled()
+        );
     }
 
     #[test]

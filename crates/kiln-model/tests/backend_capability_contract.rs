@@ -471,10 +471,6 @@ fn generated_capability_report_lists_request_descriptors() {
             "StartupCapabilities should own native-training default enablement",
         ),
         (
-            "native_training_env",
-            "StartupCapabilities should own native-training env override",
-        ),
-        (
             "decode_weight_prewarm_when_native_training",
             "StartupCapabilities should own native-training decode-weight prewarm routing",
         ),
@@ -542,9 +538,7 @@ fn generated_capability_report_lists_request_descriptors() {
     for field in [
         "direct_transposed_upload_for_cached_weights",
         "parallel_transposed_projection_upload",
-        "parallel_transposed_projection_upload_disable_env",
         "parallel_auxiliary_weight_upload",
-        "parallel_auxiliary_weight_upload_disable_env",
         "cache_full_attention_qkv_transpose_concat",
         "cache_linear_attention_ab_transpose_concat",
         "cache_mlp_gate_up_transpose_concat",
@@ -553,10 +547,6 @@ fn generated_capability_report_lists_request_descriptors() {
         "drop_projection_originals",
         "drop_projection_transposes",
         "synchronize_after_dropping_originals",
-        "keep_projection_originals_env",
-        "drop_projection_originals_env",
-        "native_training_env",
-        "keep_projection_transposes_env",
     ] {
         assert!(
             projection_load_policy_fields.contains(&field),
@@ -641,11 +631,7 @@ fn generated_capability_report_lists_request_descriptors() {
         .iter()
         .filter_map(|field| field["name"].as_str())
         .collect::<Vec<_>>();
-    for field in [
-        "allow_when_requested_by_default",
-        "explicit_enable_env",
-        "disabled_reason",
-    ] {
+    for field in ["allow_when_requested_by_default", "disabled_reason"] {
         assert!(
             kv_cache_fp8_policy_fields.contains(&field),
             "KvCacheFp8Policy should include {field}"
@@ -782,10 +768,6 @@ fn generated_capability_report_lists_request_descriptors() {
         "DecodeBatcherPolicy should own direct paged-decode attention path preference"
     );
     assert!(
-        decode_batcher_policy_fields.contains(&"direct_paged_decode_attention_env_gate"),
-        "DecodeBatcherPolicy should own direct paged-decode attention env gates"
-    );
-    assert!(
         decode_batcher_policy_fields.contains(&"allow_prefix_cache_split_snapshot"),
         "DecodeBatcherPolicy should own prefix-cache split snapshot routing"
     );
@@ -851,11 +833,7 @@ fn generated_capability_report_lists_request_descriptors() {
             .iter()
             .filter_map(|field| field["name"].as_str())
             .collect::<Vec<_>>();
-    for field in [
-        "native_route",
-        "native_training_env",
-        "native_training_default_enabled",
-    ] {
+    for field in ["native_route", "native_training_default_enabled"] {
         assert!(
             server_training_dispatch_fields.contains(&field),
             "ServerTrainingDispatchPolicy should include {field}"

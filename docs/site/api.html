@@ -370,8 +370,8 @@
               <h4 class="font-semibold mb-2"><code>accelerator_runtime</code>: immutable accelerator execution policy</h4>
               <pre class="overflow-x-auto text-xs leading-relaxed"><code>{
   "accelerator_runtime": {
-    "schema_id": "kiln.accelerator-runtime-policy.v12",
-    "version": 12,
+    "schema_id": "kiln.accelerator-runtime-policy.v13",
+    "version": 13,
     "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v3",
     "vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1",
     "serving_profile": "stable",
@@ -465,7 +465,7 @@
                     <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>full_attention_score_budget_mib</code></td><td class="p-2"><code>2048</code>; unsigned MiB in <code>64..=2048</code>. ROCm online attention uses <code>min(value, 1024)</code>.</td><td class="p-2"><code>KILN_ACCELERATOR_FULL_ATTENTION_SCORE_BUDGET_MIB</code></td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>vulkan_device_index</code></td><td class="p-2"><code>auto</code> prefers a discrete Vulkan physical device, then the first enumerated device. A zero-based integer is strict and unavailable indices fail startup. Deprecated alias: <code>KILN_VULKAN_DEVICE</code>.</td><td class="p-2"><code>KILN_ACCELERATOR_VULKAN_DEVICE_INDEX</code></td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>vulkan_validation</code></td><td class="p-2"><code>false</code>. True requires the experimental profile and fails startup unless <code>VK_LAYER_KHRONOS_validation</code> is installed. Deprecated alias: <code>KILN_VULKAN_VALIDATION</code>.</td><td class="p-2"><code>KILN_ACCELERATOR_VULKAN_VALIDATION</code></td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>cuda_kernel_profile</code></td><td class="p-2"><code>native_default</code> preserves all fourteen previously default-on CUDA backend routes without claiming hardware qualification; <code>portable_fallback</code> declines them all. The architecture reference enumerates every route.</td><td class="p-2"><code>KILN_ACCELERATOR_CUDA_KERNEL_PROFILE</code></td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>cuda_kernel_profile</code></td><td class="p-2"><code>native_default</code> preserves all twenty-five previously default-on CUDA model/backend routes without claiming hardware qualification; <code>portable_fallback</code> declines them all. The architecture reference enumerates every route.</td><td class="p-2"><code>KILN_ACCELERATOR_CUDA_KERNEL_PROFILE</code></td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_synchronization_mode</code></td><td class="p-2"><code>legacy_host_barriers</code>; also accepts experimental-only <code>stream_ordered</code>.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE</code></td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_strided_batched_matmul_mode</code></td><td class="p-2"><code>auto</code>; explicit <code>enabled</code> or <code>disabled</code> routes require the experimental profile.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE</code></td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_bf16_matmul_output_mode</code></td><td class="p-2"><code>auto</code>; explicit <code>native_bf16</code> or <code>f32_then_cast</code> routes require the experimental profile.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE</code></td></tr>
@@ -516,7 +516,7 @@
                 ROCm online-score, and tile-size environment controls. Those controls are not aliases. They
                 previously let the model and ROCm flash planners parse different permissive values during
                 execution and derive geometry from changing free-memory snapshots, including a materialized
-                ceiling as high as 32 GiB. Policy v12 installs one bounded ceiling before execution. The memory
+                ceiling as high as 32 GiB. Policy v13 installs one bounded ceiling before execution. The memory
                 governor can reject a plan whose exact working set is no longer available, but it cannot
                 silently shrink, expand, or retile that plan between layers or requests.
               </p>

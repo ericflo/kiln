@@ -17,7 +17,6 @@ use kiln_server::state;
 
 use kiln_core::config::ModelConfig;
 use kiln_core::config_hashes::{ConfigHashes, kiln_env_config_hash};
-use kiln_core::env_flag::env_tristate;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::MockEngine;
@@ -2028,10 +2027,7 @@ fn spawn_vulkan_decode_weight_prewarm(
 }
 
 fn native_training_enabled_for_startup(policy: StartupCapabilities) -> bool {
-    policy
-        .native_training_env
-        .and_then(env_tristate)
-        .unwrap_or(policy.native_training_default_enabled)
+    policy.native_training_default_enabled
 }
 
 fn spawn_tokenizer_warmup(tokenizer: Arc<KilnTokenizer>) {

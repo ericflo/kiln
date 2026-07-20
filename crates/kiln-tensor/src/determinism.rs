@@ -8,7 +8,7 @@
 //!
 //! # User-facing contract
 //!
-//! `KILN_DETERMINISTIC=1` selects one immutable process-wide policy value that
+//! The owning application selects one immutable process-wide policy value that
 //! tensor and kernel implementations can consult. This module does not claim
 //! that every `tolerance_bounded` op currently consumes the selector, nor does
 //! it configure external library controls such as `CUBLAS_WORKSPACE_CONFIG`.
@@ -34,7 +34,7 @@ use core::fmt;
 ///
 /// 1. cuBLAS workspace (constructive under `:4096:8`)
 /// 2. atomicAdd in bwd (tolerance-bounded; deterministic variant
-///    available under `KILN_DETERMINISTIC=1`)
+///    available under deterministic execution policy)
 /// 3. Reduction order in softmax / RMSNorm / cross-entropy bwd
 ///    (constructive when fixed-tree)
 /// 4. Warp-shuffle reductions (constructive)
@@ -97,25 +97,15 @@ impl fmt::Display for Determinism {
 
 /// Return the process-lifetime deterministic runtime selection.
 ///
-/// Standalone tensor consumers lazily resolve `KILN_DETERMINISTIC`. Servers
-/// should validate their typed configuration and call
-/// [`DeterministicCache::configure`] before initializing any tensor runtime.
+/// Standalone tensor consumers receive the documented `false` default. Servers
+/// validate their typed configuration and call [`DeterministicCache::configure`]
+/// before initializing any tensor runtime.
 pub fn deterministic_enabled() -> bool {
     DETERMINISTIC_CACHED.is_on()
 }
 
-fn deterministic_env_enabled() -> bool {
-    match std::env::var("KILN_DETERMINISTIC").ok().as_deref() {
-        Some(v) => {
-            let v = v.trim().to_ascii_lowercase();
-            matches!(v.as_str(), "1" | "true" | "yes" | "on")
-        }
-        None => false,
-    }
-}
-
-/// Process-lifetime deterministic selection. Standalone use reads the env var
-/// once; typed server startup may configure it before the first operation.
+/// Process-lifetime deterministic selection. Standalone use resolves to false;
+/// typed server startup may configure it before the first operation.
 ///
 /// Hot-path entry points should call this:
 ///
@@ -128,10 +118,10 @@ fn deterministic_env_enabled() -> bool {
 /// ```
 pub static DETERMINISTIC_CACHED: DeterministicCache = DeterministicCache::new();
 
-/// Sub-byte-state cache for the `KILN_DETERMINISTIC` env var.
+/// Sub-byte-state cache for deterministic execution policy.
 ///
 /// Encodes three states in a single `AtomicU8`:
-///   - 0 = unread (read from env on first `is_on()`)
+///   - 0 = unconfigured (resolve to false on first `is_on()`)
 ///   - 1 = off
 ///   - 2 = on
 #[derive(Debug)]
@@ -152,13 +142,11 @@ impl DeterministicCache {
         let v = self.state.load(Ordering::Relaxed);
         match v {
             0 => {
-                let on = deterministic_env_enabled();
-                let encoded = if on { 2 } else { 1 };
                 match self
                     .state
-                    .compare_exchange(0, encoded, Ordering::Relaxed, Ordering::Relaxed)
+                    .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
                 {
-                    Ok(_) => on,
+                    Ok(_) => false,
                     Err(active) => active == 2,
                 }
             }
@@ -191,8 +179,7 @@ impl DeterministicCache {
         }
     }
 
-    /// Force-set the cache. **Tests only** — production callers must
-    /// read the env var via [`is_on`].
+    /// Force-set the cache. **Tests only**.
     #[doc(hidden)]
     pub fn _force_for_test(&self, on: bool) {
         use core::sync::atomic::Ordering;
@@ -282,31 +269,11 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_cache_reads_env_lazily() {
+    fn deterministic_cache_defaults_off_until_configured() {
         let cache = DeterministicCache::new();
-        // Reset to unread, then ensure subsequent is_on() reads the
-        // ambient env. Test serially via a process-global lock to
-        // avoid racing other env-mutating tests.
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().unwrap();
-        cache._reset_for_test();
-        // SAFETY: documented in std::env::set_var — single-threaded in
-        // this lock-guarded test.
-        unsafe { std::env::remove_var("KILN_DETERMINISTIC") };
         assert!(!cache.is_on());
-
         cache._reset_for_test();
-        unsafe { std::env::set_var("KILN_DETERMINISTIC", "1") };
-        assert!(cache.is_on());
-
-        cache._reset_for_test();
-        unsafe { std::env::set_var("KILN_DETERMINISTIC", "on") };
-        assert!(cache.is_on());
-
-        cache._reset_for_test();
-        unsafe { std::env::set_var("KILN_DETERMINISTIC", "no") };
+        cache.configure(false).unwrap();
         assert!(!cache.is_on());
-
-        unsafe { std::env::remove_var("KILN_DETERMINISTIC") };
     }
 }

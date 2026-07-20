@@ -1496,7 +1496,6 @@ fn require_normalized_server_sft_mtp_policy(config: &SftConfig) -> Result<(), St
 #[allow(clippy::too_many_arguments)]
 fn run_sft(
     native_route_enabled: bool,
-    native_route_env: Option<&'static str>,
     req: &SftRequest,
     prepared_data: PreparedTrainingData,
     model_config: &kiln_core::config::ModelConfig,
@@ -1522,10 +1521,8 @@ fn run_sft(
     if native_route_enabled {
         #[cfg(feature = "cuda")]
         {
-            let native_route_env = native_route_env.unwrap_or("backend_native_training_policy");
             tracing::info!(
                 job_id = %job_id,
-                native_route_env,
                 "backend native training route enabled - routing to cuda_native_sft_train"
             );
             return kiln_train::cuda_train::cuda_native_sft_train_to_with_checkpoint_root_and_ingestion_with_runtime(
@@ -1547,10 +1544,8 @@ fn run_sft(
         }
         #[cfg(not(feature = "cuda"))]
         {
-            let native_route_env = native_route_env.unwrap_or("backend_native_training_policy");
             tracing::warn!(
                 job_id = %job_id,
-                native_route_env,
                 "backend native training route enabled but kiln-server was built without \
                  --features cuda - falling back to the default in-process SFT trainer (kt-tape)"
             );
@@ -1695,7 +1690,6 @@ fn take_verified_grpo_snapshot(
 #[allow(clippy::too_many_arguments)]
 fn run_grpo(
     native_route_enabled: bool,
-    native_route_env: Option<&'static str>,
     req: &GrpoRequest,
     prepared_data: PreparedTrainingData,
     model_config: &kiln_core::config::ModelConfig,
@@ -1727,11 +1721,9 @@ fn run_grpo(
         if native_route_enabled {
             #[cfg(feature = "cuda")]
             {
-                let native_route_env = native_route_env.unwrap_or("backend_native_training_policy");
                 tracing::info!(
                     job_id = %job_id,
                     dataset_path = %dataset_path.display(),
-                    native_route_env,
                     "backend native training route enabled - routing streamed GRPO dataset to \
                      cuda_native_grpo_train_pinned_jsonl"
                 );
@@ -1753,10 +1745,8 @@ fn run_grpo(
             }
             #[cfg(not(feature = "cuda"))]
             {
-                let native_route_env = native_route_env.unwrap_or("backend_native_training_policy");
                 tracing::warn!(
                     job_id = %job_id,
-                    native_route_env,
                     "backend native training route enabled but kiln-server was built without \
                      --features cuda - falling back to the default in-process GRPO trainer (kt-tape)"
                 );
@@ -1792,10 +1782,8 @@ fn run_grpo(
     if native_route_enabled {
         #[cfg(feature = "cuda")]
         {
-            let native_route_env = native_route_env.unwrap_or("backend_native_training_policy");
             tracing::info!(
                 job_id = %job_id,
-                native_route_env,
                 "backend native training route enabled - routing GRPO to cuda_native_grpo_train"
             );
             return kiln_train::cuda_train::cuda_native_grpo_train_to_with_checkpoint_root_and_runtime(
@@ -1816,10 +1804,8 @@ fn run_grpo(
         }
         #[cfg(not(feature = "cuda"))]
         {
-            let native_route_env = native_route_env.unwrap_or("backend_native_training_policy");
             tracing::warn!(
                 job_id = %job_id,
-                native_route_env,
                 "backend native training route enabled but kiln-server was built without \
                  --features cuda - falling back to the default in-process GRPO trainer (kt-tape)"
             );
@@ -4636,7 +4622,6 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                 let native_route_enabled = training_dispatch.native_route_enabled();
                 run_sft(
                     native_route_enabled,
-                    training_dispatch.native_training_env,
                     &req,
                     std::mem::take(&mut entry.prepared_data),
                     &state.model_config,
@@ -4677,7 +4662,6 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                 let native_route_enabled = training_dispatch.native_route_enabled();
                 run_grpo(
                     native_route_enabled,
-                    training_dispatch.native_training_env,
                     &req,
                     std::mem::take(&mut entry.prepared_data),
                     &state.model_config,
@@ -6769,80 +6753,32 @@ mod tests {
     }
 
     #[test]
-    fn server_training_dispatch_policy_treats_empty_and_zero_as_disabled() {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        const VAR: &str = "KILN_TEST_NATIVE_TRAINING_FLAG";
+    fn server_training_dispatch_policy_uses_immutable_backend_default() {
         let policy = ServerTrainingDispatchPolicy {
             native_route: ServerTrainingNativeRoute::LegacyCudaNative,
-            native_training_env: Some(VAR),
             native_training_default_enabled: false,
         };
-
-        unsafe {
-            std::env::remove_var(VAR);
-        }
         assert!(!policy.native_route_enabled());
-
-        unsafe {
-            std::env::set_var(VAR, "");
-        }
-        assert!(!policy.native_route_enabled());
-
-        unsafe {
-            std::env::set_var(VAR, "0");
-        }
-        assert!(!policy.native_route_enabled());
-
-        unsafe {
-            std::env::set_var(VAR, "1");
-        }
-        assert!(policy.native_route_enabled());
 
         let default_enabled_policy = ServerTrainingDispatchPolicy {
             native_route: ServerTrainingNativeRoute::LegacyCudaNative,
-            native_training_env: Some(VAR),
             native_training_default_enabled: true,
         };
-        unsafe {
-            std::env::remove_var(VAR);
-        }
         assert!(default_enabled_policy.native_route_enabled());
     }
 
     #[test]
     fn server_training_dispatch_policy_follows_backend_policy() {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        const VAR: &str = "KILN_TEST_SERVER_NATIVE_TRAINING_POLICY";
         let legacy_cuda_policy = ServerTrainingDispatchPolicy {
             native_route: ServerTrainingNativeRoute::LegacyCudaNative,
-            native_training_env: Some(VAR),
             native_training_default_enabled: false,
         };
         let shared_policy = ServerTrainingDispatchPolicy {
             native_route: ServerTrainingNativeRoute::SharedKtTape,
-            native_training_env: Some(VAR),
             native_training_default_enabled: true,
         };
-
-        unsafe {
-            std::env::remove_var(VAR);
-        }
         assert!(!legacy_cuda_policy.native_route_enabled());
-
-        unsafe {
-            std::env::set_var(VAR, "1");
-        }
-        assert!(legacy_cuda_policy.native_route_enabled());
         assert!(!shared_policy.native_route_enabled());
-
-        unsafe {
-            std::env::set_var(VAR, "0");
-        }
-        assert!(!legacy_cuda_policy.native_route_enabled());
-
-        unsafe {
-            std::env::remove_var(VAR);
-        }
     }
 
     #[test]

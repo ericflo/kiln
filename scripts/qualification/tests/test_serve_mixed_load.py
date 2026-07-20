@@ -193,8 +193,8 @@ def health_fixture(
         },
     }
     accelerator_runtime = {
-        "schema_id": "kiln.accelerator-runtime-policy.v12",
-        "version": 12,
+        "schema_id": "kiln.accelerator-runtime-policy.v13",
+        "version": 13,
         "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v3",
         "vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1",
         "serving_profile": serving_profile,
@@ -453,8 +453,8 @@ def debug_fixture(
 
     return {
         "accelerator_runtime": {
-            "schema_id": "kiln.accelerator-runtime-policy.v12",
-            "version": 12,
+            "schema_id": "kiln.accelerator-runtime-policy.v13",
+            "version": 13,
             "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v3",
             "vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1",
             "serving_profile": serving_profile,
@@ -603,9 +603,9 @@ class ServeMixedLoadTests(unittest.TestCase):
     def test_accelerator_policy_version_is_derived_from_schema_identity(self) -> None:
         self.assertEqual(
             serve.ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID,
-            "kiln.accelerator-runtime-policy.v12",
+            "kiln.accelerator-runtime-policy.v13",
         )
-        self.assertEqual(serve.ACCELERATOR_RUNTIME_POLICY_VERSION, 12)
+        self.assertEqual(serve.ACCELERATOR_RUNTIME_POLICY_VERSION, 13)
         self.assertEqual(
             serve.ACCELERATOR_RUNTIME_POLICY_VERSION,
             int(serve.ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID.rsplit(".v", 1)[1]),

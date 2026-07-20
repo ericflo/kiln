@@ -1406,7 +1406,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "BackendFallbackCapabilities": {
-      "field_count": 4,
+      "field_count": 3,
       "fields": [
         {
           "name": "generic_device_op",
@@ -1415,10 +1415,6 @@
         {
           "name": "decode_hot_path",
           "type": "FallbackPolicy"
-        },
-        {
-          "name": "decode_hot_path_debug_env",
-          "type": "Option<&'static str>"
         },
         {
           "name": "training_optimizer",
@@ -1454,7 +1450,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "DecodeBatcherPolicy": {
-      "field_count": 21,
+      "field_count": 19,
       "fields": [
         {
           "name": "rendezvous_default_enabled",
@@ -1477,10 +1473,6 @@
           "type": "bool"
         },
         {
-          "name": "rowwise_retry_env",
-          "type": "Option<&'static str>"
-        },
-        {
           "name": "require_native_decode_attention",
           "type": "bool"
         },
@@ -1491,10 +1483,6 @@
         {
           "name": "prefer_direct_paged_decode_attention",
           "type": "bool"
-        },
-        {
-          "name": "direct_paged_decode_attention_env_gate",
-          "type": "DecodeAttentionEnvGate"
         },
         {
           "name": "allow_prefix_cache_split_snapshot",
@@ -1720,15 +1708,11 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "KvCacheFp8Policy": {
-      "field_count": 3,
+      "field_count": 2,
       "fields": [
         {
           "name": "allow_when_requested_by_default",
           "type": "bool"
-        },
-        {
-          "name": "explicit_enable_env",
-          "type": "Option<&'static str>"
         },
         {
           "name": "disabled_reason",
@@ -1782,7 +1766,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "ProjectionLoadPolicy": {
-      "field_count": 18,
+      "field_count": 12,
       "fields": [
         {
           "name": "backend",
@@ -1797,16 +1781,8 @@
           "type": "bool"
         },
         {
-          "name": "parallel_transposed_projection_upload_disable_env",
-          "type": "Option<&'static str>"
-        },
-        {
           "name": "parallel_auxiliary_weight_upload",
           "type": "bool"
-        },
-        {
-          "name": "parallel_auxiliary_weight_upload_disable_env",
-          "type": "Option<&'static str>"
         },
         {
           "name": "cache_full_attention_qkv_transpose_concat",
@@ -1839,22 +1815,6 @@
         {
           "name": "synchronize_after_dropping_originals",
           "type": "bool"
-        },
-        {
-          "name": "keep_projection_originals_env",
-          "type": "Option<&'static str>"
-        },
-        {
-          "name": "drop_projection_originals_env",
-          "type": "Option<&'static str>"
-        },
-        {
-          "name": "native_training_env",
-          "type": "Option<&'static str>"
-        },
-        {
-          "name": "keep_projection_transposes_env",
-          "type": "Option<&'static str>"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"
@@ -1900,15 +1860,11 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "ServerTrainingDispatchPolicy": {
-      "field_count": 3,
+      "field_count": 2,
       "fields": [
         {
           "name": "native_route",
           "type": "ServerTrainingNativeRoute"
-        },
-        {
-          "name": "native_training_env",
-          "type": "Option<&'static str>"
         },
         {
           "name": "native_training_default_enabled",
@@ -1936,7 +1892,7 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "StartupCapabilities": {
-      "field_count": 6,
+      "field_count": 5,
       "fields": [
         {
           "name": "run_inference_prewarm",
@@ -1953,10 +1909,6 @@
         {
           "name": "native_training_default_enabled",
           "type": "bool"
-        },
-        {
-          "name": "native_training_env",
-          "type": "Option<&'static str>"
         },
         {
           "name": "decode_weight_prewarm_when_native_training",
@@ -3460,8 +3412,8 @@
         "crates/kiln-train/src/trainer.rs",
         "crates/kiln-model/tests/backend_capability_contract.rs"
       ],
-      "genuine": true,
-      "migration": "complete",
+      "genuine": false,
+      "migration": "partial",
       "migration_signals": [
         {
           "evidence": [
@@ -3481,18 +3433,20 @@
           ],
           "expected": 6,
           "name": "decode_hot_path_fallback_delegates_to_backend_capability",
-          "observed": 6,
-          "passed": true
+          "observed": 4,
+          "passed": false
         }
       ],
       "phase": 2,
-      "remaining": [],
+      "remaining": [
+        "decode hot-path fallback decisions are not centralized in BackendFallbackCapabilities"
+      ],
       "report_sections": [
         "Generic DeviceOp Fallback",
         "Decode Hot-Path Fallback",
         "Training Optimizer Fallback"
       ],
-      "status": "covered",
+      "status": "partial",
       "title": "Normalize fallback policy"
     },
     {
