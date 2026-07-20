@@ -1731,6 +1731,7 @@ class ServeMixedLoadTests(unittest.TestCase):
                     "actor_admission": 0,
                     "actor_prefill": 0,
                     "actor_decode": 0,
+                    "actor_cycle_idle": 0,
                     "response_delivery": 0,
                     "handler_queue": 0,
                     "client_delivery": 0,
@@ -1752,6 +1753,7 @@ class ServeMixedLoadTests(unittest.TestCase):
                     "tokenization_ms": 1.0,
                     "prefill_ms": 20.0,
                     "decode_ms": 8.0,
+                    "actor_cycle_idle_ms": 0.0,
                     "sampling_ms": None,
                     "readback_ms": None,
                     "response_delivery_ms": 1.0,
@@ -1775,6 +1777,26 @@ class ServeMixedLoadTests(unittest.TestCase):
             (12.0, 3.0, 20.0, True, performance["latency"]["phases"]),
         )
         self.assertIsNone(serve.parse_actor_performance({"choices": []}))
+
+        missing_idle_reason = json.loads(json.dumps(performance))
+        missing_idle_reason["latency"]["stall_reasons"].pop("actor_cycle_idle")
+        with self.assertRaisesRegex(
+            serve.QualificationError,
+            r"missing=\['actor_cycle_idle'\], extra=\[\]",
+        ):
+            serve.parse_actor_performance(
+                {"metadata": {"performance": missing_idle_reason}}
+            )
+
+        missing_idle_phase = json.loads(json.dumps(performance))
+        missing_idle_phase["latency"]["phases"].pop("actor_cycle_idle_ms")
+        with self.assertRaisesRegex(
+            serve.QualificationError,
+            r"missing=\['actor_cycle_idle_ms'\], extra=\[\]",
+        ):
+            serve.parse_actor_performance(
+                {"metadata": {"performance": missing_idle_phase}}
+            )
 
         malformed = dict(performance)
         malformed["unexpected"] = 1

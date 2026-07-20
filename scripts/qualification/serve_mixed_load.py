@@ -27,6 +27,11 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import host_thermal_guard as thermal
+from request_latency_contract import (
+    LATENCY_PHASE_FIELDS,
+    LATENCY_PHASE_NAMES,
+    LATENCY_STALL_REASON_FIELDS,
+)
 from result_details import compact_details
 
 
@@ -536,28 +541,6 @@ GRAPH_LIVE_TELEMETRY_FIELDS = (
     *(f"{phase_name}_phase" for phase_name in GRAPH_PHASE_NAMES),
     "last_transient_candidate_bytes",
     "peak_transient_candidate_bytes",
-)
-
-LATENCY_PHASE_NAMES = (
-    "actor_queue",
-    "actor_admission",
-    "tokenization",
-    "prefill",
-    "decode",
-    "sampling",
-    "readback",
-    "response_delivery",
-    "handler_queue",
-    "client_delivery",
-    "gpu_lock_wait",
-    "graph_capture",
-    "graph_replay",
-    "synchronization",
-    "resize",
-    "trim",
-    "adapter",
-    "training",
-    "unexplained",
 )
 
 METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
@@ -1164,15 +1147,6 @@ LATENCY_DIAGNOSTIC_FIELDS = {
     "ttft_ms", "itl_ms_p50", "itl_ms_p99", "itl_ms_p999", "max_itl_ms",
     "stall_threshold_ms", "stall_count", "unexplained_stall_count", "stall_reasons", "phases",
 }
-LATENCY_PHASE_FIELDS = {f"{phase}_ms" for phase in LATENCY_PHASE_NAMES}
-LATENCY_REASON_FIELDS = {
-    "actor_queue", "actor_admission", "actor_prefill", "actor_decode", "response_delivery",
-    "handler_queue", "client_delivery", "unexplained",
-    "sampling", "readback", "gpu_lock_wait", "graph_capture", "graph_replay",
-    "synchronization", "resize", "trim", "adapter", "training",
-}
-
-
 def validate_request_latency(value: Any) -> None:
     if not isinstance(value, dict) or set(value) != LATENCY_DIAGNOSTIC_FIELDS:
         raise QualificationError("request latency diagnostics have an unexpected shape")
@@ -1207,8 +1181,15 @@ def validate_request_latency(value: Any) -> None:
         if not math.isfinite(float(raw)) or float(raw) < 0:
             raise QualificationError(f"request latency {field} is not finite and nonnegative")
     reasons = value["stall_reasons"]
-    if not isinstance(reasons, dict) or set(reasons) != LATENCY_REASON_FIELDS:
-        raise QualificationError("request latency stall reasons have an unexpected shape")
+    if not isinstance(reasons, dict):
+        raise QualificationError("request latency stall reasons are not an object")
+    expected_reason_fields = set(LATENCY_STALL_REASON_FIELDS)
+    if set(reasons) != expected_reason_fields:
+        raise QualificationError(
+            "request latency stall reasons have an unexpected shape: "
+            f"missing={sorted(expected_reason_fields - set(reasons))}, "
+            f"extra={sorted(set(reasons) - expected_reason_fields)}"
+        )
     for field, raw in reasons.items():
         if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
             raise QualificationError(f"request latency stall reason {field} is invalid")
@@ -1239,8 +1220,15 @@ def validate_request_latency(value: Any) -> None:
         if value["stall_threshold_ms"] is None or abs(float(value["stall_threshold_ms"]) - expected_threshold) > 0.05:
             raise QualificationError("request latency stall threshold is inconsistent")
     phases = value["phases"]
-    if not isinstance(phases, dict) or set(phases) != LATENCY_PHASE_FIELDS:
-        raise QualificationError("request latency phases have an unexpected shape")
+    if not isinstance(phases, dict):
+        raise QualificationError("request latency phases are not an object")
+    expected_phase_fields = set(LATENCY_PHASE_FIELDS)
+    if set(phases) != expected_phase_fields:
+        raise QualificationError(
+            "request latency phases have an unexpected shape: "
+            f"missing={sorted(expected_phase_fields - set(phases))}, "
+            f"extra={sorted(set(phases) - expected_phase_fields)}"
+        )
     for field, raw in phases.items():
         if raw is None:
             continue

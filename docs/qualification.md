@@ -1931,6 +1931,24 @@ cooperative actor wait now reaches each request that remains active through the
 wait as `actor_cycle_idle_ms` and can classify its next token stall instead of
 appearing as unexplained ITL.
 
+The observability schema generator, serving benchmark, and source-bound
+mixed-load driver consume one canonical fixed-cardinality request-latency field
+registry. The mixed-load receipt includes
+`latency_phase_actor_cycle_idle_ms_total` and
+`latency_phase_actor_cycle_idle_request_count` with the other request-local
+phase metrics. A missing or additional phase or stall-reason field fails before
+measurement and reports the exact missing and additional names. This keeps a
+server schema addition from being silently ignored by one qualification path.
+
+The retained source-bound ROCm receipt
+`qualification/receipts/rocm/strix-halo/20260720t044950539805z-rocm-strix-halo-serving-mixed-rocm-v1-184c082f9e-v1.json`
+is the counterexample that closed this gap. The release server loaded,
+prewarmed, returned the correct 32-token warmup prefix, and shut down normally;
+the old mixed-load parser then rejected the already-published
+`actor_cycle_idle` stall-reason field. Its zero measured tokens and throughput
+are sentinels, not performance evidence. The corrected shared registry must be
+present in the exact pushed source used by the next run.
+
 The source-bound confirmation is
 `benchmarks/receipts/rocm/strix-halo/20260719t204756-rocm-strix-halo-request-phase-attribution-v15-c8.kiln.json`.
 All eight requests contributed complete performance and latency objects and

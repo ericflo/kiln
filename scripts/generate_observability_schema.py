@@ -5,11 +5,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+QUALIFICATION_DIR = ROOT / "scripts" / "qualification"
+if str(QUALIFICATION_DIR) not in sys.path:
+    sys.path.insert(0, str(QUALIFICATION_DIR))
+
+from request_latency_contract import (  # noqa: E402
+    LATENCY_PHASE_FIELDS,
+    LATENCY_STALL_REASON_FIELDS,
+)
+
 OUTPUT = ROOT / "contracts" / "kiln-observability-v1.schema.json"
 STATUS = {"x-kiln-field-schema-status": "complete"}
 DEFS: dict[str, dict[str, Any]] = {}
@@ -1535,32 +1545,19 @@ def build_definitions() -> None:
         "object": {"const": "list"},
         "data": array(ref("ModelInfo"), min_items=1, max_items=1),
     }, "OpenAI-compatible list of served models.")
-    add_object("LatencyStallReasonCounts", "LatencyStallReasonCounts", {
-        "actor_queue": ref("NonNegativeInteger"), "actor_admission": ref("NonNegativeInteger"),
-        "actor_prefill": ref("NonNegativeInteger"), "actor_decode": ref("NonNegativeInteger"),
-        "actor_cycle_idle": ref("NonNegativeInteger"),
-        "response_delivery": ref("NonNegativeInteger"), "handler_queue": ref("NonNegativeInteger"),
-        "client_delivery": ref("NonNegativeInteger"), "sampling": ref("NonNegativeInteger"),
-        "readback": ref("NonNegativeInteger"), "gpu_lock_wait": ref("NonNegativeInteger"),
-        "graph_capture": ref("NonNegativeInteger"), "graph_replay": ref("NonNegativeInteger"),
-        "synchronization": ref("NonNegativeInteger"), "resize": ref("NonNegativeInteger"),
-        "trim": ref("NonNegativeInteger"), "adapter": ref("NonNegativeInteger"),
-        "training": ref("NonNegativeInteger"), "unexplained": ref("NonNegativeInteger"),
-    }, "Fixed-cardinality token-stall counts by dominant blocking reason.")
+    add_object(
+        "LatencyStallReasonCounts",
+        "LatencyStallReasonCounts",
+        {field: ref("NonNegativeInteger") for field in LATENCY_STALL_REASON_FIELDS},
+        "Fixed-cardinality token-stall counts by dominant blocking reason.",
+    )
     nullable_duration = nullable(ref("NonNegativeNumber"))
-    add_object("LatencyPhaseTimings", "LatencyPhaseTimings", {
-        "actor_queue_ms": nullable_duration, "actor_admission_ms": nullable_duration,
-        "tokenization_ms": nullable_duration, "prefill_ms": nullable_duration,
-        "decode_ms": nullable_duration, "actor_cycle_idle_ms": nullable_duration,
-        "sampling_ms": nullable_duration,
-        "readback_ms": nullable_duration, "response_delivery_ms": nullable_duration,
-        "handler_queue_ms": nullable_duration, "client_delivery_ms": nullable_duration,
-        "gpu_lock_wait_ms": nullable_duration, "graph_capture_ms": nullable_duration,
-        "graph_replay_ms": nullable_duration, "synchronization_ms": nullable_duration,
-        "resize_ms": nullable_duration, "trim_ms": nullable_duration,
-        "adapter_ms": nullable_duration, "training_ms": nullable_duration,
-        "unexplained_ms": nullable_duration,
-    }, "Bounded request phase timings; null means the serving path did not measure that subphase.")
+    add_object(
+        "LatencyPhaseTimings",
+        "LatencyPhaseTimings",
+        {field: nullable_duration for field in LATENCY_PHASE_FIELDS},
+        "Bounded request phase timings; null means the serving path did not measure that subphase.",
+    )
     nullable_number = nullable(ref("NonNegativeNumber"))
     add_object("RequestLatencyDiagnostics", "RequestLatencyDiagnostics", {
         "emitted_tokens": ref("NonNegativeInteger"), "gap_samples": ref("NonNegativeInteger"),

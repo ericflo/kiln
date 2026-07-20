@@ -700,6 +700,52 @@ pub fn percentile(sorted: &[f64], p: f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    fn assert_serialized_fields_match_observability_schema(
+        value: serde_json::Value,
+        definition_name: &str,
+    ) {
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../contracts/kiln-observability-v1.schema.json"
+        ))
+        .unwrap();
+        let definition = &schema["$defs"][definition_name];
+        assert_eq!(definition["additionalProperties"], false);
+
+        let actual = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let properties = definition["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let required = definition["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|field| field.as_str().unwrap().to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, properties);
+        assert_eq!(actual, required);
+    }
+
+    #[test]
+    fn serialized_latency_fields_match_the_closed_public_schema() {
+        assert_serialized_fields_match_observability_schema(
+            serde_json::to_value(LatencyPhaseTimings::default()).unwrap(),
+            "LatencyPhaseTimings",
+        );
+        assert_serialized_fields_match_observability_schema(
+            serde_json::to_value(LatencyStallReasonCounts::default()).unwrap(),
+            "LatencyStallReasonCounts",
+        );
+    }
 
     #[test]
     fn request_tracker_attributes_stalls_and_keeps_missing_subphases_null() {

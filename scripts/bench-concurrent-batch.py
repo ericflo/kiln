@@ -116,6 +116,10 @@ from model_fingerprint import (  # noqa: E402
     ModelFingerprintError,
     fingerprint_model,
 )
+from request_latency_contract import (  # noqa: E402
+    LATENCY_PHASE_FIELDS as REQUEST_PHASE_FIELDS,
+    LATENCY_STALL_REASON_FIELDS as REQUEST_STALL_REASON_FIELDS,
+)
 from strict_json import loads as strict_json_loads  # noqa: E402
 
 HOST_THERMAL_POLICY_SCHEMA = thermal_policy_file.SCHEMA
@@ -429,49 +433,6 @@ REQUEST_LATENCY_KEYS = {
     "stall_reasons",
     "phases",
 }
-REQUEST_PHASE_FIELDS = (
-    "actor_queue_ms",
-    "actor_admission_ms",
-    "tokenization_ms",
-    "prefill_ms",
-    "decode_ms",
-    "actor_cycle_idle_ms",
-    "sampling_ms",
-    "readback_ms",
-    "response_delivery_ms",
-    "handler_queue_ms",
-    "client_delivery_ms",
-    "gpu_lock_wait_ms",
-    "graph_capture_ms",
-    "graph_replay_ms",
-    "synchronization_ms",
-    "resize_ms",
-    "trim_ms",
-    "adapter_ms",
-    "training_ms",
-    "unexplained_ms",
-)
-REQUEST_STALL_REASON_FIELDS = (
-    "actor_queue",
-    "actor_admission",
-    "actor_prefill",
-    "actor_decode",
-    "actor_cycle_idle",
-    "response_delivery",
-    "handler_queue",
-    "client_delivery",
-    "sampling",
-    "readback",
-    "gpu_lock_wait",
-    "graph_capture",
-    "graph_replay",
-    "synchronization",
-    "resize",
-    "trim",
-    "adapter",
-    "training",
-    "unexplained",
-)
 REQUEST_PERFORMANCE_METRIC_FIELDS = (
     "ttft_ms",
     "prefill_ms",

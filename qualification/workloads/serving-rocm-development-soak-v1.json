@@ -286,6 +286,8 @@
               "kv_unaccounted_blocks_end",
               "latency_phase_actor_admission_ms_total",
               "latency_phase_actor_admission_request_count",
+              "latency_phase_actor_cycle_idle_ms_total",
+              "latency_phase_actor_cycle_idle_request_count",
               "latency_phase_actor_queue_ms_total",
               "latency_phase_actor_queue_request_count",
               "latency_phase_adapter_ms_total",
