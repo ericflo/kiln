@@ -317,6 +317,21 @@ def run_self_tests(schema: dict[str, Any]) -> list[str]:
             "invalid CUDA backend profile",
         ),
         (
+            {"accelerator": {"metal_kernel_profile": "native_default"}},
+            True,
+            "native-default Metal backend profile",
+        ),
+        (
+            {"accelerator": {"metal_kernel_profile": "portable_fallback"}},
+            True,
+            "portable Metal backend fallback profile",
+        ),
+        (
+            {"accelerator": {"metal_kernel_profile": "individual_switches"}},
+            False,
+            "invalid Metal backend profile",
+        ),
+        (
             {
                 "server": {"serving_profile": "maintenance"},
                 "memory": {"kv_force_blocks": 8, "kv_autoscale": True},

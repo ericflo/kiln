@@ -136,7 +136,7 @@ RESPONSE_ORACLE_TARGET_INTEGER_COUNT = 64
 SLOW_RESPONSE_TARGET_INTEGER_COUNT = 1_024
 RESPONSE_DIAGNOSTIC_MAX_CHARACTERS = 256
 TOKEN_ID_DIAGNOSTIC_MAX_COUNT = 256
-ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID = "kiln.accelerator-runtime-policy.v13"
+ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID = "kiln.accelerator-runtime-policy.v14"
 ACCELERATOR_RUNTIME_POLICY_VERSION = int(
     ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID.rsplit(".v", 1)[1]
 )
@@ -2828,6 +2828,7 @@ def write_server_config(
     rocm_strided_batched_matmul_mode: str = "auto",
     rocm_bf16_matmul_output_mode: str = "auto",
     cuda_kernel_profile: str = "native_default",
+    metal_kernel_profile: str = "native_default",
     rocm_kernel_profile: str = "qualified",
     rocm_graph_mode: str | None = None,
     rocm_graph_cache_entries: int = 8,
@@ -2876,6 +2877,7 @@ def write_server_config(
         'vulkan_device_index = "auto"',
         "vulkan_validation = false",
         "cuda_kernel_profile = " + _toml_string(cuda_kernel_profile),
+        "metal_kernel_profile = " + _toml_string(metal_kernel_profile),
         f"rocm_synchronization_mode = {_toml_string(rocm_synchronization_mode)}",
         "rocm_strided_batched_matmul_mode = "
         + _toml_string(rocm_strided_batched_matmul_mode),
@@ -3222,6 +3224,11 @@ def accelerator_policy_attestation_failures(
             "source": "config_file",
         },
         "cuda_kernel_profile": {
+            "configured": "native_default",
+            "effective": "native_default",
+            "source": "config_file",
+        },
+        "metal_kernel_profile": {
             "configured": "native_default",
             "effective": "native_default",
             "source": "config_file",

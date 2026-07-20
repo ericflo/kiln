@@ -133,8 +133,8 @@ pub const DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 pub const ROCM_GRAPH_CACHE_MAX_BYTES_MIN: u64 = 64 * 1024 * 1024;
 pub const ROCM_GRAPH_CACHE_MAX_BYTES_MAX: u64 = 16 * 1024 * 1024 * 1024;
 /// Versioned schema identity shared by config, health, and debug diagnostics.
-pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v13";
-pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 13;
+pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v14";
+pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 14;
 
 /// Stable operator-facing default for sparse SFT checkpoint-boundary anchors.
 pub const DEFAULT_CHECKPOINT_BOUNDARY_CACHE_GB: f64 = 6.0;
@@ -1895,6 +1895,100 @@ impl<'de> Deserialize<'de> for CudaKernelProfileSetting {
     }
 }
 
+/// Closed process-lifetime Metal backend-kernel route set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetalKernelProfile {
+    /// Preserve the native Metal routes active before policy consolidation.
+    #[default]
+    NativeDefault,
+    /// Decline all profile-governed routes and use portable fallbacks.
+    PortableFallback,
+}
+
+impl MetalKernelProfile {
+    fn parse(raw: &str, label: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "native_default" => Ok(Self::NativeDefault),
+            "portable_fallback" => Ok(Self::PortableFallback),
+            _ => {
+                anyhow::bail!(
+                    "{label} must be one of native_default or portable_fallback; got {raw:?}"
+                )
+            }
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeDefault => "native_default",
+            Self::PortableFallback => "portable_fallback",
+        }
+    }
+}
+
+impl fmt::Display for MetalKernelProfile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Source-tracked Metal backend-kernel profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetalKernelProfileSetting {
+    profile: MetalKernelProfile,
+    source: ConfigValueSource,
+}
+
+impl MetalKernelProfileSetting {
+    pub const fn new(profile: MetalKernelProfile, source: ConfigValueSource) -> Self {
+        Self { profile, source }
+    }
+
+    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
+        let profile = MetalKernelProfile::parse(raw, name)?;
+        Ok(Self::new(profile, ConfigValueSource::Environment))
+    }
+
+    pub const fn profile(self) -> MetalKernelProfile {
+        self.profile
+    }
+
+    pub const fn source(self) -> ConfigValueSource {
+        self.source
+    }
+}
+
+impl Default for MetalKernelProfileSetting {
+    fn default() -> Self {
+        Self::new(
+            MetalKernelProfile::NativeDefault,
+            ConfigValueSource::Default,
+        )
+    }
+}
+
+impl Serialize for MetalKernelProfileSetting {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.profile.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for MetalKernelProfileSetting {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let profile = MetalKernelProfile::parse(&raw, "accelerator.metal_kernel_profile")
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self::new(profile, ConfigValueSource::ConfigFile))
+    }
+}
+
 /// Closed process-lifetime ROCm kernel route set.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -2430,6 +2524,7 @@ pub struct ResolvedAcceleratorRuntimePolicy {
     pub vulkan_device_index: ResolvedAcceleratorValue<Option<usize>>,
     pub vulkan_validation: ResolvedAcceleratorValue<bool>,
     pub cuda_kernel_profile: ResolvedAcceleratorValue<CudaKernelProfile>,
+    pub metal_kernel_profile: ResolvedAcceleratorValue<MetalKernelProfile>,
     pub rocm_synchronization_mode: ResolvedAcceleratorValue<RocmSynchronizationMode>,
     pub rocm_strided_batched_matmul_mode: ResolvedAcceleratorValue<RocmStridedBatchedMatmulMode>,
     pub rocm_bf16_matmul_output_mode: ResolvedAcceleratorValue<RocmBf16MatmulOutputMode>,
@@ -2449,6 +2544,7 @@ pub struct AcceleratorRuntimeConfig {
     pub vulkan_device_index: VulkanDeviceIndexSetting,
     pub vulkan_validation: VulkanValidationSetting,
     pub cuda_kernel_profile: CudaKernelProfileSetting,
+    pub metal_kernel_profile: MetalKernelProfileSetting,
     pub rocm_synchronization_mode: RocmSynchronizationModeSetting,
     pub rocm_strided_batched_matmul_mode: RocmStridedBatchedMatmulModeSetting,
     pub rocm_bf16_matmul_output_mode: RocmBf16MatmulOutputModeSetting,
@@ -2503,6 +2599,11 @@ impl AcceleratorRuntimeConfig {
                 configured: self.cuda_kernel_profile.profile(),
                 effective: self.cuda_kernel_profile.profile(),
                 source: self.cuda_kernel_profile.source(),
+            },
+            metal_kernel_profile: ResolvedAcceleratorValue {
+                configured: self.metal_kernel_profile.profile(),
+                effective: self.metal_kernel_profile.profile(),
+                source: self.metal_kernel_profile.source(),
             },
             rocm_synchronization_mode: ResolvedAcceleratorValue {
                 configured: self.rocm_synchronization_mode.mode(),
@@ -2612,6 +2713,7 @@ impl Default for AcceleratorRuntimeConfig {
             vulkan_device_index: VulkanDeviceIndexSetting::default(),
             vulkan_validation: VulkanValidationSetting::default(),
             cuda_kernel_profile: CudaKernelProfileSetting::default(),
+            metal_kernel_profile: MetalKernelProfileSetting::default(),
             rocm_synchronization_mode: RocmSynchronizationModeSetting::default(),
             rocm_strided_batched_matmul_mode: RocmStridedBatchedMatmulModeSetting::default(),
             rocm_bf16_matmul_output_mode: RocmBf16MatmulOutputModeSetting::default(),
@@ -5382,6 +5484,12 @@ impl NormalizedEnvValue for CudaKernelProfileSetting {
     }
 }
 
+impl NormalizedEnvValue for MetalKernelProfileSetting {
+    fn normalized_env_value(&self) -> String {
+        self.profile().as_str().to_owned()
+    }
+}
+
 impl NormalizedEnvValue for RocmSynchronizationModeSetting {
     fn normalized_env_value(&self) -> String {
         self.mode().as_str().to_owned()
@@ -5727,6 +5835,9 @@ macro_rules! public_env_parser {
     (cuda_kernel_profile) => {
         CudaKernelProfileSetting::from_named_environment_value
     };
+    (metal_kernel_profile) => {
+        MetalKernelProfileSetting::from_named_environment_value
+    };
     (rocm_synchronization_mode) => {
         RocmSynchronizationModeSetting::from_named_environment_value
     };
@@ -5964,6 +6075,7 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
         "KILN_VULKAN_VALIDATION"
     ),
     public_env_field!(cuda_kernel_profile, accelerator.cuda_kernel_profile),
+    public_env_field!(metal_kernel_profile, accelerator.metal_kernel_profile),
     public_env_field!(
         rocm_synchronization_mode,
         accelerator.rocm_synchronization_mode
@@ -7401,6 +7513,7 @@ mod tests {
         "KILN_ACCELERATOR_FULL_ATTENTION_SCORE_BUDGET_MIB",
         "KILN_ACCELERATOR_KT_API_MODE",
         "KILN_ACCELERATOR_CUDA_KERNEL_PROFILE",
+        "KILN_ACCELERATOR_METAL_KERNEL_PROFILE",
         "KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE",
         "KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES",
         "KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES",
@@ -7703,6 +7816,10 @@ mod tests {
             CudaKernelProfile::NativeDefault
         );
         assert_eq!(
+            config.accelerator.metal_kernel_profile.profile(),
+            MetalKernelProfile::NativeDefault
+        );
+        assert_eq!(
             config.accelerator.full_attention_score_budget_mib.mib(),
             kiln_model::DEFAULT_FULL_ATTENTION_SCORE_BUDGET_MIB
         );
@@ -7744,6 +7861,7 @@ mod tests {
             config.accelerator.vulkan_device_index.source(),
             config.accelerator.vulkan_validation.source(),
             config.accelerator.cuda_kernel_profile.source(),
+            config.accelerator.metal_kernel_profile.source(),
             config.accelerator.rocm_synchronization_mode.source(),
             config.accelerator.rocm_strided_batched_matmul_mode.source(),
             config.accelerator.rocm_bf16_matmul_output_mode.source(),
@@ -8016,6 +8134,14 @@ mod tests {
                 }
             );
             assert_eq!(
+                resolved.metal_kernel_profile,
+                ResolvedAcceleratorValue {
+                    configured: MetalKernelProfile::NativeDefault,
+                    effective: MetalKernelProfile::NativeDefault,
+                    source: ConfigValueSource::Default,
+                }
+            );
+            assert_eq!(
                 resolved.rocm_synchronization_mode,
                 ResolvedAcceleratorValue {
                     configured: RocmSynchronizationMode::LegacyHostBarriers,
@@ -8078,8 +8204,8 @@ mod tests {
             ConfigValueSource::Environment,
         )))
         .unwrap();
-        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v13");
-        assert_eq!(json["version"], 13);
+        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v14");
+        assert_eq!(json["version"], 14);
         assert_eq!(
             json["vulkan_kernel_policy_schema_id"],
             "kiln.vulkan-kernel-policy.v3"
@@ -8099,6 +8225,9 @@ mod tests {
         assert_eq!(json["cuda_kernel_profile"]["configured"], "native_default");
         assert_eq!(json["cuda_kernel_profile"]["effective"], "native_default");
         assert_eq!(json["cuda_kernel_profile"]["source"], "default");
+        assert_eq!(json["metal_kernel_profile"]["configured"], "native_default");
+        assert_eq!(json["metal_kernel_profile"]["effective"], "native_default");
+        assert_eq!(json["metal_kernel_profile"]["source"], "default");
         assert_eq!(json["rocm_kernel_profile"]["configured"], "qualified");
         assert_eq!(json["rocm_kernel_profile"]["effective"], "qualified");
         assert_eq!(json["rocm_kernel_profile"]["source"], "default");
@@ -8120,6 +8249,7 @@ full_attention_score_budget_mib = 64
 vulkan_device_index = 2
 vulkan_validation = true
 cuda_kernel_profile = "portable_fallback"
+metal_kernel_profile = "portable_fallback"
 rocm_synchronization_mode = "stream_ordered"
 rocm_strided_batched_matmul_mode = "disabled"
 rocm_bf16_matmul_output_mode = "f32_then_cast"
@@ -8138,6 +8268,10 @@ rocm_graph_cache_max_bytes = 17179869184
         assert_eq!(
             config.accelerator.cuda_kernel_profile.profile(),
             CudaKernelProfile::PortableFallback
+        );
+        assert_eq!(
+            config.accelerator.metal_kernel_profile.profile(),
+            MetalKernelProfile::PortableFallback
         );
         assert_eq!(
             config.accelerator.full_attention_score_budget_mib.source(),
@@ -8173,6 +8307,7 @@ rocm_graph_cache_max_bytes = 17179869184
             config.accelerator.vulkan_device_index.source(),
             config.accelerator.vulkan_validation.source(),
             config.accelerator.cuda_kernel_profile.source(),
+            config.accelerator.metal_kernel_profile.source(),
             config.accelerator.rocm_synchronization_mode.source(),
             config.accelerator.rocm_strided_batched_matmul_mode.source(),
             config.accelerator.rocm_bf16_matmul_output_mode.source(),
@@ -8230,6 +8365,8 @@ rocm_graph_cache_max_bytes = 17179869184
             "[accelerator]\nvulkan_validation = \"true\"\n".to_owned(),
             "[accelerator]\ncuda_kernel_profile = \"individual_switches\"\n".to_owned(),
             "[accelerator]\ncuda_kernel_profile = true\n".to_owned(),
+            "[accelerator]\nmetal_kernel_profile = \"individual_switches\"\n".to_owned(),
+            "[accelerator]\nmetal_kernel_profile = true\n".to_owned(),
             "[accelerator]\nrocm_synchronization_mode = \"eventually\"\n".to_owned(),
             "[accelerator]\nrocm_synchronization_mode = true\n".to_owned(),
             "[accelerator]\nrocm_strided_batched_matmul_mode = \"sometimes\"\n".to_owned(),
@@ -8405,6 +8542,38 @@ rocm_graph_cache_max_bytes = 17179869184
             .to_string();
         assert!(
             detail.contains("KILN_ACCELERATOR_CUDA_KERNEL_PROFILE"),
+            "{detail}"
+        );
+        assert!(detail.contains("native_default"), "{detail}");
+    }
+
+    #[test]
+    fn metal_kernel_profile_environment_is_canonical_strict_and_source_tracked() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let environment = ScopedConfigEnvironment::isolated();
+
+        for (raw, expected) in [
+            ("native_default", MetalKernelProfile::NativeDefault),
+            ("portable_fallback", MetalKernelProfile::PortableFallback),
+        ] {
+            environment.set("KILN_ACCELERATOR_METAL_KERNEL_PROFILE", raw);
+            let mut config = KilnConfig::default();
+            config.apply_env_overrides().unwrap();
+            assert_eq!(config.accelerator.metal_kernel_profile.profile(), expected);
+            assert_eq!(
+                config.accelerator.metal_kernel_profile.source(),
+                ConfigValueSource::Environment
+            );
+            environment.remove("KILN_ACCELERATOR_METAL_KERNEL_PROFILE");
+        }
+
+        environment.set("KILN_ACCELERATOR_METAL_KERNEL_PROFILE", "custom");
+        let detail = KilnConfig::default()
+            .apply_env_overrides()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            detail.contains("KILN_ACCELERATOR_METAL_KERNEL_PROFILE"),
             "{detail}"
         );
         assert!(detail.contains("native_default"), "{detail}");
@@ -8741,7 +8910,7 @@ rocm_graph_cache_max_bytes = 17179869184
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 109);
+        assert_eq!(original_len, 110);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -8812,7 +8981,7 @@ rocm_graph_cache_max_bytes = 17179869184
                 .len(),
             15
         );
-        assert_eq!(serialized_leaves.len(), 114);
+        assert_eq!(serialized_leaves.len(), 115);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 5);
 
         let mut classified = PUBLIC_ENV_FIELDS

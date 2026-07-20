@@ -2,6 +2,15 @@
 
 ## Unreleased — bounded thinking by tokens or decode time
 
+- Metal backend configuration: replaced forty-six Metal kernel-route decisions
+  and more than fifty legacy environment spellings with one immutable typed
+  `accelerator.metal_kernel_profile`. `native_default` preserves the prior
+  unset behavior with forty-five routes on and custom LM-head argmax off;
+  `portable_fallback` declines every owned route. Accelerator policy v14,
+  configuration/API/CLI/dashboard diagnostics, qualification fixtures,
+  generated schemas, the example configuration, and the website expose the
+  same source-tracked value. The complete route and retired-variable matrices
+  are documented; former per-kernel names are not aliases.
 - CUDA model/backend configuration: expanded the immutable profile from
   fourteen to twenty-five hot-path route decisions and removed their direct
   environment reads. The policy now also owns paged decode, rotary, decode QKV

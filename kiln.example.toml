@@ -147,6 +147,11 @@ cuda_kernel_profile = "native_default" # native_default | portable_fallback. One
                                       # existing accelerated dispatch without claiming hardware
                                       # qualification. Override mechanically with
                                       # KILN_ACCELERATOR_CUDA_KERNEL_PROFILE.
+metal_kernel_profile = "native_default" # native_default | portable_fallback. One immutable
+                                      # forty-six-route Metal backend policy. Native default keeps
+                                      # custom LM-head argmax off and the other forty-five routes on.
+                                      # Override mechanically with
+                                      # KILN_ACCELERATOR_METAL_KERNEL_PROFILE.
 rocm_synchronization_mode = "legacy_host_barriers" # Qualified default. `stream_ordered` removes
                                       # only proven same-stream host barriers and uses a primary-
                                       # stream external-yield wait; it requires

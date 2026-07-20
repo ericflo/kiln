@@ -7,12 +7,10 @@
 
 use anyhow::{Context, Result};
 
-use super::metal_config::{
-    DISABLE_METAL_SDPA, metal_sdpa_full_safe_for_q_seq, metal_sdpa_supports_head_dim,
-};
+use super::metal_config::{metal_sdpa_full_safe_for_q_seq, metal_sdpa_supports_head_dim};
 
 pub(super) fn metal_sdpa_prefill_available() -> bool {
-    std::env::var(DISABLE_METAL_SDPA).is_err()
+    crate::metal_policy::current_metal_kernel_policy().sdpa
 }
 
 pub(super) fn metal_flash_attn_prefill(

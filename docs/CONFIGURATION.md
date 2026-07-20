@@ -184,7 +184,7 @@ disabled.
 
 This section owns process-lifetime accelerator execution behavior that must be
 fixed before the primary device context or model runner is created. The
-resolved object uses schema `kiln.accelerator-runtime-policy.v13`. Startup,
+resolved object uses schema `kiln.accelerator-runtime-policy.v14`. Startup,
 `kiln config`, `GET /v1/config`, `/health`, trusted debug state, and the
 dashboard all report the same configured/effective/source values, plus the
 compiled Vulkan kernel-policy schema ID; lower model, tensor, and kernel paths
@@ -197,6 +197,7 @@ do not re-read these public environment names.
 | `accelerator.vulkan_device_index` | `"auto"` or unsigned integer; `"auto"` | `KILN_ACCELERATOR_VULKAN_DEVICE_INDEX` (implemented) | `KILN_VULKAN_DEVICE` (deprecated compatibility) | `auto` preserves automatic discrete-GPU preference and otherwise chooses the first enumerated Vulkan physical device. An integer strictly selects that zero-based Vulkan enumeration index. An unavailable index fails logical-device startup; it is never ignored or replaced with another device. The immutable selection is installed before Vulkan device creation and reported with source attribution. Restart required. |
 | `accelerator.vulkan_validation` | boolean; `false` | `KILN_ACCELERATOR_VULKAN_VALIDATION` (implemented) | `KILN_VULKAN_VALIDATION` (deprecated compatibility) | `true` requires `server.serving_profile = "experimental"` and enables `VK_LAYER_KHRONOS_validation` when the Vulkan instance is created. Startup fails if the layer is not installed. This is not mutable per request or dispatch. Restart required. |
 | `accelerator.cuda_kernel_profile` | string enum; `"native_default"` | `KILN_ACCELERATOR_CUDA_KERNEL_PROFILE` (implemented) | none | `native_default` or `portable_fallback`, case-insensitive. `native_default` preserves the twenty-five CUDA model/backend routes that were enabled by default before consolidation; this name deliberately makes no current-hardware qualification claim. `portable_fallback` declines every owned route. The complete route set is installed before CUDA backend construction, immutable for the process lifetime, and reported with source attribution. Restart required. |
+| `accelerator.metal_kernel_profile` | string enum; `"native_default"` | `KILN_ACCELERATOR_METAL_KERNEL_PROFILE` (implemented) | none | `native_default` or `portable_fallback`, case-insensitive. `native_default` preserves forty-five of the forty-six Metal backend routes active before consolidation; custom LM-head argmax remains disabled by default. `portable_fallback` declines every owned route. The complete route set is installed before Metal backend construction, immutable for the process lifetime, and reported with source attribution. Restart required. |
 | `accelerator.rocm_synchronization_mode` | string enum; `"legacy_host_barriers"` | `KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE` (implemented) | none | `legacy_host_barriers` or `stream_ordered`, case-insensitive. `stream_ordered` requires `server.serving_profile = "experimental"`; other profiles fail startup rather than silently weakening the request. Restart required. |
 | `accelerator.rocm_strided_batched_matmul_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE` (implemented) | `KILN_FORCE_ROCM_STRIDED_BATCHED_MATMUL` and `KILN_DISABLE_ROCM_STRIDED_BATCHED_MATMUL` (deprecated compatibility) | `auto`, `enabled`, or `disabled`, case-insensitive. `auto` applies the qualified gfx115x large-attention guard; `enabled` always permits the strided-batched route and `disabled` always uses per-row GEMMs. Either explicit route requires the experimental profile. Conflicting aliases, malformed values, and canonical-plus-alias inputs fail startup. Restart required. |
 | `accelerator.rocm_bf16_matmul_output_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE` (implemented) | `KILN_FORCE_ROCM_BF16_MATMUL_F32_OUTPUT` and `KILN_DISABLE_ROCM_BF16_MATMUL_F32_OUTPUT` (deprecated compatibility) | `auto`, `native_bf16`, or `f32_then_cast`, case-insensitive. `auto` applies the qualified ROCm 7.2 shape guard; the explicit routes require the experimental profile. Conflicting aliases, malformed values, and canonical-plus-alias inputs fail startup. Restart required. |
@@ -232,7 +233,6 @@ derived canonical environment name instead.
 | `gdn_full_chunk_forward_multiblock` | on | off |
 | `fused_paged_decode` | on | off |
 | `fused_rotary_qk` | on | off |
-| `attn_decode_qkv_prep` | on | off |
 | `fused_mlp_silu_mul` | on | off |
 | `fused_mlp_gate_up_prefill` | on | off |
 | `fused_attn_sigmoid_mul` | on | off |
@@ -258,6 +258,105 @@ sigmoid fusion, RMSNorm forward/backward, L2 QK normalization, dynamic-length
 paged decode, GDN pre-permute, training MLP chunking, and split Q/gate
 training. Use the complete profile; individual route combinations are not a
 supported product configuration.
+
+`accelerator.metal_kernel_profile` owns these forty-six Metal backend decisions:
+
+| Policy leaf | `native_default` | `portable_fallback` |
+|---|---:|---:|
+| `sdpa` | on | off |
+| `sdpa_full` | on | off |
+| `conv1d_prefill` | on | off |
+| `conv1d_update` | on | off |
+| `gdn_forward_substitution` | on | off |
+| `gdn_recurrent` | on | off |
+| `gdn_gates` | on | off |
+| `gated_rms_norm` | on | off |
+| `gdn_in_proj` | on | off |
+| `gdn_qk_norm` | on | off |
+| `gdn_qkv_conv_norm` | on | off |
+| `gdn_prefill_qkv_conv_split` | on | off |
+| `gdn_in_proj_row_pair` | on | off |
+| `gdn_in_proj_row_quad` | on | off |
+| `gdn_in_proj_row_triple` | on | off |
+| `gdn_in_proj_serial_vector_load` | on | off |
+| `gdn_in_proj_serial_x2_load` | on | off |
+| `gdn_prefill_decay_recurrent` | on | off |
+| `gdn_prefill_ab_in_proj` | on | off |
+| `gdn_decode_gates_recurrent` | on | off |
+| `gdn_decode_gates_recurrent_rmsnorm` | on | off |
+| `rms_norm` | on | off |
+| `mlp_gate_up_fusion` | on | off |
+| `mlp_gate_up_row_pair` | on | off |
+| `mlp_gate_up_row_quad` | on | off |
+| `mlp_gate_up_row_triple` | on | off |
+| `mlp_gate_up_row_quad_vector_load` | on | off |
+| `mlp_gate_up_serial_vector_load` | on | off |
+| `mlp_gate_up_serial_dedicated` | on | off |
+| `mlp_silu_mul` | on | off |
+| `attn_gate_fusion` | on | off |
+| `fused_qkv_proj` | on | off |
+| `lora_delta_decode` | on | off |
+| `lm_head_argmax` | off | off |
+| `lm_head_argmax_rows` | on | off |
+| `lm_head_argmax_gpu_reduce` | on | off |
+| `lm_head_sample` | on | off |
+| `paged_attn_decode_contiguous` | on | off |
+| `paged_kv_write_token_major` | on | off |
+| `transposed_coop_gemv` | on | off |
+| `transposed_coop_gemv_tile8` | on | off |
+| `transposed_coop_gemv_tile16` | on | off |
+| `transposed_coop_gemv_row_pair` | on | off |
+| `transposed_coop_gemv_row_quad` | on | off |
+| `transposed_coop_gemv_row_quad_tile8` | on | off |
+| `transposed_coop_gemv_row_triple_tile8` | on | off |
+
+The former Metal switches are removed, not accepted as aliases. They were:
+`KILN_DISABLE_METAL_SDPA`, `KILN_DISABLE_METAL_SDPA_FULL`,
+`KILN_DISABLE_METAL_CONV1D_PREFILL`, `KILN_DISABLE_FUSED_CONV1D`,
+`KILN_DISABLE_METAL_FUSED_CONV1D`, `KILN_DISABLE_GDN_KERNEL`,
+`KILN_DISABLE_FUSED_GDN_GATES`, `KILN_DISABLE_METAL_GDN_GATES`,
+`KILN_DISABLE_METAL_GDN_FORWARD_SUBSTITUTION`,
+`KILN_DISABLE_METAL_GDN_RECURRENT`,
+`KILN_DISABLE_METAL_GDN_DECODE_GATES_RECURRENT`,
+`KILN_DISABLE_METAL_GDN_DECODE_GATES_RECURRENT_RMSNORM`,
+`KILN_DISABLE_METAL_GATED_RMSNORM`, `KILN_DISABLE_METAL_GDN_QK_NORM`,
+`KILN_DISABLE_METAL_GDN_QKV_CONV_NORM`,
+`KILN_DISABLE_METAL_GDN_PREFILL_QKV_CONV_SPLIT`,
+`KILN_DISABLE_METAL_GDN_PREFILL_DECAY_RECURRENT`,
+`KILN_DISABLE_METAL_GDN_PREFILL_AB_IN_PROJ`,
+`KILN_DISABLE_RMSNORM_KERNEL`, `KILN_DISABLE_METAL_RMSNORM`,
+`KILN_DISABLE_METAL_MLP_GATE_UP_FUSION`,
+`KILN_DISABLE_METAL_MLP_GATE_UP_ROW_PAIR`,
+`KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD`,
+`KILN_DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE`,
+`KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD`,
+`KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD`,
+`KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_DEDICATED`,
+`KILN_DISABLE_METAL_MLP_SILU_MUL`, `KILN_DISABLE_METAL_ATTN_GATE_FUSION`,
+`KILN_DISABLE_METAL_FUSED_QKV_PROJ`,
+`KILN_DISABLE_METAL_LORA_DELTA_DECODE`,
+`KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION`,
+`KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR`,
+`KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD`,
+`KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_TRIPLE`,
+`KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_VECTOR_LOAD`,
+`KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_X2_LOAD`,
+`KILN_ENABLE_METAL_LM_HEAD_ARGMAX`, `KILN_DISABLE_METAL_LM_HEAD_ARGMAX`,
+`KILN_DISABLE_METAL_LM_HEAD_ARGMAX_ROWS`,
+`KILN_DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE`,
+`KILN_DISABLE_METAL_LM_HEAD_SAMPLE`,
+`KILN_DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS`,
+`KILN_DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR`,
+`KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV`,
+`KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8`,
+`KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16`,
+`KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR`,
+`KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD`,
+`KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8`, and
+`KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8`.
+The profile is intentionally closed: use a whole-profile comparison plus route
+telemetry and a focused reproduction rather than reconstructing arbitrary
+per-kernel combinations.
 
 ### Fixed model, loader, and fallback policy
 
@@ -379,7 +478,7 @@ decisions remain leaves of the complete typed policy.
 aliases. Previously, model and ROCm flash paths parsed different permissive
 values during execution and recomputed score budgets from changing free-memory
 snapshots, permitting route geometry to change between layers or requests.
-Policy v13 fixes one bounded ceiling before execution; the ROCm allocator
+Policy v14 fixes one bounded ceiling before execution; the ROCm allocator
 governor may still reject a planned operation when its exact working set is no
 longer admissible, but it cannot silently shrink or expand that plan.
 

@@ -20,6 +20,7 @@ pub mod lora;
 pub mod lora_loader;
 pub mod marlin_proj;
 pub mod metal_graph;
+mod metal_policy;
 mod mtp_runtime;
 pub mod packed_weight_registry;
 pub mod rocm_graph;
@@ -115,6 +116,8 @@ pub use loader::{
     LoadModelOptions, load_model, load_model_with_options, load_model_with_options_and_snapshot_dir,
 };
 pub use lora_loader::LoraWeights;
+#[cfg(feature = "metal")]
+pub use metal_policy::{MetalKernelPolicy, install_metal_kernel_policy};
 pub use paged_kv_cache_kt::{KvPoolIdentity, PagedKvCacheKt};
 pub use rocm_graph::{
     RocmGraphExecutionMode, RocmGraphExecutionPolicy, RocmGraphFallbackStats,

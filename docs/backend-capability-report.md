@@ -31,7 +31,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 |---|---|---:|---:|---:|---:|
 | `cuda` | `crates/kiln-model/src/backend/cuda.rs`, `crates/kiln-model/src/backend/cuda_rocm_common.rs` | 0 | 16 | 0 | 0 |
 | `rocm` | `crates/kiln-model/src/backend/rocm.rs`, `crates/kiln-model/src/backend/cuda_rocm_common.rs` | 0 | 19 | 0 | 0 |
-| `metal` | `crates/kiln-model/src/backend/metal.rs`, `crates/kiln-model/src/backend/metal_attention.rs`, `crates/kiln-model/src/backend/metal_config.rs`, `crates/kiln-model/src/backend/metal_conv1d.rs`, `crates/kiln-model/src/backend/metal_core.rs`, `crates/kiln-model/src/backend/metal_dense.rs`, `crates/kiln-model/src/backend/metal_gdn.rs`, `crates/kiln-model/src/backend/metal_icb.rs`, `crates/kiln-model/src/backend/metal_lm_head.rs`, `crates/kiln-model/src/backend/metal_msl.rs`, `crates/kiln-model/src/backend/metal_norm.rs`, `crates/kiln-model/src/backend/metal_paged.rs`, `crates/kiln-model/src/backend/metal_pipeline.rs`, `crates/kiln-model/src/backend/metal_precompile.rs`, `crates/kiln-model/src/backend/metal_residency.rs`, `crates/kiln-model/src/backend/metal_runtime.rs`, `crates/kiln-model/src/backend/metal_training.rs` | 0 | 20 | 47 | 0 |
+| `metal` | `crates/kiln-model/src/backend/metal.rs`, `crates/kiln-model/src/backend/metal_attention.rs`, `crates/kiln-model/src/backend/metal_config.rs`, `crates/kiln-model/src/backend/metal_conv1d.rs`, `crates/kiln-model/src/backend/metal_core.rs`, `crates/kiln-model/src/backend/metal_dense.rs`, `crates/kiln-model/src/backend/metal_gdn.rs`, `crates/kiln-model/src/backend/metal_icb.rs`, `crates/kiln-model/src/backend/metal_lm_head.rs`, `crates/kiln-model/src/backend/metal_msl.rs`, `crates/kiln-model/src/backend/metal_norm.rs`, `crates/kiln-model/src/backend/metal_paged.rs`, `crates/kiln-model/src/backend/metal_pipeline.rs`, `crates/kiln-model/src/backend/metal_precompile.rs`, `crates/kiln-model/src/backend/metal_residency.rs`, `crates/kiln-model/src/backend/metal_runtime.rs`, `crates/kiln-model/src/backend/metal_training.rs` | 0 | 20 | 0 | 0 |
 | `vulkan` | `crates/kiln-model/src/backend/vulkan.rs`, `crates/kiln-model/src/backend/vulkan_attention.rs`, `crates/kiln-model/src/backend/vulkan_config.rs`, `crates/kiln-model/src/backend/vulkan_conv1d.rs`, `crates/kiln-model/src/backend/vulkan_decode_state.rs`, `crates/kiln-model/src/backend/vulkan_dense.rs`, `crates/kiln-model/src/backend/vulkan_device.rs`, `crates/kiln-model/src/backend/vulkan_gdn.rs`, `crates/kiln-model/src/backend/vulkan_linear.rs`, `crates/kiln-model/src/backend/vulkan_residency.rs`, `crates/kiln-model/src/backend/vulkan_resources.rs`, `crates/kiln-model/src/backend/vulkan_tensor_bridge.rs`, `crates/kiln-model/src/backend/vulkan_training.rs`, `crates/kiln-model/src/backend/vulkan_weights.rs` | 0 | 21 | 0 | 0 |
 
 ## Focused Backend Facets
@@ -301,53 +301,7 @@ No literal-true support predicate currently pairs with an always-declining metho
 - none detected
 
 ### METAL
-- `KILN_DISABLE_METAL_ATTN_GATE_FUSION`
-- `KILN_DISABLE_METAL_CONV1D_PREFILL`
-- `KILN_DISABLE_METAL_FUSED_CONV1D`
-- `KILN_DISABLE_METAL_FUSED_QKV_PROJ`
-- `KILN_DISABLE_METAL_GATED_RMSNORM`
-- `KILN_DISABLE_METAL_GDN_DECODE_GATES_RECURRENT`
-- `KILN_DISABLE_METAL_GDN_DECODE_GATES_RECURRENT_RMSNORM`
-- `KILN_DISABLE_METAL_GDN_FORWARD_SUBSTITUTION`
-- `KILN_DISABLE_METAL_GDN_GATES`
-- `KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION`
-- `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR`
-- `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD`
-- `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_TRIPLE`
-- `KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_VECTOR_LOAD`
-- `KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_X2_LOAD`
-- `KILN_DISABLE_METAL_GDN_PREFILL_AB_IN_PROJ`
-- `KILN_DISABLE_METAL_GDN_PREFILL_DECAY_RECURRENT`
-- `KILN_DISABLE_METAL_GDN_PREFILL_QKV_CONV_SPLIT`
-- `KILN_DISABLE_METAL_GDN_QKV_CONV_NORM`
-- `KILN_DISABLE_METAL_GDN_QK_NORM`
-- `KILN_DISABLE_METAL_GDN_RECURRENT`
-- `KILN_DISABLE_METAL_LM_HEAD_ARGMAX`
-- `KILN_DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE`
-- `KILN_DISABLE_METAL_LM_HEAD_ARGMAX_ROWS`
-- `KILN_DISABLE_METAL_LM_HEAD_SAMPLE`
-- `KILN_DISABLE_METAL_LORA_DELTA_DECODE`
-- `KILN_DISABLE_METAL_MLP_GATE_UP_FUSION`
-- `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_PAIR`
-- `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD`
-- `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD`
-- `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE`
-- `KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_DEDICATED`
-- `KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD`
-- `KILN_DISABLE_METAL_MLP_SILU_MUL`
-- `KILN_DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS`
-- `KILN_DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR`
-- `KILN_DISABLE_METAL_RMSNORM`
-- `KILN_DISABLE_METAL_SDPA`
-- `KILN_DISABLE_METAL_SDPA_FULL`
-- `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV`
-- `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR`
-- `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD`
-- `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8`
-- `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8`
-- `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16`
-- `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8`
-- `KILN_ENABLE_METAL_LM_HEAD_ARGMAX`
+- none detected
 
 ### VULKAN
 - none detected

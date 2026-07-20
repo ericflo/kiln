@@ -1,74 +1,6 @@
-//! Metal runtime configuration and env-gated support policy.
+//! Metal runtime configuration derived from one immutable kernel policy.
 
-pub(super) const DISABLE_METAL_SDPA: &str = "KILN_DISABLE_METAL_SDPA";
-const DISABLE_METAL_SDPA_FULL: &str = "KILN_DISABLE_METAL_SDPA_FULL";
-const DISABLE_METAL_CONV1D_PREFILL: &str = "KILN_DISABLE_METAL_CONV1D_PREFILL";
-const DISABLE_FUSED_CONV1D: &str = "KILN_DISABLE_FUSED_CONV1D";
-const DISABLE_METAL_FUSED_CONV1D: &str = "KILN_DISABLE_METAL_FUSED_CONV1D";
-const DISABLE_GDN_KERNEL: &str = "KILN_DISABLE_GDN_KERNEL";
-const DISABLE_FUSED_GDN_GATES: &str = "KILN_DISABLE_FUSED_GDN_GATES";
-const DISABLE_METAL_GDN_GATES: &str = "KILN_DISABLE_METAL_GDN_GATES";
-const DISABLE_METAL_GDN_FORWARD_SUBSTITUTION: &str = "KILN_DISABLE_METAL_GDN_FORWARD_SUBSTITUTION";
-const DISABLE_METAL_GDN_RECURRENT: &str = "KILN_DISABLE_METAL_GDN_RECURRENT";
-const DISABLE_METAL_GDN_DECODE_GATES_RECURRENT: &str =
-    "KILN_DISABLE_METAL_GDN_DECODE_GATES_RECURRENT";
-const DISABLE_METAL_GDN_DECODE_GATES_RECURRENT_RMSNORM: &str =
-    "KILN_DISABLE_METAL_GDN_DECODE_GATES_RECURRENT_RMSNORM";
-const DISABLE_METAL_GATED_RMSNORM: &str = "KILN_DISABLE_METAL_GATED_RMSNORM";
-const DISABLE_METAL_GDN_QK_NORM: &str = "KILN_DISABLE_METAL_GDN_QK_NORM";
-const DISABLE_METAL_GDN_QKV_CONV_NORM: &str = "KILN_DISABLE_METAL_GDN_QKV_CONV_NORM";
-const DISABLE_METAL_GDN_PREFILL_QKV_CONV_SPLIT: &str =
-    "KILN_DISABLE_METAL_GDN_PREFILL_QKV_CONV_SPLIT";
-const DISABLE_METAL_GDN_PREFILL_DECAY_RECURRENT: &str =
-    "KILN_DISABLE_METAL_GDN_PREFILL_DECAY_RECURRENT";
-const DISABLE_METAL_GDN_PREFILL_AB_IN_PROJ: &str = "KILN_DISABLE_METAL_GDN_PREFILL_AB_IN_PROJ";
-const DISABLE_RMSNORM_KERNEL: &str = "KILN_DISABLE_RMSNORM_KERNEL";
-const DISABLE_METAL_RMSNORM: &str = "KILN_DISABLE_METAL_RMSNORM";
-const DISABLE_METAL_MLP_GATE_UP_FUSION: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_FUSION";
-const DISABLE_METAL_MLP_GATE_UP_ROW_PAIR: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_PAIR";
-const DISABLE_METAL_MLP_GATE_UP_ROW_QUAD: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD";
-const DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE";
-const DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD: &str =
-    "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD";
-const DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD: &str =
-    "KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD";
-const DISABLE_METAL_MLP_GATE_UP_SERIAL_DEDICATED: &str =
-    "KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_DEDICATED";
-const DISABLE_METAL_MLP_SILU_MUL: &str = "KILN_DISABLE_METAL_MLP_SILU_MUL";
-const DISABLE_METAL_ATTN_GATE_FUSION: &str = "KILN_DISABLE_METAL_ATTN_GATE_FUSION";
-const DISABLE_METAL_FUSED_QKV_PROJ: &str = "KILN_DISABLE_METAL_FUSED_QKV_PROJ";
-const DISABLE_METAL_LORA_DELTA_DECODE: &str = "KILN_DISABLE_METAL_LORA_DELTA_DECODE";
-const DISABLE_METAL_GDN_IN_PROJ_FUSION: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION";
-const DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR";
-const DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD";
-const DISABLE_METAL_GDN_IN_PROJ_ROW_TRIPLE: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_TRIPLE";
-const DISABLE_METAL_GDN_IN_PROJ_SERIAL_VECTOR_LOAD: &str =
-    "KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_VECTOR_LOAD";
-const DISABLE_METAL_GDN_IN_PROJ_SERIAL_X2_LOAD: &str =
-    "KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_X2_LOAD";
-const ENABLE_METAL_LM_HEAD_ARGMAX: &str = "KILN_ENABLE_METAL_LM_HEAD_ARGMAX";
-const DISABLE_METAL_LM_HEAD_ARGMAX: &str = "KILN_DISABLE_METAL_LM_HEAD_ARGMAX";
-const DISABLE_METAL_LM_HEAD_ARGMAX_ROWS: &str = "KILN_DISABLE_METAL_LM_HEAD_ARGMAX_ROWS";
-const DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE: &str =
-    "KILN_DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE";
-const DISABLE_METAL_LM_HEAD_SAMPLE: &str = "KILN_DISABLE_METAL_LM_HEAD_SAMPLE";
-const DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS: &str =
-    "KILN_DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS";
-const DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR: &str =
-    "KILN_DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR";
-const DISABLE_METAL_TRANSPOSED_COOP_GEMV: &str = "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV";
-const DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8: &str =
-    "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8";
-const DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16: &str =
-    "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16";
-const DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR: &str =
-    "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR";
-const DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD: &str =
-    "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD";
-const DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8: &str =
-    "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8";
-const DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8: &str =
-    "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8";
+use crate::metal_policy::current_metal_kernel_policy;
 
 pub(super) const METAL_TRANSPOSED_COOP_GEMV_TILE4_COLS: usize = 4;
 pub(super) const METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS: usize = 8;
@@ -119,18 +51,16 @@ pub(super) struct MetalKernelDisables {
 }
 
 impl MetalKernelDisables {
-    pub(super) fn from_env() -> Self {
-        let gdn_kernel = env_truthy(DISABLE_GDN_KERNEL);
+    pub(super) fn from_policy() -> Self {
+        let policy = current_metal_kernel_policy();
         Self {
-            conv1d_prefill: env_truthy(DISABLE_METAL_CONV1D_PREFILL),
-            conv1d_update: env_present(DISABLE_FUSED_CONV1D)
-                || env_truthy(DISABLE_METAL_FUSED_CONV1D),
-            gdn_forward_substitution: gdn_kernel
-                || env_truthy(DISABLE_METAL_GDN_FORWARD_SUBSTITUTION),
-            gdn_recurrent: gdn_kernel || env_truthy(DISABLE_METAL_GDN_RECURRENT),
-            gdn_gates: env_present(DISABLE_FUSED_GDN_GATES) || env_truthy(DISABLE_METAL_GDN_GATES),
-            gated_rms_norm: env_truthy(DISABLE_METAL_GATED_RMSNORM),
-            gdn_in_proj: gdn_kernel || env_truthy(DISABLE_METAL_GDN_IN_PROJ_FUSION),
+            conv1d_prefill: !policy.conv1d_prefill,
+            conv1d_update: !policy.conv1d_update,
+            gdn_forward_substitution: !policy.gdn_forward_substitution,
+            gdn_recurrent: !policy.gdn_recurrent,
+            gdn_gates: !policy.gdn_gates,
+            gated_rms_norm: !policy.gated_rms_norm,
+            gdn_in_proj: !policy.gdn_in_proj,
         }
     }
 }
@@ -146,178 +76,175 @@ pub(super) fn metal_sdpa_full_safe_for_q_seq(head_dim: usize, q_seq: usize) -> b
     if q_seq <= 8 {
         return true;
     }
-    head_dim == 256 && !env_truthy(DISABLE_METAL_SDPA_FULL)
+    head_dim == 256 && current_metal_kernel_policy().sdpa_full
 }
 
 pub(super) fn metal_gdn_qk_norm_disabled() -> bool {
-    env_truthy(DISABLE_METAL_GDN_QK_NORM)
+    !current_metal_kernel_policy().gdn_qk_norm
 }
 
 pub(super) fn metal_gdn_qkv_conv_norm_disabled() -> bool {
-    env_present(DISABLE_FUSED_CONV1D)
-        || env_truthy(DISABLE_METAL_FUSED_CONV1D)
-        || env_truthy(DISABLE_METAL_GDN_QKV_CONV_NORM)
+    let policy = current_metal_kernel_policy();
+    !policy.conv1d_update || !policy.gdn_qkv_conv_norm
 }
 
 pub(super) fn metal_gdn_prefill_qkv_conv_split_disabled() -> bool {
-    env_present(DISABLE_FUSED_CONV1D)
-        || env_truthy(DISABLE_METAL_CONV1D_PREFILL)
-        || env_truthy(DISABLE_METAL_FUSED_CONV1D)
-        || env_truthy(DISABLE_METAL_GDN_PREFILL_QKV_CONV_SPLIT)
+    let policy = current_metal_kernel_policy();
+    !policy.conv1d_update || !policy.conv1d_prefill || !policy.gdn_prefill_qkv_conv_split
 }
 
 pub(super) fn metal_gdn_in_proj_row_pair_disabled() -> bool {
-    env_truthy(DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR)
+    !current_metal_kernel_policy().gdn_in_proj_row_pair
 }
 
 pub(super) fn metal_gdn_in_proj_row_quad_disabled() -> bool {
-    env_truthy(DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD)
+    !current_metal_kernel_policy().gdn_in_proj_row_quad
 }
 
 pub(super) fn metal_gdn_in_proj_row_triple_disabled() -> bool {
-    env_truthy(DISABLE_METAL_GDN_IN_PROJ_ROW_TRIPLE)
+    !current_metal_kernel_policy().gdn_in_proj_row_triple
 }
 
 pub(super) fn metal_gdn_in_proj_serial_vector_load_disabled() -> bool {
-    env_truthy(DISABLE_METAL_GDN_IN_PROJ_SERIAL_VECTOR_LOAD)
+    !current_metal_kernel_policy().gdn_in_proj_serial_vector_load
 }
 
 pub(super) fn metal_gdn_in_proj_serial_x2_load_disabled() -> bool {
-    env_truthy(DISABLE_METAL_GDN_IN_PROJ_SERIAL_X2_LOAD)
+    !current_metal_kernel_policy().gdn_in_proj_serial_x2_load
 }
 
 pub(super) fn metal_gdn_gates_disabled() -> bool {
-    env_present(DISABLE_FUSED_GDN_GATES) || env_truthy(DISABLE_METAL_GDN_GATES)
+    !current_metal_kernel_policy().gdn_gates
 }
 
 pub(super) fn metal_gdn_recurrent_disabled() -> bool {
-    env_truthy(DISABLE_GDN_KERNEL) || env_truthy(DISABLE_METAL_GDN_RECURRENT)
+    !current_metal_kernel_policy().gdn_recurrent
 }
 
 pub(super) fn metal_gdn_prefill_decay_recurrent_disabled() -> bool {
     metal_gdn_gates_disabled()
         || metal_gdn_recurrent_disabled()
-        || env_truthy(DISABLE_METAL_GDN_PREFILL_DECAY_RECURRENT)
+        || !current_metal_kernel_policy().gdn_prefill_decay_recurrent
 }
 
 pub(super) fn metal_gdn_prefill_ab_in_proj_disabled() -> bool {
-    env_truthy(DISABLE_METAL_GDN_PREFILL_AB_IN_PROJ)
+    !current_metal_kernel_policy().gdn_prefill_ab_in_proj
 }
 
 pub(super) fn metal_gdn_decode_gates_recurrent_disabled() -> bool {
     metal_gdn_gates_disabled()
         || metal_gdn_recurrent_disabled()
-        || env_truthy(DISABLE_METAL_GDN_DECODE_GATES_RECURRENT)
+        || !current_metal_kernel_policy().gdn_decode_gates_recurrent
 }
 
 pub(super) fn metal_gdn_decode_gates_recurrent_rmsnorm_disabled() -> bool {
     metal_gdn_decode_gates_recurrent_disabled()
-        || env_truthy(DISABLE_METAL_GDN_DECODE_GATES_RECURRENT_RMSNORM)
-        || env_truthy(DISABLE_METAL_GATED_RMSNORM)
+        || !current_metal_kernel_policy().gdn_decode_gates_recurrent_rmsnorm
+        || !current_metal_kernel_policy().gated_rms_norm
 }
 
 pub(super) fn metal_rms_norm_disabled() -> bool {
-    env_present(DISABLE_RMSNORM_KERNEL) || env_truthy(DISABLE_METAL_RMSNORM)
+    !current_metal_kernel_policy().rms_norm
 }
 
 pub(crate) fn metal_mlp_gate_up_fusion_disabled() -> bool {
-    env_truthy(DISABLE_METAL_MLP_GATE_UP_FUSION)
+    !current_metal_kernel_policy().mlp_gate_up_fusion
 }
 
 pub(super) fn metal_mlp_gate_up_row_pair_disabled() -> bool {
-    env_truthy(DISABLE_METAL_MLP_GATE_UP_ROW_PAIR)
+    !current_metal_kernel_policy().mlp_gate_up_row_pair
 }
 
 pub(super) fn metal_mlp_gate_up_row_quad_disabled() -> bool {
-    env_truthy(DISABLE_METAL_MLP_GATE_UP_ROW_QUAD)
+    !current_metal_kernel_policy().mlp_gate_up_row_quad
 }
 
 pub(super) fn metal_mlp_gate_up_row_triple_disabled() -> bool {
-    env_truthy(DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE)
+    !current_metal_kernel_policy().mlp_gate_up_row_triple
 }
 
 pub(super) fn metal_mlp_gate_up_row_quad_vector_load_disabled() -> bool {
-    env_truthy(DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD)
+    !current_metal_kernel_policy().mlp_gate_up_row_quad_vector_load
 }
 
 pub(super) fn metal_mlp_gate_up_serial_vector_load_disabled() -> bool {
-    env_truthy(DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD)
+    !current_metal_kernel_policy().mlp_gate_up_serial_vector_load
 }
 
 pub(super) fn metal_mlp_gate_up_serial_dedicated_disabled() -> bool {
-    env_truthy(DISABLE_METAL_MLP_GATE_UP_SERIAL_DEDICATED)
+    !current_metal_kernel_policy().mlp_gate_up_serial_dedicated
 }
 
 pub(super) fn metal_mlp_silu_mul_disabled() -> bool {
-    env_truthy(DISABLE_METAL_MLP_SILU_MUL)
+    !current_metal_kernel_policy().mlp_silu_mul
 }
 
 pub(super) fn metal_attn_gate_fusion_disabled() -> bool {
-    env_truthy(DISABLE_METAL_ATTN_GATE_FUSION)
+    !current_metal_kernel_policy().attn_gate_fusion
 }
 
 pub(super) fn metal_fused_qkv_proj_disabled() -> bool {
-    env_truthy(DISABLE_METAL_FUSED_QKV_PROJ) || metal_transposed_coop_gemv_tile8_disabled()
+    !current_metal_kernel_policy().fused_qkv_proj || metal_transposed_coop_gemv_tile8_disabled()
 }
 
 pub(super) fn metal_lora_delta_decode_disabled() -> bool {
-    env_truthy(DISABLE_METAL_LORA_DELTA_DECODE)
+    !current_metal_kernel_policy().lora_delta_decode
 }
 
 pub(super) fn metal_lm_head_argmax_disabled() -> bool {
     // On the Qwen3.5-4B macOS desktop path, Candle's materialized last-row
     // projection plus argmax is faster than this custom chunk/reduce kernel.
     // Keep the kernel available for tuning, but require explicit opt-in.
-    env_truthy(DISABLE_METAL_LM_HEAD_ARGMAX) || !env_truthy(ENABLE_METAL_LM_HEAD_ARGMAX)
+    !current_metal_kernel_policy().lm_head_argmax
 }
 
 pub(super) fn metal_lm_head_argmax_rows_disabled() -> bool {
-    env_truthy(DISABLE_METAL_LM_HEAD_ARGMAX) || env_truthy(DISABLE_METAL_LM_HEAD_ARGMAX_ROWS)
+    !current_metal_kernel_policy().lm_head_argmax_rows
 }
 
 pub(super) fn metal_lm_head_argmax_gpu_reduce_disabled() -> bool {
-    env_truthy(DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE)
+    !current_metal_kernel_policy().lm_head_argmax_gpu_reduce
 }
 
 pub(super) fn metal_lm_head_sample_disabled() -> bool {
-    env_truthy(DISABLE_METAL_LM_HEAD_SAMPLE)
+    !current_metal_kernel_policy().lm_head_sample
 }
 
 pub(super) fn metal_paged_attn_decode_contiguous_disabled() -> bool {
-    env_truthy(DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS)
+    !current_metal_kernel_policy().paged_attn_decode_contiguous
 }
 
 pub(super) fn metal_paged_kv_write_token_major_disabled() -> bool {
-    env_truthy(DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR)
+    !current_metal_kernel_policy().paged_kv_write_token_major
 }
 
 pub(super) fn metal_transposed_coop_gemv_disabled() -> bool {
-    env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV)
+    !current_metal_kernel_policy().transposed_coop_gemv
 }
 
 pub(super) fn metal_transposed_coop_gemv_tile8_disabled() -> bool {
-    env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8)
+    !current_metal_kernel_policy().transposed_coop_gemv_tile8
 }
 
 pub(super) fn metal_transposed_coop_gemv_tile16_disabled() -> bool {
     metal_transposed_coop_gemv_tile8_disabled()
-        || env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16)
+        || !current_metal_kernel_policy().transposed_coop_gemv_tile16
 }
 
 pub(super) fn metal_transposed_coop_gemv_row_pair_disabled() -> bool {
-    env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR)
+    !current_metal_kernel_policy().transposed_coop_gemv_row_pair
 }
 
 pub(super) fn metal_transposed_coop_gemv_row_quad_disabled() -> bool {
-    env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD)
+    !current_metal_kernel_policy().transposed_coop_gemv_row_quad
 }
 
 pub(super) fn metal_transposed_coop_gemv_row_quad_tile8_disabled() -> bool {
-    env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8)
+    !current_metal_kernel_policy().transposed_coop_gemv_row_quad_tile8
 }
 
 pub(super) fn metal_transposed_coop_gemv_row_triple_tile8_disabled() -> bool {
-    env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8)
+    !current_metal_kernel_policy().transposed_coop_gemv_row_triple_tile8
 }
 
 pub(super) fn metal_transposed_coop_gemv_default_tile() -> MetalTransposedCoopGemvTile {
@@ -344,20 +271,4 @@ pub(super) fn metal_transposed_coop_gemv_select_tile(
     } else {
         default_tile
     }
-}
-
-fn env_present(var: &str) -> bool {
-    std::env::var(var).is_ok()
-}
-
-fn env_truthy(var: &str) -> bool {
-    matches!(
-        std::env::var(var)
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    )
 }

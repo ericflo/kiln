@@ -383,14 +383,14 @@ training request
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           ROCm execution is process-lifetime policy, resolved once before the primary HIP context or model
           runner exists. Typed <code>[accelerator]</code> intent combines with the immutable serving profile
-          to produce <code>kiln.accelerator-runtime-policy.v13</code>. The same resolved object is installed in
+          to produce <code>kiln.accelerator-runtime-policy.v14</code>. The same resolved object is installed in
           the tensor context, projected into the model graph runner, stored in server state, and returned by
           product diagnostics. Tensor, model, and kernel code do not re-read the public graph,
           synchronization, or matmul-route environment names during inference.
         </p>
         <pre class="mt-5"><code>typed [server] + [accelerator] configuration
   -> strict parse, source attribution, and serving-profile gate
-  -> immutable accelerator runtime policy v12
+  -> immutable accelerator runtime policy v14
   -> Vulkan physical-device/validation policy installed before logical-device creation
   -> kiln-tensor adapter route set installed before model execution
   -> exact full-attention score geometry installed in model and ROCm flash planners
@@ -444,7 +444,7 @@ training request
           covered model-route and packed-weight selections, recurrence residency, batch thresholds, and
           split-K geometry cannot diverge or change between requests. A source change
           must version the policy and rerun Vulkan oracle, performance, development-soak, and endurance gates.
-          Accelerator policy v12 reports this identity as <code>vulkan_kernel_policy_schema_id</code> in config,
+          Accelerator policy v14 reports this identity as <code>vulkan_kernel_policy_schema_id</code> in config,
           health, trusted debug state, the CLI config check, and the dashboard.
         </p>
         <div class="overflow-x-auto mt-4">
@@ -494,7 +494,7 @@ training request
           tile size or route between layers or requests.
         </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Policy v13 retains the deletion of eight permissive materialized-score, online-score, and tile environment controls
+          Policy v14 retains the deletion of eight permissive materialized-score, online-score, and tile environment controls
           rather than retaining aliases. The former planners could independently parse different values during
           execution and derive a materialized ceiling as high as 32 GiB from changing free memory. Real-device
           parity tests now force small multi-tile geometry with a scoped programmatic hook, so test coverage no
@@ -551,6 +551,42 @@ training request
           Route selection, training chunk geometry, and direct paged-decode preference now come from the same
           installed policy rather than request-time process state. The profile does not claim CUDA hardware
           qualification, graph support, or Marlin correctness beyond the routes enumerated above.
+        </p>
+
+        <h3 class="font-semibold mt-6 mb-3">Metal backend routes are one typed profile</h3>
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          <code>accelerator.metal_kernel_profile</code> replaces every Metal backend per-kernel environment
+          decision with one process-lifetime policy installed before backend construction.
+          <code>native_default</code> preserves forty-five established native routes and retains custom
+          LM-head argmax as the single default-off route; <code>portable_fallback</code> declines all forty-six.
+          Reinstalling the same value is idempotent and a conflicting install fails before serving.
+        </p>
+        <div class="overflow-x-auto mt-4">
+          <table class="w-full text-sm" style="color: var(--fg-dim);">
+            <thead style="color: var(--fg);"><tr><th class="text-left p-2">Family</th><th class="text-left p-2">Complete owned route set</th><th class="text-left p-2"><code>native_default</code></th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Attention and convolution</td><td class="p-2"><code>sdpa</code>, <code>sdpa_full</code>, <code>conv1d_prefill</code>, <code>conv1d_update</code></td><td class="p-2">all on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">GDN core</td><td class="p-2"><code>gdn_forward_substitution</code>, <code>gdn_recurrent</code>, <code>gdn_gates</code>, <code>gated_rms_norm</code>, <code>gdn_in_proj</code>, <code>gdn_qk_norm</code>, <code>gdn_qkv_conv_norm</code>, <code>gdn_prefill_qkv_conv_split</code></td><td class="p-2">all on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">GDN projection variants</td><td class="p-2"><code>gdn_in_proj_row_pair</code>, <code>gdn_in_proj_row_quad</code>, <code>gdn_in_proj_row_triple</code>, <code>gdn_in_proj_serial_vector_load</code>, <code>gdn_in_proj_serial_x2_load</code>, <code>gdn_prefill_decay_recurrent</code>, <code>gdn_prefill_ab_in_proj</code></td><td class="p-2">all on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">GDN decode and norm</td><td class="p-2"><code>gdn_decode_gates_recurrent</code>, <code>gdn_decode_gates_recurrent_rmsnorm</code>, <code>rms_norm</code></td><td class="p-2">all on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">MLP</td><td class="p-2"><code>mlp_gate_up_fusion</code>, <code>mlp_gate_up_row_pair</code>, <code>mlp_gate_up_row_quad</code>, <code>mlp_gate_up_row_triple</code>, <code>mlp_gate_up_row_quad_vector_load</code>, <code>mlp_gate_up_serial_vector_load</code>, <code>mlp_gate_up_serial_dedicated</code>, <code>mlp_silu_mul</code></td><td class="p-2">all on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Projection and LoRA</td><td class="p-2"><code>attn_gate_fusion</code>, <code>fused_qkv_proj</code>, <code>lora_delta_decode</code></td><td class="p-2">all on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">LM head</td><td class="p-2"><code>lm_head_argmax</code>, <code>lm_head_argmax_rows</code>, <code>lm_head_argmax_gpu_reduce</code>, <code>lm_head_sample</code></td><td class="p-2">custom argmax off; rows, reduction, and sampling on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Paged decode</td><td class="p-2"><code>paged_attn_decode_contiguous</code>, <code>paged_kv_write_token_major</code></td><td class="p-2">all on</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Transposed cooperative GEMV</td><td class="p-2"><code>transposed_coop_gemv</code>, <code>transposed_coop_gemv_tile8</code>, <code>transposed_coop_gemv_tile16</code>, <code>transposed_coop_gemv_row_pair</code>, <code>transposed_coop_gemv_row_quad</code>, <code>transposed_coop_gemv_row_quad_tile8</code>, <code>transposed_coop_gemv_row_triple_tile8</code></td><td class="p-2">all on</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          The removed names are the <code>KILN_DISABLE_METAL_SDPA*</code>,
+          <code>KILN_DISABLE_METAL_CONV1D_PREFILL</code>, generic and Metal fused-conv/GDN switches,
+          <code>KILN_DISABLE_METAL_GDN_*</code>, generic and Metal RMSNorm switches,
+          <code>KILN_DISABLE_METAL_MLP_*</code>, <code>KILN_DISABLE_METAL_ATTN_GATE_FUSION</code>,
+          <code>KILN_DISABLE_METAL_FUSED_QKV_PROJ</code>, <code>KILN_DISABLE_METAL_LORA_DELTA_DECODE</code>,
+          <code>KILN_ENABLE_METAL_LM_HEAD_ARGMAX</code>, all
+          <code>KILN_DISABLE_METAL_LM_HEAD_*</code>, both Metal paged-attention/KV switches, and every
+          <code>KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV*</code> variant. The configuration reference
+          enumerates every exact spelling. None is an alias for the typed profile.
         </p>
 
         <h3 class="font-semibold mt-6 mb-3">Fixed model, loader, and fallback policy</h3>

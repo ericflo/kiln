@@ -388,6 +388,20 @@
           "x-kiln-environment": "none",
           "x-kiln-validation": "native_default or portable_fallback, case-insensitive. native_default preserves the twenty-five CUDA model/backend routes that were enabled by default before consolidation; this name deliberately makes no current-hardware qualification claim. portable_fallback declines every owned route. The complete route set is installed before CUDA backend construction, immutable for the process lifetime, and reported with source attribution. Restart required."
         },
+        "metal_kernel_profile": {
+          "type": "string",
+          "enum": [
+            "native_default",
+            "portable_fallback"
+          ],
+          "default": "native_default",
+          "description": "native_default or portable_fallback, case-insensitive. native_default preserves forty-five of the forty-six Metal backend routes active before consolidation; custom LM-head argmax remains disabled by default. portable_fallback declines every owned route. The complete route set is installed before Metal backend construction, immutable for the process lifetime, and reported with source attribution. Restart required.",
+          "x-kiln-path": "accelerator.metal_kernel_profile",
+          "x-kiln-type-and-default": "string enum; \"native_default\"",
+          "x-kiln-canonical-env": "KILN_ACCELERATOR_METAL_KERNEL_PROFILE (implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "native_default or portable_fallback, case-insensitive. native_default preserves forty-five of the forty-six Metal backend routes active before consolidation; custom LM-head argmax remains disabled by default. portable_fallback declines every owned route. The complete route set is installed before Metal backend construction, immutable for the process lifetime, and reported with source attribution. Restart required."
+        },
         "rocm_synchronization_mode": {
           "type": "string",
           "enum": [
@@ -1936,9 +1950,9 @@
       }
     }
   ],
-  "x-kiln-field-count": 114,
+  "x-kiln-field-count": 115,
   "x-kiln-dynamic-field-template-count": 2,
-  "x-kiln-canonical-environment-count": 109,
+  "x-kiln-canonical-environment-count": 110,
   "x-kiln-config-file-only-count": 5,
   "x-kiln-compatibility-field-count": 71,
   "x-kiln-compatibility-alias-count": 76,

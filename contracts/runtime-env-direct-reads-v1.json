@@ -171,19 +171,6 @@
     },
     {
       "api": "remove_var",
-      "argument": "KILN_DISABLE_GDN_KERNEL",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 1,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "remove_var",
       "argument": "KILN_DISABLE_WEIGHTED_LM_HEAD_PREP",
       "argument_kind": "literal",
       "classification": "test_only",
@@ -228,19 +215,6 @@
       "classification": "test_only",
       "classification_basis": "example source surface",
       "count": 2,
-      "language": "rust",
-      "operation": "remove",
-      "path": "crates/kiln-server/examples/phase10_rmsnorm_bench.rs",
-      "phase": "runtime",
-      "surface": "example"
-    },
-    {
-      "api": "remove_var",
-      "argument": "KILN_DISABLE_RMSNORM_KERNEL",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "example source surface",
-      "count": 1,
       "language": "rust",
       "operation": "remove",
       "path": "crates/kiln-server/examples/phase10_rmsnorm_bench.rs",
@@ -2279,32 +2253,6 @@
     },
     {
       "api": "var",
-      "argument": "DISABLE_METAL_SDPA",
-      "argument_kind": "expression",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 1,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/backend/metal_attention.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
-      "argument": "var",
-      "argument_kind": "expression",
-      "classification": "experimental_debug",
-      "classification_basis": "runtime access outside the typed startup configuration boundary",
-      "count": 2,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/backend/metal_config.rs",
-      "phase": "runtime",
-      "surface": "source"
-    },
-    {
-      "api": "var",
       "argument": "KILN_TENSOR_VULKAN_TEST",
       "argument_kind": "literal",
       "classification": "test_only",
@@ -2335,33 +2283,7 @@
       "argument_kind": "literal",
       "classification": "test_only",
       "classification_basis": "unit-test source surface",
-      "count": 8,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 2,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "var",
-      "argument": "KILN_DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 2,
+      "count": 6,
       "language": "rust",
       "operation": "read",
       "path": "crates/kiln-model/src/forward.rs",
@@ -4397,27 +4319,27 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 129,
-    "literal_kiln_read_names": 43,
+    "literal_kiln_read_call_sites": 123,
+    "literal_kiln_read_names": 41,
     "literal_kiln_read_names_by_classification": {
       "build_time": 6,
       "experimental_debug": 6,
       "public_stable": 1,
-      "test_only": 30
+      "test_only": 28
     },
-    "process_mutation_call_sites": 163,
+    "process_mutation_call_sites": 161,
     "process_mutation_call_sites_by_classification": {
       "build_time": 8,
-      "test_only": 155
+      "test_only": 153
     },
-    "process_mutation_entries": 108,
-    "read_call_sites": 470,
+    "process_mutation_entries": 106,
+    "read_call_sites": 461,
     "read_call_sites_by_classification": {
       "build_time": 325,
-      "experimental_debug": 23,
+      "experimental_debug": 20,
       "public_stable": 9,
-      "test_only": 113
+      "test_only": 107
     },
-    "read_entries": 229
+    "read_entries": 225
   }
 }

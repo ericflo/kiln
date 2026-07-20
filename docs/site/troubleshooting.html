@@ -489,6 +489,21 @@ curl -s http://localhost:8420/metrics \
           <li>A difference between profiles localizes the problem to one of the twenty-five documented model/backend routes; it does not identify a particular route. Use route counters, profiler evidence, and a focused reproduction before drawing that conclusion.</li>
           <li>The profile includes the documented forward and training routes, but is not a complete CUDA qualification and makes no claim about graph or Marlin behavior outside the architecture table.</li>
         </ul>
+        <h3 id="metal-kernel-profile-diagnosis" class="text-lg font-semibold mt-6 mb-2">Metal backend-profile diagnosis</h3>
+        <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
+          Inspect <code>accelerator_runtime.metal_kernel_profile</code> before attributing a Metal route change.
+          <code>native_default</code> preserves forty-five established native routes and leaves custom LM-head
+          argmax off; <code>portable_fallback</code> declines all forty-six. The policy is immutable after startup
+          and its source identifies TOML, canonical environment override, or default ownership.
+        </p>
+        <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config \
+  | jq '.accelerator_runtime | {schema_id, version, metal_kernel_profile}'</code></pre>
+        <ul class="list-disc pl-5 mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
+          <li>Compare <code>accelerator.metal_kernel_profile = "native_default"</code> and <code>"portable_fallback"</code> only with identical source, model, request, seed, batch, memory, and graph policy; restart between runs and retain both resolved config objects.</li>
+          <li>A profile difference localizes the issue to the forty-six routes enumerated in the architecture reference. It does not identify a leaf; use route telemetry, a profiler trace, and a focused reproduction.</li>
+          <li>Do not restore former <code>KILN_DISABLE_METAL_*</code>, generic GDN/RMSNorm, or <code>KILN_ENABLE_METAL_LM_HEAD_ARGMAX</code> variables. They are intentionally not aliases.</li>
+          <li>Neither profile is an M1 qualification claim. Record parity, memory, pause, thermal, throughput, and lifecycle evidence on the exact pushed source before promotion.</li>
+        </ul>
         <h3 id="vulkan-kernel-policy-diagnosis" class="text-lg font-semibold mt-6 mb-2">Vulkan kernel-policy diagnosis</h3>
         <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
           The production selections documented for <code>kiln.vulkan-kernel-policy.v3</code> are fixed. Their

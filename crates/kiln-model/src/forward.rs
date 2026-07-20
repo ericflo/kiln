@@ -11426,10 +11426,8 @@ fn gated_deltanet_gates_fallback(
         // the kt-bridge borrow adapter. Falls through to candle's
         // `.exp()` on any precondition failure.
         //
-        // Same fallback path as the `.neg()` migration immediately
-        // below — the GDN gates fallback that runs when
-        // KILN_DISABLE_FUSED_GDN_GATES=1 forces the parity-baseline
-        // composite. Wiring the exp step in addition to the neg step
+        // Same fallback path as the `.neg()` migration immediately below.
+        // Wiring the exp step in addition to the neg step
         // means the full `-exp(A_log)` decay computation uses the stable KT
         // route set.
         let a_log_exp = {
@@ -11454,9 +11452,8 @@ fn gated_deltanet_gates_fallback(
         // with kind 12 (Neg) via the kt-bridge borrow adapter. Falls
         // through to candle's `.neg()` on any precondition failure.
         //
-        // This is the GDN gates fallback path — only reached when
-        // KILN_DISABLE_FUSED_GDN_GATES=1 disables the fused kernel for
-        // parity testing. Wiring here exercises the kt-API on a less-
+        // This is the GDN gates fallback path. Wiring here exercises the
+        // kt-API on a less-
         // trafficked code path that mirrors the fused kernel's
         // -exp(A_log) decay computation in candle composites, so kt-API
         // parity coverage extends to the parity baseline itself.
@@ -13659,9 +13656,8 @@ fn gated_deltanet_forward_decode_if_inner(
         // to_f32 / cat / sum / narrow / silu chain into one fused update per
         // (batch, channel). It returns F32 with SiLU already fused, so the
         // subsequent `cuda_silu(.to_dtype(F32))` step is skipped. Unsupported
-        // backends, non-bf16, kernel_size != 4, and the `KILN_DISABLE_FUSED_CONV1D`
-        // kill switch all route through the portable candle path below — which is the
-        // parity oracle.
+        // backends, non-bf16, and kernel_size != 4 all route through the
+        // portable candle path below, which is the parity oracle.
         let mixed_qkv = {
             kiln_nvtx::range!(c"kiln/gdn/conv");
             // Transpose to [B, channels, T] for conv. At seq_len == 1 the
@@ -14681,9 +14677,8 @@ fn gated_deltanet_forward_decode_if_inner(
         // Two paths: a fused backend kernel (`backend.gdn_gates`) that collapses
         // the sigmoid + softplus + exp + mul chain into one launch, and the
         // candle-op reference path for everything outside the kernel's
-        // envelope (unsupported backend, non-bf16, nv > 256, or kill switches
-        // like `KILN_DISABLE_FUSED_GDN_GATES=1` /
-        // `KILN_DISABLE_METAL_GDN_GATES=1`). The two are algorithmically
+        // envelope (unsupported backend, non-bf16, nv > 256, or a disabled
+        // backend policy route). The two are algorithmically
         // identical — the reference path is the original Phase-6 implementation
         // and remains the parity oracle.
         let (beta, g) = {
@@ -29170,14 +29165,6 @@ mod tests {
         let Some(device) = crate::backend::metal::try_new_metal() else {
             return Ok(());
         };
-        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok()
-            || std::env::var("KILN_DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS").is_ok()
-            || std::env::var("KILN_DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR").is_ok()
-        {
-            eprintln!("Metal paged decode disabled; skipping Metal graph bs=1 parity test");
-            return Ok(());
-        }
-
         (|| -> Result<()> {
             let backend = crate::backend::for_device_kt(&device);
             let vocab = 64usize;
@@ -29433,14 +29420,6 @@ mod tests {
         let Some(device) = crate::backend::metal::try_new_metal() else {
             return Ok(());
         };
-        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok()
-            || std::env::var("KILN_DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS").is_ok()
-            || std::env::var("KILN_DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR").is_ok()
-        {
-            eprintln!("Metal paged decode disabled; skipping Metal graph batched parity test");
-            return Ok(());
-        }
-
         (|| -> Result<()> {
             let backend = crate::backend::for_device_kt(&device);
             let vocab = 64usize;
@@ -32532,14 +32511,7 @@ mod tests {
             gdn_sequential_reference(&q_ref, &k_ref, &v_ref, &beta_ref, &g_ref, &mut state_ref)?;
 
         // Kernel path: chunkwise dispatcher with seq_len == 1 routes to
-        // the new fused recurrent kernel. Make sure no prior test left the
-        // kill-switch set in this process.
-        // SAFETY: cargo test is single-threaded per test by default and we
-        // are only mutating an env var that the dispatcher reads at the top
-        // of the same call below. No other thread observes it concurrently.
-        unsafe {
-            std::env::remove_var("KILN_DISABLE_GDN_KERNEL");
-        }
+        // the new fused recurrent kernel under the process-lifetime policy.
         let backend = crate::backend::for_device_kt(&device);
         let mut state_kernel = state_bf16.clone();
         let out_kernel =
@@ -32835,9 +32807,7 @@ mod tests {
         // Fused kernel path via the backend dispatch.
         let backend = crate::backend::for_device_kt(&device);
         if !ConvBackend::runtime_supports_causal_conv1d_update(backend.as_ref()) {
-            eprintln!(
-                "backend declines causal_conv1d_update (KILN_DISABLE_FUSED_CONV1D?); skipping"
-            );
+            eprintln!("backend policy declines causal_conv1d_update; skipping");
             return Ok(());
         }
         let mut s_k =
@@ -32946,9 +32916,7 @@ mod tests {
 
         let backend = crate::backend::for_device_kt(&device);
         if !ConvBackend::runtime_supports_causal_conv1d_prefill(backend.as_ref()) {
-            eprintln!(
-                "backend declines causal_conv1d_prefill (KILN_DISABLE_FUSED_CONV1D?); skipping"
-            );
+            eprintln!("backend policy declines causal_conv1d_prefill; skipping");
             return Ok(());
         }
         let mut s_k = s_init.clone();
@@ -33057,9 +33025,7 @@ mod tests {
 
         let backend = crate::backend::for_device_kt(&device);
         if !ConvBackend::runtime_supports_causal_conv1d_update(backend.as_ref()) {
-            eprintln!(
-                "backend declines causal_conv1d_update (KILN_DISABLE_FUSED_CONV1D?); skipping"
-            );
+            eprintln!("backend policy declines causal_conv1d_update; skipping");
             return Ok(());
         }
         let mut s_k =

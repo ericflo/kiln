@@ -2003,6 +2003,38 @@ handoff work. The Phase 8.1 checkboxes stay open while the remaining Metal
 backend policy, Marlin, cache-path, kernel, CLI, evaluator, and teacher owners
 still read process state.
 
+Metal backend-kernel policy checkpoint (completed 2026-07-20): the remaining
+Metal SDPA, convolution, GDN, RMSNorm, MLP, attention-gate, QKV, LoRA, LM-head,
+paged-attention/KV, and transposed cooperative-GEMV decisions now come from one
+immutable `MetalKernelPolicy`. Typed
+`accelerator.metal_kernel_profile = "native_default" | "portable_fallback"`
+is the sole public authority, installed before Metal backend construction.
+`native_default` preserves the exact unset behavior: forty-five of forty-six
+routes are enabled and custom LM-head argmax remains off. The fallback profile
+declines all forty-six. Conflicting installation fails instead of changing a
+live process, and standalone model users receive the historical default.
+
+Accelerator runtime policy advances to v14. The strict TOML loader,
+mechanically derived `KILN_ACCELERATOR_METAL_KERNEL_PROFILE`, 115-field config
+schema, CLI, config/health/debug APIs, dashboard, qualification launch and
+expected-policy fixtures, 170-definition observability schema, example TOML,
+operator reference, architecture, troubleshooting guide, and permanent
+website expose the same source-tracked value. The configuration reference
+enumerates every route and every former spelling; none is an alias. Metal
+graph parity tests no longer skip based on deleted environment variables.
+
+Verification passes 356 model and 1,094 server library tests, 83 focused
+mixed-load qualification tests, the 115-field/110-canonical-environment config
+contract, runtime-environment and capability-report generators, 10 docs-builder
+tests, the 55-document/5-asset assembled-site static smoke, and all-target
+default, ROCm `gfx1151`, Vulkan, and toolkit-free CUDA checks. The runtime
+ratchet falls from 470 to 461 reads, 163 to 161 mutations, and 23 to 20
+migration reads. Apple framework compilation, M1 native/fallback parity,
+correctness, memory, pause, throughput, and lifecycle evidence remain explicit
+Metal-machine handoff work; this checkpoint makes no Metal hardware claim.
+The broad Phase 8.1 checkboxes remain open for the twenty remaining migration
+reads and other process-state owners.
+
 ### 8.2 One scheduling model
 
 - [ ] Map ownership and production/test use of batching engine, legacy decode
@@ -3094,6 +3126,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-20 | Model hot-path environment authority and accelerator policy v13 | this source | this configuration checkpoint | model forward/generation/capability policy, tensor determinism/capture allocation, server/API/UI configuration, qualification fixtures, and permanent documentation across default, ROCm `gfx1151`, Vulkan, and toolkit-free CUDA feature builds; no accelerator execution or performance claim | 355/355 model tests; 1,093/1,093 server library tests; 20/20 backend-capability contracts; 5/5 determinism tests; 83/83 focused mixed-load qualification tests; 114-field configuration and 168-definition observability schemas; backend capability and runtime-environment generators; 10/10 docs-builder tests; 55-document/5-asset site build and assembled static smoke; all-target default, ROCm `gfx1151`, Vulkan, and toolkit-free CUDA checks; formatting and diff hygiene | portable source/configuration checkpoint passed; runtime migration queue reduced from 71 to 34 reads; broad typed-configuration phase remains open | Accelerator policy v13 expands the immutable CUDA route set from fourteen to twenty-five and removes production environment authority from model forward, generation, capability reporting, tensor determinism, and capture allocation. Fixed backend-owned policy replaces retired loader retention, inference precision, legacy training/serving, decode fallback, rowwise retry, Marlin-copy, state-scatter, Metal streaming-GDN, and weighted-LM-head controls. Schema, API, dashboard, qualification, example configuration, operator reference, and website publish the same mapping and exact retired-variable matrix. The generated ratchet falls from 531 to 487 direct reads, from 219 to 181 process mutations, and from 71 to 34 runtime-migration reads. No ROCm soak or route result is attributed to this portable checkpoint. |
 
 | 2026-07-20 | Metal graph, tape, SDPA, and command-cadence environment retirement | this source | this fixed-policy checkpoint | Metal ICB graph selection/stable metadata, shared training-tape saved-tensor residency, Metal SDPA dispatch geometry, ordered command-buffer cadence, generated environment contract, configuration reference, and permanent website; no Metal device execution, route parity, correctness, or performance claim | 355/355 model tests; 990/990 tensor tests; all-target ROCm `gfx1151`, Vulkan, and toolkit-free CUDA checks; runtime-environment generator at 470 reads/163 mutations/23 migration reads; docs-builder, generated-site, static-smoke, formatting, and diff gates | portable fixed-policy checkpoint passed; eleven production reads and eighteen process mutations removed; M1 execution remains required | Runtime options are the sole Metal graph eligibility owner; eligible runners always use stable paged metadata. Tape GDN/matmul saved tensors retain the prior default device residency. Metal SDPA retains its shape/occupancy split-K heuristic and 16-token prefill threshold, and the ordered stream retains its 50-encode commit cadence. `KILN_METAL_GRAPHS`, `KILN_FORCE_EAGER_DECODE`, `KILN_METAL_GRAPH_STABLE_PAGED_METADATA`, `KILN_TAPE_GDN_OFFLOAD_SAVED_TENSORS`, `KILN_TAPE_OFFLOAD_MATMUL_A`, `KILN_TAPE_OFFLOAD_MIN_BYTES`, `KILN_SDPA_SPLIT`, `KILN_SDPA_PREFILL_MIN`, and `CANDLE_METAL_COMPUTE_PER_BUFFER` are retired without aliases. This preserves unset behavior and does not qualify Metal hardware; the M1 handoff must run graph/SDPA parity and performance evidence. |
+
+| 2026-07-20 | Immutable typed Metal backend-kernel profile and accelerator policy v14 | this source | this configuration checkpoint | complete 46-leaf Metal backend route authority, typed config/API/CLI/UI/qualification/schema/documentation integration, and portable backend compile matrix; no Apple framework compilation, Metal device execution, parity, memory, pause, throughput, lifecycle, or promotion claim | 356/356 model and 1,094/1,094 server library tests; 83/83 focused mixed-load qualification tests; 115-field/110-canonical-environment/76-alias configuration schema; 170-definition observability schema; current capability and runtime-environment generators; 10/10 docs-builder tests; 55-document/5-asset generated website and assembled static smoke; all-target default, ROCm `gfx1151`, Vulkan, and toolkit-free CUDA checks; formatting and diff hygiene | portable source/configuration checkpoint passed; direct reads 470 -> 461, process mutations 163 -> 161, migration reads 23 -> 20; M1 execution remains required | `accelerator.metal_kernel_profile` is the only public authority for all SDPA, convolution, GDN, RMSNorm, MLP, attention-gate, QKV, LoRA, LM-head, paged-attention/KV, and transposed cooperative-GEMV routes. `native_default` preserves forty-five enabled routes and the historically opt-in custom LM-head argmax as disabled; `portable_fallback` declines all forty-six. The server installs the source-tracked policy before Metal backend construction, same-value installation is idempotent, conflicts fail, and standalone users retain historical defaults. More than fifty former generic/Metal per-kernel spellings are removed rather than aliases, and Metal graph parity tests cannot silently skip from process state. Config schema, resolved diagnostics, qualification fixtures, complete route/retired-name reference, API/architecture/troubleshooting website, and static ratchets agree on policy v14. Actual Metal feature compilation and native/fallback qualification must be performed on the M1 handoff. |
 
 ## Known Starting Defects
 

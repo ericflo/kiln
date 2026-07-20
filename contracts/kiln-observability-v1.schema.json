@@ -79,6 +79,11 @@
             "effective": "native_default",
             "source": "default"
           },
+          "metal_kernel_profile": {
+            "configured": "native_default",
+            "effective": "native_default",
+            "source": "default"
+          },
           "rocm_synchronization_mode": {
             "configured": "legacy_host_barriers",
             "effective": "legacy_host_barriers",
@@ -942,6 +947,11 @@
               "effective": "native_default",
               "source": "default"
             },
+            "metal_kernel_profile": {
+              "configured": "native_default",
+              "effective": "native_default",
+              "source": "default"
+            },
             "rocm_synchronization_mode": {
               "configured": "legacy_host_barriers",
               "effective": "legacy_host_barriers",
@@ -1571,6 +1581,11 @@
             "source": "default"
           },
           "cuda_kernel_profile": {
+            "configured": "native_default",
+            "effective": "native_default",
+            "source": "default"
+          },
+          "metal_kernel_profile": {
             "configured": "native_default",
             "effective": "native_default",
             "source": "default"
@@ -6208,6 +6223,16 @@
       "x-kiln-rust-type": "MemoryTierConfig",
       "x-kiln-field-schema-status": "complete"
     },
+    "MetalKernelProfile": {
+      "type": "string",
+      "enum": [
+        "native_default",
+        "portable_fallback"
+      ],
+      "description": "The process-lifetime Metal backend-kernel route set.",
+      "x-kiln-rust-type": "MetalKernelProfile",
+      "x-kiln-field-schema-status": "complete"
+    },
     "ModelDebugState": {
       "type": "object",
       "additionalProperties": false,
@@ -7529,6 +7554,7 @@
         "vulkan_device_index",
         "vulkan_validation",
         "cuda_kernel_profile",
+        "metal_kernel_profile",
         "rocm_synchronization_mode",
         "rocm_strided_batched_matmul_mode",
         "rocm_bf16_matmul_output_mode",
@@ -7570,6 +7596,9 @@
         },
         "cuda_kernel_profile": {
           "$ref": "#/$defs/ResolvedCudaKernelProfile"
+        },
+        "metal_kernel_profile": {
+          "$ref": "#/$defs/ResolvedMetalKernelProfile"
         },
         "rocm_synchronization_mode": {
           "$ref": "#/$defs/ResolvedRocmSynchronizationMode"
@@ -7641,6 +7670,29 @@
       },
       "description": "One configured/effective accelerator policy leaf and its startup source.",
       "x-kiln-rust-type": "ResolvedAcceleratorValue<KtApiMode>",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ResolvedMetalKernelProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configured",
+        "effective",
+        "source"
+      ],
+      "properties": {
+        "configured": {
+          "$ref": "#/$defs/MetalKernelProfile"
+        },
+        "effective": {
+          "$ref": "#/$defs/MetalKernelProfile"
+        },
+        "source": {
+          "$ref": "#/$defs/ConfigValueSource"
+        }
+      },
+      "description": "One configured/effective accelerator policy leaf and its startup source.",
+      "x-kiln-rust-type": "ResolvedAcceleratorValue<MetalKernelProfile>",
       "x-kiln-field-schema-status": "complete"
     },
     "ResolvedRocmBf16MatmulOutputMode": {

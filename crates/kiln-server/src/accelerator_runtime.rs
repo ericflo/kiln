@@ -5,6 +5,8 @@ use serde::Serialize;
 
 #[cfg(feature = "cuda")]
 use crate::config::CudaKernelProfile;
+#[cfg(feature = "metal")]
+use crate::config::MetalKernelProfile;
 use crate::config::{KtApiMode, ResolvedAcceleratorRuntimePolicy, RocmGraphMode};
 #[cfg(feature = "rocm")]
 use crate::config::{RocmKernelProfile, RocmSynchronizationMode};
@@ -140,6 +142,16 @@ fn model_cuda_kernel_policy(
     }
 }
 
+#[cfg(feature = "metal")]
+fn model_metal_kernel_policy(
+    policy: ResolvedAcceleratorRuntimePolicy,
+) -> kiln_model::MetalKernelPolicy {
+    match policy.metal_kernel_profile.effective {
+        MetalKernelProfile::NativeDefault => kiln_model::MetalKernelPolicy::native_default(),
+        MetalKernelProfile::PortableFallback => kiln_model::MetalKernelPolicy::portable_fallback(),
+    }
+}
+
 #[cfg(feature = "rocm")]
 fn model_rocm_kernel_policy(
     policy: ResolvedAcceleratorRuntimePolicy,
@@ -217,6 +229,18 @@ pub fn install_startup_policy(
 
         #[cfg(not(feature = "cuda"))]
         anyhow::bail!("cannot install a CUDA policy in a build without the `cuda` feature");
+    }
+
+    if matches!(device, kiln_tensor::Device::Metal(_)) {
+        #[cfg(feature = "metal")]
+        {
+            kiln_model::install_metal_kernel_policy(model_metal_kernel_policy(policy))
+                .context("failed to install immutable Metal backend-kernel policy")?;
+            return Ok(());
+        }
+
+        #[cfg(not(feature = "metal"))]
+        anyhow::bail!("cannot install a Metal policy in a build without the `metal` feature");
     }
 
     let kiln_tensor::Device::Rocm(device_index) = device else {
@@ -342,6 +366,8 @@ mod tests {
     };
     #[cfg(feature = "cuda")]
     use crate::config::{CudaKernelProfile, CudaKernelProfileSetting};
+    #[cfg(feature = "metal")]
+    use crate::config::{MetalKernelProfile, MetalKernelProfileSetting};
     #[cfg(feature = "rocm")]
     use crate::config::{RocmKernelProfile, RocmKernelProfileSetting};
 
@@ -383,6 +409,32 @@ mod tests {
                 }
             };
             assert_eq!(model_cuda_kernel_policy(policy), expected);
+        }
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn metal_kernel_profiles_map_exactly_to_the_model_policy() {
+        for configured in [
+            MetalKernelProfile::NativeDefault,
+            MetalKernelProfile::PortableFallback,
+        ] {
+            let mut config = AcceleratorRuntimeConfig::default();
+            config.metal_kernel_profile =
+                MetalKernelProfileSetting::new(configured, ConfigValueSource::ConfigFile);
+            let policy = config.resolved_policy(ServingProfileSetting::new(
+                ServingProfile::Stable,
+                ConfigValueSource::Default,
+            ));
+            let expected = match configured {
+                MetalKernelProfile::NativeDefault => {
+                    kiln_model::MetalKernelPolicy::native_default()
+                }
+                MetalKernelProfile::PortableFallback => {
+                    kiln_model::MetalKernelPolicy::portable_fallback()
+                }
+            };
+            assert_eq!(model_metal_kernel_policy(policy), expected);
         }
     }
 

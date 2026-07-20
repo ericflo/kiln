@@ -1641,8 +1641,8 @@ async function startServer({
           },
         },
         accelerator_runtime: {
-          schema_id: 'kiln.accelerator-runtime-policy.v13',
-          version: 12,
+          schema_id: 'kiln.accelerator-runtime-policy.v14',
+          version: 14,
           vulkan_kernel_policy_schema_id: 'kiln.vulkan-kernel-policy.v3',
           vulkan_device_policy_schema_id: 'kiln.vulkan-device-policy.v1',
           serving_profile: 'stable',
@@ -1660,6 +1660,11 @@ async function startServer({
           vulkan_device_index: { configured: null, effective: null, source: 'default' },
           vulkan_validation: { configured: false, effective: false, source: 'default' },
           cuda_kernel_profile: {
+            configured: 'native_default',
+            effective: 'native_default',
+            source: 'config_file',
+          },
+          metal_kernel_profile: {
             configured: 'native_default',
             effective: 'native_default',
             source: 'config_file',
@@ -2813,7 +2818,7 @@ async function expectDirectDecodeRendezvousRuntimeConfig(page, scenarioLabel) {
 async function expectRocmMatmulRuntimeConfig(page, scenarioLabel) {
   const prefix = `${scenarioLabel} ROCm matmul runtime config`;
   const selector = '#runtime-config-body';
-  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Policy schema[\s\S]*kiln\.accelerator-runtime-policy\.v13[\s\S]*v13/, `${prefix} should render policy schema v13`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Policy schema[\s\S]*kiln\.accelerator-runtime-policy\.v14[\s\S]*v14/, `${prefix} should render policy schema v14`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Vulkan kernel policy[\s\S]*kiln\.vulkan-kernel-policy\.v3/, `${prefix} should render the qualified Vulkan kernel policy schema`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Vulkan device policy[\s\S]*kiln\.vulkan-device-policy\.v1/, `${prefix} should render the immutable Vulkan device policy schema`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Vulkan physical device[\s\S]*automatic[\s\S]*config_file/, `${prefix} should render automatic Vulkan physical-device selection and source`);
@@ -2821,6 +2826,7 @@ async function expectRocmMatmulRuntimeConfig(page, scenarioLabel) {
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Kiln-tensor API routes[\s\S]*auto[\s\S]*default/, `${prefix} should render the immutable adapter route set and source`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Full-attention score ceiling[\s\S]*2,048 MiB[\s\S]*default/, `${prefix} should render immutable full-attention geometry and source`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*CUDA kernel profile[\s\S]*native_default[\s\S]*config_file/, `${prefix} should render the immutable CUDA backend route set and source`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Metal kernel profile[\s\S]*native_default[\s\S]*config_file/, `${prefix} should render the immutable Metal backend route set and source`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*CUDA graph policy[\s\S]*disabled[\s\S]*profile blocked/, `${prefix} should render the profile-resolved CUDA graph request`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*CUDA graph cache[\s\S]*8/, `${prefix} should render the typed CUDA graph cache bound`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*CUDA graph contract[\s\S]*stable metadata[\s\S]*single-row only/, `${prefix} should render fixed CUDA graph safety invariants`);

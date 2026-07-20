@@ -182,6 +182,12 @@ def build_definitions() -> None:
         "The process-lifetime CUDA backend-kernel route set.",
     )
     add_enum(
+        "MetalKernelProfile",
+        "MetalKernelProfile",
+        ["native_default", "portable_fallback"],
+        "The process-lifetime Metal backend-kernel route set.",
+    )
+    add_enum(
         "RocmSynchronizationMode",
         "RocmSynchronizationMode",
         ["legacy_host_barriers", "stream_ordered"],
@@ -451,6 +457,11 @@ def build_definitions() -> None:
             "CudaKernelProfile",
             ref("CudaKernelProfile"),
         ),
+        (
+            "ResolvedMetalKernelProfile",
+            "MetalKernelProfile",
+            ref("MetalKernelProfile"),
+        ),
         ("ResolvedRocmSynchronizationMode", "RocmSynchronizationMode", ref("RocmSynchronizationMode")),
         (
             "ResolvedRocmStridedBatchedMatmulMode",
@@ -497,6 +508,7 @@ def build_definitions() -> None:
             "vulkan_device_index": ref("ResolvedAcceleratorOptionalInteger"),
             "vulkan_validation": ref("ResolvedAcceleratorBoolean"),
             "cuda_kernel_profile": ref("ResolvedCudaKernelProfile"),
+            "metal_kernel_profile": ref("ResolvedMetalKernelProfile"),
             "rocm_synchronization_mode": ref("ResolvedRocmSynchronizationMode"),
             "rocm_strided_batched_matmul_mode": ref(
                 "ResolvedRocmStridedBatchedMatmulMode"

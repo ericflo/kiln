@@ -16,19 +16,19 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **470 direct read call sites** and
-**163 process-mutation call sites**. It can
-statically name **43 distinct literal `KILN_*`
-read names** across **129 call sites**.
+The scanner records **461 direct read call sites** and
+**161 process-mutation call sites**. It can
+statically name **41 distinct literal `KILN_*`
+read names** across **123 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
 | Ownership class | Read call sites | Literal `KILN_*` names | Mutation call sites |
 |---|---:|---:|---:|
 | Public stable | 9 | 1 | 0 |
-| Experimental/debug migration | 23 | 6 | 0 |
+| Experimental/debug migration | 20 | 6 | 0 |
 | Build time/provenance | 325 | 6 | 8 |
-| Test only | 113 | 30 | 155 |
+| Test only | 107 | 28 | 153 |
 
 The counts are call sites, not configuration-field counts. The central typed
 loader deliberately uses a small number of dynamic reads to resolve all public
@@ -58,7 +58,6 @@ boundary. This table is the prioritized deletion/migration queue.
 |---|---:|---:|
 | `crates/kiln-model/src/marlin_proj.rs` | 3 | 3 |
 | `crates/kiln-core/src/env_flag.rs` | 2 | 0 |
-| `crates/kiln-model/src/backend/metal_config.rs` | 2 | 0 |
 | `crates/kiln-model/src/transposed_weight_cache.rs` | 2 | 0 |
 | `crates/kiln-server/src/cli.rs` | 2 | 0 |
 | `crates/kiln-blas/src/algo_cache.rs` | 1 | 0 |
@@ -67,7 +66,6 @@ boundary. This table is the prioritized deletion/migration queue.
 | `crates/kiln-flash-attn/src/kt_api.rs` | 1 | 1 |
 | `crates/kiln-flce-kernel/src/kt_api.rs` | 1 | 0 |
 | `crates/kiln-memory/src/vram.rs` | 1 | 0 |
-| `crates/kiln-model/src/backend/metal_attention.rs` | 1 | 0 |
 | `crates/kiln-opd-loss-kernel/src/lib.rs` | 1 | 1 |
 | `crates/kiln-rocblas/src/algo_cache.rs` | 1 | 0 |
 | `crates/kiln-server/src/api/debug_model_state.rs` | 1 | 0 |
@@ -86,9 +84,7 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_COMMIT` | Build time/provenance | 2 | `crates/kiln-server/src/execution_provenance.rs`, `crates/kiln-train/src/replay.rs` |
 | `KILN_CONFIG` | Public stable | 2 | `crates/kiln-server/src/config.rs`, `crates/kiln-server/src/logging.rs` |
 | `KILN_CUDA_ARCHS` | Build time/provenance | 8 | `crates/kiln-blas/build.rs`, `crates/kiln-conv1d-kernel/build.rs`, `crates/kiln-flash-attn/build.rs`, `crates/kiln-gdn-kernel/build.rs`, `crates/kiln-marlin-gemm/build.rs`, `crates/kiln-opd-loss-kernel/build.rs`, `crates/kiln-rmsnorm-kernel/build.rs`, `crates/kiln-tensor/build.rs` |
-| `KILN_DISABLE_FUSED_PAGED_DECODE` | Test only | 8 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS` | Test only | 2 | `crates/kiln-model/src/forward.rs` |
-| `KILN_DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR` | Test only | 2 | `crates/kiln-model/src/forward.rs` |
+| `KILN_DISABLE_FUSED_PAGED_DECODE` | Test only | 6 | `crates/kiln-model/src/forward.rs` |
 | `KILN_DISABLE_OPD_LOSS_KERNEL` | Experimental/debug migration | 1 | `crates/kiln-opd-loss-kernel/src/lib.rs` |
 | `KILN_DISABLE_PARALLEL_PACK` | Experimental/debug migration | 1 | `crates/kiln-model/src/marlin_proj.rs` |
 | `KILN_DOCTEST_PYTHON` | Experimental/debug migration | 1 | `crates/kiln-eval/src/scorers/python_doctest.rs` |
@@ -179,8 +175,6 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-marlin-gemm/build.rs` | `var` | `CARGO_MANIFEST_DIR` | Build time/provenance | 1 |
 | `crates/kiln-marlin-gemm/build.rs` | `var_os` | `NVCC` | Build time/provenance | 1 |
 | `crates/kiln-memory/src/vram.rs` | `var_os` | `name` | Experimental/debug migration | 1 |
-| `crates/kiln-model/src/backend/metal_attention.rs` | `var` | `DISABLE_METAL_SDPA` | Experimental/debug migration | 1 |
-| `crates/kiln-model/src/backend/metal_config.rs` | `var` | `var` | Experimental/debug migration | 2 |
 | `crates/kiln-model/src/transposed_weight_cache.rs` | `var_os` | `HOME` | Experimental/debug migration | 1 |
 | `crates/kiln-model/src/transposed_weight_cache.rs` | `var_os` | `XDG_CACHE_HOME` | Experimental/debug migration | 1 |
 | `crates/kiln-model/tests/backend_capability_contract.rs` | `env!` | `CARGO_MANIFEST_DIR` | Test only | 1 |

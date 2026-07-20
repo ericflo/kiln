@@ -364,7 +364,6 @@ fn main() -> Result<()> {
 
     unsafe {
         std::env::remove_var("KILN_DISABLE_RMSNORM_BACKWARD");
-        std::env::remove_var("KILN_DISABLE_RMSNORM_KERNEL");
     }
 
     let model_path = parse_model_path()?;

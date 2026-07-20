@@ -2003,6 +2003,12 @@ pub fn run_config_check(
             );
             println!(
                 "  {} {} (source: {})",
+                style("Metal kernel profile:").dim(),
+                accelerator_runtime.metal_kernel_profile.effective,
+                accelerator_runtime.metal_kernel_profile.source,
+            );
+            println!(
+                "  {} {} (source: {})",
                 style("ROCm synchronization:").dim(),
                 accelerator_runtime.rocm_synchronization_mode.effective,
                 accelerator_runtime.rocm_synchronization_mode.source,
