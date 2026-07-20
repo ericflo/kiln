@@ -303,6 +303,27 @@ by settled rollback and contained eager retry, never a successful admission.
 Its snapshot, current-row gather, and equality-mask reservation is included in
 the transient-candidate high-water mark rather than hidden as unattributed
 allocator activity.
+The detailed event is complemented by durable process-lifetime fields under
+`GET /health.decode_runtime.rocm_graphs`: `batched_capture_attempts`,
+`batched_capture_successes`, `batched_capture_deferrals`,
+`batched_capture_failures`, `capture_parity_checks`, `capture_parity_passes`,
+`capture_parity_failures`, `capture_parity_errors`,
+`capture_parity_compared_bytes`, and `capture_parity_duration_micros`. Batched
+attempts equal their three outcomes, parity checks equal their three outcomes,
+and successful batched captures cannot exceed passed checks. A clean
+qualification window additionally requires zero failure/error and equal
+success/pass deltas; a later post-parity admission error may otherwise leave a
+pass without a successful admission.
+
+Prometheus publishes the same cumulative evidence as
+`kiln_rocm_graph_batched_capture_attempts_total`,
+`kiln_rocm_graph_batched_capture_outcomes_total{outcome}`,
+`kiln_rocm_graph_capture_parity_checks_total`,
+`kiln_rocm_graph_capture_parity_outcomes_total{outcome}`,
+`kiln_rocm_graph_capture_parity_compared_bytes_total`, and
+`kiln_rocm_graph_capture_parity_duration_seconds_total`. These fixed-cardinality
+counters survive log rotation and are the source for serving-receipt deltas;
+the structured event remains the source for mismatch-layer attribution.
 When computing `unexplained_ms`, Kiln conservatively subtracts the larger of
 serial actor work, response delivery, and the largest backend candidate rather
 than their sum, so overlap cannot falsely erase missing wall time.

@@ -1836,17 +1836,30 @@ one capture and 61 replays with no fallback or graph failure, 16.502 aggregate
 and 10.290 thermally sustainable output tokens/second, a 77.0 C measured peak,
 and a 90.0 C lifecycle peak without a trip.
 
-The receipt remains correctly failed because the separate-process output
-trajectory differed from its eager reference at indices 4 and 6. Both actual
-hashes recur in older retained trajectories, and one is present in an earlier
-eager receipt. This does not overturn the strict comparison result. It does
-establish that two different claims are currently coupled: the graph candidate
-passed exact same-process admission, while whole-process deterministic replay
-did not. Do not repeat cross-process exact-output pairs as if they isolated
-graph correctness. The serving qualification contract must preserve the
-cross-process reproducibility failure separately and require the current-source
-parity event for graph-correctness promotion before any performance ranking is
-updated.
+The driver-v16 receipt remains correctly failed because the separate-process
+output trajectory differed from its eager reference at indices 4 and 6. Both
+actual hashes recur in older retained trajectories, and one is present in an
+earlier eager receipt. This does not overturn the strict comparison result. It
+does establish that two different claims are currently coupled: the graph
+candidate passed exact same-process admission, while whole-process deterministic
+replay did not. Do not repeat cross-process exact-output pairs as if they
+isolated graph correctness.
+
+Serving benchmark driver v17 now enforces that separation in a typed receipt
+rather than through log interpretation. Diagnostics schema v6 retains
+measured-window and lifetime batched-capture/parity counters, reconciles every
+closed outcome, and adds the required
+`rocm_graph_capture_parity_accounted` gate. Its default
+`qualification_gate` role retains all prior exact-output verdict behavior. The
+narrow `same_artifact_graph_eager_discriminator` role requires a v17 Kiln eager
+reference with observed graph-disabled execution, the identical runtime binary
+and identity, and a graph candidate whose every measured row passes graph-route
+and first-launch-parity gates. Cross-process mismatches remain structured
+`evidence_only` reproducibility evidence only in that case. Any other role,
+artifact, reference execution, missing comparison, or parity edit fails strict
+validation. Campaign v7 forwards and records the role and reference directory
+for all five profiles. A rebuilt source-bound v17 eager/graph pair is still
+required before the performance ranking can change.
 
 Serving benchmark driver v15 closes the next attribution gap before another
 ROCm arm. Each successful Kiln stream now retains its exact terminal

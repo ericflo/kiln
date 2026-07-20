@@ -39,7 +39,7 @@ from typing import Any, Callable, Iterable
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "16"
+DRIVER_VERSION = "17"
 SUPPORTED_DRIVER_VERSIONS = {
     "2",
     "3",
@@ -55,45 +55,52 @@ SUPPORTED_DRIVER_VERSIONS = {
     "13",
     "14",
     "15",
+    "16",
     DRIVER_VERSION,
 }
 THERMAL_DRIVER_VERSIONS = {
     "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    DRIVER_VERSION,
+    "16", DRIVER_VERSION,
 }
 LIFECYCLE_DRIVER_VERSIONS = {
     "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    DRIVER_VERSION,
+    "16", DRIVER_VERSION,
 }
 PRELAUNCH_DRIVER_VERSIONS = {
     "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    DRIVER_VERSION,
+    "16", DRIVER_VERSION,
 }
 OUTPUT_EVIDENCE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", "14", "15", DRIVER_VERSION,
+    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", DRIVER_VERSION,
 }
 MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {
-    "8", "9", "10", "11", "12", "13", "14", "15", DRIVER_VERSION,
+    "8", "9", "10", "11", "12", "13", "14", "15", "16", DRIVER_VERSION,
 }
 RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS = {
-    "12", "13", "14", "15", DRIVER_VERSION,
+    "12", "13", "14", "15", "16", DRIVER_VERSION,
 }
 ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "9", "10", "11", "12", "13", "14", "15", DRIVER_VERSION,
+    "9", "10", "11", "12", "13", "14", "15", "16", DRIVER_VERSION,
 }
 ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "10", "11", "12", "13", "14", "15", DRIVER_VERSION,
+    "10", "11", "12", "13", "14", "15", "16", DRIVER_VERSION,
 }
 REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", "14", "15", DRIVER_VERSION,
+    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", DRIVER_VERSION,
 }
 IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS = {
-    "11", "12", "13", "14", "15", DRIVER_VERSION,
+    "11", "12", "13", "14", "15", "16", DRIVER_VERSION,
 }
-COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", "15", DRIVER_VERSION}
-MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", "15", DRIVER_VERSION}
-REQUEST_PERFORMANCE_DRIVER_VERSIONS = {"15", DRIVER_VERSION}
-PROMPT_SET_IDENTITY_DRIVER_VERSIONS = {"16"}
+COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", "15", "16", DRIVER_VERSION}
+MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", "15", "16", DRIVER_VERSION}
+REQUEST_PERFORMANCE_DRIVER_VERSIONS = {"15", "16", DRIVER_VERSION}
+PROMPT_SET_IDENTITY_DRIVER_VERSIONS = {"16", DRIVER_VERSION}
+GRAPH_PARITY_DRIVER_VERSIONS = {"17"}
+REFERENCE_ROLE_DRIVER_VERSIONS = {"17"}
+REFERENCE_ROLES = {
+    "qualification_gate",
+    "same_artifact_graph_eager_discriminator",
+}
 OUTPUT_EVIDENCE_MAX_UTF8_BYTES_PER_REQUEST = 1024 * 1024
 LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
 PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v1"
@@ -229,11 +236,13 @@ DIRECT_RENDEZVOUS_FIELDS = (
 SERVER_DIAGNOSTICS_SCHEMA_V2 = "kiln.serving-benchmark-server-diagnostics.v2"
 SERVER_DIAGNOSTICS_SCHEMA_V3 = "kiln.serving-benchmark-server-diagnostics.v3"
 SERVER_DIAGNOSTICS_SCHEMA_V4 = "kiln.serving-benchmark-server-diagnostics.v4"
-SERVER_DIAGNOSTICS_SCHEMA = "kiln.serving-benchmark-server-diagnostics.v5"
+SERVER_DIAGNOSTICS_SCHEMA_V5 = "kiln.serving-benchmark-server-diagnostics.v5"
+SERVER_DIAGNOSTICS_SCHEMA = "kiln.serving-benchmark-server-diagnostics.v6"
 SERVER_DIAGNOSTICS_SCHEMAS = {
     SERVER_DIAGNOSTICS_SCHEMA_V2,
     SERVER_DIAGNOSTICS_SCHEMA_V3,
     SERVER_DIAGNOSTICS_SCHEMA_V4,
+    SERVER_DIAGNOSTICS_SCHEMA_V5,
     SERVER_DIAGNOSTICS_SCHEMA,
 }
 ROCM_GRAPH_COUNTER_FIELDS = (
@@ -248,6 +257,27 @@ ROCM_GRAPH_COUNTER_FIELDS = (
     "graph_slot_create_count",
     "graph_slot_reuse_count",
     "cache_admission_successes",
+)
+ROCM_GRAPH_BATCHED_CAPTURE_COUNTER_FIELDS = (
+    "batched_capture_attempts",
+    "batched_capture_successes",
+    "batched_capture_deferrals",
+    "batched_capture_failures",
+)
+ROCM_GRAPH_CAPTURE_PARITY_COUNTER_FIELDS = (
+    "capture_parity_checks",
+    "capture_parity_passes",
+    "capture_parity_failures",
+    "capture_parity_errors",
+    "capture_parity_compared_bytes",
+    "capture_parity_duration_micros",
+)
+ROCM_GRAPH_CAPTURE_PARITY_BOUNDARY_FIELDS = (
+    "batched_capture_successes",
+    "capture_parity_checks",
+    "capture_parity_passes",
+    "capture_parity_failures",
+    "capture_parity_errors",
 )
 ROCM_GRAPH_GAUGE_FIELDS = (
     "captured_graph_count",
@@ -2004,6 +2034,92 @@ def validate_rocm_graph_diagnostics(value: Any, label: str) -> dict[str, Any]:
     )
 
 
+def validate_rocm_graph_capture_parity(value: Any, label: str) -> dict[str, Any]:
+    parity = _object(value, label)
+    delta_fields = {
+        *ROCM_GRAPH_BATCHED_CAPTURE_COUNTER_FIELDS,
+        *ROCM_GRAPH_CAPTURE_PARITY_COUNTER_FIELDS,
+    }
+    boundary_fields = {
+        f"{field}_{boundary}"
+        for field in ROCM_GRAPH_CAPTURE_PARITY_BOUNDARY_FIELDS
+        for boundary in ("start", "end")
+    }
+    _exact_keys(parity, delta_fields | boundary_fields, label)
+    for field in delta_fields | boundary_fields:
+        _nonnegative_int(parity[field], f"{label}.{field}")
+    if parity["batched_capture_attempts"] != (
+        parity["batched_capture_successes"]
+        + parity["batched_capture_deferrals"]
+        + parity["batched_capture_failures"]
+    ):
+        raise BenchmarkError(f"{label} batched capture outcomes disagree")
+    if parity["capture_parity_checks"] != (
+        parity["capture_parity_passes"]
+        + parity["capture_parity_failures"]
+        + parity["capture_parity_errors"]
+    ):
+        raise BenchmarkError(f"{label} parity outcomes disagree")
+    for field in ROCM_GRAPH_CAPTURE_PARITY_BOUNDARY_FIELDS:
+        if parity[f"{field}_end"] < parity[f"{field}_start"]:
+            raise BenchmarkError(f"{label}.{field} regressed")
+        if parity[field] != parity[f"{field}_end"] - parity[f"{field}_start"]:
+            raise BenchmarkError(f"{label}.{field} delta disagrees with boundaries")
+    for boundary in ("start", "end"):
+        checks = parity[f"capture_parity_checks_{boundary}"]
+        outcomes = (
+            parity[f"capture_parity_passes_{boundary}"]
+            + parity[f"capture_parity_failures_{boundary}"]
+            + parity[f"capture_parity_errors_{boundary}"]
+        )
+        if checks != outcomes:
+            raise BenchmarkError(
+                f"{label} cumulative parity outcomes disagree at {boundary}"
+            )
+        if (
+            parity[f"batched_capture_successes_{boundary}"]
+            > parity[f"capture_parity_passes_{boundary}"]
+        ):
+            raise BenchmarkError(
+                f"{label} successful batched captures lack parity at {boundary}"
+            )
+    if parity["capture_parity_checks"] > 0 and parity["capture_parity_compared_bytes"] == 0:
+        raise BenchmarkError(f"{label} parity checks must cover positive bytes")
+    return parity
+
+
+def validate_rocm_graph_diagnostics_v6(value: Any, label: str) -> dict[str, Any]:
+    graph = _object(value, label)
+    _exact_keys(
+        graph,
+        {
+            "state",
+            "unavailable_reason",
+            "requested",
+            "capture_requested",
+            "enabled",
+            "capture_enabled",
+            *ROCM_GRAPH_COUNTER_FIELDS,
+            *{
+                f"{field}{suffix}"
+                for field in ROCM_GRAPH_GAUGE_FIELDS
+                for suffix in ("_start", "_end")
+            },
+            "fallbacks",
+            "capture_parity",
+        },
+        label,
+    )
+    legacy = dict(graph)
+    parity = legacy.pop("capture_parity")
+    validate_rocm_graph_diagnostics(legacy, label)
+    if graph["state"] in {"enabled", "disabled"}:
+        validate_rocm_graph_capture_parity(parity, f"{label}.capture_parity")
+    elif parity is not None:
+        raise BenchmarkError(f"{label}.capture_parity must be null when unavailable")
+    return graph
+
+
 def validate_server_diagnostics_v3(value: Any, label: str) -> dict[str, Any]:
     server = _object(value, label)
     _exact_keys(
@@ -2098,7 +2214,7 @@ def validate_server_diagnostics_v4(value: Any, label: str) -> dict[str, Any]:
 
 def validate_server_diagnostics_v5(value: Any, label: str) -> dict[str, Any]:
     server = _object(value, label)
-    if server.get("schema") != SERVER_DIAGNOSTICS_SCHEMA:
+    if server.get("schema") != SERVER_DIAGNOSTICS_SCHEMA_V5:
         raise BenchmarkError(f"{label}.schema is unsupported")
     validate_rocm_graph_diagnostics(server.get("rocm_graphs"), f"{label}.rocm_graphs")
 
@@ -2131,6 +2247,22 @@ def validate_server_diagnostics_v5(value: Any, label: str) -> dict[str, Any]:
         legacy_graph["fallbacks"] = legacy_fallbacks
         legacy["rocm_graphs"] = legacy_graph
     validate_server_diagnostics_v4(legacy, label)
+    return server
+
+
+def validate_server_diagnostics_v6(value: Any, label: str) -> dict[str, Any]:
+    server = _object(value, label)
+    if server.get("schema") != SERVER_DIAGNOSTICS_SCHEMA:
+        raise BenchmarkError(f"{label}.schema is unsupported")
+    validate_rocm_graph_diagnostics_v6(
+        server.get("rocm_graphs"), f"{label}.rocm_graphs"
+    )
+    legacy = dict(server)
+    legacy["schema"] = SERVER_DIAGNOSTICS_SCHEMA_V5
+    legacy_graph = dict(server["rocm_graphs"])
+    legacy_graph.pop("capture_parity")
+    legacy["rocm_graphs"] = legacy_graph
+    validate_server_diagnostics_v5(legacy, label)
     return server
 
 
@@ -2669,7 +2801,11 @@ def validate_benchmark_run(
     if row["server"] is not None:
         if driver_version in ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS:
             server = (
-                validate_server_diagnostics_v5(row["server"], f"{label}.server")
+                validate_server_diagnostics_v6(row["server"], f"{label}.server")
+                if driver_version in GRAPH_PARITY_DRIVER_VERSIONS
+                else validate_server_diagnostics_v5(
+                    row["server"], f"{label}.server"
+                )
                 if driver_version in MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS
                 else validate_server_diagnostics_v4(
                     row["server"], f"{label}.server"
@@ -2722,6 +2858,20 @@ def validate_benchmark_run(
                 if graph_gate is None or graph_gate["passed"] != expected_graph:
                     raise BenchmarkError(
                         f"{label} has an inconsistent ROCm graph-execution gate"
+                    )
+            if driver_version in GRAPH_PARITY_DRIVER_VERSIONS:
+                parity_gate = next(
+                    (
+                        item
+                        for item in gates
+                        if item["name"] == "rocm_graph_capture_parity_accounted"
+                    ),
+                    None,
+                )
+                expected_parity = server_rocm_graph_capture_parity_accounted(server)
+                if parity_gate is None or parity_gate["passed"] != expected_parity:
+                    raise BenchmarkError(
+                        f"{label} has an inconsistent ROCm graph-parity gate"
                     )
             if driver_version in COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS:
                 idle_gate = next(
@@ -3339,6 +3489,35 @@ def validate_comparison_mismatches(value: Any, label: str) -> None:
             raise BenchmarkError(f"{mismatch_label} request indices disagree")
 
 
+def validate_eager_reference_execution_summary(value: Any, label: str) -> dict[str, Any]:
+    summary = _object(value, label)
+    _exact_keys(
+        summary,
+        {
+            "row_count",
+            "all_rows_observed",
+            "all_rows_capture_disabled",
+            "capture_successes",
+            "replay_successes",
+            "failures",
+            "fallbacks",
+        },
+        label,
+    )
+    _positive_int(summary["row_count"], f"{label}.row_count")
+    for field in ("all_rows_observed", "all_rows_capture_disabled"):
+        if not isinstance(summary[field], bool):
+            raise BenchmarkError(f"{label}.{field} must be boolean")
+    for field in (
+        "capture_successes",
+        "replay_successes",
+        "failures",
+        "fallbacks",
+    ):
+        _nonnegative_int(summary[field], f"{label}.{field}")
+    return summary
+
+
 def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
     receipt = _object(value, "receipt")
     driver_version = receipt.get("driver_version")
@@ -3347,10 +3526,15 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
         required_receipt_keys.update({"completion", "host_thermal"})
     if driver_version in LIFECYCLE_DRIVER_VERSIONS:
         required_receipt_keys.add("server_lifecycle")
+    if driver_version in REFERENCE_ROLE_DRIVER_VERSIONS:
+        required_receipt_keys.add("reference_role")
     _exact_keys(receipt, required_receipt_keys, "receipt", {"comparison"})
     if receipt["schema"] != SCHEMA or driver_version not in SUPPORTED_DRIVER_VERSIONS:
         supported = ", ".join(sorted(SUPPORTED_DRIVER_VERSIONS))
         raise BenchmarkError(f"receipt must use {SCHEMA} driver version in {{{supported}}}")
+    if driver_version in REFERENCE_ROLE_DRIVER_VERSIONS:
+        if receipt["reference_role"] not in REFERENCE_ROLES:
+            raise BenchmarkError("receipt.reference_role is unsupported")
     try:
         created_at = dt.datetime.fromisoformat(receipt["created_at"])
     except (TypeError, ValueError) as exc:
@@ -3947,6 +4131,14 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
         }
         if driver_version in THERMAL_DRIVER_VERSIONS:
             comparison_keys.add("comparison_mode")
+        if driver_version in REFERENCE_ROLE_DRIVER_VERSIONS:
+            comparison_keys.update(
+                {
+                    "reference_role",
+                    "verdict_effect",
+                    "reference_execution",
+                }
+            )
         _exact_keys(
             comparison,
             comparison_keys,
@@ -3973,7 +4165,88 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
             and comparison["comparison_mode"] != workload["comparison_mode"]
         ):
             raise BenchmarkError("receipt.comparison mode disagrees with its workload")
-        comparison_passed = comparison["matched"]
+        comparison_required = True
+        if driver_version in REFERENCE_ROLE_DRIVER_VERSIONS:
+            role = comparison["reference_role"]
+            if role != receipt["reference_role"] or role not in REFERENCE_ROLES:
+                raise BenchmarkError(
+                    "receipt comparison role disagrees with its reference policy"
+                )
+            expected_effect = (
+                "required" if role == "qualification_gate" else "evidence_only"
+            )
+            if comparison["verdict_effect"] != expected_effect:
+                raise BenchmarkError("receipt comparison verdict effect is inconsistent")
+            comparison_required = expected_effect == "required"
+            if role == "qualification_gate":
+                if comparison["reference_execution"] is not None:
+                    raise BenchmarkError(
+                        "qualification-gate comparison has graph discriminator evidence"
+                    )
+            else:
+                summary = validate_eager_reference_execution_summary(
+                    comparison["reference_execution"],
+                    "receipt.comparison.reference_execution",
+                )
+                if not (
+                    summary["row_count"]
+                    == len(runs) + (1 if receipt["warmup"] is not None else 0)
+                    and summary["all_rows_observed"]
+                    and summary["all_rows_capture_disabled"]
+                    and summary["capture_successes"] == 0
+                    and summary["replay_successes"] == 0
+                    and summary["failures"] == 0
+                    and summary["fallbacks"] == 0
+                ):
+                    raise BenchmarkError(
+                        "receipt comparison does not prove an eager reference"
+                    )
+                reference_engine = _object(
+                    comparison["reference_engine"],
+                    "receipt.comparison.reference_engine",
+                )
+                if (
+                    engine["name"] != "kiln"
+                    or reference_engine.get("name") != "kiln"
+                    or reference_engine.get("runtime_identity")
+                    != engine["runtime_identity"]
+                ):
+                    raise BenchmarkError(
+                        "graph/eager discriminator engine identity is inconsistent"
+                    )
+                reference_artifact = _object(
+                    reference_engine.get("runtime_artifact"),
+                    "receipt.comparison.reference_engine.runtime_artifact",
+                )
+                if (
+                    _sha256(
+                        reference_artifact.get("sha256"),
+                        "receipt.comparison.reference_engine.runtime_artifact.sha256",
+                    )
+                    != engine["runtime_artifact"]["sha256"]
+                ):
+                    raise BenchmarkError(
+                        "graph/eager discriminator does not use one runtime artifact"
+                    )
+                if not runs or not all(
+                    isinstance(row.get("server"), dict)
+                    and row["server"].get("schema") == SERVER_DIAGNOSTICS_SCHEMA
+                    and row["server"]["rocm_graphs"]["capture_requested"] is True
+                    and server_rocm_graph_execution_accounted(row["server"])
+                    and server_rocm_graph_capture_parity_accounted(row["server"])
+                    for row in runs
+                ):
+                    raise BenchmarkError(
+                        "graph/eager discriminator candidate lacks graph parity evidence"
+                    )
+        comparison_passed = comparison["matched"] or not comparison_required
+    elif (
+        driver_version in REFERENCE_ROLE_DRIVER_VERSIONS
+        and receipt["reference_role"] != "qualification_gate"
+    ):
+        raise BenchmarkError(
+            "graph/eager discriminator role requires a reference comparison"
+        )
     passed = (
         not repository["dirty"]
         and not completion_failures
@@ -4563,7 +4836,7 @@ def validate_decode_batcher_snapshot(value: Any) -> dict[str, Any]:
 def validate_rocm_graph_snapshot(value: Any) -> dict[str, Any]:
     label = "diagnostics.decode_runtime.rocm_graphs"
     snapshot = _object(value, label)
-    normalized = {
+    base = {
         field: snapshot.get(field)
         for field in (
             "state",
@@ -4577,13 +4850,52 @@ def validate_rocm_graph_snapshot(value: Any) -> dict[str, Any]:
             "fallbacks",
         )
     }
-    return validate_rocm_graph_record(
-        normalized,
+    normalized = validate_rocm_graph_record(
+        base,
         label,
         gauge_suffixes=("",),
         fallback_max_field="max_duration_micros",
         fallback_reason_fields=ROCM_GRAPH_FALLBACK_REASON_FIELDS,
     )
+    available = normalized["state"] in {"enabled", "disabled"}
+    parity_fields = (
+        *ROCM_GRAPH_BATCHED_CAPTURE_COUNTER_FIELDS,
+        *ROCM_GRAPH_CAPTURE_PARITY_COUNTER_FIELDS,
+    )
+    for field in parity_fields:
+        item = snapshot.get(field)
+        if available:
+            normalized[field] = _nonnegative_int(item, f"{label}.{field}")
+        else:
+            if item is not None:
+                raise BenchmarkError(f"{label}.{field} must be null when unavailable")
+            normalized[field] = None
+    if available:
+        if normalized["batched_capture_attempts"] != (
+            normalized["batched_capture_successes"]
+            + normalized["batched_capture_deferrals"]
+            + normalized["batched_capture_failures"]
+        ):
+            raise BenchmarkError(f"{label} batched capture outcomes disagree")
+        if normalized["capture_parity_checks"] != (
+            normalized["capture_parity_passes"]
+            + normalized["capture_parity_failures"]
+            + normalized["capture_parity_errors"]
+        ):
+            raise BenchmarkError(f"{label} capture parity outcomes disagree")
+        if (
+            normalized["batched_capture_successes"]
+            > normalized["capture_parity_passes"]
+        ):
+            raise BenchmarkError(
+                f"{label} successful batched captures lack parity admission"
+            )
+        if (
+            normalized["capture_parity_checks"] > 0
+            and normalized["capture_parity_compared_bytes"] == 0
+        ):
+            raise BenchmarkError(f"{label} parity checks cover zero bytes")
+    return normalized
 
 
 def server_diagnostics_snapshot(health: dict[str, Any]) -> dict[str, Any]:
@@ -4792,6 +5104,7 @@ def rocm_graph_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str,
                 for boundary in ("start", "end")
             },
             "fallbacks": None,
+            "capture_parity": None,
         }
 
     for field in ("requested", "capture_requested"):
@@ -4839,6 +5152,21 @@ def rocm_graph_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str,
         "max_duration_micros"
     ]
     result["fallbacks"] = fallback_delta
+    parity_delta: dict[str, int] = {}
+    for field in (
+        *ROCM_GRAPH_BATCHED_CAPTURE_COUNTER_FIELDS,
+        *ROCM_GRAPH_CAPTURE_PARITY_COUNTER_FIELDS,
+    ):
+        if after[field] < before[field]:
+            raise BenchmarkError(
+                f"ROCm graph parity counter {field} regressed from "
+                f"{before[field]} to {after[field]}"
+            )
+        parity_delta[field] = after[field] - before[field]
+    for field in ROCM_GRAPH_CAPTURE_PARITY_BOUNDARY_FIELDS:
+        parity_delta[f"{field}_start"] = before[field]
+        parity_delta[f"{field}_end"] = after[field]
+    result["capture_parity"] = parity_delta
     return result
 
 
@@ -4926,6 +5254,40 @@ def server_rocm_graph_execution_accounted(server: dict[str, Any]) -> bool:
         and graph["failures"] == 0
         and graph["fallbacks"]["total"] == 0
         and graph["capture_successes"] + graph["replay_successes"] > 0
+    )
+
+
+def server_rocm_graph_capture_parity_accounted(server: dict[str, Any]) -> bool:
+    graph = server["rocm_graphs"]
+    parity = graph.get("capture_parity")
+    if graph["state"] in {"busy", "unavailable"}:
+        return parity is None
+    if parity is None:
+        return False
+    batching = server["batching_engine"]
+    measured_multi_row = (
+        batching is not None and batching["total_batched_decode_forwards"] > 0
+    )
+    if not graph["capture_requested"] or not measured_multi_row:
+        return (
+            parity["batched_capture_attempts"] == 0
+            and parity["capture_parity_checks"] == 0
+        )
+    return (
+        graph["capture_enabled"]
+        and graph["failures"] == 0
+        and parity["capture_parity_failures_end"] == 0
+        and parity["capture_parity_errors_end"] == 0
+        and parity["capture_parity_checks_end"]
+        == parity["capture_parity_passes_end"]
+        and parity["batched_capture_successes_end"]
+        == parity["capture_parity_passes_end"]
+        and parity["capture_parity_passes_end"] > 0
+        and parity["batched_capture_successes"] == parity["capture_parity_passes"]
+        and (
+            parity["capture_parity_checks"] == 0
+            or parity["capture_parity_compared_bytes"] > 0
+        )
     )
 
 
@@ -5226,6 +5588,27 @@ def summarize_run(
                         ),
                     )
                 )
+                parity = graph["capture_parity"]
+                gates.append(
+                    gate(
+                        "rocm_graph_capture_parity_accounted",
+                        server_rocm_graph_capture_parity_accounted(server),
+                        (
+                            "not available for this backend"
+                            if parity is None
+                            else (
+                                f"batched_successes={parity['batched_capture_successes']}; "
+                                f"checks={parity['capture_parity_checks']}; "
+                                f"passes={parity['capture_parity_passes']}; "
+                                f"failures={parity['capture_parity_failures']}; "
+                                f"errors={parity['capture_parity_errors']}; "
+                                f"passes_end={parity['capture_parity_passes_end']}; "
+                                f"compared_bytes={parity['capture_parity_compared_bytes']}; "
+                                f"duration_micros={parity['capture_parity_duration_micros']}"
+                            )
+                        ),
+                    )
+                )
                 batching = server["batching_engine"]
                 gates.append(
                     gate(
@@ -5458,6 +5841,34 @@ def run_once(
     )
 
 
+def eager_reference_execution_summary(reference: dict[str, Any]) -> dict[str, Any]:
+    rows = list(reference.get("runs", []))
+    if reference.get("warmup") is not None:
+        rows.insert(0, reference["warmup"])
+    observed = all(
+        isinstance(row.get("server"), dict)
+        and row["server"].get("schema") == SERVER_DIAGNOSTICS_SCHEMA
+        for row in rows
+    )
+    graphs = [row["server"]["rocm_graphs"] for row in rows] if observed else []
+    capture_successes = sum(graph["capture_successes"] or 0 for graph in graphs)
+    replay_successes = sum(graph["replay_successes"] or 0 for graph in graphs)
+    failures = sum(graph["failures"] or 0 for graph in graphs)
+    fallbacks = sum(
+        (graph["fallbacks"] or {}).get("total", 0) for graph in graphs
+    )
+    return {
+        "row_count": len(rows),
+        "all_rows_observed": observed,
+        "all_rows_capture_disabled": observed
+        and all(graph["capture_requested"] is False for graph in graphs),
+        "capture_successes": capture_successes,
+        "replay_successes": replay_successes,
+        "failures": failures,
+        "fallbacks": fallbacks,
+    }
+
+
 def compare_reference(receipt: dict[str, Any], reference_path: Path) -> dict[str, Any]:
     try:
         reference_bytes = reference_path.read_bytes()
@@ -5484,6 +5895,61 @@ def compare_reference(receipt: dict[str, Any], reference_path: Path) -> dict[str
         "content_sha256"
     ):
         raise BenchmarkError("reference receipt has a different host thermal policy")
+    reference_role = receipt["reference_role"]
+    verdict_effect = "required" if reference_role == "qualification_gate" else "evidence_only"
+    reference_execution: dict[str, Any] | None = None
+    if reference_role == "same_artifact_graph_eager_discriminator":
+        if reference.get("driver_version") != DRIVER_VERSION:
+            raise BenchmarkError(
+                "same-artifact graph/eager discrimination requires a current-driver reference"
+            )
+        if reference.get("verdict") != "passed":
+            raise BenchmarkError(
+                "same-artifact graph/eager discrimination requires a passed eager reference"
+            )
+        if reference.get("reference_role") != "qualification_gate":
+            raise BenchmarkError(
+                "same-artifact graph/eager discrimination requires an ordinary eager reference"
+            )
+        current_engine = receipt["engine"]
+        reference_engine = reference["engine"]
+        if current_engine["name"] != "kiln" or reference_engine["name"] != "kiln":
+            raise BenchmarkError(
+                "same-artifact graph/eager discrimination requires two Kiln receipts"
+            )
+        if (
+            current_engine["runtime_artifact"]["sha256"]
+            != reference_engine["runtime_artifact"]["sha256"]
+            or current_engine["runtime_identity"] != reference_engine["runtime_identity"]
+        ):
+            raise BenchmarkError(
+                "same-artifact graph/eager discrimination requires the identical runtime artifact"
+            )
+        reference_execution = eager_reference_execution_summary(reference)
+        if not (
+            reference_execution["row_count"] > 0
+            and reference_execution["all_rows_observed"]
+            and reference_execution["all_rows_capture_disabled"]
+            and reference_execution["capture_successes"] == 0
+            and reference_execution["replay_successes"] == 0
+            and reference_execution["failures"] == 0
+            and reference_execution["fallbacks"] == 0
+        ):
+            raise BenchmarkError(
+                "same-artifact graph/eager reference does not prove graph-disabled execution"
+            )
+        candidate_rows = receipt.get("runs", [])
+        if not candidate_rows or not all(
+            isinstance(row.get("server"), dict)
+            and row["server"].get("schema") == SERVER_DIAGNOSTICS_SCHEMA
+            and row["server"]["rocm_graphs"]["capture_requested"] is True
+            and server_rocm_graph_execution_accounted(row["server"])
+            and server_rocm_graph_capture_parity_accounted(row["server"])
+            for row in candidate_rows
+        ):
+            raise BenchmarkError(
+                "same-artifact graph/eager candidate lacks measured graph parity evidence"
+            )
     comparison_mode = receipt["workload"]["comparison_mode"]
     current_rows = {
         (row["concurrency"], row["repeat"]): row for row in receipt.get("runs", [])
@@ -5513,6 +5979,9 @@ def compare_reference(receipt: dict[str, Any], reference_path: Path) -> dict[str
     return {
         "reference_receipt_sha256": "sha256:" + hashlib.sha256(reference_bytes).hexdigest(),
         "reference_engine": reference.get("engine"),
+        "reference_role": reference_role,
+        "verdict_effect": verdict_effect,
+        "reference_execution": reference_execution,
         "comparison_mode": comparison_mode,
         "matched": not mismatches,
         "mismatches": mismatches,
@@ -5889,6 +6358,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--reference-receipt", type=Path)
     parser.add_argument(
+        "--reference-role",
+        choices=tuple(sorted(REFERENCE_ROLES)),
+        default="qualification_gate",
+        help=(
+            "make cross-process comparison verdict-gating, or retain it as "
+            "reproducibility evidence for an exact same-artifact eager/graph "
+            "discriminator whose in-process graph parity is separately gated"
+        ),
+    )
+    parser.add_argument(
         "--output-evidence",
         choices=("hashes", "full"),
         default="hashes",
@@ -5975,6 +6454,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if not args.api_key:
             parser.error("api-key cannot be empty")
         args.api_key_source = "argument"
+    if (
+        args.reference_role == "same_artifact_graph_eager_discriminator"
+        and args.reference_receipt is None
+    ):
+        parser.error(
+            "same_artifact_graph_eager_discriminator requires --reference-receipt"
+        )
+    if (
+        args.reference_role == "same_artifact_graph_eager_discriminator"
+        and args.engine != "kiln"
+    ):
+        parser.error(
+            "same_artifact_graph_eager_discriminator is available only for Kiln"
+        )
     return args
 
 
@@ -6560,6 +7053,7 @@ def main(argv: list[str] | None = None) -> int:
         receipt: dict[str, Any] = {
             "schema": SCHEMA,
             "driver_version": DRIVER_VERSION,
+            "reference_role": args.reference_role,
             "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             "engine": {
                 "name": args.engine,
@@ -6628,7 +7122,11 @@ def main(argv: list[str] | None = None) -> int:
             and (warmup is None or warmup["verdict"] == "passed")
             and len(runs) == len(sizes) * args.repeats
             and all(row["verdict"] == "passed" for row in runs)
-            and receipt.get("comparison", {}).get("matched", True)
+            and (
+                receipt.get("comparison", {}).get("matched", True)
+                or args.reference_role
+                == "same_artifact_graph_eager_discriminator"
+            )
         )
         receipt["verdict"] = "passed" if passed else "failed"
         receipt["receipt_sha256"] = canonical_sha256(receipt)

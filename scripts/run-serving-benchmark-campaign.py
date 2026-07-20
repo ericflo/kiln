@@ -19,8 +19,12 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DRIVER = ROOT / "scripts" / "bench-concurrent-batch.py"
-SCHEMA = "kiln.serving-benchmark-campaign.v6"
+SCHEMA = "kiln.serving-benchmark-campaign.v7"
 DEFAULT_MODEL_FINGERPRINT_READ_MIB_PER_SECOND = 256
+REFERENCE_ROLES = (
+    "qualification_gate",
+    "same_artifact_graph_eager_discriminator",
+)
 PROFILES = (
     "greedy-short",
     "api-default-sampled",
@@ -100,7 +104,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--reference-dir",
         type=Path,
-        help="directory containing matching *.kiln.json receipts; required for vLLM",
+        help=(
+            "directory containing matching *.kiln.json receipts; required for vLLM "
+            "and same-artifact Kiln graph/eager discrimination"
+        ),
+    )
+    parser.add_argument(
+        "--reference-role",
+        choices=REFERENCE_ROLES,
+        default="qualification_gate",
+        help="whether reference comparison gates qualification or discriminates graph/eager execution",
     )
     parser.add_argument("--sizes", default="1,8,16,32,64,128")
     parser.add_argument("--repeats", type=int, default=3)
@@ -141,10 +154,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("campaign-id must be 3..64 portable identifier characters")
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,63}", args.prompt_set_id) is None:
         parser.error("prompt-set-id must be 3..64 portable identifier characters")
-    if args.engine == "vllm" and args.reference_dir is None:
+    if args.reference_role == "same_artifact_graph_eager_discriminator":
+        if args.engine != "kiln":
+            parser.error(
+                "same-artifact graph/eager discrimination requires --engine kiln"
+            )
+        if args.reference_dir is None:
+            parser.error(
+                "--reference-dir is required for same-artifact graph/eager discrimination"
+            )
+    elif args.engine == "vllm" and args.reference_dir is None:
         parser.error("--reference-dir is required for a vLLM campaign")
-    if args.engine == "kiln" and args.reference_dir is not None:
-        parser.error("--reference-dir is only valid for a vLLM campaign")
+    elif args.engine == "kiln" and args.reference_dir is not None:
+        parser.error(
+            "--reference-dir for Kiln requires "
+            "--reference-role same_artifact_graph_eager_discriminator"
+        )
     if args.server_pid is not None and args.server_pid <= 1:
         parser.error("--server-pid must be greater than one")
     if not 64 <= args.model_fingerprint_read_mib_per_second <= 16_384:
@@ -215,6 +240,8 @@ def benchmark_command(
         str(args.timeout_secs),
         "--output-evidence",
         args.output_evidence,
+        "--reference-role",
+        args.reference_role,
         "--out",
         str(output),
     ]
@@ -244,6 +271,12 @@ def build_summary(
         "campaign_id": args.campaign_id,
         "prompt_set_id": args.prompt_set_id,
         "engine": args.engine,
+        "reference_role": args.reference_role,
+        "reference_dir": (
+            str(args.reference_dir.resolve())
+            if args.reference_dir is not None
+            else None
+        ),
         "output_evidence": args.output_evidence,
         "model_fingerprint_read_mib_per_second": (
             args.model_fingerprint_read_mib_per_second

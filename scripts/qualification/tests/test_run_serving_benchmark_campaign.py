@@ -64,6 +64,41 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
             with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 campaign.parse_args(args)
 
+    def test_same_artifact_discriminator_requires_kiln_reference_receipts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                campaign.parse_args(
+                    [
+                        *required_args(root),
+                        "--reference-role",
+                        "same_artifact_graph_eager_discriminator",
+                    ]
+                )
+
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                campaign.parse_args(
+                    [
+                        *required_args(root, "vllm"),
+                        "--reference-role",
+                        "same_artifact_graph_eager_discriminator",
+                    ]
+                )
+
+    def test_kiln_reference_dir_requires_discriminator_role(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                campaign.parse_args(
+                    [
+                        *required_args(root),
+                        "--reference-dir",
+                        str(root / "eager"),
+                    ]
+                )
+
     def test_campaign_bounds_model_fingerprint_read_rate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             args = required_args(Path(directory))
@@ -101,10 +136,41 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
             command[command.index("--output-evidence") + 1], "hashes"
         )
         self.assertEqual(
+            command[command.index("--reference-role") + 1],
+            "qualification_gate",
+        )
+        self.assertEqual(
             command[
                 command.index("--model-fingerprint-read-mib-per-second") + 1
             ],
             "256",
+        )
+
+    def test_command_pairs_graph_campaign_with_same_artifact_eager_receipt(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = campaign.parse_args(
+                [
+                    *required_args(root),
+                    "--reference-role",
+                    "same_artifact_graph_eager_discriminator",
+                    "--reference-dir",
+                    str(root / "eager"),
+                ]
+            )
+            command = campaign.benchmark_command(
+                args, "greedy-short", root / "greedy-short.kiln.json"
+            )
+
+        self.assertEqual(
+            command[command.index("--reference-receipt") + 1],
+            str(root / "eager" / "greedy-short.kiln.json"),
+        )
+        self.assertEqual(
+            command[command.index("--reference-role") + 1],
+            "same_artifact_graph_eager_discriminator",
         )
 
     def test_campaigns_keep_prompt_identity_stable_and_run_identity_unique(self) -> None:
@@ -156,6 +222,8 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
             self.assertEqual(summary["verdict"], "passed")
             self.assertEqual(summary["schema"], campaign.SCHEMA)
             self.assertEqual(summary["prompt_set_id"], "shared-prompts-v1")
+            self.assertEqual(summary["reference_role"], "qualification_gate")
+            self.assertIsNone(summary["reference_dir"])
             self.assertEqual(summary["execution_policy"], "fail_fast")
             self.assertEqual(
                 summary["model_fingerprint_read_mib_per_second"], 256

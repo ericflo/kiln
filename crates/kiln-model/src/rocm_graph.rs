@@ -903,6 +903,16 @@ struct RocmGraphCounters {
     capture_successes: u64,
     capture_deferrals: u64,
     capture_failures: u64,
+    batched_capture_attempts: u64,
+    batched_capture_successes: u64,
+    batched_capture_deferrals: u64,
+    batched_capture_failures: u64,
+    capture_parity_checks: u64,
+    capture_parity_passes: u64,
+    capture_parity_failures: u64,
+    capture_parity_errors: u64,
+    capture_parity_compared_bytes: u64,
+    capture_parity_duration_micros: u64,
     replay_attempts: u64,
     replay_successes: u64,
     replay_failures: u64,
@@ -935,6 +945,13 @@ enum RocmGraphCaptureOutcome {
     SucceededUncached,
     Deferred,
     Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RocmGraphCaptureParityOutcome {
+    Passed,
+    Failed,
+    Error,
 }
 
 #[cfg(feature = "rocm")]
@@ -1359,6 +1376,48 @@ impl RocmGraphCounters {
         }
     }
 
+    fn record_batched_capture_outcome(&mut self, outcome: RocmGraphCaptureOutcome) {
+        self.batched_capture_attempts = self.batched_capture_attempts.saturating_add(1);
+        match outcome {
+            RocmGraphCaptureOutcome::SucceededRetained
+            | RocmGraphCaptureOutcome::SucceededUncached => {
+                self.batched_capture_successes = self.batched_capture_successes.saturating_add(1);
+            }
+            RocmGraphCaptureOutcome::Deferred => {
+                self.batched_capture_deferrals = self.batched_capture_deferrals.saturating_add(1);
+            }
+            RocmGraphCaptureOutcome::Failed => {
+                self.batched_capture_failures = self.batched_capture_failures.saturating_add(1);
+            }
+        }
+    }
+
+    fn record_capture_parity(
+        &mut self,
+        outcome: RocmGraphCaptureParityOutcome,
+        compared_bytes: u64,
+        duration: std::time::Duration,
+    ) {
+        self.capture_parity_checks = self.capture_parity_checks.saturating_add(1);
+        match outcome {
+            RocmGraphCaptureParityOutcome::Passed => {
+                self.capture_parity_passes = self.capture_parity_passes.saturating_add(1);
+            }
+            RocmGraphCaptureParityOutcome::Failed => {
+                self.capture_parity_failures = self.capture_parity_failures.saturating_add(1);
+            }
+            RocmGraphCaptureParityOutcome::Error => {
+                self.capture_parity_errors = self.capture_parity_errors.saturating_add(1);
+            }
+        }
+        self.capture_parity_compared_bytes = self
+            .capture_parity_compared_bytes
+            .saturating_add(compared_bytes);
+        self.capture_parity_duration_micros = self
+            .capture_parity_duration_micros
+            .saturating_add(duration.as_micros().try_into().unwrap_or(u64::MAX));
+    }
+
     fn record_replay_outcome(&mut self, succeeded: bool) {
         self.replay_attempts = self.replay_attempts.saturating_add(1);
         if succeeded {
@@ -1493,6 +1552,28 @@ pub struct RocmGraphStats {
     pub capture_deferrals: u64,
     /// Capture attempts that returned an error and tripped the circuit breaker.
     pub capture_failures: u64,
+    /// Capture attempts made through the multi-row graph path.
+    pub batched_capture_attempts: u64,
+    /// Multi-row native graphs successfully instantiated, launched once, and
+    /// admitted only after exact eager/graph parity.
+    pub batched_capture_successes: u64,
+    /// Multi-row attempts deferred before native capture.
+    pub batched_capture_deferrals: u64,
+    /// Multi-row attempts that failed before admission.
+    pub batched_capture_failures: u64,
+    /// Exact first-launch comparisons attempted for multi-row candidates.
+    pub capture_parity_checks: u64,
+    /// First-launch comparisons whose hidden, recurrent, convolution, and
+    /// current K/V state all matched their eager warm execution.
+    pub capture_parity_passes: u64,
+    /// Completed first-launch comparisons that found a mismatch.
+    pub capture_parity_failures: u64,
+    /// First-launch comparisons that could not complete.
+    pub capture_parity_errors: u64,
+    /// Total logical bytes covered by first-launch comparisons.
+    pub capture_parity_compared_bytes: u64,
+    /// Total first-launch comparison wall time in microseconds.
+    pub capture_parity_duration_micros: u64,
     /// Native replay launches attempted from any decode API.
     pub replay_attempts: u64,
     /// Native replay launches whose input/output stream dependencies and launch
@@ -1839,6 +1920,16 @@ impl RocmGraphRunner {
             capture_successes: self.counters.capture_successes,
             capture_deferrals: self.counters.capture_deferrals,
             capture_failures: self.counters.capture_failures,
+            batched_capture_attempts: self.counters.batched_capture_attempts,
+            batched_capture_successes: self.counters.batched_capture_successes,
+            batched_capture_deferrals: self.counters.batched_capture_deferrals,
+            batched_capture_failures: self.counters.batched_capture_failures,
+            capture_parity_checks: self.counters.capture_parity_checks,
+            capture_parity_passes: self.counters.capture_parity_passes,
+            capture_parity_failures: self.counters.capture_parity_failures,
+            capture_parity_errors: self.counters.capture_parity_errors,
+            capture_parity_compared_bytes: self.counters.capture_parity_compared_bytes,
+            capture_parity_duration_micros: self.counters.capture_parity_duration_micros,
             replay_attempts: self.counters.replay_attempts,
             replay_successes: self.counters.replay_successes,
             replay_failures: self.counters.replay_failures,
@@ -5439,6 +5530,7 @@ impl RocmGraphRunner {
         expected: &[(Tensor, Tensor)],
         paged_cache: &PagedKvCacheKt,
         slots: &Tensor,
+        compared_bytes: &mut u64,
     ) -> Result<(Option<usize>, Option<usize>)> {
         anyhow::ensure!(
             expected.len() == paged_cache.num_layers(),
@@ -5454,7 +5546,10 @@ impl RocmGraphRunner {
                 let actual_key = key_pool.index_select(slots, 0).with_context(|| {
                     format!("gather ROCm graph parity K slots at layer {layer_idx}")
                 })?;
-                if !Self::exact_tensor_values_match(expected_key, &actual_key)? {
+                let matches = Self::exact_tensor_values_match(expected_key, &actual_key)?;
+                *compared_bytes = (*compared_bytes)
+                    .saturating_add(graph_tensor_bytes([expected_key, &actual_key]));
+                if !matches {
                     key_mismatch = Some(layer_idx);
                 }
             }
@@ -5462,7 +5557,10 @@ impl RocmGraphRunner {
                 let actual_value = value_pool.index_select(slots, 0).with_context(|| {
                     format!("gather ROCm graph parity V slots at layer {layer_idx}")
                 })?;
-                if !Self::exact_tensor_values_match(expected_value, &actual_value)? {
+                let matches = Self::exact_tensor_values_match(expected_value, &actual_value)?;
+                *compared_bytes = (*compared_bytes)
+                    .saturating_add(graph_tensor_bytes([expected_value, &actual_value]));
+                if !matches {
                     value_mismatch = Some(layer_idx);
                 }
             }
@@ -5478,6 +5576,7 @@ impl RocmGraphRunner {
         actual_hidden: &Tensor,
         expected_state: &LinearAttentionState,
         actual_state: &LinearAttentionState,
+        compared_bytes: &mut u64,
     ) -> Result<(bool, Option<usize>, Option<usize>)> {
         anyhow::ensure!(
             expected_state.recurrent_states.len() == actual_state.recurrent_states.len()
@@ -5485,6 +5584,8 @@ impl RocmGraphRunner {
             "ROCm graph capture parity state layer-count mismatch"
         );
         let hidden_match = Self::exact_tensor_values_match(expected_hidden, actual_hidden)?;
+        *compared_bytes =
+            (*compared_bytes).saturating_add(graph_tensor_bytes([expected_hidden, actual_hidden]));
         let mut recurrent_mismatch = None;
         for (layer_idx, (expected, actual)) in expected_state
             .recurrent_states
@@ -5492,7 +5593,10 @@ impl RocmGraphRunner {
             .zip(&actual_state.recurrent_states)
             .enumerate()
         {
-            if !Self::exact_tensor_values_match(expected, actual)? {
+            let matches = Self::exact_tensor_values_match(expected, actual)?;
+            *compared_bytes =
+                (*compared_bytes).saturating_add(graph_tensor_bytes([expected, actual]));
+            if !matches {
                 recurrent_mismatch = Some(layer_idx);
                 break;
             }
@@ -5504,7 +5608,10 @@ impl RocmGraphRunner {
             .zip(&actual_state.conv_states)
             .enumerate()
         {
-            if !Self::exact_tensor_values_match(expected, actual)? {
+            let matches = Self::exact_tensor_values_match(expected, actual)?;
+            *compared_bytes =
+                (*compared_bytes).saturating_add(graph_tensor_bytes([expected, actual]));
+            if !matches {
                 conv_mismatch = Some(layer_idx);
                 break;
             }
@@ -5957,6 +6064,7 @@ impl RocmGraphRunner {
             Ok(RocmCaptureStep::FallbackEager { .. }) => RocmGraphCaptureOutcome::Deferred,
             Err(_) => RocmGraphCaptureOutcome::Failed,
         };
+        self.counters.record_batched_capture_outcome(outcome);
         self.counters.record_capture_outcome(outcome);
         result
     }
@@ -6507,29 +6615,20 @@ impl RocmGraphRunner {
         }
 
         let parity_started = std::time::Instant::now();
-        let parity_bytes = graph_tensor_bytes(
-            [&warm_hidden, &output_hidden]
-                .into_iter()
-                .chain(warm_gdn_state.recurrent_states.iter())
-                .chain(warm_gdn_state.conv_states.iter())
-                .chain(linear_state.recurrent_states.iter())
-                .chain(linear_state.conv_states.iter()),
-        )
-        .saturating_add(
-            graph_tensor_bytes(warm_kv_slots.iter().flat_map(|(key, value)| [key, value]))
-                .saturating_mul(2),
-        );
+        let mut parity_bytes = 0;
         let parity = Self::exact_capture_outputs_match(
             &warm_hidden,
             &output_hidden,
             &warm_gdn_state,
             linear_state,
+            &mut parity_bytes,
         )
         .and_then(|(hidden_match, recurrent_mismatch, conv_mismatch)| {
             let (kv_key_mismatch, kv_value_mismatch) = Self::exact_paged_kv_slots_match(
                 &warm_kv_slots,
                 paged_cache,
                 kv_slot_buffer.as_ref().expect("batched KV slots allocated"),
+                &mut parity_bytes,
             )?;
             Ok((
                 hidden_match,
@@ -6544,6 +6643,11 @@ impl RocmGraphRunner {
             match parity {
                 Ok(parity) => parity,
                 Err(error) => {
+                    self.counters.record_capture_parity(
+                        RocmGraphCaptureParityOutcome::Error,
+                        parity_bytes,
+                        parity_duration,
+                    );
                     tracing::error!(
                         event = "rocm_graph_capture_parity_check",
                         batch_size,
@@ -6565,19 +6669,24 @@ impl RocmGraphRunner {
                     return Err(error).context("compare batched ROCm graph capture parity");
                 }
             };
+        let parity_passed = hidden_match
+            && recurrent_mismatch.is_none()
+            && conv_mismatch.is_none()
+            && kv_key_mismatch.is_none()
+            && kv_value_mismatch.is_none();
+        self.counters.record_capture_parity(
+            if parity_passed {
+                RocmGraphCaptureParityOutcome::Passed
+            } else {
+                RocmGraphCaptureParityOutcome::Failed
+            },
+            parity_bytes,
+            parity_duration,
+        );
         tracing::info!(
             event = "rocm_graph_capture_parity_check",
             batch_size,
-            outcome = if hidden_match
-                && recurrent_mismatch.is_none()
-                && conv_mismatch.is_none()
-                && kv_key_mismatch.is_none()
-                && kv_value_mismatch.is_none()
-            {
-                "passed"
-            } else {
-                "failed"
-            },
+            outcome = if parity_passed { "passed" } else { "failed" },
             comparison_complete = true,
             compared_bytes = parity_bytes,
             duration_ms = parity_duration.as_secs_f64() * 1000.0,
@@ -6588,12 +6697,7 @@ impl RocmGraphRunner {
             kv_value_mismatch_layer = kv_value_mismatch.map(|layer| layer as u64),
             "ROCm batched graph first launch compared with its eager warm pass"
         );
-        if !hidden_match
-            || recurrent_mismatch.is_some()
-            || conv_mismatch.is_some()
-            || kv_key_mismatch.is_some()
-            || kv_value_mismatch.is_some()
-        {
+        if !parity_passed {
             capture_failure_guard.settle_before_rollback()?;
             capture_failure_guard.complete_rollback(Self::restore_linear_state_in_place(
                 linear_state,
@@ -8231,51 +8335,78 @@ mod tests {
             value_pool.slice_set(&values, 0, 0)?;
         }
         let expected_kv = RocmGraphRunner::snapshot_paged_kv_slots(&paged_cache, &kv_slots)?;
+        let mut compared_bytes = 0;
         assert_eq!(
-            RocmGraphRunner::exact_paged_kv_slots_match(&expected_kv, &paged_cache, &kv_slots,)?,
+            RocmGraphRunner::exact_paged_kv_slots_match(
+                &expected_kv,
+                &paged_cache,
+                &kv_slots,
+                &mut compared_bytes,
+            )?,
             (None, None),
         );
+        assert_eq!(compared_bytes, 768);
         let changed_row = Tensor::from_vec_on(device, vec![-1.0f32; 6], vec![1, 2, 3])?;
         let (layer_one_keys, _) = paged_cache
             .pool_tensors(1)
             .expect("capture parity KV fixture layer one");
         layer_one_keys.slice_set(&changed_row, 0, 2)?;
+        compared_bytes = 0;
         assert_eq!(
-            RocmGraphRunner::exact_paged_kv_slots_match(&expected_kv, &paged_cache, &kv_slots,)?,
+            RocmGraphRunner::exact_paged_kv_slots_match(
+                &expected_kv,
+                &paged_cache,
+                &kv_slots,
+                &mut compared_bytes,
+            )?,
             (Some(1), None),
         );
+        assert_eq!(compared_bytes, 768);
         let (_, layer_zero_values) = paged_cache
             .pool_tensors(0)
             .expect("capture parity KV fixture layer zero");
         layer_zero_values.slice_set(&changed_row, 0, 0)?;
+        compared_bytes = 0;
         assert_eq!(
-            RocmGraphRunner::exact_paged_kv_slots_match(&expected_kv, &paged_cache, &kv_slots,)?,
+            RocmGraphRunner::exact_paged_kv_slots_match(
+                &expected_kv,
+                &paged_cache,
+                &kv_slots,
+                &mut compared_bytes,
+            )?,
             (Some(1), Some(0)),
         );
+        assert_eq!(compared_bytes, 576);
 
+        compared_bytes = 0;
         assert_eq!(
             RocmGraphRunner::exact_capture_outputs_match(
                 &expected_hidden,
                 &expected_hidden.copy()?,
                 &expected_state,
                 &matching_state,
+                &mut compared_bytes,
             )?,
             (true, None, None)
         );
+        assert_eq!(compared_bytes, 80);
 
         let recurrent_mismatch = LinearAttentionState {
             recurrent_states: vec![tensor(&[3.0, 4.0]), tensor(&[5.0, 6.5])],
             conv_states: vec![tensor(&[7.0, 8.0]), tensor(&[9.0, 10.0])],
         };
+        compared_bytes = 0;
         assert_eq!(
             RocmGraphRunner::exact_capture_outputs_match(
                 &expected_hidden,
                 &tensor(&[1.0, 2.5]),
                 &expected_state,
                 &recurrent_mismatch,
+                &mut compared_bytes,
             )?,
             (false, Some(1), None)
         );
+        assert_eq!(compared_bytes, 80);
         assert!(
             !RocmGraphRunner::exact_tensor_values_match(
                 &tensor(&[f32::NAN]),
@@ -9340,6 +9471,14 @@ mod tests {
             "expected 23 native replays after capture: {stats:?}"
         );
         anyhow::ensure!(stats.failures == 0, "native graph failure: {stats:?}");
+        anyhow::ensure!(
+            stats.batched_capture_successes == stats.capture_parity_passes
+                && stats.capture_parity_checks == stats.capture_parity_passes
+                && stats.capture_parity_failures == 0
+                && stats.capture_parity_errors == 0
+                && stats.capture_parity_compared_bytes > 0,
+            "successful batched captures must have exact parity admission: {stats:?}"
+        );
         anyhow::ensure!(retained_width_four, "width-four graph was not retained");
         anyhow::ensure!(
             stats.active_graph_slot_count == 1 && stats.idle_graph_slot_count == 0,
@@ -9736,6 +9875,15 @@ mod tests {
         anyhow::ensure!(
             stats.capture_successes == 1 && stats.replay_successes == 15,
             "alternating graph did not capture once and replay fifteen times: {stats:?}"
+        );
+        anyhow::ensure!(
+            stats.batched_capture_successes == 1
+                && stats.capture_parity_checks == 1
+                && stats.capture_parity_passes == 1
+                && stats.capture_parity_failures == 0
+                && stats.capture_parity_errors == 0
+                && stats.capture_parity_compared_bytes > 0,
+            "alternating graph did not publish exact parity admission: {stats:?}"
         );
         anyhow::ensure!(stats.failures == 0 && stats.fallbacks.total == 0);
         anyhow::ensure!(stats.active_graph_slot_count == 1 && stats.idle_graph_slot_count == 0);
@@ -10250,6 +10398,24 @@ mod tests {
         counters.record_capture_outcome(RocmGraphCaptureOutcome::Deferred);
         counters.record_capture_outcome(RocmGraphCaptureOutcome::SucceededRetained);
         counters.record_capture_outcome(RocmGraphCaptureOutcome::SucceededUncached);
+        counters.record_batched_capture_outcome(RocmGraphCaptureOutcome::Failed);
+        counters.record_batched_capture_outcome(RocmGraphCaptureOutcome::Deferred);
+        counters.record_batched_capture_outcome(RocmGraphCaptureOutcome::SucceededRetained);
+        counters.record_capture_parity(
+            RocmGraphCaptureParityOutcome::Passed,
+            220_504_064,
+            std::time::Duration::from_micros(11_558),
+        );
+        counters.record_capture_parity(
+            RocmGraphCaptureParityOutcome::Failed,
+            1024,
+            std::time::Duration::from_micros(7),
+        );
+        counters.record_capture_parity(
+            RocmGraphCaptureParityOutcome::Error,
+            2048,
+            std::time::Duration::from_micros(9),
+        );
         counters.record_replay_outcome(true);
         counters.record_replay_outcome(false);
         counters.record_decode_owner_release(2);
@@ -10275,6 +10441,16 @@ mod tests {
         assert_eq!(counters.capture_successes, 2);
         assert_eq!(counters.capture_deferrals, 1);
         assert_eq!(counters.capture_failures, 1);
+        assert_eq!(counters.batched_capture_attempts, 3);
+        assert_eq!(counters.batched_capture_successes, 1);
+        assert_eq!(counters.batched_capture_deferrals, 1);
+        assert_eq!(counters.batched_capture_failures, 1);
+        assert_eq!(counters.capture_parity_checks, 3);
+        assert_eq!(counters.capture_parity_passes, 1);
+        assert_eq!(counters.capture_parity_failures, 1);
+        assert_eq!(counters.capture_parity_errors, 1);
+        assert_eq!(counters.capture_parity_compared_bytes, 220_507_136);
+        assert_eq!(counters.capture_parity_duration_micros, 11_574);
         assert_eq!(counters.replay_attempts, 2);
         assert_eq!(counters.replay_successes, 1);
         assert_eq!(counters.replay_failures, 1);

@@ -714,6 +714,19 @@ Comparison failure follows the capture rollback/settlement contract, counts as
 `capture_failure`, disables further graph execution for the runner, and reaches
 eager only after state restoration and containment succeed.
 
+Health makes the admission proof durable with process-lifetime
+`batched_capture_attempts`, `batched_capture_successes`,
+`batched_capture_deferrals`, `batched_capture_failures`,
+`capture_parity_checks`, `capture_parity_passes`,
+`capture_parity_failures`, `capture_parity_errors`,
+`capture_parity_compared_bytes` for completed equality operations, and
+`capture_parity_duration_micros`. Batched attempts and parity checks each
+reconcile to their closed outcome sets. Every
+successful batched capture has a prior passed check, so cumulative successes
+cannot exceed cumulative passes. Equality is required for a clean qualification
+window; a passed check followed by a later cache-admission error is retained as
+a pass plus capture failure rather than falsified into a successful admission.
+
 The eager-fallback reasons are exactly `multi_row_batch_unsupported`,
 `cold_cache_host_round_trip`,
 `persistent_host_round_trip`, `shape_dependent_attention`,
@@ -736,11 +749,19 @@ while full snapshot availability is zero during either runner-lock contention
 or poison. Full
 families cover state; cache, slot, owner, retained-byte and opaque-object
 gauges; admissions, evictions and their four causes; three post-capture
-rejection reasons; five pre-capture skip reasons; capture/replay outcomes; and
-all 14 fallback reasons and latency. Live families cover the one-hot current
-phase, active elapsed seconds, calls/slow/total/max duration for all five
-phases, and last/peak transient bytes. Every label set is closed; request,
-shape, allocation, and configured-byte values never become labels.
+rejection reasons; five pre-capture skip reasons; capture/replay outcomes;
+batched capture attempts/outcomes; first-launch parity checks/outcomes, logical
+bytes, and duration; and all 14 fallback reasons and latency. The new
+fixed-cardinality families are
+`kiln_rocm_graph_batched_capture_attempts_total`,
+`kiln_rocm_graph_batched_capture_outcomes_total{outcome="success|deferred|failure"}`,
+`kiln_rocm_graph_capture_parity_checks_total`,
+`kiln_rocm_graph_capture_parity_outcomes_total{outcome="passed|failed|error"}`,
+`kiln_rocm_graph_capture_parity_compared_bytes_total`, and
+`kiln_rocm_graph_capture_parity_duration_seconds_total`. Live families cover
+the one-hot current phase, active elapsed seconds, calls/slow/total/max duration
+for all five phases, and last/peak transient bytes. Every label set is closed;
+request, shape, allocation, and configured-byte values never become labels.
 
 Graph-stable paged metadata is now a correctness invariant rather than a knob.
 The runtime no longer reads `KILN_ROCM_GRAPH_STABLE_PAGED_METADATA`, graph

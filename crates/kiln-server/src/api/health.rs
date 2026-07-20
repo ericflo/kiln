@@ -553,6 +553,16 @@ struct RocmGraphInfo {
     capture_successes: Option<u64>,
     capture_deferrals: Option<u64>,
     capture_failures: Option<u64>,
+    batched_capture_attempts: Option<u64>,
+    batched_capture_successes: Option<u64>,
+    batched_capture_deferrals: Option<u64>,
+    batched_capture_failures: Option<u64>,
+    capture_parity_checks: Option<u64>,
+    capture_parity_passes: Option<u64>,
+    capture_parity_failures: Option<u64>,
+    capture_parity_errors: Option<u64>,
+    capture_parity_compared_bytes: Option<u64>,
+    capture_parity_duration_micros: Option<u64>,
     replay_attempts: Option<u64>,
     replay_successes: Option<u64>,
     replay_failures: Option<u64>,
@@ -629,6 +639,17 @@ fn rocm_graph_info(
         capture_successes: stats.map(|snapshot| snapshot.capture_successes),
         capture_deferrals: stats.map(|snapshot| snapshot.capture_deferrals),
         capture_failures: stats.map(|snapshot| snapshot.capture_failures),
+        batched_capture_attempts: stats.map(|snapshot| snapshot.batched_capture_attempts),
+        batched_capture_successes: stats.map(|snapshot| snapshot.batched_capture_successes),
+        batched_capture_deferrals: stats.map(|snapshot| snapshot.batched_capture_deferrals),
+        batched_capture_failures: stats.map(|snapshot| snapshot.batched_capture_failures),
+        capture_parity_checks: stats.map(|snapshot| snapshot.capture_parity_checks),
+        capture_parity_passes: stats.map(|snapshot| snapshot.capture_parity_passes),
+        capture_parity_failures: stats.map(|snapshot| snapshot.capture_parity_failures),
+        capture_parity_errors: stats.map(|snapshot| snapshot.capture_parity_errors),
+        capture_parity_compared_bytes: stats.map(|snapshot| snapshot.capture_parity_compared_bytes),
+        capture_parity_duration_micros: stats
+            .map(|snapshot| snapshot.capture_parity_duration_micros),
         replay_attempts: stats.map(|snapshot| snapshot.replay_attempts),
         replay_successes: stats.map(|snapshot| snapshot.replay_successes),
         replay_failures: stats.map(|snapshot| snapshot.replay_failures),
@@ -1548,6 +1569,16 @@ mod tests {
             capture_successes: 8,
             capture_deferrals: 3,
             capture_failures: 1,
+            batched_capture_attempts: 6,
+            batched_capture_successes: 4,
+            batched_capture_deferrals: 1,
+            batched_capture_failures: 1,
+            capture_parity_checks: 5,
+            capture_parity_passes: 4,
+            capture_parity_failures: 1,
+            capture_parity_errors: 0,
+            capture_parity_compared_bytes: 881_000_000,
+            capture_parity_duration_micros: 46_232,
             replay_attempts: 9,
             replay_successes: 8,
             replay_failures: 1,
@@ -1672,6 +1703,16 @@ mod tests {
         assert_eq!(json["capture_successes"], 8);
         assert_eq!(json["capture_deferrals"], 3);
         assert_eq!(json["capture_failures"], 1);
+        assert_eq!(json["batched_capture_attempts"], 6);
+        assert_eq!(json["batched_capture_successes"], 4);
+        assert_eq!(json["batched_capture_deferrals"], 1);
+        assert_eq!(json["batched_capture_failures"], 1);
+        assert_eq!(json["capture_parity_checks"], 5);
+        assert_eq!(json["capture_parity_passes"], 4);
+        assert_eq!(json["capture_parity_failures"], 1);
+        assert_eq!(json["capture_parity_errors"], 0);
+        assert_eq!(json["capture_parity_compared_bytes"], 881_000_000);
+        assert_eq!(json["capture_parity_duration_micros"], 46_232);
         assert_eq!(json["replay_attempts"], 9);
         assert_eq!(json["replay_successes"], 8);
         assert_eq!(json["replay_failures"], 1);

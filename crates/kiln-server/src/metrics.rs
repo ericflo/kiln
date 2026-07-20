@@ -908,6 +908,70 @@ impl Metrics {
                     ),
                 );
             }
+            out.push_str("# HELP kiln_rocm_graph_batched_capture_attempts_total Multi-row ROCm graph capture state-machine attempts.\n");
+            out.push_str("# TYPE kiln_rocm_graph_batched_capture_attempts_total counter\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_batched_capture_attempts_total {}",
+                    graph.batched_capture_attempts
+                ),
+            );
+            out.push_str("# HELP kiln_rocm_graph_batched_capture_outcomes_total Multi-row ROCm graph capture outcomes.\n");
+            out.push_str("# TYPE kiln_rocm_graph_batched_capture_outcomes_total counter\n");
+            for (outcome, count) in [
+                ("success", graph.batched_capture_successes),
+                ("deferred", graph.batched_capture_deferrals),
+                ("failure", graph.batched_capture_failures),
+            ] {
+                push_line(
+                    &mut out,
+                    &format!(
+                        "kiln_rocm_graph_batched_capture_outcomes_total{{outcome=\"{outcome}\"}} {count}"
+                    ),
+                );
+            }
+            out.push_str("# HELP kiln_rocm_graph_capture_parity_checks_total Exact eager/graph first-launch comparisons for multi-row candidates.\n");
+            out.push_str("# TYPE kiln_rocm_graph_capture_parity_checks_total counter\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_capture_parity_checks_total {}",
+                    graph.capture_parity_checks
+                ),
+            );
+            out.push_str("# HELP kiln_rocm_graph_capture_parity_outcomes_total Exact eager/graph first-launch comparison outcomes.\n");
+            out.push_str("# TYPE kiln_rocm_graph_capture_parity_outcomes_total counter\n");
+            for (outcome, count) in [
+                ("passed", graph.capture_parity_passes),
+                ("failed", graph.capture_parity_failures),
+                ("error", graph.capture_parity_errors),
+            ] {
+                push_line(
+                    &mut out,
+                    &format!(
+                        "kiln_rocm_graph_capture_parity_outcomes_total{{outcome=\"{outcome}\"}} {count}"
+                    ),
+                );
+            }
+            out.push_str("# HELP kiln_rocm_graph_capture_parity_compared_bytes_total Logical bytes covered by exact eager/graph first-launch comparisons.\n");
+            out.push_str("# TYPE kiln_rocm_graph_capture_parity_compared_bytes_total counter\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_capture_parity_compared_bytes_total {}",
+                    graph.capture_parity_compared_bytes
+                ),
+            );
+            out.push_str("# HELP kiln_rocm_graph_capture_parity_duration_seconds_total Wall time spent in exact eager/graph first-launch comparisons.\n");
+            out.push_str("# TYPE kiln_rocm_graph_capture_parity_duration_seconds_total counter\n");
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_graph_capture_parity_duration_seconds_total {}",
+                    graph.capture_parity_duration_micros as f64 / 1_000_000.0
+                ),
+            );
             out.push_str(
                 "# HELP kiln_rocm_graph_replay_attempts_total Native ROCm graph replay attempts.\n",
             );
@@ -3565,6 +3629,16 @@ mod tests {
                 capture_successes: 6,
                 capture_deferrals: 1,
                 capture_failures: 1,
+                batched_capture_attempts: 5,
+                batched_capture_successes: 4,
+                batched_capture_deferrals: 0,
+                batched_capture_failures: 1,
+                capture_parity_checks: 5,
+                capture_parity_passes: 4,
+                capture_parity_failures: 1,
+                capture_parity_errors: 0,
+                capture_parity_compared_bytes: 881_000_000,
+                capture_parity_duration_micros: 46_232,
                 replay_attempts: 11,
                 replay_successes: 10,
                 replay_failures: 1,
@@ -4011,6 +4085,17 @@ mod tests {
         ));
         assert!(output.contains("kiln_rocm_graph_capture_attempts_total 8"));
         assert!(output.contains("kiln_rocm_graph_capture_outcomes_total{outcome=\"deferred\"} 1"));
+        assert!(output.contains("kiln_rocm_graph_batched_capture_attempts_total 5"));
+        assert!(
+            output
+                .contains("kiln_rocm_graph_batched_capture_outcomes_total{outcome=\"success\"} 4")
+        );
+        assert!(output.contains("kiln_rocm_graph_capture_parity_checks_total 5"));
+        assert!(
+            output.contains("kiln_rocm_graph_capture_parity_outcomes_total{outcome=\"failed\"} 1")
+        );
+        assert!(output.contains("kiln_rocm_graph_capture_parity_compared_bytes_total 881000000"));
+        assert!(output.contains("kiln_rocm_graph_capture_parity_duration_seconds_total 0.046232"));
         assert!(output.contains("kiln_rocm_graph_replay_attempts_total 11"));
         assert!(
             output.contains(

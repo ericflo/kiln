@@ -55,7 +55,7 @@ argv field in its closed environment. Receipt schema
 `kiln.serving-model-fingerprint-thermal.v2` records it as
 `host_thermal.model_fingerprint.read_mib_per_second` beside the exact worker
 implementation and Python hashes plus initial/final thermal lifecycles.
-Campaign v6 records and forwards the same value to every profile. The setting
+Campaign v7 records and forwards the same value to every profile. The setting
 applies only to provenance reads; it cannot pace server startup or inference
 and is outside every request-timing window. Standalone `model_fingerprint.py`
 remains unlimited when its optional `--max-read-mib-per-second` is omitted.
@@ -274,7 +274,7 @@ accepts unique lifecycle identities while rejecting any prompt, sampling,
 shape, seed, model alias, SLO, or memory-limit drift. V2-v15 validators retain
 their original exact-workload fingerprint semantics.
 
-Driver v7 through v16 retain one ordered `output_evidence` row for every successful
+Driver v7 through v17 retain one ordered `output_evidence` row for every successful
 request. Hash-only evidence is the default and includes the combined semantic
 output hash, separate reasoning/content hashes, UTF-8 byte counts, completion
 tokens, and finish reason. The validator requires these rows to cover exactly
@@ -445,6 +445,54 @@ current K/V rows with that candidate's own eager warm pass. The structured
 `rocm_graph_capture_parity_check` event is the detailed attribution record; a
 mismatch or comparison error increments capture failure, disables graphs for the
 runner, and cannot satisfy this gate through its later contained eager retry.
+
+Driver v17 advances the closed server-diagnostics record to
+`kiln.serving-benchmark-server-diagnostics.v6` and makes that admission proof
+part of the receipt. `rocm_graphs.capture_parity` retains measured-window
+batched capture attempts/successes/deferrals/failures, parity
+checks/passes/failures/errors, successfully compared bytes, and comparison
+microseconds. It also retains start/end lifetime values for batched successes
+and every parity outcome. Validation requires batched outcomes and parity
+outcomes to reconcile,
+lifetime successful batched captures never to exceed passed parity checks,
+monotonic boundaries, and positive compared bytes for a nonzero check delta. A
+parity pass can precede a later cache-admission error, so a failed lifetime may
+contain more passes than admissions. A clean measured promotion row permits no
+such failure and requires the counts to be equal.
+
+The `rocm_graph_capture_parity_accounted` gate is not inferred from a log. For a
+measured multi-row route with capture requested, it requires an armed runner,
+zero graph failure, zero lifetime parity failure/error, equal lifetime batched
+success/pass counts, at least one admitted batch graph, and exact measured
+deltas. A single-row or graph-disabled row must report zero measured batched
+parity activity. Backends without a ROCm graph runner report null parity
+evidence and remain not applicable. The structured log event remains the
+detailed mismatch attribution record; health counters and the receipt are the
+durable promotion gate.
+
+### Reference comparison roles
+
+Driver v17 records one top-level `reference_role` selected by
+`--reference-role`:
+
+- `qualification_gate` is the default. Any prompt, token-count, or exact-output
+  mismatch keeps the entire receipt failed, exactly as in earlier drivers.
+- `same_artifact_graph_eager_discriminator` keeps cross-process exact-output
+  comparison as explicit reproducibility evidence while graph correctness is
+  gated by the same-process parity record. It is available only for Kiln and
+  requires `--reference-receipt`.
+
+The discriminator is deliberately narrow. The reference must itself be a
+passed, ordinary current-driver receipt with observed graph-disabled warmup and
+measured rows, zero graph activity/failure/fallback, the identical runtime
+binary hash and runtime identity, and the same model, thermal policy, and
+workload fingerprint. The candidate must request graph capture and pass
+graph-execution plus parity gates
+on every measured row. Its comparison object records
+`verdict_effect=evidence_only`, retains `matched` and every structured mismatch,
+and embeds the eager-reference execution summary. Changing the role, binary,
+reference graph state, or candidate parity data and recomputing the receipt hash
+still fails strict validation. No other comparison can become evidence-only.
 
 ### Cooperative actor-cycle idle evidence
 
@@ -932,11 +980,12 @@ an output directory inside the repository cannot make later profiles reject the
 source as dirty. After execution, every staged receipt is published through an
 atomic rename and the self-hashing campaign summary is published last.
 
-Campaign summary v6 records the campaign's stable prompt-set base and selected
-output-evidence mode. Each child receives an engine-qualified unique run ID and
-a profile-qualified prompt-set ID; Kiln and vLLM children for the same profile
-therefore share prompts but never a log identity. It also records
-`execution_policy`, and every
+Campaign summary v7 records the campaign's stable prompt-set base, selected
+output-evidence mode, `reference_role`, and resolved `reference_dir`. Each child
+receives an engine-qualified unique run ID and a profile-qualified prompt-set
+ID; Kiln and vLLM children for the same profile therefore share prompts but
+never a log identity. The role is forwarded explicitly to every child instead
+of relying on a driver default. It also records `execution_policy`, and every
 expected profile has a closed `status`: `completed` or
 `not_run_after_failure`. A completed row records its exit code and receipt hash;
 a skipped row records the earlier `blocked_by_profile` and has null exit and
@@ -972,10 +1021,27 @@ python3 scripts/run-serving-benchmark-campaign.py \
 ```
 
 For a vLLM campaign, add `--reference-dir` pointing at the matching Kiln
-receipts. Profile, prompt, sampling, model identity, fixed output length, thermal
-policy content, and comparison mode must agree. Performance claims should use
-median and tail distributions across repeats, include thermally sustainable
-throughput, and keep failed or unsafe diagnostic runs visibly separate.
+receipts. That campaign always uses the default `qualification_gate` role; the
+wrapper rejects the graph/eager discriminator for vLLM. Profile, prompt,
+sampling, model identity, fixed output length, thermal policy content, and
+comparison mode must agree.
+
+For a Kiln graph campaign paired to eager Kiln receipts from the exact same
+runtime artifact, add both:
+
+```bash
+--reference-role same_artifact_graph_eager_discriminator \
+--reference-dir .qualification/serving/rocm-eager-reference
+```
+
+The wrapper rejects a Kiln reference directory without that role and rejects
+the role without a reference directory. The driver then independently proves
+the same binary, eager reference execution, candidate graph execution, and
+first-launch parity for every measured row. Cross-process output differences
+remain in each receipt's comparison object but do not impersonate an in-process
+graph-corruption result. Performance claims should use median and tail
+distributions across repeats, include thermally sustainable throughput, and
+keep failed or unsafe diagnostic runs visibly separate.
 
 ## Receipt Validation
 
@@ -988,10 +1054,11 @@ mapfile -d '' receipts < <(
 python3 scripts/bench-concurrent-batch.py --validate-receipt "${receipts[@]}"
 ```
 
-Driver v16 is the current contract. It separates unique run/log identity from
-stable prompt-set identity, verifies every retained prompt-set hash against the
-latter, and excludes only the operational run ID from the workload comparison
-fingerprint. Driver v15 added strict per-request Kiln terminal performance
+Driver v17 is the current contract. It retains v16 unique run/log identity and
+stable prompt-set identity, then adds closed ROCm batch-capture parity evidence
+and fail-closed reference roles. Driver v16 verifies every retained prompt-set
+hash against `prompt_set_id` and excludes only the operational run ID from the
+workload comparison fingerprint. Driver v15 added strict per-request Kiln terminal performance
 evidence and derived phase distributions without changing the common request
 body, workload, output contract, or thermal limits. Driver v14
 added explicit multi-row ROCm graph fallback accounting and diagnostics v5.
@@ -1002,10 +1069,11 @@ integrity contract. Driver v11 added typed idle-boundary
 cooldown evidence to v10. Driver v10 added closed ROCm graph execution evidence;
 v9 added route-aware
 batching-actor and direct-rendezvous diagnostics; and v8 added mandatory initial
-and final guarded model-fingerprint lifecycles. A v16 exact-output run requires
-a v16 reference with the same prompt-set ID and model-visible workload; v7-v15
-receipts remain mutually comparison-compatible when their historical exact
-workload fingerprints match. The current arm must still satisfy v15
+and final guarded model-fingerprint lifecycles. A v17 graph/eager discriminator
+requires a v17 eager reference with the same prompt-set ID, model-visible
+workload, runtime identity, and exact binary hash. Ordinary v7-v17 references
+remain comparison-compatible when their version-appropriate workload
+fingerprints match. The current arm must still satisfy v16 prompt identity, v15
 request-performance accounting, v14 multi-row
 graph-route accounting, v13 actor-cycle idle accounting, v12 fingerprint pacing, v11
 idle cooling, v10 graph accounting, v9 routing, and v8 containment. Driver v7 added mandatory ordered
@@ -1020,6 +1088,6 @@ identity semantics. Owned evidence contains the content-hashed launch document,
 absolute server-log fingerprint, shutdown signal/status/timing,
 forced-shutdown flag, and process-group liveness. Attached and explicitly
 unsafe runs serialize null lifecycle artifacts so ownership cannot be inferred
-from missing fields. Historical driver v2 through v15 receipts remain valid
-under their original contracts, but do not satisfy current v16 performance
+from missing fields. Historical driver v2 through v16 receipts remain valid
+under their original contracts, but do not satisfy current v17 performance
 acceptance.

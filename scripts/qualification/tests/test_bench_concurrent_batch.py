@@ -141,6 +141,13 @@ def valid_request_performance(max_tokens: int, *, batching: bool = True) -> dict
     }
 
 
+def as_v5_server_diagnostics(server: dict) -> dict:
+    legacy = json.loads(json.dumps(server))
+    legacy["schema"] = bench.SERVER_DIAGNOSTICS_SCHEMA_V5
+    legacy["rocm_graphs"].pop("capture_parity")
+    return legacy
+
+
 def valid_fingerprint_thermal_evidence(
     policy_value: dict | None = None,
 ) -> dict:
@@ -317,6 +324,13 @@ class FakeState:
         self.rocm_graph_counters = {
             field: 0 for field in bench.ROCM_GRAPH_COUNTER_FIELDS
         }
+        self.rocm_graph_parity_counters = {
+            field: 0
+            for field in (
+                *bench.ROCM_GRAPH_BATCHED_CAPTURE_COUNTER_FIELDS,
+                *bench.ROCM_GRAPH_CAPTURE_PARITY_COUNTER_FIELDS,
+            )
+        }
         self.rocm_graph_gauges = {
             field: 0 for field in bench.ROCM_GRAPH_GAUGE_FIELDS
         }
@@ -409,6 +423,7 @@ class FakeState:
                     "state": "enabled",
                     "unavailable_reason": None,
                     **self.rocm_graph_counters,
+                    **self.rocm_graph_parity_counters,
                     **self.rocm_graph_gauges,
                     "fallbacks": dict(self.rocm_graph_fallbacks),
                 },
@@ -523,6 +538,15 @@ class FakeHandler(BaseHTTPRequestHandler):
                     self.state.rocm_graph_gauges["captured_graph_count"] = 1
                     self.state.rocm_graph_gauges["graph_slot_count"] = 1
                     self.state.rocm_graph_gauges["idle_graph_slot_count"] = 1
+                    if self.state.request_route == "batching_engine":
+                        self.state.rocm_graph_parity_counters.update(
+                            batched_capture_attempts=1,
+                            batched_capture_successes=1,
+                            capture_parity_checks=1,
+                            capture_parity_passes=1,
+                            capture_parity_compared_bytes=4096,
+                            capture_parity_duration_micros=10,
+                        )
                 self.state.rocm_graph_counters["replay_attempts"] += max_tokens
                 self.state.rocm_graph_counters["replay_successes"] += max_tokens
 
@@ -1288,6 +1312,11 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertEqual(result["server"]["rocm_graphs"]["fallbacks"]["total"], 0)
         checks = {gate["name"]: gate["passed"] for gate in result["gates"]}
         self.assertTrue(checks["rocm_graph_execution_accounted"])
+        self.assertTrue(checks["rocm_graph_capture_parity_accounted"])
+        parity = result["server"]["rocm_graphs"]["capture_parity"]
+        self.assertEqual(parity["batched_capture_successes"], 1)
+        self.assertEqual(parity["capture_parity_passes"], 1)
+        self.assertEqual(parity["capture_parity_compared_bytes"], 4096)
         self.assertEqual(len(fake.state.bodies), 4)
         self.assertEqual(
             len({body["messages"][0]["content"] for body in fake.state.bodies}),
@@ -1375,7 +1404,9 @@ class ServingBenchmarkTests(unittest.TestCase):
         )
         self.assertTrue(bench.server_diagnostics_has_no_errors(server))
         self.assertTrue(bench.server_request_accounting_matches(server, 1))
-        bench.validate_server_diagnostics_v5(server, "direct fixture")
+        bench.validate_server_diagnostics_v5(
+            as_v5_server_diagnostics(server), "direct fixture"
+        )
 
     def test_driver_v9_server_diagnostics_remain_strict_valid(self) -> None:
         state = FakeState()
@@ -1423,6 +1454,7 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertTrue(bench.server_actor_cycle_idle_accounted(server))
         legacy = json.loads(json.dumps(server))
         legacy["schema"] = bench.SERVER_DIAGNOSTICS_SCHEMA_V4
+        legacy["rocm_graphs"].pop("capture_parity")
         legacy_fallbacks = legacy["rocm_graphs"]["fallbacks"]
         multi_row_count = legacy_fallbacks.pop("multi_row_batch_unsupported")
         legacy_fallbacks["total"] -= multi_row_count
@@ -1440,6 +1472,33 @@ class ServingBenchmarkTests(unittest.TestCase):
         with self.assertRaisesRegex(bench.BenchmarkError, "replay_attempts regressed"):
             bench.server_diagnostics_delta(before, after)
 
+    def test_rocm_graph_parity_allows_pass_before_later_admission_failure(
+        self,
+    ) -> None:
+        state = FakeState()
+        state.rocm_graph_parity_counters.update(
+            batched_capture_attempts=1,
+            batched_capture_failures=1,
+            capture_parity_checks=1,
+            capture_parity_passes=1,
+            capture_parity_compared_bytes=4096,
+            capture_parity_duration_micros=10,
+        )
+        bench.server_diagnostics_snapshot(state.health())
+
+        state.rocm_graph_parity_counters.update(
+            batched_capture_successes=1,
+            batched_capture_failures=0,
+            capture_parity_checks=0,
+            capture_parity_passes=0,
+            capture_parity_compared_bytes=0,
+            capture_parity_duration_micros=0,
+        )
+        with self.assertRaisesRegex(
+            bench.BenchmarkError, "successful batched captures lack parity admission"
+        ):
+            bench.server_diagnostics_snapshot(state.health())
+
     def test_rocm_graph_fallback_fails_execution_accounting_gate(self) -> None:
         state = FakeState()
         before = bench.server_diagnostics_snapshot(state.health())
@@ -1450,7 +1509,9 @@ class ServingBenchmarkTests(unittest.TestCase):
         after = bench.server_diagnostics_snapshot(state.health())
         server = bench.server_diagnostics_delta(before, after)
 
-        bench.validate_server_diagnostics_v5(server, "fallback fixture")
+        bench.validate_server_diagnostics_v5(
+            as_v5_server_diagnostics(server), "fallback fixture"
+        )
         self.assertFalse(bench.server_rocm_graph_execution_accounted(server))
 
     def test_multi_row_graph_bypass_is_explicit_and_fails_execution_gate(self) -> None:
@@ -1469,7 +1530,9 @@ class ServingBenchmarkTests(unittest.TestCase):
         after = bench.server_diagnostics_snapshot(state.health())
         server = bench.server_diagnostics_delta(before, after)
 
-        bench.validate_server_diagnostics_v5(server, "multi-row fixture")
+        bench.validate_server_diagnostics_v5(
+            as_v5_server_diagnostics(server), "multi-row fixture"
+        )
         self.assertEqual(
             server["rocm_graphs"]["fallbacks"][
                 "multi_row_batch_unsupported"
@@ -1490,7 +1553,9 @@ class ServingBenchmarkTests(unittest.TestCase):
         with self.assertRaisesRegex(
             bench.BenchmarkError, "without a measured multi-row batching route"
         ):
-            bench.validate_server_diagnostics_v5(server, "contradictory fixture")
+            bench.validate_server_diagnostics_v5(
+                as_v5_server_diagnostics(server), "contradictory fixture"
+            )
 
     def test_backend_without_rocm_graph_runner_is_explicitly_unavailable(self) -> None:
         state = FakeState()
@@ -1504,6 +1569,8 @@ class ServingBenchmarkTests(unittest.TestCase):
             "enabled",
             "capture_enabled",
             *bench.ROCM_GRAPH_COUNTER_FIELDS,
+            *bench.ROCM_GRAPH_BATCHED_CAPTURE_COUNTER_FIELDS,
+            *bench.ROCM_GRAPH_CAPTURE_PARITY_COUNTER_FIELDS,
             *bench.ROCM_GRAPH_GAUGE_FIELDS,
             "fallbacks",
         ):
@@ -1512,13 +1579,17 @@ class ServingBenchmarkTests(unittest.TestCase):
         before = bench.server_diagnostics_snapshot(health)
         server = bench.server_diagnostics_delta(before, before)
 
-        bench.validate_server_diagnostics_v5(server, "unavailable fixture")
+        bench.validate_server_diagnostics_v5(
+            as_v5_server_diagnostics(server), "unavailable fixture"
+        )
         self.assertTrue(bench.server_rocm_graph_execution_accounted(server))
         self.assertIsNone(server["rocm_graphs"]["replay_successes"])
 
         server["rocm_graphs"]["state"] = "busy"
         server["rocm_graphs"]["unavailable_reason"] = "graph_runner_busy"
-        bench.validate_server_diagnostics_v5(server, "busy fixture")
+        bench.validate_server_diagnostics_v5(
+            as_v5_server_diagnostics(server), "busy fixture"
+        )
         self.assertFalse(bench.server_rocm_graph_execution_accounted(server))
 
     def test_zero_token_success_is_rejected(self) -> None:
@@ -1696,6 +1767,7 @@ class ServingBenchmarkTests(unittest.TestCase):
         current = {
             "schema": bench.SCHEMA,
             "driver_version": bench.DRIVER_VERSION,
+            "reference_role": "qualification_gate",
             "workload_fingerprint": "sha256:workload",
             "workload": {"comparison_mode": "exact_output"},
             "engine": {"model_identity": {"content_sha256": "sha256:model"}},
@@ -1781,6 +1853,140 @@ class ServingBenchmarkTests(unittest.TestCase):
                     bench.BenchmarkError, "duplicate JSON object key"
                 ):
                     bench.compare_reference(current, path)
+
+    def test_same_artifact_graph_discriminator_separates_reproducibility(self) -> None:
+        state = FakeState()
+        before = bench.server_diagnostics_snapshot(state.health())
+        state.max_active = 4
+        state.counters["total_decode_forwards"] = 1
+        state.counters["total_batched_decode_forwards"] = 1
+        state.counters["total_decode_rows"] = 4
+        state.counters["total_decode_tokens"] = 4
+        state.rocm_graph_counters.update(
+            capture_attempts=1,
+            capture_successes=1,
+            cache_admission_successes=1,
+            replay_attempts=3,
+            replay_successes=3,
+        )
+        state.rocm_graph_parity_counters.update(
+            batched_capture_attempts=1,
+            batched_capture_successes=1,
+            capture_parity_checks=1,
+            capture_parity_passes=1,
+            capture_parity_compared_bytes=4096,
+            capture_parity_duration_micros=10,
+        )
+        state.rocm_graph_gauges.update(
+            captured_graph_count=1,
+            graph_slot_count=1,
+            idle_graph_slot_count=1,
+        )
+        candidate_server = bench.server_diagnostics_delta(
+            before, bench.server_diagnostics_snapshot(state.health())
+        )
+        eager_server = json.loads(json.dumps(candidate_server))
+        eager_graph = eager_server["rocm_graphs"]
+        eager_graph["capture_requested"] = False
+        eager_graph["capture_enabled"] = False
+        for field in bench.ROCM_GRAPH_COUNTER_FIELDS:
+            eager_graph[field] = 0
+        eager_graph["fallbacks"] = {
+            field: 0 for field in eager_graph["fallbacks"]
+        }
+        eager_graph["capture_parity"] = {
+            field: 0 for field in eager_graph["capture_parity"]
+        }
+
+        output = {
+            "index": 0,
+            "output_sha256": "sha256:" + "a" * 64,
+            "reasoning_sha256": "sha256:" + "b" * 64,
+            "content_sha256": "sha256:" + "c" * 64,
+            "reasoning_utf8_bytes": 0,
+            "content_utf8_bytes": 4,
+            "completion_tokens": 1,
+            "finish_reason": "length",
+            "exact_output": None,
+        }
+        engine = {
+            "name": "kiln",
+            "runtime_identity": "kiln-git:fixture",
+            "runtime_artifact": {"sha256": "sha256:" + "d" * 64},
+            "model_identity": {"content_sha256": "sha256:model"},
+        }
+        current = {
+            "schema": bench.SCHEMA,
+            "driver_version": bench.DRIVER_VERSION,
+            "reference_role": "same_artifact_graph_eager_discriminator",
+            "workload_fingerprint": "sha256:workload",
+            "workload": {"comparison_mode": "exact_output"},
+            "engine": engine,
+            "host_thermal": {
+                "policy": {"content_sha256": "sha256:thermal-policy"}
+            },
+            "runs": [
+                {
+                    "concurrency": 1,
+                    "repeat": 0,
+                    "prompt_token_counts": [42],
+                    "prompt_set_sha256": "sha256:prompts",
+                    "output_set_sha256": "sha256:actual",
+                    "output_evidence": [output],
+                    "server": candidate_server,
+                }
+            ],
+        }
+        reference = json.loads(json.dumps(current))
+        reference["reference_role"] = "qualification_gate"
+        reference["verdict"] = "passed"
+        reference["engine"] = json.loads(json.dumps(engine))
+        reference["runs"][0]["server"] = eager_server
+        reference["runs"][0]["output_set_sha256"] = "sha256:expected"
+        reference["runs"][0]["output_evidence"][0]["output_sha256"] = (
+            "sha256:" + "e" * 64
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "reference.json"
+            path.write_text(json.dumps(reference))
+            with mock.patch.object(bench, "validate_benchmark_receipt"):
+                comparison = bench.compare_reference(current, path)
+                self.assertFalse(comparison["matched"])
+                self.assertEqual(comparison["verdict_effect"], "evidence_only")
+                self.assertTrue(
+                    comparison["reference_execution"][
+                        "all_rows_capture_disabled"
+                    ]
+                )
+
+                broken_artifact = json.loads(json.dumps(reference))
+                broken_artifact["engine"]["runtime_artifact"]["sha256"] = (
+                    "sha256:" + "f" * 64
+                )
+                path.write_text(json.dumps(broken_artifact))
+                with self.assertRaisesRegex(
+                    bench.BenchmarkError, "identical runtime artifact"
+                ):
+                    bench.compare_reference(current, path)
+
+                failed_reference = json.loads(json.dumps(reference))
+                failed_reference["verdict"] = "failed"
+                path.write_text(json.dumps(failed_reference))
+                with self.assertRaisesRegex(
+                    bench.BenchmarkError, "passed eager reference"
+                ):
+                    bench.compare_reference(current, path)
+
+                path.write_text(json.dumps(reference))
+                broken_candidate = json.loads(json.dumps(current))
+                broken_candidate["runs"][0]["server"]["rocm_graphs"][
+                    "capture_parity"
+                ]["capture_parity_passes_end"] = 0
+                with self.assertRaisesRegex(
+                    bench.BenchmarkError, "lacks measured graph parity evidence"
+                ):
+                    bench.compare_reference(broken_candidate, path)
 
     def test_model_fingerprint_runs_in_guarded_closed_worker(self) -> None:
         raw_identity = {
@@ -2406,7 +2612,8 @@ class ServingBenchmarkTests(unittest.TestCase):
             return_code, output = self._run_cli_fixture(fake, directory)
             receipt = bench.strict_json_loads(output.read_bytes())
             self.assertEqual(bench.main(["--validate-receipt", str(output)]), 0)
-            self.assertEqual(receipt["driver_version"], "16")
+            self.assertEqual(receipt["driver_version"], "17")
+            self.assertEqual(receipt["reference_role"], "qualification_gate")
             self.assertEqual(
                 receipt["workload"]["prompt_set_id"], "cli-prompt-set-v1"
             )
@@ -2439,6 +2646,19 @@ class ServingBenchmarkTests(unittest.TestCase):
                 ],
                 256,
             )
+
+            missing_discriminator = json.loads(json.dumps(receipt))
+            missing_discriminator["reference_role"] = (
+                "same_artifact_graph_eager_discriminator"
+            )
+            missing_discriminator.pop("receipt_sha256")
+            missing_discriminator["receipt_sha256"] = bench.canonical_sha256(
+                missing_discriminator
+            )
+            with self.assertRaisesRegex(
+                bench.BenchmarkError, "requires a reference comparison"
+            ):
+                bench.validate_benchmark_receipt(missing_discriminator)
 
             stale_identity = json.loads(json.dumps(receipt))
             stale_identity["workload"]["prompt_set_id"] = "stale-prompts-v1"
@@ -2487,7 +2707,17 @@ class ServingBenchmarkTests(unittest.TestCase):
 
             driver_v15 = json.loads(json.dumps(receipt))
             driver_v15["driver_version"] = "15"
+            driver_v15.pop("reference_role")
             driver_v15["workload"].pop("prompt_set_id")
+            for row in [driver_v15["warmup"], *driver_v15["runs"]]:
+                if row is None or row.get("server") is None:
+                    continue
+                row["server"] = as_v5_server_diagnostics(row["server"])
+                row["gates"] = [
+                    gate
+                    for gate in row["gates"]
+                    if gate["name"] != "rocm_graph_capture_parity_accounted"
+                ]
             driver_v15["workload_fingerprint"] = bench.canonical_sha256(
                 driver_v15["workload"]
             )
