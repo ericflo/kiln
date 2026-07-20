@@ -185,6 +185,11 @@ pub use metal_storage::{
 };
 #[cfg(feature = "rocm")]
 pub use rocm_allocator::RocmAllocator;
+/// Maximum bounded top-k accepted by the ROCm token-only W8 sampler.
+///
+/// The contract constant remains available in non-ROCm builds so shared model
+/// routing can compile without duplicating the backend envelope.
+pub const ROCM_W8_BATCH_SAMPLE_TOP_K_MAX: u32 = 64;
 #[cfg(feature = "rocm")]
 pub use rocm_capture_alloc::{
     RocmCaptureArena, rocm_capture_arena_active, rocm_capture_arena_alloc, with_rocm_capture_arena,

@@ -398,6 +398,7 @@ struct DecodeRuntimeInfo {
     direct_decode_rendezvous: DirectDecodeRendezvousRuntimeState,
     cuda_graphs: CudaGraphInfo,
     rocm_graphs: RocmGraphInfo,
+    rocm_w8_lm_head: kiln_model::RocmW8LmHeadStats,
     metal_graphs: GraphInfo,
     kv_autoscaler: crate::kv_autoscaler::KvAutoscalerState,
     memory_governor: MemoryGovernorRuntimeInfo,
@@ -977,6 +978,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         direct_decode_rendezvous: state.direct_decode_rendezvous_runtime_state(),
         cuda_graphs,
         rocm_graphs,
+        rocm_w8_lm_head: kiln_model::rocm_w8_proj::stats(),
         metal_graphs,
         kv_autoscaler: state.kv_autoscaler,
         memory_governor: memory_governor_runtime_info(
@@ -2282,6 +2284,24 @@ mod tests {
             {
                 assert!(value.is_null(), "unavailable field {field} must be null");
             }
+        }
+        let rocm_w8_lm_head = &json["decode_runtime"]["rocm_w8_lm_head"];
+        for field in [
+            "argmax_dispatches",
+            "argmax_rows",
+            "sample_dispatches",
+            "sample_rows",
+            "sample_history_entries",
+            "sample_w8a16_dispatches",
+            "sample_w8a8_dispatches",
+            "dispatch_failures",
+            "max_batch_rows",
+            "max_sample_top_k",
+        ] {
+            assert!(
+                rocm_w8_lm_head[field].is_u64(),
+                "ROCm W8 LM-head health field {field} must be an unsigned counter"
+            );
         }
         assert_eq!(json["decode_runtime"]["kv_autoscaler"]["enabled"], false);
         assert_eq!(

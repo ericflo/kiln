@@ -2595,13 +2595,18 @@ fn run_lm_head_sample_batch_with_contexts(
     );
     let top_k_values: Vec<u32> = params.iter().map(|param| param.top_k).collect();
     let temperature_values: Vec<f32> = params.iter().map(|param| param.temperature).collect();
-    if SamplingBackend::runtime_supports_linear_decode_sample_batch(
+    let rocm_w8_supported = crate::forward::rocm_w8_batch_sample_supported(
+        backend,
+        weights,
+        &temperature_values,
+        &top_k_values,
+    );
+    let backend_fused_supported = SamplingBackend::runtime_supports_linear_decode_sample_batch(
         backend,
         &top_k_values,
         &temperature_values,
-    ) {
-        let normed = crate::forward::model_forward_final_norm(hidden, weights, config)
-            .context("batched decode final norm for fused sampling")?;
+    );
+    if rocm_w8_supported || backend_fused_supported {
         let repetition_values: Vec<f32> = params
             .iter()
             .map(|param| param.repetition_penalty)
@@ -2633,25 +2638,52 @@ fn run_lm_head_sample_batch_with_contexts(
                 history_counts.push(count);
             }
         }
-        if let Some(tokens) = SamplingBackend::runtime_linear_decode_sample_batch(
-            backend,
-            &normed,
-            &weights.embed_tokens_t,
-            &history_rows,
-            &history_indices,
-            &history_counts,
-            &repetition_values,
-            &presence_values,
-            &frequency_values,
-            &temperature_values,
-            &top_k_values,
-            &top_p_values,
-            &min_p_values,
-            &seed_values,
-        )
-        .context("fused batched linear_decode_sample failed")?
-        {
-            return Ok(tokens);
+        if rocm_w8_supported {
+            if let Some(tokens) = crate::forward::rocm_w8_lm_head_sample_batch(
+                backend,
+                hidden,
+                weights,
+                config,
+                &history_rows,
+                &history_indices,
+                &history_counts,
+                &repetition_values,
+                &presence_values,
+                &frequency_values,
+                &temperature_values,
+                &top_k_values,
+                &top_p_values,
+                &min_p_values,
+                &seed_values,
+            )
+            .context("fused ROCm W8 batched lm_head sample failed")?
+            {
+                return Ok(tokens);
+            }
+        }
+        if backend_fused_supported {
+            let normed = crate::forward::model_forward_final_norm(hidden, weights, config)
+                .context("batched decode final norm for fused sampling")?;
+            if let Some(tokens) = SamplingBackend::runtime_linear_decode_sample_batch(
+                backend,
+                &normed,
+                &weights.embed_tokens_t,
+                &history_rows,
+                &history_indices,
+                &history_counts,
+                &repetition_values,
+                &presence_values,
+                &frequency_values,
+                &temperature_values,
+                &top_k_values,
+                &top_p_values,
+                &min_p_values,
+                &seed_values,
+            )
+            .context("fused batched linear_decode_sample failed")?
+            {
+                return Ok(tokens);
+            }
         }
     }
     let logits = crate::forward::model_forward_head_backend_decode_if(
@@ -6120,7 +6152,7 @@ impl ModelRunner {
                 // Single-row non-greedy: try the backend-fused fused
                 // sample path first. It does lm_head + penalty + top-k
                 // + softmax + min_p + top_p + categorical entirely
-                // on-device and reads back only the 4-byte token.
+                // on-device and reads back only one token.
                 // Falls back to the legacy "lm_head + host sample"
                 // flow when the backend declines.
                 if row_count == 1 && params[0].temperature > 0.0 {
@@ -6957,13 +6989,12 @@ impl ModelRunner {
             };
             #[cfg(feature = "rocm")]
             let rocm_graph_tokens = if let Some(hidden) = rocm_graph_hidden {
-                let logits = crate::forward::lm_head_from_batched_hidden_eager(
+                Some(crate::forward::lm_head_argmax_from_batched_hidden_eager(
                     &*self.backend,
                     &hidden,
                     &self.weights,
                     &self.config,
-                )?;
-                Some(crate::sampling::greedy_sample_rows(&logits)?)
+                )?)
             } else {
                 None
             };

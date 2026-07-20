@@ -131,6 +131,7 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         rocm_graph_telemetry: rocm_graph_observation.telemetry,
         rocm_graph_telemetry_unavailable_reason: rocm_graph_observation
             .telemetry_unavailable_reason,
+        rocm_w8_lm_head: kiln_model::rocm_w8_proj::stats(),
         scheduler_waiting,
         scheduler_running,
         blocks_used,

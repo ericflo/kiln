@@ -123,6 +123,7 @@ pub use rocm_graph::{
 };
 #[cfg(feature = "rocm")]
 pub use rocm_policy::{RocmKernelPolicy, install_rocm_kernel_policy};
+pub use rocm_w8_proj::RocmW8LmHeadStats;
 pub use speculative::SpeculativeConfig;
 pub use weight_upload::{
     ACCELERATOR_WEIGHT_UPLOAD_CANCELLATION_BOUNDARY,

@@ -2,7 +2,10 @@
 
 use std::sync::Arc;
 
-use crate::{DType, Device, Error, Layout, Result, RocmStorage, Tensor, TensorId};
+use crate::{
+    DType, Device, Error, Layout, ROCM_W8_BATCH_SAMPLE_TOP_K_MAX, Result, RocmStorage, Tensor,
+    TensorId,
+};
 
 unsafe extern "C" {
     fn kiln_w8a16_gemv_bf16_async(
@@ -109,7 +112,40 @@ unsafe extern "C" {
         seed: u64,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_w8a16_gemv_sample_batch_bf16_async(
+        x: *const core::ffi::c_void,
+        w_q: *const core::ffi::c_void,
+        w_scales: *const core::ffi::c_void,
+        history_triplets: *const core::ffi::c_void,
+        row_params: *const core::ffi::c_void,
+        scores: *mut core::ffi::c_void,
+        out_idx: *mut core::ffi::c_void,
+        m: i64,
+        n: i64,
+        k: i64,
+        history_len: i64,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_w8a8_gemv_sample_batch_bf16_async(
+        x_q: *const core::ffi::c_void,
+        w_q: *const core::ffi::c_void,
+        x_scales: *const core::ffi::c_void,
+        w_scales: *const core::ffi::c_void,
+        history_triplets: *const core::ffi::c_void,
+        row_params: *const core::ffi::c_void,
+        scores: *mut core::ffi::c_void,
+        out_idx: *mut core::ffi::c_void,
+        m: i64,
+        n: i64,
+        k: i64,
+        history_len: i64,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
+
+const ROCM_W8_BATCH_SAMPLE_PARAM_WORDS: usize = 9;
 
 /// Decode-only BF16 activation × row-wise int8 weight GEMV.
 ///
@@ -1370,4 +1406,416 @@ pub fn rocm_w8a8_gemv_gumbel_sample_bf16(
     let storage_arc: crate::Storage = Arc::new(out_storage);
     Tensor::from_parts(storage_arc, Layout::contiguous(vec![1]), TensorId::next())
         .map_err(|e| Error::Msg(format!("rocm_w8a8_gemv_gumbel_sample_bf16: wrap: {e}")))
+}
+
+/// Batched W8A16 LM-head projection, sparse token penalties, bounded top-k,
+/// min-p/top-p filtering, and categorical sampling with one `[m]` token result.
+///
+/// Sampled rows require `top_k` in `1..=64`; greedy rows (`temperature == 0`
+/// or `top_k == 1`) ignore token penalties, matching `SamplingParams`.
+#[allow(clippy::too_many_arguments)]
+pub fn rocm_w8a16_gemv_sample_batch_bf16(
+    x: &Tensor,
+    w_q: &Tensor,
+    scales: &Tensor,
+    history_rows: &[u32],
+    history_indices: &[u32],
+    history_counts: &[u32],
+    repetition_penalties: &[f32],
+    presence_penalties: &[f32],
+    frequency_penalties: &[f32],
+    temperatures: &[f32],
+    top_k: &[u32],
+    top_p: &[f32],
+    min_p: &[f32],
+    seeds: &[u64],
+) -> Result<Tensor> {
+    rocm_w8_gemv_sample_batch_bf16(
+        false,
+        x,
+        w_q,
+        scales,
+        history_rows,
+        history_indices,
+        history_counts,
+        repetition_penalties,
+        presence_penalties,
+        frequency_penalties,
+        temperatures,
+        top_k,
+        top_p,
+        min_p,
+        seeds,
+    )
+}
+
+/// W8A8 sibling of [`rocm_w8a16_gemv_sample_batch_bf16`]. Activations are
+/// quantized once per row before the batched LM-head score kernel.
+#[allow(clippy::too_many_arguments)]
+pub fn rocm_w8a8_gemv_sample_batch_bf16(
+    x: &Tensor,
+    w_q: &Tensor,
+    scales: &Tensor,
+    history_rows: &[u32],
+    history_indices: &[u32],
+    history_counts: &[u32],
+    repetition_penalties: &[f32],
+    presence_penalties: &[f32],
+    frequency_penalties: &[f32],
+    temperatures: &[f32],
+    top_k: &[u32],
+    top_p: &[f32],
+    min_p: &[f32],
+    seeds: &[u64],
+) -> Result<Tensor> {
+    rocm_w8_gemv_sample_batch_bf16(
+        true,
+        x,
+        w_q,
+        scales,
+        history_rows,
+        history_indices,
+        history_counts,
+        repetition_penalties,
+        presence_penalties,
+        frequency_penalties,
+        temperatures,
+        top_k,
+        top_p,
+        min_p,
+        seeds,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rocm_w8_gemv_sample_batch_bf16(
+    quantize_activations: bool,
+    x: &Tensor,
+    w_q: &Tensor,
+    scales: &Tensor,
+    history_rows: &[u32],
+    history_indices: &[u32],
+    history_counts: &[u32],
+    repetition_penalties: &[f32],
+    presence_penalties: &[f32],
+    frequency_penalties: &[f32],
+    temperatures: &[f32],
+    top_k: &[u32],
+    top_p: &[f32],
+    min_p: &[f32],
+    seeds: &[u64],
+) -> Result<Tensor> {
+    const NAME: &str = "rocm_w8_gemv_sample_batch_bf16";
+    if x.dtype() != DType::BF16 || w_q.dtype() != DType::U8 || scales.dtype() != DType::F32 {
+        return Err(Error::Msg(format!(
+            "{NAME}: expected BF16 x, U8 w_q, and F32 scales; got {}, {}, {}",
+            x.dtype(),
+            w_q.dtype(),
+            scales.dtype()
+        )));
+    }
+    if !x.is_contiguous() || !w_q.is_contiguous() || !scales.is_contiguous() {
+        return Err(Error::Msg(format!("{NAME}: contiguous inputs required")));
+    }
+    let device = match x.device() {
+        Device::Rocm(index) => Device::Rocm(index),
+        other => return Err(Error::Msg(format!("{NAME}: x must be ROCm, got {other}"))),
+    };
+    if w_q.device() != device || scales.device() != device {
+        return Err(Error::Msg(format!(
+            "{NAME}: device mismatch x={} w_q={} scales={}",
+            x.device(),
+            w_q.device(),
+            scales.device()
+        )));
+    }
+
+    let x_shape = x.shape();
+    if x_shape.len() < 2 {
+        return Err(Error::Msg(format!(
+            "{NAME}: x rank must be >=2, got {x_shape:?}"
+        )));
+    }
+    let k = *x_shape.last().unwrap();
+    let m: usize = x_shape[..x_shape.len() - 1].iter().product();
+    let w_shape = w_q.shape();
+    if w_shape.len() != 2 {
+        return Err(Error::Msg(format!(
+            "{NAME}: w_q must be [n, k], got {w_shape:?}"
+        )));
+    }
+    let (n, wk) = (w_shape[0], w_shape[1]);
+    if m == 0 || n == 0 || k == 0 || wk != k || scales.shape() != [n] {
+        return Err(Error::Msg(format!(
+            "{NAME}: incompatible shapes x={x_shape:?} w_q={w_shape:?} scales={:?}",
+            scales.shape()
+        )));
+    }
+
+    let row_lengths = [
+        repetition_penalties.len(),
+        presence_penalties.len(),
+        frequency_penalties.len(),
+        temperatures.len(),
+        top_k.len(),
+        top_p.len(),
+        min_p.len(),
+        seeds.len(),
+    ];
+    if row_lengths.iter().any(|&len| len != m) {
+        return Err(Error::Msg(format!(
+            "{NAME}: per-row parameter lengths {row_lengths:?} must all equal batch {m}"
+        )));
+    }
+    if history_rows.len() != history_indices.len() || history_rows.len() != history_counts.len() {
+        return Err(Error::Msg(format!(
+            "{NAME}: history row/index/count length mismatch ({}/{}/{})",
+            history_rows.len(),
+            history_indices.len(),
+            history_counts.len()
+        )));
+    }
+
+    for row in 0..m {
+        let temperature = temperatures[row];
+        let greedy =
+            temperature == 0.0 || (top_k[row] == 1 && temperature.is_finite() && temperature > 0.0);
+        if !temperature.is_finite() || temperature < 0.0 {
+            return Err(Error::Msg(format!(
+                "{NAME}: row {row} temperature must be finite and >=0, got {temperature}"
+            )));
+        }
+        if !greedy && !(1..=ROCM_W8_BATCH_SAMPLE_TOP_K_MAX).contains(&top_k[row]) {
+            return Err(Error::Msg(format!(
+                "{NAME}: sampled row {row} top_k {} outside 1..={ROCM_W8_BATCH_SAMPLE_TOP_K_MAX}",
+                top_k[row]
+            )));
+        }
+        if !repetition_penalties[row].is_finite() || repetition_penalties[row] <= 0.0 {
+            return Err(Error::Msg(format!(
+                "{NAME}: row {row} repetition penalty must be finite and >0"
+            )));
+        }
+        if !presence_penalties[row].is_finite()
+            || !frequency_penalties[row].is_finite()
+            || !top_p[row].is_finite()
+            || !min_p[row].is_finite()
+        {
+            return Err(Error::Msg(format!(
+                "{NAME}: row {row} has non-finite sampling parameters"
+            )));
+        }
+    }
+
+    let mut seen_history = std::collections::BTreeSet::new();
+    let mut history_words = Vec::with_capacity(history_rows.len() * 3);
+    for entry in 0..history_rows.len() {
+        let row = history_rows[entry] as usize;
+        let token = history_indices[entry] as usize;
+        let count = history_counts[entry];
+        if row >= m || token >= n || count == 0 {
+            return Err(Error::Msg(format!(
+                "{NAME}: history entry {entry} is invalid (row={row}, token={token}, count={count})"
+            )));
+        }
+        if !seen_history.insert((row, token)) {
+            return Err(Error::Msg(format!(
+                "{NAME}: duplicate history entry for row {row}, token {token}"
+            )));
+        }
+        history_words.extend_from_slice(&[row as u32, token as u32, count]);
+    }
+
+    let mut param_words = Vec::with_capacity(m * ROCM_W8_BATCH_SAMPLE_PARAM_WORDS);
+    for row in 0..m {
+        let seed = seeds[row];
+        param_words.extend_from_slice(&[
+            repetition_penalties[row].to_bits(),
+            presence_penalties[row].to_bits(),
+            frequency_penalties[row].to_bits(),
+            temperatures[row].to_bits(),
+            top_k[row],
+            top_p[row].to_bits(),
+            min_p[row].to_bits(),
+            seed as u32,
+            (seed >> 32) as u32,
+        ]);
+    }
+
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| Error::Msg(format!("{NAME}: x storage must be ROCm")))?;
+    let w_storage = w_q
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| Error::Msg(format!("{NAME}: w_q storage must be ROCm")))?;
+    let scale_storage = scales
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| Error::Msg(format!("{NAME}: scale storage must be ROCm")))?;
+
+    let ctx = x_storage.context();
+    let device_index = match device {
+        Device::Rocm(index) => index,
+        _ => unreachable!(),
+    };
+    let row_params_storage = RocmStorage::alloc_uninit_ctx(
+        &ctx,
+        device_index,
+        DType::U32,
+        m * ROCM_W8_BATCH_SAMPLE_PARAM_WORDS,
+    )?;
+    let row_params = Tensor::from_parts(
+        Arc::new(row_params_storage),
+        Layout::contiguous(vec![m, ROCM_W8_BATCH_SAMPLE_PARAM_WORDS]),
+        TensorId::next(),
+    )?;
+    crate::rocm_write_host_in_place(&row_params, &param_words)?;
+    let history = if history_words.is_empty() {
+        None
+    } else {
+        let storage =
+            RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::U32, history_words.len())?;
+        let tensor = Tensor::from_parts(
+            Arc::new(storage),
+            Layout::contiguous(vec![history_rows.len(), 3]),
+            TensorId::next(),
+        )?;
+        crate::rocm_write_host_in_place(&tensor, &history_words)?;
+        Some(tensor)
+    };
+    let param_storage = row_params
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| Error::Msg(format!("{NAME}: row parameter storage must be ROCm")))?;
+    let history_storage = history
+        .as_ref()
+        .map(|tensor| {
+            tensor
+                .storage()
+                .as_any()
+                .downcast_ref::<RocmStorage>()
+                .ok_or_else(|| Error::Msg(format!("{NAME}: history storage must be ROCm")))
+        })
+        .transpose()?;
+
+    let scores_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, m * n)?;
+    let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::I64, m)?;
+    let x_q_storage = if quantize_activations {
+        Some(RocmStorage::alloc_uninit_ctx(
+            &ctx,
+            device_index,
+            DType::U8,
+            m * k,
+        )?)
+    } else {
+        None
+    };
+    let x_scales_storage = if quantize_activations {
+        Some(RocmStorage::alloc_uninit_ctx(
+            &ctx,
+            device_index,
+            DType::F32,
+            m,
+        )?)
+    } else {
+        None
+    };
+
+    let (x_base, _) = x_storage.device_ptr_raw();
+    let (w_base, _) = w_storage.device_ptr_raw();
+    let (scale_base, _) = scale_storage.device_ptr_raw();
+    let (param_base, _) = param_storage.device_ptr_raw();
+    let (scores_base, _) = scores_storage.device_ptr_raw();
+    let (out_base, _) = out_storage.device_ptr_raw();
+    let x_ptr = (x_base + (x.layout().start_offset() * DType::BF16.size_in_bytes()) as u64)
+        as *const core::ffi::c_void;
+    let w_ptr = (w_base + (w_q.layout().start_offset() * DType::U8.size_in_bytes()) as u64)
+        as *const core::ffi::c_void;
+    let scale_ptr = (scale_base
+        + (scales.layout().start_offset() * DType::F32.size_in_bytes()) as u64)
+        as *const core::ffi::c_void;
+    let param_ptr = (param_base
+        + (row_params.layout().start_offset() * DType::U32.size_in_bytes()) as u64)
+        as *const core::ffi::c_void;
+    let history_ptr = history
+        .as_ref()
+        .zip(history_storage)
+        .map(|(tensor, storage)| {
+            let (base, _) = storage.device_ptr_raw();
+            (base + (tensor.layout().start_offset() * DType::U32.size_in_bytes()) as u64)
+                as *const core::ffi::c_void
+        })
+        .unwrap_or(core::ptr::null());
+
+    let stream_submission = x_storage.rocm_stream_submission()?;
+    let raw_stream = stream_submission.raw_stream();
+    let status = if quantize_activations {
+        let x_q_storage = x_q_storage.as_ref().expect("allocated for W8A8");
+        let x_scales_storage = x_scales_storage.as_ref().expect("allocated for W8A8");
+        let (x_q_base, _) = x_q_storage.device_ptr_raw();
+        let (x_scales_base, _) = x_scales_storage.device_ptr_raw();
+        let quantize_status = unsafe {
+            kiln_w8a8_quantize_bf16_async(
+                x_ptr,
+                x_q_base as *mut core::ffi::c_void,
+                x_scales_base as *mut core::ffi::c_void,
+                m as i64,
+                k as i64,
+                raw_stream,
+            )
+        };
+        if quantize_status != 0 {
+            quantize_status
+        } else {
+            unsafe {
+                kiln_w8a8_gemv_sample_batch_bf16_async(
+                    x_q_base as *const core::ffi::c_void,
+                    w_ptr,
+                    x_scales_base as *const core::ffi::c_void,
+                    scale_ptr,
+                    history_ptr,
+                    param_ptr,
+                    scores_base as *mut core::ffi::c_void,
+                    out_base as *mut core::ffi::c_void,
+                    m as i64,
+                    n as i64,
+                    k as i64,
+                    history_rows.len() as i64,
+                    raw_stream,
+                )
+            }
+        }
+    } else {
+        unsafe {
+            kiln_w8a16_gemv_sample_batch_bf16_async(
+                x_ptr,
+                w_ptr,
+                scale_ptr,
+                history_ptr,
+                param_ptr,
+                scores_base as *mut core::ffi::c_void,
+                out_base as *mut core::ffi::c_void,
+                m as i64,
+                n as i64,
+                k as i64,
+                history_rows.len() as i64,
+                raw_stream,
+            )
+        }
+    };
+    if status != 0 {
+        stream_submission.quarantine();
+        return Err(Error::Msg(format!("{NAME}: FFI returned status {status}")));
+    }
+    stream_submission.complete();
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    Tensor::from_parts(storage_arc, Layout::contiguous(vec![m]), TensorId::next())
+        .map_err(|error| Error::Msg(format!("{NAME}: wrap: {error}")))
 }

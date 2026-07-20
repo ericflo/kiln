@@ -1504,6 +1504,27 @@ the median of each request's completion count divided by its own end-to-end
 wall time. Neither is a transformer-only kernel rate, and the narrower sampling
 phase remains contained by the broad actor `decode_ms` interval.
 
+The ROCm token-only LM-head candidate requires a second, independent route
+proof. Driver v18 must snapshot
+`/health.decode_runtime.rocm_w8_lm_head` before and after the sampled wave. A
+qualified window must show positive
+sample-dispatch and sample-row deltas, W8A8 sampled dispatches equal to all
+sample dispatches under the qualified profile, a maximum sampled top-k of at
+least 40, an observed batch width of at least two, and zero dispatch-failure
+delta. The ordinary greedy row must separately show positive argmax-dispatch
+and argmax-row deltas. These counters prove route selection; request usage,
+semantic validation, phase accounting, and the exact output/reference gates
+remain authoritative for results.
+
+The focused gfx1151 kernel test is an independent mathematical discriminator,
+not a serving substitute. It projects an identity-shaped 64-token fixture
+through both W8A16 and W8A8, covers batch widths 1, 2, 4, and 6 and `top_k`
+through 64, and compares penalties, stable tie ordering, softmax, min-p, top-p,
+and the SplitMix64 categorical draw against a CPU implementation. Repeating the
+same six-row seeded batch must return the exact same vector. Serving promotion
+still requires the source-bound sampled wave, ordinary correctness, the
+30-minute development soak, and the comparable performance row.
+
 Every ROCm mixed-load arm applies the same independent host thermal policy from
 server launch through readiness, warmup, the isolated sampled wave, ordinary
 measurement, drain, server exit, and a bounded post-exit cooldown. The typed

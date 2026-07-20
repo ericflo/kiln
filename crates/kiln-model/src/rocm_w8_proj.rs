@@ -8,6 +8,51 @@
 //! throughput.
 
 use anyhow::{Context, Result};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static ARGMAX_DISPATCHES: AtomicU64 = AtomicU64::new(0);
+static ARGMAX_ROWS: AtomicU64 = AtomicU64::new(0);
+static SAMPLE_DISPATCHES: AtomicU64 = AtomicU64::new(0);
+static SAMPLE_ROWS: AtomicU64 = AtomicU64::new(0);
+static SAMPLE_HISTORY_ENTRIES: AtomicU64 = AtomicU64::new(0);
+static SAMPLE_W8A16_DISPATCHES: AtomicU64 = AtomicU64::new(0);
+static SAMPLE_W8A8_DISPATCHES: AtomicU64 = AtomicU64::new(0);
+static DISPATCH_FAILURES: AtomicU64 = AtomicU64::new(0);
+static MAX_BATCH_ROWS: AtomicU64 = AtomicU64::new(0);
+static MAX_SAMPLE_TOP_K: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct RocmW8LmHeadStats {
+    pub argmax_dispatches: u64,
+    pub argmax_rows: u64,
+    pub sample_dispatches: u64,
+    pub sample_rows: u64,
+    pub sample_history_entries: u64,
+    pub sample_w8a16_dispatches: u64,
+    pub sample_w8a8_dispatches: u64,
+    pub dispatch_failures: u64,
+    pub max_batch_rows: u64,
+    pub max_sample_top_k: u64,
+}
+
+pub fn stats() -> RocmW8LmHeadStats {
+    RocmW8LmHeadStats {
+        argmax_dispatches: ARGMAX_DISPATCHES.load(Ordering::Relaxed),
+        argmax_rows: ARGMAX_ROWS.load(Ordering::Relaxed),
+        sample_dispatches: SAMPLE_DISPATCHES.load(Ordering::Relaxed),
+        sample_rows: SAMPLE_ROWS.load(Ordering::Relaxed),
+        sample_history_entries: SAMPLE_HISTORY_ENTRIES.load(Ordering::Relaxed),
+        sample_w8a16_dispatches: SAMPLE_W8A16_DISPATCHES.load(Ordering::Relaxed),
+        sample_w8a8_dispatches: SAMPLE_W8A8_DISPATCHES.load(Ordering::Relaxed),
+        dispatch_failures: DISPATCH_FAILURES.load(Ordering::Relaxed),
+        max_batch_rows: MAX_BATCH_ROWS.load(Ordering::Relaxed),
+        max_sample_top_k: MAX_SAMPLE_TOP_K.load(Ordering::Relaxed),
+    }
+}
+
+fn observe_batch_rows(rows: usize) {
+    MAX_BATCH_ROWS.fetch_max(rows as u64, Ordering::Relaxed);
+}
 
 #[derive(Clone, Debug)]
 pub struct RocmW8Proj {
@@ -139,6 +184,192 @@ pub fn argmax_bf16(x: &kiln_tensor::Tensor, w: &RocmW8Proj) -> Result<u32> {
         .to_vec1::<i64>()
         .context("rocm_w8_proj: read argmax")?;
     Ok(values[0] as u32)
+}
+
+pub const BATCH_SAMPLE_TOP_K_MAX: u32 = kiln_tensor::ROCM_W8_BATCH_SAMPLE_TOP_K_MAX;
+
+/// Batched greedy LM-head projection and argmax. The output tensor is copied
+/// to the host once for the complete batch.
+#[cfg(feature = "rocm")]
+pub fn argmax_batch_bf16(x: &kiln_tensor::Tensor, w: &RocmW8Proj) -> Result<Vec<u32>> {
+    let dims = x.dims();
+    anyhow::ensure!(dims.len() >= 2, "rocm w8 argmax batch requires rank >=2");
+    let rows: usize = dims[..dims.len() - 1].iter().product();
+    anyhow::ensure!(rows > 0, "rocm w8 argmax batch requires rows");
+    let ones = vec![1.0f32; rows];
+    let zeros = vec![0.0f32; rows];
+    let top_k = vec![0u32; rows];
+    let seeds = vec![0u64; rows];
+    let result = (|| {
+        let indices = kiln_tensor::rocm_w8a16_gemv_sample_batch_bf16(
+            x,
+            &w.q_weight,
+            &w.scales,
+            &[],
+            &[],
+            &[],
+            &ones,
+            &zeros,
+            &zeros,
+            &zeros,
+            &top_k,
+            &ones,
+            &zeros,
+            &seeds,
+        )
+        .map_err(|error| anyhow::anyhow!("rocm_w8_proj: batched argmax: {error}"))?;
+        read_batch_tokens(indices, rows, w.n, "batched argmax")
+    })();
+    match result {
+        Ok(tokens) => {
+            ARGMAX_DISPATCHES.fetch_add(1, Ordering::Relaxed);
+            ARGMAX_ROWS.fetch_add(rows as u64, Ordering::Relaxed);
+            observe_batch_rows(rows);
+            Ok(tokens)
+        }
+        Err(error) => {
+            DISPATCH_FAILURES.fetch_add(1, Ordering::Relaxed);
+            Err(error)
+        }
+    }
+}
+
+#[cfg(not(feature = "rocm"))]
+pub fn argmax_batch_bf16(_x: &kiln_tensor::Tensor, _w: &RocmW8Proj) -> Result<Vec<u32>> {
+    anyhow::bail!("rocm_w8_proj::argmax_batch_bf16 requires the rocm feature")
+}
+
+/// Batched W8 LM-head projection, penalties, bounded filtering, and sampling.
+/// The kernel accepts mixed greedy and sampled rows and returns all token IDs
+/// through one device-to-host copy.
+#[cfg(feature = "rocm")]
+#[allow(clippy::too_many_arguments)]
+pub fn sample_batch_bf16(
+    x: &kiln_tensor::Tensor,
+    w: &RocmW8Proj,
+    history_rows: &[u32],
+    history_indices: &[u32],
+    history_counts: &[u32],
+    repetition_penalties: &[f32],
+    presence_penalties: &[f32],
+    frequency_penalties: &[f32],
+    temperatures: &[f32],
+    top_k: &[u32],
+    top_p: &[f32],
+    min_p: &[f32],
+    seeds: &[u64],
+) -> Result<Vec<u32>> {
+    let rows = temperatures.len();
+    let use_w8a8 = a8_sample_enabled();
+    let result = (|| {
+        let indices = if use_w8a8 {
+            kiln_tensor::rocm_w8a8_gemv_sample_batch_bf16(
+                x,
+                &w.q_weight,
+                &w.scales,
+                history_rows,
+                history_indices,
+                history_counts,
+                repetition_penalties,
+                presence_penalties,
+                frequency_penalties,
+                temperatures,
+                top_k,
+                top_p,
+                min_p,
+                seeds,
+            )
+            .map_err(|error| anyhow::anyhow!("rocm_w8_proj: W8A8 batched sample: {error}"))?
+        } else {
+            kiln_tensor::rocm_w8a16_gemv_sample_batch_bf16(
+                x,
+                &w.q_weight,
+                &w.scales,
+                history_rows,
+                history_indices,
+                history_counts,
+                repetition_penalties,
+                presence_penalties,
+                frequency_penalties,
+                temperatures,
+                top_k,
+                top_p,
+                min_p,
+                seeds,
+            )
+            .map_err(|error| anyhow::anyhow!("rocm_w8_proj: W8A16 batched sample: {error}"))?
+        };
+        read_batch_tokens(indices, rows, w.n, "batched sample")
+    })();
+    match result {
+        Ok(tokens) => {
+            SAMPLE_DISPATCHES.fetch_add(1, Ordering::Relaxed);
+            SAMPLE_ROWS.fetch_add(rows as u64, Ordering::Relaxed);
+            SAMPLE_HISTORY_ENTRIES.fetch_add(history_rows.len() as u64, Ordering::Relaxed);
+            if use_w8a8 {
+                SAMPLE_W8A8_DISPATCHES.fetch_add(1, Ordering::Relaxed);
+            } else {
+                SAMPLE_W8A16_DISPATCHES.fetch_add(1, Ordering::Relaxed);
+            }
+            observe_batch_rows(rows);
+            if let Some(max_top_k) = top_k.iter().copied().max() {
+                MAX_SAMPLE_TOP_K.fetch_max(max_top_k as u64, Ordering::Relaxed);
+            }
+            Ok(tokens)
+        }
+        Err(error) => {
+            DISPATCH_FAILURES.fetch_add(1, Ordering::Relaxed);
+            Err(error)
+        }
+    }
+}
+
+#[cfg(feature = "rocm")]
+fn read_batch_tokens(
+    indices: kiln_tensor::Tensor,
+    expected_rows: usize,
+    vocab_size: usize,
+    operation: &str,
+) -> Result<Vec<u32>> {
+    let values = indices
+        .to_vec1::<i64>()
+        .with_context(|| format!("rocm_w8_proj: read {operation}"))?;
+    anyhow::ensure!(
+        values.len() == expected_rows,
+        "rocm w8 {operation} returned {} rows, expected {expected_rows}",
+        values.len()
+    );
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(row, value)| {
+            anyhow::ensure!(
+                value >= 0 && (value as usize) < vocab_size,
+                "rocm w8 {operation} row {row} returned token {value} outside vocab {vocab_size}"
+            );
+            Ok(value as u32)
+        })
+        .collect()
+}
+
+#[cfg(not(feature = "rocm"))]
+#[allow(clippy::too_many_arguments)]
+pub fn sample_batch_bf16(
+    _x: &kiln_tensor::Tensor,
+    _w: &RocmW8Proj,
+    _history_rows: &[u32],
+    _history_indices: &[u32],
+    _history_counts: &[u32],
+    _repetition_penalties: &[f32],
+    _presence_penalties: &[f32],
+    _frequency_penalties: &[f32],
+    _temperatures: &[f32],
+    _top_k: &[u32],
+    _top_p: &[f32],
+    _min_p: &[f32],
+    _seeds: &[u64],
+) -> Result<Vec<u32>> {
+    anyhow::bail!("rocm_w8_proj::sample_batch_bf16 requires the rocm feature")
 }
 
 #[cfg(feature = "rocm")]

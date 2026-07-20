@@ -1082,6 +1082,80 @@ impl Metrics {
                 ),
             );
         }
+        let lm_head = gauges.rocm_w8_lm_head;
+        out.push_str("# HELP kiln_rocm_w8_lm_head_dispatches_total Successful token-only ROCm W8 LM-head dispatches.\n");
+        out.push_str("# TYPE kiln_rocm_w8_lm_head_dispatches_total counter\n");
+        for (operation, value) in [
+            ("argmax", lm_head.argmax_dispatches),
+            ("sample", lm_head.sample_dispatches),
+        ] {
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_w8_lm_head_dispatches_total{{operation=\"{operation}\"}} {value}"
+                ),
+            );
+        }
+        out.push_str("# HELP kiln_rocm_w8_lm_head_rows_total Rows processed by successful token-only ROCm W8 LM-head dispatches.\n");
+        out.push_str("# TYPE kiln_rocm_w8_lm_head_rows_total counter\n");
+        for (operation, value) in [
+            ("argmax", lm_head.argmax_rows),
+            ("sample", lm_head.sample_rows),
+        ] {
+            push_line(
+                &mut out,
+                &format!("kiln_rocm_w8_lm_head_rows_total{{operation=\"{operation}\"}} {value}"),
+            );
+        }
+        out.push_str("# HELP kiln_rocm_w8_lm_head_sample_dispatches_total Successful sampled ROCm W8 LM-head dispatches by activation arithmetic.\n");
+        out.push_str("# TYPE kiln_rocm_w8_lm_head_sample_dispatches_total counter\n");
+        for (activation, value) in [
+            ("w8a16", lm_head.sample_w8a16_dispatches),
+            ("w8a8", lm_head.sample_w8a8_dispatches),
+        ] {
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_rocm_w8_lm_head_sample_dispatches_total{{activation=\"{activation}\"}} {value}"
+                ),
+            );
+        }
+        out.push_str("# HELP kiln_rocm_w8_lm_head_sample_history_entries_total Unique row/token penalty entries processed by sampled ROCm W8 LM-head dispatches.\n");
+        out.push_str("# TYPE kiln_rocm_w8_lm_head_sample_history_entries_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_rocm_w8_lm_head_sample_history_entries_total {}",
+                lm_head.sample_history_entries
+            ),
+        );
+        out.push_str("# HELP kiln_rocm_w8_lm_head_dispatch_failures_total ROCm W8 token-only LM-head dispatch or readback failures.\n");
+        out.push_str("# TYPE kiln_rocm_w8_lm_head_dispatch_failures_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_rocm_w8_lm_head_dispatch_failures_total {}",
+                lm_head.dispatch_failures
+            ),
+        );
+        out.push_str("# HELP kiln_rocm_w8_lm_head_max_batch_rows Largest token-only ROCm W8 LM-head batch observed.\n");
+        out.push_str("# TYPE kiln_rocm_w8_lm_head_max_batch_rows gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_rocm_w8_lm_head_max_batch_rows {}",
+                lm_head.max_batch_rows
+            ),
+        );
+        out.push_str("# HELP kiln_rocm_w8_lm_head_max_sample_top_k Largest requested top-k handled by the ROCm W8 sampler.\n");
+        out.push_str("# TYPE kiln_rocm_w8_lm_head_max_sample_top_k gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_rocm_w8_lm_head_max_sample_top_k {}",
+                lm_head.max_sample_top_k
+            ),
+        );
         prom_counter(
             &mut out,
             "kiln_requests_total",
@@ -3223,6 +3297,7 @@ pub struct SnapshotGauges {
     pub rocm_graph_telemetry: Option<kiln_model::RocmGraphLiveTelemetry>,
     pub(crate) rocm_graph_telemetry_unavailable_reason:
         Option<crate::rocm_graph_observability::RocmGraphUnavailableReason>,
+    pub rocm_w8_lm_head: kiln_model::RocmW8LmHeadStats,
     pub scheduler_waiting: usize,
     pub scheduler_running: usize,
     pub blocks_used: usize,
@@ -3761,6 +3836,18 @@ mod tests {
                 peak_transient_candidate_bytes: 167_772_160,
             }),
             rocm_graph_telemetry_unavailable_reason: None,
+            rocm_w8_lm_head: kiln_model::RocmW8LmHeadStats {
+                argmax_dispatches: 12,
+                argmax_rows: 44,
+                sample_dispatches: 7,
+                sample_rows: 23,
+                sample_history_entries: 31,
+                sample_w8a16_dispatches: 2,
+                sample_w8a8_dispatches: 5,
+                dispatch_failures: 1,
+                max_batch_rows: 8,
+                max_sample_top_k: 20,
+            },
             scheduler_waiting: 3,
             scheduler_running: 1,
             blocks_used: 10,
@@ -4124,6 +4211,17 @@ mod tests {
         assert!(output.contains("kiln_rocm_graph_fallback_slow_total 2"));
         assert!(output.contains("kiln_rocm_graph_fallback_duration_seconds_total 0.425000"));
         assert!(output.contains("kiln_rocm_graph_fallback_duration_seconds_max 0.275000"));
+        assert!(output.contains("kiln_rocm_w8_lm_head_dispatches_total{operation=\"argmax\"} 12"));
+        assert!(output.contains("kiln_rocm_w8_lm_head_dispatches_total{operation=\"sample\"} 7"));
+        assert!(output.contains("kiln_rocm_w8_lm_head_rows_total{operation=\"argmax\"} 44"));
+        assert!(output.contains("kiln_rocm_w8_lm_head_rows_total{operation=\"sample\"} 23"));
+        assert!(
+            output.contains("kiln_rocm_w8_lm_head_sample_dispatches_total{activation=\"w8a8\"} 5")
+        );
+        assert!(output.contains("kiln_rocm_w8_lm_head_sample_history_entries_total 31"));
+        assert!(output.contains("kiln_rocm_w8_lm_head_dispatch_failures_total 1"));
+        assert!(output.contains("kiln_rocm_w8_lm_head_max_batch_rows 8"));
+        assert!(output.contains("kiln_rocm_w8_lm_head_max_sample_top_k 20"));
         assert!(output.contains("kiln_vulkan_buffer_live_buffers{memory=\"device_local\"} 11"));
         assert!(output.contains("kiln_vulkan_buffer_live_bytes{memory=\"host_visible\"} 102"));
         assert!(output.contains("kiln_vulkan_buffer_peak_live_bytes 203"));
@@ -4371,6 +4469,7 @@ mod tests {
             rocm_graph_unavailable_reason: None,
             rocm_graph_telemetry: Some(kiln_model::RocmGraphLiveTelemetry::default()),
             rocm_graph_telemetry_unavailable_reason: None,
+            rocm_w8_lm_head: kiln_model::RocmW8LmHeadStats::default(),
             scheduler_waiting: 0,
             scheduler_running: 0,
             blocks_used: 0,

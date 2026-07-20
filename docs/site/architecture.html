@@ -654,6 +654,24 @@ training request
           removed rather than promoted. The unused opt-in axis-zero concat kernel was deleted. Generic GPU MLP and split-projection environment controls remain live
           for CUDA/Vulkan until those hardware-host migrations, but ROCm no longer consumes them.
         </p>
+        <div class="mt-4 p-4" style="border:1px solid var(--line); border-radius:6px; background:var(--surface);">
+          <h3 class="font-semibold" style="color:var(--fg);">ROCm token-only LM head</h3>
+          <p class="mt-2 text-sm leading-relaxed" style="color:var(--fg-dim);">
+            Qualified greedy batches run the packed W8A16 tied LM head and stable argmax on-device. Sampled batches
+            use W8A8 activation arithmetic, accept mixed greedy and stochastic rows, and apply repetition,
+            presence, frequency, temperature, top-k, min-p, top-p, and categorical selection in the public order.
+            Stochastic rows are bounded to <code>top_k=1..64</code>; unsupported settings decline to the full-logit
+            path. Control uploads remain ordered on the active HIP stream, vocabulary scores remain device-local,
+            and one <code>[batch]</code> token tensor is read back.
+          </p>
+          <p class="mt-2 text-sm leading-relaxed" style="color:var(--fg-dim);">
+            The seeded device draw is SplitMix64 and replays exactly only inside the same binary/device/kernel
+            envelope; it is not a cross-backend <code>StdRng</code> promise. Health publishes dispatches, rows,
+            activation arithmetic, sparse-history entries, failures, maximum batch rows, and maximum top-k at
+            <code>decode_runtime.rocm_w8_lm_head</code>. Prometheus mirrors these as fixed-cardinality
+            <code>kiln_rocm_w8_lm_head_*</code> counters and gauges without synchronizing the device.
+          </p>
+        </div>
         <details class="mt-4" open>
           <summary class="font-medium">Retired model and tensor-layer ROCm variables</summary>
           <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">

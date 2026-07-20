@@ -9509,6 +9509,35 @@ pub fn lm_head_sample_backend_decode_if(
     {
         use kiln_core::sampling::SamplingParams as SP;
 
+        let temperatures = [params.temperature];
+        let top_k = [params.top_k];
+        if rocm_w8_batch_sample_supported(backend, weights, &temperatures, &top_k) {
+            let history_rows = vec![0u32; history_indices.len()];
+            if let Some(tokens) = rocm_w8_lm_head_sample_batch(
+                backend,
+                hidden,
+                weights,
+                config,
+                &history_rows,
+                &history_indices,
+                &history_counts,
+                &[params.repetition_penalty],
+                &[params.presence_penalty],
+                &[params.frequency_penalty],
+                &temperatures,
+                &top_k,
+                &[params.top_p],
+                &[params.min_p],
+                &[seed],
+            )? {
+                return tokens
+                    .into_iter()
+                    .next()
+                    .map(Some)
+                    .context("ROCm W8 single-row sampler returned no token");
+            }
+        }
+
         if crate::rocm_policy::current_rocm_kernel_policy().w8_sampled_lm_head
             && params.top_k == 0
             && SP::top_p_disables_nucleus_filter(params.top_p)
@@ -9607,6 +9636,159 @@ fn lm_head_argmax_rows_backend_decode_if(
         }
     }
     lm_head_argmax_rows_with_backend(backend, x, embed_tokens_t)
+}
+
+#[cfg(feature = "rocm")]
+fn rocm_w8_lm_head_argmax_rows(
+    backend: &dyn BackendRuntime,
+    normed: &Tensor,
+    weights: &GpuWeights,
+) -> Result<Option<Vec<u32>>> {
+    if !matches!(BackendIdentity::runtime_device(backend), Device::Rocm(_))
+        || normed.dtype() != DType::BF16
+        || normed.track_op()
+    {
+        return Ok(None);
+    }
+    let Some(lm_head_w8) = weights.lm_head_w8.as_ref() else {
+        return Ok(None);
+    };
+    let dims = normed.dims();
+    if dims.len() < 2 || dims.last().copied() != Some(lm_head_w8.k) {
+        return Ok(None);
+    }
+    let rows: usize = dims[..dims.len() - 1].iter().product();
+    if rows == 0 {
+        return Ok(None);
+    }
+    let normed = normed
+        .contiguous()
+        .context("rocm w8 batched argmax normed contiguous")?;
+    crate::rocm_w8_proj::argmax_batch_bf16(&normed, lm_head_w8)
+        .map(Some)
+        .context("rocm w8 batched lm_head argmax")
+}
+
+#[cfg(not(feature = "rocm"))]
+fn rocm_w8_lm_head_argmax_rows(
+    _backend: &dyn BackendRuntime,
+    _normed: &Tensor,
+    _weights: &GpuWeights,
+) -> Result<Option<Vec<u32>>> {
+    Ok(None)
+}
+
+pub(crate) fn rocm_w8_batch_sample_supported(
+    backend: &dyn BackendRuntime,
+    weights: &GpuWeights,
+    temperatures: &[f32],
+    top_k: &[u32],
+) -> bool {
+    #[cfg(feature = "rocm")]
+    {
+        matches!(BackendIdentity::runtime_device(backend), Device::Rocm(_))
+            && crate::rocm_policy::current_rocm_kernel_policy().w8_sampled_lm_head
+            && weights.lm_head_w8.is_some()
+            && temperatures.len() == top_k.len()
+            && !temperatures.is_empty()
+            && temperatures
+                .iter()
+                .zip(top_k.iter())
+                .all(|(&temperature, &k)| {
+                    let greedy = kiln_core::sampling::SamplingParams::values_are_effectively_greedy(
+                        temperature,
+                        k,
+                    );
+                    greedy
+                        || (temperature.is_finite()
+                            && temperature > 0.0
+                            && (1..=crate::rocm_w8_proj::BATCH_SAMPLE_TOP_K_MAX).contains(&k))
+                })
+    }
+    #[cfg(not(feature = "rocm"))]
+    {
+        let _ = (backend, weights, temperatures, top_k);
+        false
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rocm_w8_lm_head_sample_batch(
+    backend: &dyn BackendRuntime,
+    hidden: &Tensor,
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    history_rows: &[u32],
+    history_indices: &[u32],
+    history_counts: &[u32],
+    repetition_penalties: &[f32],
+    presence_penalties: &[f32],
+    frequency_penalties: &[f32],
+    temperatures: &[f32],
+    top_k: &[u32],
+    top_p: &[f32],
+    min_p: &[f32],
+    seeds: &[u64],
+) -> Result<Option<Vec<u32>>> {
+    if !rocm_w8_batch_sample_supported(backend, weights, temperatures, top_k) {
+        return Ok(None);
+    }
+    #[cfg(feature = "rocm")]
+    {
+        let lm_head_w8 = weights
+            .lm_head_w8
+            .as_ref()
+            .expect("support predicate requires packed ROCm LM head");
+        let normed = rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)?;
+        if normed.dtype() != DType::BF16 || normed.track_op() {
+            return Ok(None);
+        }
+        let dims = normed.dims();
+        let rows = dims
+            .get(..dims.len().saturating_sub(1))
+            .map(|leading| leading.iter().product::<usize>())
+            .unwrap_or(0);
+        if rows != temperatures.len() || dims.last().copied() != Some(lm_head_w8.k) {
+            return Ok(None);
+        }
+        let normed = normed
+            .contiguous()
+            .context("rocm w8 batched sample normed contiguous")?;
+        return crate::rocm_w8_proj::sample_batch_bf16(
+            &normed,
+            lm_head_w8,
+            history_rows,
+            history_indices,
+            history_counts,
+            repetition_penalties,
+            presence_penalties,
+            frequency_penalties,
+            temperatures,
+            top_k,
+            top_p,
+            min_p,
+            seeds,
+        )
+        .map(Some)
+        .context("rocm w8 batched lm_head sample");
+    }
+    #[cfg(not(feature = "rocm"))]
+    {
+        let _ = (
+            hidden,
+            config,
+            history_rows,
+            history_indices,
+            history_counts,
+            repetition_penalties,
+            presence_penalties,
+            frequency_penalties,
+            top_p,
+            min_p,
+            seeds,
+        );
+        Ok(None)
+    }
 }
 
 fn lm_head_weighted_prep_argmax(
@@ -21212,7 +21394,14 @@ pub(crate) fn model_forward_paged_decode_contiguous_batch_greedy_with_stable_buf
     let token_ids = {
         kiln_nvtx::range!(c"kiln/lm_head_batch_argmax_decode_stable_buffers");
         let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
-        lm_head_argmax_rows_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)?
+        match rocm_w8_lm_head_argmax_rows(backend, &normed, weights)? {
+            Some(tokens) => tokens,
+            None => lm_head_argmax_rows_backend_decode_if(
+                Some(backend),
+                &normed,
+                &weights.embed_tokens_t,
+            )?,
+        }
     };
     Ok(token_ids)
 }
@@ -22220,7 +22409,14 @@ pub fn model_forward_paged_decode_contiguous_batch_greedy_with_ids(
     let token_ids = {
         kiln_nvtx::range!(c"kiln/lm_head_batch_argmax_decode");
         let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
-        lm_head_argmax_rows_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)?
+        match rocm_w8_lm_head_argmax_rows(backend, &normed, weights)? {
+            Some(tokens) => tokens,
+            None => lm_head_argmax_rows_backend_decode_if(
+                Some(backend),
+                &normed,
+                &weights.embed_tokens_t,
+            )?,
+        }
     };
     Ok(token_ids)
 }
@@ -24142,6 +24338,26 @@ pub(crate) fn lm_head_from_batched_hidden_eager(
     // `lm_head_forward_backend_decode_if`).
     let normed = rms_norm(output_hidden, &weights.final_norm, config.rms_norm_eps)?;
     lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)
+}
+
+/// Token-only sibling of [`lm_head_from_batched_hidden_eager`]. ROCm uses the
+/// packed W8 batched LM-head/argmax pipeline when available, avoiding the
+/// `[batch, vocab]` logits allocation and returning one token vector.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub(crate) fn lm_head_argmax_from_batched_hidden_eager(
+    backend: &dyn BackendRuntime,
+    output_hidden: &Tensor,
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+) -> Result<Vec<u32>> {
+    kiln_nvtx::range!(c"kiln/lm_head_argmax_eager_batched");
+    let normed = rms_norm(output_hidden, &weights.final_norm, config.rms_norm_eps)?;
+    match rocm_w8_lm_head_argmax_rows(backend, &normed, weights)? {
+        Some(tokens) => Ok(tokens),
+        None => {
+            lm_head_argmax_rows_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)
+        }
+    }
 }
 
 /// Batched paged decode API for real continuous-batching work.

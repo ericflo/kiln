@@ -525,6 +525,57 @@ former force/disable variables are warning compatibility aliases resolved once
 by the typed startup registry. The two ad hoc trace variables were deleted;
 they are not configuration and no matmul path reads the process environment.
 
+### ROCm token-only LM-head contract
+
+The `qualified` and `experimental_multiblock` ROCm kernel profiles pack the tied
+BF16 embedding/LM-head rows once during model load and own both
+`w8_sampled_lm_head` and `w8a8_sampled_lm_head`. These are immutable leaves of
+`accelerator.rocm_kernel_profile`, not additional user settings. The
+`portable_fallback` profile disables them and retains the ordinary BF16 LM head.
+
+Greedy contiguous decode batches use W8A16 projection into an internal F32
+score scratch, perform a stable lower-token-id argmax on the device, and copy
+one token vector to the host. Sampled batches may mix greedy and stochastic
+rows. Stochastic rows support `top_k` from 1 through 64 and apply the public
+sampling contract in this order: sign-conditional repetition penalty, presence
+and frequency penalties over unique generated-token counts, temperature,
+top-k, stable softmax, min-p, top-p, and categorical selection. The qualified
+profile quantizes each final-normalized activation row once and uses W8A8 for
+the sampled projection; the same kernel contract has a W8A16 implementation for
+profiles that retain W8 projection but do not select sampled W8A8. Parameter
+and sparse-history uploads are ordered on the active HIP stream without an
+extra trailing synchronization. The full vocabulary score scratch never leaves
+the device; successful dispatch reads back only the `[batch]` I64 token tensor.
+
+`temperature = 0` and positive-temperature `top_k = 1` are greedy and ignore
+history penalties, matching `SamplingParams`. A stochastic `top_k = 0`, a
+value above 64, an incompatible dtype/shape, active gradient tracking, a profile
+that disables the route, or an unavailable packed LM head declines to the
+existing full-logit sampler. The single-row unfiltered `top_k = 0` ROCm route
+may use the existing full-distribution W8 Gumbel sampler. Invalid dimensions,
+non-finite sampling parameters, non-positive repetition penalty, duplicate
+row/token history, zero counts, and out-of-range row/token indices fail closed;
+they are not coerced into a supported request.
+
+Seeded categorical rows use the device SplitMix64 mapping defined by this ROCm
+kernel. The same binary, device path, inputs, and seed replay exactly; the seed
+does not promise the same token as Rust `StdRng`, Vulkan's device RNG, another
+backend, or a later kernel contract. Use greedy decoding where a comparison
+requires backend-independent bit-exact output.
+
+`GET /health` and `GET /v1/health` expose process-lifetime route evidence at
+`decode_runtime.rocm_w8_lm_head`: successful argmax/sample dispatches and rows,
+sample history entries, W8A16/W8A8 sampled dispatches, failures, maximum batch
+rows, and maximum sampled top-k. `/metrics` exports the same fixed-cardinality
+state as `kiln_rocm_w8_lm_head_dispatches_total{operation}`,
+`kiln_rocm_w8_lm_head_rows_total{operation}`,
+`kiln_rocm_w8_lm_head_sample_dispatches_total{activation}`,
+`kiln_rocm_w8_lm_head_sample_history_entries_total`,
+`kiln_rocm_w8_lm_head_dispatch_failures_total`,
+`kiln_rocm_w8_lm_head_max_batch_rows`, and
+`kiln_rocm_w8_lm_head_max_sample_top_k`. Reading either surface only loads host
+atomics. It does not probe or synchronize the accelerator.
+
 The primary ROCm context stores the immutable policy. A second caller asking
 for a different policy on the same device receives a startup error naming the
 already-installed and requested policies. This prevents two model/runtime

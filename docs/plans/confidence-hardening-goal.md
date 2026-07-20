@@ -1105,6 +1105,16 @@ and exact resume. Cross-backend agreement alone is insufficient.
     remain required before a broad performance promotion.
 - [ ] Implement fused ROCm batched LM head, penalties, top-k/top-p, and sampling
   with one token readback if profiling confirms the current serialization.
+  - A source candidate now implements mixed-row W8A16/W8A8 projection, sparse
+    penalties, bounded top-k through 64, min-p/top-p, device categorical
+    selection, and one batched token readback. Per-step parameter/history writes
+    are same-stream ordered rather than synchronizing generic uploads. A real
+    gfx1151 test compares both arithmetic modes and widths 1/2/4/6 against an
+    independent CPU oracle, exercises `top_k = 64`, verifies exact seeded
+    replay, and checks malformed history/top-k rejection. Health and Prometheus
+    expose closed route counters. Keep this item open until a committed-source
+    server run proves the route, semantic correctness, 30-minute stability, and
+    measured performance.
 - [ ] Replace prompt-logprob full-vocabulary host readback with a device-side
   selected-logprob/rank kernel so transfer and host work scale with O(TK), while
   retaining exact finite-value validation and the bounded projection fallback.
