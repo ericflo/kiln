@@ -1646,6 +1646,17 @@ graphs help this workload, not a cross-device or universal graph-disable claim;
 the graph-specific correctness and resilience gates remain independently
 required.
 
+The source-bound `both-off` arm then passed at
+`qualification/receipts/rocm/strix-halo/20260720t074836933014z-rocm-strix-halo-serving-mixed-rocm-v1-b68874d2e9-v1.json`.
+It differs from `graphs-off` by disabling requested and effective KV
+autoscaling. Neither arm resized or reclaimed. Their results were close:
+13.813 versus 13.710 deterministic tokens/second, 14.400 versus 14.247 sampled
+tokens/second, p99 ITL 481.584 versus 474.283 ms, and maximum decode forward
+151.908 versus 151.756 ms. That pair provides no evidence that an armed but
+inactive autoscaling monitor caused the graph-on pauses. It does not replace
+the separate forced-resize workload, where the autoscaler actually mutates KV
+capacity.
+
 Five measured-window metrics close the cooperative-idle evidence. The configured
 gauge is `batching_actor_cycle_idle_ms_configured`. The monotonic count and
 elapsed-time deltas are `batching_actor_cycle_idle_count` and
