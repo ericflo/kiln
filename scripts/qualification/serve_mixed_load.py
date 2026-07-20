@@ -323,6 +323,16 @@ def _variant_config(
     max_prefill_layers_per_cycle: int = BASELINE_MAX_PREFILL_LAYERS_PER_CYCLE,
     actor_cycle_idle_ms: int | None = None,
 ) -> dict[str, Any]:
+    max_prefill_staging_slots = (
+        min(max_decode_batch, MAX_PREFILL_STAGING_SLOTS)
+        if max_decode_batch > 1
+        else 0
+    )
+    max_prefill_staging_priority_burst = (
+        MAX_PREFILL_STAGING_PRIORITY_BURST
+        if max_prefill_staging_slots > 0
+        else 0
+    )
     config = {
         "build": ROCM_BUILD_SPEC.effective_config(),
         "model": {
@@ -350,11 +360,9 @@ def _variant_config(
             "stream_stall_grace_ms": STREAM_STALL_GRACE_MS,
             "max_batch_tokens": MAX_BATCH_TOKENS,
             "max_decode_batch": max_decode_batch,
-            "max_prefill_staging_slots": MAX_PREFILL_STAGING_SLOTS,
-            "max_active_requests": max_decode_batch + MAX_PREFILL_STAGING_SLOTS,
-            "max_prefill_staging_priority_burst": (
-                MAX_PREFILL_STAGING_PRIORITY_BURST
-            ),
+            "max_prefill_staging_slots": max_prefill_staging_slots,
+            "max_active_requests": max_decode_batch + max_prefill_staging_slots,
+            "max_prefill_staging_priority_burst": max_prefill_staging_priority_burst,
             "max_prefill_tokens_per_cycle": MAX_PREFILL_TOKENS_PER_CYCLE,
             "max_prefill_layers_per_cycle": max_prefill_layers_per_cycle,
         },
@@ -5399,17 +5407,23 @@ def metric_values(
 
 def batching_staging_contract_failures(
     values: dict[str, float | int],
+    variant: str,
 ) -> list[str]:
     failures: list[str] = []
+    server = VARIANT_CONFIGS[variant]["server"]
     expected = {
-        "batching_max_decode_batch": MAX_DECODE_BATCH,
-        "batching_prefill_staging_slot_count": MAX_PREFILL_STAGING_SLOTS,
-        "batching_max_active_requests": MAX_ACTIVE_REQUESTS,
-        "batching_prefill_staging_priority_burst": (
-            MAX_PREFILL_STAGING_PRIORITY_BURST
-        ),
-        "batching_max_prefill_tokens_per_cycle": MAX_PREFILL_TOKENS_PER_CYCLE,
-        "batching_max_prefill_layers_per_cycle": MAX_PREFILL_LAYERS_PER_CYCLE,
+        "batching_max_decode_batch": server["max_decode_batch"],
+        "batching_prefill_staging_slot_count": server["max_prefill_staging_slots"],
+        "batching_max_active_requests": server["max_active_requests"],
+        "batching_prefill_staging_priority_burst": server[
+            "max_prefill_staging_priority_burst"
+        ],
+        "batching_max_prefill_tokens_per_cycle": server[
+            "max_prefill_tokens_per_cycle"
+        ],
+        "batching_max_prefill_layers_per_cycle": server[
+            "max_prefill_layers_per_cycle"
+        ],
     }
     for name, expected_value in expected.items():
         if values.get(name) != expected_value:
@@ -5443,26 +5457,30 @@ def batching_staging_contract_failures(
     if not isinstance(observed, (int, float)) or isinstance(observed, bool):
         failures.append("measured maximum active-request width is not numeric")
     else:
-        if observed <= MAX_DECODE_BATCH:
+        if observed <= server["max_decode_batch"]:
             failures.append(
                 "measured active-request width never exceeded the ordinary decode slots"
             )
-        if observed > MAX_ACTIVE_REQUESTS:
+        if observed > server["max_active_requests"]:
             failures.append(
-                f"measured active-request width {observed} exceeded bound {MAX_ACTIVE_REQUESTS}"
+                "measured active-request width "
+                f"{observed} exceeded bound {server['max_active_requests']}"
             )
     return failures
 
 
 def actor_cycle_idle_contract_failures(
     values: dict[str, float | int],
+    variant: str,
 ) -> list[str]:
     failures: list[str] = []
+    batching = VARIANT_CONFIGS[variant].get("batching", {})
+    expected_idle_ms = batching.get("actor_cycle_idle_ms", 0)
     configured = values.get("batching_actor_cycle_idle_ms_configured")
-    if configured != ACTOR_CYCLE_IDLE_MS:
+    if configured != expected_idle_ms:
         failures.append(
             "batching_actor_cycle_idle_ms_configured="
-            f"{configured!r}, expected exact value {ACTOR_CYCLE_IDLE_MS}"
+            f"{configured!r}, expected exact value {expected_idle_ms}"
         )
     active_end = values.get("batching_actor_cycle_idle_active_end")
     if active_end != 0:
@@ -5477,9 +5495,9 @@ def actor_cycle_idle_contract_failures(
         value = values.get(name)
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             failures.append(f"{name}={value!r} is not numeric")
-        elif ACTOR_CYCLE_IDLE_MS > 0 and value <= 0:
+        elif expected_idle_ms > 0 and value <= 0:
             failures.append(f"{name}={value!r}; configured idle policy was not exercised")
-        elif ACTOR_CYCLE_IDLE_MS == 0 and value != 0:
+        elif expected_idle_ms == 0 and value != 0:
             failures.append(f"{name}={value!r} while actor-cycle idle was disabled")
     return failures
 
@@ -5576,9 +5594,23 @@ def bounded_details(value: str | None) -> str | None:
     return compact_details(value, 2000)
 
 
-def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, Any]], str | None]:
+def execute(
+    model_path: Path,
+    seed: int,
+    variant: str,
+    *,
+    built_binary: tuple[Path, str] | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
     overall_deadline = time.monotonic() + OVERALL_TIMEOUT_SECONDS
-    binary, binary_hash, build_seconds = build_binary(overall_deadline)
+    if built_binary is None:
+        binary, binary_hash, build_seconds = build_binary(overall_deadline)
+    else:
+        binary, binary_hash = built_binary
+        build_seconds = 0.0
+        if not binary.is_file():
+            raise QualificationError(f"prebuilt server binary is missing: {binary}")
+        if sha256_file(binary) != binary_hash:
+            raise QualificationError("prebuilt server binary changed between campaign arms")
     trace(
         "binary_built",
         build_seconds=build_seconds,
@@ -6013,8 +6045,8 @@ def execute(model_path: Path, seed: int, variant: str) -> tuple[list[dict[str, A
             status_failures.append(
                 "measured load exercised no bounded short-prefill service opportunity"
             )
-        status_failures.extend(batching_staging_contract_failures(values))
-        status_failures.extend(actor_cycle_idle_contract_failures(values))
+        status_failures.extend(batching_staging_contract_failures(values, variant))
+        status_failures.extend(actor_cycle_idle_contract_failures(values, variant))
         expected_prefix_cache_enabled = int(
             VARIANT_CONFIGS[variant]["runtime"]["prefix_cache_effective_enabled"]
         )

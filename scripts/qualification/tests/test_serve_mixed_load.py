@@ -3579,7 +3579,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 serve.MAX_PREFILL_LAYERS_PER_CYCLE
             ),
         }
-        self.assertEqual(serve.batching_staging_contract_failures(good), [])
+        self.assertEqual(
+            serve.batching_staging_contract_failures(good, "autoscale-off"), []
+        )
 
         mutations = {
             "batching_max_decode_batch": serve.MAX_DECODE_BATCH + 1,
@@ -3595,7 +3597,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         for name, value in mutations.items():
             with self.subTest(name=name):
                 failures = serve.batching_staging_contract_failures(
-                    {**good, name: value}
+                    {**good, name: value}, "autoscale-off"
                 )
                 self.assertTrue(failures)
 
@@ -3603,13 +3605,19 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             **good,
             "batching_max_observed_active_requests": serve.MAX_ACTIVE_REQUESTS + 1,
         }
-        self.assertTrue(serve.batching_staging_contract_failures(too_wide))
+        self.assertTrue(
+            serve.batching_staging_contract_failures(too_wide, "autoscale-off")
+        )
         invalid_subset = {
             **good,
             "batching_prefill_staging_priority_forward_count": 3,
             "batching_short_prefill_priority_forward_count": 2,
         }
-        self.assertTrue(serve.batching_staging_contract_failures(invalid_subset))
+        self.assertTrue(
+            serve.batching_staging_contract_failures(
+                invalid_subset, "autoscale-off"
+            )
+        )
 
     def test_actor_cycle_idle_contract_requires_configured_measured_drain(self) -> None:
         good = {
@@ -3619,7 +3627,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             "batching_actor_cycle_idle_ms_max_end": 50.1,
             "batching_actor_cycle_idle_ms_total": 350.0,
         }
-        self.assertEqual(serve.actor_cycle_idle_contract_failures(good), [])
+        self.assertEqual(
+            serve.actor_cycle_idle_contract_failures(good, "autoscale-off"), []
+        )
         for name, value in (
             ("batching_actor_cycle_idle_active_end", 1),
             ("batching_actor_cycle_idle_count", 0),
@@ -3629,7 +3639,9 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         ):
             with self.subTest(name=name):
                 self.assertTrue(
-                    serve.actor_cycle_idle_contract_failures({**good, name: value})
+                    serve.actor_cycle_idle_contract_failures(
+                        {**good, name: value}, "autoscale-off"
+                    )
                 )
 
     def test_metric_contract_is_sorted_closed_and_finite(self) -> None:

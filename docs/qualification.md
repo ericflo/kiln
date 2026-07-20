@@ -2790,6 +2790,63 @@ occupancy, the waiting queue, and the actor-cycle-idle gauge all to reach zero.
 This proves that the latency path ran without treating the staging capacity as
 a wider backend decode batch, accepting an active prefill as drained, or racing
 the final cooperative wait.
+
+### ROCm decode-width selection
+
+Do not raise `server.max_decode_batch` from a single throughput sample. The
+committed `serving-rocm-decode-width-campaign-v1` workload is the bounded,
+offline autotuner for the current Strix Halo ROCm profile. It tests widths 2,
+4, and 8 in ascending order against one source-built release binary. Each arm
+gets a fresh server process, private adapter/snapshot directories, the same
+typed configuration apart from the derived decode/staging/active widths, a
+97 C package-temperature guard, and a completed cooldown before the next arm.
+The source build itself uses the bounded Cargo wrapper with one job, a 50%
+CPU quota, a 15 GiB available-memory floor, no swap-backed build service, and
+`gfx1151` as the only ROCm architecture.
+
+Run it only from a clean commit already present at `origin/main`:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" python3 scripts/qualification/run.py \
+  --variant rocm \
+  --host-id strix-halo \
+  --model /absolute/path/to/Qwen3.5-4B \
+  --model-id Qwen3.5-4B \
+  qualification/workloads/serving-rocm-decode-width-campaign-v1.json
+```
+
+Every arm runs the established mixed-load contract: 1,312 fixed deterministic
+output tokens, the long-prefill/slow-consumer/cancellation overlap, eight
+seeded 32-token sampled requests at temperature 0.7/top-p 0.9/top-k 40, and a
+post-sampling deterministic replay canary. An arm is correctness-qualified
+only when both deterministic and sampled traffic actually reach its declared
+width; graph capture and replay succeed without fallback or failure; the
+fused W8A8 sampled LM-head route reaches the same width; all request, device,
+external-yield, finite-value, output-oracle, outlier, thermal, shutdown, and
+residue gates pass. A failure stops wider arms and makes the campaign fail,
+rather than interpreting a crash or partial measurement as evidence for the
+last smaller width.
+
+Among correctness-qualified arms, the selector scores the minimum of the
+deterministic and sampled throughput ratios relative to width 2. A wider arm
+is ineligible when p99 ITL, TTFT, or end-to-end latency regresses more than 25%,
+or when peak GPU allocation grows by more than 1 GiB. The narrowest width
+within 2% of the best score wins, and promotion above width 2 additionally
+requires at least a 3% minimum-throughput gain. The receipt exposes every
+candidate's throughput, tail latency, exact observed widths, graph activity,
+fused-sampling activity, peak memory, temperature, and failure counts. Its
+bounded `details` value records one short selected/rejected summary per arm;
+it does not treat raw console logs as the experiment verdict.
+
+This is qualification-time autotuning, not online self-tuning. It never changes
+a live scheduler, retries a failed width in the same process, edits a user's
+configuration, or claims portability to a different GPU/model/source tree.
+After reviewing a passed receipt, pin the selected integer in
+`server.max_decode_batch`, rerun the focused correctness gates, then rerun the
+30-minute development soak and serving benchmark from that exact pushed source.
+CUDA, Vulkan, and Metal require separate machine-local campaigns before their
+backend defaults or checked profiles can be promoted.
+
 The pressure peer also requires terminal request-scoped performance metadata.
 The 256-token peer is twice the ordinary response length. The driver dispatches
 it before the slow consumer and waits for its first
