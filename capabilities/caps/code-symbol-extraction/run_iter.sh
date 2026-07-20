@@ -78,7 +78,7 @@ KILN_CUDA_ARCHS="${KILN_CUDA_ARCHS:-86}" "$OPD_BIN" \
   2>&1 | tee "$LOG_DIR/train.log"
 
 echo "[3/4] restart kiln serve --eval-mode for adapter verify + eval…"
-KILN_MODEL_PATH="$MODEL_PATH" KILN_ADAPTER_DIR="$ADAPTER_REGISTRY" \
+KILN_MODEL_PATH="$MODEL_PATH" KILN_MODEL_ADAPTER_DIR="$ADAPTER_REGISTRY" \
   nohup "$KILN_BIN" serve --eval-mode > "$LOG_DIR/kiln-serve.log" 2>&1 &
 for i in $(seq 1 60); do
   curl -sf http://localhost:8420/v1/health > /dev/null 2>&1 && break

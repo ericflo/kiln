@@ -115,7 +115,7 @@ pod_start_kiln_serve() {
   local adapter_dir="${1:-/workspace/adapters}"
   local model_path="${KILN_MODEL_PATH:-/workspace/Qwen3.5-4B}"
   local log="${KILN_SERVE_LOG:-/workspace/kiln-serve.log}"
-  KILN_MODEL_PATH="$model_path" KILN_ADAPTER_DIR="$adapter_dir" \
+  KILN_MODEL_PATH="$model_path" KILN_MODEL_ADAPTER_DIR="$adapter_dir" \
     nohup /workspace/kiln/target/release/kiln serve --eval-mode > "$log" 2>&1 &
   for i in $(seq 1 60); do
     curl -sf http://localhost:8420/v1/health > /dev/null 2>&1 && {

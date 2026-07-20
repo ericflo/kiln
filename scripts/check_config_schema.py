@@ -76,6 +76,30 @@ PROFILE_GATES = {
     },
 }
 
+OPERATIONAL_SOURCE_ROOTS = (".github", "scripts", "capabilities", "desktop")
+OPERATIONAL_SOURCE_SUFFIXES = {
+    ".js",
+    ".mjs",
+    ".py",
+    ".rs",
+    ".sh",
+    ".ts",
+    ".tsx",
+    ".yaml",
+    ".yml",
+}
+OPERATIONAL_SOURCE_IGNORED_DIRECTORIES = {
+    "__pycache__",
+    "archive",
+    "node_modules",
+    "target",
+}
+RETIRED_ENV_REFERENCE_ALLOWLIST = {
+    "scripts/check_docs_site_smoke.mjs": "asserts the published retirement index",
+    "scripts/check_server_ui_smoke.mjs": "asserts retired names remain inert",
+    "scripts/h15c_kiln_alpha_from_csv.py": "records an exact historical benchmark invocation",
+}
+
 
 class ContractError(Exception):
     pass
@@ -121,6 +145,62 @@ def retired_environment_replacements() -> dict[str, str]:
             raise ContractError(f"duplicate retired environment name {retired}")
         replacements[retired] = canonical
     return replacements
+
+
+def find_retired_environment_names(
+    text: str, retired: dict[str, str]
+) -> list[str]:
+    if not retired:
+        return []
+    alternatives = "|".join(
+        re.escape(name) for name in sorted(retired, key=len, reverse=True)
+    )
+    pattern = re.compile(rf"(?<![A-Z0-9_])(?:{alternatives})(?![A-Z0-9_])")
+    return sorted({match.group(0) for match in pattern.finditer(text)})
+
+
+def validate_operational_retired_environment_references(
+    retired: dict[str, str],
+) -> list[str]:
+    errors: list[str] = []
+    seen_allowlist: set[str] = set()
+    for root_name in OPERATIONAL_SOURCE_ROOTS:
+        source_root = ROOT / root_name
+        if not source_root.is_dir():
+            errors.append(f"operational source root is missing: {root_name}")
+            continue
+        for path in sorted(source_root.rglob("*")):
+            if not path.is_file() or path.suffix not in OPERATIONAL_SOURCE_SUFFIXES:
+                continue
+            relative = path.relative_to(ROOT)
+            if any(
+                part in OPERATIONAL_SOURCE_IGNORED_DIRECTORIES
+                for part in relative.parts
+            ):
+                continue
+            relative_name = relative.as_posix()
+            try:
+                found = find_retired_environment_names(path.read_text(), retired)
+            except (OSError, UnicodeDecodeError) as error:
+                errors.append(f"cannot scan operational source {relative_name}: {error}")
+                continue
+            if not found:
+                continue
+            if relative_name in RETIRED_ENV_REFERENCE_ALLOWLIST:
+                seen_allowlist.add(relative_name)
+                continue
+            for name in found:
+                errors.append(
+                    f"{relative_name} references retired environment name {name}; "
+                    f"use {retired[name]}"
+                )
+
+    missing_allowlist = sorted(set(RETIRED_ENV_REFERENCE_ALLOWLIST) - seen_allowlist)
+    for relative_name in missing_allowlist:
+        errors.append(
+            f"retired environment reference allowlist entry is stale: {relative_name}"
+        )
+    return errors
 
 
 def schema_fields(schema: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -325,6 +405,7 @@ def validate_contract_metadata(schema: dict[str, Any]) -> list[str]:
             "retired environment replacements must name canonical overrides: "
             + ", ".join(unknown_replacements)
         )
+    errors.extend(validate_operational_retired_environment_references(retired))
 
     removed_toml = schema.get("x-kiln-removed-toml-field-replacements")
     expected_removed_toml = {
@@ -564,6 +645,12 @@ def run_self_tests(schema: dict[str, Any]) -> list[str]:
         actual_valid = not validate_instance(value, schema, schema)
         if actual_valid != expected_valid:
             errors.append(f"self-test {label!r} expected valid={expected_valid}, got {actual_valid}")
+    synthetic_retired = {"KILN_OLD": "KILN_NEW"}
+    found = find_retired_environment_names(
+        "KILN_OLDER=1 KILN_OLD=1 NOT_KILN_OLD=1", synthetic_retired
+    )
+    if found != ["KILN_OLD"]:
+        errors.append(f"self-test retired environment token matching got {found!r}")
     return errors
 
 
@@ -587,7 +674,8 @@ def check(*, self_test: bool) -> None:
         f"{schema['x-kiln-dynamic-field-template-count']} dynamic templates, "
         f"{schema['x-kiln-canonical-environment-count']} canonical environment overrides, "
         f"{schema['x-kiln-compatibility-alias-count']} compatibility aliases, "
-        f"{len(PROFILE_GATES)} profile gates"
+        f"{len(PROFILE_GATES)} profile gates, "
+        "0 executable retired environment references"
     )
 
 

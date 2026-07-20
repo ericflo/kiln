@@ -61,7 +61,7 @@ fi
 # 2. Confirm kiln serve is up.
 if ! curl -sf "$KILN_URL/v1/health" > /dev/null; then
   echo "[2/5] kiln serve not up at $KILN_URL — start it first, e.g.:"
-  echo "  KILN_MODEL_PATH=$MODEL_PATH KILN_ADAPTER_DIR=$ADAPTER_DIR \\"
+  echo "  KILN_MODEL_PATH=$MODEL_PATH KILN_MODEL_ADAPTER_DIR=$ADAPTER_DIR \\"
   echo "    nohup /workspace/kiln/target/release/kiln serve --eval-mode > /workspace/kiln-serve.log 2>&1 &"
   exit 2
 fi

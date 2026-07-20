@@ -1348,7 +1348,7 @@ Current audit findings and migration order (initial audit 2026-07-12, updated
 - The initial tree did not treat environment as a startup boundary: more than
   250 model/tensor/memory/kernel knobs and at least 32 training knobs were read
   below startup. Production migration is now complete. The generated inventory
-  reports 433 direct reads, 19 process mutations, and zero runtime-migration
+  reports 427 direct reads, 19 process mutations, and zero runtime-migration
   reads; the remaining reads are typed-loader/logging, startup safety,
   credential-provider, build/provenance, or test-only boundaries.
 - Strict TOML fields are now authorities rather than mirrors. GPU-memory sizing,
@@ -1370,9 +1370,8 @@ Current audit findings and migration order (initial audit 2026-07-12, updated
   coordination, memory admission, progress cancellation, and settlement.
   ROCm matmul route selection has crossed the boundary as described below; its
   qualified large-GEMM barriers remain part of the typed context
-  synchronization policy. The open Phase 8 configuration work is explicit
-  experimental/debug profile consolidation, broader dead-control deletion,
-  and the remaining test-only process mutations.
+  synchronization policy. The remaining non-production reads and mutations are
+  closed build/provenance or scoped test boundaries rather than runtime knobs.
 - The target boundary is strict: only startup configuration, a narrow
   credential-provider adapter, and immutable build/source provenance may read
   process environment. Model, tensor, kernel, scheduler, training, eval, UI,
@@ -1424,7 +1423,7 @@ Current audit findings and migration order (initial audit 2026-07-12, updated
 - [x] Prohibit direct runtime environment reads in model kernels, forwarding,
   scheduling, training, eval, UI, and request handlers via a repository check.
 - [x] Put experimental/debug knobs behind one explicit namespace and profile.
-- [ ] Delete dead, duplicate, contradictory, and undocumented knobs.
+- [x] Delete dead, duplicate, contradictory, and undocumented knobs.
 - [x] Ensure tests use scoped configuration rather than process-global env
   mutation wherever possible; use one global serialization helper where env is
   unavoidable.
@@ -1494,8 +1493,29 @@ real contract mismatch: runtime rejected non-disabled CUDA Marlin outside the
 experimental profile, but the JSON Schema had accepted it and its self-test had
 encoded the wrong behavior. Stable and maintenance schema validation now reject
 both Marlin layouts exactly like server startup. The profile-gate checklist item
-is closed; the final repository-wide dead/duplicate/contradictory-control audit
-remains open.
+is closed; the dead-control completion checkpoint below closes the last item.
+
+Dead-control completion checkpoint (2026-07-20): the complete 77-name public
+retirement index is now an executable source ratchet across current workflow,
+script, capability, and Desktop source. Twenty stale current-tree references
+were repaired: shared pod and capability launchers use the canonical model
+adapter field; CUDA phase recipes use the canonical memory graph field; current
+help and generated training examples use the canonical thinking and
+streaming-prefill fields, including the required `enabled` enum instead of a
+legacy boolean; and speculative methodology retains only its explicitly
+historical record. Exact-revision archive directories, two retirement smoke
+checks, and that one historical receipt generator are narrow declared
+exceptions; stale allowlist entries fail the same checker. Six accelerator
+parity tests can no longer be silently skipped by the retired fused-paged-decode
+process flag, and stale comments no longer promise removed model/OPD kill
+switches. The generated crate inventory is now 427 reads, 19 mutations, zero
+runtime-migration reads, and zero experimental/debug reads or mutations. The
+remaining production reads are exactly the typed loader, logging bootstrap,
+closed driver-remap safety snapshot, and credential provider; production
+process mutation is zero. Together with the prior whole-tree reachability
+deletions, canonical-only loader, single-authority TOML fields, exact profile
+gates, and scoped-test checkpoint, this closes the final Phase 8.1 item. It does
+not claim accelerator execution or performance.
 
 Environment-inventory checkpoint (2026-07-13): the lexical ratchet now resolves
 simple named environment constants, recognizes colocated `#[cfg(test)]` modules
@@ -3362,6 +3382,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-20 | Scoped test configuration and obsolete environment harness removal | this source | this portable Phase 8.1 checkpoint | logging and remote-teacher test isolation, generated runtime-environment inventory, decode fallback capability report, obsolete current-build RMSNorm/MLP A/B harnesses, legacy preserve/Candle audit inventories, and generated website; no accelerator execution or performance claim | 11/11 logging tests; 43/43 remote-teacher tests; focused remote-teacher registration integration; focused backend capability contract; runtime inventory at 433 reads/19 mutations/zero migration reads with 11 test-surface and eight build-time mutations; backend report self-test and drift check; deterministic audit regeneration at 236 environment names/689 call sites and 59 Candle APIs/131 call sites; 55-document/5-asset assembled static site and smoke; repository/release/runtime-default/thinking-budget/source-parsing checks; formatting and diff hygiene | portable scoped-test checkpoint passed; Phase 8.1 scoped-test item closed; experimental-profile and repository-wide dead-control audits remain open | Logging tests inject `RUST_LOG` values without process mutation. Credential tests serialize their unavoidable environment boundary and restore the prior value on every exit. One scanner-classified test-surface mutation is a CUDA GRPO example's child-process provenance handoff, not test-global configuration. The deleted RMSNorm backward and fused MLP gate/up A/B harnesses toggled controls already absent from current runtime, so their purported comparisons were inert. The generated decode report no longer advertises deleted debug fallback variables, and a Rust contract rejects their return. Legacy current-tree audits are refreshed and the Candle CSV generator now emits canonical LF. No GPU workload ran. |
 
 | 2026-07-20 | Executable configuration profile-gate contract | this source | this portable Phase 8.1 checkpoint | runtime validation parity, canonical JSON Schema, complete configuration reference, generated schema website, and static smoke; no accelerator execution or performance claim | exact nine-field profile-gate metadata/conditional-rule equality; configuration-schema mutation self-tests; 10/10 documentation-builder tests; 55-document/5-asset assembled static site and smoke; JSON/Python/JavaScript syntax; formatting and diff hygiene | portable profile-gate checkpoint passed; Phase 8.1 experimental/debug item closed; repository-wide dead-control audit remains open | Eight accelerator value sets require the single `experimental` serving profile and positive forced-KV sizing requires `maintenance` plus autoscaling. The audit caught and fixed the public schema's missing CUDA Marlin condition: non-disabled layouts now fail schema validation without the same experimental profile runtime already required. Generated schema tables show a dedicated Profile gate column. Trusted debug state and debug logging remain non-semantic observability controls rather than execution experiments. No GPU workload ran. |
+
+| 2026-07-20 | Retired-control operational source ratchet | this source | this portable Phase 8.1 checkpoint | current workflow/script/capability/Desktop source, model parity tests, generated runtime-environment inventory, configuration reference, and generated website; no accelerator execution or performance claim | exact 77-name retirement-index scan across nine operational source suffixes and four roots; three explicit historical/assertion exceptions with stale-entry rejection; configuration-schema mutation self-test; runtime inventory at 427 reads/19 mutations/zero migration reads and zero experimental/debug reads or mutations; shell and Python syntax; 358/358 portable model library tests; bounded training-library check; 10/10 documentation-builder tests; 55-document/5-asset assembled static site and smoke; formatting and diff hygiene | portable dead-control checkpoint passed; final Phase 8.1 item closed | Twenty current operational references were migrated to canonical model-adapter, memory-graph, thinking, speculative, and streaming-prefill names with enum values where required. Six model parity tests no longer honor an ambient retired paged-decode skip switch, and two stale comments no longer advertise deleted execution controls. Exact-revision archives remain historical evidence; two smoke checks and one benchmark-methodology generator are the only current-source mention exceptions and cannot become runtime configuration. The checker fails any new retired spelling elsewhere and rejects stale exception entries. Together with the prior reachability, single-authority, profile-gate, and scoped-test checkpoints, no production execution knob remains outside typed startup configuration. |
 
 ## Known Starting Defects
 

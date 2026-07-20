@@ -5,7 +5,7 @@ cd /workspace/kiln
 mkdir -p /tmp/c36
 
 export KILN_W4A16=1
-export KILN_CUDA_GRAPHS=true
+export KILN_MEMORY_CUDA_GRAPHS=true
 
 START=$(date +%s)
 echo "[$(date '+%H:%M:%S')] C36 bench start" | tee -a /tmp/c36.log

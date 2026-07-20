@@ -2454,6 +2454,16 @@ typed configuration to its owner; the environment contract is generated
 mechanically, and repository policy rejects direct production environment
 reads outside the closed driver-remap and credential-provider adapters.
 Internal experiment and qualification flags remain separate from this public
-API rather than being promoted by documentation. Remaining Phase 8 work is
-consolidation of explicit experimental/debug profiles and test-only process
-environment mutation, not another public configuration path.
+API rather than being promoted by documentation.
+
+Repository policy also scans executable and operational source under
+`.github/`, `scripts/`, `capabilities/`, and `desktop/` against the complete
+retirement index. A retired public name in those surfaces fails
+`scripts/check_config_schema.py`; current launchers, training recipes, generated
+corpus examples, and workflow code must use the canonical name and value
+semantics above. Exact-revision material under an `archive/` directory is
+historical evidence rather than a current command. The only non-archive source
+exceptions are two smoke checks that assert retirement behavior and one
+historical benchmark receipt generator that records the command originally
+measured. Those exceptions may mention a retired spelling, but may not use it
+as current runtime configuration.

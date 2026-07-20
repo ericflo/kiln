@@ -114,12 +114,8 @@ use kiln_model::backend::{OpdLossRoute, OpdPhaseBBackwardRoute, TrainingLossBack
 // routes through `KtForwardOp1` (kiln-kt-bridge::forward_op::KtForwardOp1,
 // commit `095f1c74`) over the kt-typed forward
 // (`opd_top_k_reverse_kl_per_position_kt`) and kt-typed backward
-// (`opd_top_k_reverse_kl_phase_b_bwd_kt`). The shim falls back to the
-// candle Phase A reference path when (a) the kill switch
-// `KILN_DISABLE_OPD_KT_FORWARD_OP=1` is set, (b) we're not on CUDA,
-// (c) `top_k` is not 16 or 32, (d) `hidden.dtype()` is not F32 or BF16,
-// or (e) `hidden.dtype() != head_t.dtype()` — so the autograd chain
-// through `mean_kl.backward()` is preserved on every code path.
+// (`opd_top_k_reverse_kl_phase_b_bwd_kt`). The production path now calls the
+// kt forward directly, with route eligibility owned by typed backend policy.
 use kiln_opd_loss_kernel::DEFAULT_CHUNK_SIZE;
 // (#1082) The candle-typed OPD glue (Phase A reference, kt-forward-op
 // shim, kt-tape adapters) was relocated from `kiln-opd-loss-kernel` into

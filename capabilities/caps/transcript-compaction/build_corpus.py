@@ -258,7 +258,7 @@ the teacher takes 22GB of VRAM you're left with ~16GB for the student
 
 user: what's the fix?
 
-agent: Set KILN_STREAMING_PREFILL=1 — there's a tiled GDN forward in
+agent: Set KILN_STREAMING_PREFILL_MODE=enabled — there's a tiled GDN forward in
 `crates/kiln-model/src/forward.rs:gated_deltanet_forward_streaming`
 that bounds peak memory by tile size instead of prompt length. Default
 tile is 8192 tokens which is way more than 400, so it's safe to enable.
@@ -291,7 +291,7 @@ free. Want me to push?
 user: yes please
 
 agent: pushed as commit 1680641c on main. Pull and rebuild, then
-re-run with `KILN_STREAMING_PREFILL=1 KILN_OPD_SAMPLER_SEGMENTS=18`.
+re-run with `KILN_STREAMING_PREFILL_MODE=enabled KILN_OPD_SAMPLER_SEGMENTS=18`.
 
 user: confirmed, that fixed it. now what should rank and epochs be?
 

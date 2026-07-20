@@ -5,7 +5,7 @@ source /root/.kiln-build-env
 export KILN_CUDA_ARCHS=86
 export CARGO_PROFILE_DEV_DEBUG=0
 export KILN_W4A16=0
-export KILN_CUDA_GRAPHS=true
+export KILN_MEMORY_CUDA_GRAPHS=true
 
 cd /workspace/kiln
 mkdir -p docs/archive/phase-c/phase-c40f

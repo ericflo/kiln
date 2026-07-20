@@ -16,10 +16,10 @@ supported public setting.
 
 ## Current baseline
 
-The scanner records **433 direct read call sites** and
+The scanner records **427 direct read call sites** and
 **19 process-mutation call sites**. It can
-statically name **32 distinct literal `KILN_*`
-read names** across **113 call sites**.
+statically name **31 distinct literal `KILN_*`
+read names** across **107 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
@@ -30,7 +30,7 @@ boundary.
 | Credential provider | 1 | 0 | 0 |
 | Experimental/debug migration | 0 | 0 | 0 |
 | Build time/provenance | 326 | 6 | 8 |
-| Test only | 99 | 25 | 11 |
+| Test only | 93 | 24 | 11 |
 
 The counts are call sites, not configuration-field counts. The central typed
 loader deliberately uses a small number of dynamic reads to resolve all public
@@ -74,7 +74,6 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_COMMIT` | Build time/provenance | 2 | `crates/kiln-server/src/execution_provenance.rs`, `crates/kiln-train/src/replay.rs` |
 | `KILN_CONFIG` | Public stable | 2 | `crates/kiln-server/src/config.rs`, `crates/kiln-server/src/logging.rs` |
 | `KILN_CUDA_ARCHS` | Build time/provenance | 8 | `crates/kiln-blas/build.rs`, `crates/kiln-conv1d-kernel/build.rs`, `crates/kiln-flash-attn/build.rs`, `crates/kiln-gdn-kernel/build.rs`, `crates/kiln-marlin-gemm/build.rs`, `crates/kiln-opd-loss-kernel/build.rs`, `crates/kiln-rmsnorm-kernel/build.rs`, `crates/kiln-tensor/build.rs` |
-| `KILN_DISABLE_FUSED_PAGED_DECODE` | Test only | 6 | `crates/kiln-model/src/forward.rs` |
 | `KILN_METAL_LORA_LINEAR_BENCH_ITERS` | Test only | 2 | `crates/kiln-model/src/forward.rs` |
 | `KILN_METAL_LORA_LINEAR_BENCH_WARMUP` | Test only | 2 | `crates/kiln-model/src/forward.rs` |
 | `KILN_METAL_LORA_QKV_LINEAR_BENCH_ITERS` | Test only | 1 | `crates/kiln-model/src/forward.rs` |

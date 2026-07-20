@@ -14058,9 +14058,8 @@ fn gated_deltanet_forward_decode_if_inner(
         // Fast paths: Metal/CUDA/ROCm default to fused F32->BF16 kernels for
         // supported bf16 tensors. These collapse the l2-normalize(Q) + scale(Q) +
         // l2-normalize(K) + dtype-cast chain (~11 candle launches on tiny per-row
-        // tensors at decode shape) into a single launch. CUDA/ROCm can be forced
-        // back to the candle parity path with `KILN_DISABLE_FUSED_L2_QK_NORM=1`
-        // or the GDN decode-specific disable flags.
+        // tensors at decode shape) into a single launch. Backend route profiles
+        // own the accelerated/fallback selection for the process lifetime.
         //
         // Both paths produce bf16 outputs in `input_dtype`; only the kernel
         // path skips the F32 round-trip through HBM. The candle path is the
@@ -28424,10 +28423,6 @@ mod tests {
         let Some(device) = crate::backend::metal::try_new_metal() else {
             return Ok(());
         };
-        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok() {
-            eprintln!("fused paged decode disabled; skipping batched contiguous decode test");
-            return Ok(());
-        }
         // kt parallel to `device` for `PagedKvCache::new_kt` call sites
         // below — the kt twin lets the constructor call drop the
         // candle::DType + &candle::Device names. (#1082)
@@ -28563,10 +28558,6 @@ mod tests {
         let Some(device) = crate::backend::metal::try_new_metal() else {
             return Ok(());
         };
-        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok() {
-            eprintln!("fused paged decode disabled; skipping batched contiguous transformer test");
-            return Ok(());
-        }
         // kt parallel to `device` for `PagedKvCache::new_kt` (#1082).
         let device_kt = device; // #1082: `device` is already kt
 
@@ -28729,10 +28720,6 @@ mod tests {
         let Some(device) = crate::backend::metal::try_new_metal() else {
             return Ok(());
         };
-        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok() {
-            eprintln!("fused paged decode disabled; skipping batched contiguous model test");
-            return Ok(());
-        }
         // kt parallel to `device` for `PagedKvCache::new_kt` (#1082).
         let device_kt = device; // #1082: `device` is already kt
 
@@ -28895,10 +28882,6 @@ mod tests {
                 return Ok(());
             }
         };
-        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok() {
-            eprintln!("fused paged decode disabled; skipping dyn_seqlen batched test");
-            return Ok(());
-        }
         // #1082: `device` is now a kt `Device` (from `new_cuda_device`), so the
         // kt cache constructor takes it directly and the backend dispatch goes
         // through the kt entry point.
@@ -29674,10 +29657,6 @@ mod tests {
                 return Ok(());
             }
         };
-        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok() {
-            eprintln!("fused paged decode disabled; skipping bs=1 CUDA-graph parity test");
-            return Ok(());
-        }
         // #1082: `device` is a kt `Device`; the kt cache constructor takes
         // it directly and the backend dispatch goes through the kt entry point.
         let device_kt = device;
@@ -29932,10 +29911,6 @@ mod tests {
         let Some(device) = crate::backend::metal::try_new_metal() else {
             return Ok(());
         };
-        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok() {
-            eprintln!("fused paged decode disabled; skipping batched hybrid model test");
-            return Ok(());
-        }
         // kt parallel to `device` for `PagedKvCache::new_kt` (#1082).
         let device_kt = device; // #1082: `device` is already kt
 

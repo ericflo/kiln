@@ -953,19 +953,6 @@
     },
     {
       "api": "var",
-      "argument": "KILN_DISABLE_FUSED_PAGED_DECODE",
-      "argument_kind": "literal",
-      "classification": "test_only",
-      "classification_basis": "unit-test source surface",
-      "count": 6,
-      "language": "rust",
-      "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
-      "phase": "runtime",
-      "surface": "unit-test"
-    },
-    {
-      "api": "var",
       "argument": "KILN_METAL_LORA_LINEAR_BENCH_ITERS",
       "argument_kind": "literal",
       "classification": "test_only",
@@ -2876,15 +2863,15 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 113,
-    "literal_kiln_read_names": 32,
+    "literal_kiln_read_call_sites": 107,
+    "literal_kiln_read_names": 31,
     "literal_kiln_read_names_by_classification": {
       "build_time": 6,
       "credential_provider": 0,
       "experimental_debug": 0,
       "public_stable": 1,
       "startup_safety": 0,
-      "test_only": 25
+      "test_only": 24
     },
     "process_mutation_call_sites": 19,
     "process_mutation_call_sites_by_classification": {
@@ -2896,15 +2883,15 @@
       "test_only": 11
     },
     "process_mutation_entries": 16,
-    "read_call_sites": 433,
+    "read_call_sites": 427,
     "read_call_sites_by_classification": {
       "build_time": 326,
       "credential_provider": 1,
       "experimental_debug": 0,
       "public_stable": 6,
       "startup_safety": 1,
-      "test_only": 99
+      "test_only": 93
     },
-    "read_entries": 204
+    "read_entries": 203
   }
 }

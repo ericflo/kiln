@@ -9,7 +9,7 @@ ADAPTER_NAME="pi-faithful-iter5-sft-strict"
 # 1. Restart kiln serve fresh
 echo "=== restart kiln serve ==="
 export KILN_MODEL_PATH=/workspace/Qwen3.5-4B
-export KILN_ADAPTER_DIR=/workspace/adapters
+export KILN_MODEL_ADAPTER_DIR=/workspace/adapters
 nohup /workspace/kiln/target/release/kiln serve --eval-mode > /workspace/iter5-kiln-serve.log 2>&1 &
 echo "pid: $!"
 for i in $(seq 1 120); do

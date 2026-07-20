@@ -199,7 +199,7 @@ def main():
     ap.add_argument("--thinking", default=PI_THINKING,
                     help="Optional Pi thinking level. Empty means use the "
                          "server/provider default; for Qwen3.5 local runs the "
-                         "Kiln KILN_DEFAULT_THINKING_ENABLED env var is the "
+                         "Kiln KILN_SERVER_DEFAULT_THINKING_ENABLED env var is the "
                          "effective on/off control.")
     ap.add_argument("--max-wall-clock-s", type=int, default=120)
     ap.add_argument("--parallel", type=int, default=1,
