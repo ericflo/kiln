@@ -37,6 +37,7 @@ mod operators;
 pub mod ops;
 pub mod probe;
 pub mod profile;
+pub mod prompt_logprobs;
 pub mod safetensors;
 mod shape;
 mod storage;
@@ -107,6 +108,7 @@ pub use error::{Error, Result};
 pub use layout::Layout;
 pub use method_api::{ArangeScalar, D, Dim};
 pub use probe::{cuda_is_available, metal_is_available};
+pub use prompt_logprobs::{DevicePromptLogprobCandidate, DevicePromptLogprobRow};
 pub use shape::Shape;
 pub use storage::{CpuStorage, Storage, StorageBackend, cpu_zeros};
 pub use stream_planner::{StreamId, StreamPlanner, StreamRecord};
@@ -140,12 +142,13 @@ pub use cuda_storage::{
     cuda_index_select_axis_n, cuda_index_select_dim0, cuda_is_finite, cuda_l2norm_last_axis,
     cuda_layernorm_last_axis, cuda_lerp, cuda_log_softmax_last_axis,
     cuda_log_softmax_last_axis_f32, cuda_masked_fill, cuda_max_axis, cuda_mean_axis,
-    cuda_mean_last_axis, cuda_mem_get_info, cuda_min_axis, cuda_rmsnorm_last_axis, cuda_rope,
-    cuda_rope_split_half, cuda_scalar_op, cuda_scatter_add_dim0, cuda_set_pool_release_threshold,
-    cuda_slice_set_dim0, cuda_softmax_last_axis, cuda_sum_axis, cuda_sum_last_axis,
-    cuda_sum_squared_last_axis, cuda_synchronize_default_stream, cuda_to_host_copy,
-    cuda_topk_last_axis, cuda_trim_pool, cuda_where_select, cuda_write_host_in_place,
-    cuda_zeros_ctx, host_to_cuda_copy, host_to_cuda_copy_ctx, primary_cuda_context,
+    cuda_mean_last_axis, cuda_mem_get_info, cuda_min_axis, cuda_prompt_logprobs,
+    cuda_rmsnorm_last_axis, cuda_rope, cuda_rope_split_half, cuda_scalar_op, cuda_scatter_add_dim0,
+    cuda_set_pool_release_threshold, cuda_slice_set_dim0, cuda_softmax_last_axis, cuda_sum_axis,
+    cuda_sum_last_axis, cuda_sum_squared_last_axis, cuda_synchronize_default_stream,
+    cuda_to_host_copy, cuda_topk_last_axis, cuda_trim_pool, cuda_where_select,
+    cuda_write_host_in_place, cuda_zeros_ctx, host_to_cuda_copy, host_to_cuda_copy_ctx,
+    primary_cuda_context,
 };
 #[cfg(feature = "cuda")]
 pub use cuda_stream_priority::{

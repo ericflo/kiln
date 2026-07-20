@@ -4396,9 +4396,10 @@ const fn completion_add_special_tokens_default() -> bool {
 /// accepted; candidate output is capped at 65,536 entries; and real scoring is
 /// serialized under exclusive GPU admission. `model` must match the served
 /// base model, and an active LoRA is rejected until an adapter content revision
-/// can be pinned in the request and response identity. The current scorer still
-/// reads full vocabulary rows to the host (O(TV)); a selected-only O(TK) device
-/// kernel remains an explicit performance gate.
+/// can be pinned in the request and response identity. CUDA and ROCm validate
+/// and select on device, transferring only O(TK) compact results. Vulkan,
+/// Metal, and CPU retain the correctness-first O(TV) host fallback within the
+/// same 64 MiB / 32-row projection-chunk bound.
 ///
 /// Token display is fail closed: an unknown token ID or decoder failure returns
 /// `tokenization_error` instead of a successful response containing an empty
@@ -4947,6 +4948,93 @@ fn select_prompt_logprobs_from_validated_rows(
     Ok(CompactPromptLogprobSelection { entries })
 }
 
+fn select_prompt_logprobs_from_device_row(
+    row: &kiln_tensor::DevicePromptLogprobRow,
+    expected_vocab_size: usize,
+    observed_token_id: TokenId,
+    top_k: usize,
+) -> Result<CompactPromptLogprobSelection, ApiError> {
+    if top_k > expected_vocab_size {
+        return Err(ApiError::generation_failed(anyhow::anyhow!(
+            "requested {top_k} prompt-logprob candidates from a vocabulary row with width {expected_vocab_size}"
+        )));
+    }
+    if observed_token_id as usize >= expected_vocab_size {
+        return Err(ApiError::generation_failed(anyhow::anyhow!(
+            "observed prompt token id {observed_token_id} was outside vocabulary row width {expected_vocab_size}"
+        )));
+    }
+    if row.candidates.len() != top_k {
+        return Err(ApiError::generation_failed(anyhow::anyhow!(
+            "device prompt-logprob selection returned {} candidates instead of {top_k}",
+            row.candidates.len()
+        )));
+    }
+    if !row.observed_logit.is_finite() || !row.observed_logprob.is_finite() {
+        return Err(ApiError::generation_failed(anyhow::anyhow!(
+            "device prompt-logprob selection returned non-finite observed values"
+        )));
+    }
+    if !(1..=expected_vocab_size).contains(&row.observed_full_rank) {
+        return Err(ApiError::generation_failed(anyhow::anyhow!(
+            "device prompt-logprob observed rank {} was outside 1..={expected_vocab_size}",
+            row.observed_full_rank
+        )));
+    }
+
+    let observed_top_rank = row
+        .candidates
+        .iter()
+        .position(|candidate| candidate.token_id == observed_token_id)
+        .map(|rank| rank + 1);
+    if let Some(rank) = observed_top_rank {
+        let candidate = &row.candidates[rank - 1];
+        if candidate.logit != row.observed_logit || candidate.logprob != row.observed_logprob {
+            return Err(ApiError::generation_failed(anyhow::anyhow!(
+                "device prompt-logprob observed candidate disagreed with observed row statistics"
+            )));
+        }
+    }
+
+    let observed_rank = observed_top_rank.unwrap_or(row.observed_full_rank);
+    let mut entries = Vec::with_capacity(top_k + usize::from(observed_top_rank.is_none()));
+    entries.push(CompactPromptLogprobEntry {
+        token_id: observed_token_id,
+        logprob: row.observed_logprob,
+        rank: observed_rank,
+    });
+    for (rank, candidate) in row.candidates.iter().enumerate() {
+        if candidate.token_id as usize >= expected_vocab_size {
+            return Err(ApiError::generation_failed(anyhow::anyhow!(
+                "device prompt-logprob candidate token id {} was outside vocabulary row width {expected_vocab_size}",
+                candidate.token_id
+            )));
+        }
+        if !candidate.logit.is_finite() || !candidate.logprob.is_finite() {
+            return Err(ApiError::generation_failed(anyhow::anyhow!(
+                "device prompt-logprob candidate at rank {} was non-finite",
+                rank + 1
+            )));
+        }
+        if candidate.token_id != observed_token_id {
+            entries.push(CompactPromptLogprobEntry {
+                token_id: candidate.token_id,
+                logprob: candidate.logprob,
+                rank: rank + 1,
+            });
+        }
+    }
+
+    let expected_len = top_k + usize::from(observed_top_rank.is_none());
+    if entries.len() != expected_len {
+        return Err(ApiError::generation_failed(anyhow::anyhow!(
+            "device prompt-logprob selection returned {} distinct candidates instead of {expected_len}",
+            entries.len()
+        )));
+    }
+    Ok(CompactPromptLogprobSelection { entries })
+}
+
 fn prompt_logprob_map_from_selection(
     state: &AppState,
     selection: &CompactPromptLogprobSelection,
@@ -5242,11 +5330,19 @@ fn score_real_prompt_logprob_rows(
     expected_vocab_size: usize,
     top_k: usize,
     cancel: &CancelHandle,
+    metrics: &crate::metrics::Metrics,
     ownership: &mut PromptLogprobWorkerOwnership,
 ) -> anyhow::Result<Vec<CompactPromptLogprobSelection>> {
     runner.ensure_backend_healthy()?;
     if runner.active_lora().is_some() {
         anyhow::bail!("prompt-logprobs active adapter changed after base-model admission");
+    }
+    if prompt_tokens.len() != scored_tokens.len().saturating_add(1) {
+        anyhow::bail!(
+            "prompt-logprobs prompt/scored token counts {}/{} did not preserve the causal one-row offset",
+            prompt_tokens.len(),
+            scored_tokens.len()
+        );
     }
 
     let device = runner.weights.device_kt();
@@ -5339,118 +5435,165 @@ fn score_real_prompt_logprob_rows(
             );
         }
 
-        // Selection and full rank use original logits. F32 log-softmax
-        // values can collapse distinct far-tail logits after the LSE
-        // subtraction, so ranking the rendered values is not equivalent.
-        // Vulkan's log-softmax is host-backed; keep that result on CPU
-        // instead of bouncing it back to the device and immediately out.
-        let host_logit_rows = if matches!(logits.device(), kiln_tensor::Device::Vulkan(_)) {
-            ownership.cpu_logits = Some(
-                logits
-                    .to_device(kiln_tensor::Device::Cpu)
-                    .context("prompt-logprobs Vulkan logits to host")?,
-            );
-            ownership.logits_2d = Some(
-                ownership
-                    .cpu_logits
-                    .as_ref()
-                    .context("prompt-logprobs CPU logits owner missing")?
-                    .squeeze(0)
-                    .context("prompt-logprobs squeeze CPU logits batch dim")?,
-            );
-            let host_rows = prompt_logprob_tensor_rows_to_f32(
-                ownership
-                    .logits_2d
-                    .as_ref()
-                    .context("prompt-logprobs logits view owner missing")?,
-            )?;
-            ownership.log_probs = Some(
-                kiln_tensor::ops::log_softmax_last_dim_f32(
+        ownership.logits_2d = Some(
+            logits
+                .squeeze(0)
+                .context("prompt-logprobs squeeze logits batch dim")?,
+        );
+        let observed_token_ids = &prompt_tokens[chunk_start + 1..chunk_start + chunk_len + 1];
+        let logits_2d = ownership
+            .logits_2d
+            .as_ref()
+            .context("prompt-logprobs logits view owner missing")?;
+        let device_rows: Option<Vec<kiln_tensor::DevicePromptLogprobRow>> = match logits_2d.device()
+        {
+            #[cfg(feature = "cuda")]
+            kiln_tensor::Device::Cuda(_) => Some(
+                kiln_tensor::cuda_prompt_logprobs(logits_2d, observed_token_ids, top_k)
+                    .context("CUDA compact prompt-logprob selection")?,
+            ),
+            #[cfg(feature = "rocm")]
+            kiln_tensor::Device::Rocm(_) => Some(
+                kiln_tensor::rocm_prompt_logprobs(logits_2d, observed_token_ids, top_k)
+                    .context("ROCm compact prompt-logprob selection")?,
+            ),
+            _ => None,
+        };
+
+        let selection_route;
+        if let Some(device_rows) = device_rows {
+            selection_route = crate::metrics::PromptLogprobSelectionRoute::CompactDevice;
+            if device_rows.len() != chunk_len {
+                anyhow::bail!(
+                    "compact prompt-logprob selection returned {} rows instead of {chunk_len}",
+                    device_rows.len()
+                );
+            }
+            for (chunk_row, row) in device_rows.iter().enumerate() {
+                ensure_prompt_logprob_scoring_active(cancel)?;
+                selections.push(
+                    select_prompt_logprobs_from_device_row(
+                        row,
+                        expected_vocab_size,
+                        observed_token_ids[chunk_row],
+                        top_k,
+                    )
+                    .map_err(|error| anyhow::anyhow!(error.message))?,
+                );
+                validated_row_count += 1;
+            }
+        } else {
+            selection_route = crate::metrics::PromptLogprobSelectionRoute::BoundedHostFallback;
+            // Selection and full rank use original logits. F32 log-softmax
+            // values can collapse distinct far-tail logits after the LSE
+            // subtraction, so ranking the rendered values is not equivalent.
+            // Vulkan's log-softmax is host-backed; keep that result on CPU
+            // instead of bouncing it back to the device and immediately out.
+            let host_logit_rows = if matches!(logits.device(), kiln_tensor::Device::Vulkan(_)) {
+                ownership.cpu_logits = Some(
+                    logits
+                        .to_device(kiln_tensor::Device::Cpu)
+                        .context("prompt-logprobs Vulkan logits to host")?,
+                );
+                ownership.logits_2d = Some(
                     ownership
                         .cpu_logits
                         .as_ref()
-                        .context("prompt-logprobs CPU logits owner missing")?,
-                )
-                .context("prompt-logprobs host log_softmax_last_dim_f32")?,
-            );
-            host_rows
-        } else {
-            ownership.logits_2d = Some(
-                logits
+                        .context("prompt-logprobs CPU logits owner missing")?
+                        .squeeze(0)
+                        .context("prompt-logprobs squeeze CPU logits batch dim")?,
+                );
+                let host_rows = prompt_logprob_tensor_rows_to_f32(
+                    ownership
+                        .logits_2d
+                        .as_ref()
+                        .context("prompt-logprobs logits view owner missing")?,
+                )?;
+                ownership.log_probs = Some(
+                    kiln_tensor::ops::log_softmax_last_dim_f32(
+                        ownership
+                            .cpu_logits
+                            .as_ref()
+                            .context("prompt-logprobs CPU logits owner missing")?,
+                    )
+                    .context("prompt-logprobs host log_softmax_last_dim_f32")?,
+                );
+                host_rows
+            } else {
+                let host_rows = prompt_logprob_tensor_rows_to_f32(
+                    ownership
+                        .logits_2d
+                        .as_ref()
+                        .context("prompt-logprobs logits view owner missing")?,
+                )?;
+                ownership.log_probs = Some(
+                    kiln_tensor::ops::log_softmax_last_dim_f32(logits)
+                        .context("prompt-logprobs log_softmax_last_dim_f32")?,
+                );
+                host_rows
+            };
+            let log_probs = ownership
+                .log_probs
+                .as_ref()
+                .context("prompt-logprobs log-probability owner missing")?;
+            if log_probs.dims() != expected_logits_shape
+                || log_probs.dtype() != kiln_tensor::DType::F32
+            {
+                anyhow::bail!(
+                    "prompt-logprobs F32 log-softmax produced shape {:?} and dtype {:?}; expected {:?} and F32",
+                    log_probs.dims(),
+                    log_probs.dtype(),
+                    expected_logits_shape
+                );
+            }
+            ownership.log_probs_2d = Some(
+                log_probs
                     .squeeze(0)
-                    .context("prompt-logprobs squeeze logits batch dim")?,
+                    .context("prompt-logprobs squeeze log-probability batch dim")?,
             );
-            let host_rows = prompt_logprob_tensor_rows_to_f32(
-                ownership
-                    .logits_2d
-                    .as_ref()
-                    .context("prompt-logprobs logits view owner missing")?,
-            )?;
-            ownership.log_probs = Some(
-                kiln_tensor::ops::log_softmax_last_dim_f32(logits)
-                    .context("prompt-logprobs log_softmax_last_dim_f32")?,
-            );
-            host_rows
-        };
-        let log_probs = ownership
-            .log_probs
-            .as_ref()
-            .context("prompt-logprobs log-probability owner missing")?;
-        if log_probs.dims() != expected_logits_shape || log_probs.dtype() != kiln_tensor::DType::F32
-        {
-            anyhow::bail!(
-                "prompt-logprobs F32 log-softmax produced shape {:?} and dtype {:?}; expected {:?} and F32",
-                log_probs.dims(),
-                log_probs.dtype(),
-                expected_logits_shape
-            );
-        }
-        ownership.log_probs_2d = Some(
-            log_probs
-                .squeeze(0)
-                .context("prompt-logprobs squeeze log-probability batch dim")?,
-        );
-        let host_logprob_rows = ownership
-            .log_probs_2d
-            .as_ref()
-            .context("prompt-logprobs log-probability view owner missing")?
-            .to_vec2::<f32>()
-            .context("prompt-logprobs F32 chunk to host")?;
+            let host_logprob_rows = ownership
+                .log_probs_2d
+                .as_ref()
+                .context("prompt-logprobs log-probability view owner missing")?
+                .to_vec2::<f32>()
+                .context("prompt-logprobs F32 chunk to host")?;
 
-        ensure_prompt_logprob_scoring_active(cancel)?;
-
-        if host_logit_rows.len() != chunk_len || host_logprob_rows.len() != chunk_len {
-            anyhow::bail!(
-                "prompt-logprobs host chunks returned logits/log-probability row counts {}/{} instead of {chunk_len}",
-                host_logit_rows.len(),
-                host_logprob_rows.len()
-            );
-        }
-        for (chunk_row, (logit_row, logprob_row)) in
-            host_logit_rows.iter().zip(&host_logprob_rows).enumerate()
-        {
             ensure_prompt_logprob_scoring_active(cancel)?;
-            let global_row = chunk_start + chunk_row;
-            let validated_logits = validate_prompt_logprob_row(logit_row, expected_vocab_size)
-                .map_err(|error| anyhow::anyhow!(error.message))?;
-            let validated_logprobs = validate_prompt_logprob_row(logprob_row, expected_vocab_size)
-                .map_err(|error| anyhow::anyhow!(error.message))?;
-            selections.push(
-                select_prompt_logprobs_from_validated_rows(
-                    validated_logits,
-                    validated_logprobs,
-                    prompt_tokens[global_row + 1],
-                    top_k,
-                )
-                .map_err(|error| anyhow::anyhow!(error.message))?,
-            );
-            validated_row_count += 1;
+            if host_logit_rows.len() != chunk_len || host_logprob_rows.len() != chunk_len {
+                anyhow::bail!(
+                    "prompt-logprobs host chunks returned logits/log-probability row counts {}/{} instead of {chunk_len}",
+                    host_logit_rows.len(),
+                    host_logprob_rows.len()
+                );
+            }
+            for (chunk_row, (logit_row, logprob_row)) in
+                host_logit_rows.iter().zip(&host_logprob_rows).enumerate()
+            {
+                ensure_prompt_logprob_scoring_active(cancel)?;
+                let global_row = chunk_start + chunk_row;
+                let validated_logits = validate_prompt_logprob_row(logit_row, expected_vocab_size)
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
+                let validated_logprobs =
+                    validate_prompt_logprob_row(logprob_row, expected_vocab_size)
+                        .map_err(|error| anyhow::anyhow!(error.message))?;
+                selections.push(
+                    select_prompt_logprobs_from_validated_rows(
+                        validated_logits,
+                        validated_logprobs,
+                        prompt_tokens[global_row + 1],
+                        top_k,
+                    )
+                    .map_err(|error| anyhow::anyhow!(error.message))?,
+                );
+                validated_row_count += 1;
+            }
         }
         // Host readback proves the requested values are available, but the
         // backend may own auxiliary stream/cache work. Use the repository's
         // explicit external-yield fence before dropping this chunk's device
         // owners and reusing their bounded memory budget.
         runner.synchronize_external_yield("prompt-logprobs projection chunk")?;
+        metrics.record_prompt_logprob_selection(selection_route, chunk_len);
         ownership.clear_completed_chunk();
     }
 
@@ -5509,6 +5652,7 @@ async fn real_prompt_logprobs(
     let expected_vocab_size = state.model_config.vocab_size;
     let cancel_inner = cancel.clone();
     let worker_backend_health = backend_health.clone();
+    let metrics = std::sync::Arc::clone(&state.metrics);
     let handle = tokio::task::spawn_blocking(
         move || -> anyhow::Result<Vec<CompactPromptLogprobSelection>> {
             run_prompt_logprob_worker_with_panic_fence(
@@ -5524,6 +5668,7 @@ async fn real_prompt_logprobs(
                         expected_vocab_size,
                         top_k,
                         &cancel_inner,
+                        &metrics,
                         ownership,
                     );
 
@@ -15386,6 +15531,65 @@ mod tests {
         assert_eq!(extra_tie.len(), 3);
         // Four values are >= token 3's value: token IDs 0, 1, 2, and 3.
         assert_eq!(extra_tie["3"].rank, 4);
+    }
+
+    #[test]
+    fn device_prompt_logprob_selection_preserves_observed_rank_semantics() {
+        let selected_row = kiln_tensor::DevicePromptLogprobRow {
+            row_max: 0.0,
+            log_sum_exp_shifted: 0.5,
+            observed_logit: 0.0,
+            observed_logprob: -0.5,
+            observed_full_rank: 4,
+            candidates: vec![
+                kiln_tensor::DevicePromptLogprobCandidate {
+                    token_id: 0,
+                    logit: 0.0,
+                    logprob: -0.5,
+                },
+                kiln_tensor::DevicePromptLogprobCandidate {
+                    token_id: 1,
+                    logit: 0.0,
+                    logprob: -0.5,
+                },
+            ],
+        };
+        let selected = select_prompt_logprobs_from_device_row(&selected_row, 5, 1, 2).unwrap();
+        assert_eq!(selected.entries.len(), 2);
+        assert_eq!(selected.entries[0].token_id, 1);
+        assert_eq!(selected.entries[0].rank, 2);
+
+        let extra_row = kiln_tensor::DevicePromptLogprobRow {
+            observed_logit: -0.25,
+            observed_logprob: -0.75,
+            observed_full_rank: 4,
+            ..selected_row
+        };
+        let extra = select_prompt_logprobs_from_device_row(&extra_row, 5, 3, 2).unwrap();
+        assert_eq!(extra.entries.len(), 3);
+        assert_eq!(extra.entries[0].token_id, 3);
+        assert_eq!(extra.entries[0].rank, 4);
+        assert_eq!(extra.entries[1].rank, 1);
+        assert_eq!(extra.entries[2].rank, 2);
+    }
+
+    #[test]
+    fn device_prompt_logprob_selection_fails_closed_on_observed_disagreement() {
+        let row = kiln_tensor::DevicePromptLogprobRow {
+            row_max: 0.0,
+            log_sum_exp_shifted: 0.5,
+            observed_logit: 0.0,
+            observed_logprob: -0.5,
+            observed_full_rank: 1,
+            candidates: vec![kiln_tensor::DevicePromptLogprobCandidate {
+                token_id: 2,
+                logit: 0.0,
+                logprob: -0.75,
+            }],
+        };
+        let error = select_prompt_logprobs_from_device_row(&row, 4, 2, 1).unwrap_err();
+        assert_eq!(error.code, "generation_error");
+        assert!(error.message.contains("disagreed"));
     }
 
     #[test]

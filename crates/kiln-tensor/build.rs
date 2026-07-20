@@ -119,6 +119,7 @@ fn build_cuda() {
     build.file(csrc_dir.join("reduce_arbitrary_axis.cu"));
     build.file(csrc_dir.join("argmax_last_axis.cu"));
     build.file(csrc_dir.join("topk_last_axis.cu"));
+    build.file(csrc_dir.join("prompt_logprobs.cu"));
     build.file(csrc_dir.join("masked_fill.cu"));
     build.file(csrc_dir.join("scatter_add.cu"));
     build.file(csrc_dir.join("cross_entropy.cu"));
@@ -300,6 +301,9 @@ fn build_rocm() {
         // reduction uses 32-lane subgroups explicitly (warp_id=tid/32,
         // shfl offset<=16), so it is wave32/64-correct as-is.
         "topk_last_axis.cu",
+        // Compact prompt-logprob selection: wave-size-agnostic shared-memory
+        // reductions, exhaustive finite checks, and O(TK) host transfer.
+        "prompt_logprobs.cu",
         // R.5b — FP8 (E4M3FN) KV-cache quantize/dequantize. Pure elementwise
         // bit math (portable f32<->e4m3 encode/decode, no hardware-fp8
         // intrinsics, no cross-lane reduction) → hipcc-clean + wave-agnostic.

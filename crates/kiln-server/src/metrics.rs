@@ -76,6 +76,31 @@ const THINKING_BUDGET_OUTCOMES: [&str; 9] = [
     "unresolved",
 ];
 
+/// Closed prompt-logprob scoring routes exposed through Prometheus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromptLogprobSelectionRoute {
+    CompactDevice,
+    BoundedHostFallback,
+}
+
+impl PromptLogprobSelectionRoute {
+    const ALL: [Self; 2] = [Self::CompactDevice, Self::BoundedHostFallback];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::CompactDevice => 0,
+            Self::BoundedHostFallback => 1,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::CompactDevice => "compact_device",
+            Self::BoundedHostFallback => "bounded_host_fallback",
+        }
+    }
+}
+
 const LATENCY_PHASES: [&str; 20] = [
     "actor_queue",
     "actor_admission",
@@ -178,6 +203,9 @@ pub struct Metrics {
     thinking_budget_time_limit_sum_ms: AtomicU64,
     thinking_budget_time_limit_buckets: [AtomicU64; THINKING_BUDGET_TIME_BUCKETS_MS.len() + 1],
 
+    prompt_logprob_selection_chunks: [AtomicU64; PromptLogprobSelectionRoute::ALL.len()],
+    prompt_logprob_selection_rows: [AtomicU64; PromptLogprobSelectionRoute::ALL.len()],
+
     // Training counters
     pub training_sft_completed: AtomicU64,
     pub training_sft_failed: AtomicU64,
@@ -223,6 +251,8 @@ impl Metrics {
             thinking_budget_time_limit_count: AtomicU64::new(0),
             thinking_budget_time_limit_sum_ms: AtomicU64::new(0),
             thinking_budget_time_limit_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            prompt_logprob_selection_chunks: std::array::from_fn(|_| AtomicU64::new(0)),
+            prompt_logprob_selection_rows: std::array::from_fn(|_| AtomicU64::new(0)),
             training_sft_completed: AtomicU64::new(0),
             training_sft_failed: AtomicU64::new(0),
             training_sft_cancelled: AtomicU64::new(0),
@@ -243,6 +273,18 @@ impl Metrics {
             RequestStatus::Timeout => self.requests_timeout.fetch_add(1, Ordering::Relaxed),
             RequestStatus::Rejected => self.requests_rejected.fetch_add(1, Ordering::Relaxed),
         };
+    }
+
+    /// Record one fully settled prompt-logprob projection chunk.
+    pub(crate) fn record_prompt_logprob_selection(
+        &self,
+        route: PromptLogprobSelectionRoute,
+        rows: usize,
+    ) {
+        let index = route.index();
+        self.prompt_logprob_selection_chunks[index].fetch_add(1, Ordering::Relaxed);
+        self.prompt_logprob_selection_rows[index]
+            .fetch_add(u64::try_from(rows).unwrap_or(u64::MAX), Ordering::Relaxed);
     }
 
     /// Record a completed request duration in seconds.
@@ -409,6 +451,28 @@ impl Metrics {
             "ok",
             self.requests_ok.load(Ordering::Relaxed),
         );
+
+        out.push_str("# HELP kiln_prompt_logprob_selection_chunks_total Completed prompt-logprob projection chunks by selection route.\n");
+        out.push_str("# TYPE kiln_prompt_logprob_selection_chunks_total counter\n");
+        out.push_str("# HELP kiln_prompt_logprob_selection_rows_total Completed prompt-logprob rows by selection route.\n");
+        out.push_str("# TYPE kiln_prompt_logprob_selection_rows_total counter\n");
+        for route in PromptLogprobSelectionRoute::ALL {
+            let index = route.index();
+            prom_counter(
+                &mut out,
+                "kiln_prompt_logprob_selection_chunks_total",
+                "route",
+                route.as_str(),
+                self.prompt_logprob_selection_chunks[index].load(Ordering::Relaxed),
+            );
+            prom_counter(
+                &mut out,
+                "kiln_prompt_logprob_selection_rows_total",
+                "route",
+                route.as_str(),
+                self.prompt_logprob_selection_rows[index].load(Ordering::Relaxed),
+            );
+        }
 
         out.push_str("# HELP kiln_backend_quarantined Whether inference is disabled because backend completion became unknown.\n");
         out.push_str("# TYPE kiln_backend_quarantined gauge\n");
@@ -3600,6 +3664,9 @@ mod tests {
         m.inc_request(RequestStatus::Ok);
         m.inc_request(RequestStatus::Ok);
         m.inc_request(RequestStatus::Error);
+        m.record_prompt_logprob_selection(PromptLogprobSelectionRoute::CompactDevice, 32);
+        m.record_prompt_logprob_selection(PromptLogprobSelectionRoute::CompactDevice, 2);
+        m.record_prompt_logprob_selection(PromptLogprobSelectionRoute::BoundedHostFallback, 7);
         m.observe_duration(0.5);
         m.observe_prefill_duration(0.25);
         m.observe_decode_duration(0.75);
@@ -4044,6 +4111,20 @@ mod tests {
 
         assert!(output.contains("kiln_requests_total{status=\"ok\"} 2"));
         assert!(output.contains("kiln_requests_total{status=\"error\"} 1"));
+        assert!(
+            output
+                .contains("kiln_prompt_logprob_selection_chunks_total{route=\"compact_device\"} 2")
+        );
+        assert!(
+            output
+                .contains("kiln_prompt_logprob_selection_rows_total{route=\"compact_device\"} 34")
+        );
+        assert!(output.contains(
+            "kiln_prompt_logprob_selection_chunks_total{route=\"bounded_host_fallback\"} 1"
+        ));
+        assert!(output.contains(
+            "kiln_prompt_logprob_selection_rows_total{route=\"bounded_host_fallback\"} 7"
+        ));
         assert!(output.contains("kiln_tokens_generated_total 100"));
         assert!(output.contains("kiln_active_requests 1"));
         assert!(output.contains("kiln_active_requests_peak 2"));

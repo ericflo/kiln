@@ -1467,9 +1467,23 @@ function validateSftLossRouteDocumentationSourceContract() {
     'before_slow_start_after_first_token',
     'first producer-ready token',
     '256-token pressure peer',
+    '36 fixed bytes plus 12 bytes per requested candidate',
+    'device-to-host transfer and host work are O(TK)',
+    'kernel still scans all V logits',
+    "observed token's exact full-vocabulary rank",
+    'ascending token-ID tie breaking',
+    'same cancellation, external-yield settlement, and backend-quarantine boundary',
+    'serialized teacher query, not a high-throughput generation route',
+    'kiln_prompt_logprob_selection_chunks_total',
+    'kiln_prompt_logprob_selection_rows_total',
+    'compact_device',
+    'bounded_host_fallback',
   ]);
   if (missingApiTerms.length > 0) {
     fail(`docs/site/api.html: SFT v4 versus GRPO/OPD v3 checkpoint wording missing terms: ${missingApiTerms.join(', ')}`);
+  }
+  if (apiText.includes('current path performs correctness-first o(tv) host readback')) {
+    fail('docs/site/api.html: remove the stale blanket O(TV) prompt-logprob claim');
   }
   const missingApiTrainingAnchors = expectedApiTrainingAnchors
     .filter((anchor) => !apiHtml.includes(`id="${anchor}"`));

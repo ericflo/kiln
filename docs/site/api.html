@@ -1906,8 +1906,19 @@ kiln serve --config kiln.toml</code></pre>
           Every response carries a canonical teacher identity whose inference-contract v2 hash binds the complete
           startup-resolved streaming-prefill policy. Changing mode, threshold, any tile, or final-tile LM-head
           behavior changes the teacher revision and invalidates identity-bound logit caches and OPD resume bindings.
-          The current path performs correctness-first O(TV) host readback rather than vLLM's selected-only O(TK)
-          transfer path.
+          CUDA and ROCm validate every logit and derived F32 log-probability on device, compute stable
+          normalization and the observed token's exact full-vocabulary rank, and select top K from original
+          logits with ascending token-ID tie breaking. Each row transfers 36 fixed bytes plus 12 bytes per
+          requested candidate, so device-to-host transfer and host work are O(TK); the kernel still scans all
+          V logits to retain exhaustive validation and exact semantics. Vulkan, Metal, and CPU retain the
+          correctness-first O(TV) host fallback inside the same 64 MiB and 32-row projection-chunk bounds.
+          Both routes use the same cancellation, external-yield settlement, and backend-quarantine boundary.
+          Route selection follows the compiled backend and has no tuning variable. Prompt scoring remains a
+          serialized teacher query, not a high-throughput generation route. Prometheus exposes only settled
+          chunks and rows through
+          <code>kiln_prompt_logprob_selection_chunks_total</code> and
+          <code>kiln_prompt_logprob_selection_rows_total</code>, labeled with the closed routes
+          <code>compact_device</code> and <code>bounded_host_fallback</code>.
         </p>
         <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>{
   "prompt": [1, 42, 314],

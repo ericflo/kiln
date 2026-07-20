@@ -1797,6 +1797,22 @@ last-token LM-head behavior. Changing any of these fields therefore changes
 identity-bound logit-cache key. A deployment must re-register the teacher and
 must not resume an OPD checkpoint pinned to the previous revision.
 
+Prompt-logprob selection has no environment variable or runtime tuning field.
+CUDA and ROCm deterministically use the compact device route: each chunk stays
+resident while the device checks every original logit and every derived F32
+log-probability, computes stable normalization and the observed token's exact
+full rank, and selects top K from original logits with token-ID tie breaking.
+Only 36 fixed bytes plus 12 bytes per requested candidate per scored row cross
+to the host, so transfer and host work are O(TK). Vulkan, Metal, and CPU use the
+bounded host fallback and therefore perform O(TV) host transfer/work. Both
+routes retain the 64 MiB projection budget and 32-row maximum chunk size, the
+same exclusive accelerator admission, cancellation settlement, and backend
+quarantine behavior. Operators can verify the resolved runtime route from the
+fixed-cardinality Prometheus counters
+`kiln_prompt_logprob_selection_chunks_total{route=...}` and
+`kiln_prompt_logprob_selection_rows_total{route=...}`; the only route labels
+are `compact_device` and `bounded_host_fallback`.
+
 `GET /v1/config` exposes the complete resolved object at
 `streaming_prefill`. Health repeats it at
 `prefill_runtime.streaming_prefill`, and trusted debug exposes it at top-level

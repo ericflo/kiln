@@ -739,6 +739,19 @@ microcode, loaded numerical-library mappings, and accelerator/driver evidence.
 External probes have a five-second deadline, bounded output, process-group
 cleanup, and explicit missing/timeout markers in the digest.
 
+CUDA and ROCm keep each projected vocabulary chunk resident and return only
+the observed-token statistics plus K `(logit, token_id)` pairs per row. Device
+to host transfer and host selection work are O(TK): 36 fixed bytes plus 12
+bytes per requested candidate per scored row. The device still scans every
+vocabulary value to preserve exhaustive finite-value validation, stable F32
+normalization, exact full rank, and original-logit ordering. Vulkan, Metal, and
+CPU use the correctness-first O(TV) host fallback; it remains bounded to 64 MiB
+and at most 32 projected rows per chunk. Route choice follows the compiled
+backend and has no tuning variable. `/metrics` reports completed chunks and
+rows through `kiln_prompt_logprob_selection_chunks_total` and
+`kiln_prompt_logprob_selection_rows_total`, with the closed `route` values
+`compact_device` and `bounded_host_fallback`.
+
 Before parsing weights, Kiln creates a private read-only checkpoint snapshot and
 loads only from that snapshot. Linux reflink and macOS clonefile make this
 copy-on-write when the filesystem supports it; otherwise startup performs a
@@ -899,10 +912,9 @@ scorer explicitly settles backend work before recycling each projection chunk
 or releasing admission; a failed or panicked settlement quarantines the
 backend and retains ownership instead of admitting work against an unknown GPU
 state. Timeouts and dropped requests signal cancellation, and timeout responses
-wait for worker settlement. The
-current correctness-first implementation still reads each scored vocabulary
-row to the host, so its transfer work is O(TV), not vLLM's selected-only O(TK)
-path; use it for bounded teacher queries rather than high-throughput serving.
+wait for worker settlement. Prompt-logprob scoring remains a serialized teacher
+query rather than a high-throughput generation endpoint even when compact
+selection removes the CUDA/ROCm vocabulary-wide host transfer.
 
 Backend quarantine is process-wide and irreversible. Once completion cannot be
 proven, `/health` becomes `503 degraded` with

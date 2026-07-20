@@ -2776,8 +2776,7 @@ async fn test_real_model_prompt_logprobs_timeout_drains_started_scorer() {
     assert_eq!(settlement.failures, 0);
 }
 
-#[tokio::test]
-async fn test_real_model_prompt_logprobs_match_full_forward_reference() {
+async fn assert_real_model_prompt_logprobs_match_full_forward_reference(device: Device) {
     const TOP_K: usize = 2;
     // The production scorer projects 32 normalized-hidden rows at a time.
     // Crossing that boundary proves the real no-head/chunked-LM-head path,
@@ -2785,7 +2784,6 @@ async fn test_real_model_prompt_logprobs_match_full_forward_reference() {
     const PROMPT_LEN: usize = 35;
 
     let config = tiny_config();
-    let device = Device::Cpu;
     let weights = tiny_weights(&config, &device);
     let reference_weights = weights.clone();
 
@@ -2973,7 +2971,7 @@ async fn test_real_model_prompt_logprobs_match_full_forward_reference() {
             .to_string(),
         ))
         .unwrap();
-    let response = app.oneshot(request).await.unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
     let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
@@ -3008,6 +3006,71 @@ async fn test_real_model_prompt_logprobs_match_full_forward_reference() {
         .expect("real prompt scoring must publish its backend settlement boundary");
     assert_eq!(settlement.calls, 2);
     assert_eq!(settlement.failures, 0);
+
+    let metrics_response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("query prompt-logprob route metrics");
+    assert_eq!(metrics_response.status(), StatusCode::OK);
+    let metrics_body = axum::body::to_bytes(metrics_response.into_body(), usize::MAX)
+        .await
+        .expect("read prompt-logprob route metrics");
+    let metrics_text = String::from_utf8(metrics_body.to_vec()).expect("metrics are UTF-8");
+    let route = match device {
+        Device::Cuda(_) | Device::Rocm(_) => "compact_device",
+        _ => "bounded_host_fallback",
+    };
+    assert!(
+        metrics_text.contains(&format!(
+            "kiln_prompt_logprob_selection_chunks_total{{route=\"{route}\"}} 4"
+        )),
+        "missing completed route chunks in metrics:\n{metrics_text}"
+    );
+    assert!(
+        metrics_text.contains(&format!(
+            "kiln_prompt_logprob_selection_rows_total{{route=\"{route}\"}} 68"
+        )),
+        "missing completed route rows in metrics:\n{metrics_text}"
+    );
+}
+
+#[tokio::test]
+async fn test_real_model_prompt_logprobs_match_full_forward_reference() {
+    assert_real_model_prompt_logprobs_match_full_forward_reference(Device::Cpu).await;
+}
+
+#[cfg(feature = "rocm")]
+#[tokio::test]
+async fn test_real_rocm_prompt_logprobs_match_full_forward_reference() {
+    if !kiln_tensor::rocm_is_available() {
+        assert!(
+            !qualification_enabled(),
+            "ROCm device unavailable while KILN_QUALIFICATION=1"
+        );
+        eprintln!("no ROCm device available; skipping prompt-logprob endpoint parity");
+        return;
+    }
+    assert_real_model_prompt_logprobs_match_full_forward_reference(Device::Rocm(0)).await;
+}
+
+#[cfg(feature = "vulkan")]
+#[tokio::test]
+async fn test_real_vulkan_prompt_logprobs_match_full_forward_reference() {
+    if !kiln_model::backend::vulkan::vulkan_is_available() {
+        assert!(
+            !qualification_enabled(),
+            "Vulkan device unavailable while KILN_QUALIFICATION=1"
+        );
+        eprintln!("no Vulkan device available; skipping prompt-logprob endpoint parity");
+        return;
+    }
+    assert_real_model_prompt_logprobs_match_full_forward_reference(Device::Vulkan(0)).await;
 }
 
 #[tokio::test]
