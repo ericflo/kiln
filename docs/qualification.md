@@ -1761,6 +1761,18 @@ unforced and zero, and no process or snapshot remained. The rejected receipt
 does not qualify the soak; batching drain publication must remain conservative
 through terminal resource cleanup before a clean-source rerun.
 
+The correction keeps the last public batching snapshot conservative across both
+normal `finish_request` and error/cancellation `discard_request` cleanup. The
+actor still removes the row from its private scheduling vector before cleanup,
+so it cannot be scheduled twice, but it does not publish that removal until the
+model boundary has released graph, recurrent-state, prefix, and private-KV
+ownership. Deterministic blocked-cleanup tests require `active_decode=1` with an
+otherwise empty actor during each boundary and zero only afterward. A complete
+1,091-test server library run, all 652 qualification-tooling tests, and bounded
+ROCm/gfx1151 and Vulkan all-target checks pass. This is portable causal evidence;
+the failed receipt remains rejected and the exact pushed correction still needs
+the full device soak.
+
 Five measured-window metrics close the cooperative-idle evidence. The configured
 gauge is `batching_actor_cycle_idle_ms_configured`. The monotonic count and
 elapsed-time deltas are `batching_actor_cycle_idle_count` and

@@ -4403,7 +4403,10 @@ impl BatchingEngineActor {
         let active = self.active.remove(idx);
         let key = active.delivery_key;
         let sequence = active.next_delivery_sequence;
-        self.refresh_snapshot();
+        // Keep the last published snapshot conservative until model-owned
+        // graph, recurrent-state, prefix, and KV resources are released by
+        // finish_request. Publishing the now-empty scheduling vector here can
+        // expose a false drained window to health readers.
         let terminal = match self.forward.finish_request(active.slot, finish_reason) {
             Ok(output) => {
                 let completion_tokens = completion_usage_tokens(
@@ -4443,7 +4446,9 @@ impl BatchingEngineActor {
         let active = self.active.remove(idx);
         let key = active.delivery_key;
         let sequence = active.next_delivery_sequence;
-        self.refresh_snapshot();
+        // discard_request is the terminal resource-ownership boundary. Leave
+        // the removed row visible in the last published snapshot until that
+        // cleanup completes.
         self.forward.discard_request(active.slot);
         self.submit_terminal_delivery(
             key,
@@ -5922,6 +5927,63 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum TerminalCleanupMode {
+        Finish,
+        Discard,
+    }
+
+    struct GatedTerminalForward {
+        inner: MockForward,
+        mode: TerminalCleanupMode,
+        started: std::sync::mpsc::Sender<()>,
+        release: StdMutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl GatedTerminalForward {
+        fn wait_if(&self, mode: TerminalCleanupMode) {
+            if self.mode == mode {
+                let _ = self.started.send(());
+                self.release.lock().unwrap().recv().ok();
+            }
+        }
+    }
+
+    impl DecodeForward for GatedTerminalForward {
+        fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
+            self.inner.prepare_request(req)
+        }
+
+        fn forward_decode(
+            &self,
+            slots: &mut [&mut DecodeSlot],
+            sampling: &[SamplingParams],
+        ) -> Result<Vec<TokenId>> {
+            if self.mode == TerminalCleanupMode::Discard {
+                anyhow::bail!("synthetic decode failure")
+            }
+            self.inner.forward_decode(slots, sampling)
+        }
+
+        fn accept_token(&self, slot: &mut DecodeSlot, token: TokenId) -> Result<usize> {
+            self.inner.accept_token(slot, token)
+        }
+
+        fn finish_request(
+            &self,
+            slot: DecodeSlot,
+            finish_reason: FinishReason,
+        ) -> Result<DecodeForwardOutput> {
+            self.wait_if(TerminalCleanupMode::Finish);
+            self.inner.finish_request(slot, finish_reason)
+        }
+
+        fn discard_request(&self, slot: DecodeSlot) {
+            self.wait_if(TerminalCleanupMode::Discard);
+            self.inner.discard_request(slot);
+        }
+    }
+
     #[tokio::test]
     async fn cached_snapshot_remains_immediate_during_blocked_forward() {
         let events: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
@@ -5990,6 +6052,58 @@ mod tests {
             }
         }
         handle.stop().await.unwrap();
+    }
+
+    async fn assert_terminal_cleanup_remains_active(mode: TerminalCleanupMode) {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let forward = Arc::new(GatedTerminalForward {
+            inner: MockForward::default(),
+            mode,
+            started: started_tx,
+            release: StdMutex::new(release_rx),
+        });
+        let handle = BatchingEngineHandle::start_with_options(forward, 1);
+        let mut response = handle.enqueue(request(100, 1)).await.unwrap();
+
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("request did not enter terminal model cleanup");
+        let during_cleanup = handle.cached_snapshot();
+        assert_eq!(during_cleanup.active_decode, 1, "{during_cleanup:?}");
+        assert_eq!(during_cleanup.active_prefill, 0, "{during_cleanup:?}");
+        assert_eq!(during_cleanup.queue_depth, 0, "{during_cleanup:?}");
+
+        release_tx.send(()).unwrap();
+        let terminal = loop {
+            match response.recv().await {
+                Some(EngineEvent::Done { .. }) => break Ok(()),
+                Some(EngineEvent::Error(error)) => break Err(error),
+                Some(EngineEvent::Token { .. }) => {}
+                None => panic!("engine closed before terminal delivery"),
+            }
+        };
+        match mode {
+            TerminalCleanupMode::Finish => assert_eq!(terminal, Ok(())),
+            TerminalCleanupMode::Discard => assert!(
+                terminal
+                    .expect_err("discard cleanup must terminate with an error")
+                    .contains("synthetic decode failure")
+            ),
+        }
+        let drained = handle.snapshot().await.unwrap();
+        assert_eq!(drained.active_decode, 0, "{drained:?}");
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_finish_remains_active_until_resource_cleanup_completes() {
+        assert_terminal_cleanup_remains_active(TerminalCleanupMode::Finish).await;
+    }
+
+    #[tokio::test]
+    async fn terminal_discard_remains_active_until_resource_cleanup_completes() {
+        assert_terminal_cleanup_remains_active(TerminalCleanupMode::Discard).await;
     }
 
     #[tokio::test]

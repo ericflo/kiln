@@ -1224,6 +1224,15 @@ kiln_rocm_graph_fallback_duration_seconds_max</code></pre>
           sampled requests while every cache metric stayed zero; the historical failed receipt remains published
           so the correction is auditable rather than overwritten.
         </p>
+        <h3 id="conservative-terminal-drain" class="text-lg font-semibold mt-6 mb-2">Conservative terminal drain</h3>
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          Batching health keeps a terminal row publicly active until normal finish or error/cancellation discard
+          has released its graph owner, recurrent-state lease, prefix-cache ownership, and private KV blocks.
+          The row has already left the private scheduling vector and cannot run again, but its removal is not
+          published until model cleanup returns and terminal delivery is queued. A zero-active health snapshot is
+          therefore a resource-ownership boundary, not merely an empty scheduling queue; graph, cache, and block
+          drain assertions cannot race terminal cleanup.
+        </p>
         <h3 id="vulkan-prefix-cache" class="text-lg font-semibold mt-6 mb-2">Vulkan cross-request prefix reuse</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           Production currently correctness-quarantines the complete Vulkan prefix cache. A guarded fresh-process

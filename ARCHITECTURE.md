@@ -218,6 +218,18 @@ layer quanta. This is required for hybrid GDN models: a resumable chunk boundary
 is also a recurrent-state precision boundary, so coupling it to a storage
 toggle can change greedy output without any cache hit.
 
+### Conservative Terminal Drain
+
+The batching engine's public `active_decode` and related drain gauges cover
+terminal model cleanup, not only membership in the actor's scheduling vector.
+A row remains visible in the last published snapshot while `finish_request` or
+`discard_request` releases its graph owner, recurrent-state lease, prefix-cache
+ownership, and private KV blocks. Only after that cleanup returns does the actor
+publish the row's removal and queue terminal delivery. This makes a zero-active
+health snapshot a resource-ownership boundary: graph, cache, and block-pool
+drain assertions cannot race a row that is no longer schedulable but is still
+being finalized.
+
 ### VRAM Budget
 
 At startup, Kiln detects GPU memory via the active backend (overridable with
