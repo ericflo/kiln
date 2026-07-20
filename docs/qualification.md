@@ -3406,6 +3406,35 @@ particular, measured p99 TTFT was 150,147.60 ms; this is acceptable for the
 current containment/correctness gate but remains an explicit performance
 backlog item rather than a production latency claim.
 
+The current hard-limit-only contract passed again from exact clean pushed source
+`fb5cb029d9fefc13796b9ecdf928062d62445f78`; retain its strict receipt at
+`qualification/receipts/vulkan/strix-halo/20260720t105341024462z-vulkan-strix-halo-serving-vulkan-developme-b5eb848d54-v1.json`.
+Six stabilization cycles completed 30 exact responses and ended with two flat
+allocator/DRM boundaries. Measurement then completed 55 exact responses, 880
+tokens, 22 waves, and five cancellations over 1,935.219 seconds at 0.455
+aggregate output tokens/second. P50/p99/p99.9 ITL was
+76.721/1,768.377/1,798.398 ms; all 228 outliers were attributed and none were
+unexplained. P50/p99 TTFT was 83.194/150.588 seconds, which remains an explicit
+performance failure relative to the product's competitive ambitions even
+though the development safety gate passed.
+
+Measured process DRM began and ended at exactly 53,687,603,200 bytes with only
+a 98,304-byte peak delta. Live Vulkan ownership and 3,527,540,736 retained pool
+bytes were byte-identical at the boundaries. There were zero measured
+allocations, frees, cache misses, evictions, or uncached allocations and
+917,184 cache hits. RSS grew 1,224,704 bytes, host availability stayed above
+20,761,858,048 bytes, and swap did not grow. The resident path completed 1,606
+forwards over 3,212 row-forwards at width two with zero decline or failure and
+drained all active rows. The batched-state cache recorded 2,668 exact reuses and
+ended with its reusable entry resident but no active lease. Request, batching,
+device, non-finite, synchronization, KV/cache ownership, worker, shutdown, and
+snapshot failures were all zero. Hard-limit-only containment produced no pacing
+event or guard trip, package temperature peaked at 89.75 C, cooldown completed,
+and shutdown was unforced and zero. This flat allocator trace does not support
+mid-inference VRAM rebalancing as the cause of the long request phases. It
+qualifies the current 30-minute development gate, not final eight-hour endurance
+or vLLM parity.
+
 At the drained warmup baseline and after each of the at most eight Vulkan
 stabilization cycles, the driver also reads `/proc/<pid>/smaps`. This is bounded
 diagnostic work, not a hot-loop sampler. Every mapping must contain Linux's

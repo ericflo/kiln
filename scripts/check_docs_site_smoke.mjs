@@ -1399,6 +1399,18 @@ function validateSftLossRouteDocumentationSourceContract() {
     fail(`docs/site/troubleshooting.html: Strix Halo qualification safety contract missing terms: ${missingRocmSafetyTerms.join(', ')}`);
   }
 
+  const missingVulkanQualificationTerms = missingNormalizedTerms(troubleshootingText, [
+    '55 requests and 880 output tokens over 1,935.219 measured seconds',
+    '0.455 aggregate output tokens/second',
+    '150.588-second p99 TTFT',
+    'contradicts a mid-inference VRAM-rebalance explanation',
+    'does not make the latency or throughput acceptable',
+    'final eight-hour common-source endurance run',
+  ]);
+  if (missingVulkanQualificationTerms.length > 0) {
+    fail(`docs/site/troubleshooting.html: current Vulkan qualification evidence missing terms: ${missingVulkanQualificationTerms.join(', ')}`);
+  }
+
   const apiHtml = readFileSync(resolve(repoRoot, 'docs/site/api.html'), 'utf8');
   const apiText = normalizedHtmlText(apiHtml);
   const missingApiTerms = missingNormalizedTerms(apiText, [
