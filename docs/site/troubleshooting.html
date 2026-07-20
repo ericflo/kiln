@@ -458,13 +458,14 @@ curl -s http://localhost:8420/metrics \
         <h3 id="rocm-decode-width-selection" class="text-lg font-semibold mt-6 mb-2">ROCm decode-width selection</h3>
         <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
           Use the committed width campaign as a bounded, offline autotuner, not a live response to a pause.
-          It runs widths 2, 4, and 8 serially against one source-built release binary, with a fresh server
-          process and completed cooldown for every arm under a 97 C package-temperature guard. Every candidate
+          It reruns the accepted width-4 control, then tests widths 6 and 8 serially against one source-built
+          release binary, with a fresh server process and completed cooldown for every arm under a 97 C
+          package-temperature guard. Width 2 is excluded after a retained slower route/outlier rejection. Every candidate
           must complete 1,312 fixed deterministic output tokens, sampled traffic, and the post-sampling canary;
           the fused W8A8 sampled LM-head route reaches the same width, and graph capture/replay must remain
           correct. The selector maximizes the minimum of the deterministic and sampled throughput ratios,
           rejects an arm when peak GPU allocation grows by more than 1 GiB or bounded tail latency regresses,
-          and chooses the narrowest width within 2% of the best score. Promotion above width 2 also requires a
+          and chooses the narrowest width within 2% of the best score. Promotion above width 4 also requires a
           material gain plus a new exact-source soak and benchmark.
         </p>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">

@@ -2795,8 +2795,11 @@ the final cooperative wait.
 
 Do not raise `server.max_decode_batch` from a single throughput sample. The
 committed `serving-rocm-decode-width-campaign-v1` workload is the bounded,
-offline autotuner for the current Strix Halo ROCm profile. It tests widths 2,
-4, and 8 in ascending order against one source-built release binary. Each arm
+offline autotuner for the current Strix Halo ROCm profile. It reruns the
+accepted width-4 control, then tests primitive-supported widths 6 and 8 in
+ascending order against one source-built release binary. Width 2 is excluded:
+its retained rejection was roughly 30% slower than width 4 and failed the
+deterministic argmax-route coverage and non-thermal ITL gates. Each arm
 gets a fresh server process, private adapter/snapshot directories, the same
 typed configuration apart from the derived decode/staging/active widths, a
 97 C package-temperature guard, and a completed cooldown before the next arm.
@@ -2828,13 +2831,16 @@ rather than interpreting a crash or partial measurement as evidence for the
 last smaller width.
 
 Among correctness-qualified arms, the selector scores the minimum of the
-deterministic and sampled throughput ratios relative to width 2. A wider arm
+deterministic and sampled throughput ratios relative to the freshly rerun
+width-4 control. A wider arm
 is ineligible when p99 ITL, TTFT, or end-to-end latency regresses more than 25%,
 or when peak GPU allocation grows by more than 1 GiB. The narrowest width
-within 2% of the best score wins, and promotion above width 2 additionally
+within 2% of the best score wins, and promotion above width 4 additionally
 requires at least a 3% minimum-throughput gain. The receipt exposes every
 candidate's throughput, tail latency, exact observed widths, graph activity,
-fused-sampling activity, peak memory, temperature, and failure counts. Its
+deterministic argmax dispatch/row coverage, fused-sampling activity, peak
+memory, temperature/guard/pacing counts, and attributed/unexplained outlier
+counts. Its
 bounded `details` value records one short selected/rejected summary per arm;
 it does not treat raw console logs as the experiment verdict.
 

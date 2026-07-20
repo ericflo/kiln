@@ -35,6 +35,7 @@ def candidate_values(
         {
             "output_token_throughput_per_second": deterministic,
             "sampled_profile_output_token_throughput_per_second": sampled,
+            "completion_token_count": 1,
             "itl_ms_p99": tail,
             "ttft_ms_p99": tail,
             "e2e_latency_ms_p99": tail,
@@ -44,6 +45,8 @@ def candidate_values(
             "sampled_profile_rocm_w8_lm_head_max_batch_rows_end": width,
             "graph_measured_capture_success_count": 1,
             "graph_measured_replay_success_count": 1,
+            "rocm_w8_lm_head_argmax_dispatch_count": 1,
+            "rocm_w8_lm_head_argmax_row_count": 1,
             "sampled_profile_rocm_w8_lm_head_sample_dispatch_count": 1,
             "sampled_profile_rocm_w8_lm_head_sample_row_count": 1,
             "peak_gpu_memory_used_bytes": memory,
@@ -79,7 +82,7 @@ def outcome(
 
 class DecodeWidthCampaignTests(unittest.TestCase):
     def test_candidate_configs_derive_active_and_staging_widths(self) -> None:
-        expected = {2: (2, 4), 4: (4, 8), 8: (4, 12)}
+        expected = {4: (4, 8), 6: (4, 10), 8: (4, 12)}
         for width, (staging, active) in expected.items():
             with self.subTest(width=width):
                 config = campaign.candidate_config(width)
@@ -96,32 +99,36 @@ class DecodeWidthCampaignTests(unittest.TestCase):
         values["sampled_profile_rocm_w8_lm_head_max_batch_rows_end"] = 2
         reasons = campaign.correctness_reasons(4, values, None)
         self.assertTrue(any("max_batch_rows_end" in reason for reason in reasons))
+        values["sampled_profile_rocm_w8_lm_head_max_batch_rows_end"] = 4
+        values["rocm_w8_lm_head_argmax_row_count"] = 0
+        reasons = campaign.correctness_reasons(4, values, None)
+        self.assertTrue(any("below completion_token_count" in reason for reason in reasons))
 
     def test_selection_uses_minimum_throughput_ratio_and_narrow_tie(self) -> None:
         outcomes = [
-            outcome(2, deterministic=10.0, sampled=10.0),
-            outcome(4, deterministic=15.0, sampled=14.8),
+            outcome(4, deterministic=10.0, sampled=10.0),
+            outcome(6, deterministic=15.0, sampled=14.8),
             outcome(8, deterministic=15.2, sampled=15.0),
         ]
         selected = campaign.select_candidate(outcomes)
-        self.assertEqual(selected.width, 4)
+        self.assertEqual(selected.width, 6)
         self.assertTrue(selected.selected)
         self.assertAlmostEqual(selected.score_ratio, 1.48)
 
     def test_selection_rejects_tail_regression(self) -> None:
         outcomes = [
-            outcome(2, deterministic=10.0, sampled=10.0),
-            outcome(4, deterministic=14.0, sampled=14.0),
+            outcome(4, deterministic=10.0, sampled=10.0),
+            outcome(6, deterministic=14.0, sampled=14.0),
             outcome(8, deterministic=18.0, sampled=18.0, tail=130.0),
         ]
         selected = campaign.select_candidate(outcomes)
-        self.assertEqual(selected.width, 4)
+        self.assertEqual(selected.width, 6)
         self.assertTrue(outcomes[2].performance_reasons)
 
     def test_selection_fails_closed_on_correctness_failure(self) -> None:
         outcomes = [
-            outcome(2, deterministic=10.0, sampled=10.0),
-            outcome(4, deterministic=14.0, sampled=14.0),
+            outcome(4, deterministic=10.0, sampled=10.0),
+            outcome(6, deterministic=14.0, sampled=14.0),
             outcome(8, deterministic=18.0, sampled=18.0),
         ]
         outcomes[2].correctness_reasons.append("graph replay failed")
@@ -132,8 +139,8 @@ class DecodeWidthCampaignTests(unittest.TestCase):
         names = campaign.declared_metric_names()
         self.assertEqual(names, sorted(set(names)))
         outcomes = [
-            outcome(2, deterministic=10.0, sampled=10.0),
-            outcome(4, deterministic=14.0, sampled=14.0),
+            outcome(4, deterministic=10.0, sampled=10.0),
+            outcome(6, deterministic=14.0, sampled=14.0),
             outcome(8, deterministic=15.0, sampled=15.0),
         ]
         selected = campaign.select_candidate(outcomes)
@@ -174,7 +181,7 @@ class DecodeWidthCampaignTests(unittest.TestCase):
 
         build.assert_called_once()
         self.assertEqual(execute.call_count, len(campaign.CANDIDATE_WIDTHS))
-        self.assertEqual([item.width for item in outcomes], [2, 4, 8])
+        self.assertEqual([item.width for item in outcomes], [4, 6, 8])
         self.assertEqual(selected.width, 8)
         self.assertGreaterEqual(build_seconds, 0.0)
 
@@ -200,7 +207,7 @@ class DecodeWidthCampaignTests(unittest.TestCase):
                 {"name": name, "value": value}
                 for name, value in values.items()
             ]
-            return metrics, "synthetic width failure" if width == 4 else None
+            return metrics, "synthetic width failure" if width == 6 else None
 
         with mock.patch.object(
             campaign.mixed,
@@ -216,7 +223,7 @@ class DecodeWidthCampaignTests(unittest.TestCase):
 
         self.assertEqual(execute.call_count, 2)
         self.assertEqual(
-            [item.width for item in raised.exception.outcomes], [2, 4, 8]
+            [item.width for item in raised.exception.outcomes], [4, 6, 8]
         )
         self.assertTrue(raised.exception.outcomes[2].not_run)
 

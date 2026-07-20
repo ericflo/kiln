@@ -21,7 +21,7 @@ CASE_ID = "rocm-decode-width-campaign"
 RESULT_ENV = "KILN_QUALIFICATION_CASE_RESULT"
 VARIANT_ENV = "KILN_QUALIFICATION_VARIANT_ID"
 VARIANT_ID = "rocm"
-CANDIDATE_WIDTHS = (2, 4, 8)
+CANDIDATE_WIDTHS = (4, 6, 8)
 BASELINE_WIDTH = CANDIDATE_WIDTHS[0]
 THROUGHPUT_TIE_PERCENT = 2.0
 MIN_PROMOTION_IMPROVEMENT_PERCENT = 3.0
@@ -29,6 +29,12 @@ MAX_TAIL_REGRESSION_PERCENT = 25.0
 MAX_PEAK_GPU_MEMORY_GROWTH_BYTES = 1 << 30
 
 SOURCE_METRICS: tuple[tuple[str, str], ...] = (
+    ("deterministic_completion_token_count", "completion_token_count"),
+    (
+        "deterministic_argmax_dispatch_count",
+        "rocm_w8_lm_head_argmax_dispatch_count",
+    ),
+    ("deterministic_argmax_row_count", "rocm_w8_lm_head_argmax_row_count"),
     ("deterministic_output_tokens_per_second", "output_token_throughput_per_second"),
     ("sampled_output_tokens_per_second", "sampled_profile_output_token_throughput_per_second"),
     ("itl_ms_p99", "itl_ms_p99"),
@@ -43,6 +49,7 @@ SOURCE_METRICS: tuple[tuple[str, str], ...] = (
     ("graph_capture_failure_count", "graph_measured_capture_failure_count"),
     ("graph_replay_success_count", "graph_measured_replay_success_count"),
     ("graph_replay_failure_count", "graph_measured_replay_failure_count"),
+    ("graph_pre_measurement_failure_count", "graph_pre_measurement_failure_count"),
     (
         "sampled_fused_dispatch_count",
         "sampled_profile_rocm_w8_lm_head_sample_dispatch_count",
@@ -61,7 +68,14 @@ SOURCE_METRICS: tuple[tuple[str, str], ...] = (
     ),
     ("peak_gpu_memory_used_bytes", "peak_gpu_memory_used_bytes"),
     ("host_temperature_peak_millicelsius", "host_temperature_peak_millicelsius"),
+    ("host_thermal_guard_error_count", "host_thermal_guard_error_count"),
+    ("host_thermal_guard_trip_count", "host_thermal_guard_trip_count"),
+    ("host_thermal_pacing_event_count", "host_thermal_pacing_event_count"),
     ("request_failure_count", "request_failure_count"),
+    (
+        "non_thermal_itl_outlier_count",
+        "non_thermal_attributed_itl_outlier_count",
+    ),
     ("unexplained_itl_outlier_count", "unexplained_itl_outlier_count"),
     ("external_yield_sync_failure_count", "external_yield_sync_failure_count"),
 )
@@ -175,7 +189,7 @@ def effective_config() -> dict[str, Any]:
             ),
             "objective": (
                 "maximize the minimum deterministic/sample throughput ratio "
-                "to width 2, then choose the narrowest width within the tie band"
+                "to width 4, then choose the narrowest width within the tie band"
             ),
             "throughput_tie_percent": THROUGHPUT_TIE_PERCENT,
         },
@@ -233,6 +247,11 @@ def correctness_reasons(
         "external_yield_sync_failure_count",
         "graph_measured_capture_failure_count",
         "graph_measured_replay_failure_count",
+        "graph_pre_measurement_failure_count",
+        "host_thermal_guard_error_count",
+        "host_thermal_guard_trip_count",
+        "host_thermal_pacing_event_count",
+        "non_thermal_attributed_itl_outlier_count",
         "request_failure_count",
         "sampled_profile_request_failure_count",
         "sampled_profile_rocm_w8_lm_head_dispatch_failure_count",
@@ -244,6 +263,8 @@ def correctness_reasons(
             reasons.append(f"{field}={values.get(field)!r}, expected 0")
     positive_fields = (
         "graph_measured_replay_success_count",
+        "rocm_w8_lm_head_argmax_dispatch_count",
+        "rocm_w8_lm_head_argmax_row_count",
         "sampled_profile_rocm_w8_lm_head_sample_dispatch_count",
         "sampled_profile_rocm_w8_lm_head_sample_row_count",
     )
@@ -255,6 +276,13 @@ def correctness_reasons(
     capture_successes += values.get("graph_measured_capture_success_count", 0)
     if capture_successes <= 0:
         reasons.append("graph capture recorded no successful warmup or measured event")
+    argmax_rows = values.get("rocm_w8_lm_head_argmax_row_count", 0)
+    completion_tokens = values.get("completion_token_count", 0)
+    if argmax_rows < completion_tokens:
+        reasons.append(
+            "rocm_w8_lm_head_argmax_row_count="
+            f"{argmax_rows!r}, below completion_token_count={completion_tokens!r}"
+        )
     return reasons
 
 
