@@ -120,7 +120,7 @@
       "slug": "benchmarks",
       "title": "Benchmarks",
       "section": "serving",
-      "description": "Serving acceptance methodology, reproducibility requirements, and measured results."
+      "description": "Current ROCm and Vulkan receipts, the measured Kiln service envelope, explicit vLLM high-concurrency guidance, and the serving acceptance methodology."
     },
     {
       "source": "qualification/schema/host-thermal-policy-v1.schema.json",

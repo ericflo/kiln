@@ -18,14 +18,14 @@
   <meta property="og:title" content="Kiln — your model gets better every time you use it">
   <meta property="og:description" content="A pure-Rust single-GPU inference server with live LoRA training. OpenAI-compatible API, hot-swap adapters, and SFT, GRPO, and OPD over HTTP.">
   <meta property="og:url" content="https://ericflo.github.io/kiln/">
-  <meta property="og:image" content="https://ericflo.github.io/kiln/assets/og-image.png">
+  <meta property="og:image" content="https://ericflo.github.io/kiln/assets/og-image-v2.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Kiln — pure-Rust single-GPU inference + live LoRA training. OpenAI-compatible. 44.75 tok/s decode on Qwen3.5-4B (A6000).">
+  <meta property="og:image:alt" content="Kiln — pure-Rust single-GPU inference, live LoRA training, and local evals. Current ROCm and Vulkan stability status with vLLM recommended for high concurrency.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Kiln — your model gets better every time you use it">
   <meta name="twitter:description" content="A pure-Rust single-GPU inference server with live LoRA training. OpenAI-compatible API, hot-swap adapters, and SFT, GRPO, and OPD over HTTP.">
-  <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image.png">
+  <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image-v2.png">
 
   <link rel="preload" as="font" type="font/woff2" href="fonts/Inter-400.woff2" crossorigin>
   <link rel="preload" as="font" type="font/woff2" href="fonts/Inter-600.woff2" crossorigin>
@@ -105,7 +105,7 @@
           <p class="hero-lede">
             Kiln is a pure-Rust, single-GPU inference server with live LoRA training <em>and</em> evals built in.
             Drop-in OpenAI API. Hot-swap adapters. <strong>SFT, GRPO, and a local eval loop over HTTP</strong> —
-            no frontier-LLM judge required. Tuned for Qwen3.5-4B on a single NVIDIA RTX A6000.
+            no frontier-LLM judge required. Built for local Qwen3.5-4B workflows on one GPU.
           </p>
           <div class="hero-cta">
             <a class="btn btn-primary btn-lg" href="quickstart.html">Quickstart</a>
@@ -273,29 +273,29 @@ console.log(resp.choices[0].message.content);</code></pre>
       </div>
     </section>
 
-    <section class="section section--tight" aria-label="A6000 benchmarks">
+    <section class="section section--tight" aria-label="Current hardware qualification and performance position">
       <div class="page">
         <div class="stat-grid">
           <div class="stat-cell">
-            <div class="stat-value">44.75 <span class="stat-unit">tok/s</span></div>
-            <div class="stat-label">Decode (median)</div>
+            <div class="stat-value">14.27 <span class="stat-unit">tok/s</span></div>
+            <div class="stat-label">ROCm mixed soak</div>
           </div>
           <div class="stat-cell">
-            <div class="stat-value">22.35 <span class="stat-unit">ms</span></div>
-            <div class="stat-label">Mean ITL</div>
+            <div class="stat-value">30 <span class="stat-unit">min</span></div>
+            <div class="stat-label">ROCm gate passed</div>
           </div>
           <div class="stat-cell">
-            <div class="stat-value">27.33 <span class="stat-unit">ms</span></div>
-            <div class="stat-label">P99 ITL</div>
+            <div class="stat-value">0.455 <span class="stat-unit">tok/s</span></div>
+            <div class="stat-label">Vulkan, stability only</div>
           </div>
           <div class="stat-cell">
-            <div class="stat-value">~10 <span class="stat-unit">GB</span></div>
-            <div class="stat-label">Peak VRAM</div>
+            <div class="stat-value">vLLM</div>
+            <div class="stat-label">Preferred at high concurrency</div>
           </div>
         </div>
         <p class="stat-foot">
-          Qwen3.5-4B · 512 → 128 tokens · A6000 sm_86 · KILN_W4A16=1, CUDA graphs on · median-of-3, range Δ&nbsp;1.8%.
-          <a href="https://github.com/ericflo/kiln/blob/main/BENCHMARKS.md">See full benchmarks →</a>
+          Current source-bound Strix Halo Qwen3.5-4B development receipts. ROCm passed stability at 14.268 aggregate tok/s; Vulkan passed stability with unacceptable serving performance. Kiln makes no current vLLM parity claim.
+          <a href="docs/benchmarks/">See receipts and limits →</a>
         </p>
       </div>
     </section>

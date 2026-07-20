@@ -5,6 +5,66 @@ the same single-GPU class. The acceptance protocol below is current. Numerical
 tables later in this file predate that protocol and are historical until they
 are replaced by checked-in `kiln.serving-benchmark.v1` receipts.
 
+## Current measured service envelope
+
+As of 2026-07-20, Kiln makes **no high-concurrency performance-parity claim**
+against vLLM on any backend. The promotion threshold is at least `0.90x` vLLM
+SLO-goodput on the same current driver, model, prompt set, request policy,
+hardware, thermal policy, and source revision, with no correctness or tail-
+latency regression. No retained comparison satisfies that threshold today.
+
+Kiln is intentionally positioned for correctness-first local Qwen3.5-4B
+workflows that need serving, adapter changes, SFT/GRPO, and evals in one artifact.
+The measured operating region is external concurrency 1 through 8 with relaxed
+latency requirements; that is a product scope, not a claim that Kiln beats a
+serving-only engine there. Use vLLM for serving-only capacity, strict latency
+SLOs, or external concurrency 8 and above. Vulkan is currently a correctness
+and portability route, not a latency-sensitive serving recommendation.
+
+### Current source-bound receipts
+
+| Backend and gate | Exact measured scope | Result | Product meaning |
+|---|---|---|---|
+| ROCm, Strix Halo development soak | Qwen3.5-4B mixed load; 1,803.201 measured seconds; 804 requests; 25,728 output tokens; maximum eight active requests and decode width four | **Passed** at 14.268 aggregate output tok/s; p50/p99 ITL 189.397/660.015 ms; p50/p99 TTFT 5.060/21.534 s; zero request, graph, device, non-finite, unexplained-outlier, or teardown failures | Accepts the 30-minute ROCm development stability gate only. The final 24-hour endurance gate and vLLM competitiveness remain open. |
+| Vulkan, Strix Halo development soak | Qwen3.5-4B mixed load; 1,935.219 measured seconds; 55 requests; 880 output tokens; maximum resident-prefill width two | **Passed stability, poor performance** at 0.455 aggregate output tok/s; p50/p99 ITL 76.721/1,768.377 ms; p50/p99 TTFT 83.194/150.588 s; zero request, allocation-growth, device, unexplained-outlier, or teardown failures | Accepts Vulkan development stability only. Do not use this result to imply acceptable interactive latency or throughput. |
+
+The exact compact receipts are:
+
+- [ROCm development soak](qualification/receipts/rocm/strix-halo/20260720t095657771585z-rocm-strix-halo-serving-rocm-development-053e89eca9-v1.json), source commit `a130e975f42e7c98a689bc309cea5f1d6eaa9a28`, receipt content `sha256:d8c517f95344049c10f7b3900b055f792a3525da36be3e9ca53d78b80e364fe8`.
+- [Vulkan development soak](qualification/receipts/vulkan/strix-halo/20260720t105341024462z-vulkan-strix-halo-serving-vulkan-developme-b5eb848d54-v1.json), source commit `fb5cb029d9fefc13796b9ecdf928062d62445f78`, receipt content `sha256:bbf4060c4c6173b30db0469bcecabb8d01c905d8ebb6997be9a36c41d72b70e7`.
+
+These soaks do not share a workload with vLLM and must not be divided by a vLLM
+number. They establish sustained behavior for their own source-bound routes.
+
+### What the paired ROCm diagnostic proves
+
+The latest retained same-machine Kiln/vLLM pair used one Qwen3.5-4B
+`greedy-short` prompt set, 64 fixed output tokens, and external concurrency
+1/8/16/32. All 57 requests per engine completed. Kiln measured
+5.914/8.395/7.489/7.118 output tok/s; vLLM measured
+3.723/18.036/34.363/51.585. At concurrency 8 and 32, Kiln therefore delivered
+0.465x and 0.138x vLLM request-window throughput. This is enough to reject a
+high-concurrency competitive claim and recommend vLLM for that use case.
+
+It is **not** an accepted performance comparison. The old process-stop thermal
+policy forced both engines to zero SLO-goodput, and exact greedy outputs diverged
+at every concurrency. Driver v7 localized the c1 divergence to generated token
+index three, after three identical tokens, but did not establish an independent
+winner. Retain both facts: the throughput counterexample guides the conservative
+backend recommendation, while the failed SLO and output gates prohibit quoting
+the ratios as parity evidence.
+
+- [Kiln diagnostic receipt](benchmarks/receipts/rocm/strix-halo/20260718t223203-rocm-strix-halo-greedy-short-c1-32-sourcepair-v1.kiln.json)
+- [vLLM failed-comparison receipt](benchmarks/receipts/rocm/strix-halo/20260718t223203-rocm-strix-halo-greedy-short-c1-32-sourcepair-v1.vllm.json)
+- [Kiln c1 divergence receipt](benchmarks/receipts/rocm/strix-halo/20260718t232632-rocm-strix-halo-greedy-c1-divergence-v1.kiln.json)
+- [vLLM c1 divergence receipt](benchmarks/receipts/rocm/strix-halo/20260718t232632-rocm-strix-halo-greedy-c1-divergence-v1.vllm.json)
+
+The next competitive comparison must use the current driver and current source,
+run without stop/resume inside active request windows, satisfy nonzero declared
+SLO-goodput, and keep correctness qualification separate from throughput mode.
+Until that receipt exists, the public position remains: choose Kiln for its
+integrated local improvement loop; choose vLLM for high-concurrency serving.
+
 ## Current serving acceptance protocol
 
 [`scripts/bench-concurrent-batch.py`](scripts/bench-concurrent-batch.py) is the

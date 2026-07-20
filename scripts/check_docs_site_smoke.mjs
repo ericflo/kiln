@@ -142,6 +142,25 @@ const generatedDocsPages = [
     ],
   },
   {
+    label: 'Benchmarks',
+    path: publishedPath('docs/benchmarks/index.html'),
+    canonical: 'https://ericflo.github.io/kiln/docs/benchmarks/',
+    h1: 'Benchmarks',
+    anchors: ['current-measured-service-envelope', 'current-source-bound-receipts', 'what-the-paired-rocm-diagnostic-proves'],
+    terms: [
+      'no high-concurrency performance-parity claim',
+      'external concurrency 1 through 8',
+      'Use vLLM for serving-only capacity',
+      'ROCm, Strix Halo development soak',
+      '14.268 aggregate output tok/s',
+      'Vulkan, Strix Halo development soak',
+      '0.455 aggregate output tok/s',
+      '0.465x and 0.138x vLLM request-window throughput',
+      'not an accepted performance comparison',
+      'choose vLLM for high-concurrency serving',
+    ],
+  },
+  {
     label: 'Configuration Reference',
     path: publishedPath('docs/configuration/index.html'),
     canonical: 'https://ericflo.github.io/kiln/docs/configuration/',
@@ -1521,6 +1540,57 @@ function validateReadmeMedia() {
   const missingDemoLinks = requiredDemoLinks.filter((link) => !readme.includes(link));
   if (missingDemoLinks.length > 0) {
     fail(`README.md: missing demo/asciicast links: ${missingDemoLinks.join(', ')}`);
+  }
+}
+
+function validateCurrentPerformancePositioning() {
+  const indexPath = resolve(repoRoot, 'docs/site/index.html');
+  const index = readFileSync(indexPath, 'utf8');
+  const requiredTerms = [
+    'Current hardware qualification and performance position',
+    '14.27',
+    'ROCm mixed soak',
+    'Vulkan, stability only',
+    'Preferred at high concurrency',
+    'Kiln makes no current vLLM parity claim',
+    'docs/benchmarks/',
+    'assets/og-image-v2.png',
+  ];
+  const missingTerms = requiredTerms.filter((term) => !index.includes(term));
+  if (missingTerms.length > 0) {
+    fail(`docs/site/index.html: current performance positioning missing terms: ${missingTerms.join(', ')}`);
+  }
+
+  const retiredTerms = [
+    '44.75',
+    'A6000 benchmarks',
+    'KILN_W4A16=1',
+    'assets/og-image.png',
+  ];
+  const presentRetiredTerms = retiredTerms.filter((term) => index.includes(term));
+  if (presentRetiredTerms.length > 0) {
+    fail(`docs/site/index.html: retired performance claims remain: ${presentRetiredTerms.join(', ')}`);
+  }
+
+  const socialAssetPath = resolve(repoRoot, 'docs/site/assets/og-image-v2.png');
+  if (!existsSync(socialAssetPath)) {
+    fail('docs/site/assets/og-image-v2.png: current social preview is missing');
+  }
+  const socialAsset = readFileSync(socialAssetPath);
+  const pngSignature = socialAsset.subarray(0, 8).toString('hex');
+  const width = socialAsset.length >= 24 ? socialAsset.readUInt32BE(16) : 0;
+  const height = socialAsset.length >= 24 ? socialAsset.readUInt32BE(20) : 0;
+  if (pngSignature !== '89504e470d0a1a0a' || width !== 1200 || height !== 630) {
+    fail(`docs/site/assets/og-image-v2.png: expected a 1200x630 PNG, got ${width}x${height}`);
+  }
+
+  const staleSocialReferences = [];
+  for (const sitePage of pages) {
+    const source = readFileSync(resolve(repoRoot, sitePage.path), 'utf8');
+    if (source.includes('assets/og-image.png')) staleSocialReferences.push(sitePage.path);
+  }
+  if (staleSocialReferences.length > 0) {
+    fail(`static site pages still reference the retired social preview: ${staleSocialReferences.join(', ')}`);
   }
 }
 
@@ -3010,6 +3080,7 @@ async function validateGeneratedDocsBrowser(browser) {
 async function runSmoke() {
   validateReadmeStartupBanner();
   validateReadmeMedia();
+  validateCurrentPerformancePositioning();
   validateReadmeColdReaderCoverage();
   validateReadmeImageReferences();
   validateReadmeQuickStartPaths();

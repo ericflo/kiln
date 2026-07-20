@@ -33,6 +33,13 @@ Kiln serves a language model, trains it, and evaluates it on one GPU from one Ru
 
 It targets one model ([Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B)) and optimizes everything for that model — the scheduler, the memory manager, the kernels. This isn't a general-purpose framework. It's a scalpel.
 
+Kiln's current measured service envelope is correctness-first local work at
+external concurrency 1 through 8 with relaxed latency requirements. It makes no
+current performance-parity claim against vLLM; use vLLM for serving-only
+capacity, strict latency SLOs, or concurrency 8 and above. The current ROCm and
+Vulkan development receipts, exact limitations, and historical counterevidence
+are published in [Benchmarks](BENCHMARKS.md#current-measured-service-envelope).
+
 ## Why
 
 Today, improving a deployed model looks like: collect failure examples, format them, upload to a training service, wait hours, download new weights, build a separate eval harness in Python, redeploy, hope. Kiln collapses that into one local binary and artifact set. For the interactive loop below, start the server with the explicit development profile:
