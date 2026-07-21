@@ -1160,7 +1160,7 @@ class ServeMixedLoadTests(unittest.TestCase):
             "cargo_cpu_quota_percent": 50,
             "cargo_execution_mode": "transient-service",
             "cargo_environment_policy": "closed-source-build-v1",
-            "cargo_host_thermal_limit_millicelsius": 97_000,
+            "cargo_host_thermal_limit_millicelsius": 90_000,
             "cargo_host_thermal_poll_milliseconds": 250,
             "cargo_host_thermal_sensor_label": "Tctl",
             "cargo_host_thermal_sensor_name": "k10temp",
@@ -1512,7 +1512,7 @@ class ServeMixedLoadTests(unittest.TestCase):
         )
         self.assertEqual(environment["KILN_CARGO_HOST_THERMAL_SENSOR_LABEL"], "Tctl")
         self.assertEqual(
-            environment["KILN_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS"], "97000"
+            environment["KILN_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS"], "90000"
         )
         self.assertEqual(
             environment["KILN_CARGO_HOST_THERMAL_POLL_MILLISECONDS"], "250"
@@ -1546,7 +1546,7 @@ class ServeMixedLoadTests(unittest.TestCase):
         )
         self.assertEqual(environment["KILN_CARGO_HOST_THERMAL_SENSOR_LABEL"], "Tctl")
         self.assertEqual(
-            environment["KILN_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS"], "97000"
+            environment["KILN_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS"], "90000"
         )
         self.assertEqual(
             environment["KILN_CARGO_HOST_THERMAL_POLL_MILLISECONDS"], "250"
@@ -1561,7 +1561,7 @@ class ServeMixedLoadTests(unittest.TestCase):
                 "cargo_cpu_quota_percent": 50,
                 "cargo_execution_mode": "transient-service",
                 "cargo_environment_policy": "closed-source-build-v1",
-                "cargo_host_thermal_limit_millicelsius": 97_000,
+                "cargo_host_thermal_limit_millicelsius": 90_000,
                 "cargo_host_thermal_poll_milliseconds": 250,
                 "cargo_host_thermal_sensor_label": "Tctl",
                 "cargo_host_thermal_sensor_name": "k10temp",

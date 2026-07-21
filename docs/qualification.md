@@ -93,7 +93,7 @@ aggregate `MemoryMax`, host reserve, zero swap, `PrivateNetwork=yes`,
 control-group kill, a hard runtime cap, and a fail-closed package-temperature
 watchdog. The typed build spec selects exactly one Linux hwmon input by
 `name=k10temp` and `label=Tctl`, polls it every 250 ms, refuses to start at or
-above 97,000 millicelsius, and stops the complete transient service if a later
+above 90,000 millicelsius, and stops the complete transient service if a later
 reading reaches that limit. Missing, ambiguous, unreadable, non-integer, or
 implausible telemetry also prevents or terminates the build. Ordinary ROCm and
 Vulkan build services are capped at 840 seconds with a 900-second caller
@@ -120,7 +120,7 @@ Outside a source-bound workload, `scripts/cargo-bounded.sh` also names every
 ordinary systemd scope and stops that complete unit from its `EXIT` trap, so a
 cancelled terminal or tool client cannot leave Cargo, rustc, or the linker
 running in an orphaned scope. When exactly one `k10temp/Tctl` input exists, the
-wrapper automatically applies the same 97,000-millicelsius, 250 ms guard to
+wrapper automatically applies the same 90,000-millicelsius, 250 ms guard to
 ordinary commands and reports `thermal=automatic:...` in its preamble. A host
 without that exact sensor runs with `thermal=disabled`; qualification source
 builds do not accept that fallback because their four explicit typed fields make
@@ -3488,10 +3488,10 @@ configuration records the sensor name, label, limit, and poll interval, so a
 receipt cannot silently inherit a different sensor or threshold. This guard
 covers model load, native prewarm, warmup, stabilization, measurement, and final
 drain. The preceding source build independently resolves the same stable sensor
-selector and enforces the same threshold and cadence around its complete
-transient compiler/linker service. A build trip exits with status 3, while a
-missing or invalid sensor fails preflight with status 2; neither can be recorded
-as a successful source-bound build.
+selector and enforces a stricter 90,000-millicelsius threshold at the same
+cadence around its complete transient compiler/linker service. A build trip
+exits with status 3, while a missing or invalid sensor fails preflight with
+status 2; neither can be recorded as a successful source-bound build.
 
 Current ROCm and Vulkan serving soaks use this controller in hard-limit-only
 mode. No setup, stabilization, measurement, drain, or teardown path may send
