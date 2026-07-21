@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "max_production_file_lines": 5000,
+  "exceptions": [
+    {
+      "path": "crates/kiln-flash-attn/src/rocm_sdpa.rs",
+      "max_lines": 5328,
+      "rationale": "ROCm SDPA kernel dispatch and capability fencing are still colocated; this exact cap prevents growth pending a backend-owned split."
+    },
+    {
+      "path": "crates/kiln-model/src/backend/metal_msl.rs",
+      "max_lines": 5042,
+      "rationale": "Embedded Metal shader source is generated-style backend material rather than orchestration; its exact physical-line count is nevertheless capped against growth."
+    },
+    {
+      "path": "crates/kiln-model/src/forward.rs",
+      "max_lines": 25995,
+      "rationale": "The Phase 8.3 attention, linear-attention, FFN, norm, cache, dispatch, and training-facing decomposition is active; growth is prohibited meanwhile."
+    },
+    {
+      "path": "crates/kiln-model/src/generate.rs",
+      "max_lines": 12268,
+      "rationale": "The inference state machine still combines prefill, decode, cache, and sampling orchestration; splitting it requires preserving request-lifecycle invariants."
+    },
+    {
+      "path": "crates/kiln-model/src/rocm_graph.rs",
+      "max_lines": 10790,
+      "rationale": "ROCm graph admission, capture, replay, telemetry, and recovery share one safety authority today; this exception is a strict non-growth ceiling."
+    },
+    {
+      "path": "crates/kiln-model/src/vk_decode_resident.rs",
+      "max_lines": 5232,
+      "rationale": "Resident Vulkan decode owns tightly coupled shader state and lifecycle validation; this exact ceiling forbids further consolidation into the file."
+    },
+    {
+      "path": "crates/kiln-server/src/api/training.rs",
+      "max_lines": 6686,
+      "rationale": "The training HTTP surface still combines several method schemas and handlers; the cap prevents growth until those API behaviors receive child modules."
+    },
+    {
+      "path": "crates/kiln-server/src/batching_engine.rs",
+      "max_lines": 8882,
+      "rationale": "The sole production scheduler intentionally owns one state machine, but its policy and resource helpers still need reviewed extraction before this exception can shrink."
+    },
+    {
+      "path": "crates/kiln-server/src/cli.rs",
+      "max_lines": 6317,
+      "rationale": "The command-line product currently centralizes command schemas and dispatch; this non-growth cap requires new command families to use owned modules."
+    },
+    {
+      "path": "crates/kiln-server/src/config.rs",
+      "max_lines": 11362,
+      "rationale": "Typed configuration is deliberately canonical and self-documenting, but parsing, validation, and schema projection must not expand this file beyond the reviewed cap."
+    },
+    {
+      "path": "crates/kiln-server/src/state.rs",
+      "max_lines": 8369,
+      "rationale": "Application state still owns multiple cache and memory authorities; this cap blocks new ownership domains until existing state is split deliberately."
+    },
+    {
+      "path": "crates/kiln-server/src/training_queue.rs",
+      "max_lines": 7826,
+      "rationale": "Training admission, execution, and publication are coupled by transactional invariants; the exception permits no growth while those owners are separated."
+    },
+    {
+      "path": "crates/kiln-server/src/ui/app.js",
+      "max_lines": 12984,
+      "rationale": "The Phase 8.3 browser modularization is active under the existing embedded build; this exact ceiling prevents additional behavior from entering the monolith."
+    },
+    {
+      "path": "crates/kiln-tensor/src/cuda_storage.rs",
+      "max_lines": 6725,
+      "rationale": "CUDA storage and operation dispatch remain coupled to backend resource ownership; this reviewed ceiling prevents further unrelated backend behavior here."
+    },
+    {
+      "path": "crates/kiln-train/src/opd.rs",
+      "max_lines": 8453,
+      "rationale": "On-policy distillation still combines data flow, resume, teacher, and optimization orchestration; this cap forbids growth pending method-owned modules."
+    },
+    {
+      "path": "crates/kiln-train/src/trainer.rs",
+      "max_lines": 16795,
+      "rationale": "The Phase 8.3 data, SFT, GRPO, checkpoint, optimizer, provenance, and oracle decomposition is active; the current count is a strict ceiling."
+    },
+    {
+      "path": "crates/kiln-vulkan-kernel/src/kernels.rs",
+      "max_lines": 11456,
+      "rationale": "This file is the centralized generated-style Vulkan kernel registry and embedded shader source authority; additions must remain within its reviewed ceiling."
+    }
+  ]
+}

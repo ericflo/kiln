@@ -2386,7 +2386,7 @@ portable ownership checkpoint.
   optimizers, provenance, and oracle-test modules.
 - [ ] Split the browser application into maintainable modules using the existing
   build/embedding approach.
-- [ ] Establish a reviewed production-file size budget. Exceptions require a
+- [x] Establish a reviewed production-file size budget. Exceptions require a
   specific rationale, not generated-code-style growth.
 
 Embedded-test extraction checkpoint (2026-07-20): the complete unit suites for
@@ -2462,6 +2462,19 @@ registration. Together with the earlier schema, preparation, streaming,
 generation, batch, prompt-logprob, and adapter modules, every behavior named by
 this checklist item has one explicit owner. All 1,092 server library tests pass
 after the final split.
+
+Production-file budget completed (2026-07-20): the closed, versioned
+`production-file-budget-v1.json` contract sets a 5,000-physical-line default
+for the 580 Rust, JavaScript, and CSS product files under `crates/**/src`, while
+excluding extracted `tests` child trees. Seventeen existing oversized files
+have sorted path-specific entries, exact current non-growth ceilings, and
+concrete ownership rationales. The checker rejects an unlisted oversized file,
+growth past an exception, missing or out-of-scope paths, stale exceptions after
+a successful shrink, duplicate/unsorted paths, unknown policy fields, weak
+rationales, and malformed counts. Six focused regressions cover those states;
+the cheap repository-hygiene workflow runs the checker on every push and pull
+request. The active `forward.rs`, `trainer.rs`, and browser exceptions must be
+reduced or removed by the remaining three behavior-split items.
 
 ### 8.4 Replace verification theater
 

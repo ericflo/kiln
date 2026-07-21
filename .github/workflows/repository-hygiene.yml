@@ -20,3 +20,4 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - run: python3 scripts/check_repository_artifacts.py
+      - run: python3 scripts/check_production_file_budget.py

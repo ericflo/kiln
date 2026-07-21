@@ -38,6 +38,21 @@ Accelerator behavior is accepted only from a non-skipped, source-bound local
 qualification receipt on the named device. Portable tests can reject a change;
 they cannot promote an unexecuted backend claim.
 
+## Production file budget
+
+`contracts/production-file-budget-v1.json` sets a 5,000-physical-line ceiling
+for Rust, JavaScript, and CSS production files under `crates/**/src`. Extracted
+`tests` child trees are excluded because they do not ship in the product.
+`python3 scripts/check_production_file_budget.py` enforces the contract in the
+cheap repository-hygiene workflow.
+
+An oversized file is allowed only as a sorted, path-specific exception with an
+exact non-growth ceiling and a concrete ownership rationale. New unlisted
+oversized files fail. Existing exceptions fail when they grow past their cap,
+disappear, leave production scope, or shrink under the default without having
+their stale exception removed. A split therefore reduces the policy surface;
+it does not silently convert the old size into a permanent allowance.
+
 ## Migration record
 
 The zero baseline replaced or deleted 112 source-text tests. Most were
