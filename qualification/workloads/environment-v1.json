@@ -13,19 +13,6 @@
   },
   "variables": [
     {
-      "name": "host_id",
-      "description": "Stable non-secret identifier for the physical qualification host.",
-      "type": "string",
-      "required": true,
-      "default": null,
-      "constraints": {
-        "allowed_values": [],
-        "minimum": null,
-        "maximum": null,
-        "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
-      }
-    },
-    {
       "name": "output_path",
       "description": "Ignored local path where the environment collector writes its receipt.",
       "type": "string",

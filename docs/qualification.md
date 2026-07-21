@@ -66,6 +66,8 @@ It emits the ordinary outer source-bound qualification receipt and a second
 ignored collector receipt named by `output_path`. The checked-in outer receipt
 owns the verdict; the ignored receipt and raw probe output exist for local
 diagnosis. Use a unique ignored path and never point it into the source tree.
+`${host_id}` is runner-owned and resolves directly from `--host-id`; do not
+repeat it as a workload variable.
 
 Strix Halo ROCm and Vulkan:
 

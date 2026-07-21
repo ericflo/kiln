@@ -430,7 +430,7 @@ def _selected_variable_references(variant: dict[str, Any]) -> set[str]:
     for case in variant["cases"]:
         for value in [*case["command"], *case["environment"].values()]:
             match = placeholder.fullmatch(value)
-            if match and match.group(1) not in {"seed", "model_path"}:
+            if match and match.group(1) not in {"seed", "model_path", "host_id"}:
                 references.add(match.group(1))
     return references
 
@@ -493,6 +493,7 @@ def _resolve_text(
     variables: dict[str, Any],
     seed: int | None,
     model_path: str | None,
+    host_id: str,
 ) -> str:
     match = re.fullmatch(r"\$\{([a-z][a-z0-9_]{1,63}|seed|model_path)\}", value)
     if match is None:
@@ -508,6 +509,8 @@ def _resolve_text(
                 "selected variant references ${model_path}, but --model was not provided"
             )
         return model_path
+    if name == "host_id":
+        return host_id
     if name not in variables:
         raise QualificationRunError(f"workload variable {name!r} has no effective value")
     return _argument_text(variables[name])
@@ -1675,7 +1678,7 @@ def _run_qualification_impl(
             command_result_path = case_directory / "command-result.json"
             normalized_result_path = case_directory / "case-result.json"
             argv = [
-                _resolve_text(item, variables, seed, resolved_model_path)
+                _resolve_text(item, variables, seed, resolved_model_path, host_id)
                 for item in case["command"]
             ]
             executed_argv = [*network_isolation.argv_prefix, *argv]
@@ -1685,7 +1688,9 @@ def _run_qualification_impl(
                     f"case {case['id']!r} working directory is not a directory"
                 )
             overrides = {
-                key: _resolve_text(value, variables, seed, resolved_model_path)
+                key: _resolve_text(
+                    value, variables, seed, resolved_model_path, host_id
+                )
                 for key, value in case["environment"].items()
             }
             process_environment = dict(case_base_environment)

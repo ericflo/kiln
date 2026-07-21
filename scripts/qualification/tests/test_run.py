@@ -381,6 +381,23 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn("CODEX_AUTH_JSON", run_config["case_base_environment"])
         self.assert_valid(outcome, repository.root)
 
+    def test_host_id_placeholder_resolves_from_runner_input(self) -> None:
+        repository = Repository(
+            environment_workload(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; assert sys.argv[1] == 'test-host'",
+                    "${host_id}",
+                ]
+            )
+        )
+        self.addCleanup(repository.close)
+        outcome = self.execute(repository)
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertEqual(outcome.receipt["workload"]["parameters"], {"variant_id": "rocm"})
+        self.assert_valid(outcome, repository.root)
+
     def test_vulkan_device_probes_allow_headless_surface_skip_only(self) -> None:
         for name in ("correctness-core-v1.json", "prefill-scheduling-v1.json"):
             with self.subTest(name=name):

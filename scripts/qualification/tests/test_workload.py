@@ -218,6 +218,29 @@ class WorkloadTests(unittest.TestCase):
         errors = workload_module.validate_workload(value)
         self.assertTrue(any("limited to correctness" in error for error in errors))
 
+    def test_host_id_is_runner_owned_and_needs_no_duplicate_variable(self) -> None:
+        value = valid_performance_workload()
+        value["variants"][0]["cases"][0]["command"].append("${host_id}")
+        self.assertEqual(workload_module.validate_workload(value), [])
+
+        value["variables"].append(
+            {
+                "name": "host_id",
+                "description": "Must remain runner-owned.",
+                "type": "string",
+                "required": False,
+                "default": "duplicate-host",
+                "constraints": {
+                    "allowed_values": [],
+                    "minimum": None,
+                    "maximum": None,
+                    "pattern": None,
+                },
+            }
+        )
+        errors = workload_module.validate_workload(value)
+        self.assertTrue(any("runner-owned and reserved" in error for error in errors))
+
     def test_required_accelerator_can_never_allow_a_skip(self) -> None:
         path = ROOT / "qualification/workloads/correctness-core-v1.json"
         value = workload_module.load_workload(path)
