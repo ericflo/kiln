@@ -73,11 +73,6 @@
       "rationale": "On-policy distillation still combines data flow, resume, teacher, and optimization orchestration; this cap forbids growth pending method-owned modules."
     },
     {
-      "path": "crates/kiln-train/src/trainer.rs",
-      "max_lines": 16795,
-      "rationale": "The Phase 8.3 data, SFT, GRPO, checkpoint, optimizer, provenance, and oracle decomposition is active; the current count is a strict ceiling."
-    },
-    {
       "path": "crates/kiln-vulkan-kernel/src/kernels.rs",
       "max_lines": 11456,
       "rationale": "This file is the centralized generated-style Vulkan kernel registry and embedded shader source authority; additions must remain within its reviewed ceiling."

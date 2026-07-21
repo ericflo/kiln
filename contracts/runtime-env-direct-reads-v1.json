@@ -2585,7 +2585,7 @@
       "count": 2,
       "language": "rust",
       "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
+      "path": "crates/kiln-train/src/trainer/checkpointing.rs",
       "phase": "compile-time",
       "surface": "source"
     },

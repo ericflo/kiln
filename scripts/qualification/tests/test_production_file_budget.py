@@ -27,7 +27,7 @@ class ProductionFileBudgetTests(unittest.TestCase):
         policy = budget.load_policy(POLICY_PATH)
         files = budget.source_files(ROOT)
         self.assertEqual(policy.max_lines, 5000)
-        self.assertEqual(len(policy.exceptions), 16)
+        self.assertEqual(len(policy.exceptions), 15)
         self.assertEqual(budget.violations(files, policy), [])
 
     def test_unlisted_growth_and_exception_growth_fail(self) -> None:

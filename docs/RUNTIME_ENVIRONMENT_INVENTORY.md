@@ -211,7 +211,7 @@ dynamic helper cannot conceal source growth.
 | `crates/kiln-train/src/train_receipt.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 1 |
 | `crates/kiln-train/src/train_receipt.rs` | `var` | `name` | Build time/provenance | 1 |
 | `crates/kiln-train/src/train_receipt.rs` | `env!` | `CARGO_PKG_VERSION` | Test only | 2 |
-| `crates/kiln-train/src/trainer.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 2 |
+| `crates/kiln-train/src/trainer/checkpointing.rs` | `env!` | `CARGO_PKG_VERSION` | Build time/provenance | 2 |
 | `crates/kiln-train/tests/qwen35_sft_oracle.rs` | `env!` | `CARGO_MANIFEST_DIR` | Test only | 1 |
 | `crates/kiln-vulkan-kernel/build.rs` | `var` | `CARGO_MANIFEST_DIR` | Build time/provenance | 1 |
 | `crates/kiln-vulkan-kernel/build.rs` | `var` | `OUT_DIR` | Build time/provenance | 1 |

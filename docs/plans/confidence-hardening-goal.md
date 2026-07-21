@@ -2382,7 +2382,7 @@ portable ownership checkpoint.
   policy.
 - [x] Split `completions.rs` into schema, validation, preparation, streaming,
   finalization, batch, and shared lifecycle modules.
-- [ ] Split `trainer.rs` into data/tokenization, SFT, GRPO, checkpointing,
+- [x] Split `trainer.rs` into data/tokenization, SFT, GRPO, checkpointing,
   optimizers, provenance, and oracle-test modules.
 - [ ] Split the browser application into maintainable modules using the existing
   build/embedding approach.
@@ -2478,18 +2478,35 @@ and bounded `kiln-model` feature builds pass for both ROCm/gfx1151 and Vulkan.
 This is a structural ownership checkpoint and makes no new runtime-performance
 or hardware-correctness claim.
 
+Trainer behavior split completed (2026-07-21): the 16,795-line implementation
+is now a 110-line public facade over sixteen behavior-owned modules plus the
+previously extracted oracle-test child. SFT and GRPO entry points, streamed
+GRPO JSONL ingestion and preflight, per-group GRPO execution, data and
+tokenization, LoRA parameters, optimizer state and execution, checkpoint
+schemas and execution, provenance, reference policy, tensor/training support,
+reporting, and forward/backward behavior each have an explicit owner. Public
+and crate-visible APIs remain re-exported through `trainer`; internal helpers
+are restricted to the parent ownership domain. The largest production child is
+the 2,562-line streamed-GRPO owner, so every resulting file is below the
+5,000-line default and the `trainer.rs` budget exception is removed. The full
+training library suite discovers 519 tests and passes 518 with the single
+pre-existing checkpointed-agentic test still ignored. Bounded `kiln-train`
+feature builds pass for ROCm/gfx1151 and Vulkan. This is a structural and
+compile checkpoint; it makes no new training-runtime, accelerator-correctness,
+or performance claim.
+
 Production-file budget completed (2026-07-20): the closed, versioned
 `production-file-budget-v1.json` contract sets a 5,000-physical-line default
-for the 593 Rust, JavaScript, and CSS product files under `crates/**/src`, while
-excluding extracted `tests` child trees. Sixteen existing oversized files
+for the current 609 Rust, JavaScript, and CSS product files under `crates/**/src`,
+while excluding extracted `tests` child trees. Fifteen existing oversized files
 have sorted path-specific entries, exact current non-growth ceilings, and
 concrete ownership rationales. The checker rejects an unlisted oversized file,
 growth past an exception, missing or out-of-scope paths, stale exceptions after
 a successful shrink, duplicate/unsorted paths, unknown policy fields, weak
 rationales, and malformed counts. Six focused regressions cover those states;
 the cheap repository-hygiene workflow runs the checker on every push and pull
-request. The active `trainer.rs` and browser exceptions must be reduced or
-removed by the remaining two behavior-split items.
+request. The active browser exception must be removed by the remaining
+behavior-split item.
 
 ### 8.4 Replace verification theater
 
