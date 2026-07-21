@@ -618,6 +618,7 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
     "candidate_warm_phase": { "calls": 12, "slow": 1, "total_duration_micros": 155000, "max_duration_micros": 108000 },
     "pre_native_reservation_phase": { "calls": 9, "slow": 0, "total_duration_micros": 900, "max_duration_micros": 180 },
     "native_capture_phase": { "calls": 8, "slow": 1, "total_duration_micros": 210000, "max_duration_micros": 120000 },
+    "native_replay_phase": { "calls": 42, "slow": 0, "total_duration_micros": 8400, "max_duration_micros": 350 },
     "rejected_candidate_cleanup_phase": { "calls": 2, "slow": 0, "total_duration_micros": 9000, "max_duration_micros": 5000 },
     "last_transient_candidate_bytes": 67108864,
     "peak_transient_candidate_bytes": 100663296
@@ -645,7 +646,7 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                     <tr style="border-top:1px solid var(--line);"><td class="p-2">Owner and slot lifecycle</td><td class="p-2"><code>decode_owner_release_count</code>, <code>decode_owner_graph_release_count</code>, <code>graph_slot_create_count</code>, <code>graph_slot_reuse_count</code>, <code>graph_slot_count</code>, <code>active_graph_slot_count</code>, <code>idle_graph_slot_count</code>, <code>tracked_decode_owner_count</code>. Active slots are assigned to live logical rows. Idle slots remain retained for reuse and include slots reserved for a particular batched width; a width reservation is not live request ownership.</td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2">Bounded cache</td><td class="p-2"><code>cache_admission_successes</code>, <code>cache_evictions</code>, <code>cache_evicted_bytes</code>, <code>budget_evictions</code>, <code>pressure_evictions</code>, <code>invalidation_evictions</code>, <code>recovery_evictions</code>, <code>entry_capacity_rejections</code>, <code>byte_budget_rejections</code>, <code>accounting_incomplete_rejections</code>, <code>pre_capture_entry_capacity_skips</code>, <code>pre_capture_byte_budget_skips</code>, <code>pre_capture_accounting_incomplete_skips</code>, <code>pre_capture_memory_reservation_denied_skips</code>, <code>memory_governor_selector_mismatch_skips</code>, and <code>captured_graph_count</code>.</td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2">Retained memory</td><td class="p-2"><code>retained_stable_io_bytes</code>, <code>retained_capture_arena_bytes</code>, <code>retained_blaslt_workspace_bytes</code>, <code>retained_slot_state_bytes</code>, <code>retained_bytes</code>, <code>peak_retained_bytes</code>, <code>opaque_native_object_count</code>, <code>retained_bytes_accounting_complete</code>, and <code>quarantined_retained_bytes</code>.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Point-in-time phase/transient copy</td><td class="p-2">The five completed <code>*_phase</code> summaries plus <code>last_transient_candidate_bytes</code> and <code>peak_transient_candidate_bytes</code> are also serialized with a successful full snapshot. Use separate <code>rocm_graph_telemetry</code> for the active phase and for telemetry that remains available while either runner lock blocks full statistics.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Point-in-time phase/transient copy</td><td class="p-2">The six completed <code>*_phase</code> summaries plus <code>last_transient_candidate_bytes</code> and <code>peak_transient_candidate_bytes</code> are also serialized with a successful full snapshot. Use separate <code>rocm_graph_telemetry</code> for the active phase and for telemetry that remains available while either runner lock blocks full statistics.</td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2">Closed fallbacks</td><td class="p-2"><code>fallbacks</code> contains <code>total</code>, all 14 reason counters, <code>slow</code>, <code>total_duration_micros</code>, and <code>max_duration_micros</code>. Current ROCm capture includes contiguous BF16 multi-row decode; a supported batched route must leave the historical <code>multi_row_batch_unsupported</code> counter at zero and publish real capture/replay activity.</td></tr>
                   </tbody>
                 </table>
@@ -655,7 +656,7 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                   <thead style="color: var(--fg);"><tr><th class="text-left p-2"><code>rocm_graph_telemetry</code> field</th><th class="text-left p-2">Meaning</th></tr></thead>
                   <tbody>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>current_phase</code>, <code>current_phase_elapsed_micros</code></td><td class="p-2">Null phase plus zero elapsed while idle; otherwise the active phase and monotonic elapsed time.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Five phase summaries</td><td class="p-2"><code>pre_candidate_headroom_phase</code>, <code>candidate_warm_phase</code>, <code>pre_native_reservation_phase</code>, <code>native_capture_phase</code>, and <code>rejected_candidate_cleanup_phase</code>. Each contains <code>calls</code>, <code>slow</code>, <code>total_duration_micros</code>, and <code>max_duration_micros</code>.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Six phase summaries</td><td class="p-2"><code>pre_candidate_headroom_phase</code>, <code>candidate_warm_phase</code>, <code>pre_native_reservation_phase</code>, <code>native_capture_phase</code>, <code>native_replay_phase</code>, and <code>rejected_candidate_cleanup_phase</code>. Each contains <code>calls</code>, <code>slow</code>, <code>total_duration_micros</code>, and <code>max_duration_micros</code>.</td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>last_transient_candidate_bytes</code>, <code>peak_transient_candidate_bytes</code></td><td class="p-2">Exact deduplicated queryable candidate allocations measured before admission; excludes already-owned recurrent slot state and opaque native objects.</td></tr>
                   </tbody>
                 </table>
@@ -678,7 +679,7 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 <code>backend_without_graph_runner</code> or either poisoned-lock reason.
                 <code>unavailable_reason</code> governs full statistics;
                 <code>phase_telemetry_available</code> and <code>phase_telemetry_unavailable_reason</code> govern
-                the current phase, five summaries, and transient-byte fields independently. The dashboard uses
+                the current phase, six summaries, and transient-byte fields independently. The dashboard uses
                 config for static policy/full-stat context and its two-second health poll to refresh Graph live
                 and Graph current phase, including typed unavailable reason and elapsed time; it never fabricates
                 zeroes for missing snapshots.
@@ -699,11 +700,13 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 Exact candidate size is unavailable until its warm pass allocates stable I/O, arena buffers, and
                 private-stream workspace. The transient fields expose that residual rather than retained cache
-                residency. The five fixed phases attribute headroom reclamation, warm allocation and execution,
+                residency. Five capture-lifecycle phases attribute headroom reclamation, warm allocation and execution,
                 reservation/accounting, native capture plus settled first launch plus defensive cache
                 admission/publication and blocking committed governor debit, and rejected-candidate cleanup.
                 <code>rejected_candidate_cleanup</code> starts only when an unretained candidate enters destruction
-                and settlement. The phase
+                and settlement. The sixth phase, <code>native_replay</code>, covers replay input updates,
+                cross-stream dependency setup, and native launch submission; external-yield settlement remains
+                separate request synchronization. The phase
                 handle is independent of both runner locks, so health and phase metrics can show an
                 in-progress phase while the full cache snapshot is busy or poisoned. Governor reads fail closed unless their device selector matches the
                 runner, and warm-pass host-copy observation is scoped so unrelated concurrent copies cannot poison
@@ -729,7 +732,7 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                     <tr style="border-top:1px solid var(--line);"><td class="p-2">Cache and limits</td><td class="p-2"><code>kiln_rocm_graph_cache_entries</code>, <code>kiln_rocm_graph_cache_entry_limit</code>, <code>kiln_rocm_graph_retained_byte_limit</code>, <code>kiln_rocm_graph_retained_byte_accounting_complete</code>, and <code>kiln_rocm_graph_opaque_native_objects</code>.</td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2">Slots and owners</td><td class="p-2"><code>kiln_rocm_graph_slots{state="total|active|idle"}</code>, <code>kiln_rocm_graph_tracked_decode_owners</code>, and <code>kiln_rocm_graph_owner_lifecycle_total{event="decode_release|graph_release|slot_create|slot_reuse"}</code>.</td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>kiln_rocm_graph_retained_bytes{kind}</code></td><td class="p-2"><code>kind</code> is exactly <code>stable_io</code>, <code>capture_arena</code>, <code>blaslt_workspace</code>, <code>slot_state</code>, <code>total</code>, <code>peak</code>, or <code>quarantined</code>.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Phase and transient telemetry</td><td class="p-2"><code>kiln_rocm_graph_current_phase{phase}</code> is one-hot, <code>kiln_rocm_graph_current_phase_elapsed_seconds</code> is zero while idle, <code>kiln_rocm_graph_phase_calls_total{phase}</code>, <code>kiln_rocm_graph_phase_slow_total{phase}</code>, <code>kiln_rocm_graph_phase_duration_seconds_total{phase}</code>, and <code>kiln_rocm_graph_phase_duration_seconds_max{phase}</code> use exactly the five phase labels, and <code>kiln_rocm_graph_transient_candidate_bytes{kind="last|peak"}</code> reports the measured residual. These remain readable for a real backend while either runner lock blocks or is poisoned.</td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Phase and transient telemetry</td><td class="p-2"><code>kiln_rocm_graph_current_phase{phase}</code> is one-hot, <code>kiln_rocm_graph_current_phase_elapsed_seconds</code> is zero while idle, <code>kiln_rocm_graph_phase_calls_total{phase}</code>, <code>kiln_rocm_graph_phase_slow_total{phase}</code>, <code>kiln_rocm_graph_phase_duration_seconds_total{phase}</code>, and <code>kiln_rocm_graph_phase_duration_seconds_max{phase}</code> use exactly the six phase labels, and <code>kiln_rocm_graph_transient_candidate_bytes{kind="last|peak"}</code> reports the measured residual. These remain readable for a real backend while either runner lock blocks or is poisoned.</td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2">Cache action counters</td><td class="p-2"><code>kiln_rocm_graph_cache_admissions_total</code>, <code>kiln_rocm_graph_cache_evictions_total</code>, <code>kiln_rocm_graph_cache_evicted_bytes_total</code>, <code>kiln_rocm_graph_cache_evictions_by_cause_total{cause="budget|pressure|invalidation|recovery"}</code>, <code>kiln_rocm_graph_cache_admission_rejections_total{reason="entry_capacity|byte_budget|accounting_incomplete"}</code>, and <code>kiln_rocm_graph_pre_capture_skips_total{reason="entry_capacity|byte_budget|accounting_incomplete|memory_reservation_denied|memory_governor_selector_mismatch"}</code>.</td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2">Capture and replay counters</td><td class="p-2"><code>kiln_rocm_graph_capture_attempts_total</code>, <code>kiln_rocm_graph_capture_outcomes_total{outcome="success|deferred|failure"}</code>, <code>kiln_rocm_graph_replay_attempts_total</code>, and <code>kiln_rocm_graph_replay_outcomes_total{outcome="success|failure"}</code>.</td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2">Fallback counters and latency</td><td class="p-2"><code>kiln_rocm_graph_fallbacks_total{reason}</code> uses exactly <code>multi_row_batch_unsupported</code>, <code>cold_cache_host_round_trip</code>, <code>persistent_host_round_trip</code>, <code>shape_dependent_attention</code>, <code>graph_cache_capacity</code>, <code>graph_cache_byte_budget</code>, <code>graph_accounting_incomplete</code>, <code>moderate_memory_pressure</code>, <code>tight_memory_pressure</code>, <code>critical_memory_pressure</code>, <code>memory_reservation_denied</code>, <code>memory_governor_selector_mismatch</code>, <code>capture_failure</code>, or <code>replay_failure</code>. <code>kiln_rocm_graph_fallback_slow_total</code>, <code>kiln_rocm_graph_fallback_duration_seconds_total</code>, and <code>kiln_rocm_graph_fallback_duration_seconds_max</code> are unlabelled bounded-latency summaries.</td></tr>
@@ -1845,13 +1848,18 @@ kiln serve --config kiln.toml</code></pre>
           <code>gpu_lock_wait_ms</code> and <code>synchronization_ms</code> candidates. ROCm sampled
           paged decode also reports its distinct post-transformer final-norm, LM-head, filtering,
           selection, and token-return tail as <code>sampling_ms</code>; behavior-logprob capture
-          reports the same boundary across backends. <code>readback_ms</code> stays <code>null</code>
-          because transfer is still nested inside that call and splitting it would add a second
-          synchronization. Greedy or native fused-forward routes leave sampling <code>null</code>
-          when no independent boundary exists. Graph, resize/trim, adapter, and training phases
-          remain <code>null</code> until their owning runtime returns request-correlated timings;
-          process-global counter deltas
-          are never presented as per-request evidence. Mixed-load, development-soak, and endurance
+          reports the same boundary across backends. Qualified ROCm W8 sampling splits the existing
+          token-index transfer into <code>readback_ms</code> without adding work and subtracts it from
+          sampling to prevent double-counting; other readback routes remain null until their owner
+          exposes the exact boundary. Greedy or native fused-forward routes leave sampling
+          <code>null</code> when no independent boundary exists. Qualified ROCm direct and batching
+          graph routes also report request-owned <code>graph_capture_ms</code> and
+          <code>graph_replay_ms</code>. One graph-runner lock encloses the before/call/after phase
+          snapshot, capture time survives eager fallback, and replay launch excludes the separately
+          reported external-yield synchronization. Other-backend graph, resize/trim, adapter, and
+          training phases remain <code>null</code> until their owning runtime returns correlated
+          timings; unlocked process-global counter deltas are never presented as per-request
+          evidence. Mixed-load, development-soak, and endurance
           qualification receipts retain each phase as a measured-window millisecond total plus an
           observation count, so unsupported <code>null</code> remains distinct from a measured zero.
           A successful measured request without terminal phase metadata fails qualification, and

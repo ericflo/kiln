@@ -224,14 +224,24 @@ tail described above, report their distinct sampling boundary but leave
 honestly. Greedy and native fused-forward routes leave sampling `null` when the
 transformer/sampler boundary is not independently observable.
 
-Non-W8 device readback, graph capture/replay, resize, trim, adapter, and
+Qualified ROCm HIP-graph decode reports request-owned `graph_capture_ms` and
+`graph_replay_ms` on both direct and batching-engine streams. The graph runner
+holds its mutex across one decode invocation and snapshots the fixed phase
+counters before and after that call, so another request cannot contaminate the
+delta. Capture is the sum of candidate headroom, warm, reservation, native
+capture, and rejected-candidate cleanup phases that completed in the call; it
+is retained even when the request continues through eager fallback. Replay
+covers device input updates, cross-stream dependency setup, and native launch
+submission. The later external-yield device settlement remains
+`synchronization_ms` and is not double-counted as replay.
+
+Other-backend graph work, non-W8 device readback, resize, trim, adapter, and
 training remain explicit nullable fields. Their aggregate subsystems have
 separate operational telemetry, but they are not yet joined to each
-request-token timeline. In particular, Kiln does not infer a request's graph
-time from process-global before/after counters because concurrent inference
-could make that attribution false. A diagnostic consumer must preserve the
-difference between `null` (not measured on this path) and `0` (measured with no
-material elapsed time).
+request-token timeline. Kiln never infers a request's graph time from unlocked
+process-global counters. A diagnostic consumer must preserve the difference
+between `null` (not measured on this path) and `0` (measured below the
+microsecond telemetry resolution).
 
 The mixed-load, development-soak, and endurance qualification clients preserve
 that distinction in compact receipts. For each fixed phase `P`, they emit

@@ -672,12 +672,17 @@ impl Metrics {
                     telemetry.native_capture_phase,
                 ),
                 (
+                    "native_replay",
+                    kiln_model::RocmGraphPhase::NativeReplay,
+                    telemetry.native_replay_phase,
+                ),
+                (
                     "rejected_candidate_cleanup",
                     kiln_model::RocmGraphPhase::RejectedCandidateCleanup,
                     telemetry.rejected_candidate_cleanup_phase,
                 ),
             ];
-            out.push_str("# HELP kiln_rocm_graph_current_phase Current ROCm graph candidate lifecycle phase as a closed one-hot gauge.\n");
+            out.push_str("# HELP kiln_rocm_graph_current_phase Current ROCm graph lifecycle or replay phase as a closed one-hot gauge.\n");
             out.push_str("# TYPE kiln_rocm_graph_current_phase gauge\n");
             for (phase, phase_kind, _) in graph_phases {
                 push_line(
@@ -710,7 +715,7 @@ impl Metrics {
                     ),
                 );
             }
-            out.push_str("# HELP kiln_rocm_graph_phase_calls_total ROCm graph candidate lifecycle calls by fixed phase.\n");
+            out.push_str("# HELP kiln_rocm_graph_phase_calls_total ROCm graph lifecycle and replay calls by fixed phase.\n");
             out.push_str("# TYPE kiln_rocm_graph_phase_calls_total counter\n");
             out.push_str("# HELP kiln_rocm_graph_phase_slow_total ROCm graph candidate phase calls taking at least 100 ms.\n");
             out.push_str("# TYPE kiln_rocm_graph_phase_slow_total counter\n");
@@ -3841,6 +3846,12 @@ mod tests {
                     total_duration_micros: 325_000,
                     max_duration_micros: 200_000,
                 },
+                native_replay_phase: kiln_model::RocmGraphPhaseStats {
+                    calls: 11,
+                    slow: 1,
+                    total_duration_micros: 275_000,
+                    max_duration_micros: 150_000,
+                },
                 rejected_candidate_cleanup_phase: kiln_model::RocmGraphPhaseStats {
                     calls: 2,
                     slow: 0,
@@ -3892,6 +3903,12 @@ mod tests {
                     slow: 1,
                     total_duration_micros: 325_000,
                     max_duration_micros: 200_000,
+                },
+                native_replay_phase: kiln_model::RocmGraphPhaseStats {
+                    calls: 11,
+                    slow: 1,
+                    total_duration_micros: 275_000,
+                    max_duration_micros: 150_000,
                 },
                 rejected_candidate_cleanup_phase: kiln_model::RocmGraphPhaseStats {
                     calls: 2,
@@ -4227,6 +4244,7 @@ mod tests {
         assert!(output.contains(
             "kiln_rocm_graph_phase_duration_seconds_total{phase=\"native_capture\"} 0.325000"
         ));
+        assert!(output.contains("kiln_rocm_graph_phase_calls_total{phase=\"native_replay\"} 11"));
         assert!(output.contains(
             "kiln_rocm_graph_phase_duration_seconds_max{phase=\"rejected_candidate_cleanup\"} 0.020000"
         ));

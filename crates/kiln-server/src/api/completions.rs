@@ -8472,6 +8472,8 @@ fn direct_stream_backend_phases(
     BackendPhaseDurations {
         sampling: phases.sampling,
         readback: phases.readback,
+        graph_capture: phases.graph_capture,
+        graph_replay: phases.graph_replay,
         gpu_lock_wait,
         synchronization: phases.synchronization,
         ..BackendPhaseDurations::default()
@@ -14099,6 +14101,8 @@ mod tests {
             kiln_model::StreamBackendPhaseDurations {
                 sampling: Some(std::time::Duration::from_millis(9)),
                 readback: Some(std::time::Duration::ZERO),
+                graph_capture: Some(std::time::Duration::from_millis(12)),
+                graph_replay: Some(std::time::Duration::from_millis(6)),
                 synchronization: Some(std::time::Duration::from_millis(4)),
             },
             Some(std::time::Duration::from_millis(3)),
@@ -14113,8 +14117,14 @@ mod tests {
             mapped.synchronization,
             Some(std::time::Duration::from_millis(4))
         );
-        assert_eq!(mapped.graph_capture, None);
-        assert_eq!(mapped.graph_replay, None);
+        assert_eq!(
+            mapped.graph_capture,
+            Some(std::time::Duration::from_millis(12))
+        );
+        assert_eq!(
+            mapped.graph_replay,
+            Some(std::time::Duration::from_millis(6))
+        );
         assert_eq!(mapped.resize, None);
     }
 

@@ -558,6 +558,7 @@ GRAPH_PHASE_NAMES = (
     "candidate_warm",
     "pre_native_reservation",
     "native_capture",
+    "native_replay",
     "rejected_candidate_cleanup",
 )
 GRAPH_HEALTH_METADATA_FIELDS = (

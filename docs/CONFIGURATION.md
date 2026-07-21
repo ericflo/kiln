@@ -914,18 +914,18 @@ are present, `busy` only for `model_runner_busy` or `graph_runner_busy`, and
 `unavailable` for the no-runner and poisoned-lock reasons. `unavailable_reason`
 belongs to the full statistics. `phase_telemetry_available` and
 `phase_telemetry_unavailable_reason` independently govern `current_phase`,
-`current_phase_elapsed_micros`, five phase summary objects, and last/peak
+`current_phase_elapsed_micros`, six phase summary objects, and last/peak
 transient candidate bytes. Every unavailable field is serialized as `null`;
 the server never fabricates a zero snapshot.
 
 For a coherent point-in-time full snapshot, `rocm_graphs` also serializes the
-five completed phase summaries and last/peak transient bytes. The separate
+six completed phase summaries and last/peak transient bytes. The separate
 `rocm_graph_telemetry` object is the authoritative current-phase source and
 continues advancing when full statistics cannot acquire either runner lock.
 Health sources its phase and transient fields from that separate channel.
 
 The phase names are exactly `pre_candidate_headroom`, `candidate_warm`,
-`pre_native_reservation`, `native_capture`, and
+`pre_native_reservation`, `native_capture`, `native_replay`, and
 `rejected_candidate_cleanup`. Each completed phase object contains `calls`,
 `slow`, `total_duration_micros`, and `max_duration_micros`; `slow` means at
 least 100 ms. `current_phase_elapsed_micros` uses a monotonic clock while a
@@ -938,6 +938,15 @@ for the exact deduplicated pre-admission candidate plus the capture-parity
 snapshot/gather/mask working set. Already-owned recurrent slot state and opaque
 native objects remain excluded. These values are not retained-cache bytes; only
 the candidate subset is committed when admission retains the graph.
+
+`native_replay` covers per-replay device input updates, the default-stream to
+capture-stream dependency, and native launch submission. It does not include
+the external-yield settlement that makes the result safe to publish; that wait
+is reported separately as request `synchronization_ms`. Direct and batched ROCm
+serving snapshot phase totals while holding the graph-runner lock for exactly
+one invocation, so their request `graph_capture_ms` and `graph_replay_ms` fields
+cannot absorb another concurrent request's work. A zero value means the phase
+ran below microsecond resolution; null means that route did not run the phase.
 
 Native ROCm HIP-graph capture supports both single-row decode and the contiguous
 BF16 multi-row route. Batched graphs are keyed by row count and bucketed
@@ -1008,7 +1017,7 @@ fixed-cardinality families are
 `kiln_rocm_graph_capture_parity_compared_bytes_total`, and
 `kiln_rocm_graph_capture_parity_duration_seconds_total`. Live families cover
 the one-hot current phase, active elapsed seconds, calls/slow/total/max duration
-for all five phases, and last/peak transient bytes. Every label set is closed;
+for all six phases, and last/peak transient bytes. Every label set is closed;
 request, shape, allocation, and configured-byte values never become labels.
 
 Graph-stable paged metadata is now a correctness invariant rather than a knob.

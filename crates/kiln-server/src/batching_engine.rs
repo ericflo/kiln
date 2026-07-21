@@ -71,12 +71,20 @@ fn observe_profiled_decode_phases(
     phases: &mut BackendPhaseDurations,
     sampling: Option<Duration>,
     readback: Option<Duration>,
+    graph_capture: Option<Duration>,
+    graph_replay: Option<Duration>,
 ) {
     if let Some(duration) = sampling {
         phases.observe_sampling(duration);
     }
     if let Some(duration) = readback {
         phases.observe_readback(duration);
+    }
+    if let Some(duration) = graph_capture {
+        phases.observe_graph_capture(duration);
+    }
+    if let Some(duration) = graph_replay {
+        phases.observe_graph_replay(duration);
     }
 }
 
@@ -1400,6 +1408,8 @@ impl DecodeForward for RealDecodeForward {
                             &mut backend_phases,
                             next.sampling_duration,
                             next.readback_duration,
+                            next.graph_capture_duration,
+                            next.graph_replay_duration,
                         );
                         anyhow::ensure!(
                             next.tokens.len() == 1,
@@ -1419,6 +1429,8 @@ impl DecodeForward for RealDecodeForward {
                         &mut backend_phases,
                         step.sampling_duration,
                         step.readback_duration,
+                        step.graph_capture_duration,
+                        step.graph_replay_duration,
                     );
                     step.tokens
                 };
@@ -1449,6 +1461,8 @@ impl DecodeForward for RealDecodeForward {
                             &mut backend_phases,
                             next.sampling_duration,
                             next.readback_duration,
+                            next.graph_capture_duration,
+                            next.graph_replay_duration,
                         );
                         anyhow::ensure!(
                             next.tokens.len() == 1,
@@ -1469,6 +1483,8 @@ impl DecodeForward for RealDecodeForward {
                         &mut backend_phases,
                         step.sampling_duration,
                         step.readback_duration,
+                        step.graph_capture_duration,
+                        step.graph_replay_duration,
                     );
                     step.tokens
                 };
@@ -4618,10 +4634,20 @@ mod tests {
             &mut phases,
             Some(Duration::from_millis(18)),
             Some(Duration::from_millis(7)),
+            Some(Duration::from_millis(13)),
+            Some(Duration::ZERO),
         );
-        observe_profiled_decode_phases(&mut phases, Some(Duration::from_millis(4)), None);
+        observe_profiled_decode_phases(
+            &mut phases,
+            Some(Duration::from_millis(4)),
+            None,
+            Some(Duration::from_millis(2)),
+            Some(Duration::from_millis(5)),
+        );
         assert_eq!(phases.sampling, Some(Duration::from_millis(22)));
         assert_eq!(phases.readback, Some(Duration::from_millis(7)));
+        assert_eq!(phases.graph_capture, Some(Duration::from_millis(15)));
+        assert_eq!(phases.graph_replay, Some(Duration::from_millis(5)));
     }
 
     #[derive(Default)]

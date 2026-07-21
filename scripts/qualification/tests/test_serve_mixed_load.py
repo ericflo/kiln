@@ -166,6 +166,12 @@ def health_fixture(
             "total_duration_micros": 0,
             "max_duration_micros": 0,
         },
+        "native_replay_phase": {
+            "calls": 0,
+            "slow": 0,
+            "total_duration_micros": 0,
+            "max_duration_micros": 0,
+        },
         "rejected_candidate_cleanup_phase": {
             "calls": 0,
             "slow": 0,
@@ -461,6 +467,7 @@ def debug_fixture(
         "candidate_warm_phase",
         "pre_native_reservation_phase",
         "native_capture_phase",
+        "native_replay_phase",
         "rejected_candidate_cleanup_phase",
         "last_transient_candidate_bytes",
         "peak_transient_candidate_bytes",

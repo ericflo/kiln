@@ -213,6 +213,12 @@
             "total_duration_micros": 0,
             "max_duration_micros": 0
           },
+          "native_replay_phase": {
+            "calls": 0,
+            "slow": 0,
+            "total_duration_micros": 0,
+            "max_duration_micros": 0
+          },
           "rejected_candidate_cleanup_phase": {
             "calls": 0,
             "slow": 0,
@@ -263,6 +269,12 @@
             "max_duration_micros": 0
           },
           "native_capture_phase": {
+            "calls": 0,
+            "slow": 0,
+            "total_duration_micros": 0,
+            "max_duration_micros": 0
+          },
+          "native_replay_phase": {
             "calls": 0,
             "slow": 0,
             "total_duration_micros": 0,
@@ -1191,6 +1203,12 @@
               "total_duration_micros": 0,
               "max_duration_micros": 0
             },
+            "native_replay_phase": {
+              "calls": 0,
+              "slow": 0,
+              "total_duration_micros": 0,
+              "max_duration_micros": 0
+            },
             "rejected_candidate_cleanup_phase": {
               "calls": 0,
               "slow": 0,
@@ -1763,6 +1781,12 @@
             "total_duration_micros": 0,
             "max_duration_micros": 0
           },
+          "native_replay_phase": {
+            "calls": 0,
+            "slow": 0,
+            "total_duration_micros": 0,
+            "max_duration_micros": 0
+          },
           "rejected_candidate_cleanup_phase": {
             "calls": 0,
             "slow": 0,
@@ -1813,6 +1837,12 @@
             "max_duration_micros": 0
           },
           "native_capture_phase": {
+            "calls": 0,
+            "slow": 0,
+            "total_duration_micros": 0,
+            "max_duration_micros": 0
+          },
+          "native_replay_phase": {
             "calls": 0,
             "slow": 0,
             "total_duration_micros": 0,
@@ -8186,6 +8216,7 @@
         "candidate_warm_phase",
         "pre_native_reservation_phase",
         "native_capture_phase",
+        "native_replay_phase",
         "rejected_candidate_cleanup_phase",
         "fallbacks"
       ],
@@ -8772,6 +8803,16 @@
             }
           ]
         },
+        "native_replay_phase": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RocmGraphPhaseStats"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "rejected_candidate_cleanup_phase": {
           "anyOf": [
             {
@@ -8807,6 +8848,7 @@
         "candidate_warm_phase",
         "pre_native_reservation_phase",
         "native_capture_phase",
+        "native_replay_phase",
         "rejected_candidate_cleanup_phase",
         "last_transient_candidate_bytes",
         "peak_transient_candidate_bytes"
@@ -8837,6 +8879,9 @@
         "native_capture_phase": {
           "$ref": "#/$defs/RocmGraphPhaseStats"
         },
+        "native_replay_phase": {
+          "$ref": "#/$defs/RocmGraphPhaseStats"
+        },
         "rejected_candidate_cleanup_phase": {
           "$ref": "#/$defs/RocmGraphPhaseStats"
         },
@@ -8847,7 +8892,7 @@
           "$ref": "#/$defs/NonNegativeInteger"
         }
       },
-      "description": "Graph-runner-lock-independent ROCm capture phase telemetry.",
+      "description": "Graph-runner-lock-independent ROCm graph phase telemetry.",
       "x-kiln-rust-type": "RocmGraphLiveTelemetry",
       "x-kiln-field-schema-status": "complete"
     },
@@ -8870,9 +8915,10 @@
         "candidate_warm",
         "pre_native_reservation",
         "native_capture",
+        "native_replay",
         "rejected_candidate_cleanup"
       ],
-      "description": "A closed ROCm graph-capture phase label.",
+      "description": "A closed ROCm graph lifecycle or replay phase label.",
       "x-kiln-rust-type": "RocmGraphPhase",
       "x-kiln-field-schema-status": "complete"
     },
@@ -8899,7 +8945,7 @@
           "$ref": "#/$defs/NonNegativeInteger"
         }
       },
-      "description": "Bounded latency telemetry for one ROCm graph-capture phase.",
+      "description": "Bounded latency telemetry for one ROCm graph lifecycle or replay phase.",
       "x-kiln-rust-type": "RocmGraphPhaseStats",
       "x-kiln-field-schema-status": "complete"
     },
@@ -8960,6 +9006,7 @@
         "candidate_warm_phase",
         "pre_native_reservation_phase",
         "native_capture_phase",
+        "native_replay_phase",
         "rejected_candidate_cleanup_phase",
         "fallbacks"
       ],
@@ -9121,6 +9168,9 @@
           "$ref": "#/$defs/RocmGraphPhaseStats"
         },
         "native_capture_phase": {
+          "$ref": "#/$defs/RocmGraphPhaseStats"
+        },
+        "native_replay_phase": {
           "$ref": "#/$defs/RocmGraphPhaseStats"
         },
         "rejected_candidate_cleanup_phase": {

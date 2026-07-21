@@ -263,9 +263,10 @@ def build_definitions() -> None:
             "candidate_warm",
             "pre_native_reservation",
             "native_capture",
+            "native_replay",
             "rejected_candidate_cleanup",
         ],
-        "A closed ROCm graph-capture phase label.",
+        "A closed ROCm graph lifecycle or replay phase label.",
     )
     add_enum(
         "StreamingPrefillMode",
@@ -698,7 +699,7 @@ def build_definitions() -> None:
             "total_duration_micros": ref("NonNegativeInteger"),
             "max_duration_micros": ref("NonNegativeInteger"),
         },
-        "Bounded latency telemetry for one ROCm graph-capture phase.",
+        "Bounded latency telemetry for one ROCm graph lifecycle or replay phase.",
     )
     fallback_fields = [
         "total",
@@ -736,11 +737,12 @@ def build_definitions() -> None:
             "candidate_warm_phase": ref("RocmGraphPhaseStats"),
             "pre_native_reservation_phase": ref("RocmGraphPhaseStats"),
             "native_capture_phase": ref("RocmGraphPhaseStats"),
+            "native_replay_phase": ref("RocmGraphPhaseStats"),
             "rejected_candidate_cleanup_phase": ref("RocmGraphPhaseStats"),
             "last_transient_candidate_bytes": ref("NonNegativeInteger"),
             "peak_transient_candidate_bytes": ref("NonNegativeInteger"),
         },
-        "Graph-runner-lock-independent ROCm capture phase telemetry.",
+        "Graph-runner-lock-independent ROCm graph phase telemetry.",
     )
     rocm_bool_fields = ["requested", "capture_requested", "enabled", "capture_enabled", "retained_bytes_accounting_complete"]
     rocm_phase_fields = [
@@ -748,6 +750,7 @@ def build_definitions() -> None:
         "candidate_warm_phase",
         "pre_native_reservation_phase",
         "native_capture_phase",
+        "native_replay_phase",
         "rejected_candidate_cleanup_phase",
     ]
     rocm_integer_fields = [

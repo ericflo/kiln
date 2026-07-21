@@ -53,8 +53,8 @@ use crate::forward::{
 };
 use crate::metal_graph::MetalGraphRunner;
 use crate::rocm_graph::{
-    RocmGraphExecutionPolicy, RocmGraphLiveTelemetry, RocmGraphRunner, RocmGraphStatsUnavailable,
-    RocmGraphTelemetryHandle,
+    RocmGraphExecutionPolicy, RocmGraphLiveTelemetry, RocmGraphProfiledValue, RocmGraphRunner,
+    RocmGraphStatsUnavailable, RocmGraphTelemetryHandle,
 };
 // (#1082) Native single-submit Vulkan-resident decode entry — only referenced
 // from the `#[cfg(feature = "vulkan")]` single-row fast path below.
@@ -1006,6 +1006,8 @@ pub struct ProfiledPagedDecodeStep<T> {
     pub tokens: Vec<T>,
     pub sampling_duration: Option<Duration>,
     pub readback_duration: Option<Duration>,
+    pub graph_capture_duration: Option<Duration>,
+    pub graph_replay_duration: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -1568,6 +1570,8 @@ pub struct MtpGenerationOutput {
 pub struct StreamBackendPhaseDurations {
     pub sampling: Option<Duration>,
     pub readback: Option<Duration>,
+    pub graph_capture: Option<Duration>,
+    pub graph_replay: Option<Duration>,
     pub synchronization: Option<Duration>,
 }
 
@@ -1578,6 +1582,14 @@ impl StreamBackendPhaseDurations {
 
     fn observe_sampling(&mut self, duration: Duration) {
         Self::add_observation(&mut self.sampling, duration);
+    }
+
+    fn observe_graph_capture(&mut self, duration: Duration) {
+        Self::add_observation(&mut self.graph_capture, duration);
+    }
+
+    fn observe_graph_replay(&mut self, duration: Duration) {
+        Self::add_observation(&mut self.graph_replay, duration);
     }
 
     fn observe_synchronization(&mut self, duration: Duration) {
@@ -5605,6 +5617,8 @@ impl ModelRunner {
         let mut sampled: Option<Vec<TokenId>> = None;
         let mut sampling_duration = None;
         let mut readback_duration = None;
+        let mut graph_capture_duration = None;
+        let mut graph_replay_duration = None;
         // Multi-batch CUDA graph fast path.
         if row_count > 1 && try_contiguous_batched && has_linear_layers {
             let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
@@ -5650,7 +5664,7 @@ impl ModelRunner {
             let result = if has_linear_layers {
                 let mut linear_state_refs: Vec<&mut LinearAttentionState> =
                     linear_states.iter_mut().map(|s| &mut **s).collect();
-                self.decode_next_tokens_paged_contiguous_batch_greedy_with_ids(
+                self.decode_next_tokens_paged_contiguous_batch_greedy_with_ids_profiled(
                     &input_tokens,
                     paged_cache,
                     &block_table_refs,
@@ -5660,7 +5674,7 @@ impl ModelRunner {
                 )
             } else {
                 let mut no_linear_states: [&mut LinearAttentionState; 0] = [];
-                self.decode_next_tokens_paged_contiguous_batch_greedy_with_ids(
+                self.decode_next_tokens_paged_contiguous_batch_greedy_with_ids_profiled(
                     &input_tokens,
                     paged_cache,
                     &block_table_refs,
@@ -5670,7 +5684,15 @@ impl ModelRunner {
                 )
             };
             match result {
-                Ok(tokens) => sampled = Some(tokens),
+                Ok(profiled) => {
+                    if let Some(duration) = profiled.capture_duration {
+                        add_profiled_duration(&mut graph_capture_duration, duration);
+                    }
+                    if let Some(duration) = profiled.replay_duration {
+                        add_profiled_duration(&mut graph_replay_duration, duration);
+                    }
+                    sampled = Some(profiled.value);
+                }
                 Err(err)
                     if !decode_hot_path_generic_fallback_enabled_for_backend(&*self.backend) =>
                 {
@@ -6006,7 +6028,7 @@ impl ModelRunner {
             let hidden_result = if has_linear_layers {
                 let mut linear_state_refs: Vec<&mut LinearAttentionState> =
                     linear_states.iter_mut().map(|s| &mut **s).collect();
-                self.decode_hidden_paged_contiguous_batch_with_ids(
+                self.decode_hidden_paged_contiguous_batch_with_ids_profiled(
                     &input_tokens,
                     paged_cache,
                     &block_table_refs,
@@ -6016,7 +6038,7 @@ impl ModelRunner {
                 )
             } else {
                 let mut no_linear_states: [&mut LinearAttentionState; 0] = [];
-                self.decode_hidden_paged_contiguous_batch_with_ids(
+                self.decode_hidden_paged_contiguous_batch_with_ids_profiled(
                     &input_tokens,
                     paged_cache,
                     &block_table_refs,
@@ -6025,7 +6047,14 @@ impl ModelRunner {
                     Some(&row_ids),
                 )
             };
-            let hidden = hidden_result.context("ROCm sampled batched hidden decode failed")?;
+            let profiled = hidden_result.context("ROCm sampled batched hidden decode failed")?;
+            if let Some(duration) = profiled.capture_duration {
+                add_profiled_duration(&mut graph_capture_duration, duration);
+            }
+            if let Some(duration) = profiled.replay_duration {
+                add_profiled_duration(&mut graph_replay_duration, duration);
+            }
+            let hidden = profiled.value;
             let sampling_started = Instant::now();
             let sampled_result = run_lm_head_sample_batch_with_contexts(
                 &*self.backend,
@@ -6054,45 +6083,64 @@ impl ModelRunner {
         if sampled.is_none() && hip_graph_single_row_ready {
             let pc_guard = lock_paged_cache(paged_cache)?;
             if params[0].temperature == 0.0 {
-                let token = self
+                let mut runner = self
                     .rocm_graph
                     .lock()
-                    .map_err(|e| anyhow::anyhow!("failed to lock ROCm graph runner: {e}"))?
-                    .decode_step_paged_greedy(
-                        &*self.backend,
-                        input_tokens[0],
-                        &self.weights,
-                        &self.config,
-                        pc_guard,
-                        &block_tables[0],
-                        sequence_lengths[0],
-                        &mut *linear_states[0],
-                        self.active_lora.as_ref(),
-                        row_ids[0],
-                    )
+                    .map_err(|e| anyhow::anyhow!("failed to lock ROCm graph runner: {e}"))?;
+                let profiled = runner
+                    .profile_invocation(|runner| {
+                        runner.decode_step_paged_greedy(
+                            &*self.backend,
+                            input_tokens[0],
+                            &self.weights,
+                            &self.config,
+                            pc_guard,
+                            &block_tables[0],
+                            sequence_lengths[0],
+                            &mut *linear_states[0],
+                            self.active_lora.as_ref(),
+                            row_ids[0],
+                        )
+                    })
                     .context("batched decode ROCm graph greedy row failed")?;
-                sampled = Some(vec![token]);
+                if let Some(duration) = profiled.capture_duration {
+                    add_profiled_duration(&mut graph_capture_duration, duration);
+                }
+                if let Some(duration) = profiled.replay_duration {
+                    add_profiled_duration(&mut graph_replay_duration, duration);
+                }
+                sampled = Some(vec![profiled.value]);
             } else {
                 let (step_seeds, generated_tokens) = batch_sampling_contexts
                     .as_ref()
                     .context("missing row-0 sampling context for ROCm graph sampled decode")?;
-                let hidden = self
+                let mut runner = self
                     .rocm_graph
                     .lock()
-                    .map_err(|e| anyhow::anyhow!("failed to lock ROCm graph runner: {e}"))?
-                    .decode_step_paged_hidden(
-                        &*self.backend,
-                        input_tokens[0],
-                        &self.weights,
-                        &self.config,
-                        pc_guard,
-                        &block_tables[0],
-                        sequence_lengths[0],
-                        &mut *linear_states[0],
-                        self.active_lora.as_ref(),
-                        row_ids[0],
-                    )
+                    .map_err(|e| anyhow::anyhow!("failed to lock ROCm graph runner: {e}"))?;
+                let profiled = runner
+                    .profile_invocation(|runner| {
+                        runner.decode_step_paged_hidden(
+                            &*self.backend,
+                            input_tokens[0],
+                            &self.weights,
+                            &self.config,
+                            pc_guard,
+                            &block_tables[0],
+                            sequence_lengths[0],
+                            &mut *linear_states[0],
+                            self.active_lora.as_ref(),
+                            row_ids[0],
+                        )
+                    })
                     .context("batched decode ROCm graph hidden row failed")?;
+                if let Some(duration) = profiled.capture_duration {
+                    add_profiled_duration(&mut graph_capture_duration, duration);
+                }
+                if let Some(duration) = profiled.replay_duration {
+                    add_profiled_duration(&mut graph_replay_duration, duration);
+                }
+                let hidden = profiled.value;
                 let sampling_started = Instant::now();
                 let token_result = (|| -> Result<ProfiledBackendSample<TokenId>> {
                     if let Some(profiled) = lm_head_sample_backend_decode_profiled_if(
@@ -6264,6 +6312,8 @@ impl ModelRunner {
             tokens: sampled,
             sampling_duration,
             readback_duration,
+            graph_capture_duration,
+            graph_replay_duration,
         })
     }
 
@@ -6331,38 +6381,52 @@ impl ModelRunner {
                 .lock()
                 .map(|graph| graph.is_enabled())
                 .unwrap_or(false);
-        let hidden = if hip_graph_single_row_ready {
+        let (hidden, graph_capture_duration, graph_replay_duration) = if hip_graph_single_row_ready
+        {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            self.rocm_graph
+            let mut runner = self
+                .rocm_graph
                 .lock()
-                .map_err(|e| anyhow::anyhow!("failed to lock ROCm graph runner: {e}"))?
-                .decode_step_paged_hidden(
+                .map_err(|e| anyhow::anyhow!("failed to lock ROCm graph runner: {e}"))?;
+            let profiled = runner
+                .profile_invocation(|runner| {
+                    runner.decode_step_paged_hidden(
+                        &*self.backend,
+                        input_tokens[0],
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        &block_tables[0],
+                        sequence_lengths[0],
+                        &mut *linear_states[0],
+                        self.active_lora.as_ref(),
+                        row_ids[0],
+                    )
+                })
+                .context("behavior-logprob ROCm graph hidden row failed")?;
+            (
+                profiled.value,
+                profiled.capture_duration,
+                profiled.replay_duration,
+            )
+        } else {
+            let pc_guard = lock_paged_cache(paged_cache)?;
+            (
+                model_forward_paged_batched_decode_hidden(
                     &*self.backend,
-                    input_tokens[0],
+                    &input_tokens,
                     &self.weights,
                     &self.config,
                     pc_guard,
-                    &block_tables[0],
-                    sequence_lengths[0],
-                    &mut *linear_states[0],
+                    &block_tables,
+                    &sequence_lengths,
+                    &mut linear_states,
                     self.active_lora.as_ref(),
-                    row_ids[0],
                 )
-                .context("behavior-logprob ROCm graph hidden row failed")?
-        } else {
-            let pc_guard = lock_paged_cache(paged_cache)?;
-            model_forward_paged_batched_decode_hidden(
-                &*self.backend,
-                &input_tokens,
-                &self.weights,
-                &self.config,
-                pc_guard,
-                &block_tables,
-                &sequence_lengths,
-                &mut linear_states,
-                self.active_lora.as_ref(),
+                .context("behavior-logprob batched decode forward pass failed")?,
+                None,
+                None,
             )
-            .context("behavior-logprob batched decode forward pass failed")?
         };
         drop(linear_states);
         let sampling_started = Instant::now();
@@ -6404,6 +6468,8 @@ impl ModelRunner {
             tokens: sampled,
             sampling_duration: Some(sampling_duration),
             readback_duration: None,
+            graph_capture_duration,
+            graph_replay_duration,
         })
     }
 
@@ -6714,6 +6780,26 @@ impl ModelRunner {
         linear_states: &mut [&mut LinearAttentionState],
         row_ids: Option<&[u64]>,
     ) -> Result<Vec<TokenId>> {
+        self.decode_next_tokens_paged_contiguous_batch_greedy_with_ids_profiled(
+            input_tokens,
+            paged_cache,
+            block_tables,
+            seq_lens,
+            linear_states,
+            row_ids,
+        )
+        .map(|profiled| profiled.value)
+    }
+
+    fn decode_next_tokens_paged_contiguous_batch_greedy_with_ids_profiled(
+        &self,
+        input_tokens: &[TokenId],
+        paged_cache: &PagedKvCache,
+        block_tables: &[&BlockTable],
+        seq_lens: &[usize],
+        linear_states: &mut [&mut LinearAttentionState],
+        row_ids: Option<&[u64]>,
+    ) -> Result<RocmGraphProfiledValue<Vec<TokenId>>> {
         let _resident_scope = GdnRecurrentResidentStateScope::new(&*self.backend);
         let batch = input_tokens.len();
         anyhow::ensure!(batch > 0, "batched decode requires at least one row");
@@ -6824,7 +6910,7 @@ impl ModelRunner {
                 }
             })
             .context("single-row greedy decode forward pass (paged) failed")?;
-            return Ok(vec![token]);
+            return Ok(RocmGraphProfiledValue::without_graph_work(vec![token]));
         }
 
         // #1082 PERF + CRASHER FIX (per-row contiguity partition).
@@ -6886,7 +6972,7 @@ impl ModelRunner {
                     };
                     tokens.push(token);
                 }
-                return Ok(tokens);
+                return Ok(RocmGraphProfiledValue::without_graph_work(tokens));
             } else if n_noncontig > 0 {
                 // MIXED: row-loop only the fragmented rows; batch the contiguous
                 // majority through the fast path (recurse on the all-contiguous
@@ -6940,7 +7026,7 @@ impl ModelRunner {
                 let contig_row_ids: Option<Vec<u64>> =
                     row_ids.map(|r| contig_idx.iter().map(|&i| r[i]).collect());
                 let contig_out = self
-                    .decode_next_tokens_paged_contiguous_batch_greedy_with_ids(
+                    .decode_next_tokens_paged_contiguous_batch_greedy_with_ids_profiled(
                         &contig_tokens,
                         paged_cache,
                         &contig_bts,
@@ -6950,9 +7036,13 @@ impl ModelRunner {
                     )
                     .context("CUDA mixed-batch contiguous-subset batched decode failed")?;
                 for (k, &row) in contig_idx.iter().enumerate() {
-                    out[row] = contig_out[k];
+                    out[row] = contig_out.value[k];
                 }
-                return Ok(out);
+                return Ok(RocmGraphProfiledValue {
+                    value: out,
+                    capture_duration: contig_out.capture_duration,
+                    replay_duration: contig_out.replay_duration,
+                });
             }
             // n_noncontig == 0: all rows contiguous -> fall through to fast path.
         }
@@ -7016,10 +7106,11 @@ impl ModelRunner {
                     ReplayNativePrimitive::HipGraph,
                 ) {
                 let state = batch_state.as_mut().unwrap_or(&mut empty_linear_state);
-                self.rocm_graph
-                    .lock()
-                    .map_err(|error| anyhow::anyhow!("failed to lock ROCm graph runner: {error}"))?
-                    .decode_step_paged_batched_hidden(
+                let mut runner = self.rocm_graph.lock().map_err(|error| {
+                    anyhow::anyhow!("failed to lock ROCm graph runner: {error}")
+                })?;
+                runner.profile_invocation(|runner| {
+                    runner.decode_step_paged_batched_hidden(
                         &*self.backend,
                         input_tokens,
                         &self.weights,
@@ -7030,12 +7121,13 @@ impl ModelRunner {
                         state,
                         self.active_lora.as_ref(),
                         row_ids,
-                    )?
+                    )
+                })?
             } else {
-                None
+                RocmGraphProfiledValue::without_graph_work(None)
             };
             #[cfg(feature = "rocm")]
-            let rocm_graph_tokens = if let Some(hidden) = rocm_graph_hidden {
+            let rocm_graph_tokens = if let Some(hidden) = rocm_graph_hidden.value {
                 Some(crate::forward::lm_head_argmax_from_batched_hidden_eager(
                     &*self.backend,
                     &hidden,
@@ -7047,6 +7139,14 @@ impl ModelRunner {
             };
             #[cfg(not(feature = "rocm"))]
             let rocm_graph_tokens: Option<Vec<TokenId>> = None;
+            #[cfg(feature = "rocm")]
+            let graph_capture_duration = rocm_graph_hidden.capture_duration;
+            #[cfg(not(feature = "rocm"))]
+            let graph_capture_duration = None;
+            #[cfg(feature = "rocm")]
+            let graph_replay_duration = rocm_graph_hidden.replay_duration;
+            #[cfg(not(feature = "rocm"))]
+            let graph_replay_duration = None;
             let graph_tokens = if paged_decode_replay_primitive_enabled(
                 self.backend.as_ref(),
                 &self.config,
@@ -7075,7 +7175,7 @@ impl ModelRunner {
             } else {
                 None
             };
-            match rocm_graph_tokens.or(graph_tokens) {
+            let tokens = match rocm_graph_tokens.or(graph_tokens) {
                 Some(tokens) => tokens,
                 None => model_forward_paged_decode_contiguous_batch_greedy_with_ids(
                     &*self.backend,
@@ -7090,7 +7190,8 @@ impl ModelRunner {
                     row_ids,
                 )
                 .context("batched greedy decode forward pass (paged) failed")?,
-            }
+            };
+            (tokens, graph_capture_duration, graph_replay_duration)
         };
         if let Some(state) = batch_state.as_ref() {
             if !state.scatter_gdn_state_resident_batch_rows_kt(&*self.backend, linear_states)? {
@@ -7108,7 +7209,11 @@ impl ModelRunner {
             self.park_batched_state(state, ids);
         }
 
-        Ok(tokens)
+        Ok(RocmGraphProfiledValue {
+            value: tokens.0,
+            capture_duration: tokens.1,
+            replay_duration: tokens.2,
+        })
     }
 
     /// Decode multiple compatible paged requests through the transformer stack,
@@ -7367,6 +7472,26 @@ impl ModelRunner {
         linear_states: &mut [&mut LinearAttentionState],
         row_ids: Option<&[u64]>,
     ) -> Result<kiln_tensor::Tensor> {
+        self.decode_hidden_paged_contiguous_batch_with_ids_profiled(
+            input_tokens,
+            paged_cache,
+            block_tables,
+            seq_lens,
+            linear_states,
+            row_ids,
+        )
+        .map(|profiled| profiled.value)
+    }
+
+    fn decode_hidden_paged_contiguous_batch_with_ids_profiled(
+        &self,
+        input_tokens: &[TokenId],
+        paged_cache: &PagedKvCache,
+        block_tables: &[&BlockTable],
+        seq_lens: &[usize],
+        linear_states: &mut [&mut LinearAttentionState],
+        row_ids: Option<&[u64]>,
+    ) -> Result<RocmGraphProfiledValue<kiln_tensor::Tensor>> {
         let _resident_scope = GdnRecurrentResidentStateScope::new(&*self.backend);
         let batch = input_tokens.len();
         anyhow::ensure!(batch > 0, "batched hidden decode requires at least one row");
@@ -7453,10 +7578,11 @@ impl ModelRunner {
                 let state = linear_state_for_forward
                     .as_deref_mut()
                     .unwrap_or(&mut empty_linear_state);
-                self.rocm_graph
-                    .lock()
-                    .map_err(|error| anyhow::anyhow!("failed to lock ROCm graph runner: {error}"))?
-                    .decode_step_paged_batched_hidden(
+                let mut runner = self.rocm_graph.lock().map_err(|error| {
+                    anyhow::anyhow!("failed to lock ROCm graph runner: {error}")
+                })?;
+                runner.profile_invocation(|runner| {
+                    runner.decode_step_paged_batched_hidden(
                         &*self.backend,
                         input_tokens,
                         &self.weights,
@@ -7467,11 +7593,12 @@ impl ModelRunner {
                         state,
                         self.active_lora.as_ref(),
                         row_ids,
-                    )?
+                    )
+                })?
             } else {
-                None
+                RocmGraphProfiledValue::without_graph_work(None)
             };
-            match graph_hidden {
+            let hidden = match graph_hidden.value {
                 Some(hidden) => hidden,
                 None => model_forward_paged_decode_contiguous_batch_hidden_with_ids(
                     &*self.backend,
@@ -7486,7 +7613,12 @@ impl ModelRunner {
                     row_ids,
                 )
                 .context("batched hidden decode forward pass (paged) failed")?,
-            }
+            };
+            (
+                hidden,
+                graph_hidden.capture_duration,
+                graph_hidden.replay_duration,
+            )
         };
         if let Some(state) = batch_state.as_ref() {
             if !state.scatter_gdn_state_resident_batch_rows_kt(&*self.backend, linear_states)? {
@@ -7498,7 +7630,11 @@ impl ModelRunner {
             self.park_batched_state(state, ids);
         }
 
-        Ok(hidden)
+        Ok(RocmGraphProfiledValue {
+            value: hidden.0,
+            capture_duration: hidden.1,
+            replay_duration: hidden.2,
+        })
     }
 
     fn decode_next_token_paged_greedy_metal_graph(
@@ -7805,7 +7941,7 @@ impl ModelRunner {
             1,
             ReplayNativePrimitive::HipGraph,
         ) {
-            let maybe_logits = {
+            let maybe_profiled_logits = {
                 let mut runner = self
                     .rocm_graph
                     .lock()
@@ -7814,33 +7950,41 @@ impl ModelRunner {
                     let pc_guard = lock_paged_cache(paged_cache)?;
                     Some(
                         runner
-                            .decode_step_paged(
-                                &*self.backend,
-                                input_token,
-                                &self.weights,
-                                &self.config,
-                                pc_guard,
-                                block_table,
-                                seq_len,
-                                linear_state,
-                                self.active_lora.as_ref(),
-                                graph_row_id,
-                            )
+                            .profile_invocation(|runner| {
+                                runner.decode_step_paged(
+                                    &*self.backend,
+                                    input_token,
+                                    &self.weights,
+                                    &self.config,
+                                    pc_guard,
+                                    block_table,
+                                    seq_len,
+                                    linear_state,
+                                    self.active_lora.as_ref(),
+                                    graph_row_id,
+                                )
+                            })
                             .context("ROCm graph decode step failed")?,
                     )
                 } else {
                     None
                 }
             };
-            if let Some(logits) = maybe_logits {
+            if let Some(profiled) = maybe_profiled_logits {
                 let sampling_started = Instant::now();
                 let token = if params.is_effectively_greedy() {
-                    greedy_sample(&logits)
+                    greedy_sample(&profiled.value)
                 } else {
-                    sample_step(&logits, params, step_seed, history)
+                    sample_step(&profiled.value, params, step_seed, history)
                 }?;
                 let mut backend_phases = StreamBackendPhaseDurations::default();
                 backend_phases.observe_sampling(sampling_started.elapsed());
+                if let Some(duration) = profiled.capture_duration {
+                    backend_phases.observe_graph_capture(duration);
+                }
+                if let Some(duration) = profiled.replay_duration {
+                    backend_phases.observe_graph_replay(duration);
+                }
                 if skip_gdn_state_readback {
                     linear_state.evict_gdn_recurrent_resident_states(&*self.backend);
                 }
@@ -11504,9 +11648,14 @@ mod tests {
         let mut phases = StreamBackendPhaseDurations::default();
         phases.observe_sampling(Duration::ZERO);
         phases.observe_sampling(Duration::from_millis(9));
+        phases.observe_graph_capture(Duration::ZERO);
+        phases.observe_graph_capture(Duration::from_millis(7));
+        phases.observe_graph_replay(Duration::from_millis(3));
         phases.observe_synchronization(Duration::from_millis(4));
         assert_eq!(phases.sampling, Some(Duration::from_millis(9)));
         assert_eq!(phases.readback, None);
+        assert_eq!(phases.graph_capture, Some(Duration::from_millis(7)));
+        assert_eq!(phases.graph_replay, Some(Duration::from_millis(3)));
         assert_eq!(phases.synchronization, Some(Duration::from_millis(4)));
     }
 

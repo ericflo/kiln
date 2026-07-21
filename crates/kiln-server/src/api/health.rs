@@ -608,6 +608,7 @@ struct RocmGraphInfo {
     candidate_warm_phase: Option<kiln_model::RocmGraphPhaseStats>,
     pre_native_reservation_phase: Option<kiln_model::RocmGraphPhaseStats>,
     native_capture_phase: Option<kiln_model::RocmGraphPhaseStats>,
+    native_replay_phase: Option<kiln_model::RocmGraphPhaseStats>,
     rejected_candidate_cleanup_phase: Option<kiln_model::RocmGraphPhaseStats>,
     last_transient_candidate_bytes: Option<u64>,
     peak_transient_candidate_bytes: Option<u64>,
@@ -705,6 +706,7 @@ fn rocm_graph_info(
         pre_native_reservation_phase: telemetry
             .map(|snapshot| snapshot.pre_native_reservation_phase),
         native_capture_phase: telemetry.map(|snapshot| snapshot.native_capture_phase),
+        native_replay_phase: telemetry.map(|snapshot| snapshot.native_replay_phase),
         rejected_candidate_cleanup_phase: telemetry
             .map(|snapshot| snapshot.rejected_candidate_cleanup_phase),
         last_transient_candidate_bytes: telemetry
@@ -1645,6 +1647,12 @@ mod tests {
                 total_duration_micros: 325_000,
                 max_duration_micros: 180_000,
             },
+            native_replay_phase: kiln_model::RocmGraphPhaseStats {
+                calls: 9,
+                slow: 1,
+                total_duration_micros: 210_000,
+                max_duration_micros: 120_000,
+            },
             rejected_candidate_cleanup_phase: kiln_model::RocmGraphPhaseStats {
                 calls: 2,
                 slow: 0,
@@ -1681,6 +1689,7 @@ mod tests {
             candidate_warm_phase: stats.candidate_warm_phase,
             pre_native_reservation_phase: stats.pre_native_reservation_phase,
             native_capture_phase: stats.native_capture_phase,
+            native_replay_phase: stats.native_replay_phase,
             rejected_candidate_cleanup_phase: stats.rejected_candidate_cleanup_phase,
             last_transient_candidate_bytes: stats.last_transient_candidate_bytes,
             peak_transient_candidate_bytes: stats.peak_transient_candidate_bytes,
@@ -1767,6 +1776,7 @@ mod tests {
             110_000
         );
         assert_eq!(json["native_capture_phase"]["calls"], 8);
+        assert_eq!(json["native_replay_phase"]["calls"], 9);
         assert_eq!(json["rejected_candidate_cleanup_phase"]["calls"], 2);
         assert_eq!(json["last_transient_candidate_bytes"], 96 * 1024 * 1024);
         assert_eq!(json["peak_transient_candidate_bytes"], 160 * 1024 * 1024);

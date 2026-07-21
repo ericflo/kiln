@@ -1188,7 +1188,7 @@ impl RocmGraphFallbackStats {
     }
 }
 
-/// Bounded latency telemetry for one fixed ROCm graph-capture phase.
+/// Bounded latency telemetry for one fixed ROCm graph lifecycle or replay phase.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct RocmGraphPhaseStats {
     pub calls: u64,
@@ -1212,7 +1212,7 @@ impl RocmGraphPhaseStats {
     }
 }
 
-/// Closed capture-phase labels for graph-runner-lock-independent observability.
+/// Closed graph phase labels for graph-runner-lock-independent observability.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RocmGraphPhase {
@@ -1220,6 +1220,7 @@ pub enum RocmGraphPhase {
     CandidateWarm,
     PreNativeReservation,
     NativeCapture,
+    NativeReplay,
     RejectedCandidateCleanup,
 }
 
@@ -1233,6 +1234,7 @@ pub struct RocmGraphLiveTelemetry {
     pub candidate_warm_phase: RocmGraphPhaseStats,
     pub pre_native_reservation_phase: RocmGraphPhaseStats,
     pub native_capture_phase: RocmGraphPhaseStats,
+    pub native_replay_phase: RocmGraphPhaseStats,
     pub rejected_candidate_cleanup_phase: RocmGraphPhaseStats,
     pub last_transient_candidate_bytes: u64,
     pub peak_transient_candidate_bytes: u64,
@@ -1355,8 +1357,67 @@ fn phase_stats_mut(
         RocmGraphPhase::CandidateWarm => &mut telemetry.candidate_warm_phase,
         RocmGraphPhase::PreNativeReservation => &mut telemetry.pre_native_reservation_phase,
         RocmGraphPhase::NativeCapture => &mut telemetry.native_capture_phase,
+        RocmGraphPhase::NativeReplay => &mut telemetry.native_replay_phase,
         RocmGraphPhase::RejectedCandidateCleanup => &mut telemetry.rejected_candidate_cleanup_phase,
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RocmGraphInvocationPhaseSnapshot {
+    capture_calls: u64,
+    capture_duration_micros: u64,
+    replay_calls: u64,
+    replay_duration_micros: u64,
+}
+
+impl From<RocmGraphLiveTelemetry> for RocmGraphInvocationPhaseSnapshot {
+    fn from(telemetry: RocmGraphLiveTelemetry) -> Self {
+        let capture_phases = [
+            telemetry.pre_candidate_headroom_phase,
+            telemetry.candidate_warm_phase,
+            telemetry.pre_native_reservation_phase,
+            telemetry.native_capture_phase,
+            telemetry.rejected_candidate_cleanup_phase,
+        ];
+        Self {
+            capture_calls: capture_phases
+                .iter()
+                .fold(0_u64, |total, phase| total.saturating_add(phase.calls)),
+            capture_duration_micros: capture_phases.iter().fold(0_u64, |total, phase| {
+                total.saturating_add(phase.total_duration_micros)
+            }),
+            replay_calls: telemetry.native_replay_phase.calls,
+            replay_duration_micros: telemetry.native_replay_phase.total_duration_micros,
+        }
+    }
+}
+
+/// Value plus graph work that occurred during one graph-runner-lock-owned call.
+#[derive(Debug)]
+pub(crate) struct RocmGraphProfiledValue<T> {
+    pub value: T,
+    pub capture_duration: Option<std::time::Duration>,
+    pub replay_duration: Option<std::time::Duration>,
+}
+
+impl<T> RocmGraphProfiledValue<T> {
+    pub(crate) fn without_graph_work(value: T) -> Self {
+        Self {
+            value,
+            capture_duration: None,
+            replay_duration: None,
+        }
+    }
+}
+
+fn profiled_phase_duration(
+    before_calls: u64,
+    before_micros: u64,
+    after_calls: u64,
+    after_micros: u64,
+) -> Option<std::time::Duration> {
+    (after_calls > before_calls)
+        .then(|| std::time::Duration::from_micros(after_micros.saturating_sub(before_micros)))
 }
 
 impl RocmGraphCounters {
@@ -1673,6 +1734,9 @@ pub struct RocmGraphStats {
     /// Stream capture, graph instantiation, the settled first native launch,
     /// defensive cache admission, and committed governor publication.
     pub native_capture_phase: RocmGraphPhaseStats,
+    /// Per-replay input updates, cross-stream dependency setup, and native graph
+    /// launch submission. External-yield settlement remains synchronization.
+    pub native_replay_phase: RocmGraphPhaseStats,
     /// Settled destruction of successfully captured but unretained candidates.
     pub rejected_candidate_cleanup_phase: RocmGraphPhaseStats,
     /// Exact deduplicated requested bytes in queryable tensor, arena, and
@@ -1855,6 +1919,32 @@ impl RocmGraphRunner {
         self.phase_telemetry.clone()
     }
 
+    /// Run exactly one graph decode while this runner remains exclusively
+    /// borrowed, then return only the capture/replay work owned by that call.
+    pub(crate) fn profile_invocation<T>(
+        &mut self,
+        invocation: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<RocmGraphProfiledValue<T>> {
+        let before = RocmGraphInvocationPhaseSnapshot::from(self.phase_telemetry.snapshot());
+        let value = invocation(self);
+        let after = RocmGraphInvocationPhaseSnapshot::from(self.phase_telemetry.snapshot());
+        value.map(|value| RocmGraphProfiledValue {
+            value,
+            capture_duration: profiled_phase_duration(
+                before.capture_calls,
+                before.capture_duration_micros,
+                after.capture_calls,
+                after.capture_duration_micros,
+            ),
+            replay_duration: profiled_phase_duration(
+                before.replay_calls,
+                before.replay_duration_micros,
+                after.replay_calls,
+                after.replay_duration_micros,
+            ),
+        })
+    }
+
     /// Return configuration, circuit-breaker state, and lifetime execution
     /// counters without resetting them.
     pub fn stats(&self) -> RocmGraphStats {
@@ -1981,6 +2071,7 @@ impl RocmGraphRunner {
             candidate_warm_phase: phase_telemetry.candidate_warm_phase,
             pre_native_reservation_phase: phase_telemetry.pre_native_reservation_phase,
             native_capture_phase: phase_telemetry.native_capture_phase,
+            native_replay_phase: phase_telemetry.native_replay_phase,
             rejected_candidate_cleanup_phase: phase_telemetry.rejected_candidate_cleanup_phase,
             last_transient_candidate_bytes: phase_telemetry.last_transient_candidate_bytes,
             peak_transient_candidate_bytes: phase_telemetry.peak_transient_candidate_bytes,
@@ -5193,8 +5284,10 @@ impl RocmGraphRunner {
         block_table: &BlockTable,
         seq_len: usize,
     ) -> Result<Tensor> {
+        let replay_timer = self.phase_telemetry.timer(RocmGraphPhase::NativeReplay);
         let result =
             self.replay_hidden_inner(key, token_id, weights, paged_cache, block_table, seq_len);
+        drop(replay_timer);
         self.counters.record_replay_outcome(result.is_ok());
         result
     }
@@ -5273,6 +5366,7 @@ impl RocmGraphRunner {
         block_tables: &[&BlockTable],
         sequence_lengths: &[usize],
     ) -> Result<Tensor> {
+        let replay_timer = self.phase_telemetry.timer(RocmGraphPhase::NativeReplay);
         let result = self.replay_hidden_batched_inner(
             key,
             token_ids,
@@ -5281,6 +5375,7 @@ impl RocmGraphRunner {
             block_tables,
             sequence_lengths,
         );
+        drop(replay_timer);
         self.counters.record_replay_outcome(result.is_ok());
         result
     }
@@ -10565,6 +10660,7 @@ mod tests {
         for phase in [
             RocmGraphPhase::PreCandidateHeadroom,
             RocmGraphPhase::PreNativeReservation,
+            RocmGraphPhase::NativeReplay,
             RocmGraphPhase::RejectedCandidateCleanup,
         ] {
             let _timer = telemetry.timer(phase);
@@ -10576,6 +10672,7 @@ mod tests {
         assert_eq!(snapshot.pre_candidate_headroom_phase.calls, 1);
         assert_eq!(snapshot.pre_native_reservation_phase.calls, 1);
         assert_eq!(snapshot.native_capture_phase.calls, 1);
+        assert_eq!(snapshot.native_replay_phase.calls, 1);
         assert_eq!(snapshot.rejected_candidate_cleanup_phase.calls, 1);
         assert_eq!(snapshot.last_transient_candidate_bytes, 1024);
         assert_eq!(snapshot.peak_transient_candidate_bytes, 4096);
@@ -10587,6 +10684,43 @@ mod tests {
         assert_eq!(phase.slow, 1);
         assert_eq!(phase.total_duration_micros, 170_000);
         assert_eq!(phase.max_duration_micros, 120_000);
+    }
+
+    #[test]
+    fn invocation_phase_snapshot_separates_capture_and_replay_work() {
+        let telemetry = RocmGraphLiveTelemetry {
+            pre_candidate_headroom_phase: RocmGraphPhaseStats {
+                calls: 1,
+                total_duration_micros: 11,
+                ..RocmGraphPhaseStats::default()
+            },
+            candidate_warm_phase: RocmGraphPhaseStats {
+                calls: 1,
+                total_duration_micros: 13,
+                ..RocmGraphPhaseStats::default()
+            },
+            native_capture_phase: RocmGraphPhaseStats {
+                calls: 1,
+                total_duration_micros: 17,
+                ..RocmGraphPhaseStats::default()
+            },
+            native_replay_phase: RocmGraphPhaseStats {
+                calls: 2,
+                total_duration_micros: 19,
+                ..RocmGraphPhaseStats::default()
+            },
+            ..RocmGraphLiveTelemetry::default()
+        };
+        let snapshot = RocmGraphInvocationPhaseSnapshot::from(telemetry);
+        assert_eq!(snapshot.capture_calls, 3);
+        assert_eq!(snapshot.capture_duration_micros, 41);
+        assert_eq!(snapshot.replay_calls, 2);
+        assert_eq!(snapshot.replay_duration_micros, 19);
+        assert_eq!(
+            profiled_phase_duration(3, 41, 4, 41),
+            Some(std::time::Duration::ZERO)
+        );
+        assert_eq!(profiled_phase_duration(3, 41, 3, 41), None);
     }
 
     #[test]
