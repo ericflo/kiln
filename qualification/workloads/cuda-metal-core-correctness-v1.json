@@ -1,0 +1,628 @@
+{
+  "schema_version": 1,
+  "workload_id": "cuda-metal-core-correctness-v1",
+  "kind": "correctness",
+  "description": "Run fail-closed CUDA or Metal device, tensor, dense-matmul, SFT-step, and pinned PyTorch AdamW oracle gates on the named handoff machines.",
+  "determinism": {
+    "seed": 20260721,
+    "seed_delivery": "fixed_fixture",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [],
+  "variants": [
+    {
+      "id": "cuda-rtx4090-desktop-24gb",
+      "description": "Require the selected desktop RTX 4090 and execute bounded CUDA substrate, matmul, training-step, and optimizer-oracle cases.",
+      "backend": "cuda",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {},
+      "cases": [
+        {
+          "id": "device-probe",
+          "description": "Require CUDA logical device zero to be the desktop NVIDIA GeForce RTX 4090 selected by the preceding environment receipt.",
+          "required": true,
+          "command": [
+            "nvidia-smi",
+            "-i",
+            "0",
+            "--query-gpu=name",
+            "--format=csv,noheader"
+          ],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 60,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "(?m)^NVIDIA GeForce RTX 4090\\s*$"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no devices were found|skipp(?:ed|ing))"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "tensor-parity",
+          "description": "Exercise CUDA allocation, device copies, compact views, prefix writes, and synchronization across shrink- and grow-shaped buffers.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-tensor",
+            "--no-default-features",
+            "--features",
+            "cuda",
+            "--test",
+            "cuda_resize_copy_primitives",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "CUDARC_CUDA_VERSION": "12080",
+            "KILN_CUDA_ARCHS": "89",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[cuda-primitives\\] OK"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(skip.*cuda|no CUDA device|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "matmul-parity",
+          "description": "Compare deterministic CUDA F32 and BF16 dense matmuls with scalar CPU oracles over skinny, square, odd, and rectangular shapes.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-tensor",
+            "--no-default-features",
+            "--features",
+            "cuda",
+            "--test",
+            "cuda_matmul_parity",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "CUDARC_CUDA_VERSION": "12080",
+            "KILN_CUDA_ARCHS": "89",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[CUDA MATMUL PARITY PASS\\] dtype=f32 shapes=4"
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[CUDA MATMUL PARITY PASS\\] dtype=bfloat16 shapes=3"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(skipping CUDA|no CUDA device|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "training-oracles",
+          "description": "Run one complete CUDA LoRA SFT forward/backward/AdamW step and the twenty-step BF16 trajectory against the pinned PyTorch oracle.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-model",
+            "--no-default-features",
+            "--features",
+            "cuda",
+            "--test",
+            "adamw_pytorch_oracle",
+            "--test",
+            "cuda_sft_step_proof",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "CUDARC_CUDA_VERSION": "12080",
+            "KILN_CUDA_ARCHS": "89",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[ADAMW PYTORCH ORACLE PASS\\] backend=cuda dtype=bfloat16 cases=2 steps=20"
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[CUDA TIER3 PASS\\] one full SFT step on Device::Cuda\\(0\\)"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(skip .*cuda|no CUDA device|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "cuda-rtx4090-laptop-16gb",
+      "description": "Require the selected laptop RTX 4090 and execute the same bounded CUDA substrate, matmul, training-step, and optimizer-oracle cases.",
+      "backend": "cuda",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {},
+      "cases": [
+        {
+          "id": "device-probe",
+          "description": "Require CUDA logical device zero to be the laptop NVIDIA GeForce RTX 4090 selected by the preceding environment receipt.",
+          "required": true,
+          "command": [
+            "nvidia-smi",
+            "-i",
+            "0",
+            "--query-gpu=name",
+            "--format=csv,noheader"
+          ],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 60,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "(?m)^NVIDIA GeForce RTX 4090 Laptop GPU\\s*$"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no devices were found|skipp(?:ed|ing))"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "tensor-parity",
+          "description": "Exercise CUDA allocation, device copies, compact views, prefix writes, and synchronization across shrink- and grow-shaped buffers.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-tensor",
+            "--no-default-features",
+            "--features",
+            "cuda",
+            "--test",
+            "cuda_resize_copy_primitives",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "CUDARC_CUDA_VERSION": "12080",
+            "KILN_CUDA_ARCHS": "89",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[cuda-primitives\\] OK"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(skip.*cuda|no CUDA device|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "matmul-parity",
+          "description": "Compare deterministic CUDA F32 and BF16 dense matmuls with scalar CPU oracles over skinny, square, odd, and rectangular shapes.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-tensor",
+            "--no-default-features",
+            "--features",
+            "cuda",
+            "--test",
+            "cuda_matmul_parity",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "CUDARC_CUDA_VERSION": "12080",
+            "KILN_CUDA_ARCHS": "89",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[CUDA MATMUL PARITY PASS\\] dtype=f32 shapes=4"
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[CUDA MATMUL PARITY PASS\\] dtype=bfloat16 shapes=3"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(skipping CUDA|no CUDA device|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "training-oracles",
+          "description": "Run one complete CUDA LoRA SFT forward/backward/AdamW step and the twenty-step BF16 trajectory against the pinned PyTorch oracle.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-model",
+            "--no-default-features",
+            "--features",
+            "cuda",
+            "--test",
+            "adamw_pytorch_oracle",
+            "--test",
+            "cuda_sft_step_proof",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "CUDARC_CUDA_VERSION": "12080",
+            "KILN_CUDA_ARCHS": "89",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[ADAMW PYTORCH ORACLE PASS\\] backend=cuda dtype=bfloat16 cases=2 steps=20"
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[CUDA TIER3 PASS\\] one full SFT step on Device::Cuda\\(0\\)"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(skip .*cuda|no CUDA device|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "metal-m1-macbook-air",
+      "description": "Require the selected eight-core Apple M1 GPU and execute bounded Metal substrate, matmul, training-step, and optimizer-oracle cases.",
+      "backend": "metal",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {},
+      "cases": [
+        {
+          "id": "device-probe",
+          "description": "Require system_profiler to report the Apple M1 GPU and its eight GPU cores.",
+          "required": true,
+          "command": ["system_profiler", "SPDisplaysDataType", "-json"],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 120,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\"(?:sppci_model|_name)\"\\s*:\\s*\"Apple M1\""
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\"(?:sppci_cores|spdisplays_gpu_cores)\"\\s*:\\s*\"?8(?: Cores)?\"?"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no Metal device|skipp(?:ed|ing))"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "tensor-parity",
+          "description": "Compare contiguous, strided-view, and BF16 Metal tensor round trips with exact CPU values.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-tensor",
+            "--no-default-features",
+            "--features",
+            "metal",
+            "--test",
+            "metal_ops_parity",
+            "roundtrip",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "roundtrip_f32_contiguous \\.\\.\\. ok"
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "roundtrip_strided_view \\.\\.\\. ok"
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "roundtrip_bf16 \\.\\.\\. ok"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no Metal device|skipp(?:ed|ing)|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "matmul-parity",
+          "description": "Compare Metal matrix-core F32, batched, and transposed dense matmuls with CPU oracles.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-tensor",
+            "--no-default-features",
+            "--features",
+            "metal",
+            "--test",
+            "metal_ops_parity",
+            "matmul_matrix_core",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "matmul_matrix_core_f32_parity \\.\\.\\. ok"
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "matmul_rhs_transposed_matrix_core_parity \\.\\.\\. ok"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no Metal device|skipp(?:ed|ing)|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "training-oracles",
+          "description": "Run one complete Metal LoRA SFT forward/backward/AdamW step and the twenty-step BF16 trajectory against the pinned PyTorch oracle.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-model",
+            "--no-default-features",
+            "--features",
+            "metal",
+            "--test",
+            "adamw_pytorch_oracle",
+            "--test",
+            "metal_sft_step_proof",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[ADAMW PYTORCH ORACLE PASS\\] backend=metal dtype=bfloat16 cases=2 steps=20"
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[Metal TIER3 PASS\\] one full SFT step on Device::Metal\\(0\\)"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(skip .*Metal|no Metal device|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        }
+      ]
+    }
+  ],
+  "comparison_policy": {
+    "mode": "self_contained_correctness",
+    "variant_pairs": [],
+    "backend_pairs": [],
+    "metric_rules": []
+  }
+}

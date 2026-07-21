@@ -32,6 +32,9 @@ const LORA_SCALE: f32 = 2.0;
 
 fn metal_enabled(test: &str) -> bool {
     if kiln_tensor::primary_metal_companion(0).is_err() {
+        if std::env::var("KILN_QUALIFICATION").ok().as_deref() == Some("1") {
+            panic!("Metal device unavailable while KILN_QUALIFICATION=1 ({test})");
+        }
         eprintln!("skip {test}: no Metal device");
         return false;
     }

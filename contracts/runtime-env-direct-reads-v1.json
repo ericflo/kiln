@@ -1082,6 +1082,32 @@
       "surface": "integration-test"
     },
     {
+      "api": "var",
+      "argument": "KILN_QUALIFICATION",
+      "argument_kind": "literal",
+      "classification": "test_only",
+      "classification_basis": "integration-test source surface",
+      "count": 1,
+      "language": "rust",
+      "operation": "read",
+      "path": "crates/kiln-model/tests/cuda_sft_step_proof.rs",
+      "phase": "runtime",
+      "surface": "integration-test"
+    },
+    {
+      "api": "var",
+      "argument": "KILN_QUALIFICATION",
+      "argument_kind": "literal",
+      "classification": "test_only",
+      "classification_basis": "integration-test source surface",
+      "count": 1,
+      "language": "rust",
+      "operation": "read",
+      "path": "crates/kiln-model/tests/metal_sft_step_proof.rs",
+      "phase": "runtime",
+      "surface": "integration-test"
+    },
+    {
       "api": "var_os",
       "argument": "KILN_MTP_BYTE_EQ_MODEL",
       "argument_kind": "literal",
@@ -2299,6 +2325,32 @@
       "count": 1,
       "language": "rust",
       "operation": "read",
+      "path": "crates/kiln-tensor/tests/cuda_matmul_parity.rs",
+      "phase": "runtime",
+      "surface": "integration-test"
+    },
+    {
+      "api": "var",
+      "argument": "KILN_QUALIFICATION",
+      "argument_kind": "literal",
+      "classification": "test_only",
+      "classification_basis": "integration-test source surface",
+      "count": 1,
+      "language": "rust",
+      "operation": "read",
+      "path": "crates/kiln-tensor/tests/cuda_resize_copy_primitives.rs",
+      "phase": "runtime",
+      "surface": "integration-test"
+    },
+    {
+      "api": "var",
+      "argument": "KILN_QUALIFICATION",
+      "argument_kind": "literal",
+      "classification": "test_only",
+      "classification_basis": "integration-test source surface",
+      "count": 1,
+      "language": "rust",
+      "operation": "read",
       "path": "crates/kiln-tensor/tests/log_softmax_backend_stability.rs",
       "phase": "runtime",
       "surface": "integration-test"
@@ -2876,7 +2928,7 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 107,
+    "literal_kiln_read_call_sites": 111,
     "literal_kiln_read_names": 31,
     "literal_kiln_read_names_by_classification": {
       "build_time": 6,
@@ -2896,15 +2948,15 @@
       "test_only": 11
     },
     "process_mutation_entries": 16,
-    "read_call_sites": 427,
+    "read_call_sites": 431,
     "read_call_sites_by_classification": {
       "build_time": 326,
       "credential_provider": 1,
       "experimental_debug": 0,
       "public_stable": 6,
       "startup_safety": 1,
-      "test_only": 93
+      "test_only": 97
     },
-    "read_entries": 204
+    "read_entries": 208
   }
 }

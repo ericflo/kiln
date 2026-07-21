@@ -100,6 +100,44 @@ class WorkloadTests(unittest.TestCase):
                 self.assertEqual(workload_module.validate_workload(workload), [])
                 self.assertRegex(workload_module.workload_file_sha256(path), r"^sha256:[0-9a-f]{64}$")
 
+    def test_cuda_metal_handoff_is_fail_closed_and_machine_specific(self) -> None:
+        path = ROOT / "qualification/workloads/cuda-metal-core-correctness-v1.json"
+        workload = workload_module.load_workload(path)
+        variants = {variant["id"]: variant for variant in workload["variants"]}
+        self.assertEqual(
+            sorted(variants),
+            [
+                "cuda-rtx4090-desktop-24gb",
+                "cuda-rtx4090-laptop-16gb",
+                "metal-m1-macbook-air",
+            ],
+        )
+        for variant in variants.values():
+            self.assertEqual(variant["device_requirement"], "required")
+            self.assertEqual(variant["skip_policy"], "fail")
+            cases = {case["id"]: case for case in variant["cases"]}
+            self.assertEqual(
+                sorted(cases),
+                ["device-probe", "matmul-parity", "tensor-parity", "training-oracles"],
+            )
+            for case_id in ("matmul-parity", "tensor-parity", "training-oracles"):
+                self.assertEqual(case_id, cases[case_id]["id"])
+                self.assertEqual(cases[case_id]["environment"]["KILN_QUALIFICATION"], "1")
+                forbidden = [
+                    assertion["pattern"]
+                    for assertion in cases[case_id]["output_assertions"]
+                    if assertion["match"] == "forbidden"
+                ]
+                self.assertTrue(any("skip" in pattern.lower() for pattern in forbidden))
+
+        desktop_probe = variants["cuda-rtx4090-desktop-24gb"]["cases"][0]
+        laptop_probe = variants["cuda-rtx4090-laptop-16gb"]["cases"][0]
+        metal_probe = variants["metal-m1-macbook-air"]["cases"][0]
+        self.assertIn("RTX 4090\\s", desktop_probe["output_assertions"][0]["pattern"])
+        self.assertIn("RTX 4090 Laptop GPU", laptop_probe["output_assertions"][0]["pattern"])
+        self.assertIn("Apple M1", metal_probe["output_assertions"][0]["pattern"])
+        self.assertIn("8", metal_probe["output_assertions"][1]["pattern"])
+
     def test_workload_cases_cannot_invoke_raw_cargo(self) -> None:
         value = valid_performance_workload()
         value["variants"][0]["cases"][0]["command"] = ["/usr/bin/cargo", "test"]

@@ -30,6 +30,9 @@ const LORA_SCALE: f32 = 2.0;
 
 fn cuda_enabled(test: &str) -> bool {
     if kiln_tensor::primary_cuda_context(0).is_err() {
+        if std::env::var("KILN_QUALIFICATION").ok().as_deref() == Some("1") {
+            panic!("CUDA device unavailable while KILN_QUALIFICATION=1 ({test})");
+        }
         eprintln!("skip {test}: no CUDA device");
         return false;
     }

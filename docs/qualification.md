@@ -359,6 +359,56 @@ Choose a stable, non-secret host ID that identifies the physical machine. Run
 one backend variant at a time. The runner prints the final receipt path and
 stores bounded stdout/stderr plus their hashes under `.qualification/runs/`.
 
+### CUDA And Metal Core Handoff
+
+Run the environment variant for the machine first, then commit its receipt.
+From that exact clean pushed source, run the matching core-correctness variant.
+The CUDA variants require logical device zero to have the exact laptop or
+desktop RTX 4090 product name. The Metal variant requires an Apple M1 with eight
+GPU cores. Missing hardware is a test failure under `KILN_QUALIFICATION=1`;
+the output contract also rejects skip diagnostics.
+
+RTX 4090 Laptop GPU, 16 GB:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" \
+python3 scripts/qualification/run.py \
+  --variant cuda-rtx4090-laptop-16gb \
+  --host-id rtx4090-laptop \
+  qualification/workloads/cuda-metal-core-correctness-v1.json
+```
+
+Desktop RTX 4090, 24 GB:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" \
+python3 scripts/qualification/run.py \
+  --variant cuda-rtx4090-desktop-24gb \
+  --host-id rtx4090-desktop \
+  qualification/workloads/cuda-metal-core-correctness-v1.json
+```
+
+M1 MacBook Air, eight-core GPU:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" \
+python3 scripts/qualification/run.py \
+  --variant metal-m1-macbook-air \
+  --host-id m1-macbook-air \
+  qualification/workloads/cuda-metal-core-correctness-v1.json
+```
+
+Each run produces four required case results. `device-probe` binds the intended
+machine class. `tensor-parity` covers device allocation, transfer, and layout
+behavior. `matmul-parity` compares accelerator results with deterministic CPU
+oracles. `training-oracles` runs a complete tiny LoRA SFT
+forward/backward/AdamW step and compares twenty native BF16 AdamW updates with
+the source-pinned PyTorch trajectory. CUDA compilation is pinned to SM 8.9 and
+the cudarc CUDA 12.8 API contract by the manifest; the environment receipt
+records the actual installed driver and toolkit. These bounded tests do not
+claim full-model correctness, graph/resize behavior, memory-pressure safety,
+serving performance, or soak completion.
+
 ROCm core correctness:
 
 ```bash

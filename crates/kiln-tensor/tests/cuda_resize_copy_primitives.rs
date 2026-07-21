@@ -16,6 +16,21 @@ use kiln_tensor::{DType, Device, Layout, Tensor, TensorId, cuda_zeros_ctx};
 const KV_HEADS: usize = 8;
 const HEAD_DIM: usize = 128;
 
+fn qualification_required(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+fn cuda_available_or_skip() -> bool {
+    if kiln_tensor::cuda_is_available() {
+        return true;
+    }
+    if qualification_required(std::env::var("KILN_QUALIFICATION").ok().as_deref()) {
+        panic!("CUDA device unavailable while KILN_QUALIFICATION=1");
+    }
+    eprintln!("skip cuda_resize_copy: no CUDA device");
+    false
+}
+
 fn cuda_pool(total_slots: usize) -> Tensor {
     let n = total_slots * KV_HEADS * HEAD_DIM;
     let storage = cuda_zeros_ctx(0, DType::BF16, n).expect("cuda_zeros_ctx");
@@ -29,8 +44,7 @@ fn cuda_pool(total_slots: usize) -> Tensor {
 
 #[test]
 fn cuda_pool_prefix_copy_preserves_bytes() {
-    if !kiln_tensor::cuda_is_available() {
-        eprintln!("skip cuda_resize_copy: no CUDA device");
+    if !cuda_available_or_skip() {
         return;
     }
     let dev = Device::Cuda(0);
@@ -95,4 +109,13 @@ fn cuda_pool_prefix_copy_preserves_bytes() {
     eprintln!(
         "[cuda-primitives] OK: cuda_zeros_ctx + narrow + slice_set preserve KV bytes across shrink+grow copies"
     );
+}
+
+#[test]
+fn qualification_mode_is_exact_opt_in() {
+    assert!(qualification_required(Some("1")));
+    assert!(!qualification_required(None));
+    assert!(!qualification_required(Some("")));
+    assert!(!qualification_required(Some("0")));
+    assert!(!qualification_required(Some("true")));
 }
