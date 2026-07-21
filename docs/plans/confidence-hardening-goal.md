@@ -2410,6 +2410,21 @@ mode or direct-rendezvous rows. All 51 historical benchmark receipts and all
 663 qualification-tooling tests pass locally; rendered browser confirmation is
 left to the inexpensive UI workflow because this host has no Chromium.
 
+Completion behavior-split checkpoint (2026-07-20): prompt-logprob scoring and
+request-scoped adapter resolution/composition now have separate child modules
+under `api/completions/`. The scoring module owns identity validation, bounded
+top-K projection and ranking, device/host selection, worker ownership,
+cancellation, timeout, and panic fencing. The adapter module owns default/base/
+named selection, serialized runtime swaps, composed-adapter validation,
+publication, loading, and bounded LRU eviction. Their symbols are restricted to
+the parent completion module with `pub(super)`; the HTTP surface and execution
+semantics are unchanged. `completions.rs` falls from 10,430 to 8,931 production
+lines, all 1,092 server tests pass, and the full behavior split remains open for
+schema, request preparation, generation/streaming, finalization, and batch
+ownership. The backend capability report was regenerated after the prior
+forward-test move; its exact non-mutating Rust enforcement test passes locally,
+closing the remaining cheap-CI regression from that structural checkpoint.
+
 ### 8.4 Replace verification theater
 
 - [x] Inventory source-string and ad hoc Rust-source parsing tests.
