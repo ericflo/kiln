@@ -105,7 +105,43 @@
               ]
             },
             "unified_memory": { "type": "boolean" },
-            "driver": { "type": "string", "minLength": 1 }
+            "driver": { "type": "string", "minLength": 1 },
+            "logical_index": {
+              "oneOf": [
+                { "type": "integer", "minimum": 0 },
+                { "type": "null" }
+              ]
+            },
+            "device_uuid": {
+              "oneOf": [
+                { "type": "string", "minLength": 1 },
+                { "type": "null" }
+              ]
+            },
+            "pci_bus_id": {
+              "oneOf": [
+                { "type": "string", "minLength": 1 },
+                { "type": "null" }
+              ]
+            },
+            "compute_capability": {
+              "oneOf": [
+                { "type": "string", "minLength": 1 },
+                { "type": "null" }
+              ]
+            },
+            "compute_units": {
+              "oneOf": [
+                { "type": "integer", "minimum": 1 },
+                { "type": "null" }
+              ]
+            },
+            "memory_available_bytes": {
+              "oneOf": [
+                { "type": "integer", "minimum": 0 },
+                { "type": "null" }
+              ]
+            }
           }
         },
         "runtime": { "$ref": "#/$defs/nonemptyStringMap" },

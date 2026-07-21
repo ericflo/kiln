@@ -292,6 +292,29 @@ class RunnerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.hook_calls = {"environment": 0, "model": 0, "network": 0}
 
+    def test_macos_network_isolation_preserves_loopback_and_denies_external_network(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, b"", b"")
+        with mock.patch.object(run_module.sys, "platform", "darwin"), mock.patch.object(
+            run_module.shutil, "which", return_value="/usr/bin/sandbox-exec"
+        ), mock.patch.object(run_module.subprocess, "run", return_value=completed) as invoked:
+            isolation = run_module.establish_network_isolation(Path("/tmp"))
+        self.assertEqual(isolation.mechanism, "macos-sandbox-loopback-only-v1")
+        self.assertEqual(isolation.argv_prefix[0], "/usr/bin/sandbox-exec")
+        self.assertIn("(deny network*)", isolation.argv_prefix[2])
+        command = invoked.call_args.args[0]
+        self.assertIn("127.0.0.1", command[-1])
+        self.assertIn("192.0.2.1", command[-1])
+
+    def test_macos_network_isolation_fails_closed_when_probe_fails(self) -> None:
+        completed = subprocess.CompletedProcess([], 1, b"", b"sandbox denied loopback")
+        with mock.patch.object(run_module.sys, "platform", "darwin"), mock.patch.object(
+            run_module.shutil, "which", return_value="/usr/bin/sandbox-exec"
+        ), mock.patch.object(run_module.subprocess, "run", return_value=completed):
+            with self.assertRaisesRegex(
+                run_module.QualificationRunError, "did not preserve loopback"
+            ):
+                run_module.establish_network_isolation(Path("/tmp"))
+
     def test_inherited_auth_payloads_are_hashed_before_local_capture(self) -> None:
         captured = run_module._redacted_environment(
             {

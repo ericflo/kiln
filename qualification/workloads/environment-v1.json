@@ -41,6 +41,152 @@
   ],
   "variants": [
     {
+      "id": "cuda-rtx4090-desktop-24gb",
+      "description": "Collect the selected 24 GB NVIDIA GeForce RTX 4090, CUDA driver/toolkit, compiler, and capture-time memory capability.",
+      "backend": "cuda",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {},
+      "cases": [
+        {
+          "id": "environment-capture",
+          "description": "Run the strict CUDA environment collector for the 24 GB desktop device class.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/environment.py",
+            "--backend",
+            "cuda",
+            "--host-id",
+            "${host_id}",
+            "--output",
+            "${output_path}",
+            "--device-index",
+            "0",
+            "--expected-device-name-regex",
+            "^NVIDIA GeForce RTX 4090$",
+            "--minimum-memory-mib",
+            "23000",
+            "--maximum-memory-mib",
+            "25000"
+          ],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 120,
+          "expected_exit_codes": [
+            0
+          ],
+          "output_assertions": [],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "case_pass",
+              "exit_code",
+              "output_assertion_failures"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "cuda-rtx4090-laptop-16gb",
+      "description": "Collect the selected 16 GB NVIDIA GeForce RTX 4090 Laptop GPU, CUDA driver/toolkit, compiler, and capture-time memory capability.",
+      "backend": "cuda",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {},
+      "cases": [
+        {
+          "id": "environment-capture",
+          "description": "Run the strict CUDA environment collector for the 16 GB laptop device class.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/environment.py",
+            "--backend",
+            "cuda",
+            "--host-id",
+            "${host_id}",
+            "--output",
+            "${output_path}",
+            "--device-index",
+            "0",
+            "--expected-device-name-regex",
+            "^NVIDIA GeForce RTX 4090 Laptop GPU$",
+            "--minimum-memory-mib",
+            "15000",
+            "--maximum-memory-mib",
+            "17000"
+          ],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 120,
+          "expected_exit_codes": [
+            0
+          ],
+          "output_assertions": [],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "case_pass",
+              "exit_code",
+              "output_assertion_failures"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "metal-m1-macbook-air",
+      "description": "Collect the Apple M1 GPU, Metal compiler/SDK, macOS build, GPU-core count, and unified-memory total.",
+      "backend": "metal",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {},
+      "cases": [
+        {
+          "id": "environment-capture",
+          "description": "Run the strict Metal environment collector for the M1 MacBook Air device class.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/environment.py",
+            "--backend",
+            "metal",
+            "--host-id",
+            "${host_id}",
+            "--output",
+            "${output_path}",
+            "--expected-device-name-regex",
+            "^Apple M1$",
+            "--expected-compute-units",
+            "8"
+          ],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 180,
+          "expected_exit_codes": [
+            0
+          ],
+          "output_assertions": [],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "case_pass",
+              "exit_code",
+              "output_assertion_failures"
+            ]
+          }
+        }
+      ]
+    },
+    {
       "id": "rocm",
       "description": "Collect ROCm, HIP, HSA, compiler, kernel, and AMD GPU identity.",
       "backend": "rocm",
@@ -65,13 +211,19 @@
           "working_directory": ".",
           "environment": {},
           "timeout_seconds": 120,
-          "expected_exit_codes": [0],
+          "expected_exit_codes": [
+            0
+          ],
           "output_assertions": [],
           "result_protocol": {
             "format": "qualification-case-result-v1",
             "producer": "runner",
             "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
-            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+            "declared_metrics": [
+              "case_pass",
+              "exit_code",
+              "output_assertion_failures"
+            ]
           }
         }
       ]
@@ -101,13 +253,19 @@
           "working_directory": ".",
           "environment": {},
           "timeout_seconds": 120,
-          "expected_exit_codes": [0],
+          "expected_exit_codes": [
+            0
+          ],
           "output_assertions": [],
           "result_protocol": {
             "format": "qualification-case-result-v1",
             "producer": "runner",
             "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
-            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+            "declared_metrics": [
+              "case_pass",
+              "exit_code",
+              "output_assertion_failures"
+            ]
           }
         }
       ]

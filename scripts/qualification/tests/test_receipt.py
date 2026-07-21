@@ -86,6 +86,25 @@ class ReceiptTests(unittest.TestCase):
     def test_valid_environment_receipt(self) -> None:
         self.assertEqual(receipt_module.validate_receipt(valid_receipt()), [])
 
+    def test_optional_device_capability_fields_are_typed_and_bounded(self) -> None:
+        value = valid_receipt()
+        value["environment"]["device"].update(
+            {
+                "logical_index": 0,
+                "device_uuid": "GPU-1234",
+                "pci_bus_id": "00000000:01:00.0",
+                "compute_capability": "8.9",
+                "compute_units": 128,
+                "memory_available_bytes": 80 * 1024**3,
+            }
+        )
+        self.assertEqual(receipt_module.validate_receipt(value), [])
+        value["environment"]["device"]["memory_available_bytes"] = 200 * 1024**3
+        value["environment"]["device"]["logical_index"] = -1
+        errors = receipt_module.validate_receipt(value)
+        self.assertTrue(any("logical_index" in error for error in errors))
+        self.assertTrue(any("exceeds memory_bytes" in error for error in errors))
+
     def test_unknown_and_missing_keys_are_rejected(self) -> None:
         value = valid_receipt()
         del value["notes"]
@@ -296,7 +315,6 @@ class ReceiptTests(unittest.TestCase):
             (schema["properties"]["qualification"], receipt_module.QUALIFICATION_KEYS),
             (schema["properties"]["environment"], receipt_module.ENVIRONMENT_KEYS),
             (schema["properties"]["environment"]["properties"]["os"], receipt_module.OS_KEYS),
-            (schema["properties"]["environment"]["properties"]["device"], receipt_module.DEVICE_KEYS),
             (schema["$defs"]["model"], receipt_module.MODEL_KEYS),
             (schema["$defs"]["weightFile"], receipt_module.WEIGHT_KEYS),
             (schema["$defs"]["workload"], receipt_module.WORKLOAD_KEYS),
@@ -309,6 +327,13 @@ class ReceiptTests(unittest.TestCase):
                 self.assertFalse(contract["additionalProperties"])
                 self.assertEqual(set(contract["required"]), expected_keys)
                 self.assertEqual(set(contract["properties"]), expected_keys)
+
+        device_contract = schema["properties"]["environment"]["properties"]["device"]
+        self.assertFalse(device_contract["additionalProperties"])
+        self.assertEqual(
+            set(device_contract["required"]), receipt_module.DEVICE_REQUIRED_KEYS
+        )
+        self.assertEqual(set(device_contract["properties"]), receipt_module.DEVICE_KEYS)
 
         qualification = schema["properties"]["qualification"]["properties"]
         self.assertEqual(set(qualification["kind"]["enum"]), receipt_module.KINDS)

@@ -52,6 +52,12 @@ WORKLOAD_DIRECTORY = Path("qualification/workloads")
 RESULT_PATH_ENVIRONMENT_VARIABLE = "KILN_QUALIFICATION_CASE_RESULT"
 VARIANT_ID_ENVIRONMENT_VARIABLE = "KILN_QUALIFICATION_VARIANT_ID"
 CASE_ENVIRONMENT_POLICY = "closed-qualification-case-v1"
+MACOS_NETWORK_SANDBOX_PROFILE = """(version 1)
+(allow default)
+(deny network*)
+(allow network* (local ip \"localhost:*\"))
+(allow network* (remote ip \"localhost:*\"))
+"""
 # Host plumbing needed to locate tools and enter the bounded user service. Any
 # backend, compiler, device-selection, or product control belongs in the
 # committed case environment instead.
@@ -564,7 +570,7 @@ def capture_backend_environment(backend: str, host_id: str, root: Path) -> Envir
         return _unavailable_environment(
             backend, host_id, "backend collector only supports the Kiln repository root"
         )
-    if backend not in {"rocm", "vulkan"}:
+    if backend not in {"rocm", "vulkan", "cuda", "metal"}:
         return _unavailable_environment(
             backend, host_id, f"backend environment collector is not implemented for {backend}"
         )
@@ -592,10 +598,45 @@ def capture_backend_environment(backend: str, host_id: str, root: Path) -> Envir
 def establish_network_isolation(root: Path) -> NetworkIsolation:
     """Probe a local no-network process wrapper before any run artifacts exist."""
 
+    if sys.platform == "darwin":
+        sandbox_exec = shutil.which("sandbox-exec")
+        if sandbox_exec is None:
+            raise QualificationRunError(
+                "sandbox-exec is required to enforce workload network_access='forbidden' on macOS"
+            )
+        prefix = (sandbox_exec, "-p", MACOS_NETWORK_SANDBOX_PROFILE)
+        probe = (
+            "import errno,socket; "
+            "listener=socket.socket(); "
+            "listener.bind(('127.0.0.1',0)); listener.listen(); "
+            "external=socket.socket(); "
+            "result=external.connect_ex(('192.0.2.1',9)); "
+            "assert result in {errno.EACCES,errno.EPERM}, result"
+        )
+        try:
+            completed = subprocess.run(
+                [*prefix, sys.executable, "-c", probe],
+                cwd=root,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise QualificationRunError(
+                f"macOS sandbox network-isolation probe failed: {exc}"
+            ) from exc
+        if completed.returncode != 0:
+            detail = completed.stderr.decode(errors="replace").strip()
+            raise QualificationRunError(
+                "macOS sandbox did not preserve loopback while denying external networking"
+                + (f": {detail}" if detail else "")
+            )
+        return NetworkIsolation("macos-sandbox-loopback-only-v1", prefix)
     if sys.platform != "linux":
         raise QualificationRunError(
-            f"network isolation is not implemented on {sys.platform}; "
-            "Metal qualification requires a tested macOS sandbox mechanism first"
+            f"network isolation is not implemented on {sys.platform}"
         )
     bubblewrap = shutil.which("bwrap")
     if bubblewrap is None:

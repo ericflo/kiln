@@ -69,7 +69,22 @@ QUALIFICATION_KEYS = {
 }
 ENVIRONMENT_KEYS = {"host_id", "os", "device", "runtime", "compiler"}
 OS_KEYS = {"name", "version", "kernel", "architecture"}
-DEVICE_KEYS = {"name", "architecture", "memory_bytes", "unified_memory", "driver"}
+DEVICE_REQUIRED_KEYS = {
+    "name",
+    "architecture",
+    "memory_bytes",
+    "unified_memory",
+    "driver",
+}
+DEVICE_OPTIONAL_KEYS = {
+    "logical_index",
+    "device_uuid",
+    "pci_bus_id",
+    "compute_capability",
+    "compute_units",
+    "memory_available_bytes",
+}
+DEVICE_KEYS = DEVICE_REQUIRED_KEYS | DEVICE_OPTIONAL_KEYS
 MODEL_KEYS = {"id", "path", "weight_files", "config_hash", "tokenizer_hash", "chat_template_hash"}
 WEIGHT_KEYS = {"path", "sha256", "bytes"}
 WORKLOAD_KEYS = {"id", "sha256", "seed", "parameters"}
@@ -137,6 +152,25 @@ def _check_exact_keys(errors: list[str], value: Any, expected: set[str], context
         return {}
     missing = sorted(expected - value.keys())
     unknown = sorted(value.keys() - expected)
+    if missing:
+        errors.append(f"{context} missing keys: {', '.join(missing)}")
+    if unknown:
+        errors.append(f"{context} has unknown keys: {', '.join(unknown)}")
+    return value
+
+
+def _check_required_keys(
+    errors: list[str],
+    value: Any,
+    required: set[str],
+    allowed: set[str],
+    context: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        errors.append(f"{context} must be an object")
+        return {}
+    missing = sorted(required - value.keys())
+    unknown = sorted(value.keys() - allowed)
     if missing:
         errors.append(f"{context} missing keys: {', '.join(missing)}")
     if unknown:
@@ -363,8 +397,12 @@ def validate_receipt(
     os_value = _check_exact_keys(errors, environment.get("os"), OS_KEYS, "receipt.environment.os")
     for key in OS_KEYS:
         _check_string(errors, os_value.get(key), f"receipt.environment.os.{key}")
-    device = _check_exact_keys(
-        errors, environment.get("device"), DEVICE_KEYS, "receipt.environment.device"
+    device = _check_required_keys(
+        errors,
+        environment.get("device"),
+        DEVICE_REQUIRED_KEYS,
+        DEVICE_KEYS,
+        "receipt.environment.device",
     )
     for key in ("name", "architecture", "driver"):
         _check_string(errors, device.get(key), f"receipt.environment.device.{key}")
@@ -374,6 +412,39 @@ def validate_receipt(
     _check_bool(
         errors, device.get("unified_memory"), "receipt.environment.device.unified_memory"
     )
+    logical_index = device.get("logical_index")
+    if logical_index is not None and (
+        not isinstance(logical_index, int)
+        or isinstance(logical_index, bool)
+        or logical_index < 0
+    ):
+        errors.append(
+            "receipt.environment.device.logical_index must be a non-negative integer or null"
+        )
+    for key in ("device_uuid", "pci_bus_id", "compute_capability"):
+        value = device.get(key)
+        if value is not None:
+            _check_string(errors, value, f"receipt.environment.device.{key}")
+    compute_units = device.get("compute_units")
+    if compute_units is not None:
+        _check_positive_int(
+            errors, compute_units, "receipt.environment.device.compute_units"
+        )
+    memory_available = device.get("memory_available_bytes")
+    if memory_available is not None:
+        if (
+            not isinstance(memory_available, int)
+            or isinstance(memory_available, bool)
+            or memory_available < 0
+        ):
+            errors.append(
+                "receipt.environment.device.memory_available_bytes must be a "
+                "non-negative integer or null"
+            )
+        elif isinstance(memory_bytes, int) and memory_available > memory_bytes:
+            errors.append(
+                "receipt.environment.device.memory_available_bytes exceeds memory_bytes"
+            )
     _check_string_map(errors, environment.get("runtime"), "receipt.environment.runtime")
     _check_string_map(errors, environment.get("compiler"), "receipt.environment.compiler")
 

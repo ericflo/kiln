@@ -23,10 +23,17 @@ git pull --ff-only origin main
 git status --short
 ```
 
-Install the backend runtime and the command-line probe named by the workload.
-For example, ROCm workloads expect `rocminfo` and `ROCM_PATH=/opt/rocm`; Vulkan
-workloads expect `vulkaninfo`. Install the Rust toolchain and fetch dependencies
-before entering an offline or network-isolated qualification environment.
+Install the backend runtime and every command-line probe named by the workload:
+
+| Backend | Required environment probes |
+| --- | --- |
+| ROCm | `rocminfo`, `hipcc`, AMD DRM sysfs, and the Rust toolchain. The standard installation is `/opt/rocm`; source-building workloads use `ROCM_PATH=/opt/rocm`. |
+| Vulkan | `vulkaninfo`, either `glslc` or `glslangValidator`, DRM sysfs when available, and the Rust toolchain. |
+| CUDA | `nvidia-smi`, `nvcc`, and the Rust toolchain. Put `nvcc` on `PATH` or install the toolkit at `/usr/local/cuda`; the closed case does not inherit an ambient `CUDA_HOME`. |
+| Metal | `system_profiler`, `sysctl`, `sw_vers`, `xcrun --find metal`, the macOS SDK, Apple Clang, and the Rust toolchain. A full Xcode toolchain is required when Command Line Tools alone do not provide `metal`. |
+
+Fetch Rust and backend dependencies before entering the offline or
+network-isolated qualification environment.
 
 Validate the workload contract before spending device time:
 
@@ -51,6 +58,101 @@ without a traceback. A cleanup failure is itself a runner failure rather than
 ignored residue. `SIGKILL`, kernel failure, or machine power loss cannot run
 userspace cleanup; after such an event, verify process ownership before
 removing the exact ignored directory.
+
+### Capture Environment And Memory Capability
+
+Run the committed `environment-v1` workload first on every physical machine.
+It emits the ordinary outer source-bound qualification receipt and a second
+ignored collector receipt named by `output_path`. The checked-in outer receipt
+owns the verdict; the ignored receipt and raw probe output exist for local
+diagnosis. Use a unique ignored path and never point it into the source tree.
+
+Strix Halo ROCm and Vulkan:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" python3 scripts/qualification/run.py \
+  --variant rocm \
+  --host-id strix-halo \
+  --var output_path=.qualification/environment/strix-halo-rocm.json \
+  qualification/workloads/environment-v1.json
+
+PATH="$HOME/.cargo/bin:$PATH" python3 scripts/qualification/run.py \
+  --variant vulkan \
+  --host-id strix-halo \
+  --var output_path=.qualification/environment/strix-halo-vulkan.json \
+  qualification/workloads/environment-v1.json
+```
+
+16 GB RTX 4090 Laptop GPU:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" python3 scripts/qualification/run.py \
+  --variant cuda-rtx4090-laptop-16gb \
+  --host-id rtx4090-laptop \
+  --var output_path=.qualification/environment/rtx4090-laptop-cuda.json \
+  qualification/workloads/environment-v1.json
+```
+
+24 GB desktop RTX 4090:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" python3 scripts/qualification/run.py \
+  --variant cuda-rtx4090-desktop-24gb \
+  --host-id rtx4090-desktop \
+  --var output_path=.qualification/environment/rtx4090-desktop-cuda.json \
+  qualification/workloads/environment-v1.json
+```
+
+M1 MacBook Air:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" python3 scripts/qualification/run.py \
+  --variant metal-m1-macbook-air \
+  --host-id m1-macbook-air \
+  --var output_path=.qualification/environment/m1-macbook-air-metal.json \
+  qualification/workloads/environment-v1.json
+```
+
+The CUDA variants select logical device zero and fail unless the complete
+reported device name and memory class match the committed machine. The laptop
+range is 15,000 through 17,000 MiB; the desktop range is 23,000 through 25,000
+MiB. This accommodates driver-reported capacity while preventing one 4090 from
+standing in for the other. Edit and review the committed workload if a machine
+uses a different logical index; do not substitute `CUDA_VISIBLE_DEVICES` in the
+shell. The Metal variant requires the complete `Apple M1` device name, exactly
+eight reported GPU cores, positive physical-memory total, explicit Metal-family
+support, and `unified_memory=true`.
+
+New environment receipts retain the common device fields and may additionally
+carry these closed optional fields:
+
+| Field | Meaning |
+| --- | --- |
+| `logical_index` | Backend-reported zero-based device selection. CUDA binds this to the requested `nvidia-smi` index; Vulkan and Metal retain their enumerated index. |
+| `device_uuid`, `pci_bus_id` | Stable NVIDIA hardware identity where the runtime reports it. They are `null` on backends without an equivalent probe. |
+| `compute_capability` | NVIDIA major/minor capability, with `architecture` derived as `sm_<major><minor>`. |
+| `compute_units` | ROCm compute-unit or Apple GPU-core count when the backend exposes it reliably. |
+| `memory_available_bytes` | Capture-time device-available memory from `nvidia-smi` or AMD DRM. `null` means the backend has no honest equivalent; it never means zero. |
+
+`memory_bytes` remains total device-visible capacity. On Apple silicon it is
+the unified physical-memory total, not a promise that Metal may allocate all of
+it. On an APU, DRM free memory is a capture-time observation rather than a
+serving admission budget. Every CUDA/ROCm/Vulkan memory value is binary bytes
+even when the source tool reports MiB. The raw artifact records the exact probe
+arguments and output hash, selected class constraints, and redacted relevant
+backend environment. Sensitive variable names are hashed; ambient controls do
+not enter the closed case.
+
+Linux cases run inside bubblewrap network and PID namespaces. On macOS the
+runner first proves that its `sandbox-exec` profile preserves loopback while an
+external test-net connection is denied, then applies that profile to the case.
+A missing mechanism or failed probe stops before a run directory or receipt is
+created. The environment receipt proves machine identity, runtime/toolchain
+presence, and capture-time memory capability only. It does not prove Kiln
+compiles, executes correctly, survives pressure, or meets a throughput target;
+the later correctness, pressure, performance, and soak workloads own those
+claims.
+
 Each case runs under `closed-qualification-case-v1`: a fixed base containing
 only path, toolchain-home, locale, temporary-directory, user, and user-session
 plumbing, followed by the committed case's exact `environment` object and the
