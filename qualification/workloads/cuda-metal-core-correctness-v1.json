@@ -2,7 +2,7 @@
   "schema_version": 1,
   "workload_id": "cuda-metal-core-correctness-v1",
   "kind": "correctness",
-  "description": "Run fail-closed CUDA or Metal device, tensor, dense-matmul, SFT-step, and pinned PyTorch AdamW oracle gates on the named handoff machines.",
+  "description": "Run fail-closed CUDA or Metal device, tensor, dense-matmul, graph-replay, SFT-step, and pinned PyTorch AdamW oracle gates on the named handoff machines.",
   "determinism": {
     "seed": 20260721,
     "seed_delivery": "fixed_fixture",
@@ -157,8 +157,57 @@
           }
         },
         {
+          "id": "graph-parity",
+          "description": "Require a real single-row CUDA graph capture and replay, then compare its token and BF16 logits with the independent eager path.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-model",
+            "--no-default-features",
+            "--features",
+            "cuda",
+            "--lib",
+            "forward::tests::test_cuda_graph_bs1_decode_matches_eager",
+            "--",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "CUDARC_CUDA_VERSION": "12080",
+            "KILN_CUDA_ARCHS": "89",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[cuda-graph-bs1\\] OK: captured and replayed graph matches eager token and BF16 logit bound"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(CUDA unavailable|skipp(?:ed|ing)|no CUDA device|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
           "id": "training-oracles",
-          "description": "Run one complete CUDA LoRA SFT forward/backward/AdamW step and the twenty-step BF16 trajectory against the pinned PyTorch oracle.",
+          "description": "Run one complete desktop CUDA LoRA SFT forward/backward/AdamW step and the twenty-step BF16 trajectory against the pinned PyTorch oracle.",
           "required": true,
           "command": [
             "scripts/qualification/cargo-test-bounded.sh",
@@ -357,8 +406,57 @@
           }
         },
         {
+          "id": "graph-parity",
+          "description": "Require a real single-row CUDA graph capture and replay, then compare its token and BF16 logits with the independent eager path.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-model",
+            "--no-default-features",
+            "--features",
+            "cuda",
+            "--lib",
+            "forward::tests::test_cuda_graph_bs1_decode_matches_eager",
+            "--",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "CUDARC_CUDA_VERSION": "12080",
+            "KILN_CUDA_ARCHS": "89",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[cuda-graph-bs1\\] OK: captured and replayed graph matches eager token and BF16 logit bound"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(CUDA unavailable|skipp(?:ed|ing)|no CUDA device|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
           "id": "training-oracles",
-          "description": "Run one complete CUDA LoRA SFT forward/backward/AdamW step and the twenty-step BF16 trajectory against the pinned PyTorch oracle.",
+          "description": "Run one complete laptop CUDA LoRA SFT forward/backward/AdamW step and the twenty-step BF16 trajectory against the pinned PyTorch oracle.",
           "required": true,
           "command": [
             "scripts/qualification/cargo-test-bounded.sh",
@@ -554,6 +652,57 @@
               "stream": "combined",
               "match": "forbidden",
               "pattern": "(?i)(no Metal device|skipp(?:ed|ing)|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "graph-parity",
+          "description": "Require real single-row and two-row Metal ICB graph replay across short and long sequence buckets, with exact token and KV-cache parity against eager execution.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-model",
+            "--no-default-features",
+            "--features",
+            "metal",
+            "--lib",
+            "forward::tests::test_metal_graph_",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[metal-graph-bs1\\] OK: eager parity across request boundaries and two replay buckets"
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[metal-graph-batched\\] OK: eager parity across two rows and two replay buckets"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(requires an available Metal device|skipp(?:ed|ing)|no Metal device|test result: FAILED)"
             }
           ],
           "result_protocol": {

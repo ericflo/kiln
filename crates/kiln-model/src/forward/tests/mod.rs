@@ -4,6 +4,10 @@
 use super::*;
 use crate::backend::cpu::CpuBackend;
 
+fn explicit_hardware_qualification() -> bool {
+    std::env::var("KILN_QUALIFICATION").as_deref() == Ok("1")
+}
+
 #[test]
 fn graph_stable_paged_metadata_keeps_bucketed_kernel_bound() -> Result<()> {
     let cache = crate::PagedKvCacheKt::new(0, 8, 64, 1, 8, DType::BF16, Device::Cpu)?;
@@ -3164,6 +3168,10 @@ fn test_model_forward_paged_decode_contiguous_batch_dyn_seqlen_cuda() -> Result<
 #[test]
 fn test_metal_graph_bs1_decode_matches_eager_across_boundaries_and_buckets() -> Result<()> {
     let Some(device) = crate::backend::metal::try_new_metal() else {
+        assert!(
+            !explicit_hardware_qualification(),
+            "Metal graph qualification requires an available Metal device"
+        );
         return Ok(());
     };
     (|| -> Result<()> {
@@ -3411,6 +3419,9 @@ fn test_metal_graph_bs1_decode_matches_eager_across_boundaries_and_buckets() -> 
             3,
             "third long bs=1 step should replay the second bucket's captured graph"
         );
+        println!(
+            "[metal-graph-bs1] OK: eager parity across request boundaries and two replay buckets"
+        );
         Ok(())
     })()
 }
@@ -3419,6 +3430,10 @@ fn test_metal_graph_bs1_decode_matches_eager_across_boundaries_and_buckets() -> 
 #[test]
 fn test_metal_graph_batched_decode_matches_eager_and_replays_bucket() -> Result<()> {
     let Some(device) = crate::backend::metal::try_new_metal() else {
+        assert!(
+            !explicit_hardware_qualification(),
+            "Metal batched graph qualification requires an available Metal device"
+        );
         return Ok(());
     };
     (|| -> Result<()> {
@@ -3629,6 +3644,7 @@ fn test_metal_graph_batched_decode_matches_eager_and_replays_bucket() -> Result<
             5,
             "third long batched step should replay the second long bucket"
         );
+        println!("[metal-graph-batched] OK: eager parity across two rows and two replay buckets");
         Ok(())
     })()
 }
@@ -3672,6 +3688,10 @@ fn test_cuda_graph_bs1_decode_matches_eager() -> Result<()> {
     let device = match new_cuda_device(0) {
         Ok(device) => device,
         Err(err) => {
+            assert!(
+                !explicit_hardware_qualification(),
+                "CUDA graph qualification requires logical device zero: {err}"
+            );
             eprintln!("CUDA unavailable, skipping test_cuda_graph_bs1_decode_matches_eager: {err}");
             return Ok(());
         }
@@ -3910,6 +3930,9 @@ fn test_cuda_graph_bs1_decode_matches_eager() -> Result<()> {
             "CUDA-graph replay max_abs_diff={max_abs_diff:e} exceeds 0.5% of \
                  max|logit|={max_abs_logit:e} — larger than bf16 GEMM-shape noise, \
                  indicates graph capture/replay corruption"
+        );
+        println!(
+            "[cuda-graph-bs1] OK: captured and replayed graph matches eager token and BF16 logit bound"
         );
         Ok(())
     })();

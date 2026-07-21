@@ -398,16 +398,20 @@ python3 scripts/qualification/run.py \
   qualification/workloads/cuda-metal-core-correctness-v1.json
 ```
 
-Each run produces four required case results. `device-probe` binds the intended
+Each run produces five required case results. `device-probe` binds the intended
 machine class. `tensor-parity` covers device allocation, transfer, and layout
 behavior. `matmul-parity` compares accelerator results with deterministic CPU
-oracles. `training-oracles` runs a complete tiny LoRA SFT
-forward/backward/AdamW step and compares twenty native BF16 AdamW updates with
-the source-pinned PyTorch trajectory. CUDA compilation is pinned to SM 8.9 and
-the cudarc CUDA 12.8 API contract by the manifest; the environment receipt
-records the actual installed driver and toolkit. These bounded tests do not
-claim full-model correctness, graph/resize behavior, memory-pressure safety,
-serving performance, or soak completion.
+oracles. `graph-parity` requires an actual captured replay rather than an eager
+fallback: CUDA compares single-row replay with independent eager token/logit
+output, while Metal checks single-row and two-row ICB replay across short and
+long sequence buckets, including KV-cache parity. `training-oracles` runs a
+complete tiny LoRA SFT forward/backward/AdamW step and compares twenty native
+BF16 AdamW updates with the source-pinned PyTorch trajectory. CUDA compilation
+is pinned to SM 8.9 and the cudarc CUDA 12.8 API contract by the manifest; the
+environment receipt records the actual installed driver and toolkit. These
+bounded tests do not claim full-model correctness, multi-row CUDA graph safety,
+resize behavior, memory-pressure safety, serving performance, or soak
+completion.
 
 ### CUDA Memory Lifecycle Handoff
 

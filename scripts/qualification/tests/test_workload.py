@@ -118,9 +118,20 @@ class WorkloadTests(unittest.TestCase):
             cases = {case["id"]: case for case in variant["cases"]}
             self.assertEqual(
                 sorted(cases),
-                ["device-probe", "matmul-parity", "tensor-parity", "training-oracles"],
+                [
+                    "device-probe",
+                    "graph-parity",
+                    "matmul-parity",
+                    "tensor-parity",
+                    "training-oracles",
+                ],
             )
-            for case_id in ("matmul-parity", "tensor-parity", "training-oracles"):
+            for case_id in (
+                "graph-parity",
+                "matmul-parity",
+                "tensor-parity",
+                "training-oracles",
+            ):
                 self.assertEqual(case_id, cases[case_id]["id"])
                 self.assertEqual(cases[case_id]["environment"]["KILN_QUALIFICATION"], "1")
                 forbidden = [
@@ -129,6 +140,15 @@ class WorkloadTests(unittest.TestCase):
                     if assertion["match"] == "forbidden"
                 ]
                 self.assertTrue(any("skip" in pattern.lower() for pattern in forbidden))
+
+            graph_case = cases["graph-parity"]
+            self.assertIn("kiln-model", graph_case["command"])
+            required = [
+                assertion["pattern"]
+                for assertion in graph_case["output_assertions"]
+                if assertion["match"] == "required"
+            ]
+            self.assertTrue(any("graph" in pattern.lower() for pattern in required))
 
         desktop_probe = variants["cuda-rtx4090-desktop-24gb"]["cases"][0]
         laptop_probe = variants["cuda-rtx4090-laptop-16gb"]["cases"][0]
