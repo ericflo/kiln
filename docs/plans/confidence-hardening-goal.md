@@ -2380,7 +2380,7 @@ portable ownership checkpoint.
 - [ ] Split `forward.rs` into owned attention, linear-attention, FFN, norm,
   cache, backend-dispatch, and training-facing modules without duplicating
   policy.
-- [ ] Split `completions.rs` into schema, validation, preparation, streaming,
+- [x] Split `completions.rs` into schema, validation, preparation, streaming,
   finalization, batch, and shared lifecycle modules.
 - [ ] Split `trainer.rs` into data/tokenization, SFT, GRPO, checkpointing,
   optimizers, provenance, and oracle-test modules.
@@ -2449,6 +2449,19 @@ reduces `completions.rs` from 6,263 to 2,788 production lines while keeping the
 new modules at 545, 1,054, 1,015, and 900 lines respectively. All 1,092 server
 library tests pass. The checkbox remains open for a dedicated validation
 boundary and separation of response finalization from cache-claim lifecycle.
+
+Completion behavior split completed (2026-07-20): `validation.rs` now owns
+backend admission, effective thinking policy, budget checks, eval defaults,
+request metadata, and bounded client attribution. Cached response assembly and
+stream reconstruction remain in the 616-line `finalization.rs`, while the
+285-line `cache_lifecycle.rs` exclusively owns deterministic cache values,
+claim completion/failure, waiter observation, and drop-guard cleanup. The
+2,081-line parent now owns endpoint dispatch, request recording, rollout
+provenance assembly, multi-choice orchestration, sampling selection, and route
+registration. Together with the earlier schema, preparation, streaming,
+generation, batch, prompt-logprob, and adapter modules, every behavior named by
+this checklist item has one explicit owner. All 1,092 server library tests pass
+after the final split.
 
 ### 8.4 Replace verification theater
 
