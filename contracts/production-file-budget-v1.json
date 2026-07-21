@@ -59,7 +59,7 @@
     },
     {
       "path": "crates/kiln-tensor/src/cuda_storage.rs",
-      "max_lines": 6725,
+      "max_lines": 6723,
       "rationale": "CUDA storage and operation dispatch remain coupled to backend resource ownership; this reviewed ceiling prevents further unrelated backend behavior here."
     },
     {

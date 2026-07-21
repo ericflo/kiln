@@ -355,6 +355,7 @@ pub fn fused_linear_cross_entropy_phase_b_with_metadata_kt(
 }
 
 fn synchronize_flce_reduction_tensor(label: &str, tensor: &KtTensor) -> Result<(), FlceError> {
+    let _ = label;
     match tensor.device() {
         #[cfg(feature = "rocm")]
         KtDevice::Rocm(device_index) => {
@@ -366,8 +367,11 @@ fn synchronize_flce_reduction_tensor(label: &str, tensor: &KtTensor) -> Result<(
             }
         }
         #[cfg(feature = "cuda")]
-        KtDevice::Cuda(device_index) => kiln_tensor::cuda_synchronize_default_stream(device_index)
-            .map_err(|e| FlceError::msg(format!("kt-flce: synchronize {label}: {e}"))),
+        KtDevice::Cuda(device_index) => kiln_tensor::cuda_synchronize_default_stream_for(
+            device_index,
+            kiln_tensor::CudaSyncReason::TensorHandoff,
+        )
+        .map_err(|e| FlceError::msg(format!("kt-flce: synchronize {label}: {e}"))),
         _ => Ok(()),
     }
 }

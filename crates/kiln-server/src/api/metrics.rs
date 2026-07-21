@@ -15,6 +15,8 @@ use crate::state::{AppState, ModelBackend};
 use kiln_train::TrainingState;
 
 async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let cuda_synchronization =
+        crate::accelerator_runtime::cuda_synchronization_runtime_stats(state.model_weight_device);
     let rocm_synchronization = state.observe_rocm_runtime_health();
     let rocm_graph_observation = crate::rocm_graph_observability::observe_rocm_graphs(&state);
     // Snapshot scheduler gauges.
@@ -106,6 +108,7 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         ),
         backend_quarantined: backend_health_quarantined || rocm_synchronization.cleanup_quarantined,
         external_yield_sync,
+        cuda_synchronization,
         rocm_synchronization_mode: state
             .accelerator_runtime_policy
             .rocm_synchronization_mode

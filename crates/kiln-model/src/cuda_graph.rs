@@ -366,7 +366,18 @@ impl ReplayPlan for CudaDecodeReplayPlan<'_> {
             .graph
             .launch()
             .map_err(|e| CaptureError::Backend(format!("CUDA graph launch: {e}")))?;
-        self.captured.capture_stream.synchronize().map_err(|e| {
+        let device_index = self
+            .captured
+            .output_hidden
+            .device()
+            .index()
+            .ok_or_else(|| CaptureError::Backend("CUDA graph output has no device index".into()))?;
+        kiln_tensor::cuda_synchronize_stream_for(
+            device_index,
+            &self.captured.capture_stream,
+            kiln_tensor::CudaSyncReason::GraphBoundary,
+        )
+        .map_err(|e| {
             CaptureError::Backend(format!("sync capture stream after replay launch: {e}"))
         })?;
         Ok(ReplayOutputs::new(inputs.resources.to_vec(), 1))
@@ -868,7 +879,10 @@ impl CudaGraphRunner {
             // stream. Sync the default stream so the refreshed token/position/
             // metadata are visible before replay (else stale reads → garbage).
             if let Some(idx) = captured.token_buffer.device().index() {
-                if let Err(e) = kiln_tensor::cuda_synchronize_default_stream(idx) {
+                if let Err(e) = kiln_tensor::cuda_synchronize_default_stream_for(
+                    idx,
+                    kiln_tensor::CudaSyncReason::GraphBoundary,
+                ) {
                     tracing::warn!(batch_size, error = %e, "batched: sync before graph launch failed, falling back to eager");
                     return Ok(None);
                 }
@@ -893,7 +907,16 @@ impl CudaGraphRunner {
             // cublasLt GEMV was the BUG2 source (wrong logits on replay despite
             // a bit-identical input hidden); the captured transformer win is
             // preserved. Mirrors the bs=1 `decode_step_paged` replay tail.
-            if let Err(e) = captured.capture_stream.synchronize() {
+            let device_index = captured
+                .output_hidden
+                .device()
+                .index()
+                .expect("CUDA graph output has a device index");
+            if let Err(e) = kiln_tensor::cuda_synchronize_stream_for(
+                device_index,
+                &captured.capture_stream,
+                kiln_tensor::CudaSyncReason::GraphBoundary,
+            ) {
                 tracing::warn!(
                     batch_size,
                     max_seqlen_k = key.max_seqlen_k,
@@ -1212,8 +1235,11 @@ impl CudaGraphRunner {
                     // and the decode diverges into garbage. Sync the default
                     // stream so those writes are visible before launch.
                     if let Some(idx) = captured.token_buffer.device().index() {
-                        kiln_tensor::cuda_synchronize_default_stream(idx)
-                            .context("sync per-replay input writes before CUDA graph launch")?;
+                        kiln_tensor::cuda_synchronize_default_stream_for(
+                            idx,
+                            kiln_tensor::CudaSyncReason::GraphBoundary,
+                        )
+                        .context("sync per-replay input writes before CUDA graph launch")?;
                     }
 
                     let mut plan = CudaDecodeReplayPlan::new(captured);
@@ -1767,14 +1793,23 @@ impl CudaGraphRunner {
         // sync the default stream before capture to guarantee those fills
         // are visible to the captured forward.
         if let Some(idx) = device.index() {
-            kiln_tensor::cuda_synchronize_default_stream(idx)
-                .context("CUDA graph capture: sync kt default stream before capture")?;
+            kiln_tensor::cuda_synchronize_default_stream_for(
+                idx,
+                kiln_tensor::CudaSyncReason::GraphBoundary,
+            )
+            .context("CUDA graph capture: sync kt default stream before capture")?;
         }
 
         // Synchronize all pending work before capture
-        stream
-            .synchronize()
-            .map_err(|e| anyhow::anyhow!("sync before graph capture: {e}"))?;
+        let device_index = device
+            .index()
+            .context("CUDA graph capture device has no index")?;
+        kiln_tensor::cuda_synchronize_stream_for(
+            device_index,
+            &stream,
+            kiln_tensor::CudaSyncReason::GraphBoundary,
+        )
+        .map_err(|e| anyhow::anyhow!("sync before graph capture: {e}"))?;
 
         let capture_status = stream
             .capture_status()
@@ -1880,9 +1915,12 @@ impl CudaGraphRunner {
                 graph
                     .launch()
                     .context("execute captured decode graph (first run)")?;
-                stream
-                    .synchronize()
-                    .map_err(|e| anyhow::anyhow!("sync after first captured-graph launch: {e}"))?;
+                kiln_tensor::cuda_synchronize_stream_for(
+                    device_index,
+                    &stream,
+                    kiln_tensor::CudaSyncReason::GraphBoundary,
+                )
+                .map_err(|e| anyhow::anyhow!("sync after first captured-graph launch: {e}"))?;
                 // #1082 box-102 FIX: run final_norm + lm_head EAGERLY on the
                 // capture-step hidden to produce this step's logits — the lm_head
                 // cublasLt GEMV is OUT of the captured graph. `output_hidden` now
@@ -2207,15 +2245,24 @@ impl CudaGraphRunner {
             // fills (and the in-place GDN restore above) are visible to the
             // captured forward.
             if let Some(idx) = device.index() {
-                kiln_tensor::cuda_synchronize_default_stream(idx)
-                    .context("batched CUDA graph capture: sync kt default stream before capture")?;
+                kiln_tensor::cuda_synchronize_default_stream_for(
+                    idx,
+                    kiln_tensor::CudaSyncReason::GraphBoundary,
+                )
+                .context("batched CUDA graph capture: sync kt default stream before capture")?;
             }
 
             // Synchronize before capture — the capture window must not
             // race with any in-flight launches from the prior step.
-            stream
-                .synchronize()
-                .map_err(|e| anyhow::anyhow!("sync before batched graph capture: {e}"))?;
+            let device_index = device
+                .index()
+                .context("batched CUDA graph capture device has no index")?;
+            kiln_tensor::cuda_synchronize_stream_for(
+                device_index,
+                &stream,
+                kiln_tensor::CudaSyncReason::GraphBoundary,
+            )
+            .map_err(|e| anyhow::anyhow!("sync before batched graph capture: {e}"))?;
 
             stream
                 .begin_capture(CU_STREAM_CAPTURE_MODE_RELAXED)
@@ -2321,9 +2368,12 @@ impl CudaGraphRunner {
             .graph
             .launch()
             .context("execute captured batched decode graph (first run)")?;
-        stream
-            .synchronize()
-            .map_err(|e| anyhow::anyhow!("sync after first batched captured-graph launch: {e}"))?;
+        kiln_tensor::cuda_synchronize_stream_for(
+            arena_device_index,
+            &stream,
+            kiln_tensor::CudaSyncReason::GraphBoundary,
+        )
+        .map_err(|e| anyhow::anyhow!("sync after first batched captured-graph launch: {e}"))?;
         // #1082 bs>1 greedy-coherence fix: scatter the post-step persistent GDN
         // slot back into the caller's per-row `linear_states` so this capture
         // step advances them by exactly one token — same as the replay path's

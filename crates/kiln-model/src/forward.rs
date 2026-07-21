@@ -950,8 +950,11 @@ fn synchronize_for_profile(device: &Device) -> Result<()> {
         // #1082: CUDA sync is kt-native — drain the device's default stream via
         // the kt cuda API; no candle bridge in the cuda lane.
         #[cfg(feature = "cuda")]
-        Device::Cuda(idx) => kiln_tensor::cuda_synchronize_default_stream(*idx)
-            .map_err(|e| anyhow::anyhow!("synchronize_for_profile: {e}")),
+        Device::Cuda(idx) => kiln_tensor::cuda_synchronize_default_stream_for(
+            *idx,
+            kiln_tensor::CudaSyncReason::ExplicitStreamDrain,
+        )
+        .map_err(|e| anyhow::anyhow!("synchronize_for_profile: {e}")),
         #[cfg(feature = "rocm")]
         Device::Rocm(idx) => kiln_tensor::rocm_synchronize_compute_stream_for(
             *idx,
@@ -989,11 +992,15 @@ fn synchronize_for_profile(device: &Device) -> Result<()> {
 }
 
 fn synchronize_tensor_ready_for_model_handoff(label: &str, tensor: &Tensor) -> Result<()> {
+    let _ = label;
     match tensor.device() {
         Device::Cpu => Ok(()),
         #[cfg(feature = "cuda")]
-        Device::Cuda(idx) => kiln_tensor::cuda_synchronize_default_stream(idx)
-            .with_context(|| format!("{label}: synchronize CUDA tensor readiness")),
+        Device::Cuda(idx) => kiln_tensor::cuda_synchronize_default_stream_for(
+            idx,
+            kiln_tensor::CudaSyncReason::ModelHandoff,
+        )
+        .with_context(|| format!("{label}: synchronize CUDA tensor readiness")),
         #[cfg(feature = "rocm")]
         Device::Rocm(_) => kiln_tensor::rocm_synchronize_tensor_same_stream_dependency(
             tensor,

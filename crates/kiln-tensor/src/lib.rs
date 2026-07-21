@@ -59,6 +59,7 @@ mod cuda_matmul;
 mod cuda_storage;
 #[cfg(feature = "cuda")]
 mod cuda_stream_priority;
+mod cuda_synchronization;
 #[cfg(feature = "cuda")]
 mod fp8;
 #[cfg(feature = "metal")]
@@ -154,6 +155,15 @@ pub use cuda_storage::{
 pub use cuda_stream_priority::{
     PrioritizedCudaStream, StreamPriority, cuda_stream_priority_range,
     new_cuda_stream_with_priority,
+};
+pub use cuda_synchronization::{
+    CUDA_SYNC_REASON_COUNT, CudaSyncReason, CudaSyncReasonStats, CudaSyncTelemetrySnapshot,
+    cuda_sync_telemetry_snapshot,
+};
+#[cfg(feature = "cuda")]
+pub use cuda_synchronization::{
+    cuda_synchronize_context_for, cuda_synchronize_default_stream_for, cuda_synchronize_stream_for,
+    cuda_synchronize_tensor_stream_for,
 };
 #[cfg(feature = "cuda")]
 pub use fp8::{

@@ -367,8 +367,11 @@ fn sync_device_for_resize(
     let started = std::time::Instant::now();
     let result = match device {
         #[cfg(feature = "cuda")]
-        kiln_tensor::Device::Cuda(i) => kiln_tensor::cuda_synchronize_default_stream(i)
-            .map_err(|e| anyhow::anyhow!("physical_resize_to: cuda sync: {e}")),
+        kiln_tensor::Device::Cuda(i) => kiln_tensor::cuda_synchronize_default_stream_for(
+            i,
+            kiln_tensor::CudaSyncReason::GlobalStateMutation,
+        )
+        .map_err(|e| anyhow::anyhow!("physical_resize_to: cuda sync: {e}")),
         #[cfg(feature = "rocm")]
         kiln_tensor::Device::Rocm(i) => kiln_tensor::rocm_synchronize_default_stream(i)
             .map_err(|e| anyhow::anyhow!("physical_resize_to: rocm sync: {e}")),

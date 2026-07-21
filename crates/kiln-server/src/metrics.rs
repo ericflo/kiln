@@ -533,6 +533,63 @@ impl Metrics {
             );
         }
         out.push_str(
+            "# HELP kiln_cuda_synchronization_active Whether the selected model backend is CUDA.\n",
+        );
+        out.push_str("# TYPE kiln_cuda_synchronization_active gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_cuda_synchronization_active {}",
+                u8::from(gauges.cuda_synchronization.active)
+            ),
+        );
+        out.push_str("# HELP kiln_cuda_synchronization_telemetry_available Whether fixed-cardinality CUDA synchronization telemetry is available.\n");
+        out.push_str("# TYPE kiln_cuda_synchronization_telemetry_available gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_cuda_synchronization_telemetry_available {}",
+                u8::from(gauges.cuda_synchronization.telemetry_available)
+            ),
+        );
+        out.push_str("# HELP kiln_cuda_synchronizations_total CUDA host wait attempts by fixed reason and scope.\n");
+        out.push_str("# TYPE kiln_cuda_synchronizations_total counter\n");
+        out.push_str("# HELP kiln_cuda_synchronization_failures_total Failed CUDA host waits by fixed reason.\n");
+        out.push_str("# TYPE kiln_cuda_synchronization_failures_total counter\n");
+        out.push_str("# HELP kiln_cuda_synchronization_wait_seconds_total Host wall time spent in CUDA waits by fixed reason.\n");
+        out.push_str("# TYPE kiln_cuda_synchronization_wait_seconds_total counter\n");
+        for stats in &gauges.cuda_synchronization.reasons {
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_cuda_synchronizations_total{{reason=\"{}\",scope=\"device\"}} {}",
+                    stats.reason, stats.device_wait_count
+                ),
+            );
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_cuda_synchronizations_total{{reason=\"{}\",scope=\"stream\"}} {}",
+                    stats.reason, stats.stream_wait_count
+                ),
+            );
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_cuda_synchronization_failures_total{{reason=\"{}\"}} {}",
+                    stats.reason, stats.failure_count
+                ),
+            );
+            push_line(
+                &mut out,
+                &format!(
+                    "kiln_cuda_synchronization_wait_seconds_total{{reason=\"{}\"}} {}",
+                    stats.reason,
+                    stats.waited_ns as f64 / 1_000_000_000.0
+                ),
+            );
+        }
+        out.push_str(
             "# HELP kiln_rocm_synchronization_active Whether the selected model backend is ROCm.\n",
         );
         out.push_str("# TYPE kiln_rocm_synchronization_active gauge\n");
@@ -3241,6 +3298,7 @@ pub struct SnapshotGauges {
     pub(crate) memory_governor: CachedMemoryGovernorObservation,
     pub backend_quarantined: bool,
     pub external_yield_sync: Vec<ExternalYieldSyncStats>,
+    pub cuda_synchronization: crate::accelerator_runtime::CudaSynchronizationRuntimeStats,
     pub rocm_synchronization_mode: &'static str,
     pub rocm_synchronization: crate::accelerator_runtime::RocmSynchronizationRuntimeStats,
     pub rocm_graph: Option<kiln_model::RocmGraphStats>,
@@ -3628,6 +3686,22 @@ mod tests {
                 max_micros: 125_000,
                 slow_calls: 1,
             }],
+            cuda_synchronization: crate::accelerator_runtime::CudaSynchronizationRuntimeStats {
+                active: true,
+                telemetry_available: true,
+                telemetry_error: None,
+                total_device_wait_count: 2,
+                total_stream_wait_count: 3,
+                total_failure_count: 1,
+                total_waited_ns: 250_000_000,
+                reasons: vec![crate::accelerator_runtime::CudaSynchronizationReasonStats {
+                    reason: "external_yield",
+                    device_wait_count: 2,
+                    stream_wait_count: 3,
+                    failure_count: 1,
+                    waited_ns: 250_000_000,
+                }],
+            },
             rocm_synchronization_mode: "stream_ordered",
             rocm_synchronization: crate::accelerator_runtime::RocmSynchronizationRuntimeStats {
                 active: true,
@@ -4060,6 +4134,20 @@ mod tests {
         assert!(output.contains(
             "kiln_backend_external_yield_sync_slow_total{boundary=\"batched decode step\"} 1"
         ));
+        assert!(output.contains("kiln_cuda_synchronization_active 1"));
+        assert!(output.contains(
+            "kiln_cuda_synchronizations_total{reason=\"external_yield\",scope=\"device\"} 2"
+        ));
+        assert!(output.contains(
+            "kiln_cuda_synchronizations_total{reason=\"external_yield\",scope=\"stream\"} 3"
+        ));
+        assert!(
+            output
+                .contains("kiln_cuda_synchronization_failures_total{reason=\"external_yield\"} 1")
+        );
+        assert!(output.contains(
+            "kiln_cuda_synchronization_wait_seconds_total{reason=\"external_yield\"} 0.25"
+        ));
         assert!(
             output.contains("kiln_rocm_synchronization_policy_info{mode=\"stream_ordered\"} 1")
         );
@@ -4426,6 +4514,8 @@ mod tests {
             memory_governor: CachedMemoryGovernorObservation::default(),
             backend_quarantined: false,
             external_yield_sync: Vec::new(),
+            cuda_synchronization:
+                crate::accelerator_runtime::CudaSynchronizationRuntimeStats::default(),
             rocm_synchronization_mode: "legacy_host_barriers",
             rocm_synchronization:
                 crate::accelerator_runtime::RocmSynchronizationRuntimeStats::default(),

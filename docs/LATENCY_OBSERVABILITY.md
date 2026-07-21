@@ -366,6 +366,74 @@ When computing `unexplained_ms`, Kiln conservatively subtracts the larger of
 serial actor work, response delivery, and the largest backend candidate rather
 than their sum, so overlap cannot falsely erase missing wall time.
 
+## CUDA Synchronization Counters
+
+CUDA host waits are attributed at the driver call rather than inferred from a
+request pause. `GET /health.decode_runtime.cuda_synchronization` and
+`GET /v1/debug/model-state.cuda_synchronization` expose the same process-lifetime
+snapshot:
+
+| Field | Meaning |
+| --- | --- |
+| `active` | The selected model-weight device is CUDA |
+| `telemetry_available` | The binary contains CUDA telemetry for the selected CUDA device |
+| `telemetry_error` | Why an active CUDA device cannot provide telemetry; omitted when there is no error |
+| `total_device_wait_count` | Sum of context-wide wait attempts across all reasons |
+| `total_stream_wait_count` | Sum of stream wait attempts across all reasons |
+| `total_failure_count` | Sum of failed waits across all reasons |
+| `total_waited_ns` | Host monotonic wall time spent inside all completed wait calls |
+| `reasons` | Exactly twelve fixed reason rows for active CUDA telemetry; empty for an inactive backend |
+
+Each reason row has `device_wait_count`, `stream_wait_count`, `failure_count`,
+and `waited_ns`. An attempt is recorded after the driver call returns, including
+failed calls. Reading the snapshot touches only relaxed process atomics: it does
+not create a context, query the driver, allocate device memory, or synchronize.
+Totals are saturating and must equal the sum of the reason rows in a settled
+snapshot.
+
+| Reason | Boundary |
+| --- | --- |
+| `explicit_device_drain` | An operator or diagnostic explicitly requests a context-wide drain |
+| `explicit_stream_drain` | An operator, diagnostic, or compatibility path explicitly drains one stream |
+| `tensor_handoff` | A tensor must be ready before another subsystem consumes it |
+| `external_yield` | Accelerator work must settle before the scheduler publishes progress or releases ownership |
+| `in_place_mutation` | An asynchronous in-place write must finish before the caller proceeds |
+| `memory_reclaim` | In-flight work must settle before allocator pages can be released |
+| `graph_boundary` | CUDA graph capture, first launch, replay input, or replay completion ordering requires a host wait |
+| `full_attention_handoff` | Full-attention output crosses an ownership boundary |
+| `model_handoff` | Model output crosses from model execution to its caller |
+| `host_readback` | Device work must finish before an existing host readback is consumed |
+| `allocation_lifetime` | An asynchronous operation must finish before temporary storage can be reused or dropped |
+| `global_state_mutation` | Device work must settle before process-visible state such as KV capacity is changed |
+
+Not every workload exercises every reason; an unexercised reason remains a
+real zero, not missing telemetry. Production CUDA context and stream waits go
+through the typed wrapper, so adding a raw driver wait is a source-contract
+regression. The compatibility `cuda_synchronize_default_stream` helper records
+`explicit_stream_drain`; owners with a narrower boundary use the reasoned form.
+
+Prometheus exports the same cumulative state:
+
+```text
+kiln_cuda_synchronization_active
+kiln_cuda_synchronization_telemetry_available
+kiln_cuda_synchronizations_total{reason,scope="device|stream"}
+kiln_cuda_synchronization_failures_total{reason}
+kiln_cuda_synchronization_wait_seconds_total{reason}
+```
+
+Reason and scope are closed labels. Device index, request identity, model,
+adapter, and error text never become labels. The wait-seconds value is
+`waited_ns / 1e9`; a qualification snapshot must reconcile it with the JSON
+counter at normal floating-point rendering precision.
+
+These counters are operational device-work evidence. Request-local
+`synchronization_ms` remains the invocation-owned external-yield wall time and
+must not be replaced by unlocked before/after deltas from these global
+counters. A request can overlap graph, model-handoff, or allocation-lifetime
+waits owned by shared work, and process counters can include maintenance or
+training outside that request.
+
 For each inter-token gap, Kiln selects the largest measured candidate since
 the preceding token. For classification, the broad actor-decode candidate is
 reduced by only the largest measured backend subphase; detailed phases may

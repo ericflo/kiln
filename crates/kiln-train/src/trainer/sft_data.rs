@@ -526,11 +526,15 @@ pub(crate) fn rms_norm_backward_pre_final_norm(
 }
 
 pub(super) fn synchronize_training_tensor_ready(label: &str, tensor: &Tensor) -> Result<()> {
+    let _ = label;
     match tensor.device() {
         Device::Cpu => Ok(()),
         #[cfg(feature = "cuda")]
-        Device::Cuda(idx) => kiln_tensor::cuda_synchronize_default_stream(idx)
-            .with_context(|| format!("{label}: synchronize CUDA tensor readiness")),
+        Device::Cuda(idx) => kiln_tensor::cuda_synchronize_default_stream_for(
+            idx,
+            kiln_tensor::CudaSyncReason::TensorHandoff,
+        )
+        .with_context(|| format!("{label}: synchronize CUDA tensor readiness")),
         #[cfg(feature = "rocm")]
         Device::Rocm(idx) => {
             if kiln_tensor::rocm_capture_arena_active() {

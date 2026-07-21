@@ -284,9 +284,12 @@ impl ExternalYieldBackend for CudaBackend {
         context
             .bind_to_thread()
             .context("bind CUDA context for external-yield synchronization")?;
-        context
-            .synchronize()
-            .context("synchronize CUDA context before external yield")
+        kiln_tensor::cuda_synchronize_context_for(
+            device_index,
+            &context,
+            kiln_tensor::CudaSyncReason::ExternalYield,
+        )
+        .context("synchronize CUDA context before external yield")
     }
 }
 

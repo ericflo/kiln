@@ -15,6 +15,65 @@ use crate::config::{RocmKernelProfile, RocmSynchronizationMode};
 pub const ROCM_CLEANUP_QUARANTINE_REASON: &str =
     "ROCm execution or cleanup state is unsafe; the device is quarantined until process restart";
 
+/// Fixed-cardinality counters for one CUDA synchronization reason.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CudaSynchronizationReasonStats {
+    pub reason: &'static str,
+    pub device_wait_count: u64,
+    pub stream_wait_count: u64,
+    pub failure_count: u64,
+    pub waited_ns: u64,
+}
+
+/// Point-in-time CUDA synchronization telemetry loaded from process atomics.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CudaSynchronizationRuntimeStats {
+    pub active: bool,
+    pub telemetry_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub telemetry_error: Option<String>,
+    pub total_device_wait_count: u64,
+    pub total_stream_wait_count: u64,
+    pub total_failure_count: u64,
+    pub total_waited_ns: u64,
+    pub reasons: Vec<CudaSynchronizationReasonStats>,
+}
+
+impl CudaSynchronizationRuntimeStats {
+    fn inactive() -> Self {
+        Self {
+            active: false,
+            telemetry_available: false,
+            telemetry_error: None,
+            total_device_wait_count: 0,
+            total_stream_wait_count: 0,
+            total_failure_count: 0,
+            total_waited_ns: 0,
+            reasons: Vec::new(),
+        }
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    fn unavailable(error: impl Into<String>) -> Self {
+        Self {
+            active: true,
+            telemetry_available: false,
+            telemetry_error: Some(error.into()),
+            total_device_wait_count: 0,
+            total_stream_wait_count: 0,
+            total_failure_count: 0,
+            total_waited_ns: 0,
+            reasons: Vec::new(),
+        }
+    }
+}
+
+impl Default for CudaSynchronizationRuntimeStats {
+    fn default() -> Self {
+        Self::inactive()
+    }
+}
+
 /// Fixed-cardinality counters for one ROCm synchronization reason.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RocmSynchronizationReasonStats {
@@ -382,6 +441,54 @@ pub fn rocm_synchronization_runtime_stats(
     }
 }
 
+/// Snapshot reasoned CUDA synchronization counters without touching the
+/// driver. Non-CUDA devices report an inactive, empty object.
+pub fn cuda_synchronization_runtime_stats(
+    device: kiln_tensor::Device,
+) -> CudaSynchronizationRuntimeStats {
+    let kiln_tensor::Device::Cuda(device_index) = device else {
+        return CudaSynchronizationRuntimeStats::inactive();
+    };
+
+    #[cfg(feature = "cuda")]
+    {
+        let snapshot = kiln_tensor::cuda_sync_telemetry_snapshot(device_index);
+        let reasons = snapshot
+            .reasons
+            .iter()
+            .map(|stats| CudaSynchronizationReasonStats {
+                reason: stats.reason.as_str(),
+                device_wait_count: stats.device_wait_count,
+                stream_wait_count: stats.stream_wait_count,
+                failure_count: stats.failure_count,
+                waited_ns: stats.waited_ns,
+            })
+            .collect();
+        CudaSynchronizationRuntimeStats {
+            active: true,
+            telemetry_available: true,
+            telemetry_error: None,
+            total_device_wait_count: snapshot.reasons.iter().fold(0u64, |total, stats| {
+                total.saturating_add(stats.device_wait_count)
+            }),
+            total_stream_wait_count: snapshot.reasons.iter().fold(0u64, |total, stats| {
+                total.saturating_add(stats.stream_wait_count)
+            }),
+            total_failure_count: snapshot.total_failure_count(),
+            total_waited_ns: snapshot.total_waited_ns(),
+            reasons,
+        }
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = device_index;
+        CudaSynchronizationRuntimeStats::unavailable(
+            "CUDA device selected in a build without the `cuda` feature",
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,6 +690,29 @@ mod tests {
         assert_eq!(
             rocm_synchronization_runtime_stats(kiln_tensor::Device::Cpu),
             RocmSynchronizationRuntimeStats::inactive()
+        );
+    }
+
+    #[test]
+    fn non_cuda_telemetry_is_inactive_without_creating_a_context() {
+        assert_eq!(
+            cuda_synchronization_runtime_stats(kiln_tensor::Device::Cpu),
+            CudaSynchronizationRuntimeStats::inactive()
+        );
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    #[test]
+    fn cuda_device_in_non_cuda_build_reports_unavailable_without_driver_access() {
+        let stats = cuda_synchronization_runtime_stats(kiln_tensor::Device::Cuda(0));
+        assert!(stats.active);
+        assert!(!stats.telemetry_available);
+        assert!(stats.reasons.is_empty());
+        assert!(
+            stats
+                .telemetry_error
+                .as_deref()
+                .is_some_and(|error| error.contains("without the `cuda` feature"))
         );
     }
 

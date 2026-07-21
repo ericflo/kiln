@@ -393,6 +393,7 @@ struct PromptCacheInfo {
 struct DecodeRuntimeInfo {
     configuration: DecodeRuntimeConfig,
     accelerator_runtime: crate::config::ResolvedAcceleratorRuntimePolicy,
+    cuda_synchronization: crate::accelerator_runtime::CudaSynchronizationRuntimeStats,
     rocm_synchronization: crate::accelerator_runtime::RocmSynchronizationRuntimeStats,
     batching_configuration: BatchingRuntimeConfig,
     cuda_graphs: CudaGraphInfo,
@@ -824,6 +825,8 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let execution_provenance_ready =
         execution_provenance_ready(real_backend, state.execution_provenance.as_deref());
     let rocm_synchronization = state.observe_rocm_runtime_health();
+    let cuda_synchronization =
+        crate::accelerator_runtime::cuda_synchronization_runtime_stats(state.model_weight_device);
     let rocm_graph_observation = crate::rocm_graph_observability::observe_rocm_graphs(&state);
 
     // Adapter info
@@ -949,6 +952,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let decode_runtime = DecodeRuntimeInfo {
         configuration: state.decode_runtime_config,
         accelerator_runtime: state.accelerator_runtime_policy,
+        cuda_synchronization,
         rocm_synchronization,
         batching_configuration: state.batching_runtime_config,
         cuda_graphs,
@@ -2170,6 +2174,18 @@ mod tests {
         assert_eq!(
             json["decode_runtime"]["rocm_synchronization"]["active"],
             false
+        );
+        assert_eq!(
+            json["decode_runtime"]["cuda_synchronization"]["active"],
+            false
+        );
+        assert_eq!(
+            json["decode_runtime"]["cuda_synchronization"]["telemetry_available"],
+            false
+        );
+        assert_eq!(
+            json["decode_runtime"]["cuda_synchronization"]["reasons"],
+            serde_json::json!([])
         );
         assert_eq!(
             json["decode_runtime"]["rocm_synchronization"]["telemetry_available"],

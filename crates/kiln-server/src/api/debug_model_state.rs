@@ -36,6 +36,7 @@ struct ModelStateResponse {
     decode_runtime: DecodeRuntimeConfig,
     accelerator_runtime: crate::config::ResolvedAcceleratorRuntimePolicy,
     cuda_graphs: super::config::CudaGraphConfigResponse,
+    cuda_synchronization: crate::accelerator_runtime::CudaSynchronizationRuntimeStats,
     rocm_synchronization: crate::accelerator_runtime::RocmSynchronizationRuntimeStats,
     rocm_graphs: Option<kiln_model::RocmGraphStats>,
     rocm_graphs_unavailable_reason:
@@ -292,6 +293,9 @@ async fn build_model_state_response(state: &AppState) -> ModelStateResponse {
         decode_runtime: state.decode_runtime_config,
         accelerator_runtime: state.accelerator_runtime_policy,
         cuda_graphs: super::config::cuda_graph_config_response(state),
+        cuda_synchronization: crate::accelerator_runtime::cuda_synchronization_runtime_stats(
+            state.model_weight_device,
+        ),
         rocm_synchronization,
         rocm_graphs: rocm_graph_observation.stats,
         rocm_graphs_unavailable_reason: rocm_graph_observation.stats_unavailable_reason,
@@ -948,6 +952,12 @@ mod tests {
         assert_eq!(json["cuda_graphs"]["stable_paged_metadata"], true);
         assert_eq!(json["cuda_graphs"]["batched_capture_available"], false);
         assert_eq!(json["cuda_graphs"]["restart_required_to_change"], true);
+        assert_eq!(json["cuda_synchronization"]["active"], false);
+        assert_eq!(json["cuda_synchronization"]["telemetry_available"], false);
+        assert_eq!(
+            json["cuda_synchronization"]["reasons"],
+            serde_json::json!([])
+        );
         assert_eq!(json["rocm_synchronization"]["active"], false);
         assert_eq!(json["rocm_synchronization"]["cleanup_quarantined"], false);
         assert!(json["rocm_graphs"].is_null());

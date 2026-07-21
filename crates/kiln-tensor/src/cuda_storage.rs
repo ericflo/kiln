@@ -482,7 +482,7 @@ pub fn cuda_trim_pool(device_index: usize, min_keep_bytes: usize) -> Result<()> 
     ctx.bind_to_thread()
         .map_err(|e| Error::Msg(format!("cuda_trim_pool bind({device_index}): {e}")))?;
     // Drain in-flight work before releasing pooled pages (see rocm_trim_pool).
-    ctx.synchronize()
+    crate::cuda_synchronize_context_for(device_index, &ctx, crate::CudaSyncReason::MemoryReclaim)
         .map_err(|e| Error::Msg(format!("cuda_trim_pool sync({device_index}): {e}")))?;
     let dev = ctx.cu_device();
     let mut pool: sys::CUmemoryPool = std::ptr::null_mut();
@@ -1230,9 +1230,12 @@ pub fn cuda_slice_set_dim0(dst: &crate::Tensor, src: &crate::Tensor, offset: usi
     // as this function returns. The copy kernel is async, so outside graph
     // capture drain the active stream before Rust can release/reuse `src`.
     if !crate::capture_arena_active() {
-        stream.synchronize().map_err(|e| {
-            crate::Error::Msg(format!("cuda_slice_set: synchronize after copy: {e:?}"))
-        })?;
+        crate::cuda_synchronize_tensor_stream_for(
+            dst,
+            &stream,
+            crate::CudaSyncReason::AllocationLifetime,
+        )
+        .map_err(|e| crate::Error::Msg(format!("cuda_slice_set: {e}")))?;
     }
     Ok(())
 }
@@ -1313,11 +1316,8 @@ pub fn cuda_write_host_in_place<E: crate::Element>(dst: &crate::Tensor, host: &[
             },
         )?;
     }
-    stream.synchronize().map_err(|e| {
-        crate::Error::Msg(format!(
-            "cuda_write_host_in_place: stream sync after write: {e:?}"
-        ))
-    })?;
+    crate::cuda_synchronize_tensor_stream_for(dst, &stream, crate::CudaSyncReason::InPlaceMutation)
+        .map_err(|e| crate::Error::Msg(format!("cuda_write_host_in_place: {e}")))?;
     Ok(())
 }
 
@@ -1334,12 +1334,10 @@ pub fn cuda_write_host_in_place<E: crate::Element>(dst: &crate::Tensor, host: &[
 /// single capture-stream sync sufficed).
 #[cfg(feature = "cuda")]
 pub fn cuda_synchronize_default_stream(device_index: usize) -> Result<()> {
-    let ctx = primary_cuda_context(device_index)?;
-    ctx.default_stream().synchronize().map_err(|e| {
-        crate::Error::Msg(format!(
-            "cuda_synchronize_default_stream({device_index}): {e:?}"
-        ))
-    })
+    crate::cuda_synchronize_default_stream_for(
+        device_index,
+        crate::CudaSyncReason::ExplicitStreamDrain,
+    )
 }
 
 /// CUDA-side `index_select(src, axis=0, indices)` — gather along the

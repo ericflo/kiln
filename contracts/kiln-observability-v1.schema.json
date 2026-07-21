@@ -990,6 +990,15 @@
               "source": "default"
             }
           },
+          "cuda_synchronization": {
+            "active": false,
+            "telemetry_available": false,
+            "total_device_wait_count": 0,
+            "total_stream_wait_count": 0,
+            "total_failure_count": 0,
+            "total_waited_ns": 0,
+            "reasons": []
+          },
           "rocm_synchronization": {
             "active": false,
             "telemetry_available": false,
@@ -1595,6 +1604,15 @@
           "stable_paged_metadata": true,
           "batched_capture_available": false,
           "restart_required_to_change": true
+        },
+        "cuda_synchronization": {
+          "active": false,
+          "telemetry_available": false,
+          "total_device_wait_count": 0,
+          "total_stream_wait_count": 0,
+          "total_failure_count": 0,
+          "total_waited_ns": 0,
+          "reasons": []
         },
         "rocm_synchronization": {
           "active": false,
@@ -3777,6 +3795,116 @@
       "x-kiln-rust-type": "CudaMarlinProfile",
       "x-kiln-field-schema-status": "complete"
     },
+    "CudaSynchronizationReason": {
+      "type": "string",
+      "enum": [
+        "explicit_device_drain",
+        "explicit_stream_drain",
+        "tensor_handoff",
+        "external_yield",
+        "in_place_mutation",
+        "memory_reclaim",
+        "graph_boundary",
+        "full_attention_handoff",
+        "model_handoff",
+        "host_readback",
+        "allocation_lifetime",
+        "global_state_mutation"
+      ],
+      "description": "Closed reason vocabulary for CUDA host synchronization.",
+      "x-kiln-rust-type": "CudaSyncReason",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CudaSynchronizationReasonStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason",
+        "device_wait_count",
+        "stream_wait_count",
+        "failure_count",
+        "waited_ns"
+      ],
+      "properties": {
+        "reason": {
+          "$ref": "#/$defs/CudaSynchronizationReason"
+        },
+        "device_wait_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "stream_wait_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "failure_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "waited_ns": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "description": "Fixed-cardinality counters for one CUDA synchronization reason.",
+      "x-kiln-rust-type": "CudaSynchronizationReasonStats",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "CudaSynchronizationRuntimeStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "active",
+        "telemetry_available",
+        "total_device_wait_count",
+        "total_stream_wait_count",
+        "total_failure_count",
+        "total_waited_ns",
+        "reasons"
+      ],
+      "properties": {
+        "active": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "telemetry_available": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "telemetry_error": {
+          "$ref": "#/$defs/String"
+        },
+        "total_device_wait_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "total_stream_wait_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "total_failure_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "total_waited_ns": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "reasons": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CudaSynchronizationReasonStats"
+              },
+              "minItems": 0,
+              "maxItems": 0
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CudaSynchronizationReasonStats"
+              },
+              "minItems": 12,
+              "maxItems": 12
+            }
+          ]
+        }
+      },
+      "description": "Point-in-time CUDA synchronization telemetry.",
+      "x-kiln-rust-type": "CudaSynchronizationRuntimeStats",
+      "x-kiln-field-schema-status": "complete"
+    },
     "DebugDisabledResponse": {
       "type": "object",
       "additionalProperties": false,
@@ -3854,6 +3982,7 @@
       "required": [
         "configuration",
         "accelerator_runtime",
+        "cuda_synchronization",
         "rocm_synchronization",
         "batching_configuration",
         "cuda_graphs",
@@ -3869,6 +3998,9 @@
         },
         "accelerator_runtime": {
           "$ref": "#/$defs/ResolvedAcceleratorRuntimePolicy"
+        },
+        "cuda_synchronization": {
+          "$ref": "#/$defs/CudaSynchronizationRuntimeStats"
         },
         "rocm_synchronization": {
           "$ref": "#/$defs/RocmSynchronizationRuntimeStats"
@@ -6154,6 +6286,7 @@
         "decode_runtime",
         "accelerator_runtime",
         "cuda_graphs",
+        "cuda_synchronization",
         "rocm_synchronization",
         "rocm_graphs",
         "rocm_graphs_unavailable_reason",
@@ -6187,6 +6320,9 @@
         },
         "cuda_graphs": {
           "$ref": "#/$defs/CudaGraphConfigResponse"
+        },
+        "cuda_synchronization": {
+          "$ref": "#/$defs/CudaSynchronizationRuntimeStats"
         },
         "rocm_synchronization": {
           "$ref": "#/$defs/RocmSynchronizationRuntimeStats"

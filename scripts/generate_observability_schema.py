@@ -587,6 +587,59 @@ def build_definitions() -> None:
         "Complete operator-facing resolved streaming-prefill policy.",
     )
 
+    add_enum(
+        "CudaSynchronizationReason",
+        "CudaSyncReason",
+        [
+            "explicit_device_drain",
+            "explicit_stream_drain",
+            "tensor_handoff",
+            "external_yield",
+            "in_place_mutation",
+            "memory_reclaim",
+            "graph_boundary",
+            "full_attention_handoff",
+            "model_handoff",
+            "host_readback",
+            "allocation_lifetime",
+            "global_state_mutation",
+        ],
+        "Closed reason vocabulary for CUDA host synchronization.",
+    )
+    add_object(
+        "CudaSynchronizationReasonStats",
+        "CudaSynchronizationReasonStats",
+        {
+            "reason": ref("CudaSynchronizationReason"),
+            "device_wait_count": ref("NonNegativeInteger"),
+            "stream_wait_count": ref("NonNegativeInteger"),
+            "failure_count": ref("NonNegativeInteger"),
+            "waited_ns": ref("NonNegativeInteger"),
+        },
+        "Fixed-cardinality counters for one CUDA synchronization reason.",
+    )
+    add_object(
+        "CudaSynchronizationRuntimeStats",
+        "CudaSynchronizationRuntimeStats",
+        {
+            "active": ref("Boolean"),
+            "telemetry_available": ref("Boolean"),
+            "telemetry_error": ref("String"),
+            "total_device_wait_count": ref("NonNegativeInteger"),
+            "total_stream_wait_count": ref("NonNegativeInteger"),
+            "total_failure_count": ref("NonNegativeInteger"),
+            "total_waited_ns": ref("NonNegativeInteger"),
+            "reasons": {
+                "oneOf": [
+                    array(ref("CudaSynchronizationReasonStats"), min_items=0, max_items=0),
+                    array(ref("CudaSynchronizationReasonStats"), min_items=12, max_items=12),
+                ]
+            },
+        },
+        "Point-in-time CUDA synchronization telemetry.",
+        optional=("telemetry_error",),
+    )
+
     add_object(
         "RocmSynchronizationReasonStats",
         "RocmSynchronizationReasonStats",
@@ -1000,6 +1053,7 @@ def build_definitions() -> None:
         {
             "configuration": ref("DecodeRuntimeConfig"),
             "accelerator_runtime": ref("ResolvedAcceleratorRuntimePolicy"),
+            "cuda_synchronization": ref("CudaSynchronizationRuntimeStats"),
             "rocm_synchronization": ref("RocmSynchronizationRuntimeStats"),
             "batching_configuration": ref("BatchingRuntimeConfig"),
             "cuda_graphs": ref("CudaGraphInfo"), "rocm_graphs": ref("RocmGraphInfo"), "metal_graphs": ref("GraphInfo"),
@@ -1526,6 +1580,7 @@ def build_definitions() -> None:
         "decode_runtime": ref("DecodeRuntimeConfig"),
         "accelerator_runtime": ref("ResolvedAcceleratorRuntimePolicy"),
         "cuda_graphs": ref("CudaGraphConfigResponse"),
+        "cuda_synchronization": ref("CudaSynchronizationRuntimeStats"),
         "rocm_synchronization": ref("RocmSynchronizationRuntimeStats"),
         "rocm_graphs": nullable(ref("RocmGraphStats")),
         "rocm_graphs_unavailable_reason": nullable(ref("RocmGraphUnavailableReason")),

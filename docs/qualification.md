@@ -3006,6 +3006,68 @@ New qualification drivers use the mechanically derived
 `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES` names. Retired shorter graph
 variables are ignored and are not evidence vocabulary.
 
+### CUDA Synchronization Evidence
+
+Every CUDA correctness, serving, graph, resize, reclaim, or training campaign
+on a 4090 must retain synchronization snapshots before warmup, after warmup,
+before the measured window, after each independently reported wave, and after
+settled teardown. Read both
+`/health.decode_runtime.cuda_synchronization` and, when trusted debug is
+enabled, `/v1/debug/model-state.cuda_synchronization`. The two snapshots must
+agree at the same settled boundary. Do not insert a synchronization merely to
+make the read convenient.
+
+An active CUDA arm requires `active=true`, `telemetry_available=true`, no
+`telemetry_error`, and exactly one row for each of these twelve reasons:
+
+```text
+explicit_device_drain explicit_stream_drain tensor_handoff external_yield
+in_place_mutation memory_reclaim graph_boundary full_attention_handoff
+model_handoff host_readback allocation_lifetime global_state_mutation
+```
+
+Reason rows must be unique and in the declared order. Counts and nanoseconds
+must be nondecreasing; each aggregate total must equal the saturating sum of
+its rows. A failure delta for any reason is a hard failure even when the request
+later falls back or returns an apparently valid token. A temporarily in-flight
+wait may not yet appear because accounting occurs when the driver returns;
+sample only after the workload boundary has settled or report the arm failed to
+settle within its deadline.
+
+Reconcile every settled JSON row with these Prometheus families:
+
+```text
+kiln_cuda_synchronization_active
+kiln_cuda_synchronization_telemetry_available
+kiln_cuda_synchronizations_total{reason,scope}
+kiln_cuda_synchronization_failures_total{reason}
+kiln_cuda_synchronization_wait_seconds_total{reason}
+```
+
+The active and availability gauges must both be `1`. Each reason must have one
+device and one stream series, one failure series, and one wait-seconds series;
+unknown or duplicate labels fail. The Prometheus count values must equal the
+JSON counts exactly, failures must remain zero, and seconds must match
+`waited_ns / 1e9` within serialization precision.
+
+Require evidence only for routes the arm actually declares. Ordinary serving
+must advance `external_yield` device waits. A graph-enabled arm must advance
+`graph_boundary` stream waits and separately prove graph capture/replay. A
+physical KV-resize arm must advance `global_state_mutation`; a CUDA pool-trim
+arm must advance `memory_reclaim`; tensor/model/training handoff arms must
+advance their matching reason. Reasons outside the workload remain valid zeroes
+and must not be stimulated with artificial work.
+
+For pause diagnosis, bracket each concurrency or mutation wave with settled
+snapshots and retain per-reason count/time deltas beside request-local ITL and
+phase data. A rising counter identifies a wait class that occurred in the
+window; it does not by itself prove that wait caused a particular request gap.
+Attribute causality only when the request-owned phase or a narrower timestamped
+event overlaps the same monotonic interval. The CUDA-machine receipt must state
+which expected reason deltas were exercised, which remained zero by design,
+the maximum per-wave wait-time delta, and that the raw-source inventory contains
+no production driver waits outside the typed wrappers.
+
 ### ROCm Development Soak
 
 After a material ROCm serving change, run the committed 30-minute development
