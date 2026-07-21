@@ -838,6 +838,31 @@ class ServingBenchmarkTests(unittest.TestCase):
                     [f"--model-fingerprint-read-mib-per-second={value}"]
                 )
 
+    def test_memory_source_selectors_are_typed_and_exclusive(self) -> None:
+        drm = bench.parse_args(["--memory-path=/tmp/fixture-drm-counter"])
+        self.assertEqual(drm.memory_source, "drm")
+        nvml = bench.parse_args(["--memory-device-index=1"])
+        self.assertEqual(nvml.memory_source, "nvml")
+        nvml_uuid = bench.parse_args(
+            ["--memory-device-uuid=GPU-01234567-89ab-cdef-0123-456789abcdef"]
+        )
+        self.assertEqual(nvml_uuid.memory_source, "nvml")
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            bench.parse_args(
+                [
+                    "--memory-source=drm",
+                    "--memory-device-index=0",
+                    "--memory-device-uuid=GPU-01234567-89ab-cdef-0123-456789abcdef",
+                ]
+            )
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            bench.parse_args(
+                [
+                    "--memory-source=nvml",
+                    "--memory-path=/tmp/fixture-drm-counter",
+                ]
+            )
+
     def _run_cli_fixture(
         self,
         fake: FakeServer,
@@ -849,6 +874,7 @@ class ServingBenchmarkTests(unittest.TestCase):
         engine: str = "kiln",
         hard_limit_only: bool = False,
         extra_args: list[str] | None = None,
+        memory_counter_path: Path | None = None,
     ) -> tuple[int, Path]:
         output = Path(directory) / "receipt.json"
         runtime_artifact = Path(directory) / "kiln-server"
@@ -859,7 +885,7 @@ class ServingBenchmarkTests(unittest.TestCase):
             fake.state.execution_identity["executable_sha256"] = (
                 "sha256:" + hashlib.sha256(b"test runtime").hexdigest()
             )
-        memory_counter = Path(directory) / "vram-used"
+        memory_counter = memory_counter_path or Path(directory) / "vram-used"
         memory_counter.write_text("1024")
         thermal_policy = Path(directory) / "host-thermal-policy.json"
         thermal_policy_value = valid_host_thermal_policy()
@@ -1658,6 +1684,12 @@ class ServingBenchmarkTests(unittest.TestCase):
             "host_thermal": {
                 "policy": {"content_sha256": "sha256:thermal-policy"}
             },
+            "memory_sampler": {
+                "source": "drm_vram_used",
+                "path": "/sys/class/drm/card0/device/mem_info_vram_used",
+                "device": None,
+                "interval_ms": 50,
+            },
             "runs": [
                 {
                     "concurrency": 1,
@@ -1809,6 +1841,12 @@ class ServingBenchmarkTests(unittest.TestCase):
             "host_thermal": {
                 "policy": {"content_sha256": "sha256:thermal-policy"}
             },
+            "memory_sampler": {
+                "source": "drm_vram_used",
+                "path": "/sys/class/drm/card0/device/mem_info_vram_used",
+                "device": None,
+                "interval_ms": 50,
+            },
             "runs": [
                 {
                     "concurrency": 1,
@@ -1843,6 +1881,16 @@ class ServingBenchmarkTests(unittest.TestCase):
                         "all_rows_capture_disabled"
                     ]
                 )
+
+                wrong_device = json.loads(json.dumps(reference))
+                wrong_device["memory_sampler"]["path"] = (
+                    "/sys/class/drm/card1/device/mem_info_vram_used"
+                )
+                path.write_text(json.dumps(wrong_device))
+                with self.assertRaisesRegex(
+                    bench.BenchmarkError, "different accelerator device"
+                ):
+                    bench.compare_reference(current, path)
 
                 broken_artifact = json.loads(json.dumps(reference))
                 broken_artifact["engine"]["runtime_artifact"]["sha256"] = (
@@ -2510,7 +2558,16 @@ class ServingBenchmarkTests(unittest.TestCase):
             return_code, output = self._run_cli_fixture(fake, directory)
             receipt = bench.strict_json_loads(output.read_bytes())
             self.assertEqual(bench.main(["--validate-receipt", str(output)]), 0)
-            self.assertEqual(receipt["driver_version"], "18")
+            self.assertEqual(receipt["driver_version"], "19")
+            self.assertEqual(
+                receipt["memory_sampler"],
+                {
+                    "source": "drm_vram_used",
+                    "path": str((Path(directory) / "vram-used").resolve()),
+                    "device": None,
+                    "interval_ms": 50,
+                },
+            )
             self.assertEqual(receipt["reference_role"], "qualification_gate")
             self.assertEqual(
                 receipt["workload"]["prompt_set_id"], "cli-prompt-set-v1"
@@ -2603,10 +2660,38 @@ class ServingBenchmarkTests(unittest.TestCase):
             with self.assertRaisesRegex(bench.BenchmarkError, "must be distinct"):
                 bench.validate_benchmark_receipt(coupled_identity)
 
+            nvml_receipt = json.loads(json.dumps(receipt))
+            nvml_receipt["memory_sampler"] = {
+                "source": "nvml_used",
+                "path": None,
+                "device": {
+                    "selector": "explicit_uuid",
+                    "index": 0,
+                    "enumerated_device_count": 2,
+                    "uuid": "GPU-01234567-89ab-cdef-0123-456789abcdef",
+                    "name": "NVIDIA GeForce RTX 4090",
+                    "total_bytes": 24 * 1024**3,
+                    "library": "libnvidia-ml.so.1",
+                    "nvml_version": "13.580.65",
+                },
+                "interval_ms": 50,
+            }
+            nvml_receipt.pop("receipt_sha256")
+            nvml_receipt["receipt_sha256"] = bench.canonical_sha256(nvml_receipt)
+            bench.validate_benchmark_receipt(nvml_receipt)
+
+            invalid_nvml = json.loads(json.dumps(nvml_receipt))
+            invalid_nvml["memory_sampler"]["device"]["uuid"] = ""
+            invalid_nvml.pop("receipt_sha256")
+            invalid_nvml["receipt_sha256"] = bench.canonical_sha256(invalid_nvml)
+            with self.assertRaisesRegex(bench.BenchmarkError, "uuid is invalid"):
+                bench.validate_benchmark_receipt(invalid_nvml)
+
             driver_v15 = json.loads(json.dumps(receipt))
             driver_v15["driver_version"] = "15"
             driver_v15.pop("reference_role")
             driver_v15["workload"].pop("prompt_set_id")
+            driver_v15["memory_sampler"].pop("device")
             for row in [driver_v15["warmup"], *driver_v15["runs"]]:
                 if row is None or row.get("server") is None:
                     continue
@@ -2902,6 +2987,7 @@ class ServingBenchmarkTests(unittest.TestCase):
                     fake,
                     directory,
                     fetch_json=fail_final_health,
+                    memory_counter_path=Path(reference_directory) / "vram-used",
                     extra_args=["--reference-receipt", str(reference_path)],
                 )
                 receipt = bench.strict_json_loads(output.read_bytes())

@@ -1152,7 +1152,7 @@ between-requests boundary. Prometheus exports the same process-lifetime state as
 intentional duty-cycle delay distinguishable from an unexplained inference
 stall, while the barrier gauges distinguish an intentional model/KV mutation
 from ordinary actor work without adding a control-plane wait. They do not
-replace request-local `adapter_ms` or `resize_ms`. Serving benchmark driver v18 records the actor as the only request
+replace request-local `adapter_ms` or `resize_ms`. Serving benchmark driver v19 records the actor as the only request
 route, snapshots an idle boundary outside each
 measured request window and fails its `actor_cycle_idle_accounted` gate when the
 source, count, elapsed time, maximum, or final active state contradicts the

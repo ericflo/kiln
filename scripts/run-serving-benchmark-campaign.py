@@ -19,7 +19,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DRIVER = ROOT / "scripts" / "bench-concurrent-batch.py"
-SCHEMA = "kiln.serving-benchmark-campaign.v7"
+SCHEMA = "kiln.serving-benchmark-campaign.v8"
 DEFAULT_MODEL_FINGERPRINT_READ_MIB_PER_SECOND = 256
 REFERENCE_ROLES = (
     "qualification_gate",
@@ -120,7 +120,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--warmup-requests", type=int, default=1)
     parser.add_argument("--seed", type=int, default=17)
-    parser.add_argument("--memory-path", type=Path, required=True)
+    parser.add_argument(
+        "--memory-source", choices=("auto", "drm", "nvml"), default="auto"
+    )
+    parser.add_argument("--memory-path", default="auto")
+    parser.add_argument("--memory-device-index", type=int)
+    parser.add_argument("--memory-device-uuid")
     parser.add_argument("--memory-limit-bytes", type=int, required=True)
     parser.add_argument("--memory-sample-ms", type=int, default=50)
     parser.add_argument(
@@ -172,6 +177,37 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if args.server_pid is not None and args.server_pid <= 1:
         parser.error("--server-pid must be greater than one")
+    if args.memory_device_index is not None and args.memory_device_index < 0:
+        parser.error("--memory-device-index must be non-negative")
+    if args.memory_device_uuid is not None and re.fullmatch(
+        r"GPU-[A-Za-z0-9-]{8,120}", args.memory_device_uuid
+    ) is None:
+        parser.error("--memory-device-uuid must be a complete NVML GPU UUID")
+    if args.memory_device_index is not None and args.memory_device_uuid is not None:
+        parser.error(
+            "--memory-device-index and --memory-device-uuid are mutually exclusive"
+        )
+    if args.memory_source == "auto":
+        has_nvml_selector = (
+            args.memory_device_index is not None
+            or args.memory_device_uuid is not None
+        )
+        if args.memory_path != "auto" and has_nvml_selector:
+            parser.error(
+                "--memory-path and an NVML device selector cannot both select a device"
+            )
+        if args.memory_path != "auto":
+            args.memory_source = "drm"
+        elif has_nvml_selector:
+            args.memory_source = "nvml"
+    elif args.memory_source == "drm" and (
+        args.memory_device_index is not None or args.memory_device_uuid is not None
+    ):
+        parser.error(
+            "NVML device selectors cannot be combined with --memory-source drm"
+        )
+    elif args.memory_source == "nvml" and args.memory_path != "auto":
+        parser.error("--memory-path cannot be combined with --memory-source nvml")
     if not 64 <= args.model_fingerprint_read_mib_per_second <= 16_384:
         parser.error("--model-fingerprint-read-mib-per-second must be in 64..=16384")
     if args.host_thermal_policy.is_symlink() or not args.host_thermal_policy.is_file():
@@ -220,6 +256,8 @@ def benchmark_command(
         str(args.warmup_requests),
         "--seed",
         str(args.seed),
+        "--memory-source",
+        args.memory_source,
         "--memory-path",
         str(args.memory_path),
         "--memory-limit-bytes",
@@ -251,6 +289,10 @@ def benchmark_command(
         command.extend(("--server-pid", str(args.server_pid)))
     if args.api_key_env is not None:
         command.extend(("--api-key-env", args.api_key_env))
+    if args.memory_device_index is not None:
+        command.extend(("--memory-device-index", str(args.memory_device_index)))
+    if args.memory_device_uuid is not None:
+        command.extend(("--memory-device-uuid", args.memory_device_uuid))
     if args.reference_dir is not None:
         command.extend(
             (
@@ -286,6 +328,22 @@ def build_summary(
             if args.continue_after_failure
             else "fail_fast"
         ),
+        "memory_sampler": {
+            "source": args.memory_source,
+            "path": (
+                (
+                    str(Path(args.memory_path).expanduser().resolve())
+                    if args.memory_path != "auto"
+                    else "auto"
+                )
+                if args.memory_source == "drm"
+                else None
+            ),
+            "device_index": args.memory_device_index,
+            "device_uuid": args.memory_device_uuid,
+            "interval_ms": args.memory_sample_ms,
+            "limit_bytes": args.memory_limit_bytes,
+        },
         "host_thermal_policy": {
             "path": str(args.host_thermal_policy.resolve()),
             "sha256": file_sha256(args.host_thermal_policy),

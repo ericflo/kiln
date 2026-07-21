@@ -1518,6 +1518,19 @@ without waiting for the remaining repository-wide cleanup phases.
   deliberately does not close the laptop item below: public-model residency,
   bounded pressure, request recovery, and a retained machine receipt still
   have to run on the 16 GB device.
+- [x] Make the shared Kiln/vLLM performance driver runnable on NVIDIA without
+  weakening memory evidence. Driver v19 resolves exactly one typed DRM or NVML
+  whole-device counter, supports explicit physical NVML indices or stable UUID
+  selection, and records resolved index, enumeration count, UUID, product,
+  total capacity, library, and NVML version. Mixed-vendor and multi-device
+  auto-selection fail instead of
+  guessing. Background read failure and failed sampler shutdown now fail the
+  receipt instead of silently losing samples. Current-version Kiln/vLLM
+  comparisons require the same source, cadence, and DRM path or NVML
+  UUID/capacity. Campaign v8 forwards and records the selector and limit for all
+  five profiles. Portable fake-NVML tests and a live Strix Halo auto-resolution
+  probe establish launch readiness; the machine checkboxes remain open until
+  their named 4090 executes and retains the receipts.
 
 ### 7.1 RTX 4090 Laptop GPU, 16 GB
 
@@ -2506,7 +2519,7 @@ thread, direct rendezvous, duplicated sampling bridge, and their five public
 configuration fields have been deleted. Removed environment names are inert
 and indexed as retired; every active qualification profile is actor-owned.
 Health, config, trusted debug, metrics, UI, token-timing, observability schema,
-benchmark driver v18, API/CLI/architecture/operator documentation, and backend
+benchmark driver v19, API/CLI/architecture/operator documentation, and backend
 capability metadata all publish that single authority. Validators for immutable
 v2-v6 benchmark receipts retain their historical direct-route vocabulary but
 cannot describe a current v7 diagnostic record.
@@ -2554,7 +2567,7 @@ five checkboxes yet.
 
 The same checkpoint repaired two regressions found immediately by the cheap
 push workflows after the actor-only change. Historical driver-v17 graph/eager
-receipts now retain their v6 server-diagnostics authority while current v18
+receipts now retain their v6 server-diagnostics authority while current v19
 receipts require actor-only v7 diagnostics, with an executable retained-receipt
 regression. The rendered dashboard smoke no longer waits for deleted batching
 mode or direct-rendezvous rows. All 51 historical benchmark receipts and all
@@ -3824,6 +3837,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-21 | Non-allocating CUDA server memory-admission handoff | workload `sha256:ae9fc43d6284f1d5dd1f9cee2cde188883560536c67d10735fe504624bfdf95a` | this portable source-handoff checkpoint | exact laptop/desktop 4090 selection and the production server paged-KV live-budget rejection path; no CUDA execution, public-model load, induced device pressure, request recovery, serving, performance, soak, or promotion claim | 686/686 qualification-tooling tests; all 24 workload manifests validated; toolkit-free CUDA 12.8/SM 8.9 server library/test typecheck; generated runtime-environment contract at 434 reads, 19 mutations, and zero migration reads; 627-file/14-exception production budget; 10/10 documentation-builder tests; 55-document/5-asset generated site, static smoke, and full Chromium smoke; formatting, JSON, and diff hygiene | portable admission launch contract passed; run the expanded lifecycle variant on each named 4090, then separately retain bounded public-model pressure and recovery evidence on the 16 GB laptop | The new serial lifecycle case reads the real CUDA allocator ceiling, retains a one-GiB safety floor, asks the exact server gate for one 1 MiB KV block beyond the remaining budget, and requires the typed stricter-governor/allocator remediation error before cache construction. Missing CUDA or allocator telemetry fails in qualification mode, and the output contract forbids skip, OOM, and failed-test diagnostics. The test lives in a focused 53-line module while `state.rs` remains at its reviewed 8,318-line ceiling. This safer proof does not manufacture an OOM or close the machine-level low-memory checkbox without a real retained receipt and public-model recovery run. |
 
 | 2026-07-21 | Fail-closed CUDA and Metal graph-parity handoff | workload `sha256:1204c7260b80f1b0d6d5367b8406534cb478832f9c47dc7efec3ada2ec9e5ac0` | this portable source-handoff checkpoint | exact laptop/desktop 4090 and eight-core M1 selection; single-row CUDA capture/replay parity plus single-row and two-row Metal ICB replay parity; no accelerator execution, full-model graph behavior, multi-row CUDA graph, sanitizer, serving, resilience, performance, soak, or promotion claim | 686/686 qualification-tooling tests; all 24 workload manifests validated; toolkit-free CUDA 12.8/SM 8.9 model library/test typecheck; generated runtime-environment contract at 435 reads, 19 mutations, and zero migration reads; 627-file/14-exception production budget; 10/10 documentation-builder tests; 55-document/5-asset generated site and full Chromium smoke; formatting, JSON, and diff hygiene | portable graph launch contract passed; execute the matching five-case core variant on each named machine before relying on graph behavior | The CUDA case requires a captured graph count above zero, a real third-call replay, exact eager token parity, and a maximum BF16 logit difference within 0.5 percent of the eager maximum magnitude. The Metal case requires positive single-row and batched markers after replaying both short and long buckets, with exact token and paged-KV parity against eager execution. All three legacy graph tests now fail rather than skip when qualification mode requires hardware. Native Metal compilation is intentionally not claimed from Linux: `objc2` rejects the non-Apple host, so the M1 compile and receipt remain authoritative. Multi-row CUDA stays unconditionally unavailable until separate NVIDIA sanitizer, parity, resilience, and throughput evidence exists. |
+
+| 2026-07-21 | Portable NVML serving-benchmark telemetry | this source | this portable CUDA performance-handoff checkpoint | shared Kiln/vLLM benchmark driver v19, campaign v8, DRM/NVML whole-device sampling, stable NVIDIA selection and receipt identity, legacy receipt validation, operator protocol, and generated website; no NVIDIA runtime, model load, CUDA request, Kiln/vLLM comparison, performance, pressure, soak, or promotion claim | 699/699 qualification-tooling tests; strict validation of all 149 compact receipts, 51 detailed serving receipts across v2-v17, and 17 specialized oracle artifacts; live Strix Halo auto-resolution selected and read the canonical AMD DRM counter; runtime-environment contract at 435 reads, 19 mutations, and zero migration reads; zero source-parsing reads/assertions; repository-artifact, release-version, configuration, thinking-budget, Python compilation, JSON, and diff-hygiene gates; 10/10 documentation-builder tests; 55-document/5-asset generated site, static checks, and full Chromium smoke | portable NVIDIA performance launch contract passed; bind the exact environment-receipt UUID and machine-specific limit when the matching 4090 runs | Driver v19 loads NVML in-process through its stable C ABI and never polls `nvidia-smi` on the measurement cadence. Selection accepts an exact GPU UUID, a physical NVML index, or automatic resolution only for one unambiguous device; mixed DRM/NVML, multi-device, missing, duplicate, or remapped identity ambiguity fails before measurement. Each receipt binds the resolved index, enumerated count, UUID, product name, total capacity, library, and NVML version. A background read error, inconsistent memory values, stuck sampler thread, or shutdown failure now fails the receipt instead of silently reducing evidence. Counter reads and baseline/peak state changes are serialized so an in-flight sample cannot cross a row boundary. Current comparisons require the same source/cadence and canonical DRM path or NVML UUID/capacity. Campaign v8 records and forwards the source, path/index/UUID, cadence, and limit to all five independently contained profiles. The 4090 hardware checkboxes remain open until retained machine receipts execute this contract. |
 
 ## Known Starting Defects
 

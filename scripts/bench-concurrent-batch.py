@@ -14,7 +14,6 @@ import base64
 import binascii
 import dataclasses
 import datetime as dt
-import glob
 import hashlib
 import json
 import math
@@ -39,7 +38,7 @@ from typing import Any, Callable, Iterable
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "18"
+DRIVER_VERSION = "19"
 SUPPORTED_DRIVER_VERSIONS = {
     "2",
     "3",
@@ -57,48 +56,50 @@ SUPPORTED_DRIVER_VERSIONS = {
     "15",
     "16",
     "17",
+    "18",
     DRIVER_VERSION,
 }
 THERMAL_DRIVER_VERSIONS = {
     "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", DRIVER_VERSION,
+    "16", "17", "18", DRIVER_VERSION,
 }
 LIFECYCLE_DRIVER_VERSIONS = {
     "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", DRIVER_VERSION,
+    "16", "17", "18", DRIVER_VERSION,
 }
 PRELAUNCH_DRIVER_VERSIONS = {
     "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", DRIVER_VERSION,
+    "16", "17", "18", DRIVER_VERSION,
 }
 OUTPUT_EVIDENCE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", DRIVER_VERSION,
+    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", DRIVER_VERSION,
 }
 MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {
-    "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", DRIVER_VERSION,
+    "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", DRIVER_VERSION,
 }
 RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS = {
-    "12", "13", "14", "15", "16", "17", DRIVER_VERSION,
+    "12", "13", "14", "15", "16", "17", "18", DRIVER_VERSION,
 }
 ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "9", "10", "11", "12", "13", "14", "15", "16", "17", DRIVER_VERSION,
+    "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", DRIVER_VERSION,
 }
 ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "10", "11", "12", "13", "14", "15", "16", "17", DRIVER_VERSION,
+    "10", "11", "12", "13", "14", "15", "16", "17", "18", DRIVER_VERSION,
 }
 REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", DRIVER_VERSION,
+    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", DRIVER_VERSION,
 }
 IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS = {
-    "11", "12", "13", "14", "15", "16", "17", DRIVER_VERSION,
+    "11", "12", "13", "14", "15", "16", "17", "18", DRIVER_VERSION,
 }
-COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", "15", "16", "17", DRIVER_VERSION}
-MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", "15", "16", "17", DRIVER_VERSION}
-REQUEST_PERFORMANCE_DRIVER_VERSIONS = {"15", "16", "17", DRIVER_VERSION}
-PROMPT_SET_IDENTITY_DRIVER_VERSIONS = {"16", "17", DRIVER_VERSION}
-GRAPH_PARITY_DRIVER_VERSIONS = {"17", DRIVER_VERSION}
-REFERENCE_ROLE_DRIVER_VERSIONS = {"17", DRIVER_VERSION}
-ACTOR_ONLY_DIAGNOSTICS_DRIVER_VERSIONS = {DRIVER_VERSION}
+COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", "15", "16", "17", "18", DRIVER_VERSION}
+MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", "15", "16", "17", "18", DRIVER_VERSION}
+REQUEST_PERFORMANCE_DRIVER_VERSIONS = {"15", "16", "17", "18", DRIVER_VERSION}
+PROMPT_SET_IDENTITY_DRIVER_VERSIONS = {"16", "17", "18", DRIVER_VERSION}
+GRAPH_PARITY_DRIVER_VERSIONS = {"17", "18", DRIVER_VERSION}
+REFERENCE_ROLE_DRIVER_VERSIONS = {"17", "18", DRIVER_VERSION}
+ACTOR_ONLY_DIAGNOSTICS_DRIVER_VERSIONS = {"18", DRIVER_VERSION}
+TYPED_MEMORY_SOURCE_DRIVER_VERSIONS = {DRIVER_VERSION}
 REFERENCE_ROLES = {
     "qualification_gate",
     "same_artifact_graph_eager_discriminator",
@@ -114,6 +115,11 @@ if str(QUALIFICATION_DIR) not in sys.path:
 import hf_thermal_supervisor as fingerprint_supervisor  # noqa: E402
 import host_thermal_guard as thermal  # noqa: E402
 import host_thermal_policy as thermal_policy_file  # noqa: E402
+from device_memory_sampler import (  # noqa: E402
+    DeviceMemoryError,
+    MemorySampler,
+    resolve_memory_counter,
+)
 from model_fingerprint import (  # noqa: E402
     ModelFingerprintError,
     fingerprint_model,
@@ -3884,8 +3890,95 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
         raise BenchmarkError("receipt.workload_fingerprint does not match workload")
 
     memory_sampler = _object(receipt["memory_sampler"], "receipt.memory_sampler")
-    _exact_keys(memory_sampler, {"source", "path", "interval_ms"}, "receipt.memory_sampler")
-    if driver_version in THERMAL_DRIVER_VERSIONS:
+    if driver_version in TYPED_MEMORY_SOURCE_DRIVER_VERSIONS:
+        _exact_keys(
+            memory_sampler,
+            {"source", "path", "device", "interval_ms"},
+            "receipt.memory_sampler",
+        )
+        _positive_int(
+            memory_sampler["interval_ms"], "receipt.memory_sampler.interval_ms"
+        )
+        if memory_sampler["source"] == "drm_vram_used":
+            if (
+                not isinstance(memory_sampler["path"], str)
+                or not memory_sampler["path"]
+                or memory_sampler["device"] is not None
+            ):
+                raise BenchmarkError(
+                    "DRM memory telemetry requires a path and no NVML device identity"
+                )
+        elif memory_sampler["source"] == "nvml_used":
+            if memory_sampler["path"] is not None:
+                raise BenchmarkError("NVML memory telemetry must not claim a DRM path")
+            device = _object(
+                memory_sampler["device"], "receipt.memory_sampler.device"
+            )
+            _exact_keys(
+                device,
+                {
+                    "selector",
+                    "index",
+                    "enumerated_device_count",
+                    "uuid",
+                    "name",
+                    "total_bytes",
+                    "library",
+                    "nvml_version",
+                },
+                "receipt.memory_sampler.device",
+            )
+            if device["selector"] not in {
+                "auto_single_device",
+                "explicit_index",
+                "explicit_uuid",
+            }:
+                raise BenchmarkError("receipt NVML selector is unsupported")
+            index = _nonnegative_int(
+                device["index"], "receipt.memory_sampler.device.index"
+            )
+            device_count = _positive_int(
+                device["enumerated_device_count"],
+                "receipt.memory_sampler.device.enumerated_device_count",
+            )
+            if index >= device_count:
+                raise BenchmarkError("receipt NVML device index exceeds device count")
+            if device["selector"] == "auto_single_device" and (
+                index != 0 or device_count != 1
+            ):
+                raise BenchmarkError(
+                    "receipt automatic NVML selection must identify the only device"
+                )
+            for name in ("uuid", "name", "library", "nvml_version"):
+                value = device[name]
+                if (
+                    not isinstance(value, str)
+                    or not value
+                    or len(value) > 256
+                    or any(ord(character) < 32 for character in value)
+                ):
+                    raise BenchmarkError(
+                        f"receipt.memory_sampler.device.{name} is invalid"
+                    )
+            total_bytes = _positive_int(
+                device["total_bytes"], "receipt.memory_sampler.device.total_bytes"
+            )
+            if memory_limit_bytes is not None and memory_limit_bytes > total_bytes:
+                raise BenchmarkError(
+                    "receipt memory limit exceeds the selected NVML device capacity"
+                )
+        else:
+            raise BenchmarkError("receipt device-memory source is unsupported")
+    else:
+        _exact_keys(
+            memory_sampler,
+            {"source", "path", "interval_ms"},
+            "receipt.memory_sampler",
+        )
+    if (
+        driver_version in THERMAL_DRIVER_VERSIONS
+        and driver_version not in TYPED_MEMORY_SOURCE_DRIVER_VERSIONS
+    ):
         if (
             memory_sampler["source"] != "drm_vram_used"
             or not isinstance(memory_sampler["path"], str)
@@ -5165,99 +5258,6 @@ def server_request_accounting_matches(
     )
 
 
-class MemorySampler:
-    def __init__(self, path: Path | None, interval_ms: int) -> None:
-        self.path = path
-        self.interval_secs = interval_ms / 1000.0
-        self._stop = threading.Event()
-        self._lock = threading.Lock()
-        self._thread: threading.Thread | None = None
-        self._baseline: int | None = None
-        self._peak: int | None = None
-        self._samples = 0
-
-    def _read(self) -> int:
-        if self.path is None:
-            raise BenchmarkError("memory sampler is disabled")
-        try:
-            raw = self.path.read_text(encoding="utf-8").strip()
-            value = int(raw)
-        except (OSError, ValueError) as exc:
-            raise BenchmarkError(f"cannot read memory counter {self.path}: {exc}") from exc
-        if value < 0:
-            raise BenchmarkError(f"memory counter at {self.path} is negative")
-        return value
-
-    def start(self) -> None:
-        if self.path is None:
-            return
-        self.reset()
-        self._thread = threading.Thread(target=self._run, name="benchmark-memory", daemon=True)
-        self._thread.start()
-
-    def _run(self) -> None:
-        while not self._stop.wait(self.interval_secs):
-            try:
-                value = self._read()
-            except Exception:
-                continue
-            with self._lock:
-                self._peak = value if self._peak is None else max(self._peak, value)
-                self._samples += 1
-
-    def reset(self) -> None:
-        if self.path is None:
-            return
-        value = self._read()
-        with self._lock:
-            self._baseline = value
-            self._peak = value
-            self._samples = 1
-
-    def snapshot(self) -> dict[str, int] | None:
-        if self.path is None:
-            return None
-        value = self._read()
-        with self._lock:
-            peak = max(self._peak or value, value)
-            baseline = self._baseline or value
-            samples = self._samples + 1
-        return {
-            "baseline_bytes": baseline,
-            "peak_bytes": peak,
-            "peak_delta_bytes": max(0, peak - baseline),
-            "samples": samples,
-        }
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-
-
-def resolve_memory_path(raw: str) -> Path | None:
-    if raw == "none":
-        return None
-    if raw != "auto":
-        path = Path(raw).expanduser().resolve()
-        if not path.is_file():
-            raise BenchmarkError(f"memory counter does not exist: {path}")
-        return path
-    candidates = sorted(
-        Path(path).resolve()
-        for path in glob.glob("/sys/class/drm/card*/device/mem_info_vram_used")
-        if Path(path).is_file()
-    )
-    if len(candidates) == 1:
-        return candidates[0]
-    if not candidates:
-        return None
-    raise BenchmarkError(
-        "multiple DRM memory counters found; select one with --memory-path: "
-        + ", ".join(str(path) for path in candidates)
-    )
-
-
 def gate(name: str, passed: bool, detail: str) -> dict[str, Any]:
     return {"name": name, "passed": passed, "detail": detail}
 
@@ -5748,6 +5748,36 @@ def compare_reference(receipt: dict[str, Any], reference_path: Path) -> dict[str
         )
     if reference.get("workload_fingerprint") != receipt.get("workload_fingerprint"):
         raise BenchmarkError("reference receipt has a different workload fingerprint")
+    if receipt.get("driver_version") in TYPED_MEMORY_SOURCE_DRIVER_VERSIONS:
+        current_memory = receipt["memory_sampler"]
+        reference_memory = reference["memory_sampler"]
+        if (
+            current_memory["source"] != reference_memory["source"]
+            or current_memory["interval_ms"] != reference_memory["interval_ms"]
+        ):
+            raise BenchmarkError(
+                "reference receipt uses different device-memory telemetry"
+            )
+        if current_memory["source"] == "drm_vram_used":
+            same_device = current_memory["path"] == reference_memory["path"]
+        else:
+            if (
+                reference.get("driver_version")
+                not in TYPED_MEMORY_SOURCE_DRIVER_VERSIONS
+            ):
+                raise BenchmarkError(
+                    "NVML comparison requires a driver v19 reference receipt"
+                )
+            same_device = (
+                current_memory["device"]["uuid"]
+                == reference_memory["device"]["uuid"]
+                and current_memory["device"]["total_bytes"]
+                == reference_memory["device"]["total_bytes"]
+            )
+        if not same_device:
+            raise BenchmarkError(
+                "reference receipt measured a different accelerator device"
+            )
     current_model = receipt.get("engine", {}).get("model_identity", {})
     reference_model = reference.get("engine", {}).get("model_identity", {})
     if current_model.get("content_sha256") != reference_model.get("content_sha256"):
@@ -6175,7 +6205,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--slo-e2e-ms", type=float, default=60_000.0)
     parser.add_argument("--timeout-secs", type=float, default=600.0)
     parser.add_argument("--diagnostics-url", default="auto")
+    parser.add_argument(
+        "--memory-source",
+        choices=("auto", "drm", "nvml"),
+        default="auto",
+        help=(
+            "whole-device memory telemetry source; auto requires exactly one "
+            "unambiguous DRM or NVML device"
+        ),
+    )
     parser.add_argument("--memory-path", default="auto")
+    parser.add_argument(
+        "--memory-device-index",
+        type=int,
+        help="physical NVML device index; index or UUID is required on multi-GPU hosts",
+    )
+    parser.add_argument(
+        "--memory-device-uuid",
+        help="stable NVML GPU UUID; preferred when CUDA device indices may be remapped",
+    )
     parser.add_argument("--memory-sample-ms", type=int, default=50)
     parser.add_argument(
         "--model-fingerprint-read-mib-per-second",
@@ -6293,6 +6341,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("timeouts, dispatch limit, and SLO thresholds must be finite and positive")
     if args.memory_sample_ms <= 0:
         parser.error("memory sampling cadence must be positive")
+    if args.memory_device_index is not None and args.memory_device_index < 0:
+        parser.error("memory-device-index must be non-negative")
+    if args.memory_device_uuid is not None and re.fullmatch(
+        r"GPU-[A-Za-z0-9-]{8,120}", args.memory_device_uuid
+    ) is None:
+        parser.error("memory-device-uuid must be a complete NVML GPU UUID")
+    if args.memory_device_index is not None and args.memory_device_uuid is not None:
+        parser.error("memory-device-index and memory-device-uuid are mutually exclusive")
+    if args.memory_source == "auto":
+        has_nvml_selector = (
+            args.memory_device_index is not None
+            or args.memory_device_uuid is not None
+        )
+        if args.memory_path != "auto" and has_nvml_selector:
+            parser.error(
+                "memory-path and an NVML device selector cannot both select a device"
+            )
+        if args.memory_path != "auto":
+            args.memory_source = "drm"
+        elif has_nvml_selector:
+            args.memory_source = "nvml"
+    elif args.memory_source == "drm" and (
+        args.memory_device_index is not None or args.memory_device_uuid is not None
+    ):
+        parser.error("NVML device selectors cannot be combined with memory-source drm")
+    elif args.memory_source == "nvml" and args.memory_path != "auto":
+        parser.error("memory-path cannot be combined with memory-source nvml")
     if not (
         MIN_MODEL_FINGERPRINT_READ_MIB_PER_SECOND
         <= args.model_fingerprint_read_mib_per_second
@@ -6565,11 +6640,27 @@ def main(argv: list[str] | None = None) -> int:
         else:
             diagnostics_url = args.diagnostics_url
 
-        memory_path = resolve_memory_path(args.memory_path)
-        if memory_path is None:
-            raise BenchmarkError("a DRM device-memory counter is required for a measured run")
+        try:
+            memory_counter = resolve_memory_counter(
+                source=args.memory_source,
+                drm_path=args.memory_path,
+                nvml_device_index=args.memory_device_index,
+                nvml_device_uuid=args.memory_device_uuid,
+            )
+        except DeviceMemoryError as exc:
+            raise BenchmarkError(f"device-memory telemetry is unavailable: {exc}") from exc
         workload = workload_contract(args, sizes)
-        sampler = MemorySampler(memory_path, args.memory_sample_ms)
+        sampler = MemorySampler(memory_counter, args.memory_sample_ms)
+        memory_sampler_identity = sampler.receipt_identity()
+        memory_device = memory_sampler_identity["device"]
+        if (
+            memory_device is not None
+            and args.memory_limit_bytes > memory_device["total_bytes"]
+        ):
+            sampler.stop()
+            raise BenchmarkError(
+                "memory-limit-bytes exceeds the selected NVML device capacity"
+            )
         warmup: dict[str, Any] | None = None
         runs: list[dict[str, Any]] = []
         completion_failures: list[dict[str, str]] = []
@@ -6673,14 +6764,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
             return row, None
 
-        if thermal_startup_error is not None:
-            record_completion_failure("host_thermal_startup", thermal_startup_error)
-        elif server_startup_error is not None:
-            record_completion_failure("server_startup", server_startup_error)
-        else:
-            sampler.start()
-            try:
+        try:
+            if thermal_startup_error is not None:
+                record_completion_failure("host_thermal_startup", thermal_startup_error)
+            elif server_startup_error is not None:
+                record_completion_failure("server_startup", server_startup_error)
+            else:
                 try:
+                    sampler.start()
                     if args.warmup_requests:
                         warmup, thermal_error = run_guarded(
                             args=args,
@@ -6720,11 +6811,11 @@ def main(argv: list[str] | None = None) -> int:
                         record_completion_failure("warmup", "warmup verdict failed")
                 except Exception as exc:
                     record_completion_failure("measurement", exc)
-            finally:
-                try:
-                    sampler.stop()
-                except Exception as exc:
-                    record_completion_failure("memory_sampler_stop", exc)
+        finally:
+            try:
+                sampler.stop()
+            except Exception as exc:
+                record_completion_failure("memory_sampler_stop", exc)
 
         if args.engine == "kiln":
             def verify_execution_identity() -> None:
@@ -6942,9 +7033,8 @@ def main(argv: list[str] | None = None) -> int:
             "workload": workload,
             "workload_fingerprint": workload_fingerprint(workload),
             "memory_sampler": {
-                "source": "drm_vram_used" if memory_path is not None else "unavailable",
-                "path": str(memory_path) if memory_path is not None else None,
-                "interval_ms": args.memory_sample_ms if memory_path is not None else None,
+                **memory_sampler_identity,
+                "interval_ms": args.memory_sample_ms,
             },
             "diagnostics": {
                 "url": diagnostics_url,

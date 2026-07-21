@@ -243,8 +243,66 @@ Every request uses a launch barrier, deterministic prompt identity, explicit
 sampling and template fields, streaming usage, a fixed completion length, and a
 bounded timeout. The receipt retains TTFT, client-visible ITL, end-to-end
 latency, request throughput, output-token throughput, SLO goodput, dispatch
-spread, prompt/output hashes, DRM memory, failures, and Kiln server-route
+spread, prompt/output hashes, whole-device memory, failures, and Kiln server-route
 diagnostics.
+
+## Device-Memory Telemetry
+
+Driver v19 samples whole-device used memory through one typed source. This is
+the same scope for both supported mechanisms: it is not per-process memory and
+therefore includes other users of the selected accelerator. Qualification
+machines must be quiescent enough that the recorded baseline and peak delta are
+meaningful.
+
+| `--memory-source` | Selector | Receipt identity |
+|---|---|---|
+| `auto` | Succeeds only when exactly one DRM or NVML device is measurable. | Resolved source and identity below. |
+| `drm` | `--memory-path auto` requires one Linux `mem_info_vram_used` file; an explicit path selects one of several DRM devices. | Canonical sysfs path, `source=drm_vram_used`. |
+| `nvml` | `--memory-device-uuid GPU-...` selects stable identity; `--memory-device-index N` selects a physical NVML index. Both may be omitted only when NVML enumerates exactly one GPU. | Resolved index, enumeration count, UUID, product name, total bytes, loaded library, and NVML version, `source=nvml_used`. |
+
+An explicit `--memory-path` with the default source is normalized to `drm`; an
+explicit NVML index or UUID is normalized to `nvml`. Supplying an index and UUID
+together, or combining a DRM path with either, is an error. On a mixed
+AMD/NVIDIA host, or any host with several candidate devices,
+`auto` fails rather than guessing which device serves the model. NVML indices
+are physical NVML enumeration indices, not remapped CUDA logical indices.
+Prefer the UUID captured in the environment receipt when `CUDA_VISIBLE_DEVICES`
+or container remapping is involved. UUID selection enumerates NVML and requires
+exactly one match.
+
+The sampler calls NVML in-process instead of polling `nvidia-smi`, avoiding a
+subprocess on every 50 ms sample. It reads once at each run boundary and on the
+background cadence. Counter reads and baseline/peak state changes share one
+boundary lock, so an in-flight sample from the prior row cannot be committed
+after the next row resets its baseline. A negative or inconsistent value, any
+background read failure, a sampler thread that does not stop, or failed NVML
+shutdown makes the receipt fail. A memory limit larger than the selected NVML
+device's recorded capacity is rejected before measurement. Passed v19
+Kiln/vLLM comparisons must
+use the same cadence and source and must bind the same DRM path or NVML
+UUID/capacity. Thus peak-memory comparisons cannot silently come from different
+GPUs.
+
+Linux AMD/ROCm and Vulkan example:
+
+```bash
+--memory-source drm \
+--memory-path /sys/class/drm/card1/device/mem_info_vram_used \
+--memory-limit-bytes 50000000000
+```
+
+Linux NVIDIA/CUDA example bound to the environment receipt's GPU UUID:
+
+```bash
+--memory-source nvml \
+--memory-device-uuid GPU-01234567-89ab-cdef-0123-456789abcdef \
+--memory-limit-bytes 15000000000
+```
+
+Choose the limit below total capacity to preserve the machine-specific safety
+margin. The 16 GB laptop and 24 GB desktop must use their own limits; changing
+the limit between Kiln and vLLM changes the workload fingerprint and makes the
+receipts incomparable.
 
 ### Run and prompt identity
 
@@ -274,7 +332,7 @@ accepts unique lifecycle identities while rejecting any prompt, sampling,
 shape, seed, model alias, SLO, or memory-limit drift. V2-v15 validators retain
 their original exact-workload fingerprint semantics.
 
-Driver v7 through v17 retain one ordered `output_evidence` row for every successful
+Driver v7 through v19 retain one ordered `output_evidence` row for every successful
 request. Hash-only evidence is the default and includes the combined semantic
 output hash, separate reasoning/content hashes, UTF-8 byte counts, completion
 tokens, and finish reason. The validator requires these rows to cover exactly
@@ -337,7 +395,7 @@ does not re-authorize active-work suspension there.
 
 ### Server route diagnostics
 
-Driver v18 uses `kiln.serving-benchmark-server-diagnostics.v7`. Its
+Drivers v18 and v19 use `kiln.serving-benchmark-server-diagnostics.v7`. Its
 `request_route` is exactly `batching_engine`; the batching-engine record is
 mandatory; and the record contains no direct-worker, rendezvous, or alternate
 route object. The before/after actor ownership must be stable, all cumulative
@@ -952,6 +1010,7 @@ python3 scripts/bench-concurrent-batch.py \
   --sizes 1,8,16,32,64,128 \
   --repeats 3 \
   --max-tokens 64 \
+  --memory-source drm \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
   --memory-limit-bytes 50000000000 \
   --model-fingerprint-read-mib-per-second 256 \
@@ -989,7 +1048,7 @@ an output directory inside the repository cannot make later profiles reject the
 source as dirty. After execution, every staged receipt is published through an
 atomic rename and the self-hashing campaign summary is published last.
 
-Campaign summary v7 records the campaign's stable prompt-set base, selected
+Campaign summary v8 records the campaign's stable prompt-set base, selected
 output-evidence mode, `reference_role`, and resolved `reference_dir`. Each child
 receives an engine-qualified unique run ID and a profile-qualified prompt-set
 ID; Kiln and vLLM children for the same profile therefore share prompts but
@@ -1000,7 +1059,9 @@ expected profile has a closed `status`: `completed` or
 a skipped row records the earlier `blocked_by_profile` and has null exit and
 receipt-hash fields. Missing receipts count as failures even when the child exits
 zero. `model_fingerprint_read_mib_per_second` records the bounded provenance
-read rate forwarded to every child.
+read rate forwarded to every child. The summary also records the typed memory
+source, path or NVML index/UUID, cadence, and absolute limit forwarded unchanged to
+all five profiles.
 
 The default execution policy is fail-fast. The first nonzero child exit or
 missing receipt prevents every later profile from starting, while preserving
@@ -1021,6 +1082,7 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --campaign-id rocm-qualified-kiln-attempt-001 \
   --prompt-set-id rocm-qualified-comparison-v1 \
   --out-dir .qualification/serving/rocm-qualified-v1 \
+  --memory-source drm \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
   --memory-limit-bytes 50000000000 \
   --model-fingerprint-read-mib-per-second 256 \
@@ -1034,6 +1096,19 @@ receipts. That campaign always uses the default `qualification_gate` role; the
 wrapper rejects the graph/eager discriminator for vLLM. Profile, prompt,
 sampling, model identity, fixed output length, thermal policy content, and
 comparison mode must agree.
+
+On either 4090, replace the DRM argument in the examples with the UUID from its
+environment receipt:
+
+```bash
+--memory-source nvml \
+--memory-device-uuid GPU-01234567-89ab-cdef-0123-456789abcdef
+```
+
+Use the same UUID, sample cadence, and memory limit for the Kiln and vLLM
+campaign. The child v19 receipts bind the resolved index and UUID; the campaign
+records the requested selector. An explicit physical index remains available
+for a stable, non-remapped single-tenant host.
 
 For a Kiln graph campaign paired to eager Kiln receipts from the exact same
 runtime artifact, add both:
@@ -1063,9 +1138,12 @@ mapfile -d '' receipts < <(
 python3 scripts/bench-concurrent-batch.py --validate-receipt "${receipts[@]}"
 ```
 
-Driver v18 is the current contract. It retains v17's closed ROCm batch-capture
-parity evidence and fail-closed reference roles, then replaces route-aware
-diagnostics with the actor-only v7 schema described above. Driver v17 retained
+Driver v19 is the current contract. It retains v18's actor-only diagnostics and
+adds typed DRM/NVML whole-device memory telemetry, stable NVML identity,
+fail-closed sampling, and same-device comparison. Driver v18 retained v17's
+closed ROCm batch-capture parity evidence and fail-closed reference roles, then
+replaced route-aware diagnostics with the actor-only v7 schema described above.
+Driver v17 retained
 v16 unique run/log identity and stable prompt-set identity. Driver v16 verifies every retained prompt-set
 hash against `prompt_set_id` and excludes only the operational run ID from the
 workload comparison fingerprint. Driver v15 added strict per-request Kiln terminal performance
@@ -1079,9 +1157,9 @@ integrity contract. Driver v11 added typed idle-boundary
 cooldown evidence to v10. Driver v10 added closed ROCm graph execution evidence;
 v9 added historical route-aware batching-actor and direct-rendezvous
 diagnostics; and v8 added mandatory initial and final guarded model-fingerprint
-lifecycles. A v17 or v18 graph/eager discriminator requires a compatible eager
-reference with the same prompt-set ID, model-visible
-workload, runtime identity, and exact binary hash. Ordinary v7-v17 references
+lifecycles. A v17, v18, or v19 graph/eager discriminator requires a compatible
+eager reference with the same prompt-set ID, model-visible
+workload, runtime identity, and exact binary hash. Ordinary v7-v19 references
 remain comparison-compatible when their version-appropriate workload
 fingerprints match. The current arm must still satisfy v16 prompt identity, v15
 request-performance accounting, v14 multi-row
@@ -1098,6 +1176,6 @@ identity semantics. Owned evidence contains the content-hashed launch document,
 absolute server-log fingerprint, shutdown signal/status/timing,
 forced-shutdown flag, and process-group liveness. Attached and explicitly
 unsafe runs serialize null lifecycle artifacts so ownership cannot be inferred
-from missing fields. Historical driver v2 through v17 receipts remain valid
-under their original contracts, but do not satisfy current v18 performance
+from missing fields. Historical driver v2 through v18 receipts remain valid
+under their original contracts, but do not satisfy current v19 performance
 acceptance.

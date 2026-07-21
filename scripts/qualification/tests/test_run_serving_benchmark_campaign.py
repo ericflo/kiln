@@ -132,6 +132,10 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
             str(root / "host-thermal-policy.json"),
         )
         self.assertEqual(command[command.index("--server-pid") + 1], "4321")
+        self.assertEqual(command[command.index("--memory-source") + 1], "drm")
+        self.assertEqual(
+            command[command.index("--memory-path") + 1], str(root / "memory")
+        )
         self.assertEqual(
             command[command.index("--output-evidence") + 1], "hashes"
         )
@@ -145,6 +149,44 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
             ],
             "256",
         )
+
+    def test_nvml_device_selection_is_typed_and_forwarded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            arguments = required_args(root)
+            memory_path = arguments.index("--memory-path")
+            del arguments[memory_path : memory_path + 2]
+            arguments.extend(("--memory-source", "nvml", "--memory-device-index", "1"))
+            args = campaign.parse_args(arguments)
+            command = campaign.benchmark_command(
+                args, "mixed", root / "mixed.kiln.json"
+            )
+        self.assertEqual(args.memory_source, "nvml")
+        self.assertEqual(command[command.index("--memory-device-index") + 1], "1")
+        self.assertEqual(command[command.index("--memory-path") + 1], "auto")
+
+    def test_nvml_uuid_selection_is_forwarded_without_an_index(self) -> None:
+        uuid = "GPU-01234567-89ab-cdef-0123-456789abcdef"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            arguments = required_args(root)
+            memory_path = arguments.index("--memory-path")
+            del arguments[memory_path : memory_path + 2]
+            arguments.extend(("--memory-device-uuid", uuid))
+            args = campaign.parse_args(arguments)
+            command = campaign.benchmark_command(
+                args, "mixed", root / "mixed.kiln.json"
+            )
+        self.assertEqual(args.memory_source, "nvml")
+        self.assertEqual(command[command.index("--memory-device-uuid") + 1], uuid)
+        self.assertNotIn("--memory-device-index", command)
+
+    def test_campaign_rejects_conflicting_memory_selectors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            arguments = required_args(Path(directory))
+            arguments.extend(("--memory-device-index", "0"))
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                campaign.parse_args(arguments)
 
     def test_command_pairs_graph_campaign_with_same_artifact_eager_receipt(
         self,
@@ -230,6 +272,17 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
             )
             self.assertEqual(summary["server_owner"]["server_pid"], 4321)
             self.assertEqual(summary["output_evidence"], "hashes")
+            self.assertEqual(
+                summary["memory_sampler"],
+                {
+                    "source": "drm",
+                    "path": str((root / "memory").resolve()),
+                    "device_index": None,
+                    "device_uuid": None,
+                    "interval_ms": 50,
+                    "limit_bytes": 4096,
+                },
+            )
             self.assertEqual(
                 summary["server_owner"]["mode"], "attached_process_group"
             )
