@@ -22,6 +22,7 @@ pub mod eval;
 pub mod eval_adapter_cli;
 pub mod eval_history;
 pub mod execution_provenance;
+pub(crate) mod gpu_coordination;
 pub mod hf_train_cli;
 pub mod kv_autoscaler;
 pub mod latency_observability;

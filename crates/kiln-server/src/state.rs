@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, watch};
+use tokio::sync::{Mutex, RwLock, watch};
 
 use kiln_core::block::BlockManager;
 use kiln_core::config::ModelConfig;
@@ -27,6 +27,10 @@ use kiln_train::TrainingState;
 use serde::Serialize;
 
 use crate::decode_stats::DecodeStatsRing;
+pub use crate::gpu_coordination::GpuCoordinationLock;
+#[cfg(any(feature = "cuda", feature = "rocm", feature = "vulkan"))]
+use crate::latency_observability::BlockingBackendPhase;
+use crate::latency_observability::BlockingBackendPhaseTracker;
 use crate::metrics::Metrics;
 use crate::recent_requests::{DEFAULT_CAPACITY as RECENT_REQUESTS_CAPACITY, RecentRequestsRing};
 use crate::training_queue::{SharedTrainingQueue, ShutdownFlag};
@@ -190,67 +194,6 @@ impl GpuMemoryBudget {
             ));
         }
         Ok(())
-    }
-}
-
-/// Coordination lock for GPU memory sharing between inference and training.
-///
-/// Inference acquires a read lock (multiple concurrent inference requests OK).
-/// Training acquires a write lock (blocks inference during gradient computation).
-/// This prevents combined peak VRAM from exceeding GPU capacity.
-///
-/// Training should acquire this per-segment (for gradient-checkpointed training),
-/// not for the entire job, to minimize inference latency impact.
-pub type GpuCoordinationLock = Arc<RwLock<()>>;
-
-pub(crate) fn gpu_coordination_read_guard(
-    gpu_lock: &GpuCoordinationLock,
-) -> OwnedRwLockReadGuard<()> {
-    futures::executor::block_on(gpu_lock.clone().read_owned())
-}
-
-#[cfg(test)]
-pub(crate) fn gpu_coordination_write_guard(
-    gpu_lock: &GpuCoordinationLock,
-) -> OwnedRwLockWriteGuard<()> {
-    futures::executor::block_on(gpu_lock.clone().write_owned())
-}
-
-const GPU_COORDINATION_HEALTH_POLL: std::time::Duration = std::time::Duration::from_millis(5);
-
-/// Wait for exclusive GPU ownership without entering an uninterruptible wait
-/// behind an inference owner whose completion state has been quarantined.
-///
-/// Quarantine deliberately leaks unknown GPU ownership. Polling `try_write`
-/// keeps writers responsive to that process-lifetime latch, and the second
-/// health check closes the acquisition race before the caller can mutate GPU
-/// state.
-pub(crate) fn gpu_coordination_write_guard_while_healthy(
-    gpu_lock: &GpuCoordinationLock,
-    backend_health: &BackendHealthHandle,
-) -> anyhow::Result<OwnedRwLockWriteGuard<()>> {
-    loop {
-        backend_health.ensure_healthy()?;
-        if let Ok(guard) = gpu_lock.clone().try_write_owned() {
-            backend_health.ensure_healthy()?;
-            return Ok(guard);
-        }
-        std::thread::sleep(GPU_COORDINATION_HEALTH_POLL);
-    }
-}
-
-/// Async counterpart of [`gpu_coordination_write_guard_while_healthy`].
-pub(crate) async fn gpu_coordination_write_guard_while_healthy_async(
-    gpu_lock: &GpuCoordinationLock,
-    backend_health: &BackendHealthHandle,
-) -> anyhow::Result<OwnedRwLockWriteGuard<()>> {
-    loop {
-        backend_health.ensure_healthy()?;
-        if let Ok(guard) = gpu_lock.clone().try_write_owned() {
-            backend_health.ensure_healthy()?;
-            return Ok(guard);
-        }
-        tokio::time::sleep(GPU_COORDINATION_HEALTH_POLL).await;
     }
 }
 
@@ -2525,6 +2468,9 @@ pub struct AppState {
     /// Coordination lock: inference takes read lock, training takes write lock.
     /// This prevents simultaneous GPU-heavy operations from OOMing.
     pub gpu_lock: GpuCoordinationLock,
+    /// Exclusive GPU-writer intervals used for causal request latency
+    /// attribution. This is deliberately distinct from actor-barrier phases.
+    pub(crate) gpu_coordination_phases: Arc<BlockingBackendPhaseTracker>,
     /// FIFO training queue — jobs are enqueued here and executed sequentially
     /// by a background worker.
     pub training_queue: SharedTrainingQueue,
@@ -3432,6 +3378,7 @@ impl AppState {
                 "mock_backend",
             ),
             gpu_lock: Arc::new(RwLock::new(())),
+            gpu_coordination_phases: Arc::new(BlockingBackendPhaseTracker::default()),
             training_queue: crate::training_queue::new_shared_queue(),
             training_data_admission_lock: Arc::new(std::sync::Mutex::new(())),
             teacher_registry: Arc::new(crate::api::teachers::TeacherRegistry::new()),
@@ -4219,6 +4166,7 @@ impl AppState {
         let paged_cache = Arc::new(paged_cache);
         let prefix_cache = Arc::new(std::sync::Mutex::new(prefix_cache));
         let gpu_lock = Arc::new(RwLock::new(()));
+        let gpu_coordination_phases = Arc::new(BlockingBackendPhaseTracker::default());
         let loaded_adapter = Arc::new(std::sync::RwLock::new(None));
         let decode_execution_policy = backend_capabilities.decode_execution;
         debug_assert_eq!(
@@ -4327,6 +4275,7 @@ impl AppState {
                 loaded_adapter.clone(),
                 serving_policy.dynamic_kv_resize,
             )
+            .with_gpu_coordination_phase_tracker(gpu_coordination_phases.clone())
             .with_resident_prefill_enabled(
                 backend_name == "vulkan" && serving_policy.vulkan_resident_prefill,
             )
@@ -4360,6 +4309,7 @@ impl AppState {
                     gpu_memory_reclaim_policy,
                     device_kt,
                     gpu_lock.clone(),
+                    gpu_coordination_phases.clone(),
                     backend_health.clone(),
                     batching_engine.clone(),
                 );
@@ -4458,6 +4408,7 @@ impl AppState {
             memory_budget: Arc::new(memory_budget),
             kv_autoscaler,
             gpu_lock,
+            gpu_coordination_phases,
             training_queue: crate::training_queue::new_shared_queue(),
             training_data_admission_lock: Arc::new(std::sync::Mutex::new(())),
             teacher_registry: teacher_registry_for_real.clone(),
@@ -4945,10 +4896,17 @@ fn register_backend_memory_reclaimer(
     policy: GpuMemoryReclaimPolicy,
     device: kiln_tensor::Device,
     gpu_lock: GpuCoordinationLock,
+    gpu_coordination_phases: Arc<BlockingBackendPhaseTracker>,
     backend_health: BackendHealthHandle,
     batching_engine: crate::batching_engine::BatchingEngineHandle,
 ) {
-    let _ = (&device, &gpu_lock, &backend_health, &batching_engine);
+    let _ = (
+        &device,
+        &gpu_lock,
+        &gpu_coordination_phases,
+        &backend_health,
+        &batching_engine,
+    );
     match policy.reclaimer {
         GpuMemoryReclaimer::None => {}
         GpuMemoryReclaimer::RocmTrimPool => {
@@ -5026,6 +4984,7 @@ fn register_backend_memory_reclaimer(
                             );
                             return 0;
                         };
+                        let _trim_phase = gpu_coordination_phases.begin(BlockingBackendPhase::Trim);
                         if let Err(error) = backend_health.ensure_healthy() {
                             tracing::warn!(
                                 %error,
@@ -5184,6 +5143,7 @@ fn register_backend_memory_reclaimer(
                         );
                         return 0;
                     };
+                    let _trim_phase = gpu_coordination_phases.begin(BlockingBackendPhase::Trim);
                     if let Err(error) = backend_health.ensure_healthy() {
                         tracing::warn!(
                             %error,
@@ -5239,17 +5199,98 @@ fn register_backend_memory_reclaimer(
                 // Raise the threshold so the pool hoards freed pages for fast
                 // reuse, turning this reclaimer into the pressure release valve.
                 let _ = kiln_tensor::cuda_set_pool_release_threshold(idx, u64::MAX);
-                kiln_memory::MemoryGovernor::global().register_reclaimer(move |_target| {
+                kiln_memory::MemoryGovernor::global().register_reclaimer(move |target| {
+                    let snapshot = batching_engine.cached_snapshot();
+                    if snapshot.active_decode > 0 || snapshot.active_prefill > 0 {
+                        tracing::debug!(
+                            reason = "active_requests",
+                            target,
+                            active_decode = snapshot.active_decode,
+                            active_prefill = snapshot.active_prefill,
+                            "CUDA pool reclaim deferred"
+                        );
+                        return 0;
+                    }
+                    if let Err(error) = backend_health.ensure_healthy() {
+                        tracing::warn!(
+                            %error,
+                            reason = "backend_unhealthy",
+                            target,
+                            "CUDA pool reclaim skipped"
+                        );
+                        return 0;
+                    }
+                    let Ok(_gpu_guard) = gpu_lock.clone().try_write_owned() else {
+                        tracing::debug!(
+                            reason = "gpu_coordination_busy",
+                            target,
+                            "CUDA pool reclaim deferred"
+                        );
+                        return 0;
+                    };
+                    let _trim_phase = gpu_coordination_phases.begin(BlockingBackendPhase::Trim);
+                    if let Err(error) = backend_health.ensure_healthy() {
+                        tracing::warn!(
+                            %error,
+                            reason = "backend_became_unhealthy",
+                            target,
+                            "CUDA pool reclaim skipped after coordination"
+                        );
+                        return 0;
+                    }
+                    let snapshot = batching_engine.cached_snapshot();
+                    if snapshot.active_decode > 0 || snapshot.active_prefill > 0 {
+                        tracing::debug!(
+                            reason = "active_requests_after_coordination",
+                            target,
+                            active_decode = snapshot.active_decode,
+                            active_prefill = snapshot.active_prefill,
+                            "CUDA pool reclaim deferred"
+                        );
+                        return 0;
+                    }
                     // Measure bytes actually returned to the OS via the live
                     // free-VRAM delta (the driver doesn't report trim yield).
                     let before = kiln_tensor::cuda_mem_get_info(idx)
                         .map(|(f, _)| f)
                         .unwrap_or(0);
-                    let _ = kiln_tensor::cuda_trim_pool(idx, 0);
+                    let started = std::time::Instant::now();
+                    let trim_result = kiln_tensor::cuda_trim_pool(idx, 0);
                     let after = kiln_tensor::cuda_mem_get_info(idx)
                         .map(|(f, _)| f)
                         .unwrap_or(0);
-                    after.saturating_sub(before) as u64
+                    let reclaimed = after.saturating_sub(before) as u64;
+                    match trim_result {
+                        Ok(()) => tracing::info!(
+                            event = "gpu_memory_operation",
+                            operation = "trim",
+                            reason = "memory_governor",
+                            outcome = if reclaimed > 0 {
+                                "reclaimed"
+                            } else {
+                                "zero_yield"
+                            },
+                            target,
+                            actual_bytes = reclaimed,
+                            duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+                            "CUDA pool reclaim completed"
+                        ),
+                        Err(error) => {
+                            tracing::warn!(
+                                event = "gpu_memory_operation",
+                                operation = "trim",
+                                reason = "memory_governor",
+                                outcome = "failed",
+                                %error,
+                                target,
+                                actual_bytes = reclaimed,
+                                duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+                                "CUDA pool reclaim failed"
+                            );
+                            return 0;
+                        }
+                    }
+                    reclaimed
                 });
             }
         }
@@ -5705,90 +5746,6 @@ mod tests {
         () => {
             ::kiln_tensor::Device::Cpu
         };
-    }
-
-    #[test]
-    fn gpu_coordination_read_owner_moves_and_excludes_writer_until_drop() {
-        let gpu_lock: GpuCoordinationLock = std::sync::Arc::new(RwLock::new(()));
-        let read_owner = gpu_coordination_read_guard(&gpu_lock);
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let reader = std::thread::spawn(move || {
-            ready_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
-            drop(read_owner);
-        });
-        ready_rx.recv().unwrap();
-        assert!(
-            gpu_lock.try_write().is_err(),
-            "training writer acquired while moved inference owner was live"
-        );
-        release_tx.send(()).unwrap();
-        reader.join().unwrap();
-        assert!(
-            gpu_lock.try_write().is_ok(),
-            "training writer must acquire after the moved read owner drops"
-        );
-    }
-
-    #[test]
-    fn health_checked_gpu_writer_rejects_without_waiting_for_retained_reader() {
-        let gpu_lock: GpuCoordinationLock = std::sync::Arc::new(RwLock::new(()));
-        let retained_reader = gpu_coordination_read_guard(&gpu_lock);
-        let backend_health = BackendHealthHandle::default();
-        let worker_lock = gpu_lock.clone();
-        let worker_health = backend_health.clone();
-        let (result_tx, result_rx) = std::sync::mpsc::channel();
-
-        std::thread::spawn(move || {
-            let result =
-                gpu_coordination_write_guard_while_healthy(&worker_lock, &worker_health).map(drop);
-            result_tx.send(result).unwrap();
-        });
-
-        assert!(
-            result_rx
-                .recv_timeout(std::time::Duration::from_millis(25))
-                .is_err(),
-            "healthy writer should still be waiting behind inference"
-        );
-        backend_health.quarantine("injected unknown inference completion");
-        let error = result_rx
-            .recv_timeout(std::time::Duration::from_millis(250))
-            .expect("quarantine must interrupt the writer wait")
-            .expect_err("quarantined writer must reject");
-        assert!(error.to_string().contains("requires restart"));
-        assert!(
-            gpu_lock.try_write().is_err(),
-            "the test must retain the unknown inference owner"
-        );
-        std::mem::forget(retained_reader);
-    }
-
-    #[tokio::test]
-    async fn async_health_checked_gpu_writer_rejects_retained_reader() {
-        let gpu_lock: GpuCoordinationLock = std::sync::Arc::new(RwLock::new(()));
-        let retained_reader = gpu_lock.clone().read_owned().await;
-        let backend_health = BackendHealthHandle::default();
-        let worker_lock = gpu_lock.clone();
-        let worker_health = backend_health.clone();
-        let writer = tokio::spawn(async move {
-            gpu_coordination_write_guard_while_healthy_async(&worker_lock, &worker_health)
-                .await
-                .map(drop)
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        assert!(!writer.is_finished());
-        backend_health.quarantine("injected async unknown inference completion");
-        let error = tokio::time::timeout(std::time::Duration::from_millis(250), writer)
-            .await
-            .expect("quarantine must interrupt the async writer wait")
-            .unwrap()
-            .expect_err("quarantined async writer must reject");
-        assert!(error.to_string().contains("requires restart"));
-        assert!(gpu_lock.try_write().is_err());
-        std::mem::forget(retained_reader);
     }
 
     fn tiny_linear_config() -> ModelConfig {

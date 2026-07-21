@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 
 use crate::batching_engine::{EngineActionTokenSource, EngineEvent, EngineRequest};
 use crate::error::ApiError;
+use crate::gpu_coordination::write_guard_while_healthy_async;
 use crate::latency_observability::{
     EngineTokenTiming, RequestLatencyDiagnostics, RequestLatencyTracker, TokenPhaseDurations,
 };
@@ -50,7 +51,7 @@ use crate::state::{
     DeterministicChatRequestInFlightState, DeterministicCompletionCacheClaim,
     DeterministicCompletionCacheKey, DeterministicCompletionCacheProbe,
     DeterministicCompletionCacheValue, DeterministicCompletionInFlightState, LoadedAdapterIdentity,
-    ModelBackend, gpu_coordination_write_guard_while_healthy_async,
+    ModelBackend,
 };
 use crate::teacher_identity::{
     MAX_COMPLETION_PROMPT_LOGPROB_CANDIDATES, MAX_COMPLETION_PROMPT_LOGPROBS,

@@ -22,6 +22,14 @@ use crate::recent_requests::now_unix_ms;
 use crate::state::{AppState, ModelBackend, TrainingJobType};
 use crate::training_history;
 
+fn server_gpu_step_coordination(
+    state: &AppState,
+    backend_health: &kiln_model::BackendHealthHandle,
+) -> trainer::GpuStepCoordination {
+    trainer::GpuStepCoordination::new(state.gpu_lock.clone(), backend_health.clone())
+        .with_writer_observer(state.gpu_coordination_phases.clone())
+}
+
 /// Mark the tracked job terminal (Completed / Failed), stamp `finished_at`
 /// + `finished_unix_ms` + the failure detail, and persist a clone to the
 /// on-disk archive. Archive write failures are logged, never propagated —
@@ -4660,10 +4668,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     progress_cb,
                     replay_ctx,
                     &job_id,
-                    Some(trainer::GpuStepCoordination::new(
-                        state.gpu_lock.clone(),
-                        backend_health.clone(),
-                    )),
+                    Some(server_gpu_step_coordination(&state, &backend_health)),
                     &training_runtime,
                 )
             }
@@ -4700,10 +4705,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     progress_cb,
                     replay_ctx,
                     &job_id,
-                    Some(trainer::GpuStepCoordination::new(
-                        state.gpu_lock.clone(),
-                        backend_health.clone(),
-                    )),
+                    Some(server_gpu_step_coordination(&state, &backend_health)),
                     &training_runtime,
                 )
             }
@@ -4728,10 +4730,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     teacher_spec,
                     prepared_remote_teacher.clone(),
                     &job_id,
-                    trainer::GpuStepCoordination::new(
-                        state.gpu_lock.clone(),
-                        backend_health.clone(),
-                    ),
+                    server_gpu_step_coordination(&state, &backend_health),
                     &training_runtime,
                 )
             }
@@ -4756,10 +4755,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     teacher_spec,
                     prepared_remote_teacher.clone(),
                     &job_id,
-                    trainer::GpuStepCoordination::new(
-                        state.gpu_lock.clone(),
-                        backend_health.clone(),
-                    ),
+                    server_gpu_step_coordination(&state, &backend_health),
                     &training_runtime,
                 )
             }
@@ -4779,10 +4775,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     &adapter_name,
                     progress_cb,
                     &job_id,
-                    trainer::GpuStepCoordination::new(
-                        state.gpu_lock.clone(),
-                        backend_health.clone(),
-                    ),
+                    server_gpu_step_coordination(&state, &backend_health),
                     &training_runtime,
                 )
             }
@@ -4807,10 +4800,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     teacher_spec,
                     prepared_remote_teacher.clone(),
                     &job_id,
-                    trainer::GpuStepCoordination::new(
-                        state.gpu_lock.clone(),
-                        backend_health.clone(),
-                    ),
+                    server_gpu_step_coordination(&state, &backend_health),
                     &training_runtime,
                 )
             }
@@ -4826,10 +4816,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     &adapter_name,
                     progress_cb,
                     &job_id,
-                    trainer::GpuStepCoordination::new(
-                        state.gpu_lock.clone(),
-                        backend_health.clone(),
-                    ),
+                    server_gpu_step_coordination(&state, &backend_health),
                     &training_runtime,
                 )
             }
@@ -6248,7 +6235,7 @@ mod tests {
                 Some(source),
             )
             .unwrap();
-            let _gpu_guard = crate::state::gpu_coordination_write_guard(&worker_gpu_lock);
+            let _gpu_guard = crate::gpu_coordination::write_guard(&worker_gpu_lock);
             write_acquired_tx.send(()).unwrap();
             fixture
         });
@@ -6256,7 +6243,7 @@ mod tests {
         entered_rx
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("slow teacher reached its blocking fetch");
-        let inference_guard = crate::state::gpu_coordination_read_guard(&gpu_lock);
+        let inference_guard = crate::gpu_coordination::read_guard(&gpu_lock);
         release_tx.send(()).unwrap();
         assert!(
             write_acquired_rx

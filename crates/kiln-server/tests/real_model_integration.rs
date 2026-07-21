@@ -5529,6 +5529,7 @@ fn assert_real_resumable_prefill_cancel_and_discard_release_ownership(
         tokens_scheduled,
         tokens_processed,
         layers_processed,
+        ..
     } = forward
         .advance_prefill(slot, 17, 1, &sampling, &request.cancel)
         .expect("advance one retained actor-owned prefill layer")

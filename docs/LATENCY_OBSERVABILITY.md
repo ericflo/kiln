@@ -150,8 +150,14 @@ The currently measured batching path exposes:
 | `actor_cycle_idle_ms` | Configured cooperative post-work idle elapsed while the request remained active |
 | `sampling_ms` | Post-transformer final norm, LM head, penalties/filters, and selection when that tail has a distinct boundary; excludes separately measured readback |
 | `readback_ms` | Existing device-to-host token transfer when the backend exposes that exact boundary without another synchronization |
-| `gpu_lock_wait_ms` | Time waiting to acquire the shared inference GPU-coordination guard for an actor-owned model invocation |
-| `synchronization_ms` | Time spent settling the decode step at the backend's external-yield boundary |
+| `gpu_lock_wait_ms` | Time waiting to acquire the shared inference GPU-coordination guard for actor-owned admission, prefill, or decode work |
+| `graph_capture_ms` | Request-owned graph capture attempt work exposed by the selected backend |
+| `graph_replay_ms` | Request-owned graph replay submission work exposed by the selected backend |
+| `synchronization_ms` | Time spent settling actor-owned admission, prefill, resident-prefill, or decode work at the backend's external-yield boundary |
+| `resize_ms` | Ordered KV-resize barrier time that delayed this queued request, or an overlapping GPU-writer resize interval |
+| `trim_ms` | Exclusive allocator-pool trim time that overlapped this request's inference-lock wait |
+| `adapter_ms` | Ordered adapter mutation barrier time that delayed this queued request |
+| `training_ms` | Exclusive server-training GPU ownership that overlapped this request's inference-lock wait |
 | `response_delivery_ms` | Producer-ready to bounded-channel enqueue or bridge receipt |
 | `handler_queue_ms` | Producer delivery to handler receipt |
 | `client_delivery_ms` | Handler receipt to response-body enqueue for streams |
@@ -179,9 +185,12 @@ remain zero. Exact repeats therefore pay fresh generic-prefill latency. This is
 an intentional correctness cost and must not be diagnosed as an undersized
 cache from the absence of hits.
 
-The batching engine measures `gpu_lock_wait_ms` and `synchronization_ms` on the
-owned decode invocation and propagates those observations only to requests
-active for that step. It likewise adds the actual elapsed cooperative
+The batching engine measures `gpu_lock_wait_ms` and `synchronization_ms` on
+owned admission, ordinary or resident prefill, and decode invocations. An
+admission or prefill invocation blocks the single actor, so its backend
+envelope is retained by the selected request and the already-active requests
+whose next progress it delayed. A decode envelope remains attached only to the
+ready requests that supplied rows to that step. The actor likewise adds the actual elapsed cooperative
 `batching.actor_cycle_idle_ms` wait only to rows that remain active when the
 wait completes. The phase is measured as zero when that policy is disabled,
 and can become the dominant `actor_cycle_idle` stall reason; it is not folded
@@ -241,13 +250,39 @@ exceed their matching lifetime phase totals multiplied by maximum observed
 decode width. Use lifetime graph telemetry for device-work totals and request
 phases for causal overlap.
 
-Other-backend graph work, non-W8 device readback, resize, trim, adapter, and
-training remain explicit nullable fields. Their aggregate subsystems have
-separate operational telemetry, but they are not yet joined to each
-request-token timeline. Kiln never infers a request's graph time from unlocked
-process-global counters. A diagnostic consumer must preserve the difference
-between `null` (not measured on this path) and `0` (measured below the
-microsecond telemetry resolution).
+Resize and adapter attribution use an actor-barrier timeline that is separate
+from GPU-lock ownership. The first queued exclusive mutation starts its typed
+interval as soon as the actor accepts the command, including any time spent
+draining the active batch; ordered mutations switch to the next typed interval
+only after the prior mutation returns. A request snapshots that timeline before
+enqueue and receives only intervals that overlap its queue-to-admission
+boundary. Requests already active when a mutation is requested continue to
+completion and are not charged for the later barrier. This makes a non-null
+`resize_ms` or `adapter_ms` a causal explanation for queued request latency,
+not a process-global event correlation.
+
+Resize, trim, and server-training writers also use a distinct GPU-ownership
+timeline. An inference acquisition first tries the shared lock without
+touching telemetry. Only after contention does it snapshot the writer timeline,
+wait for its read guard, and retain the exact typed intervals that overlapped
+that wait. `gpu_lock_wait_ms` covers the complete acquisition wait while
+`resize_ms`, `trim_ms`, and `training_ms` are narrower causal candidates inside
+it; they must not be added together. Training observation starts only after a
+step, checkpoint, or other coordinated training phase owns the write guard and
+ends before that guard is released. Allocator trim observation follows the
+same ordering. CUDA, ROCm, and Vulkan reclaimers all require an idle actor, a
+healthy backend, and a nonblocking exclusive acquisition before trimming; a
+racing request waits safely and receives the trim overlap instead of allowing a
+pool mutation underneath live inference.
+
+Stable serving disables resize, trim, adapter mutation, and server training,
+so those fields normally remain `null` there. They are also `null` when a
+permitted operation did not overlap the request's relevant ownership boundary.
+Other-backend graph work and device routes without an independently owned
+readback boundary remain explicit nullable fields. Kiln never infers request
+time from unlocked process-global counters. A diagnostic consumer must preserve
+the difference between `null` (not observed or not measurable on this path) and
+`0` (measured below the reporting resolution).
 
 The mixed-load, development-soak, and endurance qualification clients preserve
 that distinction in compact receipts. For each fixed phase `P`, they emit

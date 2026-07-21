@@ -964,7 +964,7 @@ pub(super) async fn real_prompt_logprobs(
     // mid-inference allocator stall.
     let gpu_guard = match tokio::time::timeout_at(
         deadline,
-        gpu_coordination_write_guard_while_healthy_async(&state.gpu_lock, &backend_health),
+        write_guard_while_healthy_async(&state.gpu_lock, &backend_health),
     )
     .await
     {

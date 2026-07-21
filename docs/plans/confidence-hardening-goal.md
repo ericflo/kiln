@@ -297,6 +297,16 @@ the cache usable; ROCm runtime tests exercise the real device and pass.
     toolkit-free `CUDARC_CUDA_VERSION=12080` server feature build pass on Strix
     Halo. The item remains open until both 4090 campaigns reconcile live
     counters and exercise graph, resize, reclaim, serving, and training routes.
+  - Progress: allocator trim is now coordinated consistently across CUDA, ROCm,
+    and Vulkan. Each reclaimer requires an idle batching actor, a healthy
+    backend, and a nonblocking exclusive GPU guard before entering its typed
+    trim interval; CUDA no longer calls its synchronizing pool trim beneath
+    possible live inference. Request diagnostics retain only the typed writer
+    interval that overlaps an actual inference-lock wait, while the existing
+    structured memory-operation event remains authoritative for reason, target,
+    actual reclaimed bytes, coordination wait, duration, and outcome. Portable
+    overlap tests and all-target CUDA/ROCm/Vulkan builds pass; live trim-yield
+    and counter reconciliation remain part of the hardware campaigns above.
 - [x] Attribute backend external-yield synchronization with a bounded boundary
   label, call/failure/slow counts, and total/max duration in health, debug
   state, Prometheus, and the 100 ms slow-sync log.
@@ -439,8 +449,21 @@ the cache usable; ROCm runtime tests exercise the real device and pass.
     overlap aggregate by matching measured-window lifetime phase time times
     maximum decode width, so cohort leakage fails before the receipt can be
     accepted.
-    This gate stays open for readback on other routes, other-backend graph
-    attribution, resize, trim, adapter, and training correlation. Direct
+    Request-safe blocker correlation now covers the four previously decorative
+    mutation fields. Enqueue-time actor snapshots attribute ordered resize and
+    adapter barriers only to requests whose admission they delayed, including
+    the active-batch drain, while active requests remain uncharged. A separate
+    GPU-writer timeline attributes exact resize, allocator-trim, and coordinated
+    server-training overlap only after an inference read acquisition actually
+    contends. Admission, ordinary/resident prefill, and decode now all carry the
+    resulting GPU-lock, blocker, and external-yield synchronization envelope to
+    request timing. CUDA reclaim now follows the same idle-actor, healthy-backend,
+    nonblocking-exclusive contract as ROCm and Vulkan instead of trimming an
+    uncoordinated pool beneath possible inference. Unit tests cover interval
+    boundaries, nested union accounting, writer-guard lifetime, queue-only
+    barrier ownership, and admission/prefill/decode propagation.
+    This gate stays open only for readback on other routes and other-backend
+    graph attribution. Direct
     streaming now carries its
     invocation-owned sampler and external-yield synchronization wall times on
     token events, preserves a terminal tail when EOS produces no next token,
@@ -3649,6 +3672,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-21 | Typed CUDA host-wait attribution | this source | this portable CUDA-observability checkpoint | all production CUDA context/default-stream/capture-stream host waits, health, trusted debug, Prometheus, closed schema, qualification policy, and permanent website source; no CUDA driver link, model load, accelerator execution, throughput, latency, correctness, graph parity, or promotion claim | pure fixed-reason accounting tests; focused server endpoint and Prometheus tests; default server build; full toolkit-free `CUDARC_CUDA_VERSION=12080` CUDA server feature build; raw-wait source inventory; generated observability/API/docs contracts; formatting and diff hygiene | portable source and contract checkpoint passed; live laptop and desktop 4090 reconciliation remains required | CUDA now has one fixed 12-reason synchronization vocabulary with per-device atomics for device/stream attempts, failures, and host wait duration. Every production raw wait is migrated behind a reasoned wrapper, including external yield, graph capture/launch/replay, model and tensor handoffs, in-place writes, allocation lifetime, KV resize, pool trim, and profiling. Health and trusted debug expose internally reconcilable totals; Prometheus exposes fixed reason/scope series without device, request, model, or error labels. Non-CUDA backends return an explicit inactive empty object without driver access. The public docs distinguish these process counters from request-owned external-yield latency and define exact 4090 route/delta/failure gates. Hardware validation is deliberately not claimed on this ROCm/Vulkan host. |
 
 | 2026-07-21 | Source-bound final ROCm endurance contract | this source | this qualification-contract checkpoint | final 24-hour Strix Halo ROCm workload identity, generic soak runtime, independent phase deadlines, exact driver-manifest equality, operator guide, and permanent website source; no release-candidate freeze, model load, GPU execution, duration, correctness, latency, throughput, or endurance claim | focused generic-soak tests; complete qualification-tooling tests; strict workload validation; documentation builder/static smoke; repository and formatting gates | source contract passed; exact clean pushed-source 24-hour run remains required | The missing `serving-rocm-endurance-v1` manifest now selects a distinct `rocm-endurance` runtime while reusing the accepted graph-on/fixed-KV/allocator-reclaim-off ROCm behavior and complete 160-metric gate. Its 86,400-second measurement, 120-second last-wave settlement, 900-second build, 1,200-second setup, and 180-second teardown derive an exact 88,800-second case bound. A permanent equality test rejects any drift from the driver-owned effective configuration, metric vocabulary, command, or timeout. The operator guide makes failure/interruption restart the whole 24-hour clock and forbids ad hoc duration overrides or promotion of a development receipt. |
+
+| 2026-07-21 | Request-safe blocking backend phase attribution | this source | this portable attribution checkpoint | batching actor admission/prefill/decode ownership, ordered resize/adapter barriers, coordinated resize/trim/training GPU writers, guarded CUDA/ROCm/Vulkan reclaimers, recent-request phase transport, permanent latency reference, and production-file budget; no accelerator workload, pause diagnosis, throughput, endurance, or promotion claim | 1,101/1,101 server and 519/519 executed training library tests with one documented training ignore; 670/670 qualification-tooling tests; default, toolkit-free CUDA, ROCm `gfx1151`, and Vulkan server all-target checks; 10/10 docs-builder tests; 55-document/5-asset assembled static site; exact production ceilings tightened for batching/state/training queue; formatting and diff hygiene | portable ownership, structure, and backend compile gates passed; broad Phase 1.6 remains open for other readback routes and non-ROCm graph attribution | Resize and adapter use an enqueue-to-admission actor-barrier timeline, so only queued requests delayed by the ordered mutation receive those phases; requests already active for the drain remain uncharged. Resize, allocator trim, and server training use a separate exclusive-writer timeline sampled only after an inference read-lock miss, preserving the full lock wait plus its narrower causal overlap without process-global counter correlation. Admission, ordinary/resident prefill, and decode carry their existing synchronization and new blocker envelopes through the next owned token. CUDA pool trim now requires the same idle actor, healthy backend, and nonblocking exclusive guard as ROCm/Vulkan instead of synchronizing an allocator pool beneath possible inference. A failed production-budget gate forced the new lock authority and 326 lines of phase/delivery tests into focused modules; reviewed ceilings decrease from 8,882/8,361/7,826 to 8,862/8,318/7,813 lines rather than expanding exceptions. |
 
 ## Known Starting Defects
 

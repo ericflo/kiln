@@ -480,6 +480,49 @@ fn gpu_step_coordination_rejects_when_quarantine_latches_during_wait() {
     drop(retained_inference);
 }
 
+struct TestGpuWriterObserver {
+    active: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct TestGpuWriterObservation {
+    active: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Drop for TestGpuWriterObservation {
+    fn drop(&mut self) {
+        self.active
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl GpuStepWriterObserver for TestGpuWriterObserver {
+    fn writer_acquired(self: std::sync::Arc<Self>) -> Box<dyn Send> {
+        self.active
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::new(TestGpuWriterObservation {
+            active: self.active.clone(),
+        })
+    }
+}
+
+#[test]
+fn gpu_step_writer_observation_matches_exclusive_lock_lifetime() {
+    let lock = std::sync::Arc::new(tokio::sync::RwLock::new(()));
+    let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let coordination =
+        GpuStepCoordination::new(lock.clone(), kiln_model::BackendHealthHandle::default())
+            .with_writer_observer(std::sync::Arc::new(TestGpuWriterObserver {
+                active: active.clone(),
+            }));
+
+    let guard = coordination.blocking_write().unwrap();
+    assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(lock.clone().try_read_owned().is_err());
+    drop(guard);
+    assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(lock.try_read().is_ok());
+}
+
 #[test]
 fn coordinated_grpo_phases_release_writer_between_groups_and_record_timing() {
     let lock = std::sync::Arc::new(tokio::sync::RwLock::new(()));

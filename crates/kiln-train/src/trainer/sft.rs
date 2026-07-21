@@ -1,5 +1,25 @@
 use super::*;
 
+/// Server-owned telemetry hook for the interval during which a training step
+/// has exclusive GPU ownership. The returned observation is dropped before
+/// the write guard, so readers can never acquire between the reported phase
+/// ending and the writer actually releasing ownership.
+pub trait GpuStepWriterObserver: Send + Sync {
+    fn writer_acquired(self: std::sync::Arc<Self>) -> Box<dyn Send>;
+}
+
+pub(super) struct CoordinatedGpuWriteGuard {
+    observation: Option<Box<dyn Send>>,
+    guard: Option<tokio::sync::OwnedRwLockWriteGuard<()>>,
+}
+
+impl Drop for CoordinatedGpuWriteGuard {
+    fn drop(&mut self) {
+        drop(self.observation.take());
+        drop(self.guard.take());
+    }
+}
+
 /// Per-step GPU coordination that remains interruptible by the serving
 /// backend's process-lifetime quarantine latch.
 ///
@@ -11,6 +31,7 @@ use super::*;
 pub struct GpuStepCoordination {
     pub(super) lock: std::sync::Arc<tokio::sync::RwLock<()>>,
     pub(super) backend_health: kiln_model::BackendHealthHandle,
+    writer_observer: Option<std::sync::Arc<dyn GpuStepWriterObserver>>,
 }
 
 impl GpuStepCoordination {
@@ -21,15 +42,31 @@ impl GpuStepCoordination {
         Self {
             lock,
             backend_health,
+            writer_observer: None,
         }
     }
 
-    pub(super) fn blocking_write(&self) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>> {
+    pub fn with_writer_observer(
+        mut self,
+        observer: std::sync::Arc<dyn GpuStepWriterObserver>,
+    ) -> Self {
+        self.writer_observer = Some(observer);
+        self
+    }
+
+    pub(super) fn blocking_write(&self) -> Result<CoordinatedGpuWriteGuard> {
         loop {
             self.backend_health.ensure_healthy()?;
             if let Ok(guard) = self.lock.clone().try_write_owned() {
                 self.backend_health.ensure_healthy()?;
-                return Ok(guard);
+                let observation = self
+                    .writer_observer
+                    .as_ref()
+                    .map(|observer| observer.clone().writer_acquired());
+                return Ok(CoordinatedGpuWriteGuard {
+                    observation,
+                    guard: Some(guard),
+                });
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }

@@ -7,6 +7,7 @@
 //! presented as an additive wall-clock decomposition.
 
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -74,7 +75,7 @@ impl BackendPhaseDurations {
         Self::add_observation(&mut self.training, duration);
     }
 
-    fn add_to(self, totals: &mut Self) {
+    pub(crate) fn add_to(self, totals: &mut Self) {
         for (total, observation) in [
             (&mut totals.sampling, self.sampling),
             (&mut totals.readback, self.readback),
@@ -118,6 +119,175 @@ impl BackendPhaseDurations {
         // the detailed phases may overlap, so summing them would manufacture
         // coverage and could erase genuine actor-side decode work.
         actor_decode.saturating_sub(self.max_covered_duration())
+    }
+}
+
+/// Exclusive work that can causally block an inference request.
+///
+/// Actor-barrier and GPU-writer ownership use separate trackers so a request
+/// is never charged for process work that did not exclude its execution path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlockingBackendPhase {
+    Resize,
+    Trim,
+    Adapter,
+    Training,
+}
+
+impl BlockingBackendPhase {
+    const COUNT: usize = 4;
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Resize => 0,
+            Self::Trim => 1,
+            Self::Adapter => 2,
+            Self::Training => 3,
+        }
+    }
+
+    fn observe(self, phases: &mut BackendPhaseDurations, duration: Duration) {
+        match self {
+            Self::Resize => phases.observe_resize(duration),
+            Self::Trim => phases.observe_trim(duration),
+            Self::Adapter => phases.observe_adapter(duration),
+            Self::Training => phases.observe_training(duration),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BlockingBackendPhaseSnapshot {
+    taken_at: Instant,
+    completed: [Duration; BlockingBackendPhase::COUNT],
+    active_started_at: [Option<Instant>; BlockingBackendPhase::COUNT],
+}
+
+#[derive(Debug)]
+struct BlockingBackendPhaseState {
+    completed: [Duration; BlockingBackendPhase::COUNT],
+    active_started_at: [Option<Instant>; BlockingBackendPhase::COUNT],
+    active_count: [u64; BlockingBackendPhase::COUNT],
+}
+
+impl Default for BlockingBackendPhaseState {
+    fn default() -> Self {
+        Self {
+            completed: [Duration::ZERO; BlockingBackendPhase::COUNT],
+            active_started_at: [None; BlockingBackendPhase::COUNT],
+            active_count: [0; BlockingBackendPhase::COUNT],
+        }
+    }
+}
+
+/// Records fixed-cardinality exclusive intervals and computes their exact
+/// overlap with a later request boundary.
+///
+/// The mutex is never held for the operation itself. Uncontended inference
+/// does not sample this tracker; callers snapshot it only after a lock miss or
+/// once per request enqueue, keeping decode-path overhead bounded.
+#[derive(Debug, Default)]
+pub(crate) struct BlockingBackendPhaseTracker {
+    state: Mutex<BlockingBackendPhaseState>,
+}
+
+impl BlockingBackendPhaseTracker {
+    pub(crate) fn begin(
+        self: &Arc<Self>,
+        phase: BlockingBackendPhase,
+    ) -> BlockingBackendPhaseGuard {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let index = phase.index();
+        if state.active_count[index] == 0 {
+            state.active_started_at[index] = Some(Instant::now());
+        }
+        state.active_count[index] = state.active_count[index].saturating_add(1);
+        drop(state);
+        BlockingBackendPhaseGuard {
+            tracker: Arc::clone(self),
+            phase,
+            active: true,
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> BlockingBackendPhaseSnapshot {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let taken_at = Instant::now();
+        BlockingBackendPhaseSnapshot {
+            taken_at,
+            completed: state.completed,
+            active_started_at: state.active_started_at,
+        }
+    }
+
+    pub(crate) fn observed_since(
+        &self,
+        before: BlockingBackendPhaseSnapshot,
+    ) -> BackendPhaseDurations {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let observed_at = Instant::now();
+        let mut phases = BackendPhaseDurations::default();
+        for phase in [
+            BlockingBackendPhase::Resize,
+            BlockingBackendPhase::Trim,
+            BlockingBackendPhase::Adapter,
+            BlockingBackendPhase::Training,
+        ] {
+            let index = phase.index();
+            let mut duration = state.completed[index].saturating_sub(before.completed[index]);
+
+            // A phase already active at the snapshot contributes only the
+            // interval after the request boundary, not its earlier lifetime.
+            if let Some(started_at) = before.active_started_at[index]
+                && state.active_started_at[index] != Some(started_at)
+            {
+                duration =
+                    duration.saturating_sub(before.taken_at.saturating_duration_since(started_at));
+            }
+
+            // The current active interval is not yet part of `completed`.
+            if let Some(started_at) = state.active_started_at[index] {
+                duration = duration.saturating_add(
+                    observed_at.saturating_duration_since(started_at.max(before.taken_at)),
+                );
+            }
+            if !duration.is_zero() {
+                phase.observe(&mut phases, duration);
+            }
+        }
+        phases
+    }
+
+    fn end(&self, phase: BlockingBackendPhase) {
+        let ended_at = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let index = phase.index();
+        debug_assert!(state.active_count[index] > 0);
+        if state.active_count[index] == 0 {
+            return;
+        }
+        state.active_count[index] -= 1;
+        if state.active_count[index] == 0
+            && let Some(started_at) = state.active_started_at[index].take()
+        {
+            state.completed[index] = state.completed[index]
+                .saturating_add(ended_at.saturating_duration_since(started_at));
+        }
+    }
+}
+
+pub(crate) struct BlockingBackendPhaseGuard {
+    tracker: Arc<BlockingBackendPhaseTracker>,
+    phase: BlockingBackendPhase,
+    active: bool,
+}
+
+impl Drop for BlockingBackendPhaseGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.tracker.end(self.phase);
+            self.active = false;
+        }
     }
 }
 
@@ -704,6 +874,63 @@ pub fn percentile(sorted: &[f64], p: f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blocking_phase_tracker_counts_only_post_snapshot_overlap() {
+        let tracker = Arc::new(BlockingBackendPhaseTracker::default());
+        let resize = tracker.begin(BlockingBackendPhase::Resize);
+        std::thread::sleep(Duration::from_millis(5));
+        let request_boundary = tracker.snapshot();
+        std::thread::sleep(Duration::from_millis(10));
+        drop(resize);
+
+        let observed = tracker.observed_since(request_boundary);
+        let resize = observed.resize.expect("resize overlap is observed");
+        assert!(resize >= Duration::from_millis(5), "observed {resize:?}");
+        assert!(resize < Duration::from_millis(100), "observed {resize:?}");
+        assert_eq!(observed.trim, None);
+        assert_eq!(observed.adapter, None);
+        assert_eq!(observed.training, None);
+    }
+
+    #[test]
+    fn blocking_phase_tracker_preserves_sequential_phase_identity() {
+        let tracker = Arc::new(BlockingBackendPhaseTracker::default());
+        let request_boundary = tracker.snapshot();
+        {
+            let _training = tracker.begin(BlockingBackendPhase::Training);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        {
+            let _trim = tracker.begin(BlockingBackendPhase::Trim);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let observed = tracker.observed_since(request_boundary);
+        assert!(observed.training >= Some(Duration::from_millis(2)));
+        assert!(observed.trim >= Some(Duration::from_millis(2)));
+        assert_eq!(observed.resize, None);
+        assert_eq!(observed.adapter, None);
+    }
+
+    #[test]
+    fn nested_same_phase_guards_report_union_not_sum() {
+        let tracker = Arc::new(BlockingBackendPhaseTracker::default());
+        let request_boundary = tracker.snapshot();
+        let outer = tracker.begin(BlockingBackendPhase::Adapter);
+        let inner = tracker.begin(BlockingBackendPhase::Adapter);
+        std::thread::sleep(Duration::from_millis(5));
+        drop(inner);
+        std::thread::sleep(Duration::from_millis(5));
+        drop(outer);
+
+        let adapter = tracker
+            .observed_since(request_boundary)
+            .adapter
+            .expect("adapter overlap is observed");
+        assert!(adapter >= Duration::from_millis(5), "observed {adapter:?}");
+        assert!(adapter < Duration::from_millis(100), "observed {adapter:?}");
+    }
     use std::collections::BTreeSet;
 
     fn assert_serialized_fields_match_observability_schema(

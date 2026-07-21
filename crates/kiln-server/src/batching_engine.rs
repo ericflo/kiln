@@ -30,16 +30,20 @@ use crate::config::{
     DeterministicInference, MaxDecodeBatch, MaxDecodeBatchDiagnostics, PrefillLayerBudget,
     PrefillTokenBudget, StreamStallGrace,
 };
-use crate::latency_observability::{BackendPhaseDurations, EngineTokenTiming, TokenPhaseDurations};
+use crate::gpu_coordination::{
+    GpuCoordinationLock, read_guard_with_phases, write_guard_while_healthy,
+};
+use crate::latency_observability::{
+    BackendPhaseDurations, BlockingBackendPhase, BlockingBackendPhaseGuard,
+    BlockingBackendPhaseSnapshot, BlockingBackendPhaseTracker, EngineTokenTiming,
+    TokenPhaseDurations,
+};
 use crate::response_delivery::{
     DeliveryBarrierError, DeliveryBatch, DeliveryCommand, DeliveryKey, DeliveryResult,
     DeliveryResultNotifyError, DeliveryResultSink, DeliveryResultSinkError, DeliveryTerminal,
     DeliveryWorker,
 };
-use crate::state::{
-    GpuCoordinationLock, LoadedAdapterIdentity, RealPrefixCache, RealPrefixCacheRequest,
-    gpu_coordination_read_guard, gpu_coordination_write_guard_while_healthy,
-};
+use crate::state::{LoadedAdapterIdentity, RealPrefixCache, RealPrefixCacheRequest};
 
 const DEFAULT_ENGINE_CHANNEL: usize = 1024;
 const DEFAULT_RESPONSE_CHANNEL: usize = 64;
@@ -457,12 +461,14 @@ pub enum RequestPreparation {
         tokens_scheduled: usize,
         tokens_processed: usize,
         layers_processed: usize,
+        backend_phases: BackendPhaseDurations,
     },
     Ready {
         slot: DecodeSlot,
         tokens_scheduled: usize,
         tokens_processed: usize,
         layers_processed: usize,
+        backend_phases: BackendPhaseDurations,
     },
 }
 
@@ -471,6 +477,11 @@ pub struct PrefillBatchProgress {
     pub tokens_processed: usize,
     pub layers_processed: usize,
     pub ready: bool,
+}
+
+pub struct ResidentPrefillBatchProgress {
+    pub rows: Vec<PrefillBatchProgress>,
+    pub backend_phases: BackendPhaseDurations,
 }
 
 fn collect_ready_decode_indices(
@@ -555,6 +566,7 @@ pub trait DecodeForward: Send + Sync + 'static {
             tokens_scheduled: req.prompt_tokens.len(),
             tokens_processed: req.prompt_tokens.len(),
             layers_processed: 0,
+            backend_phases: BackendPhaseDurations::default(),
         })
     }
     fn advance_prefill(
@@ -618,7 +630,7 @@ pub trait DecodeForward: Send + Sync + 'static {
         _slots: &mut [&mut DecodeSlot],
         _sampling: &[SamplingParams],
         _cancels: &[CancelHandle],
-    ) -> Result<Option<Vec<PrefillBatchProgress>>> {
+    ) -> Result<Option<ResidentPrefillBatchProgress>> {
         Ok(None)
     }
     fn can_reuse_as_strict_prefix(&self, _prompt_token_len: usize) -> bool {
@@ -722,6 +734,7 @@ pub struct RealDecodeForward {
     paged_cache: Arc<PagedKvCacheKt>,
     prefix_cache: Arc<Mutex<RealPrefixCache>>,
     gpu_lock: GpuCoordinationLock,
+    gpu_coordination_phases: Arc<BlockingBackendPhaseTracker>,
     loaded_adapter: Arc<RwLock<Option<LoadedAdapterIdentity>>>,
     allow_dynamic_kv_resize: bool,
     // Resolved once from the immutable serving profile and selected backend.
@@ -755,6 +768,7 @@ impl RealDecodeForward {
             paged_cache,
             prefix_cache,
             gpu_lock,
+            gpu_coordination_phases: Arc::new(BlockingBackendPhaseTracker::default()),
             loaded_adapter,
             allow_dynamic_kv_resize,
             resident_prefill_enabled: false,
@@ -764,6 +778,14 @@ impl RealDecodeForward {
 
     pub fn with_resident_prefill_enabled(mut self, enabled: bool) -> Self {
         self.resident_prefill_enabled = enabled;
+        self
+    }
+
+    pub(crate) fn with_gpu_coordination_phase_tracker(
+        mut self,
+        tracker: Arc<BlockingBackendPhaseTracker>,
+    ) -> Self {
+        self.gpu_coordination_phases = tracker;
         self
     }
 
@@ -1019,7 +1041,7 @@ impl DecodeForward for RealDecodeForward {
         slots: &mut [&mut DecodeSlot],
         sampling: &[SamplingParams],
         cancels: &[CancelHandle],
-    ) -> Result<Option<Vec<PrefillBatchProgress>>> {
+    ) -> Result<Option<ResidentPrefillBatchProgress>> {
         anyhow::ensure!(
             slots.len() == sampling.len() && slots.len() == cancels.len(),
             "resident prefill batch metadata length mismatch"
@@ -1032,7 +1054,8 @@ impl DecodeForward for RealDecodeForward {
             state_refs.push(state);
         }
 
-        let gpu_guard = gpu_coordination_read_guard(&self.gpu_lock);
+        let (gpu_guard, mut backend_phases) =
+            read_guard_with_phases(&self.gpu_lock, &self.gpu_coordination_phases);
         let runner_guard = self.runner_guard()?;
         let cancel_refs: Vec<&CancelHandle> = cancels.iter().collect();
         let result = runner_guard.advance_paged_batched_prefill_resident_token_batch(
@@ -1042,8 +1065,10 @@ impl DecodeForward for RealDecodeForward {
             &cancel_refs,
         );
         drop(state_refs);
+        let synchronization_started = Instant::now();
         let synchronized =
             runner_guard.synchronize_external_yield("resident batched token-prefill quantum");
+        backend_phases.observe_synchronization(synchronization_started.elapsed());
         drop(runner_guard);
         drop(gpu_guard);
         let mut progress = match (result, synchronized) {
@@ -1095,7 +1120,10 @@ impl DecodeForward for RealDecodeForward {
                 ready,
             });
         }
-        Ok(Some(actor_progress))
+        Ok(Some(ResidentPrefillBatchProgress {
+            rows: actor_progress,
+            backend_phases,
+        }))
     }
 
     fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
@@ -1126,7 +1154,8 @@ impl DecodeForward for RealDecodeForward {
             *loaded
         );
         drop(loaded);
-        let gpu_guard = gpu_coordination_read_guard(&self.gpu_lock);
+        let (gpu_guard, mut backend_phases) =
+            read_guard_with_phases(&self.gpu_lock, &self.gpu_coordination_phases);
         let runner_guard = self.runner_guard()?;
         let prefix_cache_enabled = self.prefix_cache_guard()?.is_enabled();
         let lookup = if prefix_cache_enabled {
@@ -1178,8 +1207,10 @@ impl DecodeForward for RealDecodeForward {
                 req.capture_behavior_logprobs,
                 Some(&req.cancel),
             );
+        let synchronization_started = Instant::now();
         let synchronized =
             runner_guard.synchronize_external_yield("batched request prefill initialization");
+        backend_phases.observe_synchronization(synchronization_started.elapsed());
         drop(runner_guard);
         if let Err(err) = synchronized {
             std::mem::forget(prepared);
@@ -1198,6 +1229,7 @@ impl DecodeForward for RealDecodeForward {
                 tokens_scheduled: 0,
                 tokens_processed: 0,
                 layers_processed: 0,
+                backend_phases,
             }),
             Ok(PagedBatchedPrefillStart::Prefilling(state)) => Ok(RequestPreparation::Prefilling {
                 slot: DecodeSlot::RealPrefill {
@@ -1207,6 +1239,7 @@ impl DecodeForward for RealDecodeForward {
                 tokens_scheduled: 0,
                 tokens_processed: 0,
                 layers_processed: 0,
+                backend_phases,
             }),
             Err(err) => Err(err),
         }
@@ -1227,7 +1260,8 @@ impl DecodeForward for RealDecodeForward {
         else {
             anyhow::bail!("non-prefill slot sent to resumable prefill")
         };
-        let gpu_guard = gpu_coordination_read_guard(&self.gpu_lock);
+        let (gpu_guard, mut backend_phases) =
+            read_guard_with_phases(&self.gpu_lock, &self.gpu_coordination_phases);
         let runner_guard = match self.runner_guard() {
             Ok(runner) => runner,
             Err(error) => {
@@ -1245,7 +1279,9 @@ impl DecodeForward for RealDecodeForward {
             max_layers,
             Some(cancel),
         );
+        let synchronization_started = Instant::now();
         let synchronized = runner_guard.synchronize_external_yield("batched prefill quantum");
+        backend_phases.observe_synchronization(synchronization_started.elapsed());
         if synchronized.is_ok()
             && progress.is_err()
             && let Some(prefill) = state.as_ref()
@@ -1272,6 +1308,7 @@ impl DecodeForward for RealDecodeForward {
                     tokens_scheduled: progress.tokens_scheduled,
                     tokens_processed: progress.tokens_processed,
                     layers_processed: progress.layers_processed,
+                    backend_phases,
                 }),
                 None => Ok(RequestPreparation::Prefilling {
                     slot: DecodeSlot::RealPrefill {
@@ -1281,6 +1318,7 @@ impl DecodeForward for RealDecodeForward {
                     tokens_scheduled: progress.tokens_scheduled,
                     tokens_processed: progress.tokens_processed,
                     layers_processed: progress.layers_processed,
+                    backend_phases,
                 }),
             },
             Err(error) => {
@@ -1335,9 +1373,9 @@ impl DecodeForward for RealDecodeForward {
             collect_ready_decode_indices(slots, sampling, &mut output)?;
 
         if !decode_indices.is_empty() {
-            let gpu_lock_started = Instant::now();
-            let gpu_guard = gpu_coordination_read_guard(&self.gpu_lock);
-            backend_phases.observe_gpu_lock_wait(gpu_lock_started.elapsed());
+            let (gpu_guard, coordination_phases) =
+                read_guard_with_phases(&self.gpu_lock, &self.gpu_coordination_phases);
+            coordination_phases.add_to(&mut backend_phases);
             let mut ordinary_rows = Vec::with_capacity(decode_indices.len());
             let mut ordinary_params = Vec::with_capacity(decode_indices.len());
             let mut ordinary_output_indices = Vec::with_capacity(decode_indices.len());
@@ -1745,10 +1783,12 @@ impl DecodeForward for RealDecodeForward {
             // EXCLUSIVE GPU access for the pool swap: the write guard blocks
             // decode actors and training until the transaction commits.
             let gpu_wait_started = Instant::now();
-            let gpu_guard =
-                gpu_coordination_write_guard_while_healthy(&self.gpu_lock, &self.backend_health);
+            let gpu_guard = write_guard_while_healthy(&self.gpu_lock, &self.backend_health);
             gpu_coordination_wait = gpu_wait_started.elapsed();
             let _gpu = gpu_guard?;
+            let _resize_phase = self
+                .gpu_coordination_phases
+                .begin(BlockingBackendPhase::Resize);
 
             let model_wait_started = Instant::now();
             let runner = self.runner.write().map_err(|error| {
@@ -1835,6 +1875,7 @@ impl DecodeForward for RealDecodeForward {
 pub struct BatchingEngineHandle {
     tx: mpsc::Sender<EngineCommand>,
     published_snapshot: SharedBatchingEngineSnapshot,
+    actor_barrier_phases: Arc<BlockingBackendPhaseTracker>,
 }
 
 impl BatchingEngineHandle {
@@ -2021,6 +2062,7 @@ impl BatchingEngineHandle {
             delivery_results,
         );
         let published_snapshot = actor.published_snapshot.clone();
+        let actor_barrier_phases = actor.actor_barrier_phases.clone();
         thread::Builder::new()
             .name("kiln-batching-engine".to_string())
             .spawn(move || actor.run())
@@ -2028,17 +2070,20 @@ impl BatchingEngineHandle {
         Self {
             tx,
             published_snapshot,
+            actor_barrier_phases,
         }
     }
 
     pub async fn enqueue(&self, req: EngineRequest) -> Result<mpsc::Receiver<EngineEvent>> {
         let (response_tx, response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
         let enqueued_at = Instant::now();
+        let actor_barrier_snapshot = self.actor_barrier_phases.snapshot();
         self.tx
             .send(EngineCommand::Enqueue {
                 req,
                 response_tx,
                 enqueued_at,
+                actor_barrier_snapshot,
             })
             .await
             .map_err(|_| anyhow::anyhow!("batching engine stopped"))?;
@@ -2053,11 +2098,13 @@ impl BatchingEngineHandle {
     ) -> Result<mpsc::Receiver<EngineEvent>> {
         let (response_tx, response_rx) = mpsc::channel(capacity);
         let enqueued_at = Instant::now();
+        let actor_barrier_snapshot = self.actor_barrier_phases.snapshot();
         self.tx
             .send(EngineCommand::Enqueue {
                 req,
                 response_tx,
                 enqueued_at,
+                actor_barrier_snapshot,
             })
             .await
             .map_err(|_| anyhow::anyhow!("batching engine stopped"))?;
@@ -2258,6 +2305,7 @@ enum EngineCommand {
         req: EngineRequest,
         response_tx: mpsc::Sender<EngineEvent>,
         enqueued_at: Instant,
+        actor_barrier_snapshot: BlockingBackendPhaseSnapshot,
     },
     Cancel {
         request_id: Uuid,
@@ -2305,10 +2353,20 @@ enum PendingExclusiveMutation {
     },
 }
 
+impl PendingExclusiveMutation {
+    fn blocking_phase(&self) -> BlockingBackendPhase {
+        match self {
+            Self::ResizeKv { .. } => BlockingBackendPhase::Resize,
+            Self::SwapAdapter { .. } => BlockingBackendPhase::Adapter,
+        }
+    }
+}
+
 struct QueuedRequest {
     req: EngineRequest,
     delivery_key: DeliveryKey,
     enqueued_at: Instant,
+    actor_barrier_snapshot: BlockingBackendPhaseSnapshot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2423,6 +2481,8 @@ struct BatchingEngineActor {
     /// KV resizes and adapter swaps waiting for the active batch to drain.
     /// Admission pauses until these ordered mutations finish.
     pending_exclusive_mutations: VecDeque<PendingExclusiveMutation>,
+    actor_barrier_phases: Arc<BlockingBackendPhaseTracker>,
+    pending_exclusive_phase: Option<BlockingBackendPhaseGuard>,
     snapshot: BatchingEngineSnapshot,
     published_snapshot: SharedBatchingEngineSnapshot,
 }
@@ -2556,6 +2616,8 @@ impl BatchingEngineActor {
             defer_delivery_flush: false,
             stop_replies: Vec::new(),
             pending_exclusive_mutations: VecDeque::new(),
+            actor_barrier_phases: Arc::new(BlockingBackendPhaseTracker::default()),
+            pending_exclusive_phase: None,
             snapshot,
             published_snapshot,
         }
@@ -3025,6 +3087,7 @@ impl BatchingEngineActor {
                 req,
                 response_tx,
                 enqueued_at,
+                actor_barrier_snapshot,
             } => {
                 let Some(delivery_key) = self.register_delivery(req.request_id, response_tx) else {
                     req.cancel.cancel();
@@ -3041,6 +3104,7 @@ impl BatchingEngineActor {
                         req,
                         delivery_key,
                         enqueued_at,
+                        actor_barrier_snapshot,
                     });
                     self.refresh_snapshot();
                 } else {
@@ -3092,17 +3156,25 @@ impl BatchingEngineActor {
                 enqueued_at,
                 reply,
             } => {
-                self.pending_exclusive_mutations
-                    .push_back(PendingExclusiveMutation::ResizeKv {
-                        target_blocks,
-                        reason,
-                        enqueued_at,
-                        reply,
-                    });
+                let pending = PendingExclusiveMutation::ResizeKv {
+                    target_blocks,
+                    reason,
+                    enqueued_at,
+                    reply,
+                };
+                if self.pending_exclusive_mutations.is_empty() {
+                    self.pending_exclusive_phase =
+                        Some(self.actor_barrier_phases.begin(pending.blocking_phase()));
+                }
+                self.pending_exclusive_mutations.push_back(pending);
             }
             EngineCommand::SwapAdapter { swap, reply } => {
-                self.pending_exclusive_mutations
-                    .push_back(PendingExclusiveMutation::SwapAdapter { swap, reply });
+                let pending = PendingExclusiveMutation::SwapAdapter { swap, reply };
+                if self.pending_exclusive_mutations.is_empty() {
+                    self.pending_exclusive_phase =
+                        Some(self.actor_barrier_phases.begin(pending.blocking_phase()));
+                }
+                self.pending_exclusive_mutations.push_back(pending);
             }
         }
     }
@@ -3114,6 +3186,10 @@ impl BatchingEngineActor {
             return;
         }
         while let Some(pending) = self.pending_exclusive_mutations.pop_front() {
+            let phase = self
+                .pending_exclusive_phase
+                .take()
+                .unwrap_or_else(|| self.actor_barrier_phases.begin(pending.blocking_phase()));
             match pending {
                 PendingExclusiveMutation::ResizeKv {
                     target_blocks,
@@ -3131,6 +3207,11 @@ impl BatchingEngineActor {
                 PendingExclusiveMutation::SwapAdapter { swap, reply } => {
                     let _ = reply.send(swap());
                 }
+            }
+            drop(phase);
+            if let Some(next) = self.pending_exclusive_mutations.front() {
+                self.pending_exclusive_phase =
+                    Some(self.actor_barrier_phases.begin(next.blocking_phase()));
             }
         }
     }
@@ -3274,20 +3355,38 @@ impl BatchingEngineActor {
             );
             match preparation {
                 Ok(preparation) => {
-                    let (slot, tokens_scheduled, tokens_processed, ready) = match preparation {
-                        RequestPreparation::Prefilling {
-                            slot,
-                            tokens_scheduled,
-                            tokens_processed,
-                            ..
-                        } => (slot, tokens_scheduled, tokens_processed, false),
-                        RequestPreparation::Ready {
-                            slot,
-                            tokens_scheduled,
-                            tokens_processed,
-                            ..
-                        } => (slot, tokens_scheduled, tokens_processed, true),
-                    };
+                    let (slot, tokens_scheduled, tokens_processed, backend_phases, ready) =
+                        match preparation {
+                            RequestPreparation::Prefilling {
+                                slot,
+                                tokens_scheduled,
+                                tokens_processed,
+                                backend_phases,
+                                ..
+                            } => (
+                                slot,
+                                tokens_scheduled,
+                                tokens_processed,
+                                backend_phases,
+                                false,
+                            ),
+                            RequestPreparation::Ready {
+                                slot,
+                                tokens_scheduled,
+                                tokens_processed,
+                                backend_phases,
+                                ..
+                            } => (
+                                slot,
+                                tokens_scheduled,
+                                tokens_processed,
+                                backend_phases,
+                                true,
+                            ),
+                        };
+                    for active in &mut self.active {
+                        active.token_phase_durations.add_backend(backend_phases);
+                    }
                     if tokens_scheduled > token_budget || tokens_processed > tokens_scheduled {
                         self.forward.discard_request(slot);
                         self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
@@ -3320,6 +3419,11 @@ impl BatchingEngineActor {
                     let mut token_phase_durations = TokenPhaseDurations::default();
                     token_phase_durations.add_actor_queue(actor_queue_duration);
                     token_phase_durations.add_actor_admission(actor_admission_duration);
+                    token_phase_durations.add_backend(backend_phases);
+                    token_phase_durations.add_backend(
+                        self.actor_barrier_phases
+                            .observed_since(queued.actor_barrier_snapshot),
+                    );
                     let initial_prefill_work_tokens = if ready {
                         None
                     } else {
@@ -3684,6 +3788,10 @@ impl BatchingEngineActor {
                 return Some(true);
             }
         };
+        let ResidentPrefillBatchProgress {
+            rows: progress,
+            backend_phases,
+        } = progress;
         if progress.len() != indices.len() {
             self.snapshot.total_resident_prefill_route_failures = self
                 .snapshot
@@ -3731,6 +3839,7 @@ impl BatchingEngineActor {
 
         for active in &mut self.active {
             active.token_phase_durations.add_actor_prefill(elapsed);
+            active.token_phase_durations.add_backend(backend_phases);
         }
         self.record_prefill_forward_duration(
             elapsed,
@@ -3851,18 +3960,20 @@ impl BatchingEngineActor {
                     continue;
                 }
             };
-            let (slot, tokens_scheduled, tokens_processed, layers_processed, ready) =
+            let (slot, tokens_scheduled, tokens_processed, layers_processed, backend_phases, ready) =
                 match preparation {
                     RequestPreparation::Prefilling {
                         slot,
                         tokens_scheduled,
                         tokens_processed,
                         layers_processed,
+                        backend_phases,
                     } => (
                         slot,
                         tokens_scheduled,
                         tokens_processed,
                         layers_processed,
+                        backend_phases,
                         false,
                     ),
                     RequestPreparation::Ready {
@@ -3870,14 +3981,20 @@ impl BatchingEngineActor {
                         tokens_scheduled,
                         tokens_processed,
                         layers_processed,
+                        backend_phases,
                     } => (
                         slot,
                         tokens_scheduled,
                         tokens_processed,
                         layers_processed,
+                        backend_phases,
                         true,
                     ),
                 };
+            token_phase_durations.add_backend(backend_phases);
+            for active in &mut self.active {
+                active.token_phase_durations.add_backend(backend_phases);
+            }
             if layers_processed == 0 || layers_processed > self.max_prefill_layers_per_cycle {
                 self.forward.discard_request(slot);
                 self.snapshot.total_errors = self.snapshot.total_errors.saturating_add(1);
@@ -4534,6 +4651,7 @@ impl BatchingEngineActor {
                 }
             }
         }
+        self.pending_exclusive_phase = None;
         self.refresh_snapshot();
     }
 
@@ -4609,6 +4727,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
 
+    mod phase_and_delivery;
+
     #[test]
     fn profiled_decode_phases_preserve_sampling_and_readback_separately() {
         let mut phases = BackendPhaseDurations::default();
@@ -4637,7 +4757,9 @@ mod tests {
         calls: StdMutex<Vec<Vec<TokenId>>>,
         reusable_prefixes: bool,
         prefix_probe_calls: std::sync::atomic::AtomicUsize,
+        reported_admission_phases: BackendPhaseDurations,
         reported_backend_phases: BackendPhaseDurations,
+        resize_delay: Duration,
     }
 
     #[derive(Default)]
@@ -4681,6 +4803,7 @@ mod tests {
         events: StdMutex<Vec<SchedulingEvent>>,
         resident_rows: StdMutex<HashSet<TokenId>>,
         resident_batch_outcomes: StdMutex<VecDeque<ResidentBatchOutcome>>,
+        reported_prefill_phases: BackendPhaseDurations,
         resident_prefill_enabled: bool,
         layers_per_chunk: usize,
         layer_delay: Duration,
@@ -4730,6 +4853,7 @@ mod tests {
                     tokens_scheduled: 0,
                     tokens_processed: 0,
                     layers_processed: 0,
+                    backend_phases: BackendPhaseDurations::default(),
                 });
             }
             self.remaining
@@ -4741,6 +4865,7 @@ mod tests {
                 tokens_scheduled: 0,
                 tokens_processed: 0,
                 layers_processed: 0,
+                backend_phases: BackendPhaseDurations::default(),
             })
         }
 
@@ -4818,6 +4943,7 @@ mod tests {
                         tokens_scheduled,
                         tokens_processed: 0,
                         layers_processed: layers,
+                        backend_phases: self.reported_prefill_phases,
                     });
                 }
                 layers
@@ -4860,6 +4986,7 @@ mod tests {
                     tokens_scheduled,
                     tokens_processed: tokens,
                     layers_processed,
+                    backend_phases: self.reported_prefill_phases,
                 })
             } else {
                 Ok(RequestPreparation::Prefilling {
@@ -4867,6 +4994,7 @@ mod tests {
                     tokens_scheduled,
                     tokens_processed: tokens,
                     layers_processed,
+                    backend_phases: self.reported_prefill_phases,
                 })
             }
         }
@@ -4920,7 +5048,7 @@ mod tests {
             slots: &mut [&mut DecodeSlot],
             _sampling: &[SamplingParams],
             cancels: &[CancelHandle],
-        ) -> Result<Option<Vec<PrefillBatchProgress>>> {
+        ) -> Result<Option<ResidentPrefillBatchProgress>> {
             if !self.resident_prefill_enabled {
                 return Ok(None);
             }
@@ -4980,7 +5108,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(SchedulingEvent::ResidentPrefill(keys));
-            Ok(Some(progress))
+            Ok(Some(ResidentPrefillBatchProgress {
+                rows: progress,
+                backend_phases: self.reported_prefill_phases,
+            }))
         }
 
         fn forward_decode(
@@ -5065,6 +5196,24 @@ mod tests {
             })
         }
 
+        fn prepare_request_chunked(
+            &self,
+            req: &EngineRequest,
+            max_tokens: usize,
+        ) -> Result<RequestPreparation> {
+            anyhow::ensure!(
+                req.prompt_tokens.len() <= max_tokens,
+                "mock prompt exceeds admission token budget"
+            );
+            Ok(RequestPreparation::Ready {
+                slot: self.prepare_request(req)?,
+                tokens_scheduled: req.prompt_tokens.len(),
+                tokens_processed: req.prompt_tokens.len(),
+                layers_processed: 0,
+                backend_phases: self.reported_admission_phases,
+            })
+        }
+
         fn forward_decode(
             &self,
             slots: &mut [&mut DecodeSlot],
@@ -5111,6 +5260,13 @@ mod tests {
             generated_tokens.push(token);
             *next_token = token;
             Ok(generated_tokens.len())
+        }
+
+        fn resize_kv(&self, target_blocks: usize) -> Result<usize> {
+            if !self.resize_delay.is_zero() {
+                thread::sleep(self.resize_delay);
+            }
+            Ok(target_blocks)
         }
 
         fn finish_request(
@@ -5329,10 +5485,12 @@ mod tests {
         let delivery_key = actor
             .register_delivery(req.request_id, response_tx)
             .expect("test delivery lane registers");
+        let actor_barrier_snapshot = actor.actor_barrier_phases.snapshot();
         actor.waiting.push_back(QueuedRequest {
             req,
             delivery_key,
             enqueued_at: Instant::now(),
+            actor_barrier_snapshot,
         });
     }
 
@@ -6879,188 +7037,6 @@ mod tests {
         second.unwrap().unwrap();
     }
 
-    #[tokio::test]
-    async fn dropping_final_handle_stops_actor_and_delivery_worker() {
-        let events = Arc::new(StdMutex::new(Vec::new()));
-        let (forward, release) = GatedForward::new(events);
-        let handle = BatchingEngineHandle::start_with_options(Arc::new(forward), 1);
-        let req = request(101, 4);
-        let cancel = req.cancel.clone();
-        let mut response = handle.enqueue(req).await.unwrap();
-
-        let forward_deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            let snapshot = handle.cached_snapshot();
-            if snapshot.current_batch_size == 1 {
-                break;
-            }
-            assert!(
-                Instant::now() < forward_deadline,
-                "request did not enter its gated forward: {snapshot:?}"
-            );
-            tokio::task::yield_now().await;
-        }
-
-        drop(handle);
-        release.send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while response.recv().await.is_some() {}
-        })
-        .await
-        .expect("dropping the final strong handle must tear down both threads");
-        assert!(cancel.is_cancelled());
-    }
-
-    #[test]
-    fn closed_response_channel_is_counted_without_backpressure() {
-        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
-        let forward = Arc::new(MockForward::default());
-        let mut actor = test_actor(
-            rx,
-            forward,
-            8,
-            false,
-            1,
-            false,
-            ResponseDeliveryPolicy::default(),
-        );
-        let (response_tx, response_rx) = mpsc::channel(1);
-        drop(response_rx);
-        let req = request(101, 2);
-        push_test_active(
-            &mut actor,
-            req,
-            response_tx,
-            DecodeSlot::Mock {
-                next_token: 101,
-                generated_tokens: Vec::new(),
-            },
-        );
-
-        actor.submit_token_delivery(
-            0,
-            111,
-            EngineTokenTiming::ready(Instant::now(), TokenPhaseDurations::default()),
-        );
-        settle_active_deliveries(&mut actor);
-        assert!(actor.active.is_empty());
-        assert_eq!(actor.snapshot.response_channel_closed, 1);
-        assert_eq!(actor.snapshot.response_backpressure_events, 0);
-        assert_eq!(actor.snapshot.response_backpressure_wait_ms, 0);
-        assert_eq!(actor.snapshot.response_stall_evictions, 0);
-    }
-
-    #[test]
-    fn delivered_token_carries_response_ready_timestamp() {
-        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
-        let forward = Arc::new(MockForward::default());
-        let mut actor = test_actor(
-            rx,
-            forward,
-            8,
-            false,
-            1,
-            false,
-            ResponseDeliveryPolicy::default(),
-        );
-        let (response_tx, mut response_rx) = mpsc::channel(1);
-        push_test_active(
-            &mut actor,
-            request(101, 2),
-            response_tx,
-            DecodeSlot::Mock {
-                next_token: 101,
-                generated_tokens: Vec::new(),
-            },
-        );
-
-        let before = Instant::now();
-        let ready_at = Instant::now();
-        actor.submit_token_delivery(
-            0,
-            111,
-            EngineTokenTiming::ready(ready_at, TokenPhaseDurations::default()),
-        );
-        let after = Instant::now();
-        match response_rx.blocking_recv() {
-            Some(EngineEvent::Token { token, timing }) => {
-                assert_eq!(token, 111);
-                assert!(timing.ready_at >= before);
-                assert!(timing.ready_at <= after);
-                assert!(timing.producer_delivered_at.is_some());
-            }
-            other => panic!("expected timed token, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn decode_backend_phases_follow_owned_ready_tokens_only() {
-        let mut backend_phases = BackendPhaseDurations::default();
-        backend_phases.observe_gpu_lock_wait(Duration::from_millis(7));
-        backend_phases.observe_synchronization(Duration::from_millis(11));
-        backend_phases.observe_graph_capture(Duration::from_millis(13));
-        backend_phases.observe_graph_replay(Duration::from_millis(17));
-        let forward = Arc::new(MockForward {
-            reported_backend_phases: backend_phases,
-            ..MockForward::default()
-        });
-        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
-        let mut actor = test_actor(
-            rx,
-            forward,
-            8,
-            false,
-            1,
-            false,
-            ResponseDeliveryPolicy::default(),
-        );
-        let (response_a_tx, mut response_a_rx) = mpsc::channel(2);
-        push_test_active(
-            &mut actor,
-            request(101, 2),
-            response_a_tx,
-            DecodeSlot::Mock {
-                next_token: 101,
-                generated_tokens: Vec::new(),
-            },
-        );
-        let (response_b_tx, mut response_b_rx) = mpsc::channel(2);
-        push_test_active(
-            &mut actor,
-            request(201, 2),
-            response_b_tx,
-            DecodeSlot::Mock {
-                next_token: 201,
-                generated_tokens: Vec::new(),
-            },
-        );
-        let (response_c_tx, _response_c_rx) = mpsc::channel(2);
-        push_test_active(
-            &mut actor,
-            request(301, 2),
-            response_c_tx,
-            DecodeSlot::Mock {
-                next_token: 301,
-                generated_tokens: Vec::new(),
-            },
-        );
-        actor.active[2].delivery_state = ActiveDeliveryState::InFlight { sequence: 0 };
-        let non_ready_phases = actor.active[2].token_phase_durations;
-
-        assert_eq!(actor.run_decode_batch(), 2);
-        for (expected_token, response_rx) in [(111, &mut response_a_rx), (211, &mut response_b_rx)]
-        {
-            match response_rx.blocking_recv() {
-                Some(EngineEvent::Token { token, timing }) => {
-                    assert_eq!(token, expected_token);
-                    assert_eq!(timing.phases_since_previous_token.backend, backend_phases);
-                }
-                other => panic!("expected timed token, got {other:?}"),
-            }
-        }
-        assert_eq!(actor.active[2].token_phase_durations, non_ready_phases);
-    }
-
     /// Forward whose `prepare_request` reports a block-pool shortage for a
     /// marked prompt while the flag is up, and whose decode steps block on
     /// a test-released gate (so a request stays ACTIVE deterministically)
@@ -8182,10 +8158,12 @@ mod tests {
         // Root row becomes active; keep its receiver alive so decode steps
         // can deliver tokens.
         let (root_tx, _root_rx) = mpsc::channel(64);
+        let actor_barrier_snapshot = actor.actor_barrier_phases.snapshot();
         actor.handle_command(EngineCommand::Enqueue {
             req: request_with_tokens(vec![1, 2], 32),
             response_tx: root_tx,
             enqueued_at: Instant::now(),
+            actor_barrier_snapshot,
         });
         actor.admit_waiting();
         assert_eq!(actor.active.len(), 1);
@@ -8195,10 +8173,12 @@ mod tests {
         let mut keep_rx = Vec::new();
         for _ in 0..waiting {
             let (tx, rx) = mpsc::channel(64);
+            let actor_barrier_snapshot = actor.actor_barrier_phases.snapshot();
             actor.handle_command(EngineCommand::Enqueue {
                 req: request_with_tokens(vec![1, 2, 3], 1),
                 response_tx: tx,
                 enqueued_at: Instant::now(),
+                actor_barrier_snapshot,
             });
             keep_rx.push(rx);
         }
