@@ -1045,7 +1045,7 @@ training request
           A cloneable telemetry handle is retained outside both the model-runner and graph-runner mutexes. It publishes
           <code>current_phase</code> and <code>current_phase_elapsed_micros</code> while work is still in progress,
           plus completed <code>calls</code>, <code>slow</code>, <code>total_duration_micros</code>, and
-          <code>max_duration_micros</code> for exactly five non-overlapping phases:
+          <code>max_duration_micros</code> for exactly six fixed phases. The five non-overlapping capture-lifecycle phases are
           <code>pre_candidate_headroom</code>, <code>candidate_warm</code>,
           <code>pre_native_reservation</code>, <code>native_capture</code>, and
           <code>rejected_candidate_cleanup</code>. The first includes matching-device pressure checks and settled
@@ -1053,7 +1053,9 @@ training request
           first launch, defensive cache admission/publication, and the blocking committed governor debit. The last
           begins only when an unretained candidate enters automatic destruction and settlement. A runner lock held
           by a long phase therefore does not erase the phase that operators need to diagnose.
-          A successful full <code>rocm_graphs</code> snapshot also carries point-in-time copies of the five
+          The sixth phase, <code>native_replay</code>, covers replay input updates, cross-stream dependency setup, and
+          native launch submission; external-yield settlement remains a separate request synchronization phase.
+          A successful full <code>rocm_graphs</code> snapshot also carries point-in-time copies of all six
           completed summaries and transient-byte gauges; the separate handle is the authoritative active-phase
           source and continues advancing when that full snapshot is unavailable.
         </p>
@@ -1181,7 +1183,7 @@ kiln_rocm_graph_retained_bytes{kind="stable_io|capture_arena|blaslt_workspace|sl
 kiln_rocm_graph_retained_byte_limit
 kiln_rocm_graph_retained_byte_accounting_complete
 kiln_rocm_graph_opaque_native_objects
-kiln_rocm_graph_current_phase{phase="pre_candidate_headroom|candidate_warm|pre_native_reservation|native_capture|rejected_candidate_cleanup"}
+kiln_rocm_graph_current_phase{phase="pre_candidate_headroom|candidate_warm|pre_native_reservation|native_capture|native_replay|rejected_candidate_cleanup"}
 kiln_rocm_graph_current_phase_elapsed_seconds
 kiln_rocm_graph_phase_calls_total{phase}
 kiln_rocm_graph_phase_slow_total{phase}
