@@ -29,6 +29,7 @@
     "JudgmentManifest",
     "PromoteJudgmentBody",
     "RenderJudgmentPromptResponse",
+    "ReplayBody",
     "RerunBody",
     "SuiteListResponse",
     "SuiteSaveResponse",
@@ -114,6 +115,9 @@
     },
     {
       "$ref": "#/$defs/RenderJudgmentPromptResponse"
+    },
+    {
+      "$ref": "#/$defs/ReplayBody"
     },
     {
       "$ref": "#/$defs/RerunBody"
@@ -1600,6 +1604,12 @@
         },
         "post_eval_gate": {
           "$ref": "#/$defs/PostEvalGate"
+        },
+        "replay_expectation": {
+          "$ref": "#/$defs/EvalReplayExpectationV1"
+        },
+        "replay_verdict": {
+          "$ref": "#/$defs/EvalReplayVerdict"
         }
       },
       "description": "Tracked eval-job list record; runtime-only Instants and cancellation handles are never serialized.",
@@ -1635,6 +1645,25 @@
       ],
       "description": "Evaluation job lifecycle state.",
       "x-kiln-rust-type": "kiln_eval::EvalJobState",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalModelTargetIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "adapter": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "adapter_content_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        }
+      },
+      "x-kiln-semantic-constraints": [
+        "adapter and adapter_content_sha256 are either both present or both absent"
+      ],
+      "description": "Exact base-model or named-adapter byte identity used for generation or judge scoring.",
+      "x-kiln-rust-type": "kiln_eval::EvalModelTargetIdentity",
       "x-kiln-field-schema-status": "complete"
     },
     "EvalOutcomeKind": {
@@ -1676,6 +1705,219 @@
       "x-kiln-rust-type": "kiln_eval::EvalProgress",
       "x-kiln-field-schema-status": "complete"
     },
+    "EvalRawCompletionReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome_index",
+        "example_id",
+        "completion_index",
+        "raw_completion_pointer",
+        "normalized_completion_sha256",
+        "normalized_completion_bytes"
+      ],
+      "properties": {
+        "outcome_index": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "example_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "completion_index": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "generation_seed": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "raw_completion_pointer": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "raw_completion_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "raw_completion_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "normalized_completion_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "normalized_completion_bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "description": "Content-addressed pointer from a replay record to exact raw and normalized completion bytes.",
+      "x-kiln-rust-type": "kiln_eval::EvalRawCompletionReference",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalReplayExpectationV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expectation_type",
+        "source_job_id",
+        "source_run_index",
+        "expected_record_sha256",
+        "expected_raw_completion_set_sha256"
+      ],
+      "properties": {
+        "expectation_type": {
+          "const": "kiln.eval-replay-expectation.v1"
+        },
+        "source_job_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "source_run_index": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "expected_record_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "expected_raw_completion_set_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        }
+      },
+      "description": "Immutable source and digest target installed before a strict replay becomes queue-visible.",
+      "x-kiln-rust-type": "kiln_eval::EvalReplayExpectationV1",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalReplayRecordV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "record_type",
+        "suite",
+        "effective_seed",
+        "seed_derivation",
+        "resolved_thinking_budgets",
+        "scorer_identities",
+        "raw_completions",
+        "suite_sha256",
+        "effective_generation_sha256",
+        "raw_completion_set_sha256",
+        "record_sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "record_type": {
+          "const": "kiln.eval-replay.v1"
+        },
+        "suite": {
+          "$ref": "#/$defs/EvalSuite"
+        },
+        "generation_override": {
+          "$ref": "#/$defs/EvalGenerationParams"
+        },
+        "effective_seed": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "seed_derivation": {
+          "const": "kiln.eval-seed.v1"
+        },
+        "resolved_thinking_budgets": {
+          "type": "array",
+          "items": {
+            "$ref": "thinking-budget-v1.schema.json#/$defs/record"
+          }
+        },
+        "model_target": {
+          "$ref": "#/$defs/EvalModelTargetIdentity"
+        },
+        "judge_targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvalModelTargetIdentity"
+          }
+        },
+        "scorer_identities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvalScorerIdentity"
+          }
+        },
+        "raw_completions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvalRawCompletionReference"
+          }
+        },
+        "suite_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "effective_generation_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "raw_completion_set_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "execution_provenance_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "base_weight_manifest_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "record_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        }
+      },
+      "description": "Self-validating immutable suite, generation, model, scorer, environment, and raw-completion identity for one run.",
+      "x-kiln-rust-type": "kiln_eval::EvalReplayRecordV1",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalReplayStatus": {
+      "type": "string",
+      "enum": [
+        "matched",
+        "mismatch",
+        "error"
+      ],
+      "description": "Terminal strict-replay classification.",
+      "x-kiln-rust-type": "kiln_eval::EvalReplayStatus",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalReplayVerdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "source_job_id",
+        "source_run_index",
+        "expected_record_sha256",
+        "expected_raw_completion_set_sha256",
+        "message"
+      ],
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/EvalReplayStatus"
+        },
+        "source_job_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "source_run_index": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "expected_record_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "actual_record_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "expected_raw_completion_set_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "actual_raw_completion_set_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "message": {
+          "$ref": "#/$defs/NonEmptyString"
+        }
+      },
+      "description": "Terminal comparison between a replay expectation and actual identity and raw-byte sets.",
+      "x-kiln-rust-type": "kiln_eval::EvalReplayVerdict",
+      "x-kiln-field-schema-status": "complete"
+    },
     "EvalResourceName": {
       "type": "string",
       "minLength": 1,
@@ -1714,6 +1956,12 @@
         },
         "seed_derivation": {
           "$ref": "#/$defs/String"
+        },
+        "replay_expectation": {
+          "$ref": "#/$defs/EvalReplayExpectationV1"
+        },
+        "replay_verdict": {
+          "$ref": "#/$defs/EvalReplayVerdict"
         },
         "runs": {
           "type": "array",
@@ -1812,6 +2060,36 @@
       },
       "description": "Immutable admission receipt for a queued eval job.",
       "x-kiln-rust-type": "EvalRunResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "EvalScorerIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "example_id",
+        "kind",
+        "config_sha256",
+        "requires_judge"
+      ],
+      "properties": {
+        "example_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "kind": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "config_sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "requires_judge": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "judge_adapter": {
+          "$ref": "#/$defs/String"
+        }
+      },
+      "description": "Content identity of the fully resolved scorer selected for one stable example ID.",
+      "x-kiln-rust-type": "kiln_eval::EvalScorerIdentity",
       "x-kiln-field-schema-status": "complete"
     },
     "EvalSubmissionKind": {
@@ -2336,6 +2614,19 @@
       },
       "description": "Exact pairwise prompt used by both judge training and inference.",
       "x-kiln-rust-type": "RenderJudgmentPromptResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "ReplayBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "run_index": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "description": "Select one retained run for strict identity-checked byte replay.",
+      "x-kiln-rust-type": "ReplayBody",
       "x-kiln-field-schema-status": "complete"
     },
     "RerunBody": {
@@ -2880,13 +3171,16 @@
           "$ref": "#/$defs/Rfc3339Timestamp"
         },
         "suite_hash": {
-          "$ref": "#/$defs/NonEmptyString"
+          "$ref": "#/$defs/Sha256Digest"
         },
         "effective_generation_hash": {
-          "$ref": "#/$defs/NonEmptyString"
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "replay_record": {
+          "$ref": "#/$defs/EvalReplayRecordV1"
         }
       },
-      "description": "Complete result for one suite and adapter, retaining both independent example reductions and raw completions.",
+      "description": "Complete result for one suite and adapter, retaining independent reductions, raw completions, and a replay identity record.",
       "x-kiln-rust-type": "kiln_eval::SuiteResult",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3699,7 +3993,7 @@
                 ],
                 "started_at": "2026-07-14T12:00:00Z",
                 "finished_at": "2026-07-14T12:00:01Z",
-                "suite_hash": "suite-sha256"
+                "suite_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
               }
             ],
             "headline_accuracy": 1.0,
@@ -3819,7 +4113,7 @@
             ],
             "started_at": "2026-07-14T12:00:00Z",
             "finished_at": "2026-07-14T12:00:01Z",
-            "suite_hash": "suite-sha256"
+            "suite_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
           }
         ]
       }
@@ -3913,6 +4207,11 @@
     "RenderJudgmentPromptResponse": [
       {
         "prompt": "Compare the following two assistant replies..."
+      }
+    ],
+    "ReplayBody": [
+      {
+        "run_index": 0
       }
     ],
     "RerunBody": [

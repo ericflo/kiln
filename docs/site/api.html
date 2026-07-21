@@ -277,7 +277,7 @@
         A compact website map for cold readers who want to see the serving, adapter, training,
         monitoring, and configuration endpoints before walking through the full Quickstart. The
         <a href="docs/http-api/">generated HTTP contract</a> is the complete machine-readable
-        inventory of all 102 paths and 114 method bindings. Generated
+        inventory of all 103 paths and 115 method bindings. Generated
         <a href="docs/inference-schema/">inference</a> and
         <a href="docs/observability-schema/">observability</a> schemas own the completed
         field-level wire contracts.
@@ -2298,6 +2298,7 @@ curl -s http://localhost:8420/v1/train/opd \
           <div class="endpoint"><span class="method">GET</span> <code>/v1/eval/jobs/{id}</code> &mdash; fetch one eval job with its full base-weight shard manifest, validated execution-provenance record, decimal-string job/per-completion seeds, and outcomes.</div>
           <div class="endpoint"><span class="method">DELETE</span> <code>/v1/eval/jobs/{id}</code> &mdash; cancel a queued/running eval (partial outcomes kept), or delete a terminal job from tracking.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/jobs/{id}/rerun</code> &mdash; re-run only failures using the original effective seed unless explicitly replaced.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/jobs/{id}/replay</code> &mdash; queue a strict byte replay of a completed run; optional <code>run_index</code> selects a compare arm, while admission requires exact replay, execution, base-weight, candidate, and judge identities.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/datasets/upload</code> &mdash; multipart upload of an SFT or GRPO JSONL file.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/datasets/{name}/synthesize</code> &mdash; decompose a dataset into a graded suite via <code>final_assistant</code>, <code>first_assistant_turn</code>, <code>every_assistant_turn</code>, or <code>tool_call_predict</code>.</div>
           <div class="endpoint"><span class="method">GET / POST</span> <code>/v1/judgments</code> &mdash; list or create judgment datasets (the A/B flywheel).</div>
@@ -2310,6 +2311,9 @@ curl -s http://localhost:8420/v1/train/opd \
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
           Eval admission snapshots the resident shard manifest before queue publication. Job archives and raw JSON retain the complete list; <code>kiln-eval</code> and the dashboard show a compact aggregate/count/byte summary, and downloaded outcome JSONL includes the full manifest on every standalone row. Corrupt archived manifests fail validation on restart; missing manifests identify only legacy or synthetic jobs.
+        </p>
+        <p class="mt-3 text-sm" style="color: var(--fg-dim);">
+          New completed production runs also retain a <code>kiln.eval-replay.v1</code> record over exact suite/generation/seed/budget, model/adapter/judge/scorer, execution/base-weight, and raw/normalized completion identities. A replay job publishes its expected source hashes at queue admission and a terminal <code>matched</code>, <code>mismatch</code>, or <code>error</code> verdict. See <a href="evals.html#strict-replay">Strict replay</a>; the generated <a href="docs/http-api/">HTTP contract</a> is the normative field and status reference.
         </p>
       </article>
 

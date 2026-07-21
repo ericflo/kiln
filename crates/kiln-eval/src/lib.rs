@@ -27,6 +27,7 @@ pub mod builtin;
 pub mod data_identity;
 pub mod production_trace;
 pub mod qwen3;
+pub mod replay;
 pub mod result;
 pub mod scorers;
 pub mod suite;
@@ -50,6 +51,12 @@ pub use production_trace::{
     ProductionTraceSampleRecord, ProductionTraceSampling, ProductionTraceSuiteConfig,
     ProductionTraceSuiteStats, synthesize_production_trace_suite,
     synthesize_production_trace_suite_from_lines,
+};
+pub use replay::{
+    EVAL_REPLAY_EXPECTATION_TYPE, EVAL_REPLAY_RECORD_SCHEMA_VERSION, EVAL_REPLAY_RECORD_TYPE,
+    EvalModelTargetIdentity, EvalRawCompletionReference, EvalReplayError, EvalReplayExpectationV1,
+    EvalReplayRecordV1, EvalReplayStatus, EvalReplayVerdict, EvalScorerIdentity,
+    eval_effective_generation_sha256, eval_suite_sha256,
 };
 pub use result::{
     AggregateMetrics, AggregatedExampleOutcome, EVAL_RESULT_SCHEMA_VERSION,

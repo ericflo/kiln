@@ -7,7 +7,9 @@ use std::sync::atomic::Ordering;
 use kiln_eval::scorers::JudgeRunner;
 use kiln_eval::{EvalJobState, EvalProgress};
 
-use crate::eval::executor::{noop_judge_runner, run_suite_against_adapter};
+use crate::eval::executor::{
+    EvalReplayEnvironment, noop_judge_runner, run_suite_against_adapter_with_replay,
+};
 use crate::eval::generator::generator_from_state;
 use crate::eval::queue::{EvalQueueEntry, QueuedEvalJob};
 use crate::state::AppState;
@@ -76,6 +78,76 @@ pub fn gc_eval_jobs(state: &AppState) -> usize {
     removed
 }
 
+fn evaluate_replay_verdict(
+    expectation: &kiln_eval::EvalReplayExpectationV1,
+    runs: &[kiln_eval::SuiteResult],
+) -> kiln_eval::EvalReplayVerdict {
+    let error = |message: String| kiln_eval::EvalReplayVerdict {
+        status: kiln_eval::EvalReplayStatus::Error,
+        source_job_id: expectation.source_job_id.clone(),
+        source_run_index: expectation.source_run_index,
+        expected_record_sha256: expectation.expected_record_sha256.clone(),
+        actual_record_sha256: None,
+        expected_raw_completion_set_sha256: expectation.expected_raw_completion_set_sha256.clone(),
+        actual_raw_completion_set_sha256: None,
+        message,
+    };
+    if let Err(error_message) = expectation.validate() {
+        return error(format!("invalid replay expectation: {error_message}"));
+    }
+    let [run] = runs else {
+        return error(format!(
+            "strict replay expected exactly one run, observed {}",
+            runs.len()
+        ));
+    };
+    let Some(record) = run.replay_record.as_ref() else {
+        return error("replay run did not produce an identity record".to_string());
+    };
+    if let Err(error_message) = record.validate_strict_replay(&run.outcomes) {
+        return error(format!(
+            "replay run identity is incomplete: {error_message}"
+        ));
+    }
+    let matched = record.record_sha256 == expectation.expected_record_sha256
+        && record.raw_completion_set_sha256 == expectation.expected_raw_completion_set_sha256;
+    kiln_eval::EvalReplayVerdict {
+        status: if matched {
+            kiln_eval::EvalReplayStatus::Matched
+        } else {
+            kiln_eval::EvalReplayStatus::Mismatch
+        },
+        source_job_id: expectation.source_job_id.clone(),
+        source_run_index: expectation.source_run_index,
+        expected_record_sha256: expectation.expected_record_sha256.clone(),
+        actual_record_sha256: Some(record.record_sha256.clone()),
+        expected_raw_completion_set_sha256: expectation.expected_raw_completion_set_sha256.clone(),
+        actual_raw_completion_set_sha256: Some(record.raw_completion_set_sha256.clone()),
+        message: if matched {
+            "all replay identities and raw decoder completions matched byte-for-byte".to_string()
+        } else {
+            "replay completed but at least one identity or raw decoder completion differed"
+                .to_string()
+        },
+    }
+}
+
+fn failed_replay_verdict(
+    expectation: &kiln_eval::EvalReplayExpectationV1,
+    message: String,
+) -> kiln_eval::EvalReplayVerdict {
+    kiln_eval::EvalReplayVerdict {
+        status: kiln_eval::EvalReplayStatus::Error,
+        source_job_id: expectation.source_job_id.clone(),
+        source_run_index: expectation.source_run_index,
+        expected_record_sha256: expectation.expected_record_sha256.clone(),
+        actual_record_sha256: None,
+        expected_raw_completion_set_sha256: expectation.expected_raw_completion_set_sha256.clone(),
+        actual_raw_completion_set_sha256: None,
+        message,
+    }
+}
+
 async fn run_one_job(state: AppState, entry: EvalQueueEntry) {
     let generator = generator_from_state(state.clone());
     run_one_job_with_generator(state, entry, generator).await
@@ -137,6 +209,7 @@ async fn run_one_job_with_generator(
                 &state,
                 &entry.job,
                 entry.effective_seed,
+                entry.replay_source_record.clone(),
                 generator,
                 judge_runner,
                 Some(progress_cb),
@@ -165,6 +238,10 @@ async fn run_one_job_with_generator(
                     job.state = EvalJobState::Completed;
                 }
                 job.finished_runs = runs;
+                job.replay_verdict = job
+                    .replay_expectation
+                    .as_ref()
+                    .map(|expectation| evaluate_replay_verdict(expectation, &job.finished_runs));
                 job.headline_accuracy = headline;
                 job.finished_at_iso = Some(now_iso);
                 job.finished_at = Some(now_instant);
@@ -178,6 +255,14 @@ async fn run_one_job_with_generator(
             jobs.get_mut(&job_id).map(|job| {
                 job.state = EvalJobState::Failed;
                 job.error = Some(err);
+                job.replay_verdict = job.replay_expectation.as_ref().map(|expectation| {
+                    failed_replay_verdict(
+                        expectation,
+                        job.error
+                            .clone()
+                            .unwrap_or_else(|| "replay execution failed".to_string()),
+                    )
+                });
                 job.finished_at_iso = Some(now_iso);
                 job.finished_at = Some(now_instant);
                 job.cancel_flag = None;
@@ -861,11 +946,22 @@ async fn run_job(
     state: &AppState,
     job: &QueuedEvalJob,
     effective_seed: u64,
+    replay_source_record: Option<Arc<kiln_eval::EvalReplayRecordV1>>,
     generator: Arc<dyn crate::eval::generator::EvalGenerator>,
     judge_runner: Arc<dyn JudgeRunner>,
     progress: Option<crate::eval::executor::ProgressCallback>,
     cancel_flag: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<Vec<kiln_eval::SuiteResult>, String> {
+    let replay_environment = EvalReplayEnvironment {
+        execution_provenance_sha256: state
+            .execution_provenance
+            .as_deref()
+            .map(|provenance| provenance.provenance_sha256.clone()),
+        base_weight_manifest_sha256: state
+            .base_weight_shard_manifest
+            .as_deref()
+            .map(|manifest| manifest.aggregate_sha256.clone()),
+    };
     match job {
         QueuedEvalJob::Registered {
             suite_name,
@@ -878,7 +974,7 @@ async fn run_job(
                 .ok_or_else(|| "no suite registry configured".to_string())?
                 .load(suite_name)
                 .map_err(|e| format!("{e}"))?;
-            let r = run_suite_against_adapter(
+            let r = run_suite_against_adapter_with_replay(
                 &suite,
                 adapter.as_deref(),
                 generation_override.as_ref(),
@@ -887,6 +983,8 @@ async fn run_job(
                 progress,
                 cancel_flag,
                 judge_runner,
+                replay_environment,
+                replay_source_record,
             )
             .await
             .map_err(|e| format!("{e}"))?;
@@ -897,7 +995,7 @@ async fn run_job(
             adapter,
             generation_override,
         } => {
-            let r = run_suite_against_adapter(
+            let r = run_suite_against_adapter_with_replay(
                 suite,
                 adapter.as_deref(),
                 generation_override.as_ref(),
@@ -906,6 +1004,8 @@ async fn run_job(
                 progress,
                 cancel_flag,
                 judge_runner,
+                replay_environment,
+                replay_source_record,
             )
             .await
             .map_err(|e| format!("{e}"))?;
@@ -936,7 +1036,7 @@ async fn run_job(
                 } else {
                     Some(adapter.as_str())
                 };
-                let r = run_suite_against_adapter(
+                let r = run_suite_against_adapter_with_replay(
                     &suite,
                     adapter_opt,
                     spec.generation.as_ref(),
@@ -945,6 +1045,8 @@ async fn run_job(
                     progress_slot.take(),
                     cancel_flag.clone(),
                     judge_runner.clone(),
+                    replay_environment.clone(),
+                    replay_source_record.clone(),
                 )
                 .await
                 .map_err(|e| format!("compare ({}): {e}", adapter))?;
@@ -1016,6 +1118,76 @@ mod tests {
         }
     }
 
+    fn replay_run(completion: &str) -> kiln_eval::SuiteResult {
+        let suite = gate_suite(completion);
+        let outcome = kiln_eval::ExampleOutcome {
+            example_id: "e0".into(),
+            completion_index: 0,
+            generation_seed: Some(kiln_eval::derive_eval_completion_seed(7, "e0", 0)),
+            completion_text: completion.into(),
+            raw_completion_text: Some(completion.into()),
+            thinking_budget: Some(kiln_eval::EvalThinkingBudget::default()),
+            kind: kiln_eval::EvalOutcomeKind::Pass,
+            score: 1.0,
+            detail: None,
+            prompt_tokens: Some(1),
+            completion_tokens: Some(1),
+            latency_ms: Some(1.0),
+            tags: Vec::new(),
+            metadata: None,
+            reasoning_text: None,
+            unclosed_thinking: false,
+        };
+        let record = kiln_eval::EvalReplayRecordV1::new(
+            suite.clone(),
+            None,
+            7,
+            vec![kiln_eval::EvalThinkingBudget::default()],
+            Some(kiln_eval::EvalModelTargetIdentity::base()),
+            Vec::new(),
+            Some(format!("sha256:{}", "a".repeat(64))),
+            Some(format!("sha256:{}", "b".repeat(64))),
+            std::slice::from_ref(&outcome),
+        )
+        .unwrap();
+        kiln_eval::SuiteResult {
+            suite_name: suite.name,
+            adapter: None,
+            aggregation: suite.aggregation,
+            metrics: kiln_eval::AggregateMetrics::default(),
+            outcomes: vec![outcome],
+            aggregated_outcomes: Vec::new(),
+            started_at: "2026-07-20T00:00:00Z".into(),
+            finished_at: "2026-07-20T00:00:01Z".into(),
+            suite_hash: record.suite_sha256.clone(),
+            effective_generation_hash: record.effective_generation_sha256.clone(),
+            replay_record: Some(record),
+        }
+    }
+
+    #[test]
+    fn strict_replay_verdict_distinguishes_match_mismatch_and_incomplete_runs() {
+        let source = replay_run("x");
+        let expectation = kiln_eval::EvalReplayExpectationV1::new(
+            "source-job".into(),
+            0,
+            source.replay_record.as_ref().unwrap(),
+        );
+
+        let matched = evaluate_replay_verdict(&expectation, std::slice::from_ref(&source));
+        assert_eq!(matched.status, kiln_eval::EvalReplayStatus::Matched);
+        matched.validate(&expectation).unwrap();
+
+        let changed = replay_run("y");
+        let mismatched = evaluate_replay_verdict(&expectation, &[changed]);
+        assert_eq!(mismatched.status, kiln_eval::EvalReplayStatus::Mismatch);
+        mismatched.validate(&expectation).unwrap();
+
+        let error = evaluate_replay_verdict(&expectation, &[]);
+        assert_eq!(error.status, kiln_eval::EvalReplayStatus::Error);
+        error.validate(&expectation).unwrap();
+    }
+
     fn paired_run(
         adapter: &str,
         aggregate: kiln_eval::AggregatedExampleOutcome,
@@ -1032,6 +1204,7 @@ mod tests {
             finished_at: "2026-07-14T00:00:01Z".into(),
             suite_hash: "suite".into(),
             effective_generation_hash: "generation".into(),
+            replay_record: None,
         }
     }
 
@@ -1274,6 +1447,7 @@ mod tests {
         let entry = EvalQueueEntry {
             job_id: job_id.clone(),
             effective_seed: 17,
+            replay_source_record: None,
             job: QueuedEvalJob::Inline {
                 suite: Box::new(suite),
                 adapter: None,
@@ -1389,6 +1563,7 @@ mod tests {
             finished_at: "2026-07-20T00:00:01Z".into(),
             suite_hash: "sha256:gate-suite".into(),
             effective_generation_hash: "sha256:gate-generation".into(),
+            replay_record: None,
         }
     }
 
@@ -1690,6 +1865,7 @@ mod tests {
         let entry = EvalQueueEntry {
             job_id,
             effective_seed: 17,
+            replay_source_record: None,
             job: QueuedEvalJob::Registered {
                 suite_name: "missing-suite".into(),
                 adapter: Some("unmeasured".into()),
@@ -1830,6 +2006,7 @@ mod tests {
         let entry = EvalQueueEntry {
             job_id: job_id.clone(),
             effective_seed: 17,
+            replay_source_record: None,
             job: QueuedEvalJob::Inline {
                 suite: Box::new(big_suite(total_examples)),
                 adapter: None,

@@ -39,6 +39,7 @@ ENTRYPOINTS = (
     "JudgmentManifest",
     "PromoteJudgmentBody",
     "RenderJudgmentPromptResponse",
+    "ReplayBody",
     "RerunBody",
     "SuiteListResponse",
     "SuiteSaveResponse",
@@ -178,6 +179,7 @@ def build_enums() -> None:
     add_enum("EvalJobState", "kiln_eval::EvalJobState", ["queued", "running", "completed", "failed", "cancelled"], "Evaluation job lifecycle state.")
     add_enum("EvalOutcomeKind", "kiln_eval::EvalOutcomeKind", ["pass", "fail", "invalid", "error"], "Per-completion scoring outcome.")
     add_enum("EvalSubmissionKind", "EvalSubmissionKind", ["on_demand", "post_training", "compare"], "Admission path that created an eval job.")
+    add_enum("EvalReplayStatus", "kiln_eval::EvalReplayStatus", ["matched", "mismatch", "error"], "Terminal strict-replay classification.")
     add_enum("DatasetFormat", "DatasetFormat", ["sft_chat", "grpo_groups", "raw"], "Canonical persisted dataset format.")
     add_enum("DatasetUploadFormat", "DatasetUploadMultipart::format", ["sft_chat", "sft", "grpo_groups", "grpo", "raw"], "Accepted multipart dataset format including request aliases.")
     add_enum("JudgmentWinner", "JudgmentWinner", ["a", "b", "tie", "skip"], "Human pairwise preference label.")
@@ -390,6 +392,13 @@ def build_suite_types() -> None:
         optional=("adapter", "outcome_kinds", "include_pass", "seed"),
         open_input=True,
     )
+    add_object(
+        "ReplayBody",
+        "ReplayBody",
+        {"run_index": ref("NonNegativeInteger")},
+        "Select one retained run for strict identity-checked byte replay.",
+        optional=("run_index",),
+    )
 
 
 def build_result_types() -> None:
@@ -448,15 +457,61 @@ def build_result_types() -> None:
     )
     add_object("EvalProgress", "kiln_eval::EvalProgress", {"examples_completed": ref("NonNegativeInteger"), "examples_total": ref("NonNegativeInteger"), "running_accuracy": ref("UnitInterval"), "running_mean_score": ref("UnitInterval")}, "Live progress for the active adapter run.")
     add_object(
+        "EvalModelTargetIdentity", "kiln_eval::EvalModelTargetIdentity",
+        {"adapter": ref("NonEmptyString"), "adapter_content_sha256": ref("Sha256Digest")},
+        "Exact base-model or named-adapter byte identity used for generation or judge scoring.",
+        optional=("adapter", "adapter_content_sha256"),
+        extra={"x-kiln-semantic-constraints": ["adapter and adapter_content_sha256 are either both present or both absent"]},
+    )
+    add_object(
+        "EvalScorerIdentity", "kiln_eval::EvalScorerIdentity",
+        {"example_id": ref("NonEmptyString"), "kind": ref("NonEmptyString"), "config_sha256": ref("Sha256Digest"), "requires_judge": ref("Boolean"), "judge_adapter": ref("String")},
+        "Content identity of the fully resolved scorer selected for one stable example ID.",
+        optional=("judge_adapter",),
+    )
+    add_object(
+        "EvalRawCompletionReference", "kiln_eval::EvalRawCompletionReference",
+        {"outcome_index": ref("NonNegativeInteger"), "example_id": ref("NonEmptyString"), "completion_index": ref("NonNegativeInteger"), "generation_seed": ref("DecimalU64"), "raw_completion_pointer": ref("NonEmptyString"), "raw_completion_sha256": ref("Sha256Digest"), "raw_completion_bytes": ref("NonNegativeInteger"), "normalized_completion_sha256": ref("Sha256Digest"), "normalized_completion_bytes": ref("NonNegativeInteger")},
+        "Content-addressed pointer from a replay record to exact raw and normalized completion bytes.",
+        optional=("generation_seed", "raw_completion_sha256", "raw_completion_bytes"),
+    )
+    add_object(
+        "EvalReplayRecordV1", "kiln_eval::EvalReplayRecordV1",
+        {
+            "schema_version": {"const": 1}, "record_type": {"const": "kiln.eval-replay.v1"},
+            "suite": ref("EvalSuite"), "generation_override": ref("EvalGenerationParams"),
+            "effective_seed": ref("DecimalU64"), "seed_derivation": {"const": "kiln.eval-seed.v1"},
+            "resolved_thinking_budgets": array(external_ref(THINKING_SCHEMA, "record")),
+            "model_target": ref("EvalModelTargetIdentity"), "judge_targets": array(ref("EvalModelTargetIdentity")),
+            "scorer_identities": array(ref("EvalScorerIdentity")), "raw_completions": array(ref("EvalRawCompletionReference")),
+            "suite_sha256": ref("Sha256Digest"), "effective_generation_sha256": ref("Sha256Digest"),
+            "raw_completion_set_sha256": ref("Sha256Digest"), "execution_provenance_sha256": ref("Sha256Digest"),
+            "base_weight_manifest_sha256": ref("Sha256Digest"), "record_sha256": ref("Sha256Digest"),
+        },
+        "Self-validating immutable suite, generation, model, scorer, environment, and raw-completion identity for one run.",
+        optional=("generation_override", "model_target", "judge_targets", "execution_provenance_sha256", "base_weight_manifest_sha256"),
+    )
+    add_object(
+        "EvalReplayExpectationV1", "kiln_eval::EvalReplayExpectationV1",
+        {"expectation_type": {"const": "kiln.eval-replay-expectation.v1"}, "source_job_id": ref("NonEmptyString"), "source_run_index": ref("NonNegativeInteger"), "expected_record_sha256": ref("Sha256Digest"), "expected_raw_completion_set_sha256": ref("Sha256Digest")},
+        "Immutable source and digest target installed before a strict replay becomes queue-visible.",
+    )
+    add_object(
+        "EvalReplayVerdict", "kiln_eval::EvalReplayVerdict",
+        {"status": ref("EvalReplayStatus"), "source_job_id": ref("NonEmptyString"), "source_run_index": ref("NonNegativeInteger"), "expected_record_sha256": ref("Sha256Digest"), "actual_record_sha256": ref("Sha256Digest"), "expected_raw_completion_set_sha256": ref("Sha256Digest"), "actual_raw_completion_set_sha256": ref("Sha256Digest"), "message": ref("NonEmptyString")},
+        "Terminal comparison between a replay expectation and actual identity and raw-byte sets.",
+        optional=("actual_record_sha256", "actual_raw_completion_set_sha256"),
+    )
+    add_object(
         "SuiteResult", "kiln_eval::SuiteResult",
-        {"suite_name": ref("EvalResourceName"), "adapter": nullable(ref("String")), "aggregation": ref("EvalAggregation"), "metrics": ref("AggregateMetrics"), "aggregated_outcomes": array(ref("AggregatedExampleOutcome")), "outcomes": array(ref("ExampleOutcome")), "started_at": ref("Rfc3339Timestamp"), "finished_at": ref("Rfc3339Timestamp"), "suite_hash": ref("NonEmptyString"), "effective_generation_hash": ref("NonEmptyString")},
-        "Complete result for one suite and adapter, retaining both independent example reductions and raw completions.", optional=("effective_generation_hash",),
+        {"suite_name": ref("EvalResourceName"), "adapter": nullable(ref("String")), "aggregation": ref("EvalAggregation"), "metrics": ref("AggregateMetrics"), "aggregated_outcomes": array(ref("AggregatedExampleOutcome")), "outcomes": array(ref("ExampleOutcome")), "started_at": ref("Rfc3339Timestamp"), "finished_at": ref("Rfc3339Timestamp"), "suite_hash": ref("Sha256Digest"), "effective_generation_hash": ref("Sha256Digest"), "replay_record": ref("EvalReplayRecordV1")},
+        "Complete result for one suite and adapter, retaining independent reductions, raw completions, and a replay identity record.", optional=("effective_generation_hash", "replay_record"),
     )
     add_object(
         "EvalResult", "EvalResult",
-        {"schema_version": {"const": 2}, "job_id": ref("NonEmptyString"), "state": ref("EvalJobState"), "base_weight_shard_manifest": external_ref(OBSERVABILITY_SCHEMA, "BaseWeightShardManifest"), "execution_provenance": external_ref(OBSERVABILITY_SCHEMA, "ExecutionProvenanceV1"), "effective_seed": ref("DecimalU64"), "seed_derivation": ref("String"), "runs": array(ref("SuiteResult")), "progress": ref("EvalProgress"), "error": ref("String")},
+        {"schema_version": {"const": 2}, "job_id": ref("NonEmptyString"), "state": ref("EvalJobState"), "base_weight_shard_manifest": external_ref(OBSERVABILITY_SCHEMA, "BaseWeightShardManifest"), "execution_provenance": external_ref(OBSERVABILITY_SCHEMA, "ExecutionProvenanceV1"), "effective_seed": ref("DecimalU64"), "seed_derivation": ref("String"), "replay_expectation": ref("EvalReplayExpectationV1"), "replay_verdict": ref("EvalReplayVerdict"), "runs": array(ref("SuiteResult")), "progress": ref("EvalProgress"), "error": ref("String")},
         "Top-level retained result for a single- or multi-adapter eval job.",
-        optional=("base_weight_shard_manifest", "execution_provenance", "effective_seed", "seed_derivation", "progress", "error"),
+        optional=("base_weight_shard_manifest", "execution_provenance", "effective_seed", "seed_derivation", "replay_expectation", "replay_verdict", "progress", "error"),
     )
     add_object(
         "PostEvalGate", "PostEvalGate",
@@ -465,9 +520,9 @@ def build_result_types() -> None:
     )
     add_object(
         "EvalJobInfo", "EvalJobInfo",
-        {"schema_version": {"const": 2}, "job_id": ref("NonEmptyString"), "suite_name": ref("EvalResourceName"), "adapters": array(nullable(ref("String"))), "submission_kind": ref("EvalSubmissionKind"), "base_weight_shard_manifest": external_ref(OBSERVABILITY_SCHEMA, "BaseWeightShardManifest"), "execution_provenance": external_ref(OBSERVABILITY_SCHEMA, "ExecutionProvenanceV1"), "effective_seed": ref("DecimalU64"), "state": ref("EvalJobState"), "progress": ref("EvalProgress"), "finished_runs": array(ref("SuiteResult")), "headline_accuracy": nullable(ref("FiniteNumber")), "error": nullable(ref("String")), "source_training_job_id": nullable(ref("String")), "submitted_at_iso": ref("Rfc3339Timestamp"), "started_at_iso": nullable(ref("Rfc3339Timestamp")), "finished_at_iso": nullable(ref("Rfc3339Timestamp")), "post_eval_gate": ref("PostEvalGate")},
+        {"schema_version": {"const": 2}, "job_id": ref("NonEmptyString"), "suite_name": ref("EvalResourceName"), "adapters": array(nullable(ref("String"))), "submission_kind": ref("EvalSubmissionKind"), "base_weight_shard_manifest": external_ref(OBSERVABILITY_SCHEMA, "BaseWeightShardManifest"), "execution_provenance": external_ref(OBSERVABILITY_SCHEMA, "ExecutionProvenanceV1"), "effective_seed": ref("DecimalU64"), "state": ref("EvalJobState"), "progress": ref("EvalProgress"), "finished_runs": array(ref("SuiteResult")), "headline_accuracy": nullable(ref("FiniteNumber")), "error": nullable(ref("String")), "source_training_job_id": nullable(ref("String")), "submitted_at_iso": ref("Rfc3339Timestamp"), "started_at_iso": nullable(ref("Rfc3339Timestamp")), "finished_at_iso": nullable(ref("Rfc3339Timestamp")), "post_eval_gate": ref("PostEvalGate"), "replay_expectation": ref("EvalReplayExpectationV1"), "replay_verdict": ref("EvalReplayVerdict")},
         "Tracked eval-job list record; runtime-only Instants and cancellation handles are never serialized.",
-        optional=("base_weight_shard_manifest", "execution_provenance", "effective_seed", "post_eval_gate"),
+        optional=("base_weight_shard_manifest", "execution_provenance", "effective_seed", "post_eval_gate", "replay_expectation", "replay_verdict"),
     )
     add_object("EvalJobListResponse", "EvalJobListResponse", {"jobs": array(ref("EvalJobInfo"))}, "All retained eval jobs in descending submission order.")
     cancel_variants = [
@@ -575,7 +630,7 @@ def build_examples() -> dict[str, list[Any]]:
     judgment = judgment_example()
     outcome = {"example_id": "two-plus-two", "completion_index": 0, "generation_seed": "43", "completion_text": "4", "kind": "pass", "score": 1.0, "tags": ["math"]}
     aggregated = {"example_id": "two-plus-two", "kind": "pass", "score": 1.0, "completion_indices": [0], "representative_completion_index": 0, "num_pass": 1, "num_fail": 0, "num_invalid": 0, "num_error": 0, "tags": ["math"]}
-    run = {"suite_name": "math-smoke", "adapter": None, "aggregation": {"kind": "single"}, "metrics": metrics_example(), "aggregated_outcomes": [aggregated], "outcomes": [outcome], "started_at": "2026-07-14T12:00:00Z", "finished_at": "2026-07-14T12:00:01Z", "suite_hash": "suite-sha256"}
+    run = {"suite_name": "math-smoke", "adapter": None, "aggregation": {"kind": "single"}, "metrics": metrics_example(), "aggregated_outcomes": [aggregated], "outcomes": [outcome], "started_at": "2026-07-14T12:00:00Z", "finished_at": "2026-07-14T12:00:01Z", "suite_hash": "sha256:" + "6" * 64}
     job = {"schema_version": 2, "job_id": "eval-1", "suite_name": "math-smoke", "adapters": [None], "submission_kind": "on_demand", "effective_seed": "42", "state": "completed", "progress": {"examples_completed": 1, "examples_total": 1, "running_accuracy": 1.0, "running_mean_score": 1.0}, "finished_runs": [run], "headline_accuracy": 1.0, "error": None, "source_training_job_id": None, "submitted_at_iso": "2026-07-14T12:00:00Z", "started_at_iso": "2026-07-14T12:00:00Z", "finished_at_iso": "2026-07-14T12:00:01Z"}
     append = {"prompt": [{"role": "user", "content": "Explain the answer."}], "adapter_a": None, "adapter_b": "concise-v1", "response_a": "A long answer", "response_b": "A concise answer", "winner": "b", "tags": ["style"]}
     split_config = {"seed": "0", "train_percent": 80, "validation_percent": 10}
@@ -606,6 +661,7 @@ def build_examples() -> dict[str, list[Any]]:
         "JudgmentManifest": [judgment],
         "PromoteJudgmentBody": [{"adapter": "judge-v1", "holdout_n": 20}],
         "RenderJudgmentPromptResponse": [{"prompt": "Compare the following two assistant replies..."}],
+        "ReplayBody": [{"run_index": 0}],
         "RerunBody": [{"adapter": "math-v2", "outcome_kinds": ["fail", "invalid", "error"], "include_pass": False, "seed": 42}],
         "SuiteListResponse": [{"suites": [summary]}],
         "SuiteSaveResponse": [{"name": "math-smoke", "path": "/srv/kiln/.eval/suites/math-smoke.json", "status": "created"}],

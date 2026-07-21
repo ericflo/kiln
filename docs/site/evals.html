@@ -403,7 +403,33 @@
           <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/eval/jobs/$JOB_ID | python3 -m json.tool</code></pre>
         </section>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">
-          Re-run only failures from a completed job with <code>POST /v1/eval/jobs/{id}/rerun</code>. The re-run retains the original effective seed by default; send <code>{"seed": 73}</code> only when changing it deliberately.
+          Re-run only failures from a completed job with <code>POST /v1/eval/jobs/{id}/rerun</code>. The re-run retains the original effective seed by default; send <code>{"seed": 73}</code> only when changing it deliberately. A failure rerun is a subset diagnostic and makes no byte-reproduction claim; use strict replay for that contract.
+        </p>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Reproducibility</div>
+        <h2 id="strict-replay" class="text-2xl font-semibold mb-4">Replay a seeded run and compare exact decoder bytes</h2>
+        <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
+          Every new completed production run carries a self-validating <code>kiln.eval-replay.v1</code> record. It binds the exact suite and generation override, effective and per-completion seeds, resolved thinking budgets, full scorer configurations, candidate and judge targets, base weights, execution environment, and one content-addressed reference for every raw decoder continuation and normalized scoring text. The execution identity covers backend/device and runtime evidence, binary/source, model, tokenizer vocabulary/configuration, chat templates, precision, kernels/features, and effective configuration/environment.
+        </p>
+        <section class="endpoint">
+          <h3 class="font-semibold mb-2">Strictly replay run zero</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>kiln-eval replay --job eval_123
+
+curl -s -X POST http://localhost:8420/v1/eval/jobs/eval_123/replay \
+  -H "Content-Type: application/json" \
+  -d '{}'</code></pre>
+        </section>
+        <section class="endpoint mt-4">
+          <h3 class="font-semibold mb-2">Replay one arm of a compare job</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>kiln-eval replay --job eval_compare_123 --run-index 1 --json</code></pre>
+        </section>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">
+          Admission refuses legacy/incomplete sources, changed execution or base-weight digests, and changed candidate or judge adapter bytes before queue visibility. The executor rechecks the loaded candidate before decoding and each loaded judge before scoring. Terminal <code>replay_verdict.status</code> is <code>matched</code>, <code>mismatch</code>, or <code>error</code>; the CLI watches to terminal state and exits nonzero unless all bound identities and raw continuations match byte-for-byte. The Evals dashboard offers the same operation and exact-copy hashes for the selected run.
+        </p>
+        <p class="text-sm mt-3" style="color: var(--fg-mute);">
+          A match proves reproduction for that declared run and environment, not driver correctness or cross-backend determinism. A mismatch is retained evidence and blocks the claim; nondeterministic backend operations may still be the cause. New terminal archives require and validate replay records, while legacy archives remain readable but cannot be strict-replayed. The complete identity, race-boundary, archive, and verdict contract is in <a href="https://github.com/ericflo/kiln/blob/main/docs/EVAL_GUIDE.md#strict-byte-replay">EVAL_GUIDE.md</a>.
         </p>
       </article>
 
@@ -524,11 +550,12 @@
         <div class="label mb-3">CLI</div>
         <h2 id="cli" class="text-2xl font-semibold mb-4"><code>kiln-eval</code> CLI</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          The <code>kiln-eval</code> binary wraps the HTTP surface for scripted use: <code>list</code>, <code>register</code> a suite JSON, <code>run</code> a suite against an adapter (with <code>--watch</code>), <code>compare</code> multiple adapters head-to-head, and <code>probe</code> with a one-shot prompt+target+scorer. Synthesis stays HTTP-only — call <code>POST /v1/eval/datasets/&lt;name&gt;/synthesize</code>. See the <a href="cli.html">CLI Reference</a> and <a href="https://github.com/ericflo/kiln/blob/main/docs/EVAL_GUIDE.md">EVAL_GUIDE.md</a>.
+          The <code>kiln-eval</code> binary wraps the HTTP surface for scripted use: <code>list</code>, <code>register</code> a suite JSON, <code>run</code> a suite against an adapter (with <code>--watch</code>), <code>compare</code> multiple adapters head-to-head, <code>probe</code> with a one-shot prompt+target+scorer, and <code>replay</code> a completed run to a strict terminal byte verdict. Synthesis stays HTTP-only — call <code>POST /v1/eval/datasets/&lt;name&gt;/synthesize</code>. See the <a href="cli.html">CLI Reference</a> and <a href="https://github.com/ericflo/kiln/blob/main/docs/EVAL_GUIDE.md">EVAL_GUIDE.md</a>.
         </p>
         <section class="endpoint">
           <h3 class="font-semibold mb-2">Run a suite from the terminal</h3>
-          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>kiln-eval run --suite trajectories-suite --adapter my-coder-v3</code></pre>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>kiln-eval run --suite trajectories-suite --adapter my-coder-v3
+kiln-eval replay --job eval_123 --json</code></pre>
         </section>
       </article>
     </div>

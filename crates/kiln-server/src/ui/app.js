@@ -7946,7 +7946,7 @@ async function refreshEvalJobs() {
       evalJobsFilter.query, evalJobsFilter.state,
       filtered.map(j => [
         j.job_id, j.state, j.suite_name, j.adapters, j.submission_kind,
-        j.effective_seed, j.headline_accuracy, j.progress, j.error,
+        j.effective_seed, j.headline_accuracy, j.progress, j.error, j.replay_verdict,
         (j.finished_runs || []).map(r => [r.adapter, r.metrics]),
       ]),
     ]);
@@ -8113,6 +8113,46 @@ function wireExecutionProvenanceCopy(root) {
   });
 }
 
+function replayStatusPresentation(status) {
+  if (status === 'matched') return { cls: 'completed', label: 'Replay matched' };
+  if (status === 'mismatch') return { cls: 'failed', label: 'Replay mismatch' };
+  if (status === 'error') return { cls: 'failed', label: 'Replay error' };
+  return { cls: 'running', label: 'Replay pending' };
+}
+
+function renderReplaySummary(job, compact = false) {
+  if (!job?.replay_expectation) return '';
+  const verdict = job.replay_verdict;
+  const present = replayStatusPresentation(verdict?.status);
+  if (compact) {
+    return `<span class="job-state-pill ${present.cls}" title="${escapeHtml(verdict?.message || 'Waiting for a terminal byte-comparison verdict')}">${present.label}</span>`;
+  }
+  const record = verdict?.expected_record_sha256 || job.replay_expectation.expected_record_sha256;
+  const raw = verdict?.expected_raw_completion_set_sha256 || job.replay_expectation.expected_raw_completion_set_sha256;
+  const actualRecord = verdict?.actual_record_sha256;
+  const actualRaw = verdict?.actual_raw_completion_set_sha256;
+  const short = value => value?.length > 28 ? `${value.slice(0, 18)}…${value.slice(-8)}` : (value || 'missing');
+  return `<div class="hint" style="display:flex; align-items:center; gap:6px; min-width:0; flex-wrap:wrap; font-size:11px;">
+    <span class="job-state-pill ${present.cls}" title="${escapeHtml(verdict?.message || 'Waiting for a terminal byte-comparison verdict')}">${present.label}</span>
+    <strong style="color:var(--text);">Record</strong><code title="${escapeHtml(record)}">${escapeHtml(short(record))}</code>
+    <button class="btn btn-sm btn-ghost" type="button" data-copy-replay="${escapeHtml(record)}" title="Copy expected replay-record digest" aria-label="Copy expected replay-record digest"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg></button>
+    <strong style="color:var(--text);">Raw set</strong><code title="${escapeHtml(raw)}">${escapeHtml(short(raw))}</code>
+    <button class="btn btn-sm btn-ghost" type="button" data-copy-replay="${escapeHtml(raw)}" title="Copy expected raw-completion-set digest" aria-label="Copy expected raw-completion-set digest"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg></button>
+    ${actualRecord && actualRecord !== record ? `<strong style="color:var(--text);">Actual record</strong><code title="${escapeHtml(actualRecord)}">${escapeHtml(short(actualRecord))}</code><button class="btn btn-sm btn-ghost" type="button" data-copy-replay="${escapeHtml(actualRecord)}" title="Copy actual replay-record digest" aria-label="Copy actual replay-record digest"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg></button>` : ''}
+    ${actualRaw && actualRaw !== raw ? `<strong style="color:var(--text);">Actual raw set</strong><code title="${escapeHtml(actualRaw)}">${escapeHtml(short(actualRaw))}</code><button class="btn btn-sm btn-ghost" type="button" data-copy-replay="${escapeHtml(actualRaw)}" title="Copy actual raw-completion-set digest" aria-label="Copy actual raw-completion-set digest"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg></button>` : ''}
+  </div>`;
+}
+
+function wireReplayCopy(root) {
+  root?.querySelectorAll('[data-copy-replay]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const value = btn.dataset.copyReplay;
+      if (!value) return;
+      copyText(value, btn).then(() => toast('Replay identity copied', 'ok'));
+    });
+  });
+}
+
 function renderJobCard(j) {
   const acc = j.headline_accuracy;
   const adapters = (j.adapters || []).map(a => a == null ? '<span class="hint">base</span>' : escapeHtml(a)).join(' vs ');
@@ -8168,6 +8208,7 @@ function renderJobCard(j) {
         <span>${adapters}</span>
         <span class="hint">${escapeHtml(j.submission_kind)}</span>
         ${seed ? `<span class="hint" style="font-family:var(--font-mono);" title="Immutable effective eval seed">seed ${escapeHtml(seed)}</span>` : ''}
+        ${renderReplaySummary(j, true)}
         <span class="hint" style="font-family:var(--font-mono);">${escapeHtml(j.job_id.slice(0, 8))}</span>
       </div>
       ${progressOrCounts}
@@ -8362,6 +8403,11 @@ function renderDrillModal(preserveSelection) {
       drillExampleRows(r).some(o => o.kind !== 'pass'));
     rerunBtn.hidden = isActive || !failingInAnyRun;
   }
+  const replayBtn = document.getElementById('drill-replay');
+  if (replayBtn) {
+    const selectedRun = (j.runs || [])[Math.min(drillSelectedRun, Math.max(0, (j.runs || []).length - 1))];
+    replayBtn.hidden = j.state !== 'completed' || !selectedRun?.replay_record;
+  }
   // Download outcomes (.jsonl): live across every run of the job (compare
   // jobs export all adapters, one line per outcome). Disabled until the
   // first outcome lands so the click never produces an empty file.
@@ -8385,9 +8431,11 @@ function renderDrillModal(preserveSelection) {
       <div class="hint">${j.state === 'queued' ? 'Job is queued. Will start shortly.' : (j.state === 'running' ? 'Job is running. Live progress streaming…' : 'No completed runs yet.')}</div>
       ${j.progress && j.progress.examples_total > 0 ? `<div style="flex:1;"><div class="progress-bar-wrap" style="height:8px;"><div class="progress-bar-fill" style="width:${(j.progress.examples_completed / j.progress.examples_total * 100).toFixed(1)}%;"></div></div><div class="hint" style="font-size:11px; margin-top:4px;">${j.progress.examples_completed}/${j.progress.examples_total} · running ${(j.progress.running_accuracy*100).toFixed(0)}%</div></div>` : ''}
       ${renderBaseWeightSummary(j.base_weight_shard_manifest)}
-      ${renderExecutionProvenanceSummary(j.execution_provenance)}`;
+      ${renderExecutionProvenanceSummary(j.execution_provenance)}
+      ${renderReplaySummary(j)}`;
     wireBaseWeightCopy(headerEl);
     wireExecutionProvenanceCopy(headerEl);
+    wireReplayCopy(headerEl);
     compareEl.hidden = true;
     tagsEl.hidden = true;
     document.getElementById('drill-outcomes').innerHTML = '<div class="eval-empty"><div class="eval-empty-body">Outcomes will appear here as they complete.</div></div>';
@@ -8415,9 +8463,11 @@ function renderDrillModal(preserveSelection) {
       </div>
     </div>
     ${renderBaseWeightSummary(j.base_weight_shard_manifest)}
-    ${renderExecutionProvenanceSummary(j.execution_provenance)}`;
+    ${renderExecutionProvenanceSummary(j.execution_provenance)}
+    ${renderReplaySummary(j)}`;
   wireBaseWeightCopy(headerEl);
   wireExecutionProvenanceCopy(headerEl);
+  wireReplayCopy(headerEl);
 
   // Compare matrix when multi-run
   if (isCompare && runs.length >= 2) {
@@ -8816,6 +8866,27 @@ document.getElementById('drill-rerun')?.addEventListener('click', async () => {
     refreshEvalJobs();
     setTimeout(() => openDrillModal(res.job_id), 200);
   } catch (e) { toast('Re-run failed: ' + e.message, 'err'); }
+});
+
+document.getElementById('drill-replay')?.addEventListener('click', async () => {
+  if (!drillJob) return;
+  const runIndex = Math.min(drillSelectedRun, Math.max(0, (drillJob.runs?.length || 1) - 1));
+  const run = drillJob.runs?.[runIndex];
+  if (!run?.replay_record) {
+    toast('This run predates strict replay evidence', 'err');
+    return;
+  }
+  if (!confirm(`Strictly replay run ${runIndex} and compare every raw decoder completion byte?`)) return;
+  try {
+    const res = await api('/v1/eval/jobs/' + encodeURIComponent(drillJob.job_id) + '/replay', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ run_index: runIndex }),
+    });
+    toast('Queued strict replay as ' + res.job_id.slice(0, 8), 'ok');
+    closeDrillModal();
+    refreshEvalJobs();
+    setTimeout(() => openDrillModal(res.job_id), 200);
+  } catch (e) { toast('Strict replay refused: ' + e.message, 'err'); }
 });
 
 // Modal-scoped keyboard shortcuts: / focuses search; J/K scroll through

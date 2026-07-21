@@ -2339,6 +2339,56 @@
         }
       }
     },
+    "/v1/eval/jobs/{job_id}/replay": {
+      "post": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Replay job",
+        "operationId": "eval_replay_job_post_v1_eval_jobs_job_id_replay",
+        "x-kiln-handler": "eval::replay_job",
+        "x-kiln-rust-signature": "async fn replay_job( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, Json(body): Json<ReplayBody>, ) -> Result<Json<EvalRunResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplayBody"
+              }
+            }
+          },
+          "x-kiln-rust-type": "ReplayBody"
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "EvalRunResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
     "/v1/eval/jobs/{job_id}/rerun": {
       "post": {
         "tags": [
@@ -4870,6 +4920,11 @@
         "x-kiln-rust-type": "RenderJudgmentPromptResponse",
         "x-kiln-field-schema-status": "complete"
       },
+      "ReplayBody": {
+        "$ref": "kiln-evals-v1.schema.json#/$defs/ReplayBody",
+        "x-kiln-rust-type": "ReplayBody",
+        "x-kiln-field-schema-status": "complete"
+      },
       "RequestRecord": {
         "$ref": "kiln-observability-v1.schema.json#/$defs/RequestRecord",
         "x-kiln-rust-type": "RequestRecord",
@@ -5025,19 +5080,19 @@
       }
     }
   },
-  "x-kiln-path-count": 102,
-  "x-kiln-operation-count": 114,
+  "x-kiln-path-count": 103,
+  "x-kiln-operation-count": 115,
   "x-kiln-method-counts": {
     "DELETE": 12,
     "GET": 54,
-    "POST": 47,
+    "POST": 48,
     "PUT": 1
   },
   "x-kiln-tag-counts": {
     "adapters": 9,
     "agents": 16,
     "corrections": 5,
-    "evals": 27,
+    "evals": 28,
     "hf-trl": 7,
     "inference": 3,
     "library": 3,
@@ -5050,8 +5105,8 @@
   },
   "x-kiln-field-schema-status": "complete",
   "x-kiln-component-schema-counts": {
-    "complete": 133,
+    "complete": 134,
     "migration_pending": 0,
-    "total": 133
+    "total": 134
   }
 }

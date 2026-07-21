@@ -65,6 +65,10 @@ pub struct EvalQueueEntry {
     /// worker. Kept beside the payload so execution cannot observe a mutable
     /// tracking-map value.
     pub effective_seed: u64,
+    /// Source identity retained only while a strict replay is queued/running.
+    /// The public tracking record keeps the compact expectation; execution
+    /// uses this full record to reject adapter drift before generation.
+    pub replay_source_record: Option<std::sync::Arc<kiln_eval::EvalReplayRecordV1>>,
     pub job: QueuedEvalJob,
 }
 
@@ -160,6 +164,13 @@ pub struct EvalJobInfo {
     /// carried `post_eval.min_accuracy`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_eval_gate: Option<PostEvalGate>,
+    /// Immutable byte-comparison target installed before replay queue
+    /// publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_expectation: Option<kiln_eval::EvalReplayExpectationV1>,
+    /// Terminal strict-replay classification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_verdict: Option<kiln_eval::EvalReplayVerdict>,
 }
 
 impl EvalJobInfo {
@@ -196,6 +207,8 @@ impl EvalJobInfo {
             finished_at: None,
             cancel_flag: None,
             post_eval_gate: None,
+            replay_expectation: None,
+            replay_verdict: None,
         }
     }
 
@@ -212,6 +225,8 @@ impl EvalJobInfo {
             seed_derivation: self
                 .effective_seed
                 .map(|_| kiln_eval::EVAL_SEED_DERIVATION_V1.to_string()),
+            replay_expectation: self.replay_expectation.clone(),
+            replay_verdict: self.replay_verdict.clone(),
             runs: self.finished_runs.clone(),
             progress: if matches!(self.state, EvalJobState::Running | EvalJobState::Queued) {
                 Some(self.progress.clone())
@@ -296,6 +311,7 @@ mod tests {
         q.push(EvalQueueEntry {
             job_id: "a".into(),
             effective_seed: 1,
+            replay_source_record: None,
             job: QueuedEvalJob::Inline {
                 suite: Box::new(dummy_suite()),
                 adapter: None,
@@ -305,6 +321,7 @@ mod tests {
         q.push(EvalQueueEntry {
             job_id: "b".into(),
             effective_seed: 2,
+            replay_source_record: None,
             job: QueuedEvalJob::Inline {
                 suite: Box::new(dummy_suite()),
                 adapter: None,
@@ -323,6 +340,7 @@ mod tests {
         q.push(EvalQueueEntry {
             job_id: "a".into(),
             effective_seed: 1,
+            replay_source_record: None,
             job: QueuedEvalJob::Inline {
                 suite: Box::new(dummy_suite()),
                 adapter: None,

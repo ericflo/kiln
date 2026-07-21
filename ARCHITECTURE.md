@@ -671,18 +671,47 @@ The eval queue mirrors the training queue's design — a single FIFO worker, ter
 ```
 POST /v1/eval/run ──┐
 POST /v1/eval/compare ──► EvalQueue (FIFO) ──► spawn_eval_worker
+POST /v1/eval/jobs/{id}/replay ──┘                  │
 POST /v1/train/{sft,grpo}                            │   (read-locks GPU
   with post_eval: {…} ──► enqueue_post_training_eval │    while generating)
                                                      ▼
                                   EvalJobInfo (Queued → Running → Completed/Failed)
                                   ├── progress: EvalProgress { running_accuracy, … }
                                   ├── finished_runs: Vec<SuiteResult>
+                                  ├── replay_expectation / replay_verdict
                                   └── headline_accuracy
 ```
 
 `QueuedEvalJob` has three variants — `Registered { suite_name, adapter, … }`, `Inline { suite, adapter, … }`, and `Compare(spec)` (one suite × N adapters). The worker reads the next entry, resolves the suite from the registry (or uses the inline copy), instantiates a generator that drives the in-process inference path through `crate::eval::generator::generator_from_state`, and runs `run_suite_against_adapter` per adapter. Progress callbacks update `EvalJobInfo.progress` after every example so the UI's drill-in modal can stream a running accuracy.
 
 Cancellation flows through an `Arc<AtomicBool>` checked between examples; the API's cancel endpoint marks the job `Cancelled` and the worker either skips it (if still queued) or stops at the next example boundary (if running). Terminal jobs are evicted from `eval_jobs` once `tracked_job_ttl` elapses (`gc_eval_jobs`) so long-running servers don't grow the map unbounded.
+
+### Strict eval replay
+
+Every newly finished production `SuiteResult` includes an
+`EvalReplayRecordV1`. The record binds the exact suite, generation override,
+effective/per-completion seeds, resolved thinking budgets, model and judge
+adapter content identities, per-example scorer configuration, execution and
+base-weight digests, and content-addressed raw/normalized completion references.
+Its self hash excludes incidental job timestamps and includes the raw-completion
+set hash, so two exact runs can be compared directly.
+
+`POST /v1/eval/jobs/{id}/replay` selects one completed source run and performs
+two layers of fail-closed checks. Admission validates the source record against
+retained outcomes, requires the current startup execution and base-weight
+digests, re-attests named adapter files, and publishes the new queue entry only
+after its public expectation and internal source record are installed. The
+executor then compares suite/generation/seed/environment/base identities before
+work, verifies the exact loaded candidate immediately before decode, and
+verifies each exact loaded judge immediately before scoring. This closes the
+queue-to-load race without treating a later output comparison as sufficient.
+
+The worker constructs one terminal `matched`, `mismatch`, or `error` verdict.
+`matched` requires equal record and raw-completion-set hashes; archive validation
+rejects contradictory verdicts, changed outcome bytes, and new finished runs
+without replay records. Legacy archives may load without a record but cannot be
+strict-replayed. `kiln-eval replay` always polls to this terminal verdict and
+exits nonzero for anything except `matched`.
 
 ### Post-training auto-eval hook
 

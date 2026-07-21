@@ -10,7 +10,6 @@ use kiln_eval::{
     AggregateMetrics, EvalGenerationParams, EvalOutcomeKind, EvalProgress, EvalSuite,
     EvalThinkingBudget, ExampleOutcome, SuiteResult, aggregate_example_outcomes,
 };
-use sha2::{Digest, Sha256};
 
 use crate::eval::generator::{EvalGenerationSource, EvalGenerator, PreparedPrompt};
 
@@ -29,6 +28,15 @@ pub enum EvalExecutionError {
 /// still in flight.
 pub type ProgressCallback = Box<dyn Fn(EvalProgress) + Send + Sync>;
 
+/// Startup-owned identities bound into every replay record produced by a
+/// worker. Synthetic executor callers may use the empty default; strict replay
+/// will correctly reject the resulting incomplete record.
+#[derive(Debug, Clone, Default)]
+pub struct EvalReplayEnvironment {
+    pub execution_provenance_sha256: Option<String>,
+    pub base_weight_manifest_sha256: Option<String>,
+}
+
 /// Run `suite` against `adapter` with `generator`. Returns the aggregated
 /// `SuiteResult`. The function is cancellation-cooperative — when the
 /// `cancelled` flag flips to true the executor returns early with the
@@ -43,6 +51,34 @@ pub async fn run_suite_against_adapter(
     cancelled: Arc<std::sync::atomic::AtomicBool>,
     judge_runner: Arc<dyn JudgeRunner>,
 ) -> Result<SuiteResult, EvalExecutionError> {
+    run_suite_against_adapter_with_replay(
+        suite,
+        adapter,
+        generation_override,
+        effective_seed,
+        generator,
+        progress,
+        cancelled,
+        judge_runner,
+        EvalReplayEnvironment::default(),
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_suite_against_adapter_with_replay(
+    suite: &EvalSuite,
+    adapter: Option<&str>,
+    generation_override: Option<&EvalGenerationParams>,
+    effective_seed: u64,
+    generator: Arc<dyn EvalGenerator>,
+    progress: Option<ProgressCallback>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    judge_runner: Arc<dyn JudgeRunner>,
+    replay_environment: EvalReplayEnvironment,
+    replay_source_record: Option<Arc<kiln_eval::EvalReplayRecordV1>>,
+) -> Result<SuiteResult, EvalExecutionError> {
     suite
         .validate()
         .map_err(|error| EvalExecutionError::Aggregation(error.to_string()))?;
@@ -53,12 +89,26 @@ pub async fn run_suite_against_adapter(
     // validated exactly once per run.
     let (prepared_examples, resolved_budgets) =
         prepare_and_preflight_examples(suite, generation_override, generator.as_ref()).await?;
-    let effective_generation_hash = hash_effective_generation(
+    let effective_generation_hash = kiln_eval::eval_effective_generation_sha256(
         suite,
         generation_override,
         effective_seed,
         &resolved_budgets,
-    );
+    )
+    .map_err(|error| EvalExecutionError::Aggregation(error.to_string()))?;
+    let suite_hash = kiln_eval::eval_suite_sha256(suite)
+        .map_err(|error| EvalExecutionError::Aggregation(error.to_string()))?;
+    if let Some(source) = replay_source_record.as_deref()
+        && (source.effective_seed != effective_seed
+            || source.suite_sha256 != suite_hash
+            || source.effective_generation_sha256 != effective_generation_hash
+            || source.execution_provenance_sha256 != replay_environment.execution_provenance_sha256
+            || source.base_weight_manifest_sha256 != replay_environment.base_weight_manifest_sha256)
+    {
+        return Err(EvalExecutionError::Generation(
+            "strict replay input or environment identity drifted after admission".into(),
+        ));
+    }
 
     // Hoist the adapter swap out of the per-example loop. The previous
     // active adapter is restored at the end via the same call so a suite
@@ -69,6 +119,22 @@ pub async fn run_suite_against_adapter(
         .set_adapter(adapter)
         .await
         .map_err(EvalExecutionError::Generation)?;
+    let model_target = match generator.model_target_identity(adapter) {
+        Ok(identity) => identity,
+        Err(error) => {
+            let _ = generator.restore_adapter(previous_adapter.as_deref()).await;
+            return Err(EvalExecutionError::Generation(error));
+        }
+    };
+    if let Some(source) = replay_source_record.as_deref()
+        && model_target != source.model_target
+    {
+        let _ = generator.restore_adapter(previous_adapter.as_deref()).await;
+        return Err(EvalExecutionError::Generation(format!(
+            "strict replay model target drifted after admission: expected {:?}, loaded {:?}",
+            source.model_target, model_target
+        )));
+    }
     let result = run_suite_inner(
         suite,
         adapter,
@@ -76,7 +142,11 @@ pub async fn run_suite_against_adapter(
         effective_seed,
         prepared_examples,
         resolved_budgets,
+        suite_hash,
         effective_generation_hash,
+        model_target,
+        replay_environment,
+        replay_source_record,
         generator.clone(),
         progress,
         cancelled,
@@ -119,7 +189,11 @@ async fn run_suite_inner(
     effective_seed: u64,
     prepared_examples: Vec<Result<PreparedPrompt, String>>,
     resolved_budgets: Vec<EvalThinkingBudget>,
+    suite_hash: String,
     effective_generation_hash: String,
+    model_target: Option<kiln_eval::EvalModelTargetIdentity>,
+    replay_environment: EvalReplayEnvironment,
+    replay_source_record: Option<Arc<kiln_eval::EvalReplayRecordV1>>,
     generator: Arc<dyn EvalGenerator>,
     progress: Option<ProgressCallback>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
@@ -136,6 +210,7 @@ async fn run_suite_inner(
     let mut predicted_tool_by_outcome: BTreeMap<(String, usize), String> = BTreeMap::new();
     let mut schema_violations_by_outcome: BTreeMap<(String, usize), (u32, u32)> = BTreeMap::new();
     let mut deferred_judge: Vec<DeferredJudgeScore> = Vec::new();
+    let mut judge_targets: Vec<kiln_eval::EvalModelTargetIdentity> = Vec::new();
 
     'examples: for (outcomes_example_index, example) in suite.examples.iter().enumerate() {
         if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
@@ -410,6 +485,24 @@ async fn run_suite_inner(
                 publish_reduced_progress(&outcomes, suite, progress.as_ref(), suite.examples.len());
                 continue;
             }
+            let identity = generator
+                .model_target_identity(judge_adapter.as_deref())
+                .map_err(EvalExecutionError::Generation)?;
+            if let Some(source) = replay_source_record.as_deref() {
+                let expected = source
+                    .judge_targets
+                    .iter()
+                    .find(|target| target.adapter == judge_adapter);
+                if identity.as_ref() != expected {
+                    return Err(EvalExecutionError::Generation(format!(
+                        "strict replay judge target drifted after admission for {:?}: expected {:?}, loaded {:?}",
+                        judge_adapter, expected, identity
+                    )));
+                }
+            }
+            if let Some(identity) = identity {
+                judge_targets.push(identity);
+            }
             let batch: Vec<(
                 DeferredJudgeScore,
                 kiln_eval::scorers::Scorer,
@@ -492,7 +585,18 @@ async fn run_suite_inner(
         elapsed,
     );
     let finished_at = chrono::Utc::now();
-    let suite_hash = hash_suite(suite);
+    let replay_record = kiln_eval::EvalReplayRecordV1::new(
+        suite.clone(),
+        generation_override.cloned(),
+        effective_seed,
+        resolved_budgets,
+        model_target,
+        judge_targets,
+        replay_environment.execution_provenance_sha256,
+        replay_environment.base_weight_manifest_sha256,
+        &outcomes,
+    )
+    .map_err(|error| EvalExecutionError::Aggregation(error.to_string()))?;
 
     Ok(SuiteResult {
         suite_name: suite.name.clone(),
@@ -505,6 +609,7 @@ async fn run_suite_inner(
         finished_at: finished_at.to_rfc3339(),
         suite_hash,
         effective_generation_hash,
+        replay_record: Some(replay_record),
     })
 }
 
@@ -632,43 +737,6 @@ async fn prepare_and_preflight_examples(
     Ok((prepared_examples, resolved))
 }
 
-fn hash_effective_generation(
-    suite: &EvalSuite,
-    generation_override: Option<&EvalGenerationParams>,
-    effective_seed: u64,
-    resolved_budgets: &[EvalThinkingBudget],
-) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(kiln_eval::EVAL_SEED_DERIVATION_V1.as_bytes());
-    hasher.update(effective_seed.to_le_bytes());
-    if let Ok(bytes) = serde_json::to_vec(suite) {
-        hasher.update(bytes);
-    }
-    if let Ok(bytes) = serde_json::to_vec(&generation_override) {
-        hasher.update(bytes);
-    }
-    if let Ok(bytes) = serde_json::to_vec(resolved_budgets) {
-        hasher.update(bytes);
-    }
-    let digest = hasher.finalize();
-    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
-}
-
-/// Stable hash of the suite content. Used to detect "did the suite change
-/// between runs?" in replay auditing. Hashes the suite JSON canonical form.
-pub fn hash_suite(suite: &EvalSuite) -> String {
-    let mut hasher = Sha256::new();
-    // serde_json doesn't sort keys by default but our shape is mostly
-    // arrays + strings so byte-form serialization is stable.
-    if let Ok(b) = serde_json::to_vec(suite) {
-        hasher.update(&b);
-    } else {
-        hasher.update(suite.name.as_bytes());
-    }
-    let digest = hasher.finalize();
-    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
-}
-
 /// Convenience: a no-op judge runner wrapped in an `Arc` for callers that
 /// don't have a live judge (unit tests, offline eval, etc.).
 pub fn noop_judge_runner() -> Arc<dyn JudgeRunner> {
@@ -717,6 +785,71 @@ mod tests {
         seeds: std::sync::Mutex<Vec<u64>>,
     }
 
+    struct ReplayDriftProbeGenerator {
+        run_calls: AtomicUsize,
+        adapter_calls: AtomicUsize,
+        identity_error: bool,
+    }
+
+    impl EvalGenerator for ReplayDriftProbeGenerator {
+        fn set_adapter(
+            &self,
+            _adapter: Option<&str>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send + '_>,
+        > {
+            self.adapter_calls.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async { Ok(None) })
+        }
+
+        fn model_target_identity(
+            &self,
+            _expected_adapter: Option<&str>,
+        ) -> Result<Option<kiln_eval::EvalModelTargetIdentity>, String> {
+            if self.identity_error {
+                Err("synthetic identity failure".into())
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn prepare(
+            &self,
+            _messages: &[EvalChatMessage],
+            _system_prompt: Option<&str>,
+            _tools: Option<&[serde_json::Value]>,
+            _params: &EvalGenerationParams,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<PreparedPrompt, String>> + Send + '_>,
+        > {
+            Box::pin(async {
+                Ok(PreparedPrompt {
+                    tokens: vec![1],
+                    starts_in_reasoning: false,
+                })
+            })
+        }
+
+        fn run(
+            &self,
+            _prepared: &PreparedPrompt,
+            _params: &EvalGenerationParams,
+            _thinking_budget: &EvalThinkingBudget,
+            _completion_index: usize,
+            _adapter_label: Option<&str>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<crate::eval::generator::EvalCompletion, String>,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            self.run_calls.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async { Err("run must not be reached".into()) })
+        }
+    }
+
     impl EvalGenerator for PreflightProbeGenerator {
         fn preflight_thinking_budget(
             &self,
@@ -733,6 +866,11 @@ mod tests {
                 EvalGenerationSource::RunOverride => "run_override",
                 EvalGenerationSource::Example => "example",
             };
+            let tokens_source = match params.thinking_budget_tokens {
+                EvalBudgetOverride::Inherit => "unlimited".to_string(),
+                EvalBudgetOverride::Unlimited => format!("{source}_unlimited"),
+                EvalBudgetOverride::Limited(_) => source.to_string(),
+            };
             Box::pin(async move {
                 if starts_in_reasoning {
                     return Err("synthetic invalid close sequence".into());
@@ -742,7 +880,7 @@ mod tests {
                     applied: false,
                     max_tokens,
                     max_time_ms: None,
-                    tokens_source: source.into(),
+                    tokens_source: tokens_source.into(),
                     time_source: "unlimited".into(),
                     outcome: None,
                 })
@@ -877,6 +1015,91 @@ mod tests {
         );
         assert_eq!(active.preflight_calls.load(Ordering::Relaxed), 1);
         assert_eq!(active.adapter_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn strict_replay_rejects_model_identity_drift_before_generation() {
+        let mut suite = suite_with_numeric_answer();
+        suite.examples.truncate(1);
+        let mut outcome = kiln_eval::score_completion(
+            &suite.default_scorer,
+            &suite.examples[0],
+            "2",
+            &kiln_eval::scorers::NoopJudgeRunner,
+        )
+        .unwrap();
+        outcome.generation_seed = Some(kiln_eval::derive_eval_completion_seed(17, "e1", 0));
+        outcome.raw_completion_text = Some("2".into());
+        outcome.thinking_budget = Some(EvalThinkingBudget::default());
+        let execution = format!("sha256:{}", "11".repeat(32));
+        let weights = format!("sha256:{}", "22".repeat(32));
+        let source = kiln_eval::EvalReplayRecordV1::new(
+            suite.clone(),
+            None,
+            17,
+            vec![EvalThinkingBudget::default()],
+            Some(kiln_eval::EvalModelTargetIdentity::base()),
+            Vec::new(),
+            Some(execution.clone()),
+            Some(weights.clone()),
+            std::slice::from_ref(&outcome),
+        )
+        .unwrap();
+        source.validate_strict_replay(&[outcome]).unwrap();
+        let probe = Arc::new(ReplayDriftProbeGenerator {
+            run_calls: AtomicUsize::new(0),
+            adapter_calls: AtomicUsize::new(0),
+            identity_error: false,
+        });
+        let error = run_suite_against_adapter_with_replay(
+            &suite,
+            None,
+            None,
+            17,
+            probe.clone(),
+            None,
+            Arc::new(AtomicBool::new(false)),
+            noop_judge_runner(),
+            EvalReplayEnvironment {
+                execution_provenance_sha256: Some(execution),
+                base_weight_manifest_sha256: Some(weights),
+            },
+            Some(Arc::new(source)),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("model target drifted"),
+            "{error}"
+        );
+        assert_eq!(probe.run_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(probe.adapter_calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn model_identity_attestation_error_restores_previous_adapter() {
+        let mut suite = suite_with_numeric_answer();
+        suite.examples.truncate(1);
+        let probe = Arc::new(ReplayDriftProbeGenerator {
+            run_calls: AtomicUsize::new(0),
+            adapter_calls: AtomicUsize::new(0),
+            identity_error: true,
+        });
+        let error = run_suite_against_adapter(
+            &suite,
+            Some("candidate"),
+            None,
+            17,
+            probe.clone(),
+            None,
+            Arc::new(AtomicBool::new(false)),
+            noop_judge_runner(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("synthetic identity failure"));
+        assert_eq!(probe.run_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(probe.adapter_calls.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]

@@ -154,6 +154,16 @@ pub trait EvalGenerator: Send + Sync {
         Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send + '_>,
     >;
 
+    /// Attest the exact model target selected by the preceding
+    /// [`Self::set_adapter`] call. Synthetic generators may return `None`;
+    /// strict replay refuses records without this identity.
+    fn model_target_identity(
+        &self,
+        _expected_adapter: Option<&str>,
+    ) -> Result<Option<kiln_eval::EvalModelTargetIdentity>, String> {
+        Ok(None)
+    }
+
     /// Restore the pre-suite adapter after the run. Unlike
     /// [`Self::set_adapter`], a name match may no-op: the serving
     /// adapter's content did not change while the eval held the runtime.
@@ -345,6 +355,32 @@ impl EvalGenerator for LiveEvalGenerator {
             .await?;
             Ok(previous)
         })
+    }
+
+    fn model_target_identity(
+        &self,
+        expected_adapter: Option<&str>,
+    ) -> Result<Option<kiln_eval::EvalModelTargetIdentity>, String> {
+        let expected = expected_adapter
+            .map(str::to_string)
+            .filter(|name| !name.is_empty());
+        let loaded = self.state.loaded_adapter_identity();
+        match (expected.as_deref(), loaded) {
+            (None, None) => Ok(Some(kiln_eval::EvalModelTargetIdentity::base())),
+            (Some(expected), Some(loaded)) if loaded.name == expected => {
+                kiln_eval::EvalModelTargetIdentity::adapter(loaded.name, &loaded.content_revision)
+                    .map(Some)
+                    .map_err(|error| format!("attest eval adapter identity: {error}"))
+            }
+            (expected, loaded) => Err(format!(
+                "eval target identity mismatch after adapter selection: expected {}, loaded {}",
+                expected.unwrap_or("base"),
+                loaded
+                    .as_ref()
+                    .map(|identity| identity.name.as_str())
+                    .unwrap_or("base")
+            )),
+        }
     }
 
     fn restore_adapter(

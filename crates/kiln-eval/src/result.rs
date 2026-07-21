@@ -938,6 +938,11 @@ pub struct SuiteResult {
     /// `suite_hash`, this changes when inherited server defaults change.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub effective_generation_hash: String,
+    /// Self-validating suite, generation, model/scorer, environment, and raw
+    /// completion identity. Absent only on legacy or explicitly synthetic
+    /// results that predate the replay contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_record: Option<crate::replay::EvalReplayRecordV1>,
 }
 
 /// Top-level eval result that may contain multiple suite runs (one per
@@ -970,6 +975,13 @@ pub struct EvalResult {
     pub effective_seed: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed_derivation: Option<String>,
+    /// Immutable source record expected by a strict replay job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_expectation: Option<crate::replay::EvalReplayExpectationV1>,
+    /// Byte-for-byte comparison result, populated when a replay job reaches a
+    /// terminal state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_verdict: Option<crate::replay::EvalReplayVerdict>,
     /// One entry per adapter requested. Single-adapter runs have len == 1.
     pub runs: Vec<SuiteResult>,
     /// Live progress for the currently-running adapter (cleared once the
@@ -1309,6 +1321,8 @@ mod tests {
             execution_provenance: None,
             effective_seed: None,
             seed_derivation: None,
+            replay_expectation: None,
+            replay_verdict: None,
             runs: Vec::new(),
             progress: None,
             error: None,
@@ -1330,6 +1344,7 @@ mod tests {
             finished_at: "2026-05-14T00:00:01Z".into(),
             suite_hash: "deadbeef".into(),
             effective_generation_hash: "feedface".into(),
+            replay_record: None,
         }
     }
 
@@ -1441,6 +1456,8 @@ mod tests {
             execution_provenance: None,
             effective_seed: None,
             seed_derivation: None,
+            replay_expectation: None,
+            replay_verdict: None,
             runs: vec![baseline, candidate],
             progress: None,
             error: None,
@@ -1464,6 +1481,8 @@ mod tests {
             execution_provenance: None,
             effective_seed: None,
             seed_derivation: None,
+            replay_expectation: None,
+            replay_verdict: None,
             runs: vec![mk_run(
                 "v0",
                 vec![mk("a", 0, EvalOutcomeKind::Pass, 1.0, 1.0)],

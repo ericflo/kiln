@@ -3103,6 +3103,8 @@ impl AppState {
             job,
             None,
             None,
+            None,
+            None,
         )
     }
 
@@ -3126,6 +3128,8 @@ impl AppState {
             source_training_job_id,
             job,
             Some(effective_seed),
+            None,
+            None,
             None,
         )
     }
@@ -3152,6 +3156,42 @@ impl AppState {
             job,
             forced_effective_seed,
             Some(post_eval_gate),
+            None,
+            None,
+        )
+    }
+
+    /// Atomically admit an exact replay with its immutable comparison target
+    /// installed before queue visibility.
+    pub(crate) fn enqueue_replay_eval(
+        &self,
+        suite_name: String,
+        adapters: Vec<Option<String>>,
+        kind: crate::eval::queue::EvalSubmissionKind,
+        job: crate::eval::queue::QueuedEvalJob,
+        effective_seed: u64,
+        replay_expectation: kiln_eval::EvalReplayExpectationV1,
+        replay_source_record: kiln_eval::EvalReplayRecordV1,
+    ) -> anyhow::Result<crate::eval::queue::EvalEnqueueReceipt> {
+        replay_expectation
+            .validate()
+            .map_err(|error| anyhow::anyhow!("invalid replay expectation: {error}"))?;
+        if replay_expectation.expected_record_sha256 != replay_source_record.record_sha256
+            || replay_expectation.expected_raw_completion_set_sha256
+                != replay_source_record.raw_completion_set_sha256
+        {
+            anyhow::bail!("replay source record does not match its expectation");
+        }
+        self.enqueue_eval_inner(
+            suite_name,
+            adapters,
+            kind,
+            None,
+            job,
+            Some(effective_seed),
+            None,
+            Some(replay_expectation),
+            Some(std::sync::Arc::new(replay_source_record)),
         )
     }
 
@@ -3164,6 +3204,8 @@ impl AppState {
         job: crate::eval::queue::QueuedEvalJob,
         forced_effective_seed: Option<u64>,
         post_eval_gate: Option<crate::eval::queue::PostEvalGate>,
+        replay_expectation: Option<kiln_eval::EvalReplayExpectationV1>,
+        replay_source_record: Option<std::sync::Arc<kiln_eval::EvalReplayRecordV1>>,
     ) -> anyhow::Result<crate::eval::queue::EvalEnqueueReceipt> {
         self.ensure_inference_admission_allowed()?;
         let real_backend = matches!(self.backend.as_ref(), ModelBackend::Real { .. });
@@ -3229,6 +3271,7 @@ impl AppState {
         info.base_weight_shard_manifest = self.base_weight_shard_manifest.as_deref().cloned();
         info.execution_provenance = self.execution_provenance.as_deref().cloned();
         info.post_eval_gate = post_eval_gate;
+        info.replay_expectation = replay_expectation;
         self.eval_jobs.write().unwrap().insert(job_id.clone(), info);
         let training_snapshot = if let Some(training_job_id) = backlink_training_job_id.as_deref() {
             let mut training_jobs = self.training_jobs.write().unwrap();
@@ -3269,6 +3312,7 @@ impl AppState {
             .push(crate::eval::queue::EvalQueueEntry {
                 job_id: job_id.clone(),
                 effective_seed,
+                replay_source_record,
                 job,
             });
         Ok(crate::eval::queue::EvalEnqueueReceipt {

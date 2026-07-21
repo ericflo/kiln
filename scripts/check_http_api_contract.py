@@ -109,6 +109,7 @@ EVAL_ENTRYPOINTS = (
     "JudgmentManifest",
     "PromoteJudgmentBody",
     "RenderJudgmentPromptResponse",
+    "ReplayBody",
     "RerunBody",
     "SuiteListResponse",
     "SuiteSaveResponse",
@@ -179,17 +180,17 @@ CONTROL_COMPONENT_TYPES["Vec_TrainingStatus"] = "Vec<TrainingStatus>"
 EXPECTED_OBSERVABILITY_DEFINITION_COUNT = 176
 EXPECTED_CONTROL_PLANE_DEFINITION_COUNT = 119
 EXPECTED_COMPONENT_SCHEMA_COUNTS = {
-    "complete": 133,
+    "complete": 134,
     "migration_pending": 0,
-    "total": 133,
+    "total": 134,
 }
 HTTP_METHODS = ("get", "post", "put", "patch", "delete")
-EXPECTED_METHOD_COUNTS = {"DELETE": 12, "GET": 54, "POST": 47, "PUT": 1}
+EXPECTED_METHOD_COUNTS = {"DELETE": 12, "GET": 54, "POST": 48, "PUT": 1}
 EXPECTED_TAG_COUNTS = {
     "adapters": 9,
     "agents": 16,
     "corrections": 5,
-    "evals": 27,
+    "evals": 28,
     "hf-trl": 7,
     "inference": 3,
     "library": 3,
@@ -306,8 +307,8 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
     expected_root = {
         "openapi": "3.1.1",
         "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
-        "x-kiln-path-count": 102,
-        "x-kiln-operation-count": 114,
+        "x-kiln-path-count": 103,
+        "x-kiln-operation-count": 115,
         "x-kiln-method-counts": EXPECTED_METHOD_COUNTS,
         "x-kiln-tag-counts": EXPECTED_TAG_COUNTS,
         "x-kiln-field-schema-status": "complete",
@@ -355,8 +356,8 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
     if not isinstance(paths, dict):
         errors.append("paths must be an object")
         return errors
-    if len(paths) != 102:
-        errors.append(f"paths must contain 102 entries, got {len(paths)}")
+    if len(paths) != 103:
+        errors.append(f"paths must contain 103 entries, got {len(paths)}")
     if list(paths) != sorted(paths):
         errors.append("paths must be sorted lexicographically")
 
@@ -519,8 +520,8 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
         if path in EXPLICIT_ERROR_PATHS and "default" in responses:
             errors.append(f"{label}: explicit error responses must not retain a fictitious default error")
 
-    if operation_count != 114:
-        errors.append(f"operation count must be 114, got {operation_count}")
+    if operation_count != 115:
+        errors.append(f"operation count must be 115, got {operation_count}")
     if dict(sorted(method_counts.items())) != EXPECTED_METHOD_COUNTS:
         errors.append(f"observed method counts drifted: {dict(sorted(method_counts.items()))}")
     if dict(sorted(tag_counts.items())) != EXPECTED_TAG_COUNTS:
@@ -644,6 +645,7 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
         ("get", "/v1/eval/jobs"): (None, "EvalJobListResponse"),
         ("delete", "/v1/eval/jobs/{job_id}"): (None, "CancelEvalJobResponse"),
         ("get", "/v1/eval/jobs/{job_id}"): (None, "EvalResult"),
+        ("post", "/v1/eval/jobs/{job_id}/replay"): ("ReplayBody", "EvalRunResponse"),
         ("post", "/v1/eval/jobs/{job_id}/rerun"): ("RerunBody", "EvalRunResponse"),
         ("post", "/v1/eval/run"): ("EvalRunRequest", "EvalRunResponse"),
         ("get", "/v1/eval/suites"): (None, "SuiteListResponse"),
@@ -1284,8 +1286,8 @@ def validate_eval_schema(
     if not isinstance(definitions, dict):
         errors.append("eval schema $defs must be an object")
         return errors
-    if len(definitions) != 82:
-        errors.append(f"eval schema must contain 82 definitions, got {len(definitions)}")
+    if len(definitions) != 90:
+        errors.append(f"eval schema must contain 90 definitions, got {len(definitions)}")
     if list(definitions) != sorted(definitions):
         errors.append("eval schema definitions must be sorted")
 
@@ -1458,6 +1460,11 @@ def validate_eval_schema(
         ),
         "EvalJobListResponse": ("crates/kiln-server/src/api/eval.rs", "EvalJobListResponse", set()),
         "EvalProgress": ("crates/kiln-eval/src/result.rs", "EvalProgress", set()),
+        "EvalModelTargetIdentity": ("crates/kiln-eval/src/replay.rs", "EvalModelTargetIdentity", set()),
+        "EvalRawCompletionReference": ("crates/kiln-eval/src/replay.rs", "EvalRawCompletionReference", set()),
+        "EvalReplayExpectationV1": ("crates/kiln-eval/src/replay.rs", "EvalReplayExpectationV1", set()),
+        "EvalReplayRecordV1": ("crates/kiln-eval/src/replay.rs", "EvalReplayRecordV1", set()),
+        "EvalReplayVerdict": ("crates/kiln-eval/src/replay.rs", "EvalReplayVerdict", set()),
         "EvalResult": ("crates/kiln-eval/src/result.rs", "EvalResult", set()),
         "EvalRunRequest": ("crates/kiln-server/src/api/eval.rs", "EvalRunRequest", set()),
         "EvalRunResponse": ("crates/kiln-server/src/api/eval.rs", "EvalRunResponse", set()),
@@ -1472,9 +1479,11 @@ def validate_eval_schema(
         "PromoteJudgmentBody": ("crates/kiln-server/src/api/eval.rs", "PromoteJudgmentBody", set()),
         "ReasoningLengthStats": ("crates/kiln-eval/src/result.rs", "ReasoningLengthStats", set()),
         "RenderJudgmentPromptResponse": ("crates/kiln-server/src/api/eval.rs", "RenderJudgmentPromptResponse", set()),
+        "ReplayBody": ("crates/kiln-server/src/api/eval.rs", "ReplayBody", set()),
         "RerunBody": ("crates/kiln-server/src/api/eval.rs", "RerunBody", set()),
         "Sampling": ("crates/kiln-eval/src/synthesis.rs", "Sampling", set()),
         "ScorerBreakdown": ("crates/kiln-eval/src/result.rs", "ScorerBreakdown", set()),
+        "EvalScorerIdentity": ("crates/kiln-eval/src/replay.rs", "EvalScorerIdentity", set()),
         "SuiteListResponse": ("crates/kiln-server/src/api/eval.rs", "SuiteListResponse", set()),
         "SuiteResult": ("crates/kiln-eval/src/result.rs", "SuiteResult", set()),
         "SuiteSaveResponse": ("crates/kiln-server/src/api/eval.rs", "SuiteSaveResponse", set()),

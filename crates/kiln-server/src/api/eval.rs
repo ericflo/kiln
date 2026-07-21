@@ -11,6 +11,7 @@
 //! | GET    | /v1/eval/jobs                       | List all eval jobs                           |
 //! | GET    | /v1/eval/jobs/:job_id               | Per-job status + results                     |
 //! | DELETE | /v1/eval/jobs/:job_id               | Cancel a queued / running eval job           |
+//! | POST   | /v1/eval/jobs/:job_id/replay        | Strictly reproduce one retained run          |
 
 use std::sync::atomic::Ordering;
 
@@ -463,6 +464,181 @@ async fn rerun_job(
             "Queued re-run of {} example(s) from `{suite_name}`",
             example_ids.len()
         ),
+    }))
+}
+
+/// `POST /v1/eval/jobs/:job_id/replay` — regenerate one retained run only
+/// after every declared environment and model identity matches. The worker
+/// emits a terminal byte-comparison verdict against the source record.
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ReplayBody {
+    #[serde(default)]
+    run_index: Option<u32>,
+}
+
+async fn replay_job(
+    State(state): State<AppState>,
+    AxumPath(job_id): AxumPath<String>,
+    Json(body): Json<ReplayBody>,
+) -> Result<Json<EvalRunResponse>, ApiError> {
+    let run_index = body.run_index.unwrap_or(0);
+    let (record, source_adapter, source_execution_sha256, source_base_sha256, source_seed) = {
+        let jobs = state.eval_jobs.read().unwrap();
+        let job = jobs
+            .get(&job_id)
+            .ok_or_else(|| ApiError::eval_job_not_found(&job_id))?;
+        if job.state != EvalJobState::Completed {
+            return Err(ApiError::eval_invalid_request(format!(
+                "strict replay requires a completed source job; `{job_id}` is {:?}",
+                job.state
+            )));
+        }
+        let run = job.finished_runs.get(run_index as usize).ok_or_else(|| {
+            ApiError::eval_invalid_request(format!(
+                "source job `{job_id}` has {} run(s); run_index {run_index} is out of range",
+                job.finished_runs.len()
+            ))
+        })?;
+        let record = run.replay_record.clone().ok_or_else(|| {
+            ApiError::eval_invalid_request(
+                "source run predates kiln.eval-replay.v1 and cannot make a strict replay claim",
+            )
+        })?;
+        record
+            .validate_strict_replay(&run.outcomes)
+            .map_err(|error| {
+                ApiError::eval_invalid_request(format!(
+                    "source replay record is invalid or incomplete: {error}"
+                ))
+            })?;
+        if run.suite_hash != record.suite_sha256
+            || run.effective_generation_hash != record.effective_generation_sha256
+        {
+            return Err(ApiError::eval_invalid_request(
+                "source run hashes do not match its replay record",
+            ));
+        }
+        let source_adapter = record
+            .model_target
+            .as_ref()
+            .and_then(|target| target.adapter.clone());
+        if run.adapter != source_adapter {
+            return Err(ApiError::eval_invalid_request(
+                "source run adapter selector does not match its replay target identity",
+            ));
+        }
+        let source_execution_sha256 = job
+            .execution_provenance
+            .as_ref()
+            .map(|provenance| provenance.provenance_sha256.clone());
+        let source_base_sha256 = job
+            .base_weight_shard_manifest
+            .as_ref()
+            .map(|manifest| manifest.aggregate_sha256.clone());
+        if record.execution_provenance_sha256 != source_execution_sha256
+            || record.base_weight_manifest_sha256 != source_base_sha256
+            || job.effective_seed != Some(record.effective_seed)
+        {
+            return Err(ApiError::eval_invalid_request(
+                "source job provenance or seed does not match its replay record",
+            ));
+        }
+        (
+            record,
+            source_adapter,
+            source_execution_sha256,
+            source_base_sha256,
+            job.effective_seed,
+        )
+    };
+
+    let current_execution_sha256 = state
+        .execution_provenance
+        .as_deref()
+        .map(|provenance| provenance.provenance_sha256.clone());
+    let current_base_sha256 = state
+        .base_weight_shard_manifest
+        .as_deref()
+        .map(|manifest| manifest.aggregate_sha256.clone());
+    if current_execution_sha256 != source_execution_sha256 {
+        return Err(ApiError::eval_invalid_request(format!(
+            "strict replay environment mismatch: source execution {:?}, current {:?}",
+            source_execution_sha256, current_execution_sha256
+        )));
+    }
+    if current_base_sha256 != source_base_sha256 {
+        return Err(ApiError::eval_invalid_request(format!(
+            "strict replay base-weight mismatch: source {:?}, current {:?}",
+            source_base_sha256, current_base_sha256
+        )));
+    }
+    let validate_target = |target: &kiln_eval::EvalModelTargetIdentity| -> Result<(), ApiError> {
+        target.validate().map_err(|error| {
+            ApiError::eval_invalid_request(format!("invalid replay model target: {error}"))
+        })?;
+        let Some(adapter_name) = target.adapter.as_deref() else {
+            return Ok(());
+        };
+        let identity = kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(
+            &state.adapter_dir.join(adapter_name),
+        )
+        .map_err(|error| {
+            ApiError::eval_invalid_request(format!(
+                "strict replay cannot attest adapter `{adapter_name}`: {error:#}"
+            ))
+        })?;
+        let current = format!("sha256:{}", identity.content_revision());
+        if target.adapter_content_sha256.as_deref() != Some(current.as_str()) {
+            return Err(ApiError::eval_invalid_request(format!(
+                "strict replay adapter mismatch for `{adapter_name}`: source {:?}, current {current}",
+                target.adapter_content_sha256
+            )));
+        }
+        Ok(())
+    };
+    validate_target(
+        record
+            .model_target
+            .as_ref()
+            .expect("strict replay validated a model target"),
+    )?;
+    for target in &record.judge_targets {
+        validate_target(target)?;
+    }
+
+    let qlen = state.eval_queue.lock().unwrap().len();
+    if qlen >= state.max_queued_eval_jobs {
+        return Err(ApiError::eval_queue_full(state.max_queued_eval_jobs));
+    }
+    let tracked = state.eval_jobs.read().unwrap().len();
+    if tracked >= state.max_tracked_eval_jobs {
+        return Err(ApiError::eval_tracked_full(state.max_tracked_eval_jobs));
+    }
+    let expectation = kiln_eval::EvalReplayExpectationV1::new(job_id.clone(), run_index, &record);
+    let suite = record.suite.clone();
+    let generation_override = record.generation_override.clone();
+    let effective_seed = source_seed.expect("strict replay validated the source seed");
+    let enqueued = state
+        .enqueue_replay_eval(
+            suite.name.clone(),
+            vec![source_adapter.clone()],
+            EvalSubmissionKind::OnDemand,
+            QueuedEvalJob::Inline {
+                suite: Box::new(suite),
+                adapter: source_adapter,
+                generation_override,
+            },
+            effective_seed,
+            expectation,
+            record,
+        )
+        .map_err(|error| map_eval_enqueue_error(&state, error))?;
+    Ok(Json(EvalRunResponse {
+        job_id: enqueued.job_id,
+        state: EvalJobState::Queued,
+        effective_seed: enqueued.effective_seed,
+        message: format!("Queued strict replay of source job `{job_id}` run {run_index}"),
     }))
 }
 
@@ -1274,6 +1450,7 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/eval/jobs", get(list_jobs))
         .route("/v1/eval/jobs/{job_id}", get(get_job).delete(cancel_job))
         .route("/v1/eval/jobs/{job_id}/rerun", post(rerun_job))
+        .route("/v1/eval/jobs/{job_id}/replay", post(replay_job))
         // Datasets
         .route("/v1/eval/datasets", get(list_datasets))
         .route(
@@ -1377,6 +1554,81 @@ mod tests {
             schema_version: 1,
             tools: None,
         }
+    }
+
+    fn mk_replay_source() -> AppState {
+        let mut state = mk_state();
+        let base_manifest = kiln_core::model_provenance::BaseWeightShardManifest::new(vec![
+            kiln_core::model_provenance::BaseWeightShardIdentity::from_digest(
+                "model.safetensors",
+                17,
+                [0x42; 32],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let execution = crate::execution_provenance::test_execution_provenance();
+        state.base_weight_shard_manifest = Some(std::sync::Arc::new(base_manifest.clone()));
+        state.execution_provenance = Some(std::sync::Arc::new(execution.clone()));
+
+        let suite = mk_inline_suite();
+        let mut outcome = kiln_eval::score_completion(
+            &suite.default_scorer,
+            &suite.examples[0],
+            "2",
+            &kiln_eval::scorers::NoopJudgeRunner,
+        )
+        .unwrap();
+        outcome.generation_seed = Some(kiln_eval::derive_eval_completion_seed(777, "e1", 0));
+        outcome.raw_completion_text = Some("2".into());
+        outcome.thinking_budget = Some(kiln_eval::EvalThinkingBudget::default());
+        let replay_record = kiln_eval::EvalReplayRecordV1::new(
+            suite.clone(),
+            None,
+            777,
+            vec![kiln_eval::EvalThinkingBudget::default()],
+            Some(kiln_eval::EvalModelTargetIdentity::base()),
+            Vec::new(),
+            Some(execution.provenance_sha256.clone()),
+            Some(base_manifest.aggregate_sha256.clone()),
+            std::slice::from_ref(&outcome),
+        )
+        .unwrap();
+        let aggregated_outcomes = kiln_eval::aggregate_example_outcomes(
+            std::slice::from_ref(&outcome),
+            suite.aggregation,
+        )
+        .unwrap();
+        let mut source = EvalJobInfo::queued(
+            "replay-source".into(),
+            suite.name.clone(),
+            vec![None],
+            EvalSubmissionKind::OnDemand,
+            None,
+            777,
+        );
+        source.state = EvalJobState::Completed;
+        source.base_weight_shard_manifest = Some(base_manifest);
+        source.execution_provenance = Some(execution);
+        source.finished_runs.push(kiln_eval::SuiteResult {
+            suite_name: suite.name,
+            adapter: None,
+            aggregation: suite.aggregation,
+            metrics: kiln_eval::AggregateMetrics::default(),
+            outcomes: vec![outcome],
+            aggregated_outcomes,
+            started_at: "2026-07-20T00:00:00Z".into(),
+            finished_at: "2026-07-20T00:00:01Z".into(),
+            suite_hash: replay_record.suite_sha256.clone(),
+            effective_generation_hash: replay_record.effective_generation_sha256.clone(),
+            replay_record: Some(replay_record),
+        });
+        state
+            .eval_jobs
+            .write()
+            .unwrap()
+            .insert(source.job_id.clone(), source);
+        state
     }
 
     #[tokio::test]
@@ -1765,6 +2017,7 @@ mod tests {
             finished_at: "2026-07-10T00:00:01Z".into(),
             suite_hash: "suite".into(),
             effective_generation_hash: "generation".into(),
+            replay_record: None,
         });
         state
             .eval_jobs
@@ -1800,6 +2053,103 @@ mod tests {
                 .effective_seed,
             777
         );
+    }
+
+    #[tokio::test]
+    async fn strict_replay_queues_the_exact_snapshot_and_publishes_expectation_atomically() {
+        let state = mk_replay_source();
+        let response = routes()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/eval/jobs/replay-source/replay")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"run_index":0}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(payload["effective_seed"], "777");
+        let replay_job_id = payload["job_id"].as_str().unwrap();
+        let jobs = state.eval_jobs.read().unwrap();
+        let replay_job = &jobs[replay_job_id];
+        let expectation = replay_job.replay_expectation.as_ref().unwrap();
+        assert_eq!(expectation.source_job_id, "replay-source");
+        assert_eq!(expectation.source_run_index, 0);
+        let expected_record_sha256 = expectation.expected_record_sha256.clone();
+        assert!(replay_job.replay_verdict.is_none());
+        drop(jobs);
+
+        let queued = state.eval_queue.lock().unwrap().pop().unwrap();
+        assert_eq!(queued.effective_seed, 777);
+        assert_eq!(
+            queued.replay_source_record.as_ref().unwrap().record_sha256,
+            expected_record_sha256
+        );
+        let QueuedEvalJob::Inline {
+            suite,
+            adapter,
+            generation_override,
+        } = queued.job
+        else {
+            panic!("strict replay must queue an immutable inline suite snapshot");
+        };
+        assert_eq!(suite.name, "inline-math");
+        assert_eq!(adapter, None);
+        assert_eq!(generation_override, None);
+    }
+
+    #[tokio::test]
+    async fn strict_replay_refuses_legacy_runs_before_queue_publication() {
+        let state = mk_state();
+        let mut source = EvalJobInfo::queued(
+            "legacy-source".into(),
+            "legacy".into(),
+            vec![None],
+            EvalSubmissionKind::OnDemand,
+            None,
+            11,
+        );
+        source.state = EvalJobState::Completed;
+        source.finished_runs.push(kiln_eval::SuiteResult {
+            suite_name: "legacy".into(),
+            adapter: None,
+            aggregation: kiln_eval::EvalAggregation::Single,
+            metrics: kiln_eval::AggregateMetrics::default(),
+            outcomes: Vec::new(),
+            aggregated_outcomes: Vec::new(),
+            started_at: "2026-07-20T00:00:00Z".into(),
+            finished_at: "2026-07-20T00:00:01Z".into(),
+            suite_hash: "legacy".into(),
+            effective_generation_hash: "legacy".into(),
+            replay_record: None,
+        });
+        state
+            .eval_jobs
+            .write()
+            .unwrap()
+            .insert(source.job_id.clone(), source);
+        let response = routes()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/eval/jobs/legacy-source/replay")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(state.eval_queue.lock().unwrap().is_empty());
+        assert_eq!(state.eval_jobs.read().unwrap().len(), 1);
     }
 
     #[tokio::test]

@@ -11,6 +11,8 @@
 //!       submit an eval and (optionally) wait for results
 //!   - `kiln-eval compare --suite NAME --adapter NAME [NAME ...] [--watch]`
 //!       run a compare across multiple adapters and print a head-to-head
+//!   - `kiln-eval replay --job ID [--run-index N] [--json]`
+//!       reproduce one retained run and require a byte-identical verdict
 //!   - `kiln-eval trace-suite --input TRACE.jsonl --output SUITE.json`
 //!       sample production tool-call turns from a generic JSONL export
 //!   - `kiln-eval panel-suite --suite FULL.json --max-examples N`
@@ -65,6 +67,8 @@ enum Command {
     Run(RunArgs),
     /// Run a head-to-head comparison across multiple adapters.
     Compare(CompareArgs),
+    /// Strictly reproduce one retained run and compare raw decoder bytes.
+    Replay(ReplayArgs),
     /// Quick-eval helper: build a single-example suite from CLI flags
     /// (great for sanity checks during development).
     Probe(ProbeArgs),
@@ -123,6 +127,19 @@ struct CompareArgs {
     /// Wait for the job to finish.
     #[arg(long)]
     watch: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser, Debug)]
+struct ReplayArgs {
+    /// Completed source eval job ID.
+    #[arg(long)]
+    job: String,
+    /// Zero-based run index within a multi-adapter source job.
+    #[arg(long, default_value_t = 0)]
+    run_index: u32,
+    /// Emit raw JSON instead of the human-readable result and verdict.
     #[arg(long)]
     json: bool,
 }
@@ -300,6 +317,10 @@ struct EvalResultPayload {
     effective_seed: Option<u64>,
     #[serde(default)]
     seed_derivation: Option<String>,
+    #[serde(default)]
+    replay_expectation: Option<kiln_eval::EvalReplayExpectationV1>,
+    #[serde(default)]
+    replay_verdict: Option<kiln_eval::EvalReplayVerdict>,
     runs: Vec<SuiteResult>,
     #[serde(default)]
     error: Option<String>,
@@ -326,6 +347,40 @@ impl EvalResultPayload {
                 .validate()
                 .context("eval result contains invalid execution provenance")?;
         }
+        let execution_sha256 = self
+            .execution_provenance
+            .as_ref()
+            .map(|provenance| provenance.provenance_sha256.as_str());
+        let base_sha256 = self
+            .base_weight_shard_manifest
+            .as_ref()
+            .map(|manifest| manifest.aggregate_sha256.as_str());
+        for (run_index, run) in self.runs.iter().enumerate() {
+            let Some(record) = run.replay_record.as_ref() else {
+                continue;
+            };
+            record
+                .validate(&run.outcomes)
+                .with_context(|| format!("eval run {run_index} has invalid replay evidence"))?;
+            if run.suite_hash != record.suite_sha256
+                || run.effective_generation_hash != record.effective_generation_sha256
+                || record.execution_provenance_sha256.as_deref() != execution_sha256
+                || record.base_weight_manifest_sha256.as_deref() != base_sha256
+                || Some(record.effective_seed) != self.effective_seed
+            {
+                bail!("eval run {run_index} identity does not match its enclosing result");
+            }
+        }
+        match (&self.replay_expectation, &self.replay_verdict) {
+            (Some(expectation), Some(verdict)) => verdict
+                .validate(expectation)
+                .context("eval result contains an invalid replay verdict")?,
+            (Some(expectation), None) => expectation
+                .validate()
+                .context("eval result contains an invalid replay expectation")?,
+            (None, Some(_)) => bail!("eval result has a replay verdict without an expectation"),
+            (None, None) => {}
+        }
         Ok(())
     }
 }
@@ -343,6 +398,7 @@ async fn main() -> Result<()> {
         Command::Register { file, force } => cmd_register(&client, &server, &file, force).await,
         Command::Run(args) => cmd_run(&client, &server, args).await,
         Command::Compare(args) => cmd_compare(&client, &server, args).await,
+        Command::Replay(args) => cmd_replay(&client, &server, args).await,
         Command::Probe(args) => cmd_probe(&client, &server, args).await,
         Command::TraceSuite(args) => cmd_trace_suite(args),
         Command::PanelSuite(args) => cmd_panel_suite(args),
@@ -1255,6 +1311,79 @@ async fn cmd_compare(client: &reqwest::Client, server: &str, args: CompareArgs) 
     Ok(())
 }
 
+async fn cmd_replay(client: &reqwest::Client, server: &str, args: ReplayArgs) -> Result<()> {
+    if args.job.is_empty()
+        || !args
+            .job
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        bail!("--job must be a non-empty Kiln eval job ID");
+    }
+    let response = client
+        .post(format!("{server}/v1/eval/jobs/{}/replay", args.job))
+        .json(&serde_json::json!({ "run_index": args.run_index }))
+        .send()
+        .await
+        .context("submit strict eval replay")?;
+    let status = response.status();
+    let text = response.text().await?;
+    if !status.is_success() {
+        bail!("replay refused ({status}): {text}");
+    }
+    let queued: EvalRunResponse = serde_json::from_str(&text)?;
+    eprintln!(
+        "queued strict replay {} from {} run {} (effective_seed={})",
+        queued.job_id, args.job, args.run_index, queued.effective_seed
+    );
+    let result = poll_until_done(client, server, &queued.job_id).await?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        print_human(&result);
+        print_replay_verdict(&result);
+    }
+    let verdict = result
+        .replay_verdict
+        .as_ref()
+        .context("terminal replay result is missing replay_verdict")?;
+    match verdict.status {
+        kiln_eval::EvalReplayStatus::Matched => Ok(()),
+        kiln_eval::EvalReplayStatus::Mismatch => bail!(
+            "strict replay mismatch: expected raw set {}, got {}",
+            verdict.expected_raw_completion_set_sha256,
+            verdict
+                .actual_raw_completion_set_sha256
+                .as_deref()
+                .unwrap_or("<missing>")
+        ),
+        kiln_eval::EvalReplayStatus::Error => {
+            bail!(
+                "strict replay failed before a byte verdict: {}",
+                verdict.message
+            )
+        }
+    }
+}
+
+fn print_replay_verdict(result: &EvalResultPayload) {
+    let Some(verdict) = result.replay_verdict.as_ref() else {
+        return;
+    };
+    println!();
+    println!("Strict replay: {:?}", verdict.status);
+    println!(
+        "  source: {} run {}",
+        verdict.source_job_id, verdict.source_run_index
+    );
+    println!("  record: {}", verdict.expected_record_sha256);
+    println!(
+        "  raw completions: {}",
+        verdict.expected_raw_completion_set_sha256
+    );
+    println!("  {}", verdict.message);
+}
+
 async fn cmd_probe(client: &reqwest::Client, server: &str, args: ProbeArgs) -> Result<()> {
     let scorer = match args.scorer.as_str() {
         "exact_match" => kiln_eval::Scorer::ExactMatch {
@@ -1672,6 +1801,8 @@ fn compute_flip_diff(result: &EvalResultPayload) -> Option<kiln_eval::FlipDiff> 
         execution_provenance: result.execution_provenance.clone(),
         effective_seed: result.effective_seed,
         seed_derivation: result.seed_derivation.clone(),
+        replay_expectation: result.replay_expectation.clone(),
+        replay_verdict: result.replay_verdict.clone(),
         runs: result.runs.clone(),
         progress: None,
         error: None,
@@ -1733,6 +1864,25 @@ mod tests {
     fn cli_default_server_uses_shared_runtime_default() {
         let cli = Cli::parse_from(["kiln-eval", "list"]);
         assert_eq!(cli.server, default_server_url());
+    }
+
+    #[test]
+    fn replay_cli_selects_one_source_run_and_always_waits_for_a_verdict() {
+        let cli = Cli::parse_from([
+            "kiln-eval",
+            "replay",
+            "--job",
+            "eval_1234-abcd",
+            "--run-index",
+            "2",
+            "--json",
+        ]);
+        let Command::Replay(args) = cli.cmd else {
+            panic!("expected replay command");
+        };
+        assert_eq!(args.job, "eval_1234-abcd");
+        assert_eq!(args.run_index, 2);
+        assert!(args.json);
     }
 
     #[test]

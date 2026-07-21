@@ -237,6 +237,12 @@ example with the original reducer. Compare and promotion paths require both
 runs to use the same reducer and example set; pairing is by stable
 `example_id`, never result order or completion zero.
 
+A failure rerun is a new diagnostic run over a subset. It may accept a new
+seed and does not claim that any completion is reproduced. Strict replay is a
+separate whole-run operation that retains the original suite, generation,
+seed, identity envelope, and expected raw decoder bytes; see
+[Strict byte replay](#strict-byte-replay).
+
 ### Result schema v2 and migration
 
 New result documents require top-level `schema_version: 2`. Every
@@ -748,11 +754,92 @@ Archive save and restart load validate the self-verifying canonical digest;
 tampered records are rejected instead of being reported as evidence. Legacy
 archives and synthetic/mock generators may omit the field, but a newly admitted
 production job receives the same immutable record retained by `AppState`. The
-record proves the declared execution envelope's integrity, not output replay or
-driver correctness. Kiln does not expose an eval replay-to-output command;
-reproducing an output would additionally require matching inputs, adapter,
-effective seed, and generation state. See
+record proves the declared execution envelope's integrity, not driver
+correctness or reproducibility by itself. Strict replay binds this record to
+the remaining input and output identities described below. See
 [Execution Provenance](EXECUTION_PROVENANCE.md).
+
+## Strict byte replay
+
+Every newly completed production eval run carries a self-validating
+`kiln.eval-replay.v1` record. It is the immutable identity of one complete
+suite/adapter run, not a best-effort recipe. The record contains:
+
+- the exact `EvalSuite`, optional run generation override, effective seed,
+  seed-derivation version, and every example's resolved thinking-budget limits
+  and source;
+- the candidate target and every LLM-judge target. A named adapter includes the
+  loader-attested SHA-256 identity of its config and weight bytes; the base
+  target is bound through the complete base-weight shard manifest;
+- one stable scorer kind and complete serialized scorer-configuration SHA-256
+  per example;
+- one reference per expected `(example_id, completion_index)`, pointing to its
+  adjacent `SuiteResult.outcomes` entry, with exact derived generation seed,
+  raw decoder continuation SHA-256 and byte count, and normalized scoring-text
+  SHA-256 and byte count;
+- full-domain hashes for the suite, effective generation state, raw-completion
+  set, base-weight manifest, execution provenance, and replay record itself.
+
+The execution-provenance digest binds the backend/device and bounded runtime
+evidence, executable and optional source revision, model configuration,
+tokenizer vocabulary and configuration, chat templates, precision policy,
+compiled kernels/features, and effective configuration/environment. A strict
+record is rejected if any of these identities, any raw decoder continuation,
+any completion index, any per-completion seed, or any thinking-budget record is
+missing or inconsistent. Terminal archive save validates every new finished
+run; restart loading validates any record present and rejects changed retained
+outcome bytes. Older archives remain readable, but cannot be strict-replayed.
+
+### Run a replay
+
+Use the source job ID and, for compare jobs, the source run index:
+
+```bash
+kiln-eval replay --job eval_123
+kiln-eval replay --job eval_compare_123 --run-index 1 --json
+```
+
+The dashboard exposes the same operation as **Strict replay** for the selected
+run. The HTTP form is:
+
+```bash
+curl -s -X POST http://localhost:8420/v1/eval/jobs/eval_123/replay \
+  -H 'content-type: application/json' \
+  -d '{}'
+```
+
+Replay admission fails before queue visibility unless the selected source run
+is complete, its strict record validates against retained outcomes, and the
+current execution-provenance and base-weight-manifest digests exactly match the
+source. It re-attests named candidate and judge adapter bytes on disk before
+enqueue. The queued job atomically receives both the public expectation and the
+complete internal source record. Immediately before generation the executor
+checks suite, generation, seed, environment, base weights, and the exact loaded
+candidate target; immediately before judge scoring it checks the exact loaded
+judge target. Identity drift is rejected before the affected model work rather
+than discovered only after completion.
+
+The terminal `replay_verdict.status` is:
+
+- `matched`: the complete replay-record identity and every raw decoder
+  continuation matched byte-for-byte;
+- `mismatch`: execution completed, but at least one identity or raw decoder
+  continuation differed;
+- `error`: the replay could not produce a complete, internally valid record.
+
+`kiln-eval replay` waits for a terminal state and exits nonzero for `mismatch`,
+`error`, a failed job, or a missing/invalid verdict. `--json` emits the complete
+job, including `replay_expectation`, `replay_verdict`, source/actual hashes, and
+the new run's replay record. The dashboard shows the same hashes and offers
+exact-copy controls.
+
+A `matched` verdict proves byte reproduction for this declared run and
+environment. It does not prove driver correctness or promise that another
+backend, binary, source revision, kernel, precision policy, model/tokenizer,
+template, adapter, configuration, or seed will match. A `mismatch` is retained
+evidence; on a backend with nondeterministic operations it is not automatically
+a Kiln defect, but it prevents a reproducibility claim. Use ordinary failure
+rerun for legacy jobs or intentional changes, without an exact-replay claim.
 
 ## API reference
 
@@ -798,6 +885,15 @@ with `examples_completed`, `examples_total`, `running_accuracy`, and
 
 Re-run selected failing outcomes. Omit `seed` to retain the original job's
 effective seed, or provide a replacement seed deliberately.
+
+### `POST /v1/eval/jobs/{job_id}/replay`
+
+Queue a strict whole-run byte replay of a completed source run. The optional
+body field `run_index` selects an arm of a compare job and defaults to `0`.
+Admission requires a complete strict replay record plus exact current execution,
+base-weight, and adapter identities. The POST returns the new job ID and
+effective seed; immediate job detail contains the immutable
+`replay_expectation`, and terminal detail adds `replay_verdict`.
 
 ### `DELETE /v1/eval/jobs/{job_id}`
 Cancel a queued or running job.
@@ -917,10 +1013,13 @@ kiln-eval run --suite math-smoke --adapter v1 --seed 42 --watch
 kiln-eval run --file smoke.json --adapter v1 --watch --json
 kiln-eval compare --suite math-smoke --adapter v1 --adapter v2 --seed 42 --watch
 kiln-eval probe --prompt "1+1?" --target 2 --scorer numeric --adapter v1 --seed 42
+kiln-eval replay --job eval_123 [--run-index 0] [--json]
 ```
 
 `probe` is a one-off helper that wraps a single example as an inline
-suite — useful during model debugging.
+suite — useful during model debugging. `replay` always watches through a
+terminal verdict and returns a nonzero process status unless exact raw bytes and
+all bound identities match.
 
 ## Suite-file layouts
 
@@ -950,12 +1049,23 @@ Two layouts are supported:
 - `tag_breakdown` — per-tag pass counts and confidence intervals
 - `by_scorer` — per-scorer-kind breakdown when the suite mixes scorers
 
-Each run also carries two audit hashes. `suite_hash` changes only when the
-suite content changes. `effective_generation_hash` additionally includes the
-job seed and derivation schema, run-level generation override, and every
-example's resolved thinking-budget limits and provenance, so a run that
-inherits different defaults has a different identity even when its suite file
-is unchanged.
+Each run also carries `suite_hash`, `effective_generation_hash`, and a
+`replay_record`. `suite_hash` changes only when the suite content changes.
+`effective_generation_hash` additionally includes the job seed and derivation
+schema, run-level generation override, and every example's resolved
+thinking-budget limits and provenance, so a run that inherits different
+defaults has a different identity even when its suite file is unchanged. The
+replay record binds these inputs to model/judge/scorer identities, execution and
+base-weight provenance, and exact raw and normalized completion hashes. Its
+`record_sha256` and `raw_completion_set_sha256` are the terminal strict-replay
+comparison keys.
+
+A replay job adds top-level `replay_expectation` before queue visibility and
+`replay_verdict` at terminal transition. Their source job/run coordinates and
+expected hashes must agree. A `matched` verdict must carry equal expected and
+actual record/raw-set hashes; `mismatch` must carry unequal actual hashes; an
+`error` may omit actual hashes when no valid run record was produced. Archive
+validation rejects an unbound or internally contradictory verdict.
 
 Every example record (`outcomes[]`) carries:
 

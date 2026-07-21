@@ -86,7 +86,7 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 - **Bounded online-LoRA SFT** over HTTP — one conversation per optimizer update under the fixed `native_online_lora_v1` profile; submit in `experimental` or drained `maintenance`, with atomic publication.
 - **GRPO training** over HTTP — submit scored completions for reinforcement learning. You control the reward function; GPU ownership follows the selected serving profile.
 - **On-policy distillation (OPD)** over HTTP — train against an identity-bound local or vLLM teacher, with exact candidate-boundary checkpoints and resume.
-- **First-class evals** over HTTP — register suites, run them against any adapter, drill into per-example outcomes. Auto-detect picks the right scorer per example (`numeric_tolerance`, `multiple_choice`, `json_validity`, `regex`, `contains`, `tool_call`, `code`, `llm_judge`, `all`/`any` composites).
+- **First-class evals** over HTTP — register suites, run them against any adapter, drill into per-example outcomes, and strictly replay a completed seeded run against exact model/adapter, tokenizer/template, backend/binary, generation/scorer, and raw decoder-byte identities. Auto-detect picks the right scorer per example (`numeric_tolerance`, `multiple_choice`, `json_validity`, `regex`, `contains`, `tool_call`, `code`, `llm_judge`, `all`/`any` composites).
 - **Dataset → eval synthesis** — upload an SFT JSONL and Kiln decomposes it into an eval suite (final-assistant / first-turn / every-turn / tool-call-prediction strategies). No separate eval harness to write.
 - **Judgment flywheel** — A/B-judge two adapters in `/ui/`, save your picks into a judgment dataset, compile to SFT, train a *local* judge LoRA, validate it on a held-out slice. The dashboard ships a streaming side-by-side viewer with `A`/`B`/`Tie`/`Skip` keyboard shortcuts.
 - **Post-training auto-eval** — in `experimental`, attach a held-out `post_eval` to SFT/GRPO and Kiln rejects exact, normalized, source-row, group, or session contamination before queuing; explicit `train-set-eval` runs are diagnostic-only. Results are back-linked to the training job.
@@ -271,12 +271,16 @@ curl -X POST http://localhost:8420/v1/eval/compare \
   -d '{"suite":"support-eval","adapters":["v1","v2"]}'
 
 # 4. Drill into per-example outcomes at /ui/ — pass/fail/invalid badges with prompt + target + got
-#    side-by-side, scorer detail, and a one-click "re-run failures" loop.
+#    side-by-side, scorer detail, failure reruns, and strict byte replay for a completed run.
+
+# Or verify a completed run from the terminal; this exits nonzero unless every bound identity
+# and raw decoder continuation matches byte-for-byte.
+kiln-eval replay --job eval_123 --json
 ```
 
 The judgment flywheel runs entirely on your machine — no frontier LLM, no API keys, no telemetry leaving the box. Click two replies in the playground, save them as an A/B preference, compile your picks into SFT data, train a small judge LoRA on them, then use that LoRA as the `judge_adapter` in any `LlmJudge` scorer. The judge gets better the more you use it; bad judgments are removable from the dataset and a retrain wipes their influence.
 
-See [docs/EVAL_GUIDE.md](docs/EVAL_GUIDE.md) for the full scorer reference, dataset synthesis strategies, and the judge-LoRA workflow.
+See [docs/EVAL_GUIDE.md](docs/EVAL_GUIDE.md) for the full scorer reference, dataset synthesis strategies, strict replay contract, and judge-LoRA workflow.
 
 ## Quick Start
 

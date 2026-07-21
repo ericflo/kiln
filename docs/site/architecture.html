@@ -1568,7 +1568,7 @@ kiln adapters list</code></pre>
         <div class="label mb-3">Eval pipeline</div>
         <h2 id="eval-pipeline" class="text-2xl font-semibold mb-4">Evals as a peer of training</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          The eval pipeline mirrors the training queue but rides the inference read-lock so it can run concurrently with both serving and training. A second FIFO worker pulls <code>QueuedEvalJob</code> entries from <code>state.eval_queue</code>, resolves the requested suite from <code>SuiteRegistry</code> (or uses an inline copy), drives the in-process generator across every example, and writes per-example outcomes plus a headline accuracy into <code>EvalJobInfo</code>. A streamed progress callback updates a <code>running_accuracy</code> field after every example so the <code>/ui</code> drill-in modal renders live.
+          The eval pipeline mirrors the training queue but rides the inference read-lock so it can run concurrently with both serving and training. A second FIFO worker pulls <code>QueuedEvalJob</code> entries from <code>state.eval_queue</code>, resolves the requested suite from <code>SuiteRegistry</code> (or uses an inline copy), drives the in-process generator across every example, and writes per-example outcomes plus a headline accuracy into <code>EvalJobInfo</code>. A streamed progress callback updates a <code>running_accuracy</code> field after every example so the <code>/ui</code> drill-in modal renders live. Each new production run also writes an exact replay record over suite/generation/seed/budget, model/judge/scorer, execution/base-weight, and raw-completion identities.
         </p>
         <div class="grid sm:grid-cols-2 gap-4" style="color: var(--fg-dim);">
           <div class="card p-4" style="background: var(--bg-soft-2);">
@@ -1588,6 +1588,9 @@ kiln adapters list</code></pre>
             <p>A/B/Tie/Skip preferences from <code>/ui</code> append to a <code>JudgmentStore</code>, compile to an SFT dataset, train a local judge LoRA, and that judge grades future suites &mdash; no frontier LLM called.</p>
           </div>
         </div>
+        <p class="text-sm mt-5" style="color: var(--fg-dim);">
+          Strict replay enters through <code>POST /v1/eval/jobs/{id}/replay</code>. Admission validates the selected source record, requires exact current execution and base-weight digests, re-attests adapter bytes, and installs the replay expectation before queue visibility. The executor rechecks the loaded candidate immediately before decode and each judge immediately before scoring. The worker emits a terminal <code>matched</code>, <code>mismatch</code>, or <code>error</code> verdict; archive validation rejects changed raw bytes and contradictory evidence. Legacy runs remain readable but cannot make a strict replay claim. See <a href="evals.html#strict-replay">Strict replay</a> for the operator workflow and proof boundary.
+        </p>
         <p class="text-sm mt-5" style="color: var(--fg-dim);">
           Full pipeline diagram and request shapes live in <a href="evals.html">the Evals guide</a> and <a href="https://github.com/ericflo/kiln/blob/main/ARCHITECTURE.md#evaluation-pipeline">ARCHITECTURE.md &rsaquo; Evaluation Pipeline</a>.
         </p>
