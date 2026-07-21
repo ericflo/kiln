@@ -3232,6 +3232,59 @@ fresh 1,920-second measurement envelope begin: 1,800 required seconds plus one
 or measurement phase in which it occurs. A setup failure records
 `soak_duration_seconds=0`; it cannot be mistaken for measured performance.
 
+### ROCm Final Endurance
+
+After all source changes stop and the release-candidate commit is pushed, run
+the committed 24-hour ROCm endurance gate from that exact clean checkout:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" ROCM_PATH=/opt/rocm \
+python3 scripts/qualification/run.py \
+  --variant rocm-endurance \
+  --host-id strix-halo \
+  --model /absolute/path/to/Qwen3.5-4B \
+  --model-id Qwen3.5-4B \
+  qualification/workloads/serving-rocm-endurance-v1.json
+```
+
+This is the final-duration form of the qualified ROCm development soak, not a
+new performance arm. It retains the same build policy, experimental serving
+profile, fixed KV capacity, disabled allocator reclaim, graph-required
+execution, eight-entry graph ceiling, prefix-cache policy, batching limits,
+prompt geometry, wave sequence, cancellation cadence, response oracle,
+stabilization bounds, memory limits, thermal controls, and complete metric set.
+Only the workload/variant identity, independent seed, generic driver path, and
+duration/deadline envelope differ. The manifest-driver equality test rejects
+any unreviewed difference before hardware work begins.
+
+The driver gets an independent 900-second bounded source build, then 1,200
+seconds for server startup, graph/prefix warmup, and memory stabilization. Once
+stabilization passes, the measured envelope is 86,520 seconds: 86,400 required
+seconds plus the existing 120-second final-request settlement allowance. The
+outer case timeout is 88,800 seconds, adding the three envelopes and a separate
+180-second teardown allowance. Build or setup time never counts toward the
+24-hour measurement, and thermal pacing remains inside whichever runtime
+envelope it overlaps.
+
+All development-soak gates remain mandatory for the entire measured day:
+ascending-sequence response and cancellation-prefix correctness; required
+native graph capture/replay with no fallback or failure; zero request, device,
+non-finite, synchronization, KV-accounting, cache-ownership, unexplained-ITL,
+worker-residue, forced-shutdown, nonzero-exit, or snapshot-residue failure;
+bounded GPU/RSS peak and end growth; host memory/swap containment; error-free
+accelerator telemetry; package-temperature containment and post-exit cooldown.
+Every ITL gap above the adaptive `max(250 ms, 5 * rolling p50)` boundary must
+retain a bounded reason and the final unexplained count must be zero.
+
+The compact receipt belongs under `qualification/receipts/rocm/strix-halo/`
+and must validate against the pushed release-candidate source and retained raw
+artifacts before the ROCm phase is checked complete. A failed or interrupted
+run is evidence, not a partial pass: retain its compact failure receipt when
+one was published, fix only a demonstrated defect, push the corrective commit,
+and restart the complete 24-hour clock from that new source. Do not edit the
+duration in the shell or promote the 30-minute development receipt as final
+endurance evidence.
+
 ### Vulkan Resident-Prefill Oracle
 
 Run the focused resident-state gate on a clean, pushed source tree before the

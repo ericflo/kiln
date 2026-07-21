@@ -27,6 +27,7 @@ RESULT_ENV = "KILN_QUALIFICATION_CASE_RESULT"
 VARIANT_ENV = "KILN_QUALIFICATION_VARIANT_ID"
 CASE_ID = "continuous-mixed-load"
 RUNTIME_VARIANT = "autoscale-off"
+ROCM_ENDURANCE_VARIANT = "rocm-endurance"
 VULKAN_RUNTIME_VARIANT = "vulkan-development-soak"
 VULKAN_ENDURANCE_VARIANT = "vulkan-endurance"
 VULKAN_MAX_PREFILL_TOKENS_PER_CYCLE = 128
@@ -49,6 +50,7 @@ CANCELLATION_MAX_TOKENS = 512
 CANCELLATION_PROMPT_WORDS = 48
 ROCM_REQUEST_TIMEOUT_SECONDS = 120.0
 QUALIFICATION_DURATION_SECONDS = 1800.0
+ROCM_ENDURANCE_DURATION_SECONDS = 24 * 60 * 60.0
 VULKAN_ENDURANCE_DURATION_SECONDS = 8 * 60 * 60.0
 CASE_TEARDOWN_GRACE_SECONDS = 180.0
 REQUEST_WORKER_CLEANUP_TIMEOUT_SECONDS = 10.0
@@ -159,6 +161,7 @@ def _vulkan_variant_config() -> dict[str, Any]:
     return config
 
 
+mixed.VARIANT_CONFIGS[ROCM_ENDURANCE_VARIANT] = mixed.VARIANT_CONFIGS[RUNTIME_VARIANT]
 mixed.VARIANT_CONFIGS[VULKAN_RUNTIME_VARIANT] = _vulkan_variant_config()
 mixed.VARIANT_CONFIGS[VULKAN_ENDURANCE_VARIANT] = _vulkan_variant_config()
 
@@ -227,6 +230,10 @@ ROCM_RUNTIME = SoakRuntime(
     host_thermal_policy=HOST_THERMAL_POLICY,
     accelerator_telemetry_required=True,
 )
+ROCM_ENDURANCE_RUNTIME = dataclasses.replace(
+    ROCM_RUNTIME,
+    variant_id=ROCM_ENDURANCE_VARIANT,
+)
 VULKAN_RUNTIME = SoakRuntime(
     variant_id=VULKAN_RUNTIME_VARIANT,
     backend="vulkan",
@@ -263,7 +270,12 @@ VULKAN_ENDURANCE_RUNTIME = dataclasses.replace(
 )
 RUNTIMES = {
     runtime.variant_id: runtime
-    for runtime in (ROCM_RUNTIME, VULKAN_RUNTIME, VULKAN_ENDURANCE_RUNTIME)
+    for runtime in (
+        ROCM_RUNTIME,
+        ROCM_ENDURANCE_RUNTIME,
+        VULKAN_RUNTIME,
+        VULKAN_ENDURANCE_RUNTIME,
+    )
 }
 
 

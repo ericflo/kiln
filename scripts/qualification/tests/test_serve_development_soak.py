@@ -1628,6 +1628,53 @@ class ServeRocmSoakTests(unittest.TestCase):
             ),
         )
 
+    def test_checked_in_rocm_endurance_workload_matches_driver_contract(self) -> None:
+        path = ROOT / "qualification/workloads/serving-rocm-endurance-v1.json"
+        workload = json.loads(path.read_text())
+        self.assertEqual(workload["workload_id"], "serving-rocm-endurance-v1")
+        self.assertEqual(workload["kind"], "soak")
+        self.assertIsNone(workload["comparison_policy"])
+        self.assertEqual(len(workload["variants"]), 1)
+        variant = workload["variants"][0]
+        self.assertEqual(variant["id"], soak.ROCM_ENDURANCE_RUNTIME.variant_id)
+        self.assertEqual(variant["backend"], "rocm")
+        self.assertEqual(
+            variant["effective_config"],
+            soak.effective_config(
+                soak.ROCM_ENDURANCE_DURATION_SECONDS,
+                soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
+                soak.ROCM_ENDURANCE_RUNTIME,
+            ),
+        )
+        self.assertEqual(len(variant["cases"]), 1)
+        case = variant["cases"][0]
+        self.assertEqual(case["id"], soak.CASE_ID)
+        self.assertEqual(
+            case["result_protocol"]["declared_metrics"],
+            sorted(soak.metric_definitions(soak.ROCM_ENDURANCE_RUNTIME)),
+        )
+        self.assertEqual(
+            case["command"],
+            [
+                "python3",
+                "scripts/qualification/serve_development_soak.py",
+                "--model-path",
+                "${model_path}",
+                "--seed",
+                "${seed}",
+                "--minimum-duration-seconds",
+                "86400",
+                "--memory-growth-limit-bytes",
+                str(soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES),
+            ],
+        )
+        self.assertEqual(
+            case["timeout_seconds"],
+            soak.qualification_case_timeout_seconds(
+                soak.ROCM_ENDURANCE_DURATION_SECONDS, soak.ROCM_ENDURANCE_RUNTIME
+            ),
+        )
+
     def test_checked_in_vulkan_endurance_workload_matches_driver_contract(self) -> None:
         path = ROOT / "qualification/workloads/serving-vulkan-endurance-v1.json"
         workload = json.loads(path.read_text())
