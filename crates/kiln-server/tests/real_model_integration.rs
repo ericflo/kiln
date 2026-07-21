@@ -2157,6 +2157,113 @@ async fn test_real_model_chat_completion() {
 }
 
 #[tokio::test]
+async fn test_real_model_eval_strict_replay_matches_raw_decoder_bytes() {
+    let config = tiny_config();
+    let device = Device::Cpu;
+    let weights = tiny_weights(&config, &device);
+    let runner_tokenizer = test_tokenizer();
+    let state_tokenizer = test_tokenizer();
+    let adapters = tempfile::tempdir().unwrap();
+    let runner = ModelRunner::new(weights, runner_tokenizer, config.clone());
+    let state = AppState::new_real(
+        config,
+        runner,
+        state_tokenizer,
+        device,
+        adapters.path().to_path_buf(),
+        &kiln_server::config::MemoryConfig::default(),
+        kiln_server::batching_engine::ResponseDeliveryPolicy::default(),
+        kiln_server::config::BatchTokenBudget::default(),
+        300,
+        "Qwen3.5-4B".to_string(),
+        &kiln_server::config::PrefixCacheConfig::default(),
+        None,
+    )
+    .expect("real eval test state should configure its memory runtime");
+    let suite = kiln_eval::EvalSuite {
+        name: "tiny-real-model-replay".into(),
+        description: None,
+        default_scorer: kiln_eval::Scorer::ExactMatch {
+            case_sensitive: true,
+            strip_whitespace: false,
+        },
+        generation: kiln_eval::EvalGenerationParams {
+            max_tokens: 4,
+            temperature: 0.0,
+            ..Default::default()
+        },
+        aggregation: kiln_eval::EvalAggregation::Single,
+        system_prompt: None,
+        examples: vec![kiln_eval::EvalExample {
+            id: Some("tiny-real".into()),
+            messages: vec![kiln_eval::EvalChatMessage::new("user", "t1 t2 t3")],
+            target: Some("the random model need not pass the scorer".into()),
+            ..Default::default()
+        }],
+        schema_version: kiln_eval::SUITE_SCHEMA_VERSION,
+        tools: None,
+    };
+    let environment = kiln_server::eval::executor::EvalReplayEnvironment {
+        execution_provenance_sha256: Some(format!("sha256:{}", "31".repeat(32))),
+        base_weight_manifest_sha256: Some(format!("sha256:{}", "42".repeat(32))),
+    };
+    let generator = Arc::new(kiln_server::eval::generator::LiveEvalGenerator::new(state));
+    let source = kiln_server::eval::executor::run_suite_against_adapter_with_replay(
+        &suite,
+        None,
+        None,
+        73,
+        generator.clone(),
+        None,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        kiln_server::eval::executor::noop_judge_runner(),
+        environment.clone(),
+        None,
+    )
+    .await
+    .expect("the real model eval should complete");
+    let source_record = source
+        .replay_record
+        .as_ref()
+        .expect("a real model eval must retain replay evidence");
+    source_record
+        .validate_strict_replay(&source.outcomes)
+        .expect("the real model run should be strictly replayable");
+
+    let replay = kiln_server::eval::executor::run_suite_against_adapter_with_replay(
+        &suite,
+        None,
+        None,
+        73,
+        generator,
+        None,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        kiln_server::eval::executor::noop_judge_runner(),
+        environment,
+        Some(Arc::new(source_record.clone())),
+    )
+    .await
+    .expect("the real model replay should complete");
+    let replay_record = replay
+        .replay_record
+        .as_ref()
+        .expect("the real model replay must retain replay evidence");
+    replay_record
+        .validate_strict_replay(&replay.outcomes)
+        .expect("the replay record should validate strictly");
+    assert_eq!(replay.outcomes.len(), 1);
+    assert_eq!(
+        replay.outcomes[0].raw_completion_text,
+        source.outcomes[0].raw_completion_text
+    );
+    assert_eq!(replay_record.record_sha256, source_record.record_sha256);
+    assert_eq!(
+        replay_record.raw_completion_set_sha256,
+        source_record.raw_completion_set_sha256
+    );
+}
+
+#[tokio::test]
 async fn test_real_model_chat_completion_emits_exact_rollout_provenance() {
     let config = tiny_config();
     let device = Device::Cpu;

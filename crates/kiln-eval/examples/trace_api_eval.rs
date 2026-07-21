@@ -144,6 +144,8 @@ async fn main() -> Result<()> {
         runs,
         progress: None,
         error: None,
+        replay_expectation: None,
+        replay_verdict: None,
     };
 
     if let Some(path) = args.output.as_ref() {
@@ -283,6 +285,7 @@ async fn run_model(
         finished_at: chrono::Utc::now().to_rfc3339(),
         suite_hash: suite_hash(suite)?,
         effective_generation_hash: String::new(),
+        replay_record: None,
     })
 }
 

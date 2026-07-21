@@ -107,6 +107,8 @@ async fn worker_runs_inline_suite_with_mock_generator() {
             finished_at: None,
             cancel_flag: None,
             post_eval_gate: None,
+            replay_expectation: None,
+            replay_verdict: None,
         },
     );
 
