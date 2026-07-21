@@ -2425,6 +2425,18 @@ ownership. The backend capability report was regenerated after the prior
 forward-test move; its exact non-mutating Rust enforcement test passes locally,
 closing the remaining cheap-CI regression from that structural checkpoint.
 
+Completion generation/batch split checkpoint (2026-07-20): real-model and mock
+generation plus streaming lifecycle now live in `generation.rs`; batch request
+types, deterministic cache grouping and rehydration, duplicate fan-out, and
+ordered response assembly live in `batch.rs`. The generation module owns actor
+enqueue, event collection, terminal completion/failure delivery, timeout and
+cancellation cleanup, and SSE streaming. Public batch wire types remain
+re-exported from the original module, so the HTTP and Rust API surfaces are
+unchanged. `completions.rs` falls again from 8,931 to 6,263 production lines;
+the new behavior-owned modules contain 1,178 and 1,502 lines respectively, and
+all 1,092 server library tests pass. The checkbox remains open while schema,
+validation, request preparation, and finalization still share the parent.
+
 ### 8.4 Replace verification theater
 
 - [x] Inventory source-string and ad hoc Rust-source parsing tests.

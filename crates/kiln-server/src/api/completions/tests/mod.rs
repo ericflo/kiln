@@ -1,3 +1,4 @@
+use super::batch::*;
 use super::*;
 use kiln_core::config::ModelConfig;
 
