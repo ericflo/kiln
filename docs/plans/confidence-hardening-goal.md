@@ -2333,13 +2333,47 @@ executable and is left to the inexpensive UI workflow.
 
 ### 8.2 One scheduling model
 
-- [ ] Map ownership and production/test use of batching engine, legacy decode
+- [x] Map ownership and production/test use of batching engine, legacy decode
   batcher, scheduler crate, and mock scheduler.
-- [ ] Select one production scheduling/admission abstraction.
-- [ ] Port tests to the production abstraction or a faithful injected backend.
-- [ ] Remove the idle legacy thread and duplicated policy paths.
-- [ ] Add state-machine/property tests for admission, cancellation, capacity,
+- [x] Select one production scheduling/admission abstraction.
+- [x] Port tests to the production abstraction or a faithful injected backend.
+- [x] Remove the idle legacy thread and duplicated policy paths.
+- [x] Add state-machine/property tests for admission, cancellation, capacity,
   prefix reuse, fairness, backpressure, and shutdown.
+
+Actor-only scheduling checkpoint (2026-07-20): every real-model request now
+enters one mandatory server-owned `BatchingEngine`, including streaming,
+non-streaming, internal eval/training generation, adapter-swap barriers, and KV
+resize barriers. `ModelRunner` remains the low-level execution primitive and
+does not own admission. The `kiln-scheduler` crate remains reachable only from
+the deliberately separate mock backend and isolated test fixtures; it is not a
+second real-model production scheduler. The response-delivery worker owns
+bounded delivery and acknowledgement, not request selection or model work.
+
+The optional real-backend actor, direct generation route, `DecodeBatcher`
+thread, direct rendezvous, duplicated sampling bridge, and their five public
+configuration fields have been deleted. Removed environment names are inert
+and indexed as retired; every active qualification profile is actor-owned.
+Health, config, trusted debug, metrics, UI, token-timing, observability schema,
+benchmark driver v18, API/CLI/architecture/operator documentation, and backend
+capability metadata all publish that single authority. Validators for immutable
+v2-v6 benchmark receipts retain their historical direct-route vocabulary but
+cannot describe a current v7 diagnostic record.
+
+The actor's injected `BatchingEngineBackend` state-machine suite covers bounded
+admission, transient capacity shortage, KV growth starvation, cancellation
+after delivery, prefix-aware deferral and independent-row progress, token- and
+layer-budget fairness, bounded short-prefill priority, stalled-client eviction,
+single-slot terminal delivery, concurrent stop acknowledgement, final-handle
+shutdown, and conservative terminal resource cleanup. Verification passes 358
+model library tests, 1,092 server library tests, 21 backend-capability contract
+tests, all 662 qualification-tooling tests, and compilation of the complete
+real-model integration target. The 112-field/107-environment/82-retired config
+schema, 169-definition observability schema, exact HTTP API contract, generated
+55-document/5-asset website, and assembled static smoke are current. Rendered
+browser smoke remains unavailable on this machine because Chromium is absent;
+its source/static assertions pass and no accelerator workload ran for this
+portable ownership checkpoint.
 
 ### 8.3 Split oversized modules by behavior
 

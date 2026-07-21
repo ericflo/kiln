@@ -16,7 +16,7 @@ use kiln_core::block::BlockManager;
 use kiln_core::sampling::{SamplingParams, ThinkingBudgetTokenSource};
 use kiln_core::token::TokenId;
 use kiln_model::{
-    BackendHealthHandle, CancelHandle, DecodeBatcherPolicy, FinishReason, GenerationOutput,
+    BackendHealthHandle, CancelHandle, DecodeExecutionPolicy, FinishReason, GenerationOutput,
     ModelRunner, PagedBatchedDecodeState, PagedBatchedPrefillStart, PagedBatchedPrefillState,
     PagedKvCacheKt, PagedPrefixRegistration, PagedPrefixReuse,
 };
@@ -27,8 +27,8 @@ use crate::config::{
     ACTOR_CYCLE_IDLE_COMMAND_POLL_MS, ActorCycleIdleDiagnostics, BatchTokenBudget,
     BatchingActorAdmissionConfig, BatchingBackendPolicy, BatchingConfig, ConfigValueSource,
     DEFAULT_ROWWISE_DECODE, DecodeBatchEffectiveSource, DecodeRuntimeConfig,
-    DeterministicInference, DirectDecodeRendezvousBackendPolicy, MaxDecodeBatch,
-    MaxDecodeBatchDiagnostics, PrefillLayerBudget, PrefillTokenBudget, StreamStallGrace,
+    DeterministicInference, MaxDecodeBatch, MaxDecodeBatchDiagnostics, PrefillLayerBudget,
+    PrefillTokenBudget, StreamStallGrace,
 };
 use crate::latency_observability::{BackendPhaseDurations, EngineTokenTiming, TokenPhaseDurations};
 use crate::response_delivery::{
@@ -178,14 +178,10 @@ where
 pub fn resolve_decode_runtime_config(
     deterministic: DeterministicInference,
     configured: MaxDecodeBatch,
-    policy: Option<DecodeBatcherPolicy>,
+    policy: Option<DecodeExecutionPolicy>,
     max_batch_tokens: BatchTokenBudget,
 ) -> DecodeRuntimeConfig {
-    let backend_policy = policy.map_or(DEFAULT_MAX_DECODE_BATCH, |policy| {
-        // The engine's width, not the legacy batcher's: CUDA keeps its serial
-        // legacy row loop (max_batch 1) while the engine decodes concurrently.
-        policy.engine_max_decode_batch.unwrap_or(policy.max_batch)
-    });
+    let backend_policy = policy.map_or(DEFAULT_MAX_DECODE_BATCH, |policy| policy.max_decode_batch);
     let selected = configured.limit().unwrap_or(backend_policy);
     let selected_source = match (configured.limit(), configured.source()) {
         (Some(_), ConfigValueSource::ConfigFile) => DecodeBatchEffectiveSource::ConfigFile,
@@ -1858,7 +1854,7 @@ impl BatchingEngineHandle {
     pub fn start_with_backend_options(
         forward: Arc<dyn DecodeForward>,
         max_decode_batch: usize,
-        policy: Option<DecodeBatcherPolicy>,
+        policy: Option<DecodeExecutionPolicy>,
         response_delivery_policy: ResponseDeliveryPolicy,
     ) -> Self {
         Self::start_with_runtime_options(
@@ -1875,7 +1871,7 @@ impl BatchingEngineHandle {
     pub fn start_with_runtime_options(
         forward: Arc<dyn DecodeForward>,
         max_decode_batch: usize,
-        policy: Option<DecodeBatcherPolicy>,
+        policy: Option<DecodeExecutionPolicy>,
         max_batch_tokens: BatchTokenBudget,
         max_prefill_tokens_per_cycle: PrefillTokenBudget,
         max_prefill_layers_per_cycle: PrefillLayerBudget,
@@ -1884,28 +1880,12 @@ impl BatchingEngineHandle {
         let max_decode_batch = max_decode_batch.max(1);
         let batching = BatchingConfig::default().resolve(
             BatchingBackendPolicy {
-                batching_engine_default_enabled: policy
-                    .is_some_and(|policy| policy.batching_engine_default_enabled),
                 use_decode_width_prefill_admission: policy
                     .is_some_and(|policy| policy.use_decode_width_prefill_admission),
                 burst_prefill_admission: policy
                     .is_some_and(|policy| policy.burst_prefill_admission),
                 actor_prefill_tile_alignment_required: policy
                     .is_some_and(|policy| policy.actor_prefill_tile_alignment_required),
-                direct_decode_rendezvous: policy.map_or(
-                    DirectDecodeRendezvousBackendPolicy {
-                        enabled: false,
-                        max_batch: 1,
-                        wait_us: 0,
-                        mixed_seq_lens: false,
-                    },
-                    |policy| DirectDecodeRendezvousBackendPolicy {
-                        enabled: policy.rendezvous_default_enabled,
-                        max_batch: policy.max_batch,
-                        wait_us: policy.wait_micros,
-                        mixed_seq_lens: policy.allow_mixed_seq_lens,
-                    },
-                ),
             },
             max_decode_batch,
         );
@@ -6430,16 +6410,9 @@ mod tests {
         };
         let batching = BatchingConfig::default().resolve(
             BatchingBackendPolicy {
-                batching_engine_default_enabled: false,
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
                 actor_prefill_tile_alignment_required: false,
-                direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
-                    enabled: false,
-                    max_batch: 1,
-                    wait_us: 0,
-                    mixed_seq_lens: false,
-                },
             },
             8,
         );
@@ -6614,16 +6587,9 @@ mod tests {
     async fn cooperative_actor_cycle_idle_is_accounted_and_stop_responsive() {
         let batching = BatchingConfig::default().resolve(
             BatchingBackendPolicy {
-                batching_engine_default_enabled: true,
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
                 actor_prefill_tile_alignment_required: false,
-                direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
-                    enabled: false,
-                    max_batch: 1,
-                    wait_us: 0,
-                    mixed_seq_lens: false,
-                },
             },
             1,
         );
@@ -6687,16 +6653,9 @@ mod tests {
     async fn cooperative_actor_cycle_idle_reaches_the_next_token_timing() {
         let batching = BatchingConfig::default().resolve(
             BatchingBackendPolicy {
-                batching_engine_default_enabled: true,
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
                 actor_prefill_tile_alignment_required: false,
-                direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
-                    enabled: false,
-                    max_batch: 1,
-                    wait_us: 0,
-                    mixed_seq_lens: false,
-                },
             },
             1,
         );
@@ -7410,7 +7369,7 @@ mod tests {
         let resolve = |deterministic: bool,
                        configured: Option<usize>,
                        source: ConfigValueSource,
-                       policy: Option<DecodeBatcherPolicy>| {
+                       policy: Option<DecodeExecutionPolicy>| {
             resolve_decode_runtime_config(
                 DeterministicInference::new(deterministic, source),
                 MaxDecodeBatch::new(configured, source).unwrap(),
@@ -7419,20 +7378,17 @@ mod tests {
             )
         };
         let vulkan_policy =
-            DecodeBatcherPolicy::for_backend("vulkan", kiln_tensor::Device::Vulkan(0));
-        let metal_policy = DecodeBatcherPolicy::for_backend("metal", kiln_tensor::Device::Metal(0));
+            DecodeExecutionPolicy::for_backend("vulkan", kiln_tensor::Device::Vulkan(0));
+        let metal_policy =
+            DecodeExecutionPolicy::for_backend("metal", kiln_tensor::Device::Metal(0));
         assert_eq!(
             resolve(false, None, ConfigValueSource::Default, None)
                 .max_decode_batch
                 .effective,
             8
         );
-        // CUDA: the legacy batcher stays serial (max_batch 1) but the
-        // ENGINE width must be the engine default — the policy-routing
-        // change that reused max_batch serialized all concurrent CUDA
-        // requests.
-        let cuda_policy = DecodeBatcherPolicy::for_backend("cuda", kiln_tensor::Device::Cuda(0));
-        assert_eq!(cuda_policy.max_batch, 1);
+        let cuda_policy = DecodeExecutionPolicy::for_backend("cuda", kiln_tensor::Device::Cuda(0));
+        assert_eq!(cuda_policy.max_decode_batch, 8);
         assert_eq!(
             resolve(false, None, ConfigValueSource::Default, Some(cuda_policy))
                 .max_decode_batch

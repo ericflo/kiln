@@ -4,7 +4,7 @@
 //! The `/metrics` endpoint renders all metrics in Prometheus text exposition format.
 
 use kiln_core::thinking_budget::ThinkingBudgetSource;
-use kiln_model::{DecodeBatcherStats, ExternalYieldSyncStats};
+use kiln_model::ExternalYieldSyncStats;
 use kiln_scheduler::PrefixCacheStats;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1538,123 +1538,6 @@ impl Metrics {
                 "kiln_request_prefill_tokens_completed {}",
                 self.request_prefill_tokens_completed
                     .load(Ordering::Relaxed)
-            ),
-        );
-
-        out.push_str("# HELP kiln_decode_batcher_enabled Whether the live greedy decode batcher is enabled.\n");
-        out.push_str("# TYPE kiln_decode_batcher_enabled gauge\n");
-        push_line(
-            &mut out,
-            &format!(
-                "kiln_decode_batcher_enabled {}",
-                if gauges.decode_batcher_enabled { 1 } else { 0 }
-            ),
-        );
-
-        out.push_str("# HELP kiln_decode_batcher_jobs_total Live greedy decode batcher jobs.\n");
-        out.push_str("# TYPE kiln_decode_batcher_jobs_total counter\n");
-        prom_counter(
-            &mut out,
-            "kiln_decode_batcher_jobs_total",
-            "result",
-            "submitted",
-            gauges.decode_batcher.submitted_jobs as u64,
-        );
-        prom_counter(
-            &mut out,
-            "kiln_decode_batcher_jobs_total",
-            "result",
-            "runner_busy",
-            gauges.decode_batcher.runner_busy_jobs as u64,
-        );
-        prom_counter(
-            &mut out,
-            "kiln_decode_batcher_jobs_total",
-            "result",
-            "failed",
-            gauges.decode_batcher.failed_jobs as u64,
-        );
-
-        out.push_str("# HELP kiln_decode_batcher_batches_total Live greedy decode batches executed by the rendezvous worker.\n");
-        out.push_str("# TYPE kiln_decode_batcher_batches_total counter\n");
-        push_line(
-            &mut out,
-            &format!(
-                "kiln_decode_batcher_batches_total {}",
-                gauges.decode_batcher.executed_batches
-            ),
-        );
-
-        out.push_str("# HELP kiln_decode_batcher_rows_total Live greedy decode rows executed by the rendezvous worker.\n");
-        out.push_str("# TYPE kiln_decode_batcher_rows_total counter\n");
-        push_line(
-            &mut out,
-            &format!(
-                "kiln_decode_batcher_rows_total {}",
-                gauges.decode_batcher.executed_rows
-            ),
-        );
-
-        out.push_str("# HELP kiln_decode_batcher_runner_calls_total ModelRunner decode calls issued by the live greedy decode batcher, including rowwise retry attempts.\n");
-        out.push_str("# TYPE kiln_decode_batcher_runner_calls_total counter\n");
-        push_line(
-            &mut out,
-            &format!(
-                "kiln_decode_batcher_runner_calls_total {}",
-                gauges.decode_batcher.runner_calls
-            ),
-        );
-
-        out.push_str("# HELP kiln_decode_batcher_runner_calls_per_token ModelRunner decode calls per live greedy decode token row; lower than 1.0 means batching amortized calls across rows.\n");
-        out.push_str("# TYPE kiln_decode_batcher_runner_calls_per_token gauge\n");
-        push_line(
-            &mut out,
-            &format!(
-                "kiln_decode_batcher_runner_calls_per_token {:.6}",
-                gauges
-                    .decode_batcher
-                    .runner_calls_per_token()
-                    .unwrap_or(0.0)
-            ),
-        );
-
-        out.push_str("# HELP kiln_decode_batcher_max_runner_calls_per_token Maximum ModelRunner decode calls any token row observed in one live greedy decode worker batch.\n");
-        out.push_str("# TYPE kiln_decode_batcher_max_runner_calls_per_token gauge\n");
-        push_line(
-            &mut out,
-            &format!(
-                "kiln_decode_batcher_max_runner_calls_per_token {}",
-                gauges.decode_batcher.max_runner_calls_per_token
-            ),
-        );
-
-        out.push_str("# HELP kiln_decode_batcher_runner_call_budget_per_token Phase 8 sentinel budget for maximum ModelRunner decode calls per live greedy decode token row.\n");
-        out.push_str("# TYPE kiln_decode_batcher_runner_call_budget_per_token gauge\n");
-        push_line(
-            &mut out,
-            &format!(
-                "kiln_decode_batcher_runner_call_budget_per_token {}",
-                gauges.decode_batcher.runner_call_budget_per_token()
-            ),
-        );
-
-        out.push_str("# HELP kiln_decode_batcher_runner_call_budget_exceeded Whether the observed max runner calls per token exceeded the Phase 8 sentinel budget.\n");
-        out.push_str("# TYPE kiln_decode_batcher_runner_call_budget_exceeded gauge\n");
-        push_line(
-            &mut out,
-            &format!(
-                "kiln_decode_batcher_runner_call_budget_exceeded {}",
-                usize::from(gauges.decode_batcher.runner_call_budget_exceeded())
-            ),
-        );
-
-        out.push_str("# HELP kiln_decode_batcher_max_observed_batch Largest live greedy decode batch observed since process start.\n");
-        out.push_str("# TYPE kiln_decode_batcher_max_observed_batch gauge\n");
-        push_line(
-            &mut out,
-            &format!(
-                "kiln_decode_batcher_max_observed_batch {}",
-                gauges.decode_batcher.max_observed_batch
             ),
         );
 
@@ -3389,8 +3272,6 @@ pub struct SnapshotGauges {
     pub prompt_token_cache_hits: u64,
     pub prompt_token_cache_misses: u64,
     pub prompt_token_cache_entries: usize,
-    pub decode_batcher_enabled: bool,
-    pub decode_batcher: DecodeBatcherStats,
     pub batching_engine_enabled: bool,
     pub batching_engine: BatchingEngineSnapshot,
     pub training_active: u8,
@@ -4035,17 +3916,6 @@ mod tests {
             prompt_token_cache_hits: 5,
             prompt_token_cache_misses: 2,
             prompt_token_cache_entries: 4,
-            decode_batcher_enabled: true,
-            decode_batcher: DecodeBatcherStats {
-                submitted_jobs: 4,
-                executed_batches: 2,
-                executed_rows: 4,
-                runner_calls: 2,
-                max_runner_calls_per_token: 1,
-                max_observed_batch: 3,
-                runner_busy_jobs: 1,
-                failed_jobs: 0,
-            },
             batching_engine_enabled: true,
             batching_engine: BatchingEngineSnapshot {
                 snapshot_age_ms: 1_250,
@@ -4438,11 +4308,6 @@ mod tests {
         assert!(output.contains("kiln_batching_engine_decode_forwards_total 17"));
         assert!(output.contains("kiln_batching_engine_batched_decode_forwards_total 15"));
         assert!(output.contains("kiln_batching_engine_decode_rows_total 48"));
-        assert!(output.contains("kiln_decode_batcher_runner_calls_total 2"));
-        assert!(output.contains("kiln_decode_batcher_runner_calls_per_token 0.500000"));
-        assert!(output.contains("kiln_decode_batcher_max_runner_calls_per_token 1"));
-        assert!(output.contains("kiln_decode_batcher_runner_call_budget_per_token 2"));
-        assert!(output.contains("kiln_decode_batcher_runner_call_budget_exceeded 0"));
         assert!(output.contains("kiln_batching_engine_prefill_admission_cycles_total 6"));
         assert!(output.contains("kiln_batching_engine_prefill_staging_priority_forwards_total 3"));
         assert!(output.contains("kiln_batching_engine_prefill_staging_admissions_total 4"));
@@ -4591,8 +4456,6 @@ mod tests {
             prompt_token_cache_hits: 0,
             prompt_token_cache_misses: 0,
             prompt_token_cache_entries: 0,
-            decode_batcher_enabled: false,
-            decode_batcher: DecodeBatcherStats::default(),
             batching_engine_enabled: false,
             batching_engine: BatchingEngineSnapshot::default(),
             training_active: 0,

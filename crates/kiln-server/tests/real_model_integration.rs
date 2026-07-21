@@ -2317,7 +2317,7 @@ async fn test_real_model_chat_completion_emits_exact_rollout_provenance() {
             Err(_) => {
                 let snapshot = match state_for_assert.backend.as_ref() {
                     ModelBackend::Real {
-                        batching_engine: Some(engine),
+                        batching_engine: engine,
                         ..
                     } => engine.cached_snapshot(),
                     _ => panic!("rollout fixture lost its batching engine"),
@@ -5976,15 +5976,12 @@ async fn assert_live_eval_executor_uses_vulkan() -> (u32, usize, String) {
         block_manager,
         paged_cache,
         prefix_cache,
-        batching_engine: Some(batching_engine.clone()),
-        decode_batcher: None,
+        batching_engine: batching_engine.clone(),
     });
     let batching_engine = match state.backend.as_ref() {
         ModelBackend::Real {
-            batching_engine: Some(engine),
-            ..
-        } => engine.clone(),
-        ModelBackend::Real { .. } => panic!("Vulkan live eval requires the batching engine"),
+            batching_engine, ..
+        } => batching_engine.clone(),
         ModelBackend::Mock { .. } => panic!("Vulkan live eval constructed a mock backend"),
     };
 

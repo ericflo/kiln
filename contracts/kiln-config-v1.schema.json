@@ -175,12 +175,12 @@
           "minimum": 1,
           "maximum": 65536,
           "default": 256,
-          "description": "1..=65536. Independent new-prompt-token ceiling within the combined actor budget. ROCm actor serving requires this value to equal the effective streaming-prefill tile (256 by default), requires direct streaming dispatch no later than that boundary, and requires max_batch_tokens to fit the tile plus effective decode width; unsafe combinations fail startup. The checked Strix Halo Vulkan development profile pins 128; concurrent Vulkan serving at 256 is not qualified.",
+          "description": "1..=65536. Independent new-prompt-token ceiling within the combined actor budget. ROCm actor serving requires equality with the effective streaming tile, tiled streaming-prefill dispatch no later than that boundary, and server.max_batch_tokens >= tile + effective max_decode_batch; unsafe combinations fail startup. The checked Strix Halo Vulkan development profile pins 128; concurrent Vulkan serving at 256 is not qualified.",
           "x-kiln-path": "server.max_prefill_tokens_per_cycle",
           "x-kiln-type-and-default": "unsigned integer; 256",
           "x-kiln-canonical-env": "KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-validation": "1..=65536. Independent new-prompt-token ceiling within the combined actor budget. ROCm actor serving requires equality with the effective streaming tile, direct streaming dispatch no later than that boundary, and server.max_batch_tokens >= tile + effective max_decode_batch; unsafe combinations fail startup. The checked Strix Halo Vulkan development profile pins 128; concurrent Vulkan serving at 256 is not qualified."
+          "x-kiln-validation": "1..=65536. Independent new-prompt-token ceiling within the combined actor budget. ROCm actor serving requires equality with the effective streaming tile, tiled streaming-prefill dispatch no later than that boundary, and server.max_batch_tokens >= tile + effective max_decode_batch; unsafe combinations fail startup. The checked Strix Halo Vulkan development profile pins 128; concurrent Vulkan serving at 256 is not qualified."
         },
         "max_prefill_layers_per_cycle": {
           "type": "integer",
@@ -604,21 +604,6 @@
       "description": "Production batching actor and direct-decode rendezvous policy.",
       "additionalProperties": false,
       "properties": {
-        "mode": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "enabled",
-            "disabled"
-          ],
-          "default": "auto",
-          "description": "TOML accepts auto, enabled, or disabled, case-insensitively. Environment input also accepts the strict boolean spellings, mapping true to enabled and false to disabled. auto delegates actor selection to the immutable backend policy; an explicit value wins. Restart required.",
-          "x-kiln-path": "batching.mode",
-          "x-kiln-type-and-default": "string enum; \"auto\"",
-          "x-kiln-canonical-env": "KILN_BATCHING_MODE (implemented)",
-          "x-kiln-environment": "none",
-          "x-kiln-validation": "TOML accepts auto, enabled, or disabled, case-insensitively. Environment input also accepts the strict boolean spellings, mapping true to enabled and false to disabled. auto delegates actor selection to the immutable backend policy; an explicit value wins. Restart required."
-        },
         "rowwise_decode": {
           "type": "boolean",
           "default": false,
@@ -669,75 +654,6 @@
           "x-kiln-canonical-env": "KILN_BATCHING_ACTOR_CYCLE_IDLE_MS (implemented)",
           "x-kiln-environment": "none",
           "x-kiln-validation": "0..=60000. Zero preserves the unpaced actor. A nonzero value inserts one intentional cooperative wait after an actor cycle that advanced prefill or decode, only after synchronous accelerator work has returned. The actor polls control commands at intervals no longer than 5 ms, so shutdown remains responsive, and the independent response-delivery worker and HTTP process remain live. This deliberately trades request throughput and inter-token latency for a lower sustained accelerator duty cycle; it is not a temperature controller and never changes itself from a live sensor. Config, health, debug, Prometheus, and serving-benchmark receipts expose the policy and observed waits. Restart required."
-        },
-        "direct_decode_rendezvous_mode": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "enabled",
-            "disabled"
-          ],
-          "default": "auto",
-          "description": "Selects only the fallback worker used by actor-absent direct streaming effectively-greedy requests. TOML accepts auto, enabled, or disabled, case-insensitively; environment input also accepts the strict boolean spellings. auto enables the worker on every real backend. Sampled requests, non-streaming requests, and every route using the batching actor bypass this worker. Restart required.",
-          "x-kiln-path": "batching.direct_decode_rendezvous_mode",
-          "x-kiln-type-and-default": "string enum; \"auto\"",
-          "x-kiln-canonical-env": "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE (implemented)",
-          "x-kiln-environment": "none",
-          "x-kiln-validation": "Selects only the fallback worker used by actor-absent direct streaming effectively-greedy requests. TOML accepts auto, enabled, or disabled, case-insensitively; environment input also accepts the strict boolean spellings. auto enables the worker on every real backend. Sampled requests, non-streaming requests, and every route using the batching actor bypass this worker. Restart required."
-        },
-        "direct_decode_rendezvous_max_batch": {
-          "oneOf": [
-            {
-              "const": "auto"
-            },
-            {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 65536
-            }
-          ],
-          "default": "auto",
-          "description": "An explicit integer must be 1..=65536. auto uses the backend policy below. Either selection is clamped to the already-resolved effective decode width; diagnostics use effective_decode_width when that ceiling wins. Restart required.",
-          "x-kiln-path": "batching.direct_decode_rendezvous_max_batch",
-          "x-kiln-type-and-default": "\"auto\" or unsigned integer; \"auto\"",
-          "x-kiln-canonical-env": "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH (implemented)",
-          "x-kiln-environment": "none",
-          "x-kiln-validation": "An explicit integer must be 1..=65536. auto uses the backend policy below. Either selection is clamped to the already-resolved effective decode width; diagnostics use effective_decode_width when that ceiling wins. Restart required."
-        },
-        "direct_decode_rendezvous_wait_us": {
-          "oneOf": [
-            {
-              "const": "auto"
-            },
-            {
-              "type": "integer",
-              "minimum": 0
-            }
-          ],
-          "default": "auto",
-          "description": "An explicit value is any non-negative u64 number of microseconds, including 0; auto uses backend policy. A negative, overflowing, malformed, or non-UTF-8 environment value stops startup. In particular, malformed legacy KILN_DECODE_BATCH_WAIT_US now fails startup instead of silently becoming zero. Restart required.",
-          "x-kiln-path": "batching.direct_decode_rendezvous_wait_us",
-          "x-kiln-type-and-default": "\"auto\" or unsigned integer; \"auto\"",
-          "x-kiln-canonical-env": "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US (implemented)",
-          "x-kiln-environment": "none",
-          "x-kiln-validation": "An explicit value is any non-negative u64 number of microseconds, including 0; auto uses backend policy. A negative, overflowing, malformed, or non-UTF-8 environment value stops startup. In particular, malformed legacy KILN_DECODE_BATCH_WAIT_US now fails startup instead of silently becoming zero. Restart required."
-        },
-        "direct_decode_rendezvous_mixed_seq_lens": {
-          "oneOf": [
-            {
-              "const": "auto"
-            },
-            {
-              "type": "boolean"
-            }
-          ],
-          "default": "auto",
-          "description": "TOML accepts only the string auto or a native boolean; quoted boolean strings are rejected. Environment input accepts auto or the strict boolean spellings. The value controls whether one compatible fallback cohort may contain different decode positions. Restart required.",
-          "x-kiln-path": "batching.direct_decode_rendezvous_mixed_seq_lens",
-          "x-kiln-type-and-default": "\"auto\" or boolean; \"auto\"",
-          "x-kiln-canonical-env": "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS (implemented)",
-          "x-kiln-environment": "none",
-          "x-kiln-validation": "TOML accepts only the string auto or a native boolean; quoted boolean strings are rejected. Environment input accepts auto or the strict boolean spellings. The value controls whether one compatible fallback cohort may contain different decode positions. Restart required."
         }
       },
       "default": {}
@@ -1316,12 +1232,12 @@
             "disabled"
           ],
           "default": "auto",
-          "description": "auto, enabled, or disabled, case-insensitive with surrounding whitespace ignored. auto delegates dispatch to backend policy, enabled selects every non-empty prompt, and disabled selects none. When the ROCm batching actor is effective, dispatch must cover the first effective tile; disabling streaming therefore also requires disabling the actor. Every other TOML type, TOML value, or environment value fails startup.",
+          "description": "auto, enabled, or disabled, case-insensitive with surrounding whitespace ignored. auto delegates dispatch to backend policy, enabled selects every non-empty prompt, and disabled selects none. ROCm requires dispatch to cover the first effective actor tile, so disabled is rejected for that backend. Every other TOML type, TOML value, or environment value fails startup.",
           "x-kiln-path": "streaming_prefill.mode",
           "x-kiln-type-and-default": "string enum; \"auto\"",
           "x-kiln-canonical-env": "KILN_STREAMING_PREFILL_MODE (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-validation": "auto, enabled, or disabled, case-insensitive with surrounding whitespace ignored. auto delegates dispatch to backend policy, enabled selects every non-empty prompt, and disabled selects none. When the ROCm batching actor is effective, dispatch must cover the first effective tile; disabling streaming therefore also requires disabling the actor. Every other TOML type, TOML value, or environment value fails startup."
+          "x-kiln-validation": "auto, enabled, or disabled, case-insensitive with surrounding whitespace ignored. auto delegates dispatch to backend policy, enabled selects every non-empty prompt, and disabled selects none. ROCm requires dispatch to cover the first effective actor tile, so disabled is rejected for that backend. Every other TOML type, TOML value, or environment value fails startup."
         },
         "threshold_tokens": {
           "oneOf": [
@@ -2082,19 +1998,19 @@
       }
     }
   ],
-  "x-kiln-field-count": 117,
+  "x-kiln-field-count": 112,
   "x-kiln-dynamic-field-template-count": 2,
-  "x-kiln-canonical-environment-count": 112,
+  "x-kiln-canonical-environment-count": 107,
   "x-kiln-config-file-only-count": 5,
   "x-kiln-compatibility-field-count": 0,
   "x-kiln-compatibility-alias-count": 0,
   "x-kiln-toml-compatibility-field-count": 0,
-  "x-kiln-retired-environment-count": 77,
+  "x-kiln-retired-environment-count": 82,
   "x-kiln-retired-environment-replacements": {
     "KILN_ADAPTER_DIR": "KILN_MODEL_ADAPTER_DIR",
     "KILN_ADAPTER_LIBRARY_URL": "KILN_ADAPTERS_LIBRARY_URL",
     "KILN_AGENT_RUNS": "KILN_AGENT_RUNS_ACCESS",
-    "KILN_BATCHING_ENGINE": "KILN_BATCHING_MODE",
+    "KILN_BATCHING_ENGINE": "removed; every real backend uses the actor",
     "KILN_BATCH_DECODE_ROWWISE": "KILN_BATCHING_ROWWISE_DECODE",
     "KILN_BATCH_PREFILL_ADMISSION_QUANTUM": "KILN_BATCHING_PREFILL_ADMISSION_QUANTUM",
     "KILN_BATCH_PREFIX_AWARE_ADMISSION": "KILN_BATCHING_PREFIX_AWARE_ADMISSION",
@@ -2104,10 +2020,10 @@
     "KILN_CHECKPOINT_BOUNDARY_CACHE_GB": "KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB",
     "KILN_CHECKPOINT_INTERVAL": "KILN_TRAINING_CHECKPOINT_INTERVAL",
     "KILN_CUDA_GRAPHS": "KILN_MEMORY_CUDA_GRAPHS",
-    "KILN_DECODE_BATCHER": "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE",
-    "KILN_DECODE_BATCH_MAX": "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH",
-    "KILN_DECODE_BATCH_MIXED_SEQ": "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS",
-    "KILN_DECODE_BATCH_WAIT_US": "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US",
+    "KILN_DECODE_BATCHER": "removed; the direct worker no longer exists",
+    "KILN_DECODE_BATCH_MAX": "removed; the direct worker no longer exists",
+    "KILN_DECODE_BATCH_MIXED_SEQ": "removed; the direct worker no longer exists",
+    "KILN_DECODE_BATCH_WAIT_US": "removed; the direct worker no longer exists",
     "KILN_DEFAULT_NO_THINK": "KILN_SERVER_DEFAULT_THINKING_ENABLED",
     "KILN_DEFAULT_THINKING_BUDGET_MS": "KILN_SERVER_DEFAULT_THINKING_BUDGET_MS",
     "KILN_DEFAULT_THINKING_BUDGET_TOKENS": "KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS",
@@ -2167,7 +2083,12 @@
     "KILN_TRAINING_MEMORY_GB": "KILN_MEMORY_TRAINING_MEMORY_GB",
     "KILN_VULKAN_BUFFER_POOL_GB": "KILN_MEMORY_VULKAN_BUFFER_POOL_GB",
     "KILN_VULKAN_DEVICE": "KILN_ACCELERATOR_VULKAN_DEVICE_INDEX",
-    "KILN_VULKAN_VALIDATION": "KILN_ACCELERATOR_VULKAN_VALIDATION"
+    "KILN_VULKAN_VALIDATION": "KILN_ACCELERATOR_VULKAN_VALIDATION",
+    "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH": "removed; the direct worker no longer exists",
+    "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS": "removed; the direct worker no longer exists",
+    "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE": "removed; the direct worker no longer exists",
+    "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US": "removed; the direct worker no longer exists",
+    "KILN_BATCHING_MODE": "removed; every real backend uses the actor"
   },
   "x-kiln-removed-toml-field-count": 2,
   "x-kiln-removed-toml-field-replacements": {

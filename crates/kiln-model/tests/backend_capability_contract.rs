@@ -419,7 +419,7 @@ fn generated_capability_report_lists_request_descriptors() {
         "InferenceRecurrentStatePolicy",
         "DecodeCapabilities",
         "SpeculativeDecodePolicy",
-        "DecodeBatcherPolicy",
+        "DecodeExecutionPolicy",
         "BackendTrainingCapabilities",
         "ServerTrainingDispatchPolicy",
         "TrainingAccelerationProfilePolicy",
@@ -745,73 +745,32 @@ fn generated_capability_report_lists_request_descriptors() {
             && inference_recurrent_state_policy_fields.contains(&"f16"),
         "InferenceRecurrentStatePolicy should expose BF16 and F16 support"
     );
-    let decode_batcher_policy_fields = capability_descriptors["DecodeBatcherPolicy"]["fields"]
+    let decode_execution_policy_fields = capability_descriptors["DecodeExecutionPolicy"]["fields"]
         .as_array()
-        .expect("DecodeBatcherPolicy fields should be an array")
+        .expect("DecodeExecutionPolicy fields should be an array")
         .iter()
         .filter_map(|field| field["name"].as_str())
         .collect::<Vec<_>>();
-    assert!(
-        decode_batcher_policy_fields.contains(&"require_native_decode_attention"),
-        "DecodeBatcherPolicy should own native decode-attention fallback requirements"
-    );
-    assert!(
-        decode_batcher_policy_fields.contains(&"allow_portable_lora_decode"),
-        "DecodeBatcherPolicy should own the correctness-qualified LoRA decode route"
-    );
-    assert!(
-        decode_batcher_policy_fields.contains(&"partition_noncontiguous_gdn_kv_tiles"),
-        "DecodeBatcherPolicy should own GDN KV contiguity partition routing"
-    );
-    assert!(
-        decode_batcher_policy_fields.contains(&"prefer_direct_paged_decode_attention"),
-        "DecodeBatcherPolicy should own direct paged-decode attention path preference"
-    );
-    assert!(
-        decode_batcher_policy_fields.contains(&"allow_prefix_cache_split_snapshot"),
-        "DecodeBatcherPolicy should own prefix-cache split snapshot routing"
-    );
-    assert!(
-        decode_batcher_policy_fields.contains(&"paged_decode_requires_contiguous_kv_chunks"),
-        "DecodeBatcherPolicy should own paged-decode KV chunk contiguity requirements"
-    );
-    assert!(
-        decode_batcher_policy_fields.contains(&"use_greedy_token_decode"),
-        "DecodeBatcherPolicy should own greedy-token decode shortcut routing"
-    );
-    assert!(
-        decode_batcher_policy_fields.contains(&"use_native_sampled_contiguous_decode"),
-        "DecodeBatcherPolicy should own sampled contiguous decode routing"
-    );
-    assert!(
-        decode_batcher_policy_fields
-            .contains(&"sampled_contiguous_decode_requires_resident_decode"),
-        "DecodeBatcherPolicy should own sampled contiguous resident-decode requirements"
-    );
-    for (field, message) in [
-        (
-            "rendezvous_default_enabled",
-            "DecodeBatcherPolicy should own direct-rendezvous enable defaults",
-        ),
-        (
+    assert_eq!(
+        decode_execution_policy_fields,
+        vec![
+            "max_decode_batch",
+            "require_native_decode_attention",
+            "allow_portable_lora_decode",
+            "prefer_direct_paged_decode_attention",
+            "allow_prefix_cache_split_snapshot",
+            "paged_decode_requires_contiguous_kv_chunks",
+            "use_greedy_token_decode",
+            "use_native_sampled_contiguous_decode",
+            "sampled_contiguous_decode_requires_resident_decode",
+            "partition_noncontiguous_gdn_kv_tiles",
             "use_decode_width_prefill_admission",
-            "DecodeBatcherPolicy should own prefill admission width defaults",
-        ),
-        (
             "burst_prefill_admission",
-            "DecodeBatcherPolicy should own burst prefill admission defaults",
-        ),
-        (
-            "batching_engine_default_enabled",
-            "DecodeBatcherPolicy should own server batching-engine defaults",
-        ),
-        (
+            "actor_prefill_tile_alignment_required",
             "warm_resident_decode_pool_on_startup",
-            "DecodeBatcherPolicy should own resident decode pool startup warmup",
-        ),
-    ] {
-        assert!(decode_batcher_policy_fields.contains(&field), "{message}");
-    }
+        ],
+        "DecodeExecutionPolicy should remain the exact actor decode/admission policy; scheduler activation and direct-worker fields must not return"
+    );
     let backend_training_fields = capability_descriptors["BackendTrainingCapabilities"]["fields"]
         .as_array()
         .expect("BackendTrainingCapabilities fields should be an array")
@@ -1001,7 +960,7 @@ fn generated_capability_report_lists_request_descriptors() {
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
     for path in [
-        "crates/kiln-model/src/generate.rs",
+        "crates/kiln-server/src/batching_engine.rs",
         "crates/kiln-server/src/metrics.rs",
         "crates/kiln-server/src/api/health.rs",
         "crates/kiln-server/src/api/debug_model_state.rs",
@@ -2266,7 +2225,7 @@ fn generated_capability_report_check_mode_is_non_mutating_and_enforced() {
 /// startup warning — never a silent policy `false`.
 #[test]
 fn every_backend_allows_prefix_cache_split_snapshot() {
-    use kiln_model::backend::capability::DecodeBatcherPolicy;
+    use kiln_model::backend::capability::DecodeExecutionPolicy;
 
     let arms = [
         ("cuda", kiln_tensor::Device::Cuda(0)),
@@ -2276,7 +2235,7 @@ fn every_backend_allows_prefix_cache_split_snapshot() {
         ("cpu", kiln_tensor::Device::Cpu),
     ];
     for (name, device) in arms {
-        let policy = DecodeBatcherPolicy::for_backend(name, device);
+        let policy = DecodeExecutionPolicy::for_backend(name, device);
         assert!(
             policy.allow_prefix_cache_split_snapshot,
             "backend `{name}` disables the prefix-cache split snapshot, which kills \
@@ -2288,7 +2247,7 @@ fn every_backend_allows_prefix_cache_split_snapshot() {
 
 #[test]
 fn portable_lora_decode_is_an_explicit_vulkan_only_capability() {
-    use kiln_model::backend::capability::DecodeBatcherPolicy;
+    use kiln_model::backend::capability::DecodeExecutionPolicy;
 
     for (name, device, expected) in [
         ("cuda", kiln_tensor::Device::Cuda(0), false),
@@ -2298,7 +2257,7 @@ fn portable_lora_decode_is_an_explicit_vulkan_only_capability() {
         ("cpu", kiln_tensor::Device::Cpu, false),
     ] {
         assert_eq!(
-            DecodeBatcherPolicy::for_backend(name, device).allow_portable_lora_decode,
+            DecodeExecutionPolicy::for_backend(name, device).allow_portable_lora_decode,
             expected,
             "backend `{name}` portable LoRA decode policy drifted"
         );

@@ -39,7 +39,7 @@ from typing import Any, Callable, Iterable
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "17"
+DRIVER_VERSION = "18"
 SUPPORTED_DRIVER_VERSIONS = {
     "2",
     "3",
@@ -56,47 +56,49 @@ SUPPORTED_DRIVER_VERSIONS = {
     "14",
     "15",
     "16",
+    "17",
     DRIVER_VERSION,
 }
 THERMAL_DRIVER_VERSIONS = {
     "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", DRIVER_VERSION,
+    "16", "17", DRIVER_VERSION,
 }
 LIFECYCLE_DRIVER_VERSIONS = {
     "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", DRIVER_VERSION,
+    "16", "17", DRIVER_VERSION,
 }
 PRELAUNCH_DRIVER_VERSIONS = {
     "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", DRIVER_VERSION,
+    "16", "17", DRIVER_VERSION,
 }
 OUTPUT_EVIDENCE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", DRIVER_VERSION,
+    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", DRIVER_VERSION,
 }
 MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {
-    "8", "9", "10", "11", "12", "13", "14", "15", "16", DRIVER_VERSION,
+    "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", DRIVER_VERSION,
 }
 RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS = {
-    "12", "13", "14", "15", "16", DRIVER_VERSION,
+    "12", "13", "14", "15", "16", "17", DRIVER_VERSION,
 }
 ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "9", "10", "11", "12", "13", "14", "15", "16", DRIVER_VERSION,
+    "9", "10", "11", "12", "13", "14", "15", "16", "17", DRIVER_VERSION,
 }
 ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "10", "11", "12", "13", "14", "15", "16", DRIVER_VERSION,
+    "10", "11", "12", "13", "14", "15", "16", "17", DRIVER_VERSION,
 }
 REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", DRIVER_VERSION,
+    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", DRIVER_VERSION,
 }
 IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS = {
-    "11", "12", "13", "14", "15", "16", DRIVER_VERSION,
+    "11", "12", "13", "14", "15", "16", "17", DRIVER_VERSION,
 }
-COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", "15", "16", DRIVER_VERSION}
-MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", "15", "16", DRIVER_VERSION}
-REQUEST_PERFORMANCE_DRIVER_VERSIONS = {"15", "16", DRIVER_VERSION}
-PROMPT_SET_IDENTITY_DRIVER_VERSIONS = {"16", DRIVER_VERSION}
-GRAPH_PARITY_DRIVER_VERSIONS = {"17"}
-REFERENCE_ROLE_DRIVER_VERSIONS = {"17"}
+COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", "15", "16", "17", DRIVER_VERSION}
+MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", "15", "16", "17", DRIVER_VERSION}
+REQUEST_PERFORMANCE_DRIVER_VERSIONS = {"15", "16", "17", DRIVER_VERSION}
+PROMPT_SET_IDENTITY_DRIVER_VERSIONS = {"16", "17", DRIVER_VERSION}
+GRAPH_PARITY_DRIVER_VERSIONS = {"17", DRIVER_VERSION}
+REFERENCE_ROLE_DRIVER_VERSIONS = {"17", DRIVER_VERSION}
+ACTOR_ONLY_DIAGNOSTICS_DRIVER_VERSIONS = {DRIVER_VERSION}
 REFERENCE_ROLES = {
     "qualification_gate",
     "same_artifact_graph_eager_discriminator",
@@ -241,12 +243,14 @@ SERVER_DIAGNOSTICS_SCHEMA_V2 = "kiln.serving-benchmark-server-diagnostics.v2"
 SERVER_DIAGNOSTICS_SCHEMA_V3 = "kiln.serving-benchmark-server-diagnostics.v3"
 SERVER_DIAGNOSTICS_SCHEMA_V4 = "kiln.serving-benchmark-server-diagnostics.v4"
 SERVER_DIAGNOSTICS_SCHEMA_V5 = "kiln.serving-benchmark-server-diagnostics.v5"
-SERVER_DIAGNOSTICS_SCHEMA = "kiln.serving-benchmark-server-diagnostics.v6"
+SERVER_DIAGNOSTICS_SCHEMA_V6 = "kiln.serving-benchmark-server-diagnostics.v6"
+SERVER_DIAGNOSTICS_SCHEMA = "kiln.serving-benchmark-server-diagnostics.v7"
 SERVER_DIAGNOSTICS_SCHEMAS = {
     SERVER_DIAGNOSTICS_SCHEMA_V2,
     SERVER_DIAGNOSTICS_SCHEMA_V3,
     SERVER_DIAGNOSTICS_SCHEMA_V4,
     SERVER_DIAGNOSTICS_SCHEMA_V5,
+    SERVER_DIAGNOSTICS_SCHEMA_V6,
     SERVER_DIAGNOSTICS_SCHEMA,
 }
 ROCM_GRAPH_COUNTER_FIELDS = (
@@ -2213,7 +2217,7 @@ def validate_server_diagnostics_v5(value: Any, label: str) -> dict[str, Any]:
 
 def validate_server_diagnostics_v6(value: Any, label: str) -> dict[str, Any]:
     server = _object(value, label)
-    if server.get("schema") != SERVER_DIAGNOSTICS_SCHEMA:
+    if server.get("schema") != SERVER_DIAGNOSTICS_SCHEMA_V6:
         raise BenchmarkError(f"{label}.schema is unsupported")
     validate_rocm_graph_diagnostics_v6(
         server.get("rocm_graphs"), f"{label}.rocm_graphs"
@@ -2224,6 +2228,105 @@ def validate_server_diagnostics_v6(value: Any, label: str) -> dict[str, Any]:
     legacy_graph.pop("capture_parity")
     legacy["rocm_graphs"] = legacy_graph
     validate_server_diagnostics_v5(legacy, label)
+    return server
+
+
+def validate_server_diagnostics_v7(value: Any, label: str) -> dict[str, Any]:
+    server = _object(value, label)
+    _exact_keys(
+        server,
+        {"schema", "request_route", "requests", "batching_engine", "rocm_graphs"},
+        label,
+    )
+    if server["schema"] != SERVER_DIAGNOSTICS_SCHEMA:
+        raise BenchmarkError(f"{label}.schema is unsupported")
+    if server["request_route"] != "batching_engine":
+        raise BenchmarkError(f"{label}.request_route must be batching_engine")
+
+    requests = _object(server["requests"], f"{label}.requests")
+    request_fields = {
+        *REQUEST_COUNTER_FIELDS,
+        "active_end",
+        "process_active_peak",
+    }
+    _exact_keys(requests, request_fields, f"{label}.requests")
+    for field in request_fields:
+        _nonnegative_int(requests[field], f"{label}.requests.{field}")
+    if requests["total"] != sum(
+        requests[field] for field in REQUEST_COUNTER_FIELDS[1:]
+    ):
+        raise BenchmarkError(f"{label}.requests status counters disagree")
+    if requests["active_end"] > requests["process_active_peak"]:
+        raise BenchmarkError(f"{label}.requests active_end exceeds process peak")
+
+    batching = _object(server["batching_engine"], f"{label}.batching_engine")
+    base_batching_fields = set(COUNTER_FIELDS) | {
+        "effective_max_decode_batch",
+        "process_max_observed_batch",
+        "mean_decode_rows_per_forward",
+        "batched_decode_forward_fraction",
+    }
+    idle_fields = {
+        "actor_cycle_idle_ms",
+        "actor_cycle_idle_source",
+        "actor_cycle_idle_active_end",
+        "actor_cycle_idle_count",
+        "actor_cycle_idle_seconds",
+        "process_max_actor_cycle_idle_ms",
+    }
+    _exact_keys(
+        batching,
+        base_batching_fields | idle_fields,
+        f"{label}.batching_engine",
+    )
+    for field in base_batching_fields:
+        _nonnegative_number(batching[field], f"{label}.batching_engine.{field}")
+    _nonnegative_int(
+        batching["actor_cycle_idle_ms"],
+        f"{label}.batching_engine.actor_cycle_idle_ms",
+    )
+    if batching["actor_cycle_idle_source"] not in {
+        "default",
+        "config_file",
+        "environment",
+    }:
+        raise BenchmarkError(
+            f"{label}.batching_engine.actor_cycle_idle_source is unsupported"
+        )
+    if not isinstance(batching["actor_cycle_idle_active_end"], bool):
+        raise BenchmarkError(
+            f"{label}.batching_engine.actor_cycle_idle_active_end must be boolean"
+        )
+    _nonnegative_int(
+        batching["actor_cycle_idle_count"],
+        f"{label}.batching_engine.actor_cycle_idle_count",
+    )
+    for field in ("actor_cycle_idle_seconds", "process_max_actor_cycle_idle_ms"):
+        _nonnegative_number(batching[field], f"{label}.batching_engine.{field}")
+    if batching["actor_cycle_idle_ms"] == 0 and (
+        batching["actor_cycle_idle_count"] != 0
+        or batching["actor_cycle_idle_seconds"] != 0
+    ):
+        raise BenchmarkError(
+            f"{label}.batching_engine reports waits while cycle idle is disabled"
+        )
+
+    graph = validate_rocm_graph_diagnostics_v6(
+        server["rocm_graphs"], f"{label}.rocm_graphs"
+    )
+    if graph["fallbacks"] is not None:
+        multi_row_count = graph["fallbacks"]["multi_row_batch_unsupported"]
+        if multi_row_count > 0:
+            if not graph["capture_requested"]:
+                raise BenchmarkError(
+                    f"{label}.rocm_graphs reports a multi-row graph fallback "
+                    "without requested capture"
+                )
+            if batching["total_batched_decode_forwards"] == 0:
+                raise BenchmarkError(
+                    f"{label}.rocm_graphs reports a multi-row graph fallback "
+                    "without a measured multi-row batching route"
+                )
     return server
 
 
@@ -2762,6 +2865,9 @@ def validate_benchmark_run(
     if row["server"] is not None:
         if driver_version in ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS:
             server = (
+                validate_server_diagnostics_v7(row["server"], f"{label}.server")
+                if driver_version in ACTOR_ONLY_DIAGNOSTICS_DRIVER_VERSIONS
+                else
                 validate_server_diagnostics_v6(row["server"], f"{label}.server")
                 if driver_version in GRAPH_PARITY_DRIVER_VERSIONS
                 else validate_server_diagnostics_v5(
@@ -4739,61 +4845,6 @@ def validate_request_snapshot(value: Any) -> dict[str, int]:
     return normalized
 
 
-def validate_decode_batcher_snapshot(value: Any) -> dict[str, Any]:
-    snapshot = _object(value, "diagnostics.decode_runtime.decode_batcher")
-    integer_fields = {
-        *DECODE_BATCHER_COUNTER_FIELDS,
-        "max_runner_calls_per_token",
-        "runner_call_budget_per_token",
-        "max_observed_batch",
-    }
-    required = {
-        *integer_fields,
-        "runner_calls_per_token",
-        "runner_call_budget_exceeded",
-    }
-    _exact_keys(snapshot, required, "diagnostics.decode_runtime.decode_batcher")
-    normalized: dict[str, Any] = {
-        field: _nonnegative_int(
-            snapshot[field], f"diagnostics.decode_runtime.decode_batcher.{field}"
-        )
-        for field in integer_fields
-    }
-    calls_per_token = snapshot["runner_calls_per_token"]
-    if calls_per_token is not None:
-        calls_per_token = _nonnegative_number(
-            calls_per_token,
-            "diagnostics.decode_runtime.decode_batcher.runner_calls_per_token",
-        )
-    expected_calls_per_token = (
-        normalized["runner_calls"] / normalized["executed_rows"]
-        if normalized["executed_rows"]
-        else None
-    )
-    if calls_per_token != expected_calls_per_token:
-        raise BenchmarkError(
-            "diagnostics.decode_runtime.decode_batcher.runner_calls_per_token "
-            "disagrees with runner_calls/executed_rows"
-        )
-    exceeded = snapshot["runner_call_budget_exceeded"]
-    if not isinstance(exceeded, bool):
-        raise BenchmarkError(
-            "diagnostics.decode_runtime.decode_batcher.runner_call_budget_exceeded "
-            "must be boolean"
-        )
-    expected_exceeded = (
-        normalized["max_runner_calls_per_token"]
-        > normalized["runner_call_budget_per_token"]
-    )
-    if exceeded != expected_exceeded:
-        raise BenchmarkError(
-            "diagnostics.decode_runtime.decode_batcher runner-call budget disagrees"
-        )
-    normalized["runner_calls_per_token"] = calls_per_token
-    normalized["runner_call_budget_exceeded"] = exceeded
-    return normalized
-
-
 def validate_rocm_graph_snapshot(value: Any) -> dict[str, Any]:
     label = "diagnostics.decode_runtime.rocm_graphs"
     snapshot = _object(value, label)
@@ -4862,104 +4913,15 @@ def validate_rocm_graph_snapshot(value: Any) -> dict[str, Any]:
 def server_diagnostics_snapshot(health: dict[str, Any]) -> dict[str, Any]:
     requests = validate_request_snapshot(health.get("requests"))
     runtime = _object(health.get("decode_runtime"), "diagnostics.decode_runtime")
-    batching_configuration = _object(
-        runtime.get("batching_configuration"),
-        "diagnostics.decode_runtime.batching_configuration",
-    )
-    mode = _object(
-        batching_configuration.get("mode"),
-        "diagnostics.decode_runtime.batching_configuration.mode",
-    )
-    batching_actor_effective = mode.get("effective_enabled")
-    if not isinstance(batching_actor_effective, bool):
-        raise BenchmarkError(
-            "diagnostics.decode_runtime.batching_configuration.mode.effective_enabled "
-            "must be boolean"
-        )
-
-    direct_value = _object(
-        runtime.get("direct_decode_rendezvous"),
-        "diagnostics.decode_runtime.direct_decode_rendezvous",
-    )
-    direct = {
-        "scope": direct_value.get("scope"),
-        "backend_available": direct_value.get("backend_available"),
-        "backend_unavailable_reason": direct_value.get("backend_unavailable_reason"),
-        "actor_active": direct_value.get("actor_active"),
-        "worker_active": direct_value.get("worker_active"),
-        "route_available": direct_value.get("route_available"),
-    }
-    if not isinstance(direct["scope"], str) or not direct["scope"]:
-        raise BenchmarkError(
-            "diagnostics.decode_runtime.direct_decode_rendezvous.scope must be non-empty"
-        )
-    for field in (
-        "backend_available",
-        "actor_active",
-        "worker_active",
-        "route_available",
-    ):
-        if not isinstance(direct[field], bool):
-            raise BenchmarkError(
-                f"diagnostics.decode_runtime.direct_decode_rendezvous.{field} must be boolean"
-            )
-    reason = direct["backend_unavailable_reason"]
-    if direct["backend_available"]:
-        if reason is not None:
-            raise BenchmarkError(
-                "available direct-rendezvous backend has an unavailable reason"
-            )
-    elif not isinstance(reason, str) or not reason:
-        raise BenchmarkError(
-            "unavailable direct-rendezvous backend omits its reason"
-        )
-    expected_route_available = (
-        direct["backend_available"]
-        and not direct["actor_active"]
-        and direct["worker_active"]
-    )
-    if direct["route_available"] != expected_route_available:
-        raise BenchmarkError(
-            "direct-rendezvous route availability disagrees with runtime ownership"
-        )
-    if direct["actor_active"] != batching_actor_effective:
-        raise BenchmarkError(
-            "direct-rendezvous actor state disagrees with effective batching mode"
-        )
-
     batching_value = runtime.get("batching_engine")
-    batching_engine = (
-        validate_batching_engine_snapshot(batching_value)
-        if batching_value is not None
-        else None
-    )
-    if (batching_engine is not None) != batching_actor_effective:
-        raise BenchmarkError(
-            "batching-engine diagnostics disagree with effective batching mode"
-        )
-
-    decode_batcher_value = runtime.get("decode_batcher")
-    decode_batcher = (
-        validate_decode_batcher_snapshot(decode_batcher_value)
-        if decode_batcher_value is not None
-        else None
-    )
-    if (decode_batcher is not None) != direct["worker_active"]:
-        raise BenchmarkError(
-            "decode-batcher diagnostics disagree with direct-rendezvous worker state"
-        )
+    if batching_value is None:
+        raise BenchmarkError("diagnostics.decode_runtime.batching_engine is unavailable")
+    batching_engine = validate_batching_engine_snapshot(batching_value)
     rocm_graphs = validate_rocm_graph_snapshot(runtime.get("rocm_graphs"))
     return {
-        "request_route": (
-            "batching_engine" if batching_actor_effective else "direct_streaming"
-        ),
+        "request_route": "batching_engine",
         "requests": requests,
-        "routing": {
-            "batching_actor_effective": batching_actor_effective,
-            "direct_decode_rendezvous": direct,
-        },
         "batching_engine": batching_engine,
-        "decode_batcher": decode_batcher,
         "rocm_graphs": rocm_graphs,
     }
 
@@ -4999,47 +4961,6 @@ def request_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, in
         )
     result["active_end"] = after["active"]
     result["process_active_peak"] = after["active_peak"]
-    return result
-
-
-def decode_batcher_delta(
-    before: dict[str, Any], after: dict[str, Any]
-) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for field in DECODE_BATCHER_COUNTER_FIELDS:
-        if after[field] < before[field]:
-            raise BenchmarkError(
-                f"decode-batcher counter {field} regressed from "
-                f"{before[field]} to {after[field]}"
-            )
-        result[field] = after[field] - before[field]
-    if after["max_observed_batch"] < before["max_observed_batch"]:
-        raise BenchmarkError("decode-batcher max_observed_batch regressed")
-    if (
-        after["max_runner_calls_per_token"]
-        < before["max_runner_calls_per_token"]
-    ):
-        raise BenchmarkError("decode-batcher max_runner_calls_per_token regressed")
-    if (
-        after["runner_call_budget_per_token"]
-        != before["runner_call_budget_per_token"]
-    ):
-        raise BenchmarkError("decode-batcher runner-call budget changed during run")
-    result.update(
-        {
-            "mean_runner_calls_per_executed_row": (
-                result["runner_calls"] / result["executed_rows"]
-                if result["executed_rows"]
-                else None
-            ),
-            "process_max_observed_batch": after["max_observed_batch"],
-            "process_max_runner_calls_per_token": after[
-                "max_runner_calls_per_token"
-            ],
-            "runner_call_budget_per_token": after["runner_call_budget_per_token"],
-            "runner_call_budget_exceeded": after["runner_call_budget_exceeded"],
-        }
-    )
     return result
 
 
@@ -5136,31 +5057,13 @@ def server_diagnostics_delta(
 ) -> dict[str, Any]:
     if before["request_route"] != after["request_route"]:
         raise BenchmarkError("effective request route changed during run")
-    if before["routing"] != after["routing"]:
-        raise BenchmarkError("server routing ownership changed during run")
     before_batching = before["batching_engine"]
     after_batching = after["batching_engine"]
-    if (before_batching is None) != (after_batching is None):
-        raise BenchmarkError("batching-engine availability changed during run")
-    before_direct = before["decode_batcher"]
-    after_direct = after["decode_batcher"]
-    if (before_direct is None) != (after_direct is None):
-        raise BenchmarkError("decode-batcher availability changed during run")
     return {
         "schema": SERVER_DIAGNOSTICS_SCHEMA,
         "request_route": after["request_route"],
         "requests": request_delta(before["requests"], after["requests"]),
-        "routing": after["routing"],
-        "batching_engine": (
-            batching_delta(before_batching, after_batching)
-            if before_batching is not None and after_batching is not None
-            else None
-        ),
-        "decode_batcher": (
-            decode_batcher_delta(before_direct, after_direct)
-            if before_direct is not None and after_direct is not None
-            else None
-        ),
+        "batching_engine": batching_delta(before_batching, after_batching),
         "rocm_graphs": rocm_graph_delta(
             before["rocm_graphs"], after["rocm_graphs"]
         ),
@@ -5173,12 +5076,6 @@ def server_diagnostics_has_no_errors(server: dict[str, Any]) -> bool:
         return False
     batching_engine = server["batching_engine"]
     if batching_engine is not None and batching_engine["total_errors"]:
-        return False
-    decode_batcher = server["decode_batcher"]
-    if decode_batcher is not None and (
-        decode_batcher["failed_jobs"] != 0
-        or decode_batcher["runner_call_budget_exceeded"]
-    ):
         return False
     graph = server.get("rocm_graphs")
     return graph is None or graph["failures"] in {None, 0}
@@ -5492,7 +5389,7 @@ def summarize_run(
             )
             direct_errors = (
                 server["decode_batcher"]["failed_jobs"]
-                if server["decode_batcher"] is not None
+                if server.get("decode_batcher") is not None
                 else 0
             )
             graph = server.get("rocm_graphs")
@@ -6191,7 +6088,7 @@ def print_run(row: dict[str, Any]) -> None:
         route_diagnostics = (
             server["batching_engine"]
             if route == "batching_engine"
-            else server["decode_batcher"]
+            else server.get("decode_batcher")
         ) or {}
         width = route_diagnostics.get("process_max_observed_batch")
         mean = (

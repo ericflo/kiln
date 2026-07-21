@@ -834,7 +834,7 @@ async fn main() -> Result<()> {
         }
         let backend_capabilities =
             kiln_model::backend::for_device_kt(&device_kt).backend_capabilities();
-        let decode_batcher_policy = backend_capabilities.decode_batcher;
+        let decode_execution_policy = backend_capabilities.decode_execution;
         let speculative_mtp_support = backend_capabilities.decode.mtp_speculative_generation;
         let streaming_prefill_runtime_config = config
             .streaming_prefill
@@ -843,12 +843,12 @@ async fn main() -> Result<()> {
         let startup_decode_runtime = kiln_server::batching_engine::resolve_decode_runtime_config(
             config.server.deterministic,
             config.server.max_decode_batch,
-            Some(decode_batcher_policy),
+            Some(decode_execution_policy),
             config.server.max_batch_tokens,
         );
         let startup_batching_runtime = config.batching.resolve(
-            kiln_server::config::BatchingBackendPolicy::from_decode_batcher_policy(
-                decode_batcher_policy,
+            kiln_server::config::BatchingBackendPolicy::from_decode_execution_policy(
+                decode_execution_policy,
             ),
             startup_decode_runtime.max_decode_batch.effective,
         );
@@ -1156,17 +1156,9 @@ async fn main() -> Result<()> {
         );
         state.batching_runtime_config = config.batching.resolve(
             kiln_server::config::BatchingBackendPolicy {
-                batching_engine_default_enabled: false,
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
                 actor_prefill_tile_alignment_required: false,
-                direct_decode_rendezvous:
-                    kiln_server::config::DirectDecodeRendezvousBackendPolicy {
-                        enabled: false,
-                        max_batch: 1,
-                        wait_us: 0,
-                        mixed_seq_lens: false,
-                    },
             },
             state.decode_runtime_config.max_decode_batch.effective,
         );
@@ -1742,15 +1734,12 @@ async fn main() -> Result<()> {
     // Snapshot the batching engine handle so the signal handler can
     // proactively stop it. The handle is cheap to clone (just an mpsc
     // sender + a snapshot atomic).
-    let (engine_for_shutdown, decode_batcher_for_shutdown) =
-        match app_state_for_shutdown.backend.as_ref() {
-            ModelBackend::Real {
-                batching_engine,
-                decode_batcher,
-                ..
-            } => (batching_engine.clone(), decode_batcher.clone()),
-            ModelBackend::Mock { .. } => (None, None),
-        };
+    let engine_for_shutdown = match app_state_for_shutdown.backend.as_ref() {
+        ModelBackend::Real {
+            batching_engine, ..
+        } => Some(batching_engine.clone()),
+        ModelBackend::Mock { .. } => None,
+    };
 
     // Serve until the shutdown signal triggers + axum drains. The drain
     // is bounded by a watchdog set up *inside* `shutdown_signal` once
@@ -1770,13 +1759,6 @@ async fn main() -> Result<()> {
             .shutdown
             .store(true, Ordering::Release);
         tracing::warn!(error = %error, "HTTP server stopped with an error; cancelling background work");
-    }
-
-    if let Some(decode_batcher) = decode_batcher_for_shutdown {
-        decode_batcher
-            .shutdown()
-            .context("stop and join decode batcher before accelerator teardown")?;
-        tracing::debug!("decode batcher stopped and joined");
     }
 
     if let Some(task) = backend_prewarm_task {

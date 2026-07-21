@@ -146,12 +146,6 @@ def build_definitions() -> None:
         "The immutable process-lifetime serving profile.",
     )
     add_enum(
-        "BatchingMode",
-        "BatchingMode",
-        ["auto", "enabled", "disabled"],
-        "Operator intent for production batching-actor ownership.",
-    )
-    add_enum(
         "LocalCapabilityAccess",
         "config::LocalCapabilityAccess",
         ["loopback_only", "enabled", "disabled"],
@@ -355,18 +349,6 @@ def build_definitions() -> None:
         "The immutable process-lifetime decode policy.",
     )
     add_object(
-        "BatchingModeDiagnostics",
-        "BatchingModeDiagnostics",
-        {
-            "configured": ref("BatchingMode"),
-            "configured_source": ref("ConfigValueSource"),
-            "backend_policy_enabled": ref("Boolean"),
-            "effective_enabled": ref("Boolean"),
-            "effective_source": ref("BatchingEffectiveSource"),
-        },
-        "Configured and effective batching-actor mode.",
-    )
-    add_object(
         "BatchingToggleDiagnostics",
         "BatchingToggleDiagnostics",
         {"enabled": ref("Boolean"), "source": ref("ConfigValueSource")},
@@ -395,61 +377,18 @@ def build_definitions() -> None:
         },
         "Configured cooperative safe-boundary actor idle and control-command polling contract.",
     )
-    for suffix, rust_value, value_schema in (
-        ("Integer", "usize | u64", ref("NonNegativeInteger")),
-        ("Boolean", "bool", ref("Boolean")),
-    ):
-        add_object(
-            f"DirectDecodeRendezvousValueDiagnostics{suffix}",
-            f"DirectDecodeRendezvousValueDiagnostics<{rust_value}>",
-            {
-                "configured": nullable(value_schema),
-                "configured_source": ref("ConfigValueSource"),
-                "backend_policy": value_schema,
-                "effective": value_schema,
-                "effective_source": ref("BatchingEffectiveSource"),
-            },
-            "Configured, backend, and effective direct-decode rendezvous value.",
-        )
-    add_object(
-        "DirectDecodeRendezvousDiagnostics",
-        "DirectDecodeRendezvousDiagnostics",
-        {
-            "mode": ref("BatchingModeDiagnostics"),
-            "max_batch": ref("DirectDecodeRendezvousValueDiagnosticsInteger"),
-            "wait_us": ref("DirectDecodeRendezvousValueDiagnosticsInteger"),
-            "mixed_seq_lens": ref("DirectDecodeRendezvousValueDiagnosticsBoolean"),
-        },
-        "Resolved fallback direct-stream greedy decode rendezvous policy.",
-    )
     add_object(
         "BatchingRuntimeConfig",
         "BatchingRuntimeConfig",
         {
-            "mode": ref("BatchingModeDiagnostics"),
             "rowwise_decode": ref("BatchingToggleDiagnostics"),
             "prefix_aware_admission": ref("BatchingToggleDiagnostics"),
             "prefill_admission_quantum": ref("PrefillAdmissionQuantumDiagnostics"),
             "actor_cycle_idle": ref("ActorCycleIdleDiagnostics"),
-            "direct_decode_rendezvous": ref("DirectDecodeRendezvousDiagnostics"),
             "burst_prefill_admission": ref("Boolean"),
             "actor_prefill_tile_alignment_required": ref("Boolean"),
         },
         "Runtime-ready batching policy resolved once after backend selection.",
-    )
-    add_object(
-        "DirectDecodeRendezvousRuntimeState",
-        "DirectDecodeRendezvousRuntimeState",
-        {
-            "scope": ref("NonEmptyString"),
-            "backend_available": ref("Boolean"),
-            "backend_unavailable_reason": ref("String"),
-            "actor_active": ref("Boolean"),
-            "worker_active": ref("Boolean"),
-            "route_available": ref("Boolean"),
-        },
-        "Runtime availability of the fallback direct-streaming greedy rendezvous.",
-        optional=("backend_unavailable_reason",),
     )
 
     add_object(
@@ -1033,22 +972,6 @@ def build_definitions() -> None:
         batch_snapshot_fields,
         "Cached batching-engine admission, execution, latency, backpressure, and fairness counters.",
     )
-    decode_batcher_fields = {
-        field: ref("NonNegativeInteger")
-        for field in [
-            "submitted_jobs", "executed_batches", "executed_rows", "runner_calls",
-            "max_runner_calls_per_token", "runner_call_budget_per_token", "max_observed_batch",
-            "runner_busy_jobs", "failed_jobs",
-        ]
-    }
-    decode_batcher_fields["runner_calls_per_token"] = nullable(ref("NonNegativeNumber"))
-    decode_batcher_fields["runner_call_budget_exceeded"] = ref("Boolean")
-    add_object(
-        "DecodeBatcherStats",
-        "DecodeBatcherInfo | DecodeBatcherDebug",
-        decode_batcher_fields,
-        "Legacy decode-batcher activity and runner-call budget counters.",
-    )
     add_object(
         "MemoryGovernorRuntimeInfo",
         "MemoryGovernorRuntimeInfo",
@@ -1079,10 +1002,8 @@ def build_definitions() -> None:
             "accelerator_runtime": ref("ResolvedAcceleratorRuntimePolicy"),
             "rocm_synchronization": ref("RocmSynchronizationRuntimeStats"),
             "batching_configuration": ref("BatchingRuntimeConfig"),
-            "direct_decode_rendezvous": ref("DirectDecodeRendezvousRuntimeState"),
             "cuda_graphs": ref("CudaGraphInfo"), "rocm_graphs": ref("RocmGraphInfo"), "metal_graphs": ref("GraphInfo"),
             "kv_autoscaler": ref("KvAutoscalerState"), "memory_governor": ref("MemoryGovernorRuntimeInfo"),
-            "decode_batcher": nullable(ref("DecodeBatcherStats")),
             "batching_engine": nullable(ref("BatchingEngineSnapshot")),
         },
         "Resolved decode configuration and live backend execution state.",
@@ -1248,8 +1169,7 @@ def build_definitions() -> None:
 
     add_object("BatchingConfigResponse", "BatchingConfigResponse", {
         "configuration": ref("BatchingRuntimeConfig"), "actor_active": ref("Boolean"),
-        "direct_decode_rendezvous": ref("DirectDecodeRendezvousRuntimeState"),
-    }, "Resolved batching policy plus live actor and fallback-route state.")
+    }, "Resolved batching policy plus live actor state.")
     add_object("PrefixCacheConfig", "config::PrefixCacheConfig", {
         "enabled": ref("Boolean"),
         "max_blocks": nullable(ref("PositiveInteger")),
@@ -1544,8 +1464,7 @@ def build_definitions() -> None:
     }, "Loaded model shape, provenance, defaults, and backend health state.")
     add_object("BatchingEngineDebugState", "BatchingEngineDebugState", {
         "backend": ref("String"), "enabled": ref("Boolean"), "configuration": ref("BatchingRuntimeConfig"),
-        "direct_decode_rendezvous": ref("DirectDecodeRendezvousRuntimeState"),
-        "snapshot": nullable(ref("BatchingEngineSnapshot")), "decode_batcher": nullable(ref("DecodeBatcherStats")),
+        "snapshot": nullable(ref("BatchingEngineSnapshot")),
     }, "Selected batching backend, resolved configuration, and live execution state.")
     add_object("ThinkingDebugState", "ThinkingDebugState", {
         "eval_mode": ref("Boolean"), "default_thinking_enabled": nullable(ref("Boolean")),

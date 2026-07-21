@@ -93,8 +93,6 @@ pub const ACTOR_CYCLE_IDLE_MAX_MS: u64 = 60_000;
 pub const ACTOR_CYCLE_IDLE_COMMAND_POLL_MS: u64 = 5;
 /// Bounds for the direct-stream greedy decode rendezvous worker. Its effective
 /// width is also clamped to the already-resolved process decode ceiling.
-pub const DIRECT_DECODE_RENDEZVOUS_MAX_BATCH_MIN: usize = 1;
-pub const DIRECT_DECODE_RENDEZVOUS_MAX_BATCH_MAX: usize = MAX_BATCH_TOKENS_MAX;
 /// Stable admission default used by the production batching actor.
 pub const DEFAULT_PREFIX_AWARE_ADMISSION: bool = true;
 /// Stable decode default: issue one true batched forward for all ready rows.
@@ -132,7 +130,7 @@ pub enum ConfigValueSource {
 
 pub const EFFECTIVE_CONFIGURATION_SCHEMA_ID: &str = "kiln.effective-configuration.v1";
 pub const EFFECTIVE_CONFIGURATION_SCHEMA_VERSION: u32 = 1;
-pub const EFFECTIVE_CONFIGURATION_FIXED_FIELD_COUNT: usize = 117;
+pub const EFFECTIVE_CONFIGURATION_FIXED_FIELD_COUNT: usize = 112;
 
 /// One post-precedence typed startup value in the complete configuration dump.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -408,113 +406,6 @@ fn is_auto_decode_batch(raw: &str) -> bool {
     )
 }
 
-/// Operator intent for whether the production batching actor owns inference.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BatchingMode {
-    /// Defer to the selected backend's immutable decode policy.
-    #[default]
-    Auto,
-    Enabled,
-    Disabled,
-}
-
-impl BatchingMode {
-    fn parse_config(raw: &str) -> Result<Self> {
-        Self::parse_config_for("batching.mode", raw)
-    }
-
-    fn parse_config_for(field: &str, raw: &str) -> Result<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "auto" => Ok(Self::Auto),
-            "enabled" => Ok(Self::Enabled),
-            "disabled" => Ok(Self::Disabled),
-            _ => anyhow::bail!("{field} must be one of auto, enabled, or disabled, got {raw:?}"),
-        }
-    }
-
-    fn parse_environment(name: &str, raw: &str) -> Result<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "auto" => Ok(Self::Auto),
-            "enabled" | "1" | "true" | "yes" | "on" => Ok(Self::Enabled),
-            "disabled" | "0" | "false" | "no" | "off" => Ok(Self::Disabled),
-            _ => anyhow::bail!(
-                "{name} must be one of auto, enabled, disabled, true, false, 1, 0, yes, no, on, or off, got {raw:?}"
-            ),
-        }
-    }
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Enabled => "enabled",
-            Self::Disabled => "disabled",
-        }
-    }
-}
-
-impl fmt::Display for BatchingMode {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-/// Validated batching-mode selector plus the startup source that selected it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BatchingModeSetting {
-    mode: BatchingMode,
-    source: ConfigValueSource,
-}
-
-impl BatchingModeSetting {
-    pub const fn new(mode: BatchingMode, source: ConfigValueSource) -> Self {
-        Self { mode, source }
-    }
-
-    pub const fn mode(self) -> BatchingMode {
-        self.mode
-    }
-
-    pub const fn source(self) -> ConfigValueSource {
-        self.source
-    }
-
-    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
-        Ok(Self::new(
-            BatchingMode::parse_environment(name, raw)?,
-            ConfigValueSource::Environment,
-        ))
-    }
-}
-
-impl Default for BatchingModeSetting {
-    fn default() -> Self {
-        Self::new(BatchingMode::Auto, ConfigValueSource::Default)
-    }
-}
-
-impl Serialize for BatchingModeSetting {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.mode.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for BatchingModeSetting {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let raw = String::deserialize(deserializer)?;
-        Ok(Self::new(
-            BatchingMode::parse_config(&raw).map_err(serde::de::Error::custom)?,
-            ConfigValueSource::ConfigFile,
-        ))
-    }
-}
-
 /// Boolean batching setting represented as a TOML boolean with provenance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatchingToggle {
@@ -668,170 +559,6 @@ impl<'de> Deserialize<'de> for PrefillAdmissionQuantum {
     }
 }
 
-/// Backend-relative selector for the fallback direct-stream greedy rendezvous
-/// worker. This is distinct from [`BatchingModeSetting`], which selects the
-/// production batching actor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DirectDecodeRendezvousModeSetting {
-    mode: BatchingMode,
-    source: ConfigValueSource,
-}
-
-impl DirectDecodeRendezvousModeSetting {
-    pub const fn new(mode: BatchingMode, source: ConfigValueSource) -> Self {
-        Self { mode, source }
-    }
-
-    pub const fn mode(self) -> BatchingMode {
-        self.mode
-    }
-
-    pub const fn source(self) -> ConfigValueSource {
-        self.source
-    }
-
-    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
-        Ok(Self::new(
-            BatchingMode::parse_environment(name, raw)?,
-            ConfigValueSource::Environment,
-        ))
-    }
-}
-
-impl Default for DirectDecodeRendezvousModeSetting {
-    fn default() -> Self {
-        Self::new(BatchingMode::Auto, ConfigValueSource::Default)
-    }
-}
-
-impl Serialize for DirectDecodeRendezvousModeSetting {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.mode.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for DirectDecodeRendezvousModeSetting {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let raw = String::deserialize(deserializer)?;
-        Ok(Self::new(
-            BatchingMode::parse_config_for("batching.direct_decode_rendezvous_mode", &raw)
-                .map_err(serde::de::Error::custom)?,
-            ConfigValueSource::ConfigFile,
-        ))
-    }
-}
-
-/// Optional direct-decode rendezvous width. `None` delegates to the backend
-/// policy before the shared effective decode-width ceiling is applied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DirectDecodeRendezvousMaxBatch {
-    configured: Option<usize>,
-    source: ConfigValueSource,
-}
-
-impl DirectDecodeRendezvousMaxBatch {
-    pub fn new(configured: Option<usize>, source: ConfigValueSource) -> Result<Self> {
-        if let Some(value) = configured {
-            validate_direct_decode_rendezvous_max_batch(value)?;
-        }
-        Ok(Self { configured, source })
-    }
-
-    pub const fn configured(self) -> Option<usize> {
-        self.configured
-    }
-
-    pub const fn source(self) -> ConfigValueSource {
-        self.source
-    }
-
-    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
-        let trimmed = raw.trim();
-        if trimmed.eq_ignore_ascii_case("auto") {
-            return Ok(Self {
-                configured: None,
-                source: ConfigValueSource::Environment,
-            });
-        }
-        let value = trimmed.parse::<usize>().with_context(|| {
-            format!(
-                "{name} must be 'auto' or a decimal integer in {DIRECT_DECODE_RENDEZVOUS_MAX_BATCH_MIN}..={DIRECT_DECODE_RENDEZVOUS_MAX_BATCH_MAX}, got {raw:?}"
-            )
-        })?;
-        Self::new(Some(value), ConfigValueSource::Environment)
-            .with_context(|| format!("invalid {name} value {raw:?}"))
-    }
-}
-
-impl Default for DirectDecodeRendezvousMaxBatch {
-    fn default() -> Self {
-        Self {
-            configured: None,
-            source: ConfigValueSource::Default,
-        }
-    }
-}
-
-impl Serialize for DirectDecodeRendezvousMaxBatch {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match self.configured {
-            Some(value) => serializer.serialize_u64(value as u64),
-            None => serializer.serialize_str("auto"),
-        }
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RawDirectDecodeRendezvousMaxBatch {
-    Value(usize),
-    Mode(String),
-}
-
-impl<'de> Deserialize<'de> for DirectDecodeRendezvousMaxBatch {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        match RawDirectDecodeRendezvousMaxBatch::deserialize(deserializer)? {
-            RawDirectDecodeRendezvousMaxBatch::Value(value) => {
-                Self::new(Some(value), ConfigValueSource::ConfigFile)
-                    .map_err(serde::de::Error::custom)
-            }
-            RawDirectDecodeRendezvousMaxBatch::Mode(mode)
-                if mode.trim().eq_ignore_ascii_case("auto") =>
-            {
-                Ok(Self {
-                    configured: None,
-                    source: ConfigValueSource::ConfigFile,
-                })
-            }
-            RawDirectDecodeRendezvousMaxBatch::Mode(mode) => {
-                Err(serde::de::Error::custom(format!(
-                    "batching.direct_decode_rendezvous_max_batch must be 'auto' or an integer in {DIRECT_DECODE_RENDEZVOUS_MAX_BATCH_MIN}..={DIRECT_DECODE_RENDEZVOUS_MAX_BATCH_MAX}, got {mode:?}"
-                )))
-            }
-        }
-    }
-}
-
-/// Optional microsecond rendezvous delay. Every `u64`, including zero, is a
-/// valid explicit value; `None` delegates to backend policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DirectDecodeRendezvousWaitUs {
-    configured: Option<u64>,
-    source: ConfigValueSource,
-}
-
 /// Cooperative idle after a batching actor cycle that performed accelerator
 /// work, plus the startup source that selected it.
 ///
@@ -900,157 +627,6 @@ impl<'de> Deserialize<'de> for ActorCycleIdle {
     }
 }
 
-impl DirectDecodeRendezvousWaitUs {
-    pub const fn new(configured: Option<u64>, source: ConfigValueSource) -> Self {
-        Self { configured, source }
-    }
-
-    pub const fn configured(self) -> Option<u64> {
-        self.configured
-    }
-
-    pub const fn source(self) -> ConfigValueSource {
-        self.source
-    }
-
-    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
-        let trimmed = raw.trim();
-        if trimmed.eq_ignore_ascii_case("auto") {
-            return Ok(Self::new(None, ConfigValueSource::Environment));
-        }
-        let value = trimmed.parse::<u64>().with_context(|| {
-            format!("{name} must be 'auto' or a non-negative decimal integer, got {raw:?}")
-        })?;
-        Ok(Self::new(Some(value), ConfigValueSource::Environment))
-    }
-}
-
-impl Default for DirectDecodeRendezvousWaitUs {
-    fn default() -> Self {
-        Self::new(None, ConfigValueSource::Default)
-    }
-}
-
-impl Serialize for DirectDecodeRendezvousWaitUs {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match self.configured {
-            Some(value) => serializer.serialize_u64(value),
-            None => serializer.serialize_str("auto"),
-        }
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RawDirectDecodeRendezvousWaitUs {
-    Value(u64),
-    Mode(String),
-}
-
-impl<'de> Deserialize<'de> for DirectDecodeRendezvousWaitUs {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        match RawDirectDecodeRendezvousWaitUs::deserialize(deserializer)? {
-            RawDirectDecodeRendezvousWaitUs::Value(value) => {
-                Ok(Self::new(Some(value), ConfigValueSource::ConfigFile))
-            }
-            RawDirectDecodeRendezvousWaitUs::Mode(mode)
-                if mode.trim().eq_ignore_ascii_case("auto") =>
-            {
-                Ok(Self::new(None, ConfigValueSource::ConfigFile))
-            }
-            RawDirectDecodeRendezvousWaitUs::Mode(mode) => Err(serde::de::Error::custom(format!(
-                "batching.direct_decode_rendezvous_wait_us must be 'auto' or a non-negative integer, got {mode:?}"
-            ))),
-        }
-    }
-}
-
-/// Optional mixed-sequence admission selector. TOML accepts only `auto` or a
-/// native boolean so strings cannot masquerade as configured booleans.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DirectDecodeRendezvousMixedSeqLens {
-    configured: Option<bool>,
-    source: ConfigValueSource,
-}
-
-impl DirectDecodeRendezvousMixedSeqLens {
-    pub const fn new(configured: Option<bool>, source: ConfigValueSource) -> Self {
-        Self { configured, source }
-    }
-
-    pub const fn configured(self) -> Option<bool> {
-        self.configured
-    }
-
-    pub const fn source(self) -> ConfigValueSource {
-        self.source
-    }
-
-    fn from_named_environment_value(name: &str, raw: &str) -> Result<Self> {
-        if raw.trim().eq_ignore_ascii_case("auto") {
-            return Ok(Self::new(None, ConfigValueSource::Environment));
-        }
-        Ok(Self::new(
-            Some(parse_required_bool_env(name, raw)?),
-            ConfigValueSource::Environment,
-        ))
-    }
-}
-
-impl Default for DirectDecodeRendezvousMixedSeqLens {
-    fn default() -> Self {
-        Self::new(None, ConfigValueSource::Default)
-    }
-}
-
-impl Serialize for DirectDecodeRendezvousMixedSeqLens {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match self.configured {
-            Some(value) => serializer.serialize_bool(value),
-            None => serializer.serialize_str("auto"),
-        }
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RawDirectDecodeRendezvousMixedSeqLens {
-    Value(bool),
-    Mode(String),
-}
-
-impl<'de> Deserialize<'de> for DirectDecodeRendezvousMixedSeqLens {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        match RawDirectDecodeRendezvousMixedSeqLens::deserialize(deserializer)? {
-            RawDirectDecodeRendezvousMixedSeqLens::Value(value) => {
-                Ok(Self::new(Some(value), ConfigValueSource::ConfigFile))
-            }
-            RawDirectDecodeRendezvousMixedSeqLens::Mode(mode)
-                if mode.trim().eq_ignore_ascii_case("auto") =>
-            {
-                Ok(Self::new(None, ConfigValueSource::ConfigFile))
-            }
-            RawDirectDecodeRendezvousMixedSeqLens::Mode(mode) => {
-                Err(serde::de::Error::custom(format!(
-                    "batching.direct_decode_rendezvous_mixed_seq_lens must be 'auto' or a boolean, got {mode:?}"
-                )))
-            }
-        }
-    }
-}
-
 /// Authority that selected an effective batching value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1081,58 +657,37 @@ impl fmt::Display for BatchingEffectiveSource {
 /// swapped at the startup boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatchingBackendPolicy {
-    pub batching_engine_default_enabled: bool,
     pub use_decode_width_prefill_admission: bool,
     pub burst_prefill_admission: bool,
     pub actor_prefill_tile_alignment_required: bool,
-    pub direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy,
 }
 
 impl BatchingBackendPolicy {
-    /// Project the model backend's complete decode-batcher policy onto the
+    /// Project the model backend's complete decode-execution policy onto the
     /// narrower server-owned settings needed for startup resolution.
-    pub const fn from_decode_batcher_policy(policy: kiln_model::DecodeBatcherPolicy) -> Self {
+    pub const fn from_decode_execution_policy(policy: kiln_model::DecodeExecutionPolicy) -> Self {
         Self {
-            batching_engine_default_enabled: policy.batching_engine_default_enabled,
             use_decode_width_prefill_admission: policy.use_decode_width_prefill_admission,
             burst_prefill_admission: policy.burst_prefill_admission,
             actor_prefill_tile_alignment_required: policy.actor_prefill_tile_alignment_required,
-            direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
-                enabled: policy.rendezvous_default_enabled,
-                max_batch: policy.max_batch,
-                wait_us: policy.wait_micros,
-                mixed_seq_lens: policy.allow_mixed_seq_lens,
-            },
         }
     }
-}
-
-/// Backend-owned defaults for the fallback direct-stream greedy decode
-/// rendezvous worker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DirectDecodeRendezvousBackendPolicy {
-    pub enabled: bool,
-    pub max_batch: usize,
-    pub wait_us: u64,
-    pub mixed_seq_lens: bool,
 }
 
 /// Runtime-ready batching policy resolved once after backend selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct BatchingRuntimeConfig {
-    pub mode: BatchingModeDiagnostics,
     pub rowwise_decode: BatchingToggleDiagnostics,
     pub prefix_aware_admission: BatchingToggleDiagnostics,
     pub prefill_admission_quantum: PrefillAdmissionQuantumDiagnostics,
     /// Intentional safe-boundary delay after actor cycles that advanced model
     /// work. This is zero unless explicitly configured.
     pub actor_cycle_idle: ActorCycleIdleDiagnostics,
-    pub direct_decode_rendezvous: DirectDecodeRendezvousDiagnostics,
     /// Backend-owned refill behavior, carried here so actor construction does
     /// not retain a second copy of the backend decode policy.
     pub burst_prefill_admission: bool,
-    /// Whether startup must prove that actor prompt chunks and direct
-    /// streaming-prefill tiles have the same numerical boundary.
+    /// Whether startup must prove that actor prompt chunks preserve the
+    /// backend-qualified streaming-prefill numerical boundary.
     pub actor_prefill_tile_alignment_required: bool,
 }
 
@@ -1180,15 +735,6 @@ pub struct BatchingActorAdmissionConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct BatchingModeDiagnostics {
-    pub configured: BatchingMode,
-    pub configured_source: ConfigValueSource,
-    pub backend_policy_enabled: bool,
-    pub effective_enabled: bool,
-    pub effective_source: BatchingEffectiveSource,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct BatchingToggleDiagnostics {
     pub enabled: bool,
     pub source: ConfigValueSource,
@@ -1200,25 +746,6 @@ pub struct PrefillAdmissionQuantumDiagnostics {
     pub configured_source: ConfigValueSource,
     pub backend_policy: usize,
     pub effective: usize,
-    pub effective_source: BatchingEffectiveSource,
-}
-
-/// Resolved fallback direct-stream greedy decode rendezvous policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct DirectDecodeRendezvousDiagnostics {
-    pub mode: BatchingModeDiagnostics,
-    pub max_batch: DirectDecodeRendezvousValueDiagnostics<usize>,
-    pub wait_us: DirectDecodeRendezvousValueDiagnostics<u64>,
-    pub mixed_seq_lens: DirectDecodeRendezvousValueDiagnostics<bool>,
-}
-
-/// Configured/backend/effective value and its startup authorities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct DirectDecodeRendezvousValueDiagnostics<T> {
-    pub configured: Option<T>,
-    pub configured_source: ConfigValueSource,
-    pub backend_policy: T,
-    pub effective: T,
     pub effective_source: BatchingEffectiveSource,
 }
 
@@ -4454,15 +3981,12 @@ pub struct PrefixCacheConfig {
     pub max_entries: Option<usize>,
 }
 
-/// Production decode-scheduling settings for the primary batching actor and
-/// the fallback direct-stream rendezvous worker. Canonical startup overrides
-/// are mechanically derived as `KILN_BATCHING_<FIELD>`.
+/// Production scheduling and admission settings for the single batching
+/// actor. Canonical startup overrides are mechanically derived as
+/// `KILN_BATCHING_<FIELD>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BatchingConfig {
-    /// Whether the batching actor is selected. `auto` preserves the active
-    /// backend policy instead of imposing one cross-backend default.
-    pub mode: BatchingModeSetting,
     /// Issue each row of a ready decode cohort separately. This is an emergency
     /// comparison/fallback switch; true batched decode is the stable default.
     pub rowwise_decode: BatchingToggle,
@@ -4476,17 +4000,6 @@ pub struct BatchingConfig {
     /// Cooperative idle in milliseconds after an actor cycle that advanced
     /// prefill or decode. Zero disables pacing. Default: 0.
     pub actor_cycle_idle_ms: ActorCycleIdle,
-    /// Select the fallback rendezvous worker used by direct streaming greedy
-    /// decode when the production batching actor is inactive.
-    pub direct_decode_rendezvous_mode: DirectDecodeRendezvousModeSetting,
-    /// Maximum compatible direct-stream rows collected by that worker.
-    pub direct_decode_rendezvous_max_batch: DirectDecodeRendezvousMaxBatch,
-    /// Optional collection delay, in microseconds, before that worker drains a
-    /// compatible direct-stream cohort.
-    pub direct_decode_rendezvous_wait_us: DirectDecodeRendezvousWaitUs,
-    /// Whether one fallback rendezvous cohort may contain different sequence
-    /// lengths.
-    pub direct_decode_rendezvous_mixed_seq_lens: DirectDecodeRendezvousMixedSeqLens,
 }
 
 impl BatchingConfig {
@@ -4498,21 +4011,6 @@ impl BatchingConfig {
         effective_decode_width: usize,
     ) -> BatchingRuntimeConfig {
         let effective_decode_width = effective_decode_width.max(1);
-        let (effective_enabled, mode_effective_source) = match self.mode.mode() {
-            BatchingMode::Auto => (
-                backend_policy.batching_engine_default_enabled,
-                BatchingEffectiveSource::BackendPolicy,
-            ),
-            BatchingMode::Enabled => (
-                true,
-                effective_source_for_explicit_value(self.mode.source()),
-            ),
-            BatchingMode::Disabled => (
-                false,
-                effective_source_for_explicit_value(self.mode.source()),
-            ),
-        };
-
         let backend_quantum = if backend_policy.use_decode_width_prefill_admission {
             effective_decode_width
         } else {
@@ -4531,58 +4029,7 @@ impl BatchingConfig {
             BatchingEffectiveSource::BackendPolicy
         };
 
-        let direct_backend = backend_policy.direct_decode_rendezvous;
-        let (direct_effective_enabled, direct_mode_effective_source) = match self
-            .direct_decode_rendezvous_mode
-            .mode()
-        {
-            BatchingMode::Auto => (
-                direct_backend.enabled,
-                BatchingEffectiveSource::BackendPolicy,
-            ),
-            BatchingMode::Enabled => (
-                true,
-                effective_source_for_explicit_value(self.direct_decode_rendezvous_mode.source()),
-            ),
-            BatchingMode::Disabled => (
-                false,
-                effective_source_for_explicit_value(self.direct_decode_rendezvous_mode.source()),
-            ),
-        };
-        let configured_direct_max = self.direct_decode_rendezvous_max_batch.configured();
-        let selected_direct_max = configured_direct_max.unwrap_or(direct_backend.max_batch);
-        let effective_direct_max = selected_direct_max.clamp(1, effective_decode_width);
-        let direct_max_effective_source = if effective_direct_max != selected_direct_max {
-            BatchingEffectiveSource::EffectiveDecodeWidth
-        } else if configured_direct_max.is_some() {
-            effective_source_for_explicit_value(self.direct_decode_rendezvous_max_batch.source())
-        } else {
-            BatchingEffectiveSource::BackendPolicy
-        };
-        let configured_direct_wait = self.direct_decode_rendezvous_wait_us.configured();
-        let effective_direct_wait = configured_direct_wait.unwrap_or(direct_backend.wait_us);
-        let direct_wait_effective_source = configured_direct_wait
-            .map_or(BatchingEffectiveSource::BackendPolicy, |_| {
-                effective_source_for_explicit_value(self.direct_decode_rendezvous_wait_us.source())
-            });
-        let configured_direct_mixed = self.direct_decode_rendezvous_mixed_seq_lens.configured();
-        let effective_direct_mixed =
-            configured_direct_mixed.unwrap_or(direct_backend.mixed_seq_lens);
-        let direct_mixed_effective_source =
-            configured_direct_mixed.map_or(BatchingEffectiveSource::BackendPolicy, |_| {
-                effective_source_for_explicit_value(
-                    self.direct_decode_rendezvous_mixed_seq_lens.source(),
-                )
-            });
-
         BatchingRuntimeConfig {
-            mode: BatchingModeDiagnostics {
-                configured: self.mode.mode(),
-                configured_source: self.mode.source(),
-                backend_policy_enabled: backend_policy.batching_engine_default_enabled,
-                effective_enabled,
-                effective_source: mode_effective_source,
-            },
             rowwise_decode: self.rowwise_decode.diagnostics(),
             prefix_aware_admission: self.prefix_aware_admission.diagnostics(),
             prefill_admission_quantum: PrefillAdmissionQuantumDiagnostics {
@@ -4597,36 +4044,6 @@ impl BatchingConfig {
                 source: self.actor_cycle_idle_ms.source(),
                 enabled: self.actor_cycle_idle_ms.millis() > 0,
                 command_poll_milliseconds: ACTOR_CYCLE_IDLE_COMMAND_POLL_MS,
-            },
-            direct_decode_rendezvous: DirectDecodeRendezvousDiagnostics {
-                mode: BatchingModeDiagnostics {
-                    configured: self.direct_decode_rendezvous_mode.mode(),
-                    configured_source: self.direct_decode_rendezvous_mode.source(),
-                    backend_policy_enabled: direct_backend.enabled,
-                    effective_enabled: direct_effective_enabled,
-                    effective_source: direct_mode_effective_source,
-                },
-                max_batch: DirectDecodeRendezvousValueDiagnostics {
-                    configured: configured_direct_max,
-                    configured_source: self.direct_decode_rendezvous_max_batch.source(),
-                    backend_policy: direct_backend.max_batch,
-                    effective: effective_direct_max,
-                    effective_source: direct_max_effective_source,
-                },
-                wait_us: DirectDecodeRendezvousValueDiagnostics {
-                    configured: configured_direct_wait,
-                    configured_source: self.direct_decode_rendezvous_wait_us.source(),
-                    backend_policy: direct_backend.wait_us,
-                    effective: effective_direct_wait,
-                    effective_source: direct_wait_effective_source,
-                },
-                mixed_seq_lens: DirectDecodeRendezvousValueDiagnostics {
-                    configured: configured_direct_mixed,
-                    configured_source: self.direct_decode_rendezvous_mixed_seq_lens.source(),
-                    backend_policy: direct_backend.mixed_seq_lens,
-                    effective: effective_direct_mixed,
-                    effective_source: direct_mixed_effective_source,
-                },
             },
             burst_prefill_admission: backend_policy.burst_prefill_admission,
             actor_prefill_tile_alignment_required: backend_policy
@@ -5174,7 +4591,7 @@ impl StreamingPrefillRuntimeConfig {
 }
 
 /// Reject batching-actor settings that can partition the same prompt
-/// differently from direct streaming prefill on a backend whose deterministic
+/// differently from tiled streaming prefill on a backend whose deterministic
 /// output is sensitive to that boundary.
 pub fn validate_actor_prefill_tile_contract(
     batching: BatchingRuntimeConfig,
@@ -5183,7 +4600,7 @@ pub fn validate_actor_prefill_tile_contract(
     max_prefill_tokens_per_cycle: PrefillTokenBudget,
     max_decode_batch: usize,
 ) -> Result<()> {
-    if !batching.mode.effective_enabled || !batching.actor_prefill_tile_alignment_required {
+    if !batching.actor_prefill_tile_alignment_required {
         return Ok(());
     }
 
@@ -5205,7 +4622,7 @@ pub fn validate_actor_prefill_tile_contract(
     };
     anyhow::ensure!(
         dispatch_covers_first_split,
-        "streaming_prefill.mode and streaming_prefill.threshold_tokens must enable direct streaming prefill no later than the first {tile_tokens}-token actor chunk because the batching actor requires route-invariant prefill chunks"
+        "streaming_prefill.mode and streaming_prefill.threshold_tokens must enable tiled streaming prefill no later than the first {tile_tokens}-token actor chunk because the batching actor requires route-invariant prefill chunks"
     );
 
     let required_batch_tokens = tile_tokens
@@ -5661,9 +5078,6 @@ macro_rules! public_env_parser {
     (max_decode_batch) => {
         MaxDecodeBatch::from_named_environment_value
     };
-    (batching_mode) => {
-        BatchingModeSetting::from_named_environment_value
-    };
     (batching_toggle) => {
         BatchingToggle::from_named_environment_value
     };
@@ -5672,18 +5086,6 @@ macro_rules! public_env_parser {
     };
     (prefill_admission_quantum) => {
         PrefillAdmissionQuantum::from_named_environment_value
-    };
-    (direct_decode_rendezvous_mode) => {
-        DirectDecodeRendezvousModeSetting::from_named_environment_value
-    };
-    (direct_decode_rendezvous_max_batch) => {
-        DirectDecodeRendezvousMaxBatch::from_named_environment_value
-    };
-    (direct_decode_rendezvous_wait_us) => {
-        DirectDecodeRendezvousWaitUs::from_named_environment_value
-    };
-    (direct_decode_rendezvous_mixed_seq_lens) => {
-        DirectDecodeRendezvousMixedSeqLens::from_named_environment_value
     };
     (checkpoint_boundary_recompute) => {
         CheckpointBoundaryRecomputeSetting::from_named_environment_value
@@ -5808,7 +5210,6 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
     public_env_field!(bool, server.chat_config_hash_metadata),
     public_env_field!(u64, server.slow_request_warn_secs),
     public_env_field!(u64, server.shutdown_timeout_secs),
-    public_env_field!(batching_mode, batching.mode),
     public_env_field!(batching_toggle, batching.rowwise_decode),
     public_env_field!(batching_toggle, batching.prefix_aware_admission),
     public_env_field!(
@@ -5816,22 +5217,6 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
         batching.prefill_admission_quantum
     ),
     public_env_field!(actor_cycle_idle, batching.actor_cycle_idle_ms),
-    public_env_field!(
-        direct_decode_rendezvous_mode,
-        batching.direct_decode_rendezvous_mode
-    ),
-    public_env_field!(
-        direct_decode_rendezvous_max_batch,
-        batching.direct_decode_rendezvous_max_batch
-    ),
-    public_env_field!(
-        direct_decode_rendezvous_wait_us,
-        batching.direct_decode_rendezvous_wait_us
-    ),
-    public_env_field!(
-        direct_decode_rendezvous_mixed_seq_lens,
-        batching.direct_decode_rendezvous_mixed_seq_lens
-    ),
     public_env_field!(some_text, model.path),
     public_env_field!(text, model.model_id),
     public_env_field!(some_text, model.tokenizer_path),
@@ -6146,7 +5531,6 @@ impl Default for PrefixCacheConfig {
 impl Default for BatchingConfig {
     fn default() -> Self {
         Self {
-            mode: BatchingModeSetting::default(),
             rowwise_decode: BatchingToggle::new(DEFAULT_ROWWISE_DECODE, ConfigValueSource::Default),
             prefix_aware_admission: BatchingToggle::new(
                 DEFAULT_PREFIX_AWARE_ADMISSION,
@@ -6154,10 +5538,6 @@ impl Default for BatchingConfig {
             ),
             prefill_admission_quantum: PrefillAdmissionQuantum::default(),
             actor_cycle_idle_ms: ActorCycleIdle::default(),
-            direct_decode_rendezvous_mode: DirectDecodeRendezvousModeSetting::default(),
-            direct_decode_rendezvous_max_batch: DirectDecodeRendezvousMaxBatch::default(),
-            direct_decode_rendezvous_wait_us: DirectDecodeRendezvousWaitUs::default(),
-            direct_decode_rendezvous_mixed_seq_lens: DirectDecodeRendezvousMixedSeqLens::default(),
         }
     }
 }
@@ -6620,13 +6000,6 @@ impl KilnConfig {
             validate_prefill_admission_quantum(quantum)?;
         }
         validate_actor_cycle_idle_ms(self.batching.actor_cycle_idle_ms.millis())?;
-        if let Some(max_batch) = self
-            .batching
-            .direct_decode_rendezvous_max_batch
-            .configured()
-        {
-            validate_direct_decode_rendezvous_max_batch(max_batch)?;
-        }
         if self.server.shutdown_timeout_secs == 0 {
             anyhow::bail!(
                 "server.shutdown_timeout_secs must be > 0, got {}",
@@ -7068,19 +6441,6 @@ fn validate_prefill_admission_quantum(quantum: usize) -> Result<()> {
     Ok(())
 }
 
-fn validate_direct_decode_rendezvous_max_batch(max_batch: usize) -> Result<()> {
-    if !(DIRECT_DECODE_RENDEZVOUS_MAX_BATCH_MIN..=DIRECT_DECODE_RENDEZVOUS_MAX_BATCH_MAX)
-        .contains(&max_batch)
-    {
-        anyhow::bail!(
-            "batching.direct_decode_rendezvous_max_batch must be between {} and {} rows, got {max_batch}",
-            DIRECT_DECODE_RENDEZVOUS_MAX_BATCH_MIN,
-            DIRECT_DECODE_RENDEZVOUS_MAX_BATCH_MAX
-        );
-    }
-    Ok(())
-}
-
 fn parse_bool_env(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
@@ -7182,11 +6542,6 @@ mod tests {
         "KILN_AGENT_RUN_TIMEOUT_SECS",
         "KILN_AGENT_SELF_IMPROVE_INTERVAL_HOURS",
         "KILN_BATCHING_ACTOR_CYCLE_IDLE_MS",
-        "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH",
-        "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS",
-        "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE",
-        "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US",
-        "KILN_BATCHING_MODE",
         "KILN_BATCHING_PREFIX_AWARE_ADMISSION",
         "KILN_BATCHING_PREFILL_ADMISSION_QUANTUM",
         "KILN_BATCHING_ROWWISE_DECODE",
@@ -7274,7 +6629,12 @@ mod tests {
         "KILN_ADAPTER_DIR",
         "KILN_ADAPTER_LIBRARY_URL",
         "KILN_AGENT_RUNS",
+        "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH",
+        "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS",
+        "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE",
+        "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US",
         "KILN_BATCHING_ENGINE",
+        "KILN_BATCHING_MODE",
         "KILN_BATCH_DECODE_ROWWISE",
         "KILN_BATCH_PREFILL_ADMISSION_QUANTUM",
         "KILN_BATCH_PREFIX_AWARE_ADMISSION",
@@ -7601,8 +6961,6 @@ mod tests {
         ] {
             assert_eq!(source, ConfigValueSource::Default);
         }
-        assert_eq!(config.batching.mode.mode(), BatchingMode::Auto);
-        assert_eq!(config.batching.mode.source(), ConfigValueSource::Default);
         assert!(!config.batching.rowwise_decode.enabled());
         assert_eq!(
             config.batching.rowwise_decode.source(),
@@ -7623,45 +6981,6 @@ mod tests {
             config.batching.actor_cycle_idle_ms.source(),
             ConfigValueSource::Default
         );
-        assert_eq!(
-            config.batching.direct_decode_rendezvous_mode.mode(),
-            BatchingMode::Auto
-        );
-        assert_eq!(
-            config.batching.direct_decode_rendezvous_mode.source(),
-            ConfigValueSource::Default
-        );
-        assert_eq!(
-            config
-                .batching
-                .direct_decode_rendezvous_max_batch
-                .configured(),
-            None
-        );
-        assert_eq!(
-            config
-                .batching
-                .direct_decode_rendezvous_wait_us
-                .configured(),
-            None
-        );
-        assert_eq!(
-            config
-                .batching
-                .direct_decode_rendezvous_mixed_seq_lens
-                .configured(),
-            None
-        );
-        for source in [
-            config.batching.direct_decode_rendezvous_max_batch.source(),
-            config.batching.direct_decode_rendezvous_wait_us.source(),
-            config
-                .batching
-                .direct_decode_rendezvous_mixed_seq_lens
-                .source(),
-        ] {
-            assert_eq!(source, ConfigValueSource::Default);
-        }
         assert_eq!(config.model.model_id, "Qwen/Qwen3.5-4B");
         assert!(config.model.path.is_none());
         assert!(config.model.tokenizer_path.is_none());
@@ -8554,7 +7873,7 @@ rocm_graph_cache_max_bytes = 17179869184
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 112);
+        assert_eq!(original_len, 107);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -8575,7 +7894,7 @@ rocm_graph_cache_max_bytes = 17179869184
         let mut retired = RETIRED_PUBLIC_ENVIRONMENT_ALIASES.to_vec();
         retired.sort_unstable();
         retired.dedup();
-        assert_eq!(retired.len(), 77);
+        assert_eq!(retired.len(), 82);
         let schema: serde_json::Value = serde_json::from_str(include_str!(
             "../../../contracts/kiln-config-v1.schema.json"
         ))
@@ -8640,7 +7959,7 @@ rocm_graph_cache_max_bytes = 17179869184
                 .len(),
             16
         );
-        assert_eq!(serialized_leaves.len(), 117);
+        assert_eq!(serialized_leaves.len(), 112);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 5);
 
         let mut classified = PUBLIC_ENV_FIELDS
@@ -8726,9 +8045,9 @@ api_key_env = "{SECRET_ENV}"
 
         assert_eq!(effective.schema_id, EFFECTIVE_CONFIGURATION_SCHEMA_ID);
         assert_eq!(effective.schema_version, 1);
-        assert_eq!(effective.fixed_field_count, 117);
+        assert_eq!(effective.fixed_field_count, 112);
         assert_eq!(effective.dynamic_field_count, 2);
-        assert_eq!(effective.fields.len(), 119);
+        assert_eq!(effective.fields.len(), 114);
         assert!(effective.all_fields_restart_required_to_change);
         assert!(
             effective
@@ -8851,18 +8170,10 @@ api_key_env = "{SECRET_ENV}"
             ("KILN_SERVER_CHAT_CONFIG_HASH_METADATA", "true"),
             ("KILN_SERVER_SLOW_REQUEST_WARN_SECS", "0"),
             ("KILN_SERVER_SHUTDOWN_TIMEOUT_SECS", "9"),
-            ("KILN_BATCHING_MODE", "enabled"),
             ("KILN_BATCHING_ROWWISE_DECODE", "true"),
             ("KILN_BATCHING_PREFIX_AWARE_ADMISSION", "false"),
             ("KILN_BATCHING_PREFILL_ADMISSION_QUANTUM", "16"),
             ("KILN_BATCHING_ACTOR_CYCLE_IDLE_MS", "75"),
-            ("KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE", "disabled"),
-            ("KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH", "12"),
-            ("KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US", "250"),
-            (
-                "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS",
-                "true",
-            ),
             ("KILN_MODEL_PATH", "/tmp/canonical-model"),
             ("KILN_MODEL_MODEL_ID", "Canonical/Test-Model"),
             ("KILN_MODEL_TOKENIZER_PATH", "/tmp/canonical-tokenizer"),
@@ -8991,7 +8302,6 @@ api_key_env = "{SECRET_ENV}"
         assert!(config.server.chat_config_hash_metadata);
         assert_eq!(config.server.slow_request_warn_secs, 0);
         assert_eq!(config.server.shutdown_timeout_secs, 9);
-        assert_eq!(config.batching.mode.mode(), BatchingMode::Enabled);
         assert!(config.batching.rowwise_decode.enabled());
         assert!(!config.batching.prefix_aware_admission.enabled());
         assert_eq!(
@@ -9002,31 +8312,6 @@ api_key_env = "{SECRET_ENV}"
         assert_eq!(
             config.batching.actor_cycle_idle_ms.source(),
             ConfigValueSource::Environment
-        );
-        assert_eq!(
-            config.batching.direct_decode_rendezvous_mode.mode(),
-            BatchingMode::Disabled
-        );
-        assert_eq!(
-            config
-                .batching
-                .direct_decode_rendezvous_max_batch
-                .configured(),
-            Some(12)
-        );
-        assert_eq!(
-            config
-                .batching
-                .direct_decode_rendezvous_wait_us
-                .configured(),
-            Some(250)
-        );
-        assert_eq!(
-            config
-                .batching
-                .direct_decode_rendezvous_mixed_seq_lens
-                .configured(),
-            Some(true)
         );
         assert_eq!(config.model.path.as_deref(), Some("/tmp/canonical-model"));
         assert_eq!(config.model.model_id, "Canonical/Test-Model");
@@ -9186,17 +8471,9 @@ api_key_env = "{SECRET_ENV}"
             config.server.max_prefill_tokens_per_cycle.source(),
             config.server.max_prefill_layers_per_cycle.source(),
             config.server.max_decode_batch.source(),
-            config.batching.mode.source(),
             config.batching.rowwise_decode.source(),
             config.batching.prefix_aware_admission.source(),
             config.batching.prefill_admission_quantum.source(),
-            config.batching.direct_decode_rendezvous_mode.source(),
-            config.batching.direct_decode_rendezvous_max_batch.source(),
-            config.batching.direct_decode_rendezvous_wait_us.source(),
-            config
-                .batching
-                .direct_decode_rendezvous_mixed_seq_lens
-                .source(),
             config.memory.kv_autoscale.source(),
             config.memory.kv_force_blocks.source(),
             config.training.recompute_checkpoint_boundaries.source(),
@@ -9249,17 +8526,9 @@ api_key_env = "{SECRET_ENV}"
             ("KILN_SERVER_DETERMINISTIC", "maybe"),
             ("KILN_SERVER_TERMINAL_ACCESS", "sometimes"),
             ("KILN_SERVER_DEFAULT_THINKING_BUDGET_MS", "2.5"),
-            ("KILN_BATCHING_MODE", "sometimes"),
             ("KILN_BATCHING_ROWWISE_DECODE", "row-by-row-ish"),
             ("KILN_BATCHING_PREFIX_AWARE_ADMISSION", "preferably"),
             ("KILN_BATCHING_PREFILL_ADMISSION_QUANTUM", "0"),
-            ("KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE", "sometimes"),
-            ("KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH", "0"),
-            ("KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US", "-1"),
-            (
-                "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS",
-                "sometimes",
-            ),
             ("KILN_TRAINING_RECOMPUTE_CHECKPOINT_BOUNDARIES", "true"),
             ("KILN_TRAINING_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS", "0"),
             ("KILN_TRAINING_CHECKPOINT_BOUNDARY_ANCHOR_STRIDE", "0"),
@@ -9318,20 +8587,6 @@ api_key_env = "{SECRET_ENV}"
 
     #[test]
     fn batching_toml_is_strict_source_tracked_and_bounded() {
-        for mode in ["auto", "enabled", "disabled"] {
-            let config: KilnConfig =
-                toml::from_str(&format!("[batching]\nmode = {mode:?}\n")).unwrap();
-            assert_eq!(config.batching.mode.mode().as_str(), mode);
-            assert_eq!(config.batching.mode.source(), ConfigValueSource::ConfigFile);
-            assert!(!config.batching.rowwise_decode.enabled());
-            assert!(config.batching.prefix_aware_admission.enabled());
-            assert_eq!(
-                config.batching.prefix_aware_admission.source(),
-                ConfigValueSource::Default
-            );
-            assert_eq!(config.batching.prefill_admission_quantum.configured(), None);
-        }
-
         for quantum in [PREFILL_ADMISSION_QUANTUM_MIN, PREFILL_ADMISSION_QUANTUM_MAX] {
             let config: KilnConfig = toml::from_str(&format!(
                 "[batching]\nprefill_admission_quantum = {quantum}\n"
@@ -9356,8 +8611,7 @@ api_key_env = "{SECRET_ENV}"
         );
 
         for document in [
-            "[batching]\nmode = \"sometimes\"\n".to_owned(),
-            "[batching]\nmode = true\n".to_owned(),
+            "[batching]\nmode = \"enabled\"\n".to_owned(),
             "[batching]\nrowwise_decode = \"true\"\n".to_owned(),
             "[batching]\nprefix_aware_admission = 1\n".to_owned(),
             "[batching]\nprefill_admission_quantum = 0\n".to_owned(),
@@ -9370,166 +8624,12 @@ api_key_env = "{SECRET_ENV}"
             let error = toml::from_str::<KilnConfig>(&document).unwrap_err();
             let detail = error.to_string();
             assert!(
-                detail.contains("batching") || detail.contains("invalid type"),
-                "unexpected error for {document:?}: {error:#}"
-            );
-        }
-    }
-
-    #[test]
-    fn direct_decode_rendezvous_toml_is_strict_source_tracked_and_bounded() {
-        for mode in ["auto", "enabled", "disabled"] {
-            let config: KilnConfig = toml::from_str(&format!(
-                "[batching]\ndirect_decode_rendezvous_mode = {mode:?}\n"
-            ))
-            .unwrap();
-            assert_eq!(
-                config
-                    .batching
-                    .direct_decode_rendezvous_mode
-                    .mode()
-                    .as_str(),
-                mode
-            );
-            assert_eq!(
-                config.batching.direct_decode_rendezvous_mode.source(),
-                ConfigValueSource::ConfigFile
-            );
-        }
-
-        for max_batch in [
-            DIRECT_DECODE_RENDEZVOUS_MAX_BATCH_MIN,
-            DIRECT_DECODE_RENDEZVOUS_MAX_BATCH_MAX,
-        ] {
-            let config: KilnConfig = toml::from_str(&format!(
-                "[batching]\ndirect_decode_rendezvous_max_batch = {max_batch}\n"
-            ))
-            .unwrap();
-            assert_eq!(
-                config
-                    .batching
-                    .direct_decode_rendezvous_max_batch
-                    .configured(),
-                Some(max_batch)
-            );
-            assert_eq!(
-                config.batching.direct_decode_rendezvous_max_batch.source(),
-                ConfigValueSource::ConfigFile
-            );
-        }
-
-        let explicit: KilnConfig = toml::from_str(
-            r#"
-[batching]
-direct_decode_rendezvous_wait_us = 0
-direct_decode_rendezvous_mixed_seq_lens = true
-"#,
-        )
-        .unwrap();
-        assert_eq!(
-            explicit
-                .batching
-                .direct_decode_rendezvous_wait_us
-                .configured(),
-            Some(0)
-        );
-        assert_eq!(
-            explicit
-                .batching
-                .direct_decode_rendezvous_mixed_seq_lens
-                .configured(),
-            Some(true)
-        );
-        assert_eq!(
-            explicit.batching.direct_decode_rendezvous_wait_us.source(),
-            ConfigValueSource::ConfigFile
-        );
-        assert_eq!(
-            explicit
-                .batching
-                .direct_decode_rendezvous_mixed_seq_lens
-                .source(),
-            ConfigValueSource::ConfigFile
-        );
-
-        let automatic: KilnConfig = toml::from_str(
-            r#"
-[batching]
-direct_decode_rendezvous_mode = "auto"
-direct_decode_rendezvous_max_batch = "auto"
-direct_decode_rendezvous_wait_us = "auto"
-direct_decode_rendezvous_mixed_seq_lens = "auto"
-"#,
-        )
-        .unwrap();
-        assert_eq!(
-            automatic.batching.direct_decode_rendezvous_mode.mode(),
-            BatchingMode::Auto
-        );
-        assert_eq!(
-            automatic
-                .batching
-                .direct_decode_rendezvous_max_batch
-                .configured(),
-            None
-        );
-        assert_eq!(
-            automatic
-                .batching
-                .direct_decode_rendezvous_wait_us
-                .configured(),
-            None
-        );
-        assert_eq!(
-            automatic
-                .batching
-                .direct_decode_rendezvous_mixed_seq_lens
-                .configured(),
-            None
-        );
-        for source in [
-            automatic.batching.direct_decode_rendezvous_mode.source(),
-            automatic
-                .batching
-                .direct_decode_rendezvous_max_batch
-                .source(),
-            automatic.batching.direct_decode_rendezvous_wait_us.source(),
-            automatic
-                .batching
-                .direct_decode_rendezvous_mixed_seq_lens
-                .source(),
-        ] {
-            assert_eq!(source, ConfigValueSource::ConfigFile);
-        }
-
-        for document in [
-            "[batching]\ndirect_decode_rendezvous_mode = \"sometimes\"\n".to_owned(),
-            "[batching]\ndirect_decode_rendezvous_mode = true\n".to_owned(),
-            "[batching]\ndirect_decode_rendezvous_max_batch = 0\n".to_owned(),
-            format!(
-                "[batching]\ndirect_decode_rendezvous_max_batch = {}\n",
-                DIRECT_DECODE_RENDEZVOUS_MAX_BATCH_MAX + 1
-            ),
-            "[batching]\ndirect_decode_rendezvous_max_batch = \"wide\"\n".to_owned(),
-            "[batching]\ndirect_decode_rendezvous_wait_us = -1\n".to_owned(),
-            "[batching]\ndirect_decode_rendezvous_wait_us = \"soon\"\n".to_owned(),
-            "[batching]\ndirect_decode_rendezvous_wait_us = false\n".to_owned(),
-            "[batching]\ndirect_decode_rendezvous_mixed_seq_lens = \"true\"\n".to_owned(),
-            "[batching]\ndirect_decode_rendezvous_mixed_seq_lens = 1\n".to_owned(),
-        ] {
-            let error = toml::from_str::<KilnConfig>(&document).unwrap_err();
-            let detail = error.to_string();
-            assert!(
-                detail.contains("direct_decode_rendezvous")
+                detail.contains("batching")
                     || detail.contains("invalid type")
-                    || detail.contains("data did not match"),
+                    || detail.contains("unknown field"),
                 "unexpected error for {document:?}: {error:#}"
             );
         }
-
-        let maximum_wait =
-            DirectDecodeRendezvousWaitUs::new(Some(u64::MAX), ConfigValueSource::ConfigFile);
-        assert_eq!(maximum_wait.configured(), Some(u64::MAX));
     }
 
     #[test]
@@ -9537,17 +8637,9 @@ direct_decode_rendezvous_mixed_seq_lens = "auto"
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let environment = ScopedConfigEnvironment::isolated();
         for (name, value) in [
-            ("KILN_BATCHING_MODE", "on"),
             ("KILN_BATCHING_ROWWISE_DECODE", "yes"),
             ("KILN_BATCHING_PREFIX_AWARE_ADMISSION", "off"),
             ("KILN_BATCHING_PREFILL_ADMISSION_QUANTUM", "9"),
-            ("KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE", "off"),
-            ("KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH", "12"),
-            ("KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US", "250"),
-            (
-                "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS",
-                "on",
-            ),
         ] {
             environment.set(name, value);
         }
@@ -9555,127 +8647,43 @@ direct_decode_rendezvous_mixed_seq_lens = "auto"
         let mut config: KilnConfig = toml::from_str(
             r#"
 [batching]
-mode = "disabled"
 rowwise_decode = false
 prefix_aware_admission = true
 prefill_admission_quantum = "auto"
-direct_decode_rendezvous_mode = "enabled"
-direct_decode_rendezvous_max_batch = "auto"
-direct_decode_rendezvous_wait_us = "auto"
-direct_decode_rendezvous_mixed_seq_lens = false
 "#,
         )
         .unwrap();
         config.apply_env_overrides().unwrap();
 
-        assert_eq!(config.batching.mode.mode(), BatchingMode::Enabled);
         assert!(config.batching.rowwise_decode.enabled());
         assert!(!config.batching.prefix_aware_admission.enabled());
         assert_eq!(
             config.batching.prefill_admission_quantum.configured(),
             Some(9)
         );
-        assert_eq!(
-            config.batching.direct_decode_rendezvous_mode.mode(),
-            BatchingMode::Disabled
-        );
-        assert_eq!(
-            config
-                .batching
-                .direct_decode_rendezvous_max_batch
-                .configured(),
-            Some(12)
-        );
-        assert_eq!(
-            config
-                .batching
-                .direct_decode_rendezvous_wait_us
-                .configured(),
-            Some(250)
-        );
-        assert_eq!(
-            config
-                .batching
-                .direct_decode_rendezvous_mixed_seq_lens
-                .configured(),
-            Some(true)
-        );
         for source in [
-            config.batching.mode.source(),
             config.batching.rowwise_decode.source(),
             config.batching.prefix_aware_admission.source(),
             config.batching.prefill_admission_quantum.source(),
-            config.batching.direct_decode_rendezvous_mode.source(),
-            config.batching.direct_decode_rendezvous_max_batch.source(),
-            config.batching.direct_decode_rendezvous_wait_us.source(),
-            config
-                .batching
-                .direct_decode_rendezvous_mixed_seq_lens
-                .source(),
         ] {
             assert_eq!(source, ConfigValueSource::Environment);
         }
 
         for name in [
-            "KILN_BATCHING_MODE",
             "KILN_BATCHING_ROWWISE_DECODE",
             "KILN_BATCHING_PREFIX_AWARE_ADMISSION",
             "KILN_BATCHING_PREFILL_ADMISSION_QUANTUM",
-            "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE",
-            "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH",
-            "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US",
-            "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS",
         ] {
             environment.remove(name);
         }
-        environment.set("KILN_BATCHING_MODE", " auto ");
         environment.set("KILN_BATCHING_PREFILL_ADMISSION_QUANTUM", " AUTO ");
-        environment.set("KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE", " AUTO ");
-        environment.set("KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH", " AUTO ");
-        environment.set("KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US", " AUTO ");
-        environment.set(
-            "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS",
-            " AUTO ",
-        );
         let mut auto = KilnConfig::default();
         auto.apply_env_overrides().unwrap();
-        assert_eq!(auto.batching.mode.mode(), BatchingMode::Auto);
-        assert_eq!(auto.batching.mode.source(), ConfigValueSource::Environment);
         assert_eq!(auto.batching.prefill_admission_quantum.configured(), None);
         assert_eq!(
             auto.batching.prefill_admission_quantum.source(),
             ConfigValueSource::Environment
         );
-        assert_eq!(
-            auto.batching.direct_decode_rendezvous_mode.mode(),
-            BatchingMode::Auto
-        );
-        assert_eq!(
-            auto.batching
-                .direct_decode_rendezvous_max_batch
-                .configured(),
-            None
-        );
-        assert_eq!(
-            auto.batching.direct_decode_rendezvous_wait_us.configured(),
-            None
-        );
-        assert_eq!(
-            auto.batching
-                .direct_decode_rendezvous_mixed_seq_lens
-                .configured(),
-            None
-        );
-        for source in [
-            auto.batching.direct_decode_rendezvous_mode.source(),
-            auto.batching.direct_decode_rendezvous_max_batch.source(),
-            auto.batching.direct_decode_rendezvous_wait_us.source(),
-            auto.batching
-                .direct_decode_rendezvous_mixed_seq_lens
-                .source(),
-        ] {
-            assert_eq!(source, ConfigValueSource::Environment);
-        }
     }
 
     #[test]
@@ -9683,20 +8691,9 @@ direct_decode_rendezvous_mixed_seq_lens = false
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let environment = ScopedConfigEnvironment::isolated();
         for (name, invalid) in [
-            ("KILN_BATCHING_MODE", "automatic-ish"),
             ("KILN_BATCHING_ROWWISE_DECODE", "maybe"),
             ("KILN_BATCHING_PREFIX_AWARE_ADMISSION", ""),
             ("KILN_BATCHING_PREFILL_ADMISSION_QUANTUM", "65537"),
-            (
-                "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE",
-                "automatic-ish",
-            ),
-            ("KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH", "65537"),
-            ("KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US", "-1"),
-            (
-                "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS",
-                "sometimes",
-            ),
         ] {
             environment.set(name, invalid);
             let error = KilnConfig::default().apply_env_overrides().unwrap_err();
@@ -9708,27 +8705,15 @@ direct_decode_rendezvous_mixed_seq_lens = false
     }
 
     #[test]
-    fn batching_runtime_resolution_preserves_backend_auto_policy_and_clamps_quantum() {
+    fn batching_runtime_resolution_preserves_actor_policy_and_clamps_quantum() {
         let defaults = BatchingConfig::default();
         let latency_backend = defaults.resolve(
             BatchingBackendPolicy {
-                batching_engine_default_enabled: false,
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
                 actor_prefill_tile_alignment_required: false,
-                direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
-                    enabled: true,
-                    max_batch: 8,
-                    wait_us: 0,
-                    mixed_seq_lens: false,
-                },
             },
             64,
-        );
-        assert!(!latency_backend.mode.effective_enabled);
-        assert_eq!(
-            latency_backend.mode.effective_source,
-            BatchingEffectiveSource::BackendPolicy
         );
         assert_eq!(latency_backend.prefill_admission_quantum.backend_policy, 4);
         assert_eq!(latency_backend.prefill_admission_quantum.effective, 4);
@@ -9739,20 +8724,12 @@ direct_decode_rendezvous_mixed_seq_lens = false
 
         let throughput_backend = defaults.resolve(
             BatchingBackendPolicy {
-                batching_engine_default_enabled: true,
                 use_decode_width_prefill_admission: true,
                 burst_prefill_admission: true,
                 actor_prefill_tile_alignment_required: false,
-                direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
-                    enabled: true,
-                    max_batch: 64,
-                    wait_us: 5_000,
-                    mixed_seq_lens: true,
-                },
             },
             64,
         );
-        assert!(throughput_backend.mode.effective_enabled);
         assert!(throughput_backend.burst_prefill_admission);
         assert_eq!(
             throughput_backend.prefill_admission_quantum.backend_policy,
@@ -9768,32 +8745,9 @@ direct_decode_rendezvous_mixed_seq_lens = false
             }
         );
 
-        let narrow_backend = defaults.resolve(
-            BatchingBackendPolicy {
-                batching_engine_default_enabled: true,
-                use_decode_width_prefill_admission: false,
-                burst_prefill_admission: false,
-                actor_prefill_tile_alignment_required: false,
-                direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
-                    enabled: true,
-                    max_batch: 8,
-                    wait_us: 0,
-                    mixed_seq_lens: false,
-                },
-            },
-            2,
-        );
-        assert_eq!(narrow_backend.prefill_admission_quantum.backend_policy, 4);
-        assert_eq!(narrow_backend.prefill_admission_quantum.effective, 2);
-        assert_eq!(
-            narrow_backend.prefill_admission_quantum.effective_source,
-            BatchingEffectiveSource::EffectiveDecodeWidth
-        );
-
         let explicit: KilnConfig = toml::from_str(
             r#"
 [batching]
-mode = "disabled"
 rowwise_decode = true
 prefix_aware_admission = false
 prefill_admission_quantum = 100
@@ -9802,23 +8756,11 @@ prefill_admission_quantum = 100
         .unwrap();
         let resolved = explicit.batching.resolve(
             BatchingBackendPolicy {
-                batching_engine_default_enabled: true,
                 use_decode_width_prefill_admission: true,
                 burst_prefill_admission: true,
                 actor_prefill_tile_alignment_required: false,
-                direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
-                    enabled: true,
-                    max_batch: 8,
-                    wait_us: 0,
-                    mixed_seq_lens: false,
-                },
             },
             16,
-        );
-        assert!(!resolved.mode.effective_enabled);
-        assert_eq!(
-            resolved.mode.effective_source,
-            BatchingEffectiveSource::ConfigFile
         );
         assert!(resolved.rowwise_decode.enabled);
         assert!(!resolved.prefix_aware_admission.enabled);
@@ -9829,381 +8771,6 @@ prefill_admission_quantum = 100
             resolved.prefill_admission_quantum.effective_source,
             BatchingEffectiveSource::EffectiveDecodeWidth
         );
-
-        let built_in_explicit = BatchingConfig {
-            mode: BatchingModeSetting::new(BatchingMode::Enabled, ConfigValueSource::Default),
-            prefill_admission_quantum: PrefillAdmissionQuantum::new(
-                Some(3),
-                ConfigValueSource::Default,
-            )
-            .unwrap(),
-            ..BatchingConfig::default()
-        }
-        .resolve(
-            BatchingBackendPolicy {
-                batching_engine_default_enabled: false,
-                use_decode_width_prefill_admission: false,
-                burst_prefill_admission: false,
-                actor_prefill_tile_alignment_required: false,
-                direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
-                    enabled: true,
-                    max_batch: 8,
-                    wait_us: 0,
-                    mixed_seq_lens: false,
-                },
-            },
-            16,
-        );
-        assert!(built_in_explicit.mode.effective_enabled);
-        assert_eq!(
-            built_in_explicit.mode.effective_source,
-            BatchingEffectiveSource::Default
-        );
-        assert_eq!(built_in_explicit.prefill_admission_quantum.effective, 3);
-        assert_eq!(
-            built_in_explicit.prefill_admission_quantum.effective_source,
-            BatchingEffectiveSource::Default
-        );
-    }
-
-    #[test]
-    fn direct_decode_rendezvous_backend_matrix_is_preserved_exactly() {
-        for (backend, policy, effective_decode_width) in [
-            (
-                "cpu",
-                DirectDecodeRendezvousBackendPolicy {
-                    enabled: true,
-                    max_batch: 8,
-                    wait_us: 0,
-                    mixed_seq_lens: false,
-                },
-                8,
-            ),
-            (
-                "cuda",
-                DirectDecodeRendezvousBackendPolicy {
-                    enabled: true,
-                    max_batch: 1,
-                    wait_us: 0,
-                    mixed_seq_lens: false,
-                },
-                8,
-            ),
-            (
-                "metal",
-                DirectDecodeRendezvousBackendPolicy {
-                    enabled: true,
-                    max_batch: 8,
-                    wait_us: 100,
-                    mixed_seq_lens: true,
-                },
-                8,
-            ),
-            (
-                "vulkan",
-                DirectDecodeRendezvousBackendPolicy {
-                    enabled: true,
-                    max_batch: 64,
-                    wait_us: 5_000,
-                    mixed_seq_lens: true,
-                },
-                64,
-            ),
-            (
-                "rocm",
-                DirectDecodeRendezvousBackendPolicy {
-                    enabled: true,
-                    max_batch: 8,
-                    wait_us: 0,
-                    mixed_seq_lens: false,
-                },
-                8,
-            ),
-        ] {
-            let resolved = BatchingConfig::default().resolve(
-                BatchingBackendPolicy {
-                    batching_engine_default_enabled: true,
-                    use_decode_width_prefill_admission: false,
-                    burst_prefill_admission: false,
-                    actor_prefill_tile_alignment_required: false,
-                    direct_decode_rendezvous: policy,
-                },
-                effective_decode_width,
-            );
-            let direct = resolved.direct_decode_rendezvous;
-            assert_eq!(direct.mode.configured, BatchingMode::Auto, "{backend}");
-            assert_eq!(
-                direct.mode.configured_source,
-                ConfigValueSource::Default,
-                "{backend}"
-            );
-            assert_eq!(
-                direct.mode.backend_policy_enabled, policy.enabled,
-                "{backend}"
-            );
-            assert_eq!(direct.mode.effective_enabled, policy.enabled, "{backend}");
-            assert_eq!(
-                direct.mode.effective_source,
-                BatchingEffectiveSource::BackendPolicy,
-                "{backend}"
-            );
-            assert_eq!(direct.max_batch.configured, None, "{backend}");
-            assert_eq!(
-                direct.max_batch.backend_policy, policy.max_batch,
-                "{backend}"
-            );
-            assert_eq!(direct.max_batch.effective, policy.max_batch, "{backend}");
-            assert_eq!(
-                direct.max_batch.effective_source,
-                BatchingEffectiveSource::BackendPolicy,
-                "{backend}"
-            );
-            assert_eq!(direct.wait_us.configured, None, "{backend}");
-            assert_eq!(direct.wait_us.backend_policy, policy.wait_us, "{backend}");
-            assert_eq!(direct.wait_us.effective, policy.wait_us, "{backend}");
-            assert_eq!(
-                direct.wait_us.effective_source,
-                BatchingEffectiveSource::BackendPolicy,
-                "{backend}"
-            );
-            assert_eq!(direct.mixed_seq_lens.configured, None, "{backend}");
-            assert_eq!(
-                direct.mixed_seq_lens.backend_policy, policy.mixed_seq_lens,
-                "{backend}"
-            );
-            assert_eq!(
-                direct.mixed_seq_lens.effective, policy.mixed_seq_lens,
-                "{backend}"
-            );
-            assert_eq!(
-                direct.mixed_seq_lens.effective_source,
-                BatchingEffectiveSource::BackendPolicy,
-                "{backend}"
-            );
-            for source in [
-                direct.max_batch.configured_source,
-                direct.wait_us.configured_source,
-                direct.mixed_seq_lens.configured_source,
-            ] {
-                assert_eq!(source, ConfigValueSource::Default, "{backend}");
-            }
-        }
-    }
-
-    #[test]
-    fn direct_decode_rendezvous_resolution_clamps_width_and_tracks_each_authority() {
-        let backend = DirectDecodeRendezvousBackendPolicy {
-            enabled: false,
-            max_batch: 64,
-            wait_us: 5_000,
-            mixed_seq_lens: true,
-        };
-        let config: KilnConfig = toml::from_str(
-            r#"
-[batching]
-direct_decode_rendezvous_mode = "enabled"
-direct_decode_rendezvous_max_batch = 12
-direct_decode_rendezvous_wait_us = 0
-direct_decode_rendezvous_mixed_seq_lens = false
-"#,
-        )
-        .unwrap();
-        let direct = config
-            .batching
-            .resolve(
-                BatchingBackendPolicy {
-                    batching_engine_default_enabled: true,
-                    use_decode_width_prefill_admission: false,
-                    burst_prefill_admission: false,
-                    actor_prefill_tile_alignment_required: false,
-                    direct_decode_rendezvous: backend,
-                },
-                8,
-            )
-            .direct_decode_rendezvous;
-        assert!(direct.mode.effective_enabled);
-        assert_eq!(
-            direct.mode.effective_source,
-            BatchingEffectiveSource::ConfigFile
-        );
-        assert_eq!(direct.max_batch.configured, Some(12));
-        assert_eq!(
-            direct.max_batch.configured_source,
-            ConfigValueSource::ConfigFile
-        );
-        assert_eq!(direct.max_batch.backend_policy, 64);
-        assert_eq!(direct.max_batch.effective, 8);
-        assert_eq!(
-            direct.max_batch.effective_source,
-            BatchingEffectiveSource::EffectiveDecodeWidth
-        );
-        assert_eq!(direct.wait_us.configured, Some(0));
-        assert_eq!(direct.wait_us.effective, 0);
-        assert_eq!(
-            direct.wait_us.effective_source,
-            BatchingEffectiveSource::ConfigFile
-        );
-        assert_eq!(direct.mixed_seq_lens.configured, Some(false));
-        assert!(!direct.mixed_seq_lens.effective);
-        assert_eq!(
-            direct.mixed_seq_lens.effective_source,
-            BatchingEffectiveSource::ConfigFile
-        );
-
-        let automatic = BatchingConfig::default()
-            .resolve(
-                BatchingBackendPolicy {
-                    batching_engine_default_enabled: true,
-                    use_decode_width_prefill_admission: false,
-                    burst_prefill_admission: false,
-                    actor_prefill_tile_alignment_required: false,
-                    direct_decode_rendezvous: backend,
-                },
-                8,
-            )
-            .direct_decode_rendezvous;
-        assert!(!automatic.mode.effective_enabled);
-        assert_eq!(automatic.max_batch.configured, None);
-        assert_eq!(automatic.max_batch.effective, 8);
-        assert_eq!(
-            automatic.max_batch.effective_source,
-            BatchingEffectiveSource::EffectiveDecodeWidth
-        );
-        assert_eq!(automatic.wait_us.effective, 5_000);
-        assert!(automatic.mixed_seq_lens.effective);
-
-        let narrowest = BatchingConfig::default()
-            .resolve(
-                BatchingBackendPolicy {
-                    batching_engine_default_enabled: true,
-                    use_decode_width_prefill_admission: false,
-                    burst_prefill_admission: false,
-                    actor_prefill_tile_alignment_required: false,
-                    direct_decode_rendezvous: backend,
-                },
-                0,
-            )
-            .direct_decode_rendezvous;
-        assert_eq!(narrowest.max_batch.effective, 1);
-        assert_eq!(
-            narrowest.max_batch.effective_source,
-            BatchingEffectiveSource::EffectiveDecodeWidth
-        );
-
-        let built_in = BatchingConfig {
-            direct_decode_rendezvous_mode: DirectDecodeRendezvousModeSetting::new(
-                BatchingMode::Disabled,
-                ConfigValueSource::Default,
-            ),
-            direct_decode_rendezvous_max_batch: DirectDecodeRendezvousMaxBatch::new(
-                Some(3),
-                ConfigValueSource::Default,
-            )
-            .unwrap(),
-            direct_decode_rendezvous_wait_us: DirectDecodeRendezvousWaitUs::new(
-                Some(u64::MAX),
-                ConfigValueSource::Default,
-            ),
-            direct_decode_rendezvous_mixed_seq_lens: DirectDecodeRendezvousMixedSeqLens::new(
-                Some(false),
-                ConfigValueSource::Default,
-            ),
-            ..BatchingConfig::default()
-        }
-        .resolve(
-            BatchingBackendPolicy {
-                batching_engine_default_enabled: true,
-                use_decode_width_prefill_admission: false,
-                burst_prefill_admission: false,
-                actor_prefill_tile_alignment_required: false,
-                direct_decode_rendezvous: backend,
-            },
-            8,
-        )
-        .direct_decode_rendezvous;
-        assert!(!built_in.mode.effective_enabled);
-        assert_eq!(
-            built_in.mode.effective_source,
-            BatchingEffectiveSource::Default
-        );
-        assert_eq!(built_in.max_batch.effective, 3);
-        assert_eq!(
-            built_in.max_batch.effective_source,
-            BatchingEffectiveSource::Default
-        );
-        assert_eq!(built_in.wait_us.effective, u64::MAX);
-        assert_eq!(
-            built_in.wait_us.effective_source,
-            BatchingEffectiveSource::Default
-        );
-        assert!(!built_in.mixed_seq_lens.effective);
-        assert_eq!(
-            built_in.mixed_seq_lens.effective_source,
-            BatchingEffectiveSource::Default
-        );
-    }
-
-    #[test]
-    fn direct_decode_rendezvous_environment_provenance_survives_resolution() {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        let environment = ScopedConfigEnvironment::isolated();
-        let maximum_wait = u64::MAX.to_string();
-        for (name, value) in [
-            ("KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE", "disabled"),
-            ("KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH", "7"),
-            (
-                "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US",
-                maximum_wait.as_str(),
-            ),
-            (
-                "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS",
-                "false",
-            ),
-        ] {
-            environment.set(name, value);
-        }
-        let mut config = KilnConfig::default();
-        config.apply_env_overrides().unwrap();
-        let direct = config
-            .batching
-            .resolve(
-                BatchingBackendPolicy {
-                    batching_engine_default_enabled: true,
-                    use_decode_width_prefill_admission: false,
-                    burst_prefill_admission: false,
-                    actor_prefill_tile_alignment_required: false,
-                    direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
-                        enabled: true,
-                        max_batch: 64,
-                        wait_us: 5_000,
-                        mixed_seq_lens: true,
-                    },
-                },
-                8,
-            )
-            .direct_decode_rendezvous;
-        assert!(!direct.mode.effective_enabled);
-        assert_eq!(
-            direct.mode.effective_source,
-            BatchingEffectiveSource::Environment
-        );
-        assert_eq!(direct.max_batch.effective, 7);
-        assert_eq!(direct.wait_us.effective, u64::MAX);
-        assert!(!direct.mixed_seq_lens.effective);
-        for source in [
-            direct.max_batch.configured_source,
-            direct.wait_us.configured_source,
-            direct.mixed_seq_lens.configured_source,
-        ] {
-            assert_eq!(source, ConfigValueSource::Environment);
-        }
-        for source in [
-            direct.max_batch.effective_source,
-            direct.wait_us.effective_source,
-            direct.mixed_seq_lens.effective_source,
-        ] {
-            assert_eq!(source, BatchingEffectiveSource::Environment);
-        }
     }
 
     #[test]
@@ -10252,29 +8819,6 @@ direct_decode_rendezvous_mixed_seq_lens = false
         let detail = format!("{error:#}");
         assert!(detail.contains("KILN_SERVER_PORT"), "{detail}");
         assert!(detail.contains("UTF-8"), "{detail}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn direct_decode_rendezvous_non_unicode_canonical_inputs_are_fatal() {
-        use std::os::unix::ffi::OsStringExt;
-
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        let environment = ScopedConfigEnvironment::isolated();
-        for name in [
-            "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE",
-            "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH",
-            "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US",
-            "KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS",
-        ] {
-            let invalid = OsString::from_vec(vec![b'1', 0xff]);
-            environment.set_os(name, &invalid);
-            let error = KilnConfig::default().apply_env_overrides().unwrap_err();
-            environment.remove(name);
-            let detail = format!("{error:#}");
-            assert!(detail.contains(name), "{name}: {detail}");
-            assert!(detail.contains("UTF-8"), "{name}: {detail}");
-        }
     }
 
     #[cfg(unix)]
@@ -10549,7 +9093,6 @@ slow_request_warn_secs = 15
 shutdown_timeout_secs = 10
 
 [batching]
-mode = "enabled"
 rowwise_decode = true
 prefix_aware_admission = false
 prefill_admission_quantum = 12
@@ -10658,8 +9201,6 @@ composed_cache_max_entries = 8
         assert!(config.server.chat_performance_metadata);
         assert!(config.server.chat_config_hash_metadata);
         assert_eq!(config.server.slow_request_warn_secs, 15);
-        assert_eq!(config.batching.mode.mode(), BatchingMode::Enabled);
-        assert_eq!(config.batching.mode.source(), ConfigValueSource::ConfigFile);
         assert!(config.batching.rowwise_decode.enabled());
         assert_eq!(
             config.batching.rowwise_decode.source(),
@@ -11417,8 +9958,8 @@ mode = "enabled"
     #[test]
     fn rocm_actor_prefill_contract_accepts_only_route_invariant_chunking() {
         let decode =
-            kiln_model::DecodeBatcherPolicy::for_backend("rocm", kiln_tensor::Device::Rocm(0));
-        let backend_policy = BatchingBackendPolicy::from_decode_batcher_policy(decode);
+            kiln_model::DecodeExecutionPolicy::for_backend("rocm", kiln_tensor::Device::Rocm(0));
+        let backend_policy = BatchingBackendPolicy::from_decode_execution_policy(decode);
         let batching = BatchingConfig::default().resolve(backend_policy, 8);
         let streaming = StreamingPrefillConfig::default().resolve(
             kiln_model::StreamingPrefillBackendPolicy::for_backend(
@@ -11472,11 +10013,7 @@ mode = "enabled"
             8,
         )
         .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("enable direct streaming prefill")
-        );
+        assert!(error.to_string().contains("enable tiled streaming prefill"));
 
         let narrow_batch = BatchTokenBudget::new(263, ConfigValueSource::ConfigFile).unwrap();
         let error = validate_actor_prefill_tile_contract(
@@ -11495,23 +10032,12 @@ mode = "enabled"
     }
 
     #[test]
-    fn actor_prefill_contract_is_inert_when_actor_or_backend_requirement_is_off() {
-        let disabled = BatchingConfig {
-            mode: BatchingModeSetting::new(BatchingMode::Disabled, ConfigValueSource::ConfigFile),
-            ..BatchingConfig::default()
-        }
-        .resolve(
+    fn actor_prefill_contract_is_inert_when_backend_requirement_is_off() {
+        let batching = BatchingConfig::default().resolve(
             BatchingBackendPolicy {
-                batching_engine_default_enabled: true,
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
-                actor_prefill_tile_alignment_required: true,
-                direct_decode_rendezvous: DirectDecodeRendezvousBackendPolicy {
-                    enabled: true,
-                    max_batch: 8,
-                    wait_us: 0,
-                    mixed_seq_lens: false,
-                },
+                actor_prefill_tile_alignment_required: false,
             },
             8,
         );
@@ -11519,7 +10045,7 @@ mode = "enabled"
             kiln_model::StreamingPrefillBackendPolicy::for_backend("cpu", kiln_tensor::Device::Cpu),
         );
         validate_actor_prefill_tile_contract(
-            disabled,
+            batching,
             never_streaming,
             BatchTokenBudget::new(2, ConfigValueSource::ConfigFile).unwrap(),
             PrefillTokenBudget::new(1, ConfigValueSource::ConfigFile).unwrap(),

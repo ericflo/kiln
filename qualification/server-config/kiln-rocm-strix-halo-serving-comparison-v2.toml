@@ -1,6 +1,6 @@
 # Repaired source-bound Strix Halo ROCm comparison profile. ROCm owns a
 # 256-token numerical prefill tile, and startup requires the batching actor to
-# use the same boundary as direct streaming prefill.
+# use the same boundary as tiled streaming prefill.
 
 [server]
 serving_profile = "experimental"
@@ -37,14 +37,9 @@ rocm_graph_cache_entries = 12
 rocm_graph_cache_max_bytes = 1073741824
 
 [batching]
-mode = "enabled"
 rowwise_decode = false
 prefix_aware_admission = true
 prefill_admission_quantum = "auto"
-direct_decode_rendezvous_mode = "auto"
-direct_decode_rendezvous_max_batch = "auto"
-direct_decode_rendezvous_wait_us = "auto"
-direct_decode_rendezvous_mixed_seq_lens = "auto"
 
 [model]
 path = "/home/ericflo/Development/kiln/Qwen3.5-4B"

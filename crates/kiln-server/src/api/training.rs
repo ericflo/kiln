@@ -397,7 +397,6 @@ fn dynamic_training_availability(
     if let ModelBackend::Real {
         runner,
         paged_cache,
-        batching_engine,
         ..
     } = state.backend.as_ref()
         && let Ok(runner) = runner.read()
@@ -414,10 +413,7 @@ fn dynamic_training_availability(
         let cache_device_matches_model = paged_cache
             .device()
             .is_some_and(|cache_device| cache_device == device);
-        if capabilities.storage.kv_cache_device_memory_pressure
-            && batching_engine.is_some()
-            && cache_device_matches_model
-        {
+        if capabilities.storage.kv_cache_device_memory_pressure && cache_device_matches_model {
             let current_blocks = paged_cache.num_blocks();
             let bytes_per_block = paged_cache.bytes_per_block() as u64;
             reclaimable_kv_bytes = current_blocks.saturating_sub(1) as u64 * bytes_per_block;

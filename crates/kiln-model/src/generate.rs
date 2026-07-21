@@ -5,11 +5,11 @@
 
 use anyhow::{Context, Result};
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{
     Arc, Mutex, OnceLock,
-    atomic::{AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicU64, Ordering},
     mpsc,
 };
 use std::time::{Duration, Instant};
@@ -20,7 +20,7 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 
 #[cfg(test)]
-use crate::backend::capability::DecodeBatcherPolicy;
+use crate::backend::capability::DecodeExecutionPolicy;
 use crate::backend::{
     self, BackendIdentity, BackendRuntime, GdnRecurrentStateResidencyStats, LinearBackend,
     ReplayBackend, ResidencyBackend, SamplingBackend, StartupBackend, TrainingLossBackend,
@@ -1369,8 +1369,8 @@ fn decode_buffer_max_batch(
     // batch N exceeds buffer max_batch M`. The owning server injects its exact
     // validated ceiling above; standalone consumers receive the backend-owned
     // safe default unless they construct the runner with an explicit option.
-    let policy = BackendCapabilityQueries::backend_capabilities(backend).decode_batcher;
-    let backend_default = policy.engine_max_decode_batch.unwrap_or(policy.max_batch);
+    let policy = BackendCapabilityQueries::backend_capabilities(backend).decode_execution;
+    let backend_default = policy.max_decode_batch;
     backend_default.max(1)
 }
 
@@ -1645,36 +1645,15 @@ enum StreamTokenDisposition {
     ReceiverDropped,
 }
 
-/// Configuration for the live greedy decode rendezvous worker.
-///
-/// This is a pure execution value: the owning product resolves operator intent,
-/// backend defaults, and scheduler ceilings before constructing it. Metal's
-/// backend policy uses a small admission delay to collect compatible peers;
-/// CUDA drains immediately and defaults to one row per worker pass because the
-/// current coalesced CUDA GDN decode path is slower than rowwise scheduling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DecodeBatcherConfig {
-    /// Maximum compatible rows to execute in one decode forward pass.
-    pub max_batch: usize,
-    /// Optional admission delay for collecting peers.
-    pub wait: std::time::Duration,
-    /// Whether one batch may contain rows at different decode positions.
-    pub allow_mixed_seq_lens: bool,
-}
-
-fn decode_batcher_rowwise_retry_enabled(backend: &dyn BackendRuntime) -> bool {
-    decode_hot_path_fallback_policy_for_backend(backend).allows_fallback()
-}
-
 fn greedy_token_decode_enabled(backend: &dyn BackendRuntime) -> bool {
     BackendCapabilityQueries::backend_capabilities(backend)
-        .decode_batcher
+        .decode_execution
         .use_greedy_token_decode
 }
 
 fn prefix_cache_split_snapshot_allowed(backend: &dyn BackendRuntime) -> bool {
     BackendCapabilityQueries::backend_capabilities(backend)
-        .decode_batcher
+        .decode_execution
         .allow_prefix_cache_split_snapshot
 }
 
@@ -1743,531 +1722,6 @@ fn decode_hot_path_fallback_disabled_context(
         decode_hot_path_fallback_policy_for_backend(backend),
         BackendIdentity::runtime_name(backend)
     )
-}
-
-/// Shared live decode rendezvous for greedy streaming requests.
-///
-/// Requests keep ownership of stop handling, output routing, block lifetime,
-/// and one-row GDN state. At each eligible decode step they temporarily hand a
-/// single-token job to this worker; the worker groups same-position jobs and
-/// calls `ModelRunner::decode_next_tokens_paged_contiguous_batch_greedy`.
-pub struct DecodeBatcher {
-    sender: Mutex<Option<mpsc::Sender<DecodeBatchJob>>>,
-    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
-    counters: Arc<DecodeBatcherCounters>,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DecodeBatcherStats {
-    pub submitted_jobs: usize,
-    pub executed_batches: usize,
-    pub executed_rows: usize,
-    pub runner_calls: usize,
-    pub max_runner_calls_per_token: usize,
-    pub max_observed_batch: usize,
-    pub runner_busy_jobs: usize,
-    pub failed_jobs: usize,
-}
-
-impl DecodeBatcherStats {
-    /// Phase 8 sentinel budget: a live greedy decode row should normally cost
-    /// one runner call, with one extra call allowed for the explicit rowwise
-    /// retry path after a failed batched attempt.
-    pub const MAX_RUNNER_CALLS_PER_TOKEN_BUDGET: usize = 2;
-
-    pub fn runner_calls_per_token(&self) -> Option<f64> {
-        if self.executed_rows == 0 {
-            None
-        } else {
-            Some(self.runner_calls as f64 / self.executed_rows as f64)
-        }
-    }
-
-    pub const fn runner_call_budget_per_token(&self) -> usize {
-        Self::MAX_RUNNER_CALLS_PER_TOKEN_BUDGET
-    }
-
-    pub const fn runner_call_budget_exceeded(&self) -> bool {
-        self.max_runner_calls_per_token > Self::MAX_RUNNER_CALLS_PER_TOKEN_BUDGET
-    }
-}
-
-struct DecodeBatcherCounters {
-    submitted_jobs: AtomicUsize,
-    executed_batches: AtomicUsize,
-    executed_rows: AtomicUsize,
-    runner_calls: AtomicUsize,
-    max_runner_calls_per_token: AtomicUsize,
-    max_observed_batch: AtomicUsize,
-    runner_busy_jobs: AtomicUsize,
-    failed_jobs: AtomicUsize,
-}
-
-struct DecodeBatchJob {
-    input_token: TokenId,
-    seq_len: usize,
-    block_table: BlockTable,
-    linear_state: LinearAttentionState,
-    skip_gdn_state_readback: bool,
-    response: mpsc::Sender<DecodeBatchReply>,
-}
-
-enum DecodeBatchReply {
-    Decoded {
-        token: TokenId,
-        linear_state: LinearAttentionState,
-    },
-    RunnerBusy {
-        linear_state: LinearAttentionState,
-    },
-    Failed {
-        error: String,
-        linear_state: LinearAttentionState,
-    },
-}
-
-enum DecodeBatcherDecode {
-    Decoded(TokenId),
-    RunnerBusy,
-}
-
-impl DecodeBatcher {
-    pub fn spawn(
-        runner_lock: Arc<std::sync::RwLock<ModelRunner>>,
-        paged_cache: Arc<PagedKvCache>,
-        config: DecodeBatcherConfig,
-    ) -> Result<Arc<Self>> {
-        let (sender, receiver) = mpsc::channel();
-        let backend = runner_lock
-            .read()
-            .map_err(|err| anyhow::anyhow!("failed to acquire model runner for batcher: {err}"))?
-            .backend
-            .clone();
-        let counters = Arc::new(DecodeBatcherCounters {
-            submitted_jobs: AtomicUsize::new(0),
-            executed_batches: AtomicUsize::new(0),
-            executed_rows: AtomicUsize::new(0),
-            runner_calls: AtomicUsize::new(0),
-            max_runner_calls_per_token: AtomicUsize::new(0),
-            max_observed_batch: AtomicUsize::new(0),
-            runner_busy_jobs: AtomicUsize::new(0),
-            failed_jobs: AtomicUsize::new(0),
-        });
-        let counters_for_worker = counters.clone();
-        let worker = std::thread::Builder::new()
-            .name("kiln-decode-batcher".to_string())
-            .spawn(move || {
-                run_decode_batcher_worker(
-                    runner_lock,
-                    paged_cache,
-                    backend,
-                    receiver,
-                    config,
-                    counters_for_worker,
-                );
-            })
-            .map_err(|e| anyhow::anyhow!("failed to spawn decode batcher worker: {e}"))?;
-
-        Ok(Arc::new(Self {
-            sender: Mutex::new(Some(sender)),
-            worker: Mutex::new(Some(worker)),
-            counters,
-        }))
-    }
-
-    pub fn max_observed_batch(&self) -> usize {
-        self.counters.max_observed_batch.load(Ordering::Relaxed)
-    }
-
-    pub fn stats(&self) -> DecodeBatcherStats {
-        DecodeBatcherStats {
-            submitted_jobs: self.counters.submitted_jobs.load(Ordering::Relaxed),
-            executed_batches: self.counters.executed_batches.load(Ordering::Relaxed),
-            executed_rows: self.counters.executed_rows.load(Ordering::Relaxed),
-            runner_calls: self.counters.runner_calls.load(Ordering::Relaxed),
-            max_runner_calls_per_token: self
-                .counters
-                .max_runner_calls_per_token
-                .load(Ordering::Relaxed),
-            max_observed_batch: self.counters.max_observed_batch.load(Ordering::Relaxed),
-            runner_busy_jobs: self.counters.runner_busy_jobs.load(Ordering::Relaxed),
-            failed_jobs: self.counters.failed_jobs.load(Ordering::Relaxed),
-        }
-    }
-
-    /// Close the rendezvous queue and join its worker before accelerator
-    /// runtime teardown. The worker owns a model-runner reference, so leaving
-    /// it detached can race graph-buffer destruction with HIP/CUDA finalizers.
-    pub fn shutdown(&self) -> Result<()> {
-        self.sender
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        let worker = self
-            .worker
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        let Some(worker) = worker else {
-            return Ok(());
-        };
-        anyhow::ensure!(
-            worker.thread().id() != std::thread::current().id(),
-            "decode batcher cannot join itself"
-        );
-        worker
-            .join()
-            .map_err(|_| anyhow::anyhow!("decode batcher worker panicked during shutdown"))?;
-        Ok(())
-    }
-
-    fn decode_next_token_greedy(
-        &self,
-        input_token: TokenId,
-        block_table: &BlockTable,
-        seq_len: usize,
-        linear_state: &mut LinearAttentionState,
-        skip_gdn_state_readback: bool,
-    ) -> Result<DecodeBatcherDecode> {
-        let (response_tx, response_rx) = mpsc::channel();
-        let owned_state = take_linear_attention_state(linear_state);
-        let job = DecodeBatchJob {
-            input_token,
-            seq_len,
-            block_table: block_table.clone(),
-            linear_state: owned_state,
-            skip_gdn_state_readback,
-            response: response_tx,
-        };
-        let sender_guard = self
-            .sender
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(sender) = sender_guard.as_ref() else {
-            *linear_state = job.linear_state;
-            anyhow::bail!("decode batcher worker is shutting down");
-        };
-        if let Err(err) = sender.send(job) {
-            *linear_state = err.0.linear_state;
-            anyhow::bail!("decode batcher worker is not running");
-        }
-        drop(sender_guard);
-        self.counters.submitted_jobs.fetch_add(1, Ordering::Relaxed);
-
-        match response_rx.recv() {
-            Ok(DecodeBatchReply::Decoded {
-                token,
-                linear_state: returned_state,
-            }) => {
-                *linear_state = returned_state;
-                Ok(DecodeBatcherDecode::Decoded(token))
-            }
-            Ok(DecodeBatchReply::RunnerBusy {
-                linear_state: returned_state,
-            }) => {
-                *linear_state = returned_state;
-                Ok(DecodeBatcherDecode::RunnerBusy)
-            }
-            Ok(DecodeBatchReply::Failed {
-                error,
-                linear_state: returned_state,
-            }) => {
-                *linear_state = returned_state;
-                anyhow::bail!("{error}");
-            }
-            Err(err) => anyhow::bail!("decode batcher worker disconnected before reply: {err}"),
-        }
-    }
-}
-
-impl Drop for DecodeBatcher {
-    fn drop(&mut self) {
-        if let Err(error) = self.shutdown() {
-            tracing::error!(
-                event = "decode_batcher_shutdown_failed",
-                error = %error,
-                "decode batcher failed to join during drop"
-            );
-        }
-    }
-}
-
-fn take_linear_attention_state(state: &mut LinearAttentionState) -> LinearAttentionState {
-    std::mem::replace(
-        state,
-        LinearAttentionState {
-            recurrent_states: Vec::new(),
-            conv_states: Vec::new(),
-        },
-    )
-}
-
-fn materialize_decode_job_resident_states(
-    backend: &dyn BackendRuntime,
-    jobs: &mut [DecodeBatchJob],
-) -> Result<()> {
-    for job in jobs {
-        job.linear_state
-            .materialize_gdn_recurrent_resident_states(backend)?;
-    }
-    Ok(())
-}
-
-fn run_decode_batcher_worker(
-    runner_lock: Arc<std::sync::RwLock<ModelRunner>>,
-    paged_cache: Arc<PagedKvCache>,
-    backend: Arc<dyn BackendRuntime>,
-    receiver: mpsc::Receiver<DecodeBatchJob>,
-    config: DecodeBatcherConfig,
-    counters: Arc<DecodeBatcherCounters>,
-) {
-    let max_batch = config.max_batch.max(1);
-    let allow_mixed_seq_lens = config.allow_mixed_seq_lens;
-    let mut deferred = VecDeque::new();
-    let mut disconnected = false;
-
-    while !disconnected || !deferred.is_empty() {
-        let Some(first) = deferred.pop_front().or_else(|| receiver.recv().ok()) else {
-            break;
-        };
-        let seq_len = first.seq_len;
-        let mut jobs = vec![first];
-
-        while jobs.len() < max_batch {
-            match receiver.try_recv() {
-                Ok(job) if allow_mixed_seq_lens || job.seq_len == seq_len => jobs.push(job),
-                Ok(job) => deferred.push_back(job),
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    disconnected = true;
-                    break;
-                }
-            }
-        }
-
-        if config.wait > std::time::Duration::ZERO && jobs.len() < max_batch && !disconnected {
-            let deadline = std::time::Instant::now() + config.wait;
-            while jobs.len() < max_batch {
-                let now = std::time::Instant::now();
-                if now >= deadline {
-                    break;
-                }
-                match receiver.recv_timeout(deadline.saturating_duration_since(now)) {
-                    Ok(job) if allow_mixed_seq_lens || job.seq_len == seq_len => jobs.push(job),
-                    Ok(job) => deferred.push_back(job),
-                    Err(mpsc::RecvTimeoutError::Timeout) => break,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        disconnected = true;
-                        break;
-                    }
-                }
-            }
-        }
-
-        counters
-            .max_observed_batch
-            .fetch_max(jobs.len(), Ordering::Relaxed);
-        counters.executed_batches.fetch_add(1, Ordering::Relaxed);
-        counters
-            .executed_rows
-            .fetch_add(jobs.len(), Ordering::Relaxed);
-        process_decode_batch_jobs(
-            &runner_lock,
-            paged_cache.as_ref(),
-            &*backend,
-            jobs,
-            &counters,
-        );
-    }
-}
-
-fn process_decode_batch_jobs(
-    runner_lock: &std::sync::RwLock<ModelRunner>,
-    paged_cache: &PagedKvCache,
-    fallback_backend: &dyn BackendRuntime,
-    mut jobs: Vec<DecodeBatchJob>,
-    counters: &DecodeBatcherCounters,
-) {
-    let runner_guard = match runner_lock.try_read() {
-        Ok(guard) => guard,
-        Err(std::sync::TryLockError::WouldBlock) => {
-            counters
-                .runner_busy_jobs
-                .fetch_add(jobs.len(), Ordering::Relaxed);
-            if let Err(err) = materialize_decode_job_resident_states(fallback_backend, &mut jobs) {
-                let message = format!(
-                    "failed to materialize resident GDN state before runner-busy fallback: {err:#}"
-                );
-                counters
-                    .failed_jobs
-                    .fetch_add(jobs.len(), Ordering::Relaxed);
-                for job in jobs {
-                    let _ = job.response.send(DecodeBatchReply::Failed {
-                        error: message.clone(),
-                        linear_state: job.linear_state,
-                    });
-                }
-                return;
-            }
-            for job in jobs {
-                let _ = job.response.send(DecodeBatchReply::RunnerBusy {
-                    linear_state: job.linear_state,
-                });
-            }
-            return;
-        }
-        Err(std::sync::TryLockError::Poisoned(err)) => {
-            let mut message =
-                format!("failed to acquire runner read lock in decode batcher: {err}");
-            if let Err(materialize_err) =
-                materialize_decode_job_resident_states(fallback_backend, &mut jobs)
-            {
-                tracing::warn!(
-                    error = %materialize_err,
-                    "failed to materialize resident GDN state after poisoned runner lock"
-                );
-                message = format!(
-                    "{message}; also failed to materialize resident GDN state: {materialize_err:#}"
-                );
-            }
-            counters
-                .failed_jobs
-                .fetch_add(jobs.len(), Ordering::Relaxed);
-            for job in jobs {
-                let _ = job.response.send(DecodeBatchReply::Failed {
-                    error: message.clone(),
-                    linear_state: job.linear_state,
-                });
-            }
-            return;
-        }
-    };
-
-    let backend = &*runner_guard.backend;
-    let job_count = jobs.len();
-    let mut runner_calls_for_jobs = 1usize;
-    let rowwise_retry_enabled = decode_batcher_rowwise_retry_enabled(backend);
-    let tokens =
-        match decode_batch_jobs_with_runner(&runner_guard, paged_cache, &mut jobs, counters) {
-            Ok(tokens) => Ok(tokens),
-            Err(err) if jobs.len() > 1 && rowwise_retry_enabled => {
-                tracing::debug!(
-                    batch = jobs.len(),
-                    error = %err,
-                    "batched greedy decode failed; falling back to rowwise decode jobs"
-                );
-                let mut tokens = Vec::with_capacity(jobs.len());
-                let mut fallback_error = None;
-                for idx in 0..jobs.len() {
-                    runner_calls_for_jobs += 1;
-                    match decode_batch_jobs_with_runner(
-                        &runner_guard,
-                        paged_cache,
-                        &mut jobs[idx..idx + 1],
-                        counters,
-                    ) {
-                        Ok(mut row_tokens) => tokens.push(row_tokens.remove(0)),
-                        Err(row_err) => {
-                            fallback_error = Some(row_err);
-                            break;
-                        }
-                    }
-                }
-                match fallback_error {
-                    Some(err) => Err(err),
-                    None => Ok(tokens),
-                }
-            }
-            Err(err) if jobs.len() > 1 => {
-                tracing::debug!(
-                    batch = jobs.len(),
-                    error = %err,
-                    "batched greedy decode failed; rowwise retry disabled"
-                );
-                Err(err)
-            }
-            Err(err) => Err(err),
-        };
-    counters.max_runner_calls_per_token.fetch_max(
-        if job_count > 0 && runner_calls_for_jobs > 1 {
-            2
-        } else {
-            usize::from(job_count > 0)
-        },
-        Ordering::Relaxed,
-    );
-
-    match tokens {
-        Ok(tokens) => {
-            for (job, token) in jobs.into_iter().zip(tokens.into_iter()) {
-                if job.skip_gdn_state_readback {
-                    job.linear_state
-                        .evict_gdn_recurrent_resident_states(backend);
-                }
-                let _ = job.response.send(DecodeBatchReply::Decoded {
-                    token,
-                    linear_state: job.linear_state,
-                });
-            }
-        }
-        Err(err) => {
-            let message = format!("{err:#}");
-            if let Err(materialize_err) = materialize_decode_job_resident_states(backend, &mut jobs)
-            {
-                tracing::warn!(
-                    error = %materialize_err,
-                    "failed to materialize resident GDN state after decode batch error"
-                );
-            }
-            counters
-                .failed_jobs
-                .fetch_add(jobs.len(), Ordering::Relaxed);
-            for job in jobs {
-                let _ = job.response.send(DecodeBatchReply::Failed {
-                    error: message.clone(),
-                    linear_state: job.linear_state,
-                });
-            }
-        }
-    }
-}
-
-fn decode_batch_jobs_with_runner(
-    runner: &ModelRunner,
-    paged_cache: &PagedKvCache,
-    jobs: &mut [DecodeBatchJob],
-    counters: &DecodeBatcherCounters,
-) -> Result<Vec<TokenId>> {
-    counters.runner_calls.fetch_add(1, Ordering::Relaxed);
-    let input_tokens: Vec<TokenId> = jobs.iter().map(|job| job.input_token).collect();
-    let seq_lens: Vec<usize> = jobs.iter().map(|job| job.seq_len).collect();
-    let block_tables: Vec<BlockTable> = jobs.iter().map(|job| job.block_table.clone()).collect();
-    let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
-    let skip_gdn_state_readback = skip_final_gdn_state_readback_enabled()
-        && jobs.iter().all(|job| job.skip_gdn_state_readback);
-
-    let _skip_scope = crate::forward::VulkanSkipGdnStateReadbackScope::new(skip_gdn_state_readback);
-    let tokens = if runner.has_linear_attention_layers() {
-        let mut linear_states: Vec<&mut LinearAttentionState> =
-            jobs.iter_mut().map(|job| &mut job.linear_state).collect();
-        runner.decode_next_tokens_paged_contiguous_batch_greedy(
-            &input_tokens,
-            paged_cache,
-            &block_table_refs,
-            &seq_lens,
-            &mut linear_states,
-        )
-    } else {
-        let mut no_linear_states: [&mut LinearAttentionState; 0] = [];
-        runner.decode_next_tokens_paged_contiguous_batch_greedy(
-            &input_tokens,
-            paged_cache,
-            &block_table_refs,
-            &seq_lens,
-            &mut no_linear_states,
-        )
-    };
-    tokens
 }
 
 struct SharedBlockReservation<'a> {
@@ -5573,17 +5027,17 @@ impl ModelRunner {
         let cache_is_fp8 = lock_paged_cache(paged_cache)?.is_fp8();
         let has_linear_layers = self.has_linear_attention_layers();
         #[cfg(any(feature = "vulkan", feature = "metal"))]
-        let decode_batcher_policy =
-            BackendCapabilityQueries::backend_capabilities(self.backend.as_ref()).decode_batcher;
+        let decode_execution_policy =
+            BackendCapabilityQueries::backend_capabilities(self.backend.as_ref()).decode_execution;
         #[cfg(feature = "vulkan")]
-        let sampled_contiguous_resident_decode_ready = decode_batcher_policy
+        let sampled_contiguous_resident_decode_ready = decode_execution_policy
             .use_native_sampled_contiguous_decode
-            && decode_batcher_policy.sampled_contiguous_decode_requires_resident_decode
+            && decode_execution_policy.sampled_contiguous_decode_requires_resident_decode
             && ReplayBackend::runtime_supports_resident_decode(self.backend.as_ref());
         #[cfg(feature = "metal")]
-        let sampled_contiguous_nonresident_decode_ready = decode_batcher_policy
+        let sampled_contiguous_nonresident_decode_ready = decode_execution_policy
             .use_native_sampled_contiguous_decode
-            && !decode_batcher_policy.sampled_contiguous_decode_requires_resident_decode;
+            && !decode_execution_policy.sampled_contiguous_decode_requires_resident_decode;
         // `model_forward_paged_decode_contiguous_batch_hidden` already handles
         // per-row positions via dyn-seqlen flash attention for full-attn
         // layers, and the GDN layers operate on the batched
@@ -6928,7 +6382,7 @@ impl ModelRunner {
         // majority through the fast path. Crash-safe (no non-adjacent pages ever
         // reach the kernel) and a strict superset of #1445's correctness.
         let decode_policy =
-            BackendCapabilityQueries::backend_capabilities(self.backend.as_ref()).decode_batcher;
+            BackendCapabilityQueries::backend_capabilities(self.backend.as_ref()).decode_execution;
         if decode_policy.partition_noncontiguous_gdn_kv_tiles && has_linear_layers {
             let block_size = paged_cache.block_size();
             let noncontig: Vec<bool> = (0..batch)
@@ -8028,53 +7482,6 @@ impl ModelRunner {
             token,
             backend_phases,
         })
-    }
-
-    fn decode_next_token_paged_interleaved_or_batched(
-        &self,
-        params: &SamplingParams,
-        input_token: TokenId,
-        paged_cache: &PagedKvCache,
-        block_table: &BlockTable,
-        seq_len: usize,
-        linear_state: &mut LinearAttentionState,
-        step_seed: Option<u64>,
-        decode_batcher: Option<&DecodeBatcher>,
-        history: &[TokenId],
-        graph_row_id: u64,
-        skip_gdn_state_readback: bool,
-    ) -> Result<ProfiledDirectDecodeStep> {
-        if params.is_effectively_greedy()
-            && let Some(batcher) = decode_batcher
-        {
-            match batcher.decode_next_token_greedy(
-                input_token,
-                block_table,
-                seq_len,
-                linear_state,
-                skip_gdn_state_readback,
-            )? {
-                DecodeBatcherDecode::Decoded(token) => {
-                    return Ok(ProfiledDirectDecodeStep::without_distinct_backend_phase(
-                        token,
-                    ));
-                }
-                DecodeBatcherDecode::RunnerBusy => {}
-            }
-        }
-
-        self.decode_next_token_paged_interleaved(
-            params,
-            input_token,
-            paged_cache,
-            block_table,
-            seq_len,
-            linear_state,
-            step_seed,
-            history,
-            graph_row_id,
-            skip_gdn_state_readback,
-        )
     }
 
     /// Unavailable high-level paged speculative generation entry point.
@@ -9955,7 +9362,6 @@ impl ModelRunner {
         params: SamplingParams,
         block_manager: Arc<Mutex<BlockManager>>,
         paged_cache: Arc<PagedKvCache>,
-        decode_batcher: Option<Arc<DecodeBatcher>>,
         cancel: CancelHandle,
         worker_lifetime: L,
     ) -> Result<ThreadedStreamingOutput>
@@ -10108,7 +9514,6 @@ impl ModelRunner {
         let runner_for_thread = runner_lock;
         let bm_for_thread = block_manager.clone();
         let pc_for_thread = paged_cache;
-        let decode_batcher_for_thread = decode_batcher;
         let cleanup = PrefixCachedStreamingCleanup {
             registration: None,
             extra_registrations: Vec::new(),
@@ -10144,7 +9549,6 @@ impl ModelRunner {
                             pc_for_thread.as_ref(),
                             &block_table,
                             &mut linear_state,
-                            decode_batcher_for_thread.as_deref(),
                             Some(&cancel),
                         );
                         match runner_guard.ensure_backend_healthy() {
@@ -10202,7 +9606,6 @@ impl ModelRunner {
         block_manager: Arc<Mutex<BlockManager>>,
         paged_cache: Arc<PagedKvCache>,
         cached_prefix: Option<PagedPrefixReuse>,
-        decode_batcher: Option<Arc<DecodeBatcher>>,
         cancel: CancelHandle,
         worker_lifetime: L,
         post_decode: F,
@@ -10530,7 +9933,6 @@ impl ModelRunner {
         let seq_len = prompt_tokens.len();
         let runner_for_thread = runner_lock;
         let pc_for_thread = paged_cache;
-        let decode_batcher_for_thread = decode_batcher;
         let block_table_for_thread = block_table.clone();
         let cleanup = PrefixCachedStreamingCleanup {
             registration,
@@ -10567,7 +9969,6 @@ impl ModelRunner {
                             pc_for_thread.as_ref(),
                             &block_table_for_thread,
                             &mut linear_state,
-                            decode_batcher_for_thread.as_deref(),
                             Some(&cancel),
                         );
                         match runner_guard.ensure_backend_healthy() {
@@ -11037,7 +10438,6 @@ impl ModelRunner {
             block_table,
             linear_state,
             None,
-            None,
         )?;
         if let Some(done) = done {
             let _ = tx.send(StreamEvent::Done(done));
@@ -11061,7 +10461,6 @@ impl ModelRunner {
         paged_cache: &PagedKvCache,
         block_table: &BlockTable,
         linear_state: &mut LinearAttentionState,
-        decode_batcher: Option<&DecodeBatcher>,
         cancel: Option<&CancelHandle>,
     ) -> Result<Option<StreamDone>> {
         let rocm_owner = RocmDecodeOwnerLease::new(&self.rocm_graph, &self.backend_health);
@@ -11112,7 +10511,7 @@ impl ModelRunner {
 
             let skip_gdn_state_readback = skip_final_gdn_state_readback_enabled()
                 && generated_tokens.len() + 1 >= params.max_tokens;
-            let decode_result = self.decode_next_token_paged_interleaved_or_batched(
+            let decode_result = self.decode_next_token_paged_interleaved(
                 params,
                 next_token,
                 paged_cache,
@@ -11120,7 +10519,6 @@ impl ModelRunner {
                 seq_len,
                 linear_state,
                 step_seed,
-                decode_batcher,
                 &generated_tokens,
                 rocm_owner.row_id(),
                 skip_gdn_state_readback,
@@ -12374,154 +11772,22 @@ mod tests {
     impl BackendRuntime for NamedTestBackend {}
 
     #[test]
-    fn decode_batcher_stats_report_runner_calls_per_token() {
-        let stats = DecodeBatcherStats {
-            executed_rows: 4,
-            runner_calls: 5,
-            max_runner_calls_per_token: 2,
-            ..DecodeBatcherStats::default()
-        };
-
-        assert_eq!(stats.runner_calls_per_token(), Some(1.25));
-        assert_eq!(stats.max_runner_calls_per_token, 2);
-        assert_eq!(stats.runner_call_budget_per_token(), 2);
-        assert!(!stats.runner_call_budget_exceeded());
-        assert_eq!(DecodeBatcherStats::default().runner_calls_per_token(), None);
-
-        let exceeded = DecodeBatcherStats {
-            max_runner_calls_per_token: 3,
-            ..DecodeBatcherStats::default()
-        };
-        assert!(exceeded.runner_call_budget_exceeded());
-    }
-
-    #[test]
-    fn test_decode_batcher_default_backend_policy() {
-        for (
-            backend_name,
-            device,
-            max_batch,
-            wait_micros,
-            allow_mixed_seq_lens,
-            use_native_sampled_contiguous_decode,
-            sampled_contiguous_decode_requires_resident_decode,
-            partition_noncontiguous_gdn_kv_tiles,
-        ) in [
-            (
-                "cpu",
-                kiln_tensor::Device::Cpu,
-                8,
-                0,
-                false,
-                false,
-                false,
-                false,
-            ),
-            (
-                "cuda",
-                kiln_tensor::Device::Cpu,
-                1,
-                0,
-                false,
-                false,
-                false,
-                true,
-            ),
-            (
-                "cuda",
-                kiln_tensor::Device::Cuda(0),
-                1,
-                0,
-                false,
-                false,
-                false,
-                true,
-            ),
-            (
-                "metal",
-                kiln_tensor::Device::Metal(0),
-                8,
-                100,
-                true,
-                true,
-                false,
-                false,
-            ),
-            (
-                "vulkan",
-                kiln_tensor::Device::Cpu,
-                64,
-                5_000,
-                true,
-                true,
-                true,
-                false,
-            ),
-            (
-                "vulkan",
-                kiln_tensor::Device::Vulkan(0),
-                64,
-                5_000,
-                true,
-                true,
-                true,
-                false,
-            ),
-            (
-                "rocm",
-                kiln_tensor::Device::Rocm(0),
-                8,
-                0,
-                false,
-                false,
-                false,
-                false,
-            ),
+    fn test_decode_actor_default_backend_policy() {
+        for (backend_name, device, max_decode_batch) in [
+            ("cpu", kiln_tensor::Device::Cpu, 8),
+            ("cuda", kiln_tensor::Device::Cpu, 8),
+            ("cuda", kiln_tensor::Device::Cuda(0), 8),
+            ("metal", kiln_tensor::Device::Metal(0), 8),
+            ("vulkan", kiln_tensor::Device::Cpu, 64),
+            ("vulkan", kiln_tensor::Device::Vulkan(0), 64),
+            ("rocm", kiln_tensor::Device::Rocm(0), 8),
         ] {
-            let policy = DecodeBatcherPolicy::for_backend(backend_name, device);
-            assert!(
-                policy.rendezvous_default_enabled,
-                "{backend_name} rendezvous enable policy drifted"
-            );
+            let policy = DecodeExecutionPolicy::for_backend(backend_name, device);
             assert_eq!(
-                policy.max_batch, max_batch,
-                "{backend_name} max batch policy drifted"
-            );
-            assert_eq!(
-                policy.wait_micros, wait_micros,
-                "{backend_name} wait policy drifted"
-            );
-            assert_eq!(
-                policy.allow_mixed_seq_lens, allow_mixed_seq_lens,
-                "{backend_name} mixed-seq policy drifted"
-            );
-            assert_eq!(
-                policy.use_native_sampled_contiguous_decode, use_native_sampled_contiguous_decode,
-                "{backend_name} sampled contiguous decode policy drifted"
-            );
-            assert_eq!(
-                policy.sampled_contiguous_decode_requires_resident_decode,
-                sampled_contiguous_decode_requires_resident_decode,
-                "{backend_name} sampled contiguous resident requirement policy drifted"
-            );
-            assert_eq!(
-                policy.partition_noncontiguous_gdn_kv_tiles, partition_noncontiguous_gdn_kv_tiles,
-                "{backend_name} GDN KV contiguity partition policy drifted"
+                policy.max_decode_batch, max_decode_batch,
+                "{backend_name} actor decode width policy drifted"
             );
         }
-    }
-
-    #[test]
-    fn decode_batcher_config_preserves_injected_execution_values() {
-        let config = DecodeBatcherConfig {
-            max_batch: 12,
-            wait: std::time::Duration::from_micros(3_500),
-            allow_mixed_seq_lens: true,
-        };
-
-        assert_eq!(config.max_batch, 12);
-        assert_eq!(config.wait, std::time::Duration::from_micros(3_500));
-        assert!(config.allow_mixed_seq_lens);
     }
 
     #[test]
@@ -12536,25 +11802,6 @@ mod tests {
         assert_eq!(decode_buffer_max_batch(&vulkan, None), 64);
         assert_eq!(decode_buffer_max_batch(&vulkan, Some(24)), 24);
         assert_eq!(decode_buffer_max_batch(&vulkan, Some(1)), 1);
-    }
-
-    #[test]
-    fn test_decode_batcher_rowwise_retry_uses_backend_policy() {
-        let vulkan_cpu_sentinel = NamedTestBackend {
-            name: "vulkan",
-            device: kiln_tensor::Device::Cpu,
-            resident_linear_state: false,
-            resident_recurrent_state: false,
-        };
-        let metal = NamedTestBackend {
-            name: "metal",
-            device: kiln_tensor::Device::Metal(0),
-            resident_linear_state: false,
-            resident_recurrent_state: false,
-        };
-
-        assert!(!decode_batcher_rowwise_retry_enabled(&vulkan_cpu_sentinel));
-        assert!(!decode_batcher_rowwise_retry_enabled(&metal));
     }
 
     #[test]

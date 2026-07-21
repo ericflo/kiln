@@ -135,15 +135,19 @@ def reference_rows() -> dict[str, list[str]]:
 
 def retired_environment_replacements() -> dict[str, str]:
     replacements: dict[str, str] = {}
-    pattern = re.compile(r"^\| `(KILN_[A-Z0-9_]+)` \| `(KILN_[A-Z0-9_]+)` \|$")
+    pattern = re.compile(r"^\| `(KILN_[A-Z0-9_]+)` \| (.+) \|$")
     for line in REFERENCE_PATH.read_text().splitlines():
         match = pattern.match(line)
         if not match:
             continue
-        retired, canonical = match.groups()
+        retired, replacement = match.groups()
+        if replacement.startswith("`") and replacement.endswith("`"):
+            replacement = replacement[1:-1]
+        elif not replacement.startswith("removed; "):
+            continue
         if retired in replacements:
             raise ContractError(f"duplicate retired environment name {retired}")
-        replacements[retired] = canonical
+        replacements[retired] = replacement
     return replacements
 
 
@@ -399,10 +403,14 @@ def validate_contract_metadata(schema: dict[str, Any]) -> list[str]:
     }
     if set(retired) & canonical_names:
         errors.append("retired environment names must be disjoint from canonical names")
-    unknown_replacements = sorted(set(retired.values()) - canonical_names)
+    unknown_replacements = sorted(
+        replacement
+        for replacement in set(retired.values()) - canonical_names
+        if not replacement.startswith("removed; ")
+    )
     if unknown_replacements:
         errors.append(
-            "retired environment replacements must name canonical overrides: "
+            "retired environment replacements must name canonical overrides or an explicit removed reason: "
             + ", ".join(unknown_replacements)
         )
     errors.extend(validate_operational_retired_environment_references(retired))

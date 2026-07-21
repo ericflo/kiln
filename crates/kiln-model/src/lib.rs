@@ -59,7 +59,7 @@ pub mod weights;
 pub use backend::capability::{
     AttentionCapabilities, AttentionRequest, AttentionRequestKind, BackendCapabilities,
     BackendCapabilityQueries, BackendCapabilitySnapshot, BackendFallbackCapabilities,
-    BackendTrainingCapabilities, DecodeBatcherPolicy, DecodeCapabilities, GdnCapabilities,
+    BackendTrainingCapabilities, DecodeCapabilities, DecodeExecutionPolicy, GdnCapabilities,
     GpuAllocatorMemoryProbe, GpuAllocatorMemoryProbePolicy, GpuMemoryBudgetPolicy,
     GpuMemoryDetectionPolicy, GpuMemoryReclaimPolicy, GpuMemoryReclaimer,
     InferenceRecurrentStatePolicy, KvCacheAutoBlockPolicy, KvCacheFp8Policy,
@@ -108,9 +108,8 @@ pub use full_attention_policy::{
     validate_full_attention_score_budget_mib,
 };
 pub use generate::{
-    BackendHealthHandle, BackendHealthSnapshot, BatchedStateCacheStats, DecodeBatcher,
-    DecodeBatcherConfig, DecodeBatcherStats, ExternalYieldSyncStats, FinishReason,
-    GenerationOutput, InferenceMemoryRuntime, ModelRunner, ModelRunnerRuntimeOptions,
+    BackendHealthHandle, BackendHealthSnapshot, BatchedStateCacheStats, ExternalYieldSyncStats,
+    FinishReason, GenerationOutput, InferenceMemoryRuntime, ModelRunner, ModelRunnerRuntimeOptions,
     MtpGenerationOutput, PagedBatchedDecodeState, PagedBatchedPrefillProgress,
     PagedBatchedPrefillStart, PagedBatchedPrefillState, PagedPrefixNextToken,
     PagedPrefixRegistration, PagedPrefixReuse, PrefixCachedGenerationOutput,

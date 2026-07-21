@@ -1998,17 +1998,10 @@ function renderRuntimeConfigBody(cfg) {
   const generation = cfg.generation || {};
   const batching = cfg.batching || {};
   const batchingConfiguration = batching.configuration || {};
-  const batchingMode = batchingConfiguration.mode || {};
   const rowwiseDecode = batchingConfiguration.rowwise_decode || {};
   const prefixAwareAdmission = batchingConfiguration.prefix_aware_admission || {};
   const prefillAdmissionQuantum = batchingConfiguration.prefill_admission_quantum || {};
   const actorCycleIdle = batchingConfiguration.actor_cycle_idle || {};
-  const directRendezvousConfiguration = batchingConfiguration.direct_decode_rendezvous || {};
-  const directRendezvousMode = directRendezvousConfiguration.mode || {};
-  const directRendezvousMaxBatch = directRendezvousConfiguration.max_batch || {};
-  const directRendezvousWaitUs = directRendezvousConfiguration.wait_us || {};
-  const directRendezvousMixedSeqLens = directRendezvousConfiguration.mixed_seq_lens || {};
-  const directRendezvousRuntime = batching.direct_decode_rendezvous || {};
   const streamingPrefill = cfg.streaming_prefill || {};
   const streamingDispatch = streamingPrefill.dispatch || {};
   const streamingThreshold = streamingPrefill.threshold_tokens || {};
@@ -2023,7 +2016,6 @@ function renderRuntimeConfigBody(cfg) {
   const onOff = v => v ? 'on' : 'off';
   const enabledState = v => v === true ? 'on' : v === false ? 'off' : '—';
   const activeState = v => v === true ? 'active' : v === false ? 'inactive' : '—';
-  const availableState = v => v === true ? 'available' : v === false ? 'unavailable' : '—';
   const hasOwn = (object, field) => Object.prototype.hasOwnProperty.call(object, field);
   const num = v => (typeof v === 'number' && isFinite(v)) ? v.toLocaleString() : '—';
   const closedSum = (object, fields) => fields.every(field => Number.isFinite(object[field]))
@@ -2065,15 +2057,6 @@ function renderRuntimeConfigBody(cfg) {
   const graphPhaseSlowChip = (phase, label) => Number.isFinite(phase.slow) && phase.slow > 0
     ? flagChip(`${num(phase.slow)} ${label} slow`, `${label} phase calls taking at least 100 ms.`)
     : '';
-  const autoNumber = (object, field, suffix = '') => {
-    if (!hasOwn(object, field)) return '—';
-    const value = object[field];
-    return value == null ? 'auto' : `${num(value)}${suffix}`;
-  };
-  const autoToggle = (object, field) => {
-    if (!hasOwn(object, field)) return '—';
-    return object[field] == null ? 'auto' : enabledState(object[field]);
-  };
   const tokens = value => (typeof value === 'number' && isFinite(value))
     ? `${num(value)} tokens`
     : '—';
@@ -2212,25 +2195,9 @@ function renderRuntimeConfigBody(cfg) {
           : 'The effective reclaim behavior differs from the requested configuration.',
       )
     : '';
-  const batchingConfiguredMode = batchingMode.configured == null
-    ? '—'
-    : String(batchingMode.configured);
   const configuredPrefillQuantum = Object.prototype.hasOwnProperty.call(prefillAdmissionQuantum, 'configured')
     ? prefillAdmissionQuantum.configured == null ? 'auto' : num(prefillAdmissionQuantum.configured)
     : '—';
-  const directScope = directRendezvousRuntime.scope == null
-    ? '—'
-    : String(directRendezvousRuntime.scope).replaceAll('_', ' ');
-  const directBackendReason = directRendezvousRuntime.backend_unavailable_reason == null
-    ? '—'
-    : String(directRendezvousRuntime.backend_unavailable_reason);
-  const directRouteDetail = directRendezvousRuntime.route_available === false
-    && directRendezvousRuntime.actor_active === true
-    ? flagChip('shadowed by primary actor', 'The fallback worker may be live, but the primary batching actor owns this route.')
-    : '';
-  const directConfiguredMode = directRendezvousMode.configured == null
-    ? '—'
-    : String(directRendezvousMode.configured);
   return `
     <div class="rc-groups">
       <div class="rc-group">
@@ -2337,9 +2304,6 @@ function renderRuntimeConfigBody(cfg) {
       <div class="rc-group">
         <div class="rc-group-title">Batching</div>
         ${runtimeConfigRow('Primary actor', `<strong>${activeState(batching.actor_active)}</strong>`, 'Whether the primary production batching actor is active in the current model state.')}
-        ${runtimeConfigRow('Mode configured', `<strong>${escapeHtml(batchingConfiguredMode)}</strong>${srcChip(batchingMode.configured_source)}`, 'The typed batching mode selected at startup.')}
-        ${runtimeConfigRow('Backend policy', `<strong>${enabledState(batchingMode.backend_policy_enabled)}</strong>`, 'The backend default used when batching mode is auto.')}
-        ${runtimeConfigRow('Mode effective', `<strong>${enabledState(batchingMode.effective_enabled)}</strong>${srcChip(batchingMode.effective_source)}`, 'The immutable batching mode after resolving the configured mode against backend policy.')}
         ${runtimeConfigRow('Rowwise decode', `<strong>${enabledState(rowwiseDecode.enabled)}</strong>${srcChip(rowwiseDecode.source)}`, 'Whether batched decode executes one row at a time.')}
         ${runtimeConfigRow('Prefix admission', `<strong>${enabledState(prefixAwareAdmission.enabled)}</strong>${srcChip(prefixAwareAdmission.source)}`, 'Whether admission accounts for reusable prompt prefixes.')}
         ${runtimeConfigRow('Prefill configured', `<strong>${configuredPrefillQuantum}</strong>${srcChip(prefillAdmissionQuantum.configured_source)}`, 'Configured prompt-admission quantum; auto delegates to backend policy.')}
@@ -2347,26 +2311,7 @@ function renderRuntimeConfigBody(cfg) {
         ${runtimeConfigRow('Prefill effective', `<strong>${num(prefillAdmissionQuantum.effective)}</strong>${srcChip(prefillAdmissionQuantum.effective_source)}`, 'Prompt-admission quantum used by the batching actor.')}
         ${runtimeConfigRow('Cycle idle', `<strong>${num(actorCycleIdle.milliseconds)}${Number.isFinite(actorCycleIdle.milliseconds) ? ' ms' : ''}</strong>${srcChip(actorCycleIdle.source)}${actorCycleIdle.enabled === true ? flagChip(`poll ${num(actorCycleIdle.command_poll_milliseconds)} ms`, 'Maximum control-command polling interval during the cooperative wait.') : ''}`, 'Intentional safe-boundary idle after actor cycles that advanced prefill or decode. Zero disables pacing; nonzero values trade throughput and latency for lower sustained accelerator duty cycle.')}
         ${runtimeConfigRow('Burst prefill', `<strong>${enabledState(batchingConfiguration.burst_prefill_admission)}</strong>`, 'Whether the backend admits a burst of prefill work between decode steps.')}
-        ${runtimeConfigRow('Tile alignment', `<strong>${enabledState(batchingConfiguration.actor_prefill_tile_alignment_required)}</strong>`, 'Whether startup requires actor prompt chunks to match the direct streaming-prefill numerical tile. ROCm enables this correctness contract.')}
-        <div class="rc-group-title" title="Compatibility rendezvous for direct streaming effectively-greedy decode when the primary batching actor is inactive. This is not primary actor batching.">Direct-stream greedy fallback</div>
-        ${runtimeConfigRow('Scope', `<strong>${escapeHtml(directScope)}</strong>`, 'Only the direct streaming effectively-greedy path can use this fallback. Sampled, non-streaming, and primary-actor requests are excluded.')}
-        ${runtimeConfigRow('Backend available', `<strong>${availableState(directRendezvousRuntime.backend_available)}</strong>`, 'Whether the selected backend can construct the fallback rendezvous worker.')}
-        ${runtimeConfigRow('Backend reason', `<strong>${escapeHtml(directBackendReason)}</strong>`, 'Why the selected backend cannot construct the fallback worker, when unavailable.')}
-        ${runtimeConfigRow('Primary actor gate', `<strong>${activeState(directRendezvousRuntime.actor_active)}</strong>`, 'Live primary-actor state as seen by fallback routing. An active actor shadows this compatibility route.')}
-        ${runtimeConfigRow('Worker', `<strong>${activeState(directRendezvousRuntime.worker_active)}</strong>`, 'Whether the fallback rendezvous worker was constructed and remains live.')}
-        ${runtimeConfigRow('Route', `<strong>${availableState(directRendezvousRuntime.route_available)}</strong>${directRouteDetail}`, 'Whether direct streaming greedy requests can currently reach the fallback worker. This requires backend and worker availability with the primary actor inactive.')}
-        ${runtimeConfigRow('Mode configured', `<strong>${escapeHtml(directConfiguredMode)}</strong>${srcChip(directRendezvousMode.configured_source)}`, 'Configured fallback-worker mode; auto delegates to backend policy.')}
-        ${runtimeConfigRow('Mode backend', `<strong>${enabledState(directRendezvousMode.backend_policy_enabled)}</strong>${policySource(directRendezvousMode, 'backend_policy_enabled')}`, 'Backend default for the fallback rendezvous worker.')}
-        ${runtimeConfigRow('Mode effective', `<strong>${enabledState(directRendezvousMode.effective_enabled)}</strong>${srcChip(directRendezvousMode.effective_source)}`, 'Immutable fallback-worker mode resolved at startup.')}
-        ${runtimeConfigRow('Max batch configured', `<strong>${autoNumber(directRendezvousMaxBatch, 'configured')}</strong>${srcChip(directRendezvousMaxBatch.configured_source)}`, 'Configured fallback rendezvous width; auto delegates to backend policy.')}
-        ${runtimeConfigRow('Max batch backend', `<strong>${num(directRendezvousMaxBatch.backend_policy)}</strong>${policySource(directRendezvousMaxBatch, 'backend_policy')}`, 'Backend-selected fallback rendezvous width before the decode-width bound is applied.')}
-        ${runtimeConfigRow('Max batch effective', `<strong>${num(directRendezvousMaxBatch.effective)}</strong>${srcChip(directRendezvousMaxBatch.effective_source)}`, 'Fallback rendezvous width after startup resolution and decode-width clamping.')}
-        ${runtimeConfigRow('Wait configured', `<strong>${autoNumber(directRendezvousWaitUs, 'configured', ' us')}</strong>${srcChip(directRendezvousWaitUs.configured_source)}`, 'Configured microsecond wait for assembling a fallback cohort; auto delegates to backend policy.')}
-        ${runtimeConfigRow('Wait backend', `<strong>${num(directRendezvousWaitUs.backend_policy)}${hasOwn(directRendezvousWaitUs, 'backend_policy') ? ' us' : ''}</strong>${policySource(directRendezvousWaitUs, 'backend_policy')}`, 'Backend-selected fallback cohort wait.')}
-        ${runtimeConfigRow('Wait effective', `<strong>${num(directRendezvousWaitUs.effective)}${hasOwn(directRendezvousWaitUs, 'effective') ? ' us' : ''}</strong>${srcChip(directRendezvousWaitUs.effective_source)}`, 'Microsecond wait used by the fallback rendezvous worker.')}
-        ${runtimeConfigRow('Mixed lengths configured', `<strong>${autoToggle(directRendezvousMixedSeqLens, 'configured')}</strong>${srcChip(directRendezvousMixedSeqLens.configured_source)}`, 'Whether a fallback cohort may mix sequence lengths; auto delegates to backend policy.')}
-        ${runtimeConfigRow('Mixed lengths backend', `<strong>${enabledState(directRendezvousMixedSeqLens.backend_policy)}</strong>${policySource(directRendezvousMixedSeqLens, 'backend_policy')}`, 'Backend default for mixed sequence lengths in a fallback cohort.')}
-        ${runtimeConfigRow('Mixed lengths effective', `<strong>${enabledState(directRendezvousMixedSeqLens.effective)}</strong>${srcChip(directRendezvousMixedSeqLens.effective_source)}`, 'Immutable mixed-sequence-length policy used by the fallback rendezvous worker.')}
+        ${runtimeConfigRow('Tile alignment', `<strong>${enabledState(batchingConfiguration.actor_prefill_tile_alignment_required)}</strong>`, 'Whether startup requires actor prompt chunks to preserve the backend-qualified streaming-prefill numerical boundary. ROCm enables this correctness contract.')}
       </div>
       <div class="rc-group">
         <div class="rc-group-title">Training</div>

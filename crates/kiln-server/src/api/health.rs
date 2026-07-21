@@ -17,7 +17,7 @@ use crate::config::{
 };
 use crate::memory_observability::CachedMemoryGovernorObservation;
 use crate::recent_requests::RequestRecord;
-use crate::state::{AppState, DirectDecodeRendezvousRuntimeState, ModelBackend};
+use crate::state::{AppState, ModelBackend};
 
 #[derive(Serialize)]
 struct HealthResponse {
@@ -395,14 +395,12 @@ struct DecodeRuntimeInfo {
     accelerator_runtime: crate::config::ResolvedAcceleratorRuntimePolicy,
     rocm_synchronization: crate::accelerator_runtime::RocmSynchronizationRuntimeStats,
     batching_configuration: BatchingRuntimeConfig,
-    direct_decode_rendezvous: DirectDecodeRendezvousRuntimeState,
     cuda_graphs: CudaGraphInfo,
     rocm_graphs: RocmGraphInfo,
     rocm_w8_lm_head: kiln_model::RocmW8LmHeadStats,
     metal_graphs: GraphInfo,
     kv_autoscaler: crate::kv_autoscaler::KvAutoscalerState,
     memory_governor: MemoryGovernorRuntimeInfo,
-    decode_batcher: Option<DecodeBatcherInfo>,
     batching_engine: Option<BatchingEngineInfo>,
 }
 
@@ -718,21 +716,6 @@ fn rocm_graph_info(
 }
 
 #[derive(Serialize)]
-struct DecodeBatcherInfo {
-    submitted_jobs: usize,
-    executed_batches: usize,
-    executed_rows: usize,
-    runner_calls: usize,
-    runner_calls_per_token: Option<f64>,
-    max_runner_calls_per_token: usize,
-    runner_call_budget_per_token: usize,
-    runner_call_budget_exceeded: bool,
-    max_observed_batch: usize,
-    runner_busy_jobs: usize,
-    failed_jobs: usize,
-}
-
-#[derive(Serialize)]
 struct BatchingEngineInfo {
     snapshot_age_ms: u64,
     stream_stall_grace_ms: u64,
@@ -863,7 +846,6 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         mut backend_runtime,
         scheduler_stats,
         prefix_cache,
-        decode_batcher,
         batching_engine,
         cuda_graph_enabled,
         rocm_graphs,
@@ -891,7 +873,6 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                 }),
                 PrefixCacheInfo::from(sched.prefix_cache_stats()),
                 None,
-                None,
                 Some(false),
                 rocm_graph_info(rocm_graph_observation),
                 graph_info(Some(false)),
@@ -904,7 +885,6 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
             block_manager,
             prefix_cache,
             batching_engine,
-            decode_batcher,
             ..
         } => {
             let external_yield_sync = backend_health.external_yield_sync_stats();
@@ -930,13 +910,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                 let cache = prefix_cache.lock().unwrap();
                 PrefixCacheInfo::from(cache.stats())
             };
-            let decode_batcher = decode_batcher
-                .as_ref()
-                .map(|batcher| DecodeBatcherInfo::from(batcher.stats()));
-            let batching_engine = match batching_engine {
-                Some(engine) => Some(BatchingEngineInfo::from(engine.cached_snapshot())),
-                None => None,
-            };
+            let batching_engine = Some(BatchingEngineInfo::from(batching_engine.cached_snapshot()));
             let (cuda_graph_enabled, metal_graph_enabled) = match runner.try_read() {
                 Ok(runner) => (
                     runner.cuda_graph_enabled().ok(),
@@ -949,7 +923,6 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                 backend_runtime,
                 scheduler_stats,
                 prefix_cache,
-                decode_batcher,
                 batching_engine,
                 cuda_graph_enabled,
                 rocm_graph_info(rocm_graph_observation),
@@ -978,7 +951,6 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         accelerator_runtime: state.accelerator_runtime_policy,
         rocm_synchronization,
         batching_configuration: state.batching_runtime_config,
-        direct_decode_rendezvous: state.direct_decode_rendezvous_runtime_state(),
         cuda_graphs,
         rocm_graphs,
         rocm_w8_lm_head: kiln_model::rocm_w8_proj::stats(),
@@ -990,7 +962,6 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
             serving_policy,
             state.memory_config.reclaim_mode.source(),
         ),
-        decode_batcher,
         batching_engine,
     };
 
@@ -1377,24 +1348,6 @@ impl From<PrefixCacheStats> for PrefixCacheInfo {
             block_utilization: utilization(stats.cached_blocks as u64, stats.max_blocks as u64),
             entry_utilization: utilization(stats.cached_entries as u64, stats.max_entries as u64),
             state_utilization: utilization(stats.cached_state_bytes, stats.max_state_bytes),
-        }
-    }
-}
-
-impl From<kiln_model::DecodeBatcherStats> for DecodeBatcherInfo {
-    fn from(stats: kiln_model::DecodeBatcherStats) -> Self {
-        Self {
-            submitted_jobs: stats.submitted_jobs,
-            executed_batches: stats.executed_batches,
-            executed_rows: stats.executed_rows,
-            runner_calls: stats.runner_calls,
-            runner_calls_per_token: stats.runner_calls_per_token(),
-            max_runner_calls_per_token: stats.max_runner_calls_per_token,
-            runner_call_budget_per_token: stats.runner_call_budget_per_token(),
-            runner_call_budget_exceeded: stats.runner_call_budget_exceeded(),
-            max_observed_batch: stats.max_observed_batch,
-            runner_busy_jobs: stats.runner_busy_jobs,
-            failed_jobs: stats.failed_jobs,
         }
     }
 }
@@ -2231,10 +2184,6 @@ mod tests {
             8
         );
         assert_eq!(
-            json["decode_runtime"]["batching_configuration"]["mode"]["effective_enabled"],
-            false
-        );
-        assert_eq!(
             json["decode_runtime"]["batching_configuration"]["prefill_admission_quantum"]["effective"],
             4
         );
@@ -2249,30 +2198,6 @@ mod tests {
         assert_eq!(
             json["decode_runtime"]["batching_configuration"]["actor_cycle_idle"]["command_poll_milliseconds"],
             5
-        );
-        assert_eq!(
-            json["decode_runtime"]["direct_decode_rendezvous"]["scope"],
-            "direct_streaming_greedy_only"
-        );
-        assert_eq!(
-            json["decode_runtime"]["direct_decode_rendezvous"]["backend_available"],
-            false
-        );
-        assert_eq!(
-            json["decode_runtime"]["direct_decode_rendezvous"]["backend_unavailable_reason"],
-            "mock_backend"
-        );
-        assert_eq!(
-            json["decode_runtime"]["direct_decode_rendezvous"]["actor_active"],
-            false
-        );
-        assert_eq!(
-            json["decode_runtime"]["direct_decode_rendezvous"]["worker_active"],
-            false
-        );
-        assert_eq!(
-            json["decode_runtime"]["direct_decode_rendezvous"]["route_available"],
-            false
         );
         let cuda_graphs = &json["decode_runtime"]["cuda_graphs"];
         assert_eq!(cuda_graphs["requested"], true);

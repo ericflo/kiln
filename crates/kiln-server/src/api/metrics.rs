@@ -24,8 +24,6 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         blocks_used,
         blocks_total,
         prefix_cache,
-        decode_batcher_enabled,
-        decode_batcher,
         batching_engine_enabled,
         batching_engine,
         backend_health_quarantined,
@@ -43,8 +41,6 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                 bm.num_blocks(),
                 sched.prefix_cache_stats(),
                 false,
-                kiln_model::DecodeBatcherStats::default(),
-                false,
                 BatchingEngineSnapshot::default(),
                 false,
                 Vec::new(),
@@ -57,7 +53,6 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
             prefix_cache,
             backend_health,
             batching_engine,
-            decode_batcher,
             runner,
             ..
         } => {
@@ -69,14 +64,7 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                 let cache = prefix_cache.lock().unwrap();
                 cache.stats()
             };
-            let batcher_stats = decode_batcher
-                .as_ref()
-                .map(|batcher| batcher.stats())
-                .unwrap_or_default();
-            let batching_engine_snapshot = match batching_engine {
-                Some(engine) => engine.cached_snapshot(),
-                None => BatchingEngineSnapshot::default(),
-            };
+            let batching_engine_snapshot = batching_engine.cached_snapshot();
             let backend_health_snapshot = backend_health.snapshot();
             let runner = runner
                 .read()
@@ -87,9 +75,7 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                 blocks_used,
                 blocks_total,
                 prefix_cache,
-                decode_batcher.is_some(),
-                batcher_stats,
-                batching_engine.is_some(),
+                true,
                 batching_engine_snapshot,
                 backend_health_snapshot.quarantined,
                 backend_health.external_yield_sync_stats(),
@@ -154,8 +140,6 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         prompt_token_cache_hits,
         prompt_token_cache_misses,
         prompt_token_cache_entries,
-        decode_batcher_enabled,
-        decode_batcher,
         batching_engine_enabled,
         batching_engine,
         training_active,

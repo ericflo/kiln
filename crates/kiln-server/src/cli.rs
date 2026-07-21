@@ -1822,7 +1822,7 @@ fn resolve_actor_prefill_backend_config(
     use anyhow::Context as _;
 
     let (backend_name, device) = backend.policy_identity();
-    let decode_policy = kiln_model::DecodeBatcherPolicy::for_backend(backend_name, device);
+    let decode_policy = kiln_model::DecodeExecutionPolicy::for_backend(backend_name, device);
     let decode_runtime = crate::batching_engine::resolve_decode_runtime_config(
         config.server.deterministic,
         config.server.max_decode_batch,
@@ -1830,7 +1830,7 @@ fn resolve_actor_prefill_backend_config(
         config.server.max_batch_tokens,
     );
     let batching = config.batching.resolve(
-        crate::config::BatchingBackendPolicy::from_decode_batcher_policy(decode_policy),
+        crate::config::BatchingBackendPolicy::from_decode_execution_policy(decode_policy),
         decode_runtime.max_decode_batch.effective,
     );
     let streaming =
@@ -1871,10 +1871,8 @@ fn format_actor_prefill_backend_preview(preview: &ConfigCheckBackendPreview) -> 
     );
     let _ = writeln!(
         output,
-        "  {} {} (source: {})",
+        "  {} true (source: built_in)",
         style("Batching actor effective:").dim(),
-        preview.batching.mode.effective_enabled,
-        preview.batching.mode.effective_source
     );
     let _ = writeln!(
         output,
@@ -2144,50 +2142,11 @@ pub fn run_config_check(
                 style("Prefix cache:").dim(),
                 config.prefix_cache.enabled
             );
-            println!(
-                "  {} {}",
-                style("Batching actor:").dim(),
-                config.batching.mode.mode()
-            );
+            println!("  {} always enabled", style("Batching actor:").dim(),);
             print!("{}", format_actor_prefill_config(&config));
             if let Some(preview) = backend_preview.as_ref() {
                 print!("{}", format_actor_prefill_backend_preview(preview));
             }
-            println!(
-                "  {} {}",
-                style("Direct streaming rendezvous:").dim(),
-                config.batching.direct_decode_rendezvous_mode.mode()
-            );
-            println!(
-                "  {} {}",
-                style("Direct rendezvous max batch:").dim(),
-                config
-                    .batching
-                    .direct_decode_rendezvous_max_batch
-                    .configured()
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "auto".to_string())
-            );
-            println!(
-                "  {} {}",
-                style("Direct rendezvous wait (us):").dim(),
-                config
-                    .batching
-                    .direct_decode_rendezvous_wait_us
-                    .configured()
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "auto".to_string())
-            );
-            println!(
-                "  {} {}",
-                style("Direct rendezvous mixed lengths:").dim(),
-                config
-                    .batching
-                    .direct_decode_rendezvous_mixed_seq_lens
-                    .configured()
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "auto".to_string())
-            );
             println!(
                 "  {} {}",
                 style("Rowwise decode:").dim(),
@@ -4449,7 +4408,7 @@ detached_full_attn_tile_tokens = 8192
             .expect("default ROCm actor-prefill contract should be valid");
         for expected in [
             "Target backend: rocm (hardware-free policy preview)",
-            "Batching actor effective: true (source: backend_policy)",
+            "Batching actor effective: true (source: built_in)",
             "Actor prefill alignment required: true (source: backend_policy)",
             "Effective decode width: 8 rows (source: backend_policy)",
             "Effective streaming dispatch: prompt_tokens_at_least 256 tokens (source: backend_policy)",
@@ -4478,7 +4437,7 @@ max_prefill_tokens_per_cycle = 64
             "server.max_prefill_tokens_per_cycle=64 must equal the backend's effective streaming_prefill.tile_tokens=256"
         ));
 
-        let actor_disabled: crate::config::KilnConfig = toml::from_str(
+        let actor_disabled = toml::from_str::<crate::config::KilnConfig>(
             r#"
 [server]
 max_prefill_tokens_per_cycle = 64
@@ -4487,9 +4446,20 @@ max_prefill_tokens_per_cycle = 64
 mode = "disabled"
 "#,
         )
+        .expect_err("batching.mode must remain removed");
+        assert!(actor_disabled.to_string().contains("unknown field `mode`"));
+
+        let streaming_disabled: crate::config::KilnConfig = toml::from_str(
+            r#"
+[streaming_prefill]
+mode = "disabled"
+"#,
+        )
         .unwrap();
-        format_actor_prefill_backend_config(&actor_disabled, ConfigCheckBackend::Rocm)
-            .expect("the alignment contract is inert when the actor is explicitly disabled");
+        let error =
+            format_actor_prefill_backend_config(&streaming_disabled, ConfigCheckBackend::Rocm)
+                .expect_err("ROCm must preserve tiled prefill under mandatory actor ownership");
+        assert!(format!("{error:#}").contains("enable tiled streaming prefill"));
     }
 
     #[test]

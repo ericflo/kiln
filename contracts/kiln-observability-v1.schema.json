@@ -314,13 +314,6 @@
         },
         "batching": {
           "configuration": {
-            "mode": {
-              "configured": "auto",
-              "configured_source": "default",
-              "backend_policy_enabled": false,
-              "effective_enabled": false,
-              "effective_source": "default"
-            },
             "rowwise_decode": {
               "enabled": false,
               "source": "default"
@@ -342,47 +335,10 @@
               "enabled": false,
               "command_poll_milliseconds": 1
             },
-            "direct_decode_rendezvous": {
-              "mode": {
-                "configured": "auto",
-                "configured_source": "default",
-                "backend_policy_enabled": false,
-                "effective_enabled": false,
-                "effective_source": "default"
-              },
-              "max_batch": {
-                "configured": 0,
-                "configured_source": "default",
-                "backend_policy": 0,
-                "effective": 0,
-                "effective_source": "default"
-              },
-              "wait_us": {
-                "configured": 0,
-                "configured_source": "default",
-                "backend_policy": 0,
-                "effective": 0,
-                "effective_source": "default"
-              },
-              "mixed_seq_lens": {
-                "configured": false,
-                "configured_source": "default",
-                "backend_policy": false,
-                "effective": false,
-                "effective_source": "default"
-              }
-            },
             "burst_prefill_admission": false,
             "actor_prefill_tile_alignment_required": false
           },
-          "actor_active": false,
-          "direct_decode_rendezvous": {
-            "scope": "value",
-            "backend_available": false,
-            "actor_active": false,
-            "worker_active": false,
-            "route_available": false
-          }
+          "actor_active": false
         },
         "prefix_cache": {
           "configuration": {
@@ -1045,13 +1001,6 @@
             "reasons": []
           },
           "batching_configuration": {
-            "mode": {
-              "configured": "auto",
-              "configured_source": "default",
-              "backend_policy_enabled": false,
-              "effective_enabled": false,
-              "effective_source": "default"
-            },
             "rowwise_decode": {
               "enabled": false,
               "source": "default"
@@ -1073,45 +1022,8 @@
               "enabled": false,
               "command_poll_milliseconds": 1
             },
-            "direct_decode_rendezvous": {
-              "mode": {
-                "configured": "auto",
-                "configured_source": "default",
-                "backend_policy_enabled": false,
-                "effective_enabled": false,
-                "effective_source": "default"
-              },
-              "max_batch": {
-                "configured": 0,
-                "configured_source": "default",
-                "backend_policy": 0,
-                "effective": 0,
-                "effective_source": "default"
-              },
-              "wait_us": {
-                "configured": 0,
-                "configured_source": "default",
-                "backend_policy": 0,
-                "effective": 0,
-                "effective_source": "default"
-              },
-              "mixed_seq_lens": {
-                "configured": false,
-                "configured_source": "default",
-                "backend_policy": false,
-                "effective": false,
-                "effective_source": "default"
-              }
-            },
             "burst_prefill_admission": false,
             "actor_prefill_tile_alignment_required": false
-          },
-          "direct_decode_rendezvous": {
-            "scope": "value",
-            "backend_available": false,
-            "actor_active": false,
-            "worker_active": false,
-            "route_available": false
           },
           "cuda_graphs": {
             "requested": false,
@@ -1274,19 +1186,6 @@
             "sample_stale": false,
             "source": "default",
             "disabled_by_serving_profile": false
-          },
-          "decode_batcher": {
-            "submitted_jobs": 0,
-            "executed_batches": 0,
-            "executed_rows": 0,
-            "runner_calls": 0,
-            "max_runner_calls_per_token": 0,
-            "runner_call_budget_per_token": 0,
-            "max_observed_batch": 0,
-            "runner_busy_jobs": 0,
-            "failed_jobs": 0,
-            "runner_calls_per_token": 0,
-            "runner_call_budget_exceeded": false
           },
           "batching_engine": {
             "snapshot_age_ms": 0,
@@ -1941,13 +1840,6 @@
           "backend": "value",
           "enabled": false,
           "configuration": {
-            "mode": {
-              "configured": "auto",
-              "configured_source": "default",
-              "backend_policy_enabled": false,
-              "effective_enabled": false,
-              "effective_source": "default"
-            },
             "rowwise_decode": {
               "enabled": false,
               "source": "default"
@@ -1969,45 +1861,8 @@
               "enabled": false,
               "command_poll_milliseconds": 1
             },
-            "direct_decode_rendezvous": {
-              "mode": {
-                "configured": "auto",
-                "configured_source": "default",
-                "backend_policy_enabled": false,
-                "effective_enabled": false,
-                "effective_source": "default"
-              },
-              "max_batch": {
-                "configured": 0,
-                "configured_source": "default",
-                "backend_policy": 0,
-                "effective": 0,
-                "effective_source": "default"
-              },
-              "wait_us": {
-                "configured": 0,
-                "configured_source": "default",
-                "backend_policy": 0,
-                "effective": 0,
-                "effective_source": "default"
-              },
-              "mixed_seq_lens": {
-                "configured": false,
-                "configured_source": "default",
-                "backend_policy": false,
-                "effective": false,
-                "effective_source": "default"
-              }
-            },
             "burst_prefill_admission": false,
             "actor_prefill_tile_alignment_required": false
-          },
-          "direct_decode_rendezvous": {
-            "scope": "value",
-            "backend_available": false,
-            "actor_active": false,
-            "worker_active": false,
-            "route_available": false
           },
           "snapshot": {
             "snapshot_age_ms": 0,
@@ -2086,19 +1941,6 @@
             "max_batch_tokens_source": "default",
             "max_prefill_tokens_per_cycle_source": "default",
             "max_prefill_layers_per_cycle_source": "default"
-          },
-          "decode_batcher": {
-            "submitted_jobs": 0,
-            "executed_batches": 0,
-            "executed_rows": 0,
-            "runner_calls": 0,
-            "max_runner_calls_per_token": 0,
-            "runner_call_budget_per_token": 0,
-            "max_observed_batch": 0,
-            "runner_busy_jobs": 0,
-            "failed_jobs": 0,
-            "runner_calls_per_token": 0,
-            "runner_call_budget_exceeded": false
           }
         },
         "thinking": {
@@ -2921,8 +2763,7 @@
       "additionalProperties": false,
       "required": [
         "configuration",
-        "actor_active",
-        "direct_decode_rendezvous"
+        "actor_active"
       ],
       "properties": {
         "configuration": {
@@ -2930,12 +2771,9 @@
         },
         "actor_active": {
           "$ref": "#/$defs/Boolean"
-        },
-        "direct_decode_rendezvous": {
-          "$ref": "#/$defs/DirectDecodeRendezvousRuntimeState"
         }
       },
-      "description": "Resolved batching policy plus live actor and fallback-route state.",
+      "description": "Resolved batching policy plus live actor state.",
       "x-kiln-rust-type": "BatchingConfigResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2960,9 +2798,7 @@
         "backend",
         "enabled",
         "configuration",
-        "direct_decode_rendezvous",
-        "snapshot",
-        "decode_batcher"
+        "snapshot"
       ],
       "properties": {
         "backend": {
@@ -2974,23 +2810,10 @@
         "configuration": {
           "$ref": "#/$defs/BatchingRuntimeConfig"
         },
-        "direct_decode_rendezvous": {
-          "$ref": "#/$defs/DirectDecodeRendezvousRuntimeState"
-        },
         "snapshot": {
           "anyOf": [
             {
               "$ref": "#/$defs/BatchingEngineSnapshot"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "decode_batcher": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DecodeBatcherStats"
             },
             {
               "type": "null"
@@ -3317,65 +3140,18 @@
       "x-kiln-rust-type": "BatchingEngineInfo | BatchingEngineSnapshotDebug",
       "x-kiln-field-schema-status": "complete"
     },
-    "BatchingMode": {
-      "type": "string",
-      "enum": [
-        "auto",
-        "enabled",
-        "disabled"
-      ],
-      "description": "Operator intent for production batching-actor ownership.",
-      "x-kiln-rust-type": "BatchingMode",
-      "x-kiln-field-schema-status": "complete"
-    },
-    "BatchingModeDiagnostics": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "configured",
-        "configured_source",
-        "backend_policy_enabled",
-        "effective_enabled",
-        "effective_source"
-      ],
-      "properties": {
-        "configured": {
-          "$ref": "#/$defs/BatchingMode"
-        },
-        "configured_source": {
-          "$ref": "#/$defs/ConfigValueSource"
-        },
-        "backend_policy_enabled": {
-          "$ref": "#/$defs/Boolean"
-        },
-        "effective_enabled": {
-          "$ref": "#/$defs/Boolean"
-        },
-        "effective_source": {
-          "$ref": "#/$defs/BatchingEffectiveSource"
-        }
-      },
-      "description": "Configured and effective batching-actor mode.",
-      "x-kiln-rust-type": "BatchingModeDiagnostics",
-      "x-kiln-field-schema-status": "complete"
-    },
     "BatchingRuntimeConfig": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "mode",
         "rowwise_decode",
         "prefix_aware_admission",
         "prefill_admission_quantum",
         "actor_cycle_idle",
-        "direct_decode_rendezvous",
         "burst_prefill_admission",
         "actor_prefill_tile_alignment_required"
       ],
       "properties": {
-        "mode": {
-          "$ref": "#/$defs/BatchingModeDiagnostics"
-        },
         "rowwise_decode": {
           "$ref": "#/$defs/BatchingToggleDiagnostics"
         },
@@ -3387,9 +3163,6 @@
         },
         "actor_cycle_idle": {
           "$ref": "#/$defs/ActorCycleIdleDiagnostics"
-        },
-        "direct_decode_rendezvous": {
-          "$ref": "#/$defs/DirectDecodeRendezvousDiagnostics"
         },
         "burst_prefill_admission": {
           "$ref": "#/$defs/Boolean"
@@ -4056,68 +3829,6 @@
       "x-kiln-rust-type": "DecodeBatchEffectiveSource",
       "x-kiln-field-schema-status": "complete"
     },
-    "DecodeBatcherStats": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "submitted_jobs",
-        "executed_batches",
-        "executed_rows",
-        "runner_calls",
-        "max_runner_calls_per_token",
-        "runner_call_budget_per_token",
-        "max_observed_batch",
-        "runner_busy_jobs",
-        "failed_jobs",
-        "runner_calls_per_token",
-        "runner_call_budget_exceeded"
-      ],
-      "properties": {
-        "submitted_jobs": {
-          "$ref": "#/$defs/NonNegativeInteger"
-        },
-        "executed_batches": {
-          "$ref": "#/$defs/NonNegativeInteger"
-        },
-        "executed_rows": {
-          "$ref": "#/$defs/NonNegativeInteger"
-        },
-        "runner_calls": {
-          "$ref": "#/$defs/NonNegativeInteger"
-        },
-        "max_runner_calls_per_token": {
-          "$ref": "#/$defs/NonNegativeInteger"
-        },
-        "runner_call_budget_per_token": {
-          "$ref": "#/$defs/NonNegativeInteger"
-        },
-        "max_observed_batch": {
-          "$ref": "#/$defs/NonNegativeInteger"
-        },
-        "runner_busy_jobs": {
-          "$ref": "#/$defs/NonNegativeInteger"
-        },
-        "failed_jobs": {
-          "$ref": "#/$defs/NonNegativeInteger"
-        },
-        "runner_calls_per_token": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NonNegativeNumber"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "runner_call_budget_exceeded": {
-          "$ref": "#/$defs/Boolean"
-        }
-      },
-      "description": "Legacy decode-batcher activity and runner-call budget counters.",
-      "x-kiln-rust-type": "DecodeBatcherInfo | DecodeBatcherDebug",
-      "x-kiln-field-schema-status": "complete"
-    },
     "DecodeRuntimeConfig": {
       "type": "object",
       "additionalProperties": false,
@@ -4145,13 +3856,11 @@
         "accelerator_runtime",
         "rocm_synchronization",
         "batching_configuration",
-        "direct_decode_rendezvous",
         "cuda_graphs",
         "rocm_graphs",
         "metal_graphs",
         "kv_autoscaler",
         "memory_governor",
-        "decode_batcher",
         "batching_engine"
       ],
       "properties": {
@@ -4167,9 +3876,6 @@
         "batching_configuration": {
           "$ref": "#/$defs/BatchingRuntimeConfig"
         },
-        "direct_decode_rendezvous": {
-          "$ref": "#/$defs/DirectDecodeRendezvousRuntimeState"
-        },
         "cuda_graphs": {
           "$ref": "#/$defs/CudaGraphInfo"
         },
@@ -4184,16 +3890,6 @@
         },
         "memory_governor": {
           "$ref": "#/$defs/MemoryGovernorRuntimeInfo"
-        },
-        "decode_batcher": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DecodeBatcherStats"
-            },
-            {
-              "type": "null"
-            }
-          ]
         },
         "batching_engine": {
           "anyOf": [
@@ -4286,143 +3982,6 @@
       },
       "description": "Resolved deterministic-inference state and startup provenance.",
       "x-kiln-rust-type": "DeterministicInferenceDiagnostics",
-      "x-kiln-field-schema-status": "complete"
-    },
-    "DirectDecodeRendezvousDiagnostics": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "mode",
-        "max_batch",
-        "wait_us",
-        "mixed_seq_lens"
-      ],
-      "properties": {
-        "mode": {
-          "$ref": "#/$defs/BatchingModeDiagnostics"
-        },
-        "max_batch": {
-          "$ref": "#/$defs/DirectDecodeRendezvousValueDiagnosticsInteger"
-        },
-        "wait_us": {
-          "$ref": "#/$defs/DirectDecodeRendezvousValueDiagnosticsInteger"
-        },
-        "mixed_seq_lens": {
-          "$ref": "#/$defs/DirectDecodeRendezvousValueDiagnosticsBoolean"
-        }
-      },
-      "description": "Resolved fallback direct-stream greedy decode rendezvous policy.",
-      "x-kiln-rust-type": "DirectDecodeRendezvousDiagnostics",
-      "x-kiln-field-schema-status": "complete"
-    },
-    "DirectDecodeRendezvousRuntimeState": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "scope",
-        "backend_available",
-        "actor_active",
-        "worker_active",
-        "route_available"
-      ],
-      "properties": {
-        "scope": {
-          "$ref": "#/$defs/NonEmptyString"
-        },
-        "backend_available": {
-          "$ref": "#/$defs/Boolean"
-        },
-        "backend_unavailable_reason": {
-          "$ref": "#/$defs/String"
-        },
-        "actor_active": {
-          "$ref": "#/$defs/Boolean"
-        },
-        "worker_active": {
-          "$ref": "#/$defs/Boolean"
-        },
-        "route_available": {
-          "$ref": "#/$defs/Boolean"
-        }
-      },
-      "description": "Runtime availability of the fallback direct-streaming greedy rendezvous.",
-      "x-kiln-rust-type": "DirectDecodeRendezvousRuntimeState",
-      "x-kiln-field-schema-status": "complete"
-    },
-    "DirectDecodeRendezvousValueDiagnosticsBoolean": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "configured",
-        "configured_source",
-        "backend_policy",
-        "effective",
-        "effective_source"
-      ],
-      "properties": {
-        "configured": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Boolean"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "configured_source": {
-          "$ref": "#/$defs/ConfigValueSource"
-        },
-        "backend_policy": {
-          "$ref": "#/$defs/Boolean"
-        },
-        "effective": {
-          "$ref": "#/$defs/Boolean"
-        },
-        "effective_source": {
-          "$ref": "#/$defs/BatchingEffectiveSource"
-        }
-      },
-      "description": "Configured, backend, and effective direct-decode rendezvous value.",
-      "x-kiln-rust-type": "DirectDecodeRendezvousValueDiagnostics<bool>",
-      "x-kiln-field-schema-status": "complete"
-    },
-    "DirectDecodeRendezvousValueDiagnosticsInteger": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "configured",
-        "configured_source",
-        "backend_policy",
-        "effective",
-        "effective_source"
-      ],
-      "properties": {
-        "configured": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NonNegativeInteger"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "configured_source": {
-          "$ref": "#/$defs/ConfigValueSource"
-        },
-        "backend_policy": {
-          "$ref": "#/$defs/NonNegativeInteger"
-        },
-        "effective": {
-          "$ref": "#/$defs/NonNegativeInteger"
-        },
-        "effective_source": {
-          "$ref": "#/$defs/BatchingEffectiveSource"
-        }
-      },
-      "description": "Configured, backend, and effective direct-decode rendezvous value.",
-      "x-kiln-rust-type": "DirectDecodeRendezvousValueDiagnostics<usize | u64>",
       "x-kiln-field-schema-status": "complete"
     },
     "EffectiveConfiguration": {

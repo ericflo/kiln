@@ -10,11 +10,9 @@
 //! would continue mid-generation on different weights whenever training
 //! auto-loaded or an eval swapped adapters.
 //!
-//! With the batching engine running (the default), the swap closure executes
-//! at the engine's between-requests barrier (the `ResizeKv` pattern): admission
-//! pauses, active requests finish, then the weights flip and queued requests
-//! resume. The engine-less fallback takes exclusive GPU coordination ownership,
-//! paired with the request-lifetime read owner held by direct inference.
+//! The swap closure executes at the batching actor's between-requests barrier
+//! (the `ResizeKv` pattern): admission pauses, active requests finish, then the
+//! weights flip and queued requests resume.
 //!
 //! Cache coherence and the server-default selection ride along: when the
 //! target adapter's directory content changed (retrain/import), its name-keyed
@@ -27,9 +25,7 @@ use std::sync::Arc;
 use kiln_model::ModelRunner;
 use kiln_model::lora_loader::LoraWeights;
 
-use crate::state::{
-    AppState, LoadedAdapterIdentity, ModelBackend, gpu_coordination_write_guard_while_healthy,
-};
+use crate::state::{AppState, LoadedAdapterIdentity, ModelBackend};
 
 /// What to activate.
 #[derive(Debug, Clone)]
@@ -189,24 +185,10 @@ pub(crate) async fn swap_runtime_adapter_locked(
         req.default_adapter,
         None,
     );
-    match engine {
-        Some(engine) => engine
-            .swap_adapter_while_healthy(closure, &backend_health)
-            .await
-            .map_err(|e| format!("{e:#}"))?,
-        None => {
-            let gpu_lock = state.gpu_lock.clone();
-            let backend_health = backend_health.clone();
-            tokio::task::spawn_blocking(move || {
-                let _gpu_guard =
-                    gpu_coordination_write_guard_while_healthy(&gpu_lock, &backend_health)
-                        .map_err(|error| format!("{error:#}"))?;
-                closure()
-            })
-            .await
-            .map_err(|e| format!("join error: {e}"))??;
-        }
-    }
+    engine
+        .swap_adapter_while_healthy(closure, &backend_health)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
 
     log_transition(&current, &target_name, req.reason);
     Ok(current)
@@ -281,17 +263,9 @@ fn swap_runtime_adapter_blocking_locked_with_action(
         req.default_adapter,
         barrier_action,
     );
-    match engine {
-        Some(engine) => engine
-            .swap_adapter_blocking_while_healthy(closure, &backend_health)
-            .map_err(|e| format!("{e:#}"))?,
-        None => {
-            let _gpu_guard =
-                gpu_coordination_write_guard_while_healthy(&state.gpu_lock, &backend_health)
-                    .map_err(|error| format!("{error:#}"))?;
-            closure()?;
-        }
-    }
+    engine
+        .swap_adapter_blocking_while_healthy(closure, &backend_health)
+        .map_err(|e| format!("{e:#}"))?;
 
     log_transition(&current, &target_name, req.reason);
     Ok(current)
@@ -515,7 +489,7 @@ fn real_backend_handles(
 ) -> Result<
     (
         Arc<std::sync::RwLock<ModelRunner>>,
-        Option<crate::batching_engine::BatchingEngineHandle>,
+        crate::batching_engine::BatchingEngineHandle,
     ),
     String,
 > {
@@ -562,8 +536,8 @@ fn loaded_identity(
     }
 }
 
-/// The work that runs at the engine barrier (or inline on the fallback
-/// path): flip the weights, update the physical-truth name, and purge the
+/// The work that runs at the actor barrier: flip the weights, update the
+/// physical-truth name, and purge the
 /// target's stale cache entries when its content changed — after every
 /// request that could have used the old weights has finished, so none can
 /// re-register stale entries behind the purge.

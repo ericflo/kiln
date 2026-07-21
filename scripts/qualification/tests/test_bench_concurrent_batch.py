@@ -144,6 +144,18 @@ def valid_request_performance(max_tokens: int, *, batching: bool = True) -> dict
 def as_v5_server_diagnostics(server: dict) -> dict:
     legacy = json.loads(json.dumps(server))
     legacy["schema"] = bench.SERVER_DIAGNOSTICS_SCHEMA_V5
+    legacy["routing"] = {
+        "batching_actor_effective": True,
+        "direct_decode_rendezvous": {
+            "scope": "retired",
+            "backend_available": True,
+            "backend_unavailable_reason": None,
+            "actor_active": True,
+            "worker_active": False,
+            "route_available": False,
+        },
+    }
+    legacy["decode_batcher"] = None
     legacy["rocm_graphs"].pop("capture_parity")
     return legacy
 
@@ -302,14 +314,7 @@ class FakeStartupTrippedThermalGuard(FakeThermalGuard):
 
 
 class FakeState:
-    def __init__(self, request_route: str = "batching_engine") -> None:
-        if request_route not in {
-            "batching_engine",
-            "direct_streaming",
-            "direct_streaming_without_rendezvous",
-        }:
-            raise ValueError(f"unsupported fake request route: {request_route}")
-        self.request_route = request_route
+    def __init__(self) -> None:
         self.lock = threading.Lock()
         self.active = 0
         self.max_active = 0
@@ -317,9 +322,6 @@ class FakeState:
         self.counters = {field: 0 for field in bench.COUNTER_FIELDS}
         self.request_counters = {
             field: 0 for field in bench.REQUEST_COUNTER_FIELDS[1:]
-        }
-        self.decode_batcher_counters = {
-            field: 0 for field in bench.DECODE_BATCHER_COUNTER_FIELDS
         }
         self.rocm_graph_counters = {
             field: 0 for field in bench.ROCM_GRAPH_COUNTER_FIELDS
@@ -377,44 +379,12 @@ class FakeState:
                 "active": self.active,
                 "active_peak": self.max_active,
             }
-            direct_snapshot = {
-                **self.decode_batcher_counters,
-                "runner_calls_per_token": (
-                    self.decode_batcher_counters["runner_calls"]
-                    / self.decode_batcher_counters["executed_rows"]
-                    if self.decode_batcher_counters["executed_rows"]
-                    else None
-                ),
-                "max_runner_calls_per_token": (
-                    1 if self.decode_batcher_counters["executed_rows"] else 0
-                ),
-                "runner_call_budget_per_token": 2,
-                "runner_call_budget_exceeded": False,
-                "max_observed_batch": (
-                    self.max_active
-                    if self.decode_batcher_counters["executed_rows"]
-                    else 0
-                ),
-            }
-            actor_active = self.request_route == "batching_engine"
-            worker_active = self.request_route != "direct_streaming_without_rendezvous"
         return {
             "version": "test-v1",
             "execution_identity": self.execution_identity,
             "requests": request_snapshot,
             "decode_runtime": {
-                "batching_configuration": {
-                    "mode": {"effective_enabled": actor_active}
-                },
-                "direct_decode_rendezvous": {
-                    "scope": "direct_streaming_greedy_only",
-                    "backend_available": True,
-                    "actor_active": actor_active,
-                    "worker_active": worker_active,
-                    "route_available": not actor_active and worker_active,
-                },
-                "batching_engine": batching_snapshot if actor_active else None,
-                "decode_batcher": direct_snapshot if worker_active else None,
+                "batching_engine": batching_snapshot,
                 "rocm_graphs": {
                     "requested": True,
                     "capture_requested": True,
@@ -490,7 +460,7 @@ class FakeHandler(BaseHTTPRequestHandler):
                     event["metadata"] = {
                         "performance": valid_request_performance(
                             max_tokens,
-                            batching=self.state.request_route == "batching_engine",
+                            batching=True,
                         )
                     }
                 self._event(event)
@@ -511,25 +481,18 @@ class FakeHandler(BaseHTTPRequestHandler):
             with self.state.lock:
                 self.state.active -= 1
                 self.state.request_counters["ok"] += 1
-                if self.state.request_route == "batching_engine":
-                    self.state.counters["total_decode_forwards"] += max_tokens
-                    self.state.counters["total_batched_decode_forwards"] += max_tokens
-                    self.state.counters["total_decode_rows"] += max_tokens
-                    self.state.counters["total_decode_tokens"] += max_tokens
-                    self.state.counters["total_decode_forward_ms"] += max_tokens * 0.25
-                    self.state.counters["total_prefill_forwards"] += 1
-                    self.state.counters["total_prefill_tokens"] += 42
-                    self.state.counters["total_prefill_layers"] += 8
-                    self.state.counters["total_prefill_layer_yields"] += 1
-                    self.state.counters["total_prefill_forward_ms"] += 0.5
-                    self.state.counters["total_admission_calls"] += 1
-                    self.state.counters["total_admission_ms"] += 0.1
-                elif self.state.request_route == "direct_streaming":
-                    decode_tokens = max(0, max_tokens - 1)
-                    self.state.decode_batcher_counters["submitted_jobs"] += decode_tokens
-                    self.state.decode_batcher_counters["executed_batches"] += decode_tokens
-                    self.state.decode_batcher_counters["executed_rows"] += decode_tokens
-                    self.state.decode_batcher_counters["runner_calls"] += decode_tokens
+                self.state.counters["total_decode_forwards"] += max_tokens
+                self.state.counters["total_batched_decode_forwards"] += max_tokens
+                self.state.counters["total_decode_rows"] += max_tokens
+                self.state.counters["total_decode_tokens"] += max_tokens
+                self.state.counters["total_decode_forward_ms"] += max_tokens * 0.25
+                self.state.counters["total_prefill_forwards"] += 1
+                self.state.counters["total_prefill_tokens"] += 42
+                self.state.counters["total_prefill_layers"] += 8
+                self.state.counters["total_prefill_layer_yields"] += 1
+                self.state.counters["total_prefill_forward_ms"] += 0.5
+                self.state.counters["total_admission_calls"] += 1
+                self.state.counters["total_admission_ms"] += 0.1
                 if self.state.rocm_graph_counters["capture_attempts"] == 0:
                     self.state.rocm_graph_counters["capture_attempts"] = 1
                     self.state.rocm_graph_counters["capture_successes"] = 1
@@ -538,15 +501,14 @@ class FakeHandler(BaseHTTPRequestHandler):
                     self.state.rocm_graph_gauges["captured_graph_count"] = 1
                     self.state.rocm_graph_gauges["graph_slot_count"] = 1
                     self.state.rocm_graph_gauges["idle_graph_slot_count"] = 1
-                    if self.state.request_route == "batching_engine":
-                        self.state.rocm_graph_parity_counters.update(
-                            batched_capture_attempts=1,
-                            batched_capture_successes=1,
-                            capture_parity_checks=1,
-                            capture_parity_passes=1,
-                            capture_parity_compared_bytes=4096,
-                            capture_parity_duration_micros=10,
-                        )
+                    self.state.rocm_graph_parity_counters.update(
+                        batched_capture_attempts=1,
+                        batched_capture_successes=1,
+                        capture_parity_checks=1,
+                        capture_parity_passes=1,
+                        capture_parity_compared_bytes=4096,
+                        capture_parity_duration_micros=10,
+                    )
                 self.state.rocm_graph_counters["replay_attempts"] += max_tokens
                 self.state.rocm_graph_counters["replay_successes"] += max_tokens
 
@@ -556,11 +518,8 @@ class FakeHandler(BaseHTTPRequestHandler):
 
 
 class FakeServer:
-    def __init__(self, request_route: str = "batching_engine") -> None:
-        self.request_route = request_route
-
     def __enter__(self) -> "FakeServer":
-        state = FakeState(self.request_route)
+        state = FakeState()
         handler = type("BoundFakeHandler", (FakeHandler,), {"state": state})
         self.state = state
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -599,10 +558,6 @@ class ServingBenchmarkTests(unittest.TestCase):
             "kiln-rocm-strix-halo-serving-comparison-graph-disabled-"
             "no-prefix-cache-v1"
         )
-        no_batching_name = (
-            "kiln-rocm-strix-halo-serving-comparison-graph-disabled-"
-            "no-prefix-cache-no-batching-v1"
-        )
         prefill_256_name = (
             "kiln-rocm-strix-halo-serving-comparison-graph-disabled-"
             "no-prefix-cache-prefill-256-v1"
@@ -630,16 +585,6 @@ class ServingBenchmarkTests(unittest.TestCase):
         )
         self.assertEqual(no_prefix, graph_disabled)
 
-        no_batching = self._parse_server_config(
-            config_root / f"{no_batching_name}.toml"
-        )
-        self.assertEqual(no_batching["batching"]["mode"], "disabled")
-        no_batching["batching"]["mode"] = "enabled"
-        no_prefix = self._parse_server_config(
-            config_root / f"{no_prefix_name}.toml"
-        )
-        self.assertEqual(no_batching, no_prefix)
-
         prefill_256 = self._parse_server_config(
             config_root / f"{prefill_256_name}.toml"
         )
@@ -665,7 +610,6 @@ class ServingBenchmarkTests(unittest.TestCase):
             base_name,
             diagnostic_name,
             no_prefix_name,
-            no_batching_name,
             prefill_256_name,
             repaired_name,
         ):
@@ -1329,84 +1273,13 @@ class ServingBenchmarkTests(unittest.TestCase):
             self.assertEqual(body["frequency_penalty"], 0.0)
             self.assertEqual(body["repetition_penalty"], 1.0)
 
-    def test_direct_stream_run_uses_route_aware_diagnostics(self) -> None:
-        with FakeServer("direct_streaming") as fake:
-            args = bench.parse_args(
-                [
-                    "--base-url",
-                    fake.base_url,
-                    "--model",
-                    "test-model",
-                    "--runtime-identity",
-                    "test-runtime",
-                    "--run-id",
-                    "direct-fixture-v1",
-                    "--prompt-set-id",
-                    "direct-fixture-prompts-v1",
-                    "--sizes",
-                    "1",
-                    "--max-tokens",
-                    "3",
-                    "--warmup-requests",
-                    "0",
-                    "--max-dispatch-spread-ms",
-                    "1000",
-                ]
-            )
-            result = bench.run_once(
-                args=args,
-                concurrency=1,
-                repeat=0,
-                max_tokens=3,
-                phase="measure-c001-r000",
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "text/event-stream",
-                },
-                sampler=bench.MemorySampler(None, 50),
-                diagnostics_url=f"{fake.base_url}/health",
-            )
-
-        self.assertEqual(result["verdict"], "passed", result)
-        server = result["server"]
-        self.assertEqual(server["request_route"], "direct_streaming")
-        self.assertIsNone(server["batching_engine"])
-        self.assertTrue(
-            server["routing"]["direct_decode_rendezvous"]["route_available"]
-        )
-        self.assertEqual(server["decode_batcher"]["submitted_jobs"], 2)
-        self.assertEqual(server["decode_batcher"]["failed_jobs"], 0)
-        self.assertEqual(server["requests"]["ok"], 1)
-        checks = {gate["name"]: gate["passed"] for gate in result["gates"]}
-        self.assertTrue(checks["server_reported_no_errors"])
-        self.assertTrue(checks["server_request_accounting"])
-
-    def test_route_diagnostics_reject_worker_state_without_counters(self) -> None:
-        health = FakeState("direct_streaming").health()
-        health["decode_runtime"]["decode_batcher"] = None
+    def test_actor_only_diagnostics_require_the_engine_snapshot(self) -> None:
+        health = FakeState().health()
+        health["decode_runtime"]["batching_engine"] = None
         with self.assertRaisesRegex(
-            bench.BenchmarkError, "decode-batcher diagnostics disagree"
+            bench.BenchmarkError, "batching_engine is unavailable"
         ):
             bench.server_diagnostics_snapshot(health)
-
-    def test_direct_stream_without_rendezvous_retains_request_diagnostics(self) -> None:
-        state = FakeState("direct_streaming_without_rendezvous")
-        before = bench.server_diagnostics_snapshot(state.health())
-        state.request_counters["ok"] = 1
-        after = bench.server_diagnostics_snapshot(state.health())
-        server = bench.server_diagnostics_delta(before, after)
-
-        self.assertEqual(server["request_route"], "direct_streaming")
-        self.assertIsNone(server["batching_engine"])
-        self.assertIsNone(server["decode_batcher"])
-        self.assertFalse(
-            server["routing"]["direct_decode_rendezvous"]["route_available"]
-        )
-        self.assertTrue(bench.server_diagnostics_has_no_errors(server))
-        self.assertTrue(bench.server_request_accounting_matches(server, 1))
-        bench.validate_server_diagnostics_v5(
-            as_v5_server_diagnostics(server), "direct fixture"
-        )
 
     def test_driver_v9_server_diagnostics_remain_strict_valid(self) -> None:
         state = FakeState()
@@ -1416,6 +1289,18 @@ class ServingBenchmarkTests(unittest.TestCase):
         server = bench.server_diagnostics_delta(before, after)
         legacy = {key: value for key, value in server.items() if key != "rocm_graphs"}
         legacy["schema"] = bench.SERVER_DIAGNOSTICS_SCHEMA_V2
+        legacy["routing"] = {
+            "batching_actor_effective": True,
+            "direct_decode_rendezvous": {
+                "scope": "retired",
+                "backend_available": True,
+                "backend_unavailable_reason": None,
+                "actor_active": True,
+                "worker_active": False,
+                "route_available": False,
+            },
+        }
+        legacy["decode_batcher"] = None
         legacy["batching_engine"] = {
             key: value
             for key, value in legacy["batching_engine"].items()
@@ -1452,9 +1337,8 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertAlmostEqual(batching["actor_cycle_idle_seconds"], 0.4015)
         self.assertEqual(batching["process_max_actor_cycle_idle_ms"], 101.25)
         self.assertTrue(bench.server_actor_cycle_idle_accounted(server))
-        legacy = json.loads(json.dumps(server))
+        legacy = as_v5_server_diagnostics(server)
         legacy["schema"] = bench.SERVER_DIAGNOSTICS_SCHEMA_V4
-        legacy["rocm_graphs"].pop("capture_parity")
         legacy_fallbacks = legacy["rocm_graphs"]["fallbacks"]
         multi_row_count = legacy_fallbacks.pop("multi_row_batch_unsupported")
         legacy_fallbacks["total"] -= multi_row_count
@@ -2612,7 +2496,7 @@ class ServingBenchmarkTests(unittest.TestCase):
             return_code, output = self._run_cli_fixture(fake, directory)
             receipt = bench.strict_json_loads(output.read_bytes())
             self.assertEqual(bench.main(["--validate-receipt", str(output)]), 0)
-            self.assertEqual(receipt["driver_version"], "17")
+            self.assertEqual(receipt["driver_version"], "18")
             self.assertEqual(receipt["reference_role"], "qualification_gate")
             self.assertEqual(
                 receipt["workload"]["prompt_set_id"], "cli-prompt-set-v1"

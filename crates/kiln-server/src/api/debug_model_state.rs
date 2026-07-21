@@ -19,7 +19,7 @@ use crate::config::{
     BatchingRuntimeConfig, ConfigValueSource, DecodeRuntimeConfig, ModelDefaultsProfile,
     StreamingPrefillRuntimeConfig,
 };
-use crate::state::{AppState, DirectDecodeRendezvousRuntimeState, ModelBackend};
+use crate::state::{AppState, ModelBackend};
 
 #[derive(Serialize)]
 struct DebugDisabledResponse {
@@ -112,9 +112,7 @@ struct BatchingEngineDebugState {
     backend: &'static str,
     enabled: bool,
     configuration: BatchingRuntimeConfig,
-    direct_decode_rendezvous: DirectDecodeRendezvousRuntimeState,
     snapshot: Option<BatchingEngineSnapshotDebug>,
-    decode_batcher: Option<DecodeBatcherDebug>,
 }
 
 #[derive(Serialize)]
@@ -197,21 +195,6 @@ struct BatchingEngineSnapshotDebug {
     adapter_groups_waiting: usize,
     prefix_deferred_waiting: usize,
     prefix_admission_deferrals: u64,
-}
-
-#[derive(Serialize)]
-struct DecodeBatcherDebug {
-    submitted_jobs: usize,
-    executed_batches: usize,
-    executed_rows: usize,
-    runner_calls: usize,
-    runner_calls_per_token: Option<f64>,
-    max_runner_calls_per_token: usize,
-    runner_call_budget_per_token: usize,
-    runner_call_budget_exceeded: bool,
-    max_observed_batch: usize,
-    runner_busy_jobs: usize,
-    failed_jobs: usize,
 }
 
 #[derive(Serialize)]
@@ -461,43 +444,16 @@ async fn batching_engine_state(state: &AppState) -> BatchingEngineDebugState {
             backend: "mock",
             enabled: false,
             configuration: state.batching_runtime_config,
-            direct_decode_rendezvous: state.direct_decode_rendezvous_runtime_state(),
             snapshot: None,
-            decode_batcher: None,
         },
         ModelBackend::Real {
-            batching_engine,
-            decode_batcher,
-            ..
-        } => {
-            let snapshot = match batching_engine {
-                Some(engine) => Some(engine.cached_snapshot().into()),
-                None => None,
-            };
-            BatchingEngineDebugState {
-                backend: "model",
-                enabled: batching_engine.is_some(),
-                configuration: state.batching_runtime_config,
-                direct_decode_rendezvous: state.direct_decode_rendezvous_runtime_state(),
-                snapshot,
-                decode_batcher: decode_batcher.as_ref().map(|batcher| {
-                    let stats = batcher.stats();
-                    DecodeBatcherDebug {
-                        submitted_jobs: stats.submitted_jobs,
-                        executed_batches: stats.executed_batches,
-                        executed_rows: stats.executed_rows,
-                        runner_calls: stats.runner_calls,
-                        runner_calls_per_token: stats.runner_calls_per_token(),
-                        max_runner_calls_per_token: stats.max_runner_calls_per_token,
-                        runner_call_budget_per_token: stats.runner_call_budget_per_token(),
-                        runner_call_budget_exceeded: stats.runner_call_budget_exceeded(),
-                        max_observed_batch: stats.max_observed_batch,
-                        runner_busy_jobs: stats.runner_busy_jobs,
-                        failed_jobs: stats.failed_jobs,
-                    }
-                }),
-            }
-        }
+            batching_engine, ..
+        } => BatchingEngineDebugState {
+            backend: "model",
+            enabled: true,
+            configuration: state.batching_runtime_config,
+            snapshot: Some(batching_engine.cached_snapshot().into()),
+        },
     }
 }
 
@@ -898,34 +854,6 @@ mod tests {
         );
         assert_eq!(json["batching_engine"]["backend"], "mock");
         assert_eq!(json["batching_engine"]["enabled"], false);
-        assert_eq!(
-            json["batching_engine"]["direct_decode_rendezvous"]["scope"],
-            "direct_streaming_greedy_only"
-        );
-        assert_eq!(
-            json["batching_engine"]["direct_decode_rendezvous"]["backend_available"],
-            false
-        );
-        assert_eq!(
-            json["batching_engine"]["direct_decode_rendezvous"]["backend_unavailable_reason"],
-            "mock_backend"
-        );
-        assert_eq!(
-            json["batching_engine"]["direct_decode_rendezvous"]["actor_active"],
-            false
-        );
-        assert_eq!(
-            json["batching_engine"]["direct_decode_rendezvous"]["worker_active"],
-            false
-        );
-        assert_eq!(
-            json["batching_engine"]["direct_decode_rendezvous"]["route_available"],
-            false
-        );
-        assert_eq!(
-            json["batching_engine"]["configuration"]["mode"]["effective_enabled"],
-            false
-        );
         assert_eq!(
             json["batching_engine"]["configuration"]["prefix_aware_admission"]["enabled"],
             true

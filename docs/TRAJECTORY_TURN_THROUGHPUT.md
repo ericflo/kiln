@@ -22,14 +22,9 @@ process environment:
 max_decode_batch = 16
 
 [batching]
-mode = "enabled"
 rowwise_decode = false
 prefix_aware_admission = true
 prefill_admission_quantum = "auto"
-direct_decode_rendezvous_mode = "auto"
-direct_decode_rendezvous_max_batch = "auto"
-direct_decode_rendezvous_wait_us = "auto"
-direct_decode_rendezvous_mixed_seq_lens = "auto"
 
 [prefix_cache]
 enabled = true
@@ -62,16 +57,15 @@ request above is true. On Vulkan, exact repeats and descendant turns use fresh
 generic prefill; do not use this guide to claim trajectory prefix reuse until
 the effective capability is true and the cache hit/block counters increase.
 
-Verify `batching.actor_active=true`, effective mode enabled, rowwise decode
-false, and prefix-aware admission true in the captured JSON. The automatic
+Verify `batching.actor_active=true`, rowwise decode false, and prefix-aware
+admission true in the captured JSON. The automatic
 admission quantum is backend-owned: it is the effective decode width on CUDA
 and Vulkan, and 4 on ROCm, Metal, and CPU, always clamped to that effective
 width. The response records the exact backend, configured, effective, clamp,
 and source values so two runs cannot silently compare different policies.
-The captured direct-rendezvous worker may be active, but this actor-backed
-trajectory run requires its sibling `route_available=false`. That fallback is
-only for actor-absent direct streaming effectively-greedy work; it is not part
-of this benchmark path.
+Every real backend constructs the actor and exposes no secondary decode worker.
+Treat an absent actor or any direct-worker field in a current response as a
+contract failure, not as a benchmark arm.
 
 ## Benchmark
 

@@ -1029,24 +1029,11 @@ pub struct SpeculativeDecodePolicy {
     pub long_prompt_skip_layer_min_output_tokens: usize,
 }
 
-/// Backend-owned defaults for the live decode rendezvous worker.
+/// Backend-owned decode execution and actor-admission policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DecodeBatcherPolicy {
-    /// Whether the direct-streaming rendezvous worker is selected when the
-    /// owning product leaves the setting on backend policy.
-    pub rendezvous_default_enabled: bool,
-    /// LEGACY DecodeBatcher width (the in-runner row loop).
-    pub max_batch: usize,
-    /// Concurrent-decode width for the BATCHING ENGINE actor, when it
-    /// should differ from `max_batch`. `None` → the engine reuses
-    /// `max_batch`. CUDA needs the split: its legacy batcher is serial
-    /// (`max_batch: 1`), but the engine ran width-8 from its
-    /// introduction until the policy-routing change silently pulled the
-    /// legacy 1 into the engine width and serialized all concurrent
-    /// CUDA requests.
-    pub engine_max_decode_batch: Option<usize>,
-    pub wait_micros: u64,
-    pub allow_mixed_seq_lens: bool,
+pub struct DecodeExecutionPolicy {
+    /// Maximum ready rows admitted to one production actor decode invocation.
+    pub max_decode_batch: usize,
     pub require_native_decode_attention: bool,
     /// Permit the portable paged-attention route while a LoRA adapter is
     /// active. This is separate from the general hot-path fallback policy:
@@ -1062,9 +1049,8 @@ pub struct DecodeBatcherPolicy {
     pub partition_noncontiguous_gdn_kv_tiles: bool,
     pub use_decode_width_prefill_admission: bool,
     pub burst_prefill_admission: bool,
-    pub batching_engine_default_enabled: bool,
     /// Require the production batching actor to use the same numerical prompt
-    /// partition as direct streaming prefill. Backends set this after
+    /// partition as the model's tiled streaming-prefill implementation. Backends set this after
     /// qualification proves that changing a prompt chunk boundary can change
     /// deterministic output.
     pub actor_prefill_tile_alignment_required: bool,
@@ -1533,7 +1519,7 @@ pub struct BackendCapabilities {
     pub streaming_prefill: StreamingPrefillBackendPolicy,
     pub gdn: GdnCapabilities,
     pub decode: DecodeCapabilities,
-    pub decode_batcher: DecodeBatcherPolicy,
+    pub decode_execution: DecodeExecutionPolicy,
     pub training: BackendTrainingCapabilities,
     pub graph_replay: ReplayCapabilities,
     pub fallback: BackendFallbackCapabilities,
@@ -1729,7 +1715,7 @@ impl BackendCapabilities {
                     &linear_sample_batch,
                 ),
             },
-            decode_batcher: DecodeBatcherPolicy::for_backend(name, device),
+            decode_execution: DecodeExecutionPolicy::for_backend(name, device),
             training: BackendTrainingCapabilities {
                 hooks: TrainingLossBackend::runtime_training_capabilities(backend),
                 precision: TrainingLossBackend::runtime_training_precision_policy(backend),
@@ -2001,20 +1987,14 @@ impl Default for SpeculativeDecodePolicy {
     }
 }
 
-impl DecodeBatcherPolicy {
+impl DecodeExecutionPolicy {
     pub const DEFAULT_MAX_BATCH: usize = 8;
     pub const VULKAN_MAX_BATCH: usize = 64;
-    pub const METAL_WAIT_MICROS: u64 = 100;
-    pub const VULKAN_WAIT_MICROS: u64 = 5_000;
 
     pub fn for_backend(name: &str, device: kiln_tensor::Device) -> Self {
         match backend_kind_for_runtime(name, device) {
             kiln_tensor::Backend::Cuda => Self {
-                rendezvous_default_enabled: true,
-                max_batch: 1,
-                engine_max_decode_batch: Some(Self::DEFAULT_MAX_BATCH),
-                wait_micros: 0,
-                allow_mixed_seq_lens: false,
+                max_decode_batch: Self::DEFAULT_MAX_BATCH,
                 require_native_decode_attention: false,
                 allow_portable_lora_decode: false,
                 prefer_direct_paged_decode_attention:
@@ -2027,16 +2007,11 @@ impl DecodeBatcherPolicy {
                 partition_noncontiguous_gdn_kv_tiles: true,
                 use_decode_width_prefill_admission: true,
                 burst_prefill_admission: true,
-                batching_engine_default_enabled: true,
                 actor_prefill_tile_alignment_required: false,
                 warm_resident_decode_pool_on_startup: false,
             },
             kiln_tensor::Backend::Metal => Self {
-                rendezvous_default_enabled: true,
-                max_batch: Self::DEFAULT_MAX_BATCH,
-                engine_max_decode_batch: None,
-                wait_micros: Self::METAL_WAIT_MICROS,
-                allow_mixed_seq_lens: true,
+                max_decode_batch: Self::DEFAULT_MAX_BATCH,
                 require_native_decode_attention: false,
                 allow_portable_lora_decode: false,
                 prefer_direct_paged_decode_attention: false,
@@ -2048,16 +2023,11 @@ impl DecodeBatcherPolicy {
                 partition_noncontiguous_gdn_kv_tiles: false,
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
-                batching_engine_default_enabled: false,
                 actor_prefill_tile_alignment_required: false,
                 warm_resident_decode_pool_on_startup: false,
             },
             kiln_tensor::Backend::Vulkan => Self {
-                rendezvous_default_enabled: true,
-                max_batch: Self::VULKAN_MAX_BATCH,
-                engine_max_decode_batch: None,
-                wait_micros: Self::VULKAN_WAIT_MICROS,
-                allow_mixed_seq_lens: true,
+                max_decode_batch: Self::VULKAN_MAX_BATCH,
                 require_native_decode_attention: true,
                 allow_portable_lora_decode: true,
                 prefer_direct_paged_decode_attention: true,
@@ -2069,16 +2039,11 @@ impl DecodeBatcherPolicy {
                 partition_noncontiguous_gdn_kv_tiles: false,
                 use_decode_width_prefill_admission: true,
                 burst_prefill_admission: false,
-                batching_engine_default_enabled: true,
                 actor_prefill_tile_alignment_required: false,
                 warm_resident_decode_pool_on_startup: true,
             },
             kiln_tensor::Backend::Rocm => Self {
-                rendezvous_default_enabled: true,
-                max_batch: Self::DEFAULT_MAX_BATCH,
-                engine_max_decode_batch: None,
-                wait_micros: 0,
-                allow_mixed_seq_lens: false,
+                max_decode_batch: Self::DEFAULT_MAX_BATCH,
                 require_native_decode_attention: false,
                 allow_portable_lora_decode: false,
                 prefer_direct_paged_decode_attention:
@@ -2100,16 +2065,11 @@ impl DecodeBatcherPolicy {
                 partition_noncontiguous_gdn_kv_tiles: false,
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
-                batching_engine_default_enabled: true,
                 actor_prefill_tile_alignment_required: true,
                 warm_resident_decode_pool_on_startup: false,
             },
             _ => Self {
-                rendezvous_default_enabled: true,
-                max_batch: Self::DEFAULT_MAX_BATCH,
-                engine_max_decode_batch: None,
-                wait_micros: 0,
-                allow_mixed_seq_lens: false,
+                max_decode_batch: Self::DEFAULT_MAX_BATCH,
                 require_native_decode_attention: false,
                 allow_portable_lora_decode: false,
                 prefer_direct_paged_decode_attention: false,
@@ -2121,7 +2081,6 @@ impl DecodeBatcherPolicy {
                 partition_noncontiguous_gdn_kv_tiles: false,
                 use_decode_width_prefill_admission: false,
                 burst_prefill_admission: false,
-                batching_engine_default_enabled: true,
                 actor_prefill_tile_alignment_required: false,
                 warm_resident_decode_pool_on_startup: false,
             },
@@ -2698,7 +2657,7 @@ mod tests {
             ("rocm", kiln_tensor::Device::Rocm(0), true),
         ] {
             assert_eq!(
-                DecodeBatcherPolicy::for_backend(name, device)
+                DecodeExecutionPolicy::for_backend(name, device)
                     .actor_prefill_tile_alignment_required,
                 required,
                 "{name}"

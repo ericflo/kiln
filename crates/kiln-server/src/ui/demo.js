@@ -299,13 +299,6 @@
       kv_cache: { num_blocks: 528, num_blocks_source: 'auto', fp8_enabled: true },
       batching: {
         configuration: {
-          mode: {
-            configured: 'auto',
-            configured_source: 'default',
-            backend_policy_enabled: true,
-            effective_enabled: true,
-            effective_source: 'backend_policy',
-          },
           rowwise_decode: { enabled: false, source: 'default' },
           prefix_aware_admission: { enabled: true, source: 'default' },
           prefill_admission_quantum: {
@@ -315,47 +308,10 @@
             effective: 16,
             effective_source: 'backend_policy',
           },
-          direct_decode_rendezvous: {
-            mode: {
-              configured: 'auto',
-              configured_source: 'default',
-              backend_policy_enabled: true,
-              effective_enabled: true,
-              effective_source: 'backend_policy',
-            },
-            max_batch: {
-              configured: null,
-              configured_source: 'default',
-              backend_policy: 1,
-              effective: 1,
-              effective_source: 'backend_policy',
-            },
-            wait_us: {
-              configured: null,
-              configured_source: 'default',
-              backend_policy: 0,
-              effective: 0,
-              effective_source: 'backend_policy',
-            },
-            mixed_seq_lens: {
-              configured: null,
-              configured_source: 'default',
-              backend_policy: false,
-              effective: false,
-              effective_source: 'backend_policy',
-            },
-          },
           burst_prefill_admission: true,
           actor_prefill_tile_alignment_required: false,
         },
         actor_active: true,
-        direct_decode_rendezvous: {
-          scope: 'direct_streaming_greedy_only',
-          backend_available: true,
-          actor_active: true,
-          worker_active: true,
-          route_available: false,
-        },
       },
       streaming_prefill: {
         dispatch: {

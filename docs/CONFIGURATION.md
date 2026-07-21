@@ -125,15 +125,17 @@ open an accelerator, or load model weights.
 
 ## Coverage summary
 
-The accepted TOML surface contains 16 top-level sections and 117 fixed leaf
+The accepted TOML surface contains 16 top-level sections and 112 fixed leaf
 fields. Dynamic `teachers.credentials.<id>` entries add two leaf fields per
-credential. Of the 117 fixed fields:
+credential. Of the 112 fixed fields:
 
-- 112 implement the canonical mechanical environment name;
+- 107 implement the canonical mechanical environment name;
 - 5 are config-file-only and have no environment override;
 - no field has an alternate environment spelling.
 
-The tables below cover all 117 fixed fields and both dynamic credential fields.
+The tables below cover all 112 fixed fields and both dynamic credential fields.
+The migration index separately tracks all 82 former public spellings; entries
+marked removed are inert and intentionally have no replacement field.
 Unknown TOML fields are rejected, including the removed
 `speculative.enabled` and `streaming_prefill.enabled` toggles. Their canonical
 replacement fields are documented below.
@@ -151,7 +153,7 @@ replacement fields are documented below.
 | `server.http_send_buffer_bytes` | optional unsigned integer; omitted (`None`) | `KILN_SERVER_HTTP_SEND_BUFFER_BYTES` (implemented) | none | When set, `1024..=16777216`. Applied to accepted sockets. Startup preflights the listener and rejects an OS read-back smaller than requested. |
 | `server.stream_stall_grace_ms` | unsigned integer; `2000` | `KILN_SERVER_STREAM_STALL_GRACE_MS` (implemented) | none | `10..=2000`. A request retaining KV state with no streaming delivery progress is selected for cancellation after this grace. |
 | `server.max_batch_tokens` | unsigned integer; `512` | `KILN_SERVER_MAX_BATCH_TOKENS` (implemented) | none | `2..=65536`. Combined decode-plus-prefill token budget for one batching-actor cycle. |
-| `server.max_prefill_tokens_per_cycle` | unsigned integer; `256` | `KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE` (implemented) | none | `1..=65536`. Independent new-prompt-token ceiling within the combined actor budget. ROCm actor serving requires equality with the effective streaming tile, direct streaming dispatch no later than that boundary, and `server.max_batch_tokens >= tile + effective max_decode_batch`; unsafe combinations fail startup. The checked Strix Halo Vulkan development profile pins `128`; concurrent Vulkan serving at `256` is not qualified. |
+| `server.max_prefill_tokens_per_cycle` | unsigned integer; `256` | `KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE` (implemented) | none | `1..=65536`. Independent new-prompt-token ceiling within the combined actor budget. ROCm actor serving requires equality with the effective streaming tile, tiled streaming-prefill dispatch no later than that boundary, and `server.max_batch_tokens >= tile + effective max_decode_batch`; unsafe combinations fail startup. The checked Strix Halo Vulkan development profile pins `128`; concurrent Vulkan serving at `256` is not qualified. |
 | `server.max_prefill_layers_per_cycle` | unsigned integer; `4` | `KILN_SERVER_MAX_PREFILL_LAYERS_PER_CYCLE` (implemented) | none | `1..=1024`. Number of transformer layers an in-flight prefill chunk may execute before yielding to decode. |
 | `server.max_decode_batch` | `"auto"` or unsigned integer; `"auto"` | `KILN_SERVER_MAX_DECODE_BATCH` (implemented) | none | `auto`, `backend`, and `backend_policy` all delegate to backend policy; an integer must be `1..=65536`. Deterministic mode and `max_batch_tokens` may lower the final width. Do not raise this from a single throughput sample: the machine-local ROCm selector documented in the Qualification guide requires exact-width deterministic and fused-sampled execution, graph correctness, bounded tail/memory regression, restart/cooldown between arms, and follow-up soak/benchmark evidence. It emits a selection receipt but never mutates this field. The Strix Halo Vulkan development-soak candidate sets `2`; together with a prefill admission quantum of two, this yields four total active requests and admits an equal pair together. |
 | `server.eval_mode` | boolean; `false` | `KILN_SERVER_EVAL_MODE` (implemented) | none | Enables deterministic eval-serving defaults, headers, adapter warnings, and transient-cache cleanup behavior. `serve --eval-mode` applies a typed override after environment resolution and wins without mutating process environment. |
@@ -1045,15 +1047,16 @@ requires a process restart; none is a live tuning control.
 
 | TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
-| `batching.mode` | string enum; `"auto"` | `KILN_BATCHING_MODE` (implemented) | none | TOML accepts `auto`, `enabled`, or `disabled`, case-insensitively. Environment input also accepts the strict boolean spellings, mapping true to `enabled` and false to `disabled`. `auto` delegates actor selection to the immutable backend policy; an explicit value wins. Restart required. |
 | `batching.rowwise_decode` | boolean; `false` | `KILN_BATCHING_ROWWISE_DECODE` (implemented) | none | `false` sends each ready cohort through one true batched forward. `true` issues one forward per row while retaining actor ownership; it is an emergency correctness comparison, normally reduces throughput, and does not increase the effective decode width. Restart required. |
 | `batching.prefix_aware_admission` | boolean; `true` | `KILN_BATCHING_PREFIX_AWARE_ADMISSION` (implemented) | none | When true, a queued same-adapter strict descendant waits while its active shorter prefix can become reusable; independent rows may still be admitted. Disable only for a controlled admission A/B. Restart required. |
 | `batching.prefill_admission_quantum` | `"auto"` or unsigned integer; `"auto"` | `KILN_BATCHING_PREFILL_ADMISSION_QUANTUM` (implemented) | none | An integer must be `1..=65536` and caps how many queued prompts the actor admits in one cycle before returning to decode. `auto` is case-insensitive and uses the backend policy below. The selected value is then clamped to `1..=effective max_decode_batch`; the diagnostics name `effective_decode_width` as final authority when it performs that clamp. With non-burst admission, total active capacity is effective decode width plus this staging quantum, capped internally at four staging slots. The Strix Halo Vulkan development-soak candidate sets `2`, admitting an equal pair while retaining a four-request active ceiling. Restart required. |
 | `batching.actor_cycle_idle_ms` | unsigned integer milliseconds; `0` | `KILN_BATCHING_ACTOR_CYCLE_IDLE_MS` (implemented) | none | `0..=60000`. Zero preserves the unpaced actor. A nonzero value inserts one intentional cooperative wait after an actor cycle that advanced prefill or decode, only after synchronous accelerator work has returned. The actor polls control commands at intervals no longer than 5 ms, so shutdown remains responsive, and the independent response-delivery worker and HTTP process remain live. This deliberately trades request throughput and inter-token latency for a lower sustained accelerator duty cycle; it is not a temperature controller and never changes itself from a live sensor. Config, health, debug, Prometheus, and serving-benchmark receipts expose the policy and observed waits. Restart required. |
-| `batching.direct_decode_rendezvous_mode` | string enum; `"auto"` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE` (implemented) | none | Selects only the fallback worker used by actor-absent direct streaming effectively-greedy requests. TOML accepts `auto`, `enabled`, or `disabled`, case-insensitively; environment input also accepts the strict boolean spellings. `auto` enables the worker on every real backend. Sampled requests, non-streaming requests, and every route using the batching actor bypass this worker. Restart required. |
-| `batching.direct_decode_rendezvous_max_batch` | `"auto"` or unsigned integer; `"auto"` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH` (implemented) | none | An explicit integer must be `1..=65536`. `auto` uses the backend policy below. Either selection is clamped to the already-resolved effective decode width; diagnostics use `effective_decode_width` when that ceiling wins. Restart required. |
-| `batching.direct_decode_rendezvous_wait_us` | `"auto"` or unsigned integer; `"auto"` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US` (implemented) | none | An explicit value is any non-negative `u64` number of microseconds, including `0`; `auto` uses backend policy. A negative, overflowing, malformed, or non-UTF-8 environment value stops startup. In particular, malformed legacy `KILN_DECODE_BATCH_WAIT_US` now fails startup instead of silently becoming zero. Restart required. |
-| `batching.direct_decode_rendezvous_mixed_seq_lens` | `"auto"` or boolean; `"auto"` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS` (implemented) | none | TOML accepts only the string `auto` or a native boolean; quoted boolean strings are rejected. Environment input accepts `auto` or the strict boolean spellings. The value controls whether one compatible fallback cohort may contain different decode positions. Restart required. |
+
+Every real backend uses the batching actor. There is no activation switch and
+no second direct-stream decode scheduler. This invariant gives cancellation,
+backpressure, admission, adapter barriers, KV ownership, and shutdown one
+state machine. Mock mode keeps the deterministic scheduler-backed test engine
+and does not construct a production actor.
 
 ### Backend-owned `auto` policy
 
@@ -1061,45 +1064,22 @@ requires a process restart; none is a live tuning control.
 default. The matrix is evaluated against the final effective decode width, not
 the unconstrained backend maximum.
 
-| Backend | `batching.mode = "auto"` | Backend decode width before server constraints | `prefill_admission_quantum = "auto"` | `burst_prefill_admission` diagnostic | `actor_prefill_tile_alignment_required` diagnostic |
-|---|---:|---:|---:|---:|---:|
-| CUDA | enabled | 8 | effective decode width | true | false |
-| ROCm | enabled | 8 | 4, clamped to effective width | false | true |
-| Vulkan | enabled | 64 | effective decode width | false | false |
-| Metal | disabled | 8 | 4, clamped to effective width | false | false |
-| CPU/other | enabled | 8 | 4, clamped to effective width | false | false |
+| Backend | Backend decode width before server constraints | `prefill_admission_quantum = "auto"` | `burst_prefill_admission` diagnostic | `actor_prefill_tile_alignment_required` diagnostic |
+|---|---:|---:|---:|---:|
+| CUDA | 8 | effective decode width | true | false |
+| ROCm | 8 | 4, clamped to effective width | false | true |
+| Vulkan | 64 | effective decode width | false | false |
+| Metal | 8 | 4, clamped to effective width | false | false |
+| CPU/other | 8 | 4, clamped to effective width | false | false |
 
 `burst_prefill_admission` is backend-owned and intentionally has no TOML or
 public environment field. On CUDA it lets admission refill the decode width in
 one actor turn. It is reported with the four primary-actor settings so an observed
 CUDA/Vulkan/ROCm difference is not mistaken for a hidden runtime override.
 `actor_prefill_tile_alignment_required` is also backend-owned. ROCm sets it
-because local deterministic parity proved that a 64-token actor partition and
-monolithic direct prefill could select different greedy tokens. Startup now
-requires the actor ceiling, direct streaming crossover, combined token budget,
-and effective decode width to preserve one 256-token numerical partition.
-
-The fallback direct-stream rendezvous has a separate backend-owned `auto`
-matrix. Its mode is enabled on every real backend, but a live worker is not the
-same as an available request route:
-
-| Backend | `direct_decode_rendezvous_mode = "auto"` | `max_batch = "auto"` | `wait_us = "auto"` | `mixed_seq_lens = "auto"` |
-|---|---:|---:|---:|---:|
-| CPU/other | enabled | 8 | 0 | false |
-| CUDA | enabled | 1 | 0 | false |
-| ROCm | enabled | 8 | 0 | false |
-| Metal | enabled | 8 | 100 | true |
-| Vulkan | enabled | 64 | 5000 | true |
-
-The selected `max_batch` is always clamped to the effective decode width. The
-worker is constructed independently of the primary actor so startup and worker
-failures remain observable, but its route is available only for a real backend
-when the actor is absent and the worker is active. An actor-active process can
-therefore legitimately report `worker_active=true` and
-`route_available=false`. Under the complete default policy, this makes the
-route available only on Metal: every real backend auto-enables the worker, but
-Metal is the only backend whose primary actor is auto-disabled. Explicitly
-disabling the actor can make the route available on another real backend.
+because local deterministic parity proved that changing a prompt partition can
+change greedy output. Startup therefore requires actor prompt chunks and the
+qualified streaming-prefill tile policy to preserve one numerical partition.
 
 ### Effective policy and provenance
 
@@ -1111,13 +1091,6 @@ disabling the actor can make the route available on another real backend.
 {
   "batching": {
     "configuration": {
-      "mode": {
-        "configured": "auto",
-        "configured_source": "default",
-        "backend_policy_enabled": true,
-        "effective_enabled": true,
-        "effective_source": "backend_policy"
-      },
       "rowwise_decode": { "enabled": false, "source": "default" },
       "prefix_aware_admission": { "enabled": true, "source": "default" },
       "prefill_admission_quantum": {
@@ -1133,57 +1106,17 @@ disabling the actor can make the route available on another real backend.
         "enabled": false,
         "command_poll_milliseconds": 5
       },
-      "direct_decode_rendezvous": {
-        "mode": {
-          "configured": "auto",
-          "configured_source": "default",
-          "backend_policy_enabled": true,
-          "effective_enabled": true,
-          "effective_source": "backend_policy"
-        },
-        "max_batch": {
-          "configured": null,
-          "configured_source": "default",
-          "backend_policy": 8,
-          "effective": 8,
-          "effective_source": "backend_policy"
-        },
-        "wait_us": {
-          "configured": null,
-          "configured_source": "default",
-          "backend_policy": 0,
-          "effective": 0,
-          "effective_source": "backend_policy"
-        },
-        "mixed_seq_lens": {
-          "configured": null,
-          "configured_source": "default",
-          "backend_policy": false,
-          "effective": false,
-          "effective_source": "backend_policy"
-        }
-      },
       "burst_prefill_admission": false,
       "actor_prefill_tile_alignment_required": true
     },
-    "actor_active": true,
-    "direct_decode_rendezvous": {
-      "scope": "direct_streaming_greedy_only",
-      "backend_available": true,
-      "actor_active": true,
-      "worker_active": true,
-      "route_available": false
-    }
+    "actor_active": true
   }
 }
 ```
 
 For explicit values, the configured source is `config_file` or `environment`.
 The complete effective-source enum is `default`, `backend_policy`,
-`config_file`, `environment`, or `effective_decode_width`. The mode normally
-uses the middle three; `default` is reachable only for an explicit
-programmatic value carrying default provenance, not for ordinary built-in
-`auto`, which resolves through `backend_policy`. The admission quantum uses
+`config_file`, `environment`, or `effective_decode_width`. The admission quantum uses
 `effective_decode_width` when the final decode width lowers the selected value.
 A nonzero actor-cycle idle has no backend-derived effective value: its exact
 configured milliseconds and source are immutable for the process. The actor
@@ -1192,24 +1125,15 @@ waiting for a request. Because the delay begins only after synchronous
 accelerator return, it does not suspend outstanding device work. It is
 intentionally separate from external thermal containment: operators must still
 use a hardware guard for qualification and measure the resulting throughput and
-ITL cost.
-A configured quantum or direct-rendezvous width is retained even when clamped,
-so intent and execution cannot be confused. The direct policy is nested at
-`batching.configuration.direct_decode_rendezvous`; the sibling
-`batching.direct_decode_rendezvous` is actual process state, with exact fields
-`scope`, `backend_available`, optional `backend_unavailable_reason`,
-`actor_active`, `worker_active`, and `route_available`. Mock mode reports
-`backend_available=false` and `backend_unavailable_reason="mock_backend"`.
+ITL cost. A configured quantum is retained even when clamped, so intent and
+execution cannot be confused.
 
 `GET /health` repeats the same immutable object at
 `decode_runtime.batching_configuration` beside the optional live
-`decode_runtime.batching_engine` snapshot and reports actual fallback state at
-`decode_runtime.direct_decode_rendezvous`. The trusted debug response keeps the
-existing `batching_engine.enabled` actor-activity flag, adds the immutable
-object at `batching_engine.configuration`, and reports actual fallback state at
-`batching_engine.direct_decode_rendezvous`. Actor activity can be false even
-when configured intent is visible, and worker activity does not prove routing;
-clients must use `route_available` for this deliberately narrow direct route.
+`decode_runtime.batching_engine` snapshot. The trusted debug response keeps the
+`batching_engine.enabled` actor-activity flag and the immutable object at
+`batching_engine.configuration`. A real backend always reports the actor live;
+mock mode reports no production actor snapshot.
 
 When the actor exists, the live health/debug snapshot reports
 `actor_cycle_idle_ms`, `actor_cycle_idle_source`, `actor_cycle_idle_active`,
@@ -1221,24 +1145,24 @@ When the actor exists, the live health/debug snapshot reports
 `kiln_batching_engine_actor_cycle_idle_seconds_total`, and
 `kiln_batching_engine_actor_cycle_idle_max_seconds`. These counters make an
 intentional duty-cycle delay distinguishable from an unexplained inference
-stall. Serving benchmark driver v13 snapshots an idle boundary outside each
+stall. Serving benchmark driver v18 records the actor as the only request
+route, snapshots an idle boundary outside each
 measured request window and fails its `actor_cycle_idle_accounted` gate when the
 source, count, elapsed time, maximum, or final active state contradicts the
 configured policy.
 
-`kiln config --file <path>` validates and prints all nine `[batching]` startup
-values: actor mode, rowwise decode, prefix-aware admission, prefill quantum,
-actor-cycle idle, direct rendezvous mode, maximum batch, wait microseconds, and
-mixed-sequence policy. It also prints the combined actor-cycle budget, prompt-token and layer
+`kiln config --file <path>` validates and prints all four `[batching]` startup
+values: rowwise decode, prefix-aware admission, prefill quantum, and
+actor-cycle idle. It also prints the combined actor-cycle budget, prompt-token and layer
 ceilings, configured decode-width ceiling, streaming mode, threshold, base,
 tape, and detached full-attention tiles with source provenance. It does not
 construct an accelerator. Add `--backend rocm` (or another target) to resolve
-the effective actor selection, alignment requirement, decode width, streaming
+the alignment requirement, decode width, streaming
 dispatch, and tiles from the same backend policies used at serve startup. The
 command applies the real actor-prefill contract and exits nonzero before any
 hardware access when the combination is invalid. Without `--backend`, it names
 those values as a serve-startup contract instead of guessing a target. Inspect
-`/v1/config` after restart for actual selected-device and live route facts.
+`/v1/config` after restart for actual selected-device and actor state.
 
 ## `[model]`
 
@@ -1934,7 +1858,7 @@ and conclusions remain labeled as such in `PROFILING.md`.
 
 | TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
-| `streaming_prefill.mode` | string enum; `"auto"` | `KILN_STREAMING_PREFILL_MODE` (implemented) | none | `auto`, `enabled`, or `disabled`, case-insensitive with surrounding whitespace ignored. `auto` delegates dispatch to backend policy, `enabled` selects every non-empty prompt, and `disabled` selects none. When the ROCm batching actor is effective, dispatch must cover the first effective tile; disabling streaming therefore also requires disabling the actor. Every other TOML type, TOML value, or environment value fails startup. |
+| `streaming_prefill.mode` | string enum; `"auto"` | `KILN_STREAMING_PREFILL_MODE` (implemented) | none | `auto`, `enabled`, or `disabled`, case-insensitive with surrounding whitespace ignored. `auto` delegates dispatch to backend policy, `enabled` selects every non-empty prompt, and `disabled` selects none. ROCm requires dispatch to cover the first effective actor tile, so `disabled` is rejected for that backend. Every other TOML type, TOML value, or environment value fails startup. |
 | `streaming_prefill.threshold_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_THRESHOLD_TOKENS` (implemented) | none | In `auto` mode, an integer replaces the backend crossover only when that backend already has a threshold-based automatic policy. It does not make CPU or Vulkan auto-dispatch streaming. With the ROCm batching actor effective, the crossover cannot be later than the effective tile. `0`, negative values, and strings other than `auto` fail startup. `enabled` and `disabled` modes ignore this crossover for dispatch while retaining it in diagnostics. |
 | `streaming_prefill.tile_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_TILE_TOKENS` (implemented) | none | Base tile for ordinary tiled prefill and non-tape GDN segment execution. Concrete values must be positive multiples of 64. With the ROCm batching actor effective, this tile must equal `server.max_prefill_tokens_per_cycle` and fit beside effective decode width in `server.max_batch_tokens`. When this field is concrete and either specialized tile below is `auto`, that specialized route inherits this base value rather than its backend default. |
 | `streaming_prefill.tape_tile_tokens` | `"auto"` or positive unsigned integer; `"auto"` | `KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS` (implemented) | none | Tile used by tape-authoritative training forward paths. Concrete values must be positive multiples of 64. `auto` inherits an explicit `tile_tokens`; when both are `auto`, backend policy owns the value. |
@@ -2087,22 +2011,14 @@ last_token_lm_head = true
 ```
 
 ```toml
-# Isolate a suspected tiled-prefill pause through the direct route. ROCm must
-# disable the actor as well because actor/direct tile alignment is mandatory.
-[batching]
-mode = "disabled"
-
+# Isolate a suspected tiled-prefill pause while keeping actor ownership.
 [streaming_prefill]
 mode = "disabled"
 ```
 
 ```toml
-# ROCm actor-disabled tuning experiment: stream from 4096 tokens and use one
-# base tile for all ordinary, tape, detached, boundary, and replay routes.
-# This is an isolation control, not a production actor configuration.
-[batching]
-mode = "disabled"
-
+# ROCm tuning experiment: stream from 4096 tokens and use one base tile for
+# all ordinary, tape, detached, boundary, and replay routes.
 [streaming_prefill]
 mode = "auto"
 threshold_tokens = 4096
@@ -2309,7 +2225,7 @@ Kiln exposes complementary startup-input and runtime-derived views:
   decode-width sources.
 
 The versioned `kiln.effective-configuration.v1` object is a deterministic flat
-map keyed by canonical TOML paths. It always contains all 117 fixed typed
+map keyed by canonical TOML paths. It always contains all 112 fixed typed
 leaves, including materialized defaults for optional `[eval]` and `[agent]`
 sections, plus two dynamic leaves for every configured teacher credential:
 `teachers.credentials.<id>.origin` and
@@ -2352,7 +2268,7 @@ availability, and live state.
 
 ## Configuration migration
 
-The canonical-only environment contract is a breaking cleanup. The 77 former
+The canonical-only environment contract is a breaking cleanup. The former
 public spellings below are ignored rather than accepted as aliases. Replace
 them before upgrading; `kiln config --json` exposes the final source of every
 effective field so deployment checks can prove the replacement took effect.
@@ -2362,7 +2278,12 @@ effective field so deployment checks can prove the replacement took effect.
 | `KILN_ADAPTER_DIR` | `KILN_MODEL_ADAPTER_DIR` |
 | `KILN_ADAPTER_LIBRARY_URL` | `KILN_ADAPTERS_LIBRARY_URL` |
 | `KILN_AGENT_RUNS` | `KILN_AGENT_RUNS_ACCESS` |
-| `KILN_BATCHING_ENGINE` | `KILN_BATCHING_MODE` |
+| `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH` | removed; the direct worker no longer exists |
+| `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS` | removed; the direct worker no longer exists |
+| `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE` | removed; the direct worker no longer exists |
+| `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US` | removed; the direct worker no longer exists |
+| `KILN_BATCHING_ENGINE` | removed; every real backend uses the actor |
+| `KILN_BATCHING_MODE` | removed; every real backend uses the actor |
 | `KILN_BATCH_DECODE_ROWWISE` | `KILN_BATCHING_ROWWISE_DECODE` |
 | `KILN_BATCH_PREFILL_ADMISSION_QUANTUM` | `KILN_BATCHING_PREFILL_ADMISSION_QUANTUM` |
 | `KILN_BATCH_PREFIX_AWARE_ADMISSION` | `KILN_BATCHING_PREFIX_AWARE_ADMISSION` |
@@ -2372,10 +2293,10 @@ effective field so deployment checks can prove the replacement took effect.
 | `KILN_CHECKPOINT_BOUNDARY_CACHE_GB` | `KILN_TRAINING_CHECKPOINT_BOUNDARY_CACHE_GB` |
 | `KILN_CHECKPOINT_INTERVAL` | `KILN_TRAINING_CHECKPOINT_INTERVAL` |
 | `KILN_CUDA_GRAPHS` | `KILN_MEMORY_CUDA_GRAPHS` |
-| `KILN_DECODE_BATCHER` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE` |
-| `KILN_DECODE_BATCH_MAX` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH` |
-| `KILN_DECODE_BATCH_MIXED_SEQ` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS` |
-| `KILN_DECODE_BATCH_WAIT_US` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US` |
+| `KILN_DECODE_BATCHER` | removed; the direct worker no longer exists |
+| `KILN_DECODE_BATCH_MAX` | removed; the direct worker no longer exists |
+| `KILN_DECODE_BATCH_MIXED_SEQ` | removed; the direct worker no longer exists |
+| `KILN_DECODE_BATCH_WAIT_US` | removed; the direct worker no longer exists |
 | `KILN_DEFAULT_NO_THINK` | `KILN_SERVER_DEFAULT_THINKING_ENABLED` |
 | `KILN_DEFAULT_THINKING_BUDGET_MS` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_MS` |
 | `KILN_DEFAULT_THINKING_BUDGET_TOKENS` | `KILN_SERVER_DEFAULT_THINKING_BUDGET_TOKENS` |

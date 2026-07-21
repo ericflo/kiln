@@ -337,7 +337,16 @@ does not re-authorize active-work suspension there.
 
 ### Server route diagnostics
 
-Driver v9 replaces the batching-only `server` record with
+Driver v18 uses `kiln.serving-benchmark-server-diagnostics.v7`. Its
+`request_route` is exactly `batching_engine`; the batching-engine record is
+mandatory; and the record contains no direct-worker, rendezvous, or alternate
+route object. The before/after actor ownership must be stable, all cumulative
+counters must be monotonic, and the end-of-window active count must be zero.
+This is the current qualification contract for every real backend.
+
+Drivers v9 through v17 retain the following historical route-aware contracts
+so committed receipts remain independently valid. Driver v9 replaced the
+then-batching-only `server` record with
 `kiln.serving-benchmark-server-diagnostics.v2`. This is a receipt-contract
 change, not a request-workload change; strict-valid v7 and v8 receipts remain
 accepted and comparison-compatible.
@@ -659,12 +668,12 @@ recorded zero thermal trips, a sub-60 C complete lifecycle, clean shutdown and
 cooldown, and no owned residue. Its 6.74 output tokens/second is
 diagnostic-only.
 
-The next tracked arm changes only `batching.mode` from `enabled` to `disabled`
-relative to that result:
+The historical next arm changed only the now-removed `batching.mode` from
+`enabled` to `disabled` relative to that result:
 `qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-graph-disabled-no-prefix-cache-no-batching-v1.json`.
-The direct streaming rendezvous retains its typed `auto` backend policy. This
-isolates actor-owned prefill/decode scheduling before any lower-level direct
-route is disabled.
+That launch artifact has been retired from the runnable qualification matrix;
+the immutable receipt below remains localization evidence from the source that
+still supported the alternate route.
 
 The strict-valid driver-v9 result is retained at
 `benchmarks/receipts/rocm/strix-halo/20260719t065243-rocm-strix-halo-greedy-c1-direct-rendezvous-actor-exclusion-v1.kiln.json`.
@@ -677,9 +686,9 @@ Graphs and prefix caching remain disabled, so the single changed field makes
 the batching actor's prefill/decode path causal for the pinned fourth-token
 divergence and excludes the corresponding direct path.
 
-This four-token c1 result is localization evidence only. It does not separate
+This four-token c1 result is historical localization evidence only. It does not separate
 actor prefill from actor decode/state assembly, prove 64-token parity, qualify
-the actor-disabled configuration for production, or support concurrency,
+the retired actor-disabled configuration for production, or support concurrency,
 throughput, latency, or endurance claims. Its 9.40 output tokens/second is
 diagnostic-only.
 
@@ -1054,9 +1063,10 @@ mapfile -d '' receipts < <(
 python3 scripts/bench-concurrent-batch.py --validate-receipt "${receipts[@]}"
 ```
 
-Driver v17 is the current contract. It retains v16 unique run/log identity and
-stable prompt-set identity, then adds closed ROCm batch-capture parity evidence
-and fail-closed reference roles. Driver v16 verifies every retained prompt-set
+Driver v18 is the current contract. It retains v17's closed ROCm batch-capture
+parity evidence and fail-closed reference roles, then replaces route-aware
+diagnostics with the actor-only v7 schema described above. Driver v17 retained
+v16 unique run/log identity and stable prompt-set identity. Driver v16 verifies every retained prompt-set
 hash against `prompt_set_id` and excludes only the operational run ID from the
 workload comparison fingerprint. Driver v15 added strict per-request Kiln terminal performance
 evidence and derived phase distributions without changing the common request
@@ -1067,10 +1077,10 @@ actor-cycle idle policy and measured-window accounting. Driver v12 added a bound
 receipt-recorded model-fingerprint read rate without changing the double-read
 integrity contract. Driver v11 added typed idle-boundary
 cooldown evidence to v10. Driver v10 added closed ROCm graph execution evidence;
-v9 added route-aware
-batching-actor and direct-rendezvous diagnostics; and v8 added mandatory initial
-and final guarded model-fingerprint lifecycles. A v17 graph/eager discriminator
-requires a v17 eager reference with the same prompt-set ID, model-visible
+v9 added historical route-aware batching-actor and direct-rendezvous
+diagnostics; and v8 added mandatory initial and final guarded model-fingerprint
+lifecycles. A v17 or v18 graph/eager discriminator requires a compatible eager
+reference with the same prompt-set ID, model-visible
 workload, runtime identity, and exact binary hash. Ordinary v7-v17 references
 remain comparison-compatible when their version-appropriate workload
 fingerprints match. The current arm must still satisfy v16 prompt identity, v15
@@ -1088,6 +1098,6 @@ identity semantics. Owned evidence contains the content-hashed launch document,
 absolute server-log fingerprint, shutdown signal/status/timing,
 forced-shutdown flag, and process-group liveness. Attached and explicitly
 unsafe runs serialize null lifecycle artifacts so ownership cannot be inferred
-from missing fields. Historical driver v2 through v16 receipts remain valid
-under their original contracts, but do not satisfy current v17 performance
+from missing fields. Historical driver v2 through v17 receipts remain valid
+under their original contracts, but do not satisfy current v18 performance
 acceptance.

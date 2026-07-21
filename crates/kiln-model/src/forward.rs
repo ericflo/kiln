@@ -255,26 +255,26 @@ fn fused_paged_decode_disabled(device: Device) -> bool {
 /// immutable qualified profile enables the route and its KV-pool contract.
 #[cfg(feature = "rocm")]
 pub(crate) fn rocm_paged_decode_enabled() -> bool {
-    crate::backend::capability::DecodeBatcherPolicy::for_backend("rocm", Device::Rocm(0))
+    crate::backend::capability::DecodeExecutionPolicy::for_backend("rocm", Device::Rocm(0))
         .direct_paged_decode_attention_enabled()
 }
 
 fn direct_paged_decode_attention_enabled(backend: &dyn BackendRuntime) -> bool {
     BackendCapabilityQueries::backend_capabilities(backend)
-        .decode_batcher
+        .decode_execution
         .direct_paged_decode_attention_enabled()
         && AttentionBackend::runtime_supports_flash_attn_paged_decode(backend)
 }
 
 fn native_decode_attention_required(backend: &dyn BackendRuntime) -> bool {
     BackendCapabilityQueries::backend_capabilities(backend)
-        .decode_batcher
+        .decode_execution
         .require_native_decode_attention
 }
 
 fn portable_lora_decode_allowed(backend: &dyn BackendRuntime) -> bool {
     BackendCapabilityQueries::backend_capabilities(backend)
-        .decode_batcher
+        .decode_execution
         .allow_portable_lora_decode
 }
 
@@ -295,7 +295,7 @@ fn record_vulkan_lora_paged_decode_fallback(full_attn_layer_idx: usize, total_se
 
 fn paged_decode_requires_contiguous_kv_chunks(backend: &dyn BackendRuntime) -> bool {
     BackendCapabilityQueries::backend_capabilities(backend)
-        .decode_batcher
+        .decode_execution
         .paged_decode_requires_contiguous_kv_chunks
 }
 

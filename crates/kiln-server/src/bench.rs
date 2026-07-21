@@ -1105,7 +1105,9 @@ fn bench_latency_paged(
     let backend = runtime_backend_for_bench(&device_kt, weights)?;
     let backend_capabilities = BackendCapabilityQueries::backend_capabilities(backend.as_ref());
     let greedy_token_decode_enabled = backend_capabilities.decode.linear_argmax.is_native()
-        || backend_capabilities.decode_batcher.use_greedy_token_decode;
+        || backend_capabilities
+            .decode_execution
+            .use_greedy_token_decode;
     let mut rocm_graph = kiln_model::rocm_graph::RocmGraphRunner::new(
         &device_kt,
         kiln_model::RocmGraphExecutionPolicy::lazy_capture_replay(),

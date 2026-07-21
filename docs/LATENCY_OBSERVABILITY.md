@@ -23,8 +23,8 @@ Set `include_performance` on a chat request:
 }
 ```
 
-For a non-streaming batching-engine request, the response carries
-`metadata.performance.latency`. For either real-model streaming path, the
+For a non-streaming real-model request, the response carries
+`metadata.performance.latency`. For a real-model streaming request, the
 terminal chat chunk carries the request summary and each emitted model token
 is followed by a `kiln.token_timing` SSE object. Custom timing objects are emitted
 only after an explicit request opt-in; enabling the server-wide performance
@@ -32,9 +32,9 @@ metadata default does not silently add non-OpenAI SSE objects.
 
 Completed instrumented requests also retain the summary in the bounded
 `GET /v1/stats/recent-requests` ring. The dashboard renders it under **Latency
-diagnosis**. Direct streaming records model-producer and bridge boundaries,
-but leaves actor-only phases `null` and attributes the otherwise unpartitioned
-interval between model-ready tokens to `unexplained`.
+diagnosis**. Every real-model request uses the batching actor, so actor queue,
+admission, prefill, decode, delivery, and backend phase attribution share one
+request-local timing model.
 
 ## Timing Boundaries
 
@@ -45,8 +45,8 @@ the named boundaries.
 | Boundary | Meaning |
 | --- | --- |
 | request receipt | Entry to chat request handling, before prompt rendering and tokenization |
-| ready | The batching actor or direct model producer made the accepted token ready for delivery |
-| producer delivered | The batching delivery worker enqueued the token into the actor-to-handler channel, or the direct bridge received it from the model channel |
+| ready | The batching actor made the accepted token ready for delivery |
+| producer delivered | The batching delivery worker enqueued the token into the actor-to-handler channel |
 | handler received | The async chat producer received the bridged token event |
 | body enqueued | The producer successfully enqueued the rendered content into the HTTP response body channel |
 
@@ -150,7 +150,7 @@ The currently measured batching path exposes:
 | `actor_cycle_idle_ms` | Configured cooperative post-work idle elapsed while the request remained active |
 | `sampling_ms` | Post-transformer final norm, LM head, penalties/filters, and selection when that tail has a distinct boundary; excludes separately measured readback |
 | `readback_ms` | Existing device-to-host token transfer when the backend exposes that exact boundary without another synchronization |
-| `gpu_lock_wait_ms` | Time waiting to acquire the shared inference GPU-coordination guard for a batching decode step or the direct request lifetime |
+| `gpu_lock_wait_ms` | Time waiting to acquire the shared inference GPU-coordination guard for an actor-owned model invocation |
 | `synchronization_ms` | Time spent settling the decode step at the backend's external-yield boundary |
 | `response_delivery_ms` | Producer-ready to bounded-channel enqueue or bridge receipt |
 | `handler_queue_ms` | Producer delivery to handler receipt |
@@ -159,9 +159,8 @@ The currently measured batching path exposes:
 
 The terminal performance object also reports `resident_prefill_used`. It is
 `true` only when that request completed at least one prompt token through a
-successful native multi-row resident-prefill forward, `false` when a batching
-request never entered that route, and `null` on direct paths that cannot use
-it. This is request-scoped route evidence, not an inference from process-global
+successful native multi-row resident-prefill forward and `false` when the
+request never entered that route. This is request-scoped route evidence, not an inference from process-global
 counters; a native decline that performs no mutation leaves it `false`.
 Production currently publishes `resident_prefill_enabled=false` and therefore
 must emit `false` for every batching request: guarded Vulkan model runs found
@@ -186,28 +185,24 @@ active for that step. It likewise adds the actual elapsed cooperative
 `batching.actor_cycle_idle_ms` wait only to rows that remain active when the
 wait completes. The phase is measured as zero when that policy is disabled,
 and can become the dominant `actor_cycle_idle` stall reason; it is not folded
-into actor decode or left as unexplained wall time. Direct streaming measures
-`tokenization_ms`, model-ready-to-bridge
-`response_delivery_ms`, bridge-to-handler `handler_queue_ms`, response-body
-enqueue `client_delivery_ms`, request-local `unexplained_ms`, and the
-invocation-owned backend phases described below. Its
-`actor_queue_ms`, `actor_admission_ms`, `prefill_ms`, and `decode_ms` fields are
-`null`, as is `actor_cycle_idle_ms`, because that path does not expose actor
-phase boundaries. The direct model event envelope carries its distinct sampler
-tail and external-yield synchronization wait with the token they produced. A
+into actor decode or left as unexplained wall time. The actor path also measures
+`tokenization_ms`, producer-to-delivery-worker `response_delivery_ms`,
+delivery-worker-to-handler `handler_queue_ms`, response-body enqueue
+`client_delivery_ms`, request-local `unexplained_ms`, and the invocation-owned
+backend phases described below. The model event envelope carries its distinct
+sampler tail and external-yield synchronization wait with the token they produced. A
 decode that selects EOS instead of emitting another token carries those phases
 on the terminal event, so successful request totals do not discard the final
-backend invocation. The server attaches its request-lifetime GPU-lock wait
-exactly once, to the first model event. Measured zero remains distinct from an
-unsupported `null` phase.
+backend invocation. Measured zero remains distinct from an unsupported `null`
+phase.
 
-Direct `sampling_ms` is a caller-wall-time candidate around the existing
+`sampling_ms` is a caller-wall-time candidate around the existing
 sampler operation. Because accelerator work may be asynchronous, it can include
 completion of work submitted immediately before that sampler; it is not claimed
 as isolated GPU-kernel time and is not added to another broad phase. Kiln does
-not insert a synchronization to manufacture a cleaner number. Direct fused
-token routes leave sampling `null` when they do not expose a separate sampler
-boundary, and direct readback remains `null` until that route's backend owner
+not insert a synchronization to manufacture a cleaner number. Fused token
+routes leave sampling `null` when they do not expose a separate sampler
+boundary, and readback remains `null` until that route's backend owner
 can split the existing transfer exactly.
 
 Qualified ROCm W8 sampled paged decode reports `sampling_ms` for the distinct
@@ -218,14 +213,14 @@ envelope subtracts the exact readback duration from sampling before both are
 published, so the two candidates do not double-count. The bounded top-k batch
 and single-row full-distribution Gumbel routes both carry this envelope.
 
-Other sampled paths, including behavior-logprob capture and the direct sampler
+Other sampled paths, including behavior-logprob capture and the model sampler
 tail described above, report their distinct sampling boundary but leave
 `readback_ms` `null` until their backend owner can split the existing transfer
 honestly. Greedy and native fused-forward routes leave sampling `null` when the
 transformer/sampler boundary is not independently observable.
 
 Qualified ROCm HIP-graph decode reports request-owned `graph_capture_ms` and
-`graph_replay_ms` on both direct and batching-engine streams. The graph runner
+`graph_replay_ms` on batching-engine streams. The graph runner
 holds its mutex across one decode invocation and snapshots the fixed phase
 counters before and after that call, so another request cannot contaminate the
 delta. Capture is the sum of candidate headroom, warm, reservation, native
@@ -407,9 +402,9 @@ content has entered the response-body channel:
 }
 ```
 
-`source` is the closed value `batching_engine` or `direct`. The
-`producer_delivered_ms` boundary is therefore meaningful without pretending a
-direct stream uses the batching actor.
+`source` is the closed value `batching_engine`. The field remains explicit so
+captured diagnostics identify the scheduling authority without inference from
+other payload fields.
 
 `token_id` is the exact accepted model token represented by this timing row.
 It remains present when the tokenizer decodes a special token to an empty text

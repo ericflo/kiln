@@ -142,11 +142,6 @@ function checkRuntimeConfigSchemaContract(source) {
     'training_budget_bytes',
     'training_budget_gib',
     'batching.actor_active',
-    'batchingMode.configured',
-    'batchingMode.configured_source',
-    'batchingMode.backend_policy_enabled',
-    'batchingMode.effective_enabled',
-    'batchingMode.effective_source',
     'rowwiseDecode.enabled',
     'rowwiseDecode.source',
     'prefixAwareAdmission.enabled',
@@ -162,34 +157,6 @@ function checkRuntimeConfigSchemaContract(source) {
     'actorCycleIdle.command_poll_milliseconds',
     'batchingConfiguration.burst_prefill_admission',
     'batchingConfiguration.actor_prefill_tile_alignment_required',
-    'batchingConfiguration.direct_decode_rendezvous',
-    'directRendezvousMode.configured',
-    'directRendezvousMode.configured_source',
-    'directRendezvousMode.backend_policy_enabled',
-    'directRendezvousMode.effective_enabled',
-    'directRendezvousMode.effective_source',
-    'directRendezvousMaxBatch.configured',
-    'directRendezvousMaxBatch.configured_source',
-    'directRendezvousMaxBatch.backend_policy',
-    'directRendezvousMaxBatch.effective',
-    'directRendezvousMaxBatch.effective_source',
-    'directRendezvousWaitUs.configured',
-    'directRendezvousWaitUs.configured_source',
-    'directRendezvousWaitUs.backend_policy',
-    'directRendezvousWaitUs.effective',
-    'directRendezvousWaitUs.effective_source',
-    'directRendezvousMixedSeqLens.configured',
-    'directRendezvousMixedSeqLens.configured_source',
-    'directRendezvousMixedSeqLens.backend_policy',
-    'directRendezvousMixedSeqLens.effective',
-    'directRendezvousMixedSeqLens.effective_source',
-    'batching.direct_decode_rendezvous',
-    'directRendezvousRuntime.scope',
-    'directRendezvousRuntime.backend_available',
-    'directRendezvousRuntime.backend_unavailable_reason',
-    'directRendezvousRuntime.actor_active',
-    'directRendezvousRuntime.worker_active',
-    'directRendezvousRuntime.route_available',
     'cfg.streaming_prefill',
     'streamingPrefill.dispatch',
     'streamingPrefill.threshold_tokens',
@@ -257,63 +224,10 @@ function checkRuntimeConfigSchemaContract(source) {
   vm.runInContext(`${renderer}\nthis.renderRuntimeConfigBody = renderRuntimeConfigBody;`, context);
   for (const [label, config] of [
     ['missing response fields', {}],
-    ['pre-rendezvous batching response', {
+    ['actor-only batching response', {
       batching: {
-        configuration: {
-          mode: {
-            configured: 'auto',
-            configured_source: 'default',
-            backend_policy_enabled: true,
-            effective_enabled: true,
-            effective_source: 'backend_policy',
-          },
-        },
+        configuration: {},
         actor_active: true,
-      },
-    }],
-    ['automatic unavailable fallback response', {
-      batching: {
-        configuration: {
-          direct_decode_rendezvous: {
-            mode: {
-              configured: 'auto',
-              configured_source: 'default',
-              backend_policy_enabled: false,
-              effective_enabled: false,
-              effective_source: 'backend_policy',
-            },
-            max_batch: {
-              configured: null,
-              configured_source: 'default',
-              backend_policy: 1,
-              effective: 1,
-              effective_source: 'backend_policy',
-            },
-            wait_us: {
-              configured: null,
-              configured_source: 'default',
-              backend_policy: 0,
-              effective: 0,
-              effective_source: 'backend_policy',
-            },
-            mixed_seq_lens: {
-              configured: null,
-              configured_source: 'default',
-              backend_policy: false,
-              effective: false,
-              effective_source: 'backend_policy',
-            },
-          },
-        },
-        actor_active: false,
-        direct_decode_rendezvous: {
-          scope: 'direct_streaming_greedy_only',
-          backend_available: false,
-          backend_unavailable_reason: 'mock_backend',
-          actor_active: false,
-          worker_active: false,
-          route_available: false,
-        },
       },
     }],
     ['legacy null effective Muon maximum', {
@@ -344,19 +258,11 @@ function checkRuntimeConfigSchemaContract(source) {
       fail(`Runtime-config renderer crashed for ${label}: ${error.message}`);
     }
     if (/undefined/.test(html)) fail(`Runtime-config renderer exposed undefined for ${label}`);
-    if (!/Direct-stream greedy fallback/.test(html)) {
-      fail(`Runtime-config renderer omitted the fallback scope for ${label}`);
+    if (!/Primary actor/.test(html)) {
+      fail(`Runtime-config renderer omitted actor ownership for ${label}`);
     }
     if (!/Streaming prefill/.test(html)) {
       fail(`Runtime-config renderer omitted streaming-prefill diagnostics for ${label}`);
-    }
-    if (label === 'automatic unavailable fallback response') {
-      if ((html.match(/<strong>auto<\/strong>/g) || []).length < 3) {
-        fail('Runtime-config renderer should display null fallback values as auto');
-      }
-      if (!/mock_backend/.test(html)) {
-        fail('Runtime-config renderer should display the backend unavailable reason');
-      }
     }
     if (label === 'legacy null effective Muon maximum') {
       if (!/Muon rank:<strong>2\+<\/strong>/.test(html)
@@ -1720,13 +1626,6 @@ async function startServer({
         kv_cache: { num_blocks: 1024, num_blocks_source: 'auto', fp8_enabled: true },
         batching: {
           configuration: {
-            mode: {
-              configured: 'auto',
-              configured_source: 'default',
-              backend_policy_enabled: true,
-              effective_enabled: true,
-              effective_source: 'backend_policy',
-            },
             rowwise_decode: { enabled: false, source: 'default' },
             prefix_aware_admission: { enabled: true, source: 'environment' },
             prefill_admission_quantum: {
@@ -1742,47 +1641,10 @@ async function startServer({
               enabled: true,
               command_poll_milliseconds: 5,
             },
-            direct_decode_rendezvous: {
-              mode: {
-                configured: 'enabled',
-                configured_source: 'environment',
-                backend_policy_enabled: true,
-                effective_enabled: true,
-                effective_source: 'environment',
-              },
-              max_batch: {
-                configured: 32,
-                configured_source: 'config_file',
-                backend_policy: 64,
-                effective: 16,
-                effective_source: 'effective_decode_width',
-              },
-              wait_us: {
-                configured: null,
-                configured_source: 'default',
-                backend_policy: 5_000,
-                effective: 5_000,
-                effective_source: 'backend_policy',
-              },
-              mixed_seq_lens: {
-                configured: false,
-                configured_source: 'config_file',
-                backend_policy: true,
-                effective: false,
-                effective_source: 'config_file',
-              },
-            },
             burst_prefill_admission: true,
             actor_prefill_tile_alignment_required: false,
           },
           actor_active: true,
-          direct_decode_rendezvous: {
-            scope: 'direct_streaming_greedy_only',
-            backend_available: true,
-            actor_active: true,
-            worker_active: true,
-            route_available: false,
-          },
         },
         streaming_prefill: {
           dispatch: {
@@ -4644,7 +4506,7 @@ async function runSmoke(baseUrl, {
       (el) => !el.hidden
         && /"memory_budget"/.test(el.textContent || '')
         && /"cache_root": "\/var\/cache\/kiln"/.test(el.textContent || '')
-        && /"direct_decode_rendezvous"/.test(el.textContent || '')
+        && /"actor_active": true/.test(el.textContent || '')
         && /"streaming_prefill"/.test(el.textContent || ''),
     );
     if (!configRawShown) fail('Runtime config raw JSON toggle should reveal the pretty-printed /v1/config payload including resolved paths, batching, and streaming-prefill state');

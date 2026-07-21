@@ -421,21 +421,20 @@ curl -s http://localhost:8420/metrics | grep -E 'kiln_gpu_memory_(probe_failed|s
           <div>
             <div class="label mb-2">Check</div>
             <ul class="list-disc pl-5">
-              <li>Inspect <code>GET /v1/config</code> at <code>batching</code>: require an active actor, effective mode enabled, and <code>rowwise_decode.enabled=false</code> for ordinary throughput.</li>
-              <li>Inspect <code>batching.direct_decode_rendezvous</code> separately. <code>worker_active=true</code> does not mean traffic uses it; <code>route_available</code> is false whenever the actor is active.</li>
+              <li>Inspect <code>GET /v1/config</code> at <code>batching</code>: require an active actor and <code>rowwise_decode.enabled=false</code> for ordinary throughput.</li>
               <li>Compare the configured, backend-policy, effective, and source values for decode width and <code>prefill_admission_quantum</code>. Deterministic mode or token budget can clamp both.</li>
               <li>Request <code>include_performance=true</code> and compare <code>actor_queue_ms</code>, <code>actor_admission_ms</code>, and <code>actor_prefill_wall_ms</code> with live actor, allocator, reclaim, and KV-resize metrics.</li>
             </ul>
           </div>
           <div>
             <div class="label mb-2">Fix</div>
-            <p>Put the eight controls in <code>[batching]</code>, restart, capture the resolved object, and change one field per A/B. Restore <code>rowwise_decode=false</code> for throughput. A smaller admission quantum can isolate prompt-admission delay but may reduce batch fill; actor-disabled mode is an isolation comparison, not a performance fix. Do not tune direct-rendezvous fields for an actor-backed run.</p>
+            <p>Put the four controls in <code>[batching]</code>, restart, capture the resolved object, and change one field per A/B. Restore <code>rowwise_decode=false</code> for throughput. A smaller admission quantum can isolate prompt-admission delay but may reduce batch fill.</p>
           </div>
         </div>
         <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config \
   | jq '.batching, .decode_runtime.max_decode_batch'
 curl -s http://localhost:8420/health \
-  | jq '.decode_runtime.batching_configuration, .decode_runtime.batching_engine, .decode_runtime.direct_decode_rendezvous, .decode_runtime.memory_governor'
+  | jq '.decode_runtime.batching_configuration, .decode_runtime.batching_engine, .decode_runtime.memory_governor'
 curl -s http://localhost:8420/metrics \
   | grep -E 'kiln_batching_engine_|kiln_gpu_memory_|kiln_kv_'</code></pre>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
@@ -444,16 +443,6 @@ curl -s http://localhost:8420/metrics \
           device-memory operation are different hypotheses and require different evidence. CUDA/Vulkan
           automatically admit up to effective decode width; ROCm/Metal/CPU default to 4, clamped to that
           width. Every batching change is process-lifetime policy and requires restart.
-        </p>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          The direct rendezvous scope is exactly actor-absent direct streaming effectively-greedy
-          requests. Sampled and non-streaming requests bypass it. If intentionally diagnosing that fallback,
-          disable the actor, restart, and require <code>route_available=true</code>; then change one of its
-          mode, maximum-batch, wait-microsecond, or mixed-sequence fields at a time. Automatic tuples are CPU
-          <code>(8,0,false)</code>, CUDA <code>(1,0,false)</code>, ROCm <code>(8,0,false)</code>, Metal
-          <code>(8,100,true)</code>, and Vulkan <code>(64,5000,true)</code>, with width clamped to effective
-          decode width. Malformed canonical or deprecated values fail startup instead of silently selecting a
-          fallback.
         </p>
         <h3 id="rocm-decode-width-selection" class="text-lg font-semibold mt-6 mb-2">ROCm decode-width selection</h3>
         <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
@@ -1161,49 +1150,42 @@ rocm_graph_cache_max_bytes = 1073741824</code></pre>
             <ul class="list-disc pl-5">
               <li>Inspect <code>/v1/config.streaming_prefill</code> and health <code>prefill_runtime.streaming_prefill</code>; require identical dispatch, tiles, sources, and restart flags.</li>
               <li>On ROCm defaults, expect auto dispatch at <code>&gt;=256</code>, base/tape tiles of 256, and detached/boundary/replay tiles of 8192.</li>
-              <li>With the batching actor effective, require <code>server.max_prefill_tokens_per_cycle=256</code>, direct streaming no later than the first split, and <code>server.max_batch_tokens=512</code> for that tile plus the effective decode width. Startup rejects a mismatched route before loading model weights.</li>
+              <li>Require <code>server.max_prefill_tokens_per_cycle=256</code> and <code>server.max_batch_tokens=512</code> for that tile plus the effective decode width. Startup rejects a mismatched actor-prefill contract before loading model weights.</li>
               <li>Separate ordinary inference/base tiles, tape-authoritative training tiles, and detached materialized full-attention routes. Tuning the wrong field cannot explain that path.</li>
               <li>Correlate the gap with actor phase timing, model segment/tile timing, external-yield synchronization, allocator reclaim, physical KV resize, live memory samples, and primary versus host-backed peak memory.</li>
             </ul>
           </div>
           <div>
             <div class="label mb-2">Fix or isolate</div>
-            <p>For a direct-route diagnostic, explicitly disable the batching actor, then restart with streaming <code>mode="disabled"</code> for one monolithic arm and <code>auto</code> for its tiled peer. Change only the threshold or one route-specific tile per run. Production actor serving keeps the route-invariant 256-token boundary. Reduce a diagnostic tile in multiples of 64 for a measured OOM; do not broadly raise the timeout or infer VRAM rebalancing from a temporal gap alone.</p>
+            <p>Keep actor ownership and tiled dispatch fixed. Change the actor ceiling, streaming threshold, and base tile together in a separate diagnostic file so they retain one numerical boundary. Reduce that boundary in multiples of 64 for a measured OOM; do not broadly raise the timeout or infer VRAM rebalancing from a temporal gap alone.</p>
           </div>
         </div>
-<pre class="mt-5"><code># kiln-monolithic.toml: direct monolithic isolation arm
-[batching]
-mode = "disabled"
+<pre class="mt-5"><code># kiln-rocm-prefill-128-diagnostic.toml
+[server]
+max_batch_tokens = 256
+max_prefill_tokens_per_cycle = 128
 
 [streaming_prefill]
-mode = "disabled"</code></pre>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          Put the tiled peer in a separate file so each arm is a valid, independently reviewable
-          configuration.
-        </p>
-<pre class="mt-3"><code># kiln-tiled-diagnostic.toml: direct tiled diagnostic peer
-[batching]
-mode = "disabled"
-
-[streaming_prefill]
-mode = "auto"
-threshold_tokens = 4096
-tile_tokens = 2048
+mode = "enabled"
+threshold_tokens = 128
+tile_tokens = 128
 tape_tile_tokens = "auto"
 detached_full_attn_tile_tokens = "auto"
 last_token_lm_head = true
 
-kiln config --file kiln-tiled-diagnostic.toml
-kiln serve --config kiln-tiled-diagnostic.toml
+kiln config --file kiln-rocm-prefill-128-diagnostic.toml --backend rocm
+kiln serve --config kiln-rocm-prefill-128-diagnostic.toml
 curl -s http://localhost:8420/v1/config | jq '.streaming_prefill'
 curl -s http://localhost:8420/health | jq '.prefill_runtime.streaming_prefill'
 curl -s http://localhost:8420/metrics \
   | grep -E 'kiln_batching_engine_|kiln_gpu_memory_|kiln_kv_'</code></pre>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          In the tuning peer, the explicit base tile is inherited by both specialized <code>auto</code>
+          On ROCm, <code>mode="disabled"</code> and a threshold later than the first actor tile are invalid:
+          startup rejects either before loading weights. In the diagnostic arm, the explicit base tile is inherited by both specialized <code>auto</code>
           fields and by detached boundary/replay variants. Set <code>tape_tile_tokens</code> or
           <code>detached_full_attn_tile_tokens</code> explicitly when you need a route to differ. Every
-          value is immutable after startup; changing the file or shell without restart has no effect.
+          value is immutable after startup; changing the file or shell without restart has no effect. A
+          smaller tile can change deterministic output, so require parity before treating it as a fix.
           Canonical names follow <code>KILN_STREAMING_PREFILL_&lt;FIELD&gt;</code>. Deprecated shorter names
           parse strictly, warn, and fail startup if they conflict with a canonical value.
         </p>

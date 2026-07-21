@@ -7,7 +7,7 @@ use crate::config::{
     StreamingPrefillRuntimeConfig,
 };
 use crate::memory_observability::CachedMemoryGovernorObservation;
-use crate::state::{AppState, DirectDecodeRendezvousRuntimeState, ModelBackend, TrainingWorkload};
+use crate::state::{AppState, ModelBackend, TrainingWorkload};
 
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 const SPECULATIVE_SERVING_UNAVAILABLE_REASON: &str =
@@ -128,7 +128,6 @@ pub(crate) fn cuda_graph_config_response(state: &AppState) -> CudaGraphConfigRes
 struct BatchingConfigResponse {
     configuration: BatchingRuntimeConfig,
     actor_active: bool,
-    direct_decode_rendezvous: DirectDecodeRendezvousRuntimeState,
 }
 
 #[derive(Serialize)]
@@ -479,14 +478,7 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
         decode_runtime: state.decode_runtime_config,
         batching: BatchingConfigResponse {
             configuration: state.batching_runtime_config,
-            actor_active: matches!(
-                state.backend.as_ref(),
-                ModelBackend::Real {
-                    batching_engine: Some(_),
-                    ..
-                }
-            ),
-            direct_decode_rendezvous: state.direct_decode_rendezvous_runtime_state(),
+            actor_active: matches!(state.backend.as_ref(), ModelBackend::Real { .. }),
         },
         prefix_cache: PrefixCacheConfigResponse {
             configuration: state.prefix_cache_config.clone(),
@@ -1131,11 +1123,11 @@ mod tests {
         let effective = &json["effective_configuration"];
         assert_eq!(effective["schema_id"], "kiln.effective-configuration.v1");
         assert_eq!(effective["schema_version"], 1);
-        assert_eq!(effective["fixed_field_count"], 117);
+        assert_eq!(effective["fixed_field_count"], 112);
         assert_eq!(effective["dynamic_field_count"], 0);
         assert_eq!(
             effective["fields"].as_object().unwrap().len(),
-            117,
+            112,
             "the API snapshot must include every fixed typed leaf"
         );
         assert_eq!(effective["fields"]["server.port"]["source"], "default");
@@ -1298,38 +1290,6 @@ mod tests {
         );
         assert_eq!(json["prefix_cache"]["effective_max_entries"], 0);
         assert_eq!(
-            json["batching"]["direct_decode_rendezvous"]["scope"],
-            "direct_streaming_greedy_only"
-        );
-        assert_eq!(
-            json["batching"]["direct_decode_rendezvous"]["backend_available"],
-            false
-        );
-        assert_eq!(
-            json["batching"]["direct_decode_rendezvous"]["backend_unavailable_reason"],
-            "mock_backend"
-        );
-        assert_eq!(
-            json["batching"]["direct_decode_rendezvous"]["actor_active"],
-            false
-        );
-        assert_eq!(
-            json["batching"]["direct_decode_rendezvous"]["worker_active"],
-            false
-        );
-        assert_eq!(
-            json["batching"]["direct_decode_rendezvous"]["route_available"],
-            false
-        );
-        assert_eq!(
-            json["batching"]["configuration"]["mode"]["configured"],
-            "auto"
-        );
-        assert_eq!(
-            json["batching"]["configuration"]["mode"]["effective_enabled"],
-            false
-        );
-        assert_eq!(
             json["batching"]["configuration"]["rowwise_decode"]["enabled"],
             false
         );
@@ -1356,34 +1316,6 @@ mod tests {
         assert_eq!(
             json["batching"]["configuration"]["actor_cycle_idle"]["command_poll_milliseconds"],
             5
-        );
-        assert_eq!(
-            json["batching"]["configuration"]["direct_decode_rendezvous"]["mode"]["configured"],
-            "auto"
-        );
-        assert_eq!(
-            json["batching"]["configuration"]["direct_decode_rendezvous"]["mode"]["backend_policy_enabled"],
-            false
-        );
-        assert_eq!(
-            json["batching"]["configuration"]["direct_decode_rendezvous"]["mode"]["effective_enabled"],
-            false
-        );
-        assert_eq!(
-            json["batching"]["configuration"]["direct_decode_rendezvous"]["max_batch"]["backend_policy"],
-            1
-        );
-        assert_eq!(
-            json["batching"]["configuration"]["direct_decode_rendezvous"]["max_batch"]["effective"],
-            1
-        );
-        assert_eq!(
-            json["batching"]["configuration"]["direct_decode_rendezvous"]["wait_us"]["effective"],
-            0
-        );
-        assert_eq!(
-            json["batching"]["configuration"]["direct_decode_rendezvous"]["mixed_seq_lens"]["effective"],
-            false
         );
         assert_eq!(
             json["batching"]["configuration"]["burst_prefill_admission"],

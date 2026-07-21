@@ -1291,8 +1291,8 @@
           "type": "DecodeCapabilities"
         },
         {
-          "name": "decode_batcher",
-          "type": "DecodeBatcherPolicy"
+          "name": "decode_execution",
+          "type": "DecodeExecutionPolicy"
         },
         {
           "name": "training",
@@ -1353,28 +1353,50 @@
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
-    "DecodeBatcherPolicy": {
-      "field_count": 19,
+    "DecodeCapabilities": {
+      "field_count": 8,
       "fields": [
         {
-          "name": "rendezvous_default_enabled",
-          "type": "bool"
+          "name": "resident_decode",
+          "type": "Support"
         },
         {
-          "name": "max_batch",
+          "name": "paged_decode_graph_outputs",
+          "type": "Support"
+        },
+        {
+          "name": "mtp_speculative_generation",
+          "type": "Support"
+        },
+        {
+          "name": "speculative_policy",
+          "type": "SpeculativeDecodePolicy"
+        },
+        {
+          "name": "linear_argmax",
+          "type": "Support"
+        },
+        {
+          "name": "linear_argmax_batch",
+          "type": "Support"
+        },
+        {
+          "name": "linear_sample",
+          "type": "Support"
+        },
+        {
+          "name": "linear_sample_batch",
+          "type": "Support"
+        }
+      ],
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "DecodeExecutionPolicy": {
+      "field_count": 14,
+      "fields": [
+        {
+          "name": "max_decode_batch",
           "type": "usize"
-        },
-        {
-          "name": "engine_max_decode_batch",
-          "type": "Option<usize>"
-        },
-        {
-          "name": "wait_micros",
-          "type": "u64"
-        },
-        {
-          "name": "allow_mixed_seq_lens",
-          "type": "bool"
         },
         {
           "name": "require_native_decode_attention",
@@ -1421,54 +1443,12 @@
           "type": "bool"
         },
         {
-          "name": "batching_engine_default_enabled",
-          "type": "bool"
-        },
-        {
           "name": "actor_prefill_tile_alignment_required",
           "type": "bool"
         },
         {
           "name": "warm_resident_decode_pool_on_startup",
           "type": "bool"
-        }
-      ],
-      "source": "crates/kiln-model/src/backend/capability.rs"
-    },
-    "DecodeCapabilities": {
-      "field_count": 8,
-      "fields": [
-        {
-          "name": "resident_decode",
-          "type": "Support"
-        },
-        {
-          "name": "paged_decode_graph_outputs",
-          "type": "Support"
-        },
-        {
-          "name": "mtp_speculative_generation",
-          "type": "Support"
-        },
-        {
-          "name": "speculative_policy",
-          "type": "SpeculativeDecodePolicy"
-        },
-        {
-          "name": "linear_argmax",
-          "type": "Support"
-        },
-        {
-          "name": "linear_argmax_batch",
-          "type": "Support"
-        },
-        {
-          "name": "linear_sample",
-          "type": "Support"
-        },
-        {
-          "name": "linear_sample_batch",
-          "type": "Support"
         }
       ],
       "source": "crates/kiln-model/src/backend/capability.rs"
@@ -2275,10 +2255,10 @@
       "supplemental_commands": []
     },
     {
-      "command": "cargo test -p kiln-model decode_batcher_stats_report_runner_calls_per_token && cargo test -p kiln-server test_metrics_render && cargo test -p kiln-graph replay",
+      "command": "cargo test -p kiln-server batching_engine && cargo test -p kiln-server test_metrics_render && cargo test -p kiln-graph replay",
       "coverage_blockers": [],
       "evidence": [
-        "crates/kiln-model/src/generate.rs",
+        "crates/kiln-server/src/batching_engine.rs",
         "crates/kiln-server/src/metrics.rs",
         "crates/kiln-server/src/api/health.rs",
         "crates/kiln-server/src/api/debug_model_state.rs",
@@ -2287,7 +2267,7 @@
       ],
       "evidence_missing": [],
       "evidence_present": [
-        "crates/kiln-model/src/generate.rs",
+        "crates/kiln-server/src/batching_engine.rs",
         "crates/kiln-server/src/metrics.rs",
         "crates/kiln-server/src/api/health.rs",
         "crates/kiln-server/src/api/debug_model_state.rs",

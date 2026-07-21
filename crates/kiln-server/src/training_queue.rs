@@ -3741,7 +3741,7 @@ fn run_distill_self(
 }
 
 struct TrainingMemoryRuntime {
-    batching_engine: Option<crate::batching_engine::BatchingEngineHandle>,
+    batching_engine: crate::batching_engine::BatchingEngineHandle,
     paged_cache: Arc<kiln_model::PagedKvCacheKt>,
     allocator_policy: kiln_model::GpuAllocatorMemoryProbePolicy,
     device: kiln_tensor::Device,
@@ -3940,8 +3940,8 @@ fn prepare_training_memory_for_job(
                     required_bytes,
                     before,
                 )
-                && let Some(engine) = runtime.batching_engine.as_ref()
             {
+                let engine = &runtime.batching_engine;
                 let staging_available =
                     current_kv_staging_available_bytes(runtime, current_reservation_bytes);
                 let governor = kiln_memory::MemoryGovernor::global();

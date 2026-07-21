@@ -156,45 +156,27 @@ and attests these exact runtime targets before measurement:
 ```text
 GET /v1/config -> .batching.configuration
 GET /v1/config -> .batching.actor_active
-GET /v1/config -> .batching.direct_decode_rendezvous
 GET /health -> .decode_runtime.batching_configuration
 GET /health -> .decode_runtime.batching_engine
-GET /health -> .decode_runtime.direct_decode_rendezvous
 ```
 
 The immutable objects at `/v1/config`
 `.batching.configuration` and `/health`
-`.decode_runtime.batching_configuration` must be equal. The two actual
-direct-rendezvous objects at `/v1/config`
-`.batching.direct_decode_rendezvous` and `/health`
-`.decode_runtime.direct_decode_rendezvous` must also be equal. `actor_active`
-must agree with whether the optional live health `batching_engine` snapshot is
-present and enabled; the snapshot is not itself equal to that boolean. The
-attestation records mode
-intent, backend default, effective selection and source; rowwise and
-prefix-aware values and sources; admission quantum intent, backend default,
-effective clamp and source; and backend-owned burst admission. A malformed
-value, a canonical/deprecated-alias conflict, an unexpected source, or a
-missing actor in an actor-required variant fails before device work. The direct
-rendezvous policy within `batching.configuration` records configured,
-backend-policy, effective, and source values for mode, max batch, wait
-microseconds, and mixed sequence lengths. Its sibling status object records the
-exact scope plus backend, actor, worker, and route availability. A worker may be
-active while the route is unavailable because the actor is active.
+`.decode_runtime.batching_configuration` must be equal. For a real backend,
+`actor_active` must be true and the live health `batching_engine` snapshot must
+be present and accepting before measurement. The attestation records rowwise
+and prefix-aware values and sources; admission quantum intent, backend default,
+effective clamp and source; actor-cycle idle; backend-owned burst admission;
+and the numerical tile-alignment requirement. A malformed value, an unexpected
+source, or a missing actor fails before device work.
 
 Use only canonical mechanically derived names in new workload manifests:
-`KILN_BATCHING_MODE`, `KILN_BATCHING_ROWWISE_DECODE`,
+`KILN_BATCHING_ROWWISE_DECODE`,
 `KILN_BATCHING_PREFIX_AWARE_ADMISSION`, and
 `KILN_BATCHING_PREFILL_ADMISSION_QUANTUM`, plus
-`KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE`,
-`KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH`,
-`KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US`, and
-`KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS`. The eight historical
-spellings are compatibility inputs for existing deployments, not qualification
-vocabulary. A direct-rendezvous variant must disable the actor, restart, prove
-`scope="direct_streaming_greedy_only"` and `route_available=true`, and send only
-streaming effectively-greedy requests. Actor, sampled, and non-streaming runs
-cannot qualify this fallback path.
+`KILN_BATCHING_ACTOR_CYCLE_IDLE_MS` when pacing is part of the arm. Production
+actor activation and the former direct-rendezvous worker are not configurable.
+The removed names are ignored and must not appear in new launch environments.
 
 Streaming-prefill qualification has the same source-bound rule. Declare the
 complete `[streaming_prefill]` table in the committed variant, restart between
@@ -1261,14 +1243,14 @@ shut down normally, and no listener, process, or snapshot remained. Its 6.608
 output tokens/second and 6.562 thermally sustainable output tokens/second are
 diagnostic-only.
 
-The next one-field discriminator launches
+The next historical one-field discriminator launched
 `qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-graph-disabled-no-prefix-cache-v1.json`.
 Relative to the graph-disabled arm it changes only
 `prefix_cache.enabled = false`, retaining the same batching actor, repaired
 kernel profile, memory policy, model, prompt, and four-token bound. A
 `foundation` result attributes the defect to prefix-cache KV/recurrent-state
 reuse; `baseline` excludes that subsystem and advances the comparison to the
-batching/direct serving boundary.
+then-distinct actor/direct serving boundary.
 
 The no-prefix-cache result is retained at
 `benchmarks/receipts/rocm/strix-halo/20260719t061953-rocm-strix-halo-greedy-c1-no-prefix-cache-counterevidence-v1.kiln.json`
@@ -1282,28 +1264,30 @@ peaked at 35,214,360,576 bytes, shutdown was normal, and no listener, process,
 or snapshot remained. Its 6.738 output tokens/second and 6.706 thermally
 sustainable output tokens/second are diagnostic-only.
 
-The next one-field discriminator launches
+The following historical one-field discriminator launched
 `qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-graph-disabled-no-prefix-cache-no-batching-v1.json`.
 Relative to the no-prefix-cache arm it changes only
 `batching.mode = "disabled"`. The direct streaming rendezvous remains `auto`
 and therefore uses the ROCm backend's typed policy. A `foundation` result
 attributes the defect to actor-owned prefill/decode scheduling; `baseline`
 excludes the actor and advances the comparison to the direct rendezvous/model
-forward boundary.
+forward boundary. The no-batching launch/config pair is now retired and deleted;
+current source always constructs the actor for a real backend. Its receipt is
+preserved solely as source-bound localization evidence.
 
 The first direct-path attempt retained
 `benchmarks/receipts/rocm/strix-halo/20260719t062650-rocm-strix-halo-greedy-c1-direct-driver-v8-diagnostics-failed-v1.kiln.json`.
 Its four-token warmup completed and emitted `To establish a foundation`, but
 driver v8 failed the warmup verdict before the pinned 163-token measurement
 because it unconditionally required `decode_runtime.batching_engine`. The
-typed arm had disabled that actor, so the health response correctly omitted it
+historical typed arm had disabled that actor, so the health response correctly omitted it
 and exposed the live direct-rendezvous worker instead. This is failed harness
 evidence only: the distinct 160-token warmup cannot answer the measured prompt's
 correctness discriminator. Initial fingerprint, server, and final fingerprint
 lifecycles stayed below 60 C, all 35 server pacing intervals completed, and
 shutdown/cooldown left no listener, process, or snapshot residue.
 
-Serving benchmark driver v9 retains the v8 provenance containment and makes
+Historical serving benchmark driver v9 retained the v8 provenance containment and made
 server diagnostics route-aware before retrying that arm. Driver v8 runs both
 the initial and final model fingerprints
 as start-gated child process groups under the same typed host thermal policy,
@@ -1333,8 +1317,8 @@ zero busy/failure jobs, no runner-call-budget violation, one server `ok`, and
 zero request errors, timeouts, rejections, or active requests at the boundary.
 The batching-engine record is correctly null.
 
-Graphs and prefix caching remain disabled in both sides of this one-field
-comparison. The actor-enabled arm emits `baseline`; changing only
+Graphs and prefix caching were disabled in both sides of this historical
+one-field comparison. The actor-enabled arm emits `baseline`; changing only
 `batching.mode` to `disabled` emits `foundation`. This causally localizes the
 pinned serving divergence to the batching actor's prefill/decode path and
 excludes the direct streaming/rendezvous/model path under this request. It does
@@ -1348,7 +1332,7 @@ trip, and no listener, process, or snapshot remained.
 
 The actor-enabled parent records three prompt-token chunks, 24 prefill
 forwards, 21 layer yields, and 96 completed transformer layers for the exact
-163-token prompt. The direct route has no actor prefill counter. To separate
+163-token prompt. The retired direct route has no actor prefill counter. To separate
 actor token chunking from layer resumption, launch
 `qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-graph-disabled-no-prefix-cache-prefill-256-v1.json`.
 Relative to the actor-enabled no-prefix parent, it changes only
@@ -1387,10 +1371,10 @@ The repaired production input is now
 `qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-v2.json`.
 Its TOML differs from the preserved v1 production profile only by changing the
 actor prefill ceiling from 64 to 256. The backend policy simultaneously makes
-256 the ROCm direct-streaming threshold and base/tape tile. A typed
+256 the ROCm tiled streaming-prefill threshold and base/tape tile. A typed
 `actor_prefill_tile_alignment_required=true` diagnostic explains the
 fail-closed startup checks: the actor ceiling must equal the effective tile,
-direct streaming must cover the first split, and `max_batch_tokens` must fit
+tiled streaming prefill must cover the first split, and `max_batch_tokens` must fit
 the tile plus the effective decode width. This prevents configuration drift
 from reintroducing route-dependent deterministic output. Historical 64-token
 actor profiles remain receipt-bound evidence and are not rewritten; a repaired

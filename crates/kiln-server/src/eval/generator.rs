@@ -550,10 +550,7 @@ impl EvalGenerator for LiveEvalGenerator {
             else {
                 return Err("eval requires the real model backend".into());
             };
-            let batching_engine = match batching_engine.as_ref() {
-                Some(h) => h.clone(),
-                None => return Err("batching engine not initialized".into()),
-            };
+            let batching_engine = batching_engine.clone();
             let request_id = Uuid::new_v4();
             let cancel = kiln_model::CancelHandle::with_prefill_progress_gauge(
                 state.metrics.request_prefill_tokens_completed.clone(),

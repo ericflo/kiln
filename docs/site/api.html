@@ -335,7 +335,7 @@
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/decode</code> &mdash; live decode tokens/sec and inter-token latency stats used by the dashboard.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/recent-requests</code> &mdash; bounded recent chat-completion history with effective thinking-budget provenance and outcomes for the dashboard's request panel.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/models</code> &mdash; list the served model.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return the complete immutable <code>kiln.effective-configuration.v1</code> startup snapshot, the versioned accelerator execution policy, top-level <code>cuda_graphs</code> configured/effective/cache/invariant state, independent top-level <code>rocm_graphs</code> full statistics and <code>rocm_graph_telemetry</code> live phase/transient snapshots with a typed unavailable-reason field beside each, typed batching and streaming-prefill intent/backend/effective policy, actor activity, direct-rendezvous worker/route status, fail-closed speculative diagnostics, device-scoped memory capacity and live availability diagnostics, effective gradient and SFT boundary-checkpoint policy, the resident optimizer implementation/tuple/per-workload admission contract, memory-budget partitions, generation defaults, and the immutable <code>operational</code> snapshot for terminal/agent access, pi resolution, library URL, and cache/session paths. A null live value never means its counters were zero.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return the complete immutable <code>kiln.effective-configuration.v1</code> startup snapshot, the versioned accelerator execution policy, top-level <code>cuda_graphs</code> configured/effective/cache/invariant state, independent top-level <code>rocm_graphs</code> full statistics and <code>rocm_graph_telemetry</code> live phase/transient snapshots with a typed unavailable-reason field beside each, typed actor scheduling and streaming-prefill policy, actor activity, fail-closed speculative diagnostics, device-scoped memory capacity and live availability diagnostics, effective gradient and SFT boundary-checkpoint policy, the resident optimizer implementation/tuple/per-workload admission contract, memory-budget partitions, generation defaults, and the immutable <code>operational</code> snapshot for terminal/agent access, pi resolution, library URL, and cache/session paths. A null live value never means its counters were zero.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/debug/model-state</code> &mdash; gated trusted-debug state including the complete base-weight shard manifest, execution-provenance record, immutable checkpoint-boundary policy under <code>training.checkpoint_boundary_policy</code>, the same top-level <code>cuda_graphs</code> policy snapshot as config, and the resolved ROCm policy plus the same four graph value/reason fields as config. Do not enable this endpoint merely to collect routine graph telemetry; health carries the operational snapshot.</div>
         </div>
         <p class="leading-relaxed mt-4" style="color: var(--fg-dim);">
@@ -353,7 +353,7 @@
 curl -s http://localhost:8420/v1/config | jq '.effective_configuration'
 curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["server.port"]'</code></pre>
           <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-            <code>effective_configuration</code> is a sorted flat map of all 117 fixed typed startup leaves plus two dynamic leaves for each teacher credential. Every field carries its post-precedence typed value, <code>default</code>, <code>config_file</code>, <code>environment</code>, or <code>command_line</code> source, its canonical environment spelling, an explicitly empty compatibility-name list, redaction state, and a true restart requirement. Self-improvement requests, webhook URLs, and credential-provider names are retained only as redacted null entries. The map includes the typed effective-config hash and is identical to the startup snapshot available from <code>kiln config --json</code>. The response keeps that input object separate from accelerator, batching, and streaming-prefill intent, backend policy, effective execution, startup
+            <code>effective_configuration</code> is a sorted flat map of all 112 fixed typed startup leaves plus two dynamic leaves for each teacher credential. Every field carries its post-precedence typed value, <code>default</code>, <code>config_file</code>, <code>environment</code>, or <code>command_line</code> source, its canonical environment spelling, an explicitly empty compatibility-name list, redaction state, and a true restart requirement. Self-improvement requests, webhook URLs, and credential-provider names are retained only as redacted null entries. The map includes the typed effective-config hash and is identical to the startup snapshot available from <code>kiln config --json</code>. The response keeps that input object separate from accelerator, batching, and streaming-prefill intent, backend policy, effective execution, startup
             capacity resolution, the current safe memory sample, and the budget derived from effective
             capacity separate. Every <code>*_gib</code> value uses
             1 GiB = 1,073,741,824 bytes and is paired with an exact <code>*_bytes</code> value where the
@@ -783,13 +783,6 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
               <pre class="overflow-x-auto text-xs leading-relaxed"><code>{
   "batching": {
     "configuration": {
-      "mode": {
-        "configured": "auto",
-        "configured_source": "default",
-        "backend_policy_enabled": true,
-        "effective_enabled": true,
-        "effective_source": "backend_policy"
-      },
       "rowwise_decode": { "enabled": false, "source": "default" },
       "prefix_aware_admission": { "enabled": true, "source": "default" },
       "prefill_admission_quantum": {
@@ -805,58 +798,17 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
         "enabled": false,
         "command_poll_milliseconds": 5
       },
-      "direct_decode_rendezvous": {
-        "mode": {
-          "configured": "auto",
-          "configured_source": "default",
-          "backend_policy_enabled": true,
-          "effective_enabled": true,
-          "effective_source": "backend_policy"
-        },
-        "max_batch": {
-          "configured": null,
-          "configured_source": "default",
-          "backend_policy": 8,
-          "effective": 8,
-          "effective_source": "backend_policy"
-        },
-        "wait_us": {
-          "configured": null,
-          "configured_source": "default",
-          "backend_policy": 0,
-          "effective": 0,
-          "effective_source": "backend_policy"
-        },
-        "mixed_seq_lens": {
-          "configured": null,
-          "configured_source": "default",
-          "backend_policy": false,
-          "effective": false,
-          "effective_source": "backend_policy"
-        }
-      },
       "burst_prefill_admission": false,
       "actor_prefill_tile_alignment_required": true
     },
-    "actor_active": true,
-    "direct_decode_rendezvous": {
-      "scope": "direct_streaming_greedy_only",
-      "backend_available": true,
-      "actor_active": true,
-      "worker_active": true,
-      "route_available": false
-    }
+    "actor_active": true
   }
 }</code></pre>
               <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>mode.configured</code> is <code>auto</code>, <code>enabled</code>, or
-                <code>disabled</code>. Its configured source is <code>default</code>,
-                <code>config_file</code>, or <code>environment</code>;
-                <code>backend_policy_enabled</code> records what <code>auto</code> would select, and
-                <code>effective_enabled</code>/<code>effective_source</code> record the final decision.
-                Automatic actor selection is enabled on CUDA, ROCm, Vulkan, and CPU and disabled on
-                Metal. <code>actor_active</code> says whether the actor was actually constructed; never
-                infer that from configured intent alone.
+                Every real backend constructs this actor. Streaming and non-streaming requests,
+                deterministic and sampled decode, cancellation, backpressure, KV ownership, adapter
+                barriers, and shutdown all use that one scheduling state machine. Mock mode retains the
+                scheduler-backed test engine and reports <code>actor_active=false</code>.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 <code>rowwise_decode=false</code> is true multi-row decode. Turning it on is an emergency
@@ -875,10 +827,8 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 currently reports <code>burst_prefill_admission=true</code>; this value is backend-owned and
                 has no operator field. ROCm alone reports
                 <code>actor_prefill_tile_alignment_required=true</code>. Its startup contract requires
-                route-invariant prefill chunks: the actor ceiling must equal the effective 256-token
-                streaming tile, direct streaming must begin no later than that boundary, and the combined
-                token budget must fit the tile plus effective decode width. Unsafe combinations fail startup
-                instead of silently changing deterministic output by route. Every batching setting is
+                actor prompt chunks to preserve the qualified streaming-prefill numerical boundary. Unsafe
+                combinations fail startup instead of silently changing deterministic output. Every batching setting is
                 startup-only and requires restart.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
@@ -892,39 +842,14 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 external hardware guard.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>configuration.direct_decode_rendezvous</code> is the immutable fallback policy.
-                Its mode is <code>auto</code>, <code>enabled</code>, or <code>disabled</code>; max batch
-                is <code>auto</code> or 1&ndash;65536 and is always clamped to effective decode width;
-                wait is <code>auto</code> or any non-negative microsecond integer; mixed sequence lengths
-                is <code>auto</code> or a boolean. All real backends auto-enable the worker. Automatic
-                <code>(max_batch, wait_us, mixed_seq_lens)</code> values are CPU <code>(8,0,false)</code>,
-                CUDA <code>(1,0,false)</code>, ROCm <code>(8,0,false)</code>, Metal
-                <code>(8,100,true)</code>, and Vulkan <code>(64,5000,true)</code>.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                The sibling <code>batching.direct_decode_rendezvous</code> is actual process state, not
-                another configuration object. It reports <code>scope</code>,
-                <code>backend_available</code>, optional <code>backend_unavailable_reason</code> (currently
-                <code>mock_backend</code>), <code>actor_active</code>, <code>worker_active</code>, and
-                <code>route_available</code>. The scope is exactly direct streaming effectively-greedy
-                requests. Sampled requests, non-streaming requests, and all actor-routed work bypass it.
-                A worker can be active while its route is unavailable because the actor is active. With
-                all defaults, only Metal has this fallback route available because actor auto-selection is
-                disabled there; explicitly disabling the actor can expose it on another real backend.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 <code>GET /health</code> repeats the same immutable object at
                 <code>decode_runtime.batching_configuration</code> beside the optional live
-                <code>batching_engine</code> snapshot and reports fallback state at
-                <code>decode_runtime.direct_decode_rendezvous</code>. <code>GET /v1/health</code> is the
-                same response. The gated trusted
-                debug response retains <code>batching_engine.enabled</code> for actual activity and adds
-                the object at <code>batching_engine.configuration</code>, with fallback state at
-                <code>batching_engine.direct_decode_rendezvous</code>. Canonical startup overrides are
+                <code>batching_engine</code> snapshot. <code>GET /v1/health</code> is the same response.
+                The gated trusted debug response retains <code>batching_engine.enabled</code> for actual
+                activity and adds the object at <code>batching_engine.configuration</code>. Canonical startup overrides are
                 mechanically derived as <code>KILN_BATCHING_&lt;FIELD&gt;</code>; see the
                 <a href="docs/configuration/" class="link">complete Configuration Reference</a> for strict
-                grammar and the eight deprecated aliases. In particular, malformed legacy
-                <code>KILN_DECODE_BATCH_WAIT_US</code> now fails startup instead of silently selecting zero.
+                grammar and removed-variable migration.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 A live actor snapshot reports <code>actor_cycle_idle_ms</code>,
@@ -936,7 +861,7 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 <code>kiln_batching_engine_actor_cycle_idles_total</code>,
                 <code>kiln_batching_engine_actor_cycle_idle_seconds_total</code>, and
                 <code>kiln_batching_engine_actor_cycle_idle_max_seconds</code>. Serving benchmark driver
-                v13 records the configured source plus measured-window count and elapsed time, settles an
+                v18 records the actor-only route, configured source, measured-window count, and elapsed time, settles an
                 idle boundary outside request timing, and fails the
                 <code>actor_cycle_idle_accounted</code> gate on contradictory evidence.
               </p>

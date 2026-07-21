@@ -333,7 +333,7 @@ kiln serve --served-model-id Qwen3.5-4B-local</code></pre>
       <div class="card p-6 lg:col-span-2">
         <p class="label mb-2">Effective configuration</p>
         <h2 class="text-2xl font-semibold tracking-tight mb-4">Inspect every startup value and authority</h2>
-        <p class="mb-4" style="color: var(--fg-dim);">The JSON check contains <code>kiln.effective-configuration.v1</code>: all 117 fixed typed leaves plus two dynamic leaves for each configured teacher credential. The flat, sorted field map records the post-precedence typed value, <code>default</code>/<code>config_file</code>/<code>environment</code>/<code>command_line</code> source, the canonical environment spelling, an explicitly empty compatibility-name list, redaction state, and restart requirement.</p>
+        <p class="mb-4" style="color: var(--fg-dim);">The JSON check contains <code>kiln.effective-configuration.v1</code>: all 112 fixed typed leaves plus two dynamic leaves for each configured teacher credential. The flat, sorted field map records the post-precedence typed value, <code>default</code>/<code>config_file</code>/<code>environment</code>/<code>command_line</code> source, the canonical environment spelling, an explicitly empty compatibility-name list, redaction state, and restart requirement.</p>
 <pre class="text-sm"><code>kiln config --file kiln.toml --json | jq '.effective_configuration'
 kiln config --file kiln.toml --backend vulkan --json | jq '.backend_preview'
 curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["server.max_decode_batch"]'</code></pre>
@@ -360,19 +360,14 @@ curl -s http://localhost:8420/health | jq '.decode_runtime.cuda_graphs'</code></
         <h2 class="text-2xl font-semibold tracking-tight mb-4">Resolve scheduler controls at startup</h2>
         <p class="mb-4" style="color: var(--fg-dim);">Put production scheduling controls in typed TOML. The canonical environment rule is mechanically derived as <code>KILN_BATCHING_&lt;FIELD&gt;</code>, but files are easier to review and bind into benchmark evidence. Every change requires a server restart.</p>
 <pre class="text-sm"><code>[batching]
-mode = "auto"
 rowwise_decode = false
 prefix_aware_admission = true
 prefill_admission_quantum = "auto"
-actor_cycle_idle_ms = 0
-direct_decode_rendezvous_mode = "auto"
-direct_decode_rendezvous_max_batch = "auto"
-direct_decode_rendezvous_wait_us = "auto"
-direct_decode_rendezvous_mixed_seq_lens = "auto"</code></pre>
+actor_cycle_idle_ms = 0</code></pre>
 <pre class="text-sm mt-4"><code>kiln config --file kiln.toml --backend rocm
 kiln serve --config kiln.toml
 curl -s http://localhost:8420/v1/config | jq '.batching'</code></pre>
-        <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>kiln config</code> validates and prints all nine batching fields plus the combined actor-cycle budget, prompt-token and layer ceilings, decode-width ceiling, streaming mode, threshold, and three configured tiles, each with source provenance. <code>auto</code> keeps backend-qualified actor, admission, and direct-rendezvous defaults. <code>actor_cycle_idle_ms</code> is an explicit 0&ndash;60,000 ms safe-boundary duty-cycle delay: zero is unpaced; nonzero trades throughput and ITL for lower sustained accelerator duty cycle and polls control commands within 5 ms. Its canonical environment override is <code>KILN_BATCHING_ACTOR_CYCLE_IDLE_MS</code>. Add <code>--backend</code> to resolve effective actor selection, alignment requirement, decode width, streaming dispatch, and tiles and reject an invalid contract without probing hardware or loading model weights. Without it, the command leaves backend-effective values unresolved. After restart, <code>/v1/config</code> reports actual backend policy, effective selection, decode-width clamping, <code>actor_active</code>, and worker versus route availability. The fallback route applies only to actor-absent direct streaming effectively-greedy requests; sampled and non-streaming work bypass it. A live worker can remain unroutable while the actor is active.</p>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>kiln config</code> validates and prints all four batching fields plus the combined actor-cycle budget, prompt-token and layer ceilings, decode-width ceiling, streaming mode, threshold, and three configured tiles, each with source provenance. Every real backend uses one batching actor; activation and the former direct worker are not configurable. <code>actor_cycle_idle_ms</code> is an explicit 0&ndash;60,000 ms safe-boundary duty-cycle delay: zero is unpaced; nonzero trades throughput and ITL for lower sustained accelerator duty cycle and polls control commands within 5 ms. Its canonical environment override is <code>KILN_BATCHING_ACTOR_CYCLE_IDLE_MS</code>. Add <code>--backend</code> to resolve the alignment requirement, decode width, streaming dispatch, and tiles and reject an invalid contract without probing hardware or loading model weights. Without it, the command leaves backend-effective values unresolved. After restart, <code>/v1/config</code> reports backend policy, effective decode-width clamping, and <code>actor_active</code>.</p>
       </div>
       <div class="card p-6 lg:col-span-2">
         <p class="label mb-2">Prefix-cache policy</p>
