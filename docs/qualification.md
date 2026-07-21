@@ -2570,6 +2570,15 @@ call/failure/slow count, total time, and maximum duration. A failed sync, a sync
 lasting at least 100 ms, any physical resize/reclaim/graph event, or any
 unexplained ITL outlier fails the stable arm.
 
+Graph-on mixed-load arms also conserve request phase attribution against the
+same measured-window lifetime graph telemetry. A shared batched capture or
+replay envelope is expected to appear on every ready request row that
+participated, so the request aggregate may exceed device work; it must not
+exceed the matching lifetime phase total multiplied by maximum observed decode
+width. Exceeding that bound fails the arm because it proves phase charging
+escaped the participating cohort. Use the request total to diagnose causal
+overlap and the lifetime total to quantify process/device work.
+
 Experimental ROCm graph runs expose a closed fallback contract at
 `/health.decode_runtime.rocm_graphs.fallbacks`. It reports the total and the
 fourteen reason counts (`multi_row_batch_unsupported`,

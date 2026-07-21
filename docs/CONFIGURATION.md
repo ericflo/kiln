@@ -948,6 +948,14 @@ one invocation, so their request `graph_capture_ms` and `graph_replay_ms` fields
 cannot absorb another concurrent request's work. A zero value means the phase
 ran below microsecond resolution; null means that route did not run the phase.
 
+For batched decode, the same invocation envelope is attached only to the ready
+requests whose rows participated. It is intentionally a per-request overlap
+candidate, so summing requests can duplicate shared work by the decode width;
+process-work totals remain authoritative in the six lifetime phase summaries.
+ROCm mixed-load qualification rejects request totals above lifetime phase time
+times maximum observed decode width, which also catches contamination from
+prefilling or backpressured active slots.
+
 Native ROCm HIP-graph capture supports both single-row decode and the contiguous
 BF16 multi-row route. Batched graphs are keyed by row count and bucketed
 attention geometry. They retain graph-stable token IDs, positions, RoPE tables,

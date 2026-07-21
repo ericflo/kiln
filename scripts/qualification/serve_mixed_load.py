@@ -561,6 +561,10 @@ GRAPH_PHASE_NAMES = (
     "native_replay",
     "rejected_candidate_cleanup",
 )
+GRAPH_CAPTURE_PHASE_NAMES = tuple(
+    phase_name for phase_name in GRAPH_PHASE_NAMES if phase_name != "native_replay"
+)
+GRAPH_PHASE_CONSERVATION_TOLERANCE_MS = 0.001
 GRAPH_HEALTH_METADATA_FIELDS = (
     "state",
     "unavailable_reason",
@@ -5494,6 +5498,49 @@ def actor_cycle_idle_contract_failures(
     return failures
 
 
+def graph_phase_conservation_failures(
+    values: dict[str, float | int],
+) -> list[str]:
+    max_width = values.get("batching_max_observed_batch_size")
+    if (
+        not isinstance(max_width, (int, float))
+        or isinstance(max_width, bool)
+        or not math.isfinite(max_width)
+        or max_width < 1
+    ):
+        return [
+            "cannot bound request graph phases: "
+            f"batching_max_observed_batch_size={max_width!r}"
+        ]
+
+    lifetime_capture_ms = sum(
+        float(values[f"graph_{phase_name}_duration_ms_total"])
+        for phase_name in GRAPH_CAPTURE_PHASE_NAMES
+    )
+    comparisons = (
+        (
+            "capture",
+            float(values["latency_phase_graph_capture_ms_total"]),
+            lifetime_capture_ms,
+        ),
+        (
+            "replay",
+            float(values["latency_phase_graph_replay_ms_total"]),
+            float(values["graph_native_replay_duration_ms_total"]),
+        ),
+    )
+    failures: list[str] = []
+    for phase_name, request_total_ms, lifetime_total_ms in comparisons:
+        bound_ms = lifetime_total_ms * float(max_width)
+        if request_total_ms > bound_ms + GRAPH_PHASE_CONSERVATION_TOLERANCE_MS:
+            failures.append(
+                f"request graph {phase_name} total {request_total_ms:.3f} ms exceeded "
+                f"lifetime {phase_name} total {lifetime_total_ms:.3f} ms times "
+                f"maximum decode width {max_width:g} ({bound_ms:.3f} ms)"
+            )
+    return failures
+
+
 def metrics_from_values(values: dict[str, float | int]) -> list[dict[str, Any]]:
     if set(values) != set(METRIC_DEFINITIONS):
         missing = sorted(set(METRIC_DEFINITIONS) - set(values))
@@ -6039,6 +6086,7 @@ def execute(
             )
         status_failures.extend(batching_staging_contract_failures(values, variant))
         status_failures.extend(actor_cycle_idle_contract_failures(values, variant))
+        status_failures.extend(graph_phase_conservation_failures(values))
         expected_prefix_cache_enabled = int(
             VARIANT_CONFIGS[variant]["runtime"]["prefix_cache_effective_enabled"]
         )

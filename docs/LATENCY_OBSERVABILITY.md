@@ -235,6 +235,17 @@ covers device input updates, cross-stream dependency setup, and native launch
 submission. The later external-yield device settlement remains
 `synchronization_ms` and is not double-counted as replay.
 
+A batching-engine graph invocation is shared work. Its phase envelope is
+attached once to every ready request that supplied a row to that invocation so
+each request can explain the wall interval it overlapped. Prefilling,
+backpressured, first-token-pending, and otherwise non-ready active requests are
+not charged. Consequently, request-level totals are not process-work totals:
+they may duplicate one shared invocation by at most the observed decode width.
+The ROCm mixed-load gate enforces that capture and replay request totals do not
+exceed their matching lifetime phase totals multiplied by maximum observed
+decode width. Use lifetime graph telemetry for device-work totals and request
+phases for causal overlap.
+
 Other-backend graph work, non-W8 device readback, resize, trim, adapter, and
 training remain explicit nullable fields. Their aggregate subsystems have
 separate operational telemetry, but they are not yet joined to each
@@ -249,7 +260,9 @@ that distinction in compact receipts. For each fixed phase `P`, they emit
 only non-null request observations, while the count identifies the population
 that contributed to it. `latency_phase_metadata_missing_count` counts
 successful measured requests that omitted the entire terminal phase object and
-is a hard qualification failure. These are source-bound measured-window
+is a hard qualification failure. Shared batch-phase aggregates are additionally
+guarded by the lifetime-times-width conservation bound above. These are
+source-bound measured-window
 aggregates, not values reconstructed from threshold-filtered logs. Older
 receipts created before this contract are not backfilled.
 

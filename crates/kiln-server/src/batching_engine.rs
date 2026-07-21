@@ -4307,8 +4307,10 @@ impl BatchingEngineActor {
             .forward_decode_with_phases(&mut slots, &sampling);
         let elapsed = started.elapsed();
         drop(slots);
-        for active in &mut self.active {
-            active.token_phase_durations.add_actor_decode(elapsed);
+        for &idx in &ready_indices {
+            self.active[idx]
+                .token_phase_durations
+                .add_actor_decode(elapsed);
         }
         self.record_decode_forward_duration(elapsed, batch_len);
         self.snapshot.last_batch_size = batch_len;
@@ -4317,8 +4319,8 @@ impl BatchingEngineActor {
 
         let output_tokens = match result {
             Ok(step) if step.tokens.len() == batch_len => {
-                for active in &mut self.active {
-                    active
+                for &idx in &ready_indices {
+                    self.active[idx]
                         .token_phase_durations
                         .add_backend(step.backend_phases);
                 }
@@ -7033,7 +7035,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_backend_phases_follow_the_owned_tokens_to_each_request() {
+    fn decode_backend_phases_follow_owned_ready_tokens_only() {
         let mut backend_phases = BackendPhaseDurations::default();
         backend_phases.observe_gpu_lock_wait(Duration::from_millis(7));
         backend_phases.observe_synchronization(Duration::from_millis(11));
@@ -7073,6 +7075,18 @@ mod tests {
                 generated_tokens: Vec::new(),
             },
         );
+        let (response_c_tx, _response_c_rx) = mpsc::channel(2);
+        push_test_active(
+            &mut actor,
+            request(301, 2),
+            response_c_tx,
+            DecodeSlot::Mock {
+                next_token: 301,
+                generated_tokens: Vec::new(),
+            },
+        );
+        actor.active[2].delivery_state = ActiveDeliveryState::InFlight { sequence: 0 };
+        let non_ready_phases = actor.active[2].token_phase_durations;
 
         assert_eq!(actor.run_decode_batch(), 2);
         for (expected_token, response_rx) in [(111, &mut response_a_rx), (211, &mut response_b_rx)]
@@ -7085,6 +7099,7 @@ mod tests {
                 other => panic!("expected timed token, got {other:?}"),
             }
         }
+        assert_eq!(actor.active[2].token_phase_durations, non_ready_phases);
     }
 
     /// Forward whose `prepare_request` reports a block-pool shortage for a

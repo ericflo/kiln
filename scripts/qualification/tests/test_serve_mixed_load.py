@@ -3661,6 +3661,48 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                     )
                 )
 
+    def test_graph_phase_conservation_bounds_request_charging_by_decode_width(self) -> None:
+        values = {
+            "batching_max_observed_batch_size": 4,
+            "latency_phase_graph_capture_ms_total": 40.0,
+            "latency_phase_graph_replay_ms_total": 8.0,
+            "graph_native_replay_duration_ms_total": 2.0,
+            **{
+                f"graph_{phase_name}_duration_ms_total": 2.0
+                for phase_name in serve.GRAPH_CAPTURE_PHASE_NAMES
+            },
+        }
+        self.assertEqual(serve.graph_phase_conservation_failures(values), [])
+        self.assertEqual(
+            serve.graph_phase_conservation_failures(
+                {
+                    **values,
+                    "latency_phase_graph_capture_ms_total": 40.002,
+                    "latency_phase_graph_replay_ms_total": 8.002,
+                }
+            ),
+            [
+                "request graph capture total 40.002 ms exceeded lifetime capture "
+                "total 10.000 ms times maximum decode width 4 (40.000 ms)",
+                "request graph replay total 8.002 ms exceeded lifetime replay total "
+                "2.000 ms times maximum decode width 4 (8.000 ms)",
+            ],
+        )
+        self.assertTrue(
+            serve.graph_phase_conservation_failures(
+                {**values, "batching_max_observed_batch_size": 0}
+            )
+        )
+        self.assertEqual(
+            serve.graph_phase_conservation_failures(
+                {
+                    key: 0.0 if "duration" in key or "latency" in key else value
+                    for key, value in values.items()
+                }
+            ),
+            [],
+        )
+
     def test_metric_contract_is_sorted_closed_and_finite(self) -> None:
         metrics = serve.zero_metrics()
         self.assertEqual(

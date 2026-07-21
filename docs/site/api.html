@@ -1856,7 +1856,11 @@ kiln serve --config kiln.toml</code></pre>
           graph routes also report request-owned <code>graph_capture_ms</code> and
           <code>graph_replay_ms</code>. One graph-runner lock encloses the before/call/after phase
           snapshot, capture time survives eager fallback, and replay launch excludes the separately
-          reported external-yield synchronization. Other-backend graph, resize/trim, adapter, and
+          reported external-yield synchronization. A shared batched invocation is attached only to
+          the ready requests whose rows participated, so request totals are overlap evidence and may
+          duplicate device work by at most observed decode width; lifetime graph telemetry remains
+          the process-work total, and ROCm qualification enforces that conservation bound.
+          Other-backend graph, resize/trim, adapter, and
           training phases remain <code>null</code> until their owning runtime returns correlated
           timings; unlocked process-global counter deltas are never presented as per-request
           evidence. Mixed-load, development-soak, and endurance
