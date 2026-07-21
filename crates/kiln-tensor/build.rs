@@ -365,6 +365,7 @@ fn build_rocm() {
     if !status.success() {
         panic!("ar failed to archive ROCm kernels into {}", lib.display());
     }
+    verify_rocm_archive(&lib, ROCM_KERNELS, &rocm_root);
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=kiln_tensor_rocm_ops");
@@ -382,6 +383,90 @@ fn build_rocm() {
     println!("cargo:rerun-if-env-changed=HIPCC");
     println!("cargo:rerun-if-env-changed=KILN_ROCM_ARCHS");
     println!("cargo:rerun-if-env-changed=KILN_ROCM_WAVE64");
+}
+
+fn verify_rocm_archive(lib: &Path, kernels: &[&str], rocm_root: &Path) {
+    let members = Command::new("ar")
+        .arg("t")
+        .arg(lib)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to inspect {}: {error}", lib.display()));
+    if !members.status.success() {
+        panic!(
+            "ar failed to list ROCm kernel archive {}: {}",
+            lib.display(),
+            String::from_utf8_lossy(&members.stderr).trim()
+        );
+    }
+
+    let mut actual = String::from_utf8(members.stdout)
+        .unwrap_or_else(|error| panic!("{} has non-UTF-8 member names: {error}", lib.display()))
+        .lines()
+        .map(str::trim)
+        .filter(|member| !member.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut expected = kernels
+        .iter()
+        .map(|kernel| format!("{kernel}.o"))
+        .collect::<Vec<_>>();
+    actual.sort();
+    expected.sort();
+    if actual != expected {
+        let missing = expected
+            .iter()
+            .filter(|member| !actual.contains(member))
+            .cloned()
+            .collect::<Vec<_>>();
+        let unexpected = actual
+            .iter()
+            .filter(|member| !expected.contains(member))
+            .cloned()
+            .collect::<Vec<_>>();
+        panic!(
+            "ROCm kernel archive {} did not match its declared inputs: missing={missing:?}, unexpected={unexpected:?}",
+            lib.display()
+        );
+    }
+
+    let rocm_nm = rocm_root
+        .join("lib")
+        .join("llvm")
+        .join("bin")
+        .join("llvm-nm");
+    let nm = if rocm_nm.is_file() {
+        rocm_nm
+    } else {
+        PathBuf::from("nm")
+    };
+    let symbols = Command::new(&nm)
+        .arg("-g")
+        .arg("--defined-only")
+        .arg(lib)
+        .output()
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to inspect ROCm kernel symbols with {}: {error}",
+                nm.display()
+            )
+        });
+    if !symbols.status.success() {
+        panic!(
+            "{} failed to inspect ROCm kernel archive {}: {}",
+            nm.display(),
+            lib.display(),
+            String::from_utf8_lossy(&symbols.stderr).trim()
+        );
+    }
+    let symbols = String::from_utf8_lossy(&symbols.stdout);
+    for required in ["kiln_prompt_logprobs_async"] {
+        if !symbols.split_whitespace().any(|field| field == required) {
+            panic!(
+                "ROCm kernel archive {} is missing required symbol {required}",
+                lib.display()
+            );
+        }
+    }
 }
 
 /// Locate a ROCm install root containing `bin/hipcc`. Honours `ROCM_PATH` /
