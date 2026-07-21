@@ -2437,6 +2437,19 @@ the new behavior-owned modules contain 1,178 and 1,502 lines respectively, and
 all 1,092 server library tests pass. The checkbox remains open while schema,
 validation, request preparation, and finalization still share the parent.
 
+Completion schema/preparation/streaming/finalization checkpoint (2026-07-20):
+the crate-visible OpenAI request/response wire types now live in `schema.rs`,
+prompt rendering/tokenization/context enforcement and deterministic cache-key
+normalization live in `preparation.rs`, incremental reasoning/tool-call/SSE
+output handling lives in `streaming.rs`, and cached response reconstruction
+plus claim-owner completion/failure lifecycle live in `response_cache.rs`.
+The parent preserves its two crate-visible eval helpers through explicit
+re-exports; all other cross-module symbols are restricted to the parent. This
+reduces `completions.rs` from 6,263 to 2,788 production lines while keeping the
+new modules at 545, 1,054, 1,015, and 900 lines respectively. All 1,092 server
+library tests pass. The checkbox remains open for a dedicated validation
+boundary and separation of response finalization from cache-claim lifecycle.
+
 ### 8.4 Replace verification theater
 
 - [x] Inventory source-string and ad hoc Rust-source parsing tests.
