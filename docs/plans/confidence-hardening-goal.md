@@ -2377,7 +2377,7 @@ portable ownership checkpoint.
 
 ### 8.3 Split oversized modules by behavior
 
-- [ ] Split `forward.rs` into owned attention, linear-attention, FFN, norm,
+- [x] Split `forward.rs` into owned attention, linear-attention, FFN, norm,
   cache, backend-dispatch, and training-facing modules without duplicating
   policy.
 - [x] Split `completions.rs` into schema, validation, preparation, streaming,
@@ -2463,18 +2463,33 @@ generation, batch, prompt-logprob, and adapter modules, every behavior named by
 this checklist item has one explicit owner. All 1,092 server library tests pass
 after the final split.
 
+Forward behavior split completed (2026-07-21): the 25,995-line implementation
+is now a 1,879-line backend-bridge facade over thirteen behavior-owned modules.
+Weight types, linear-attention state, weight loading, execution policy,
+embedding/norm/rotary primitives, FFN, LM head, linear-attention core,
+training derivatives, streaming GDN, full attention and cache interaction,
+transformer blocks, and model dispatch each have one explicit owner. Original
+public and crate-visible APIs remain re-exported from `forward`; sibling-only
+helpers are restricted to the parent ownership domain. The largest child is
+the 4,884-line model dispatcher, followed by the 4,784-line full-attention
+owner, so every resulting production file is below the 5,000-line default and
+the `forward.rs` budget exception is removed. All 358 default model tests pass,
+and bounded `kiln-model` feature builds pass for both ROCm/gfx1151 and Vulkan.
+This is a structural ownership checkpoint and makes no new runtime-performance
+or hardware-correctness claim.
+
 Production-file budget completed (2026-07-20): the closed, versioned
 `production-file-budget-v1.json` contract sets a 5,000-physical-line default
-for the 580 Rust, JavaScript, and CSS product files under `crates/**/src`, while
-excluding extracted `tests` child trees. Seventeen existing oversized files
+for the 593 Rust, JavaScript, and CSS product files under `crates/**/src`, while
+excluding extracted `tests` child trees. Sixteen existing oversized files
 have sorted path-specific entries, exact current non-growth ceilings, and
 concrete ownership rationales. The checker rejects an unlisted oversized file,
 growth past an exception, missing or out-of-scope paths, stale exceptions after
 a successful shrink, duplicate/unsorted paths, unknown policy fields, weak
 rationales, and malformed counts. Six focused regressions cover those states;
 the cheap repository-hygiene workflow runs the checker on every push and pull
-request. The active `forward.rs`, `trainer.rs`, and browser exceptions must be
-reduced or removed by the remaining three behavior-split items.
+request. The active `trainer.rs` and browser exceptions must be reduced or
+removed by the remaining two behavior-split items.
 
 ### 8.4 Replace verification theater
 

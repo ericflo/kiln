@@ -13,11 +13,6 @@
       "rationale": "Embedded Metal shader source is generated-style backend material rather than orchestration; its exact physical-line count is nevertheless capped against growth."
     },
     {
-      "path": "crates/kiln-model/src/forward.rs",
-      "max_lines": 25995,
-      "rationale": "The Phase 8.3 attention, linear-attention, FFN, norm, cache, dispatch, and training-facing decomposition is active; growth is prohibited meanwhile."
-    },
-    {
       "path": "crates/kiln-model/src/generate.rs",
       "max_lines": 12268,
       "rationale": "The inference state machine still combines prefill, decode, cache, and sampling orchestration; splitting it requires preserving request-lifecycle invariants."
