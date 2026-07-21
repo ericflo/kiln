@@ -36,7 +36,7 @@ jobs:
     name: macOS / aarch64 / Metal
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust stable
         run: |
@@ -200,7 +200,7 @@ jobs:
           docker-images: false
           swap-storage: true
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust stable
         run: |
@@ -291,7 +291,7 @@ jobs:
     name: Linux / x86_64 / Vulkan
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust stable
         run: |
@@ -370,7 +370,7 @@ jobs:
       ROCM_PATH: /opt/rocm
       KILN_ROCM_ARCHS: 'gfx90a;gfx942;gfx1100;gfx1151'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Free disk space for the ROCm toolchain
         # GitHub-hosted runners ship ~14 GB free on /; the ROCm HIP SDK
@@ -486,7 +486,7 @@ jobs:
       # `msvcr*.dll` on end-user machines — a nice distribution win.
       RUSTFLAGS: '-C target-feature=+crt-static'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust stable
         run: |
@@ -653,7 +653,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Upload third-party license attribution
         env:
