@@ -15,6 +15,8 @@ use kiln_tensor::metal_types::{
     Buffer, MTLResourceOptions, MTLResourceUsage, MetalCompanion, MetalRawDevice,
 };
 
+use crate::execution_phase::{GraphPhase, GraphPhaseTimer};
+
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct MetalGraphScalarBuffer {
@@ -257,6 +259,7 @@ pub(crate) struct MetalSingleTokenPagedDecodeIcbGraph {
 #[allow(dead_code)]
 impl MetalSingleTokenPagedDecodeIcbGraph {
     pub(crate) fn replay(&self, slot: u32, max_seqlen_k: u32, softmax_scale: f32) -> Result<()> {
+        let _phase = GraphPhaseTimer::start(GraphPhase::Replay);
         self.kv_args.update_slot(slot)?;
         self.attn_args.update_max_seqlen_k(max_seqlen_k)?;
         self.attn_args.update_softmax_scale(softmax_scale)?;
@@ -310,6 +313,7 @@ impl MetalPagedDecodeIcbGraph {
     }
 
     fn replay_native(&self, max_seqlen_k: u32, softmax_scale: f32) -> Result<()> {
+        let _phase = GraphPhaseTimer::start(GraphPhase::Replay);
         self.attn_args.update_max_seqlen_k(max_seqlen_k)?;
         self.attn_args.update_softmax_scale(softmax_scale)?;
         self.captured

@@ -14,12 +14,12 @@
     },
     {
       "path": "crates/kiln-model/src/generate.rs",
-      "max_lines": 12268,
+      "max_lines": 12199,
       "rationale": "The inference state machine still combines prefill, decode, cache, and sampling orchestration; splitting it requires preserving request-lifecycle invariants."
     },
     {
       "path": "crates/kiln-model/src/rocm_graph.rs",
-      "max_lines": 10790,
+      "max_lines": 10773,
       "rationale": "ROCm graph admission, capture, replay, telemetry, and recovery share one safety authority today; this exception is a strict non-growth ceiling."
     },
     {

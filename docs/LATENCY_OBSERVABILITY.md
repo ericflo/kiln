@@ -152,7 +152,7 @@ The currently measured batching path exposes:
 | `readback_ms` | Existing device-to-host token transfer when the backend exposes that exact boundary without another synchronization |
 | `gpu_lock_wait_ms` | Time waiting to acquire the shared inference GPU-coordination guard for actor-owned admission, prefill, or decode work |
 | `graph_capture_ms` | Request-owned graph capture attempt work exposed by the selected backend |
-| `graph_replay_ms` | Request-owned graph replay submission work exposed by the selected backend |
+| `graph_replay_ms` | Request-owned graph replay work exposed by the selected backend |
 | `synchronization_ms` | Time spent settling actor-owned admission, prefill, resident-prefill, or decode work at the backend's external-yield boundary |
 | `resize_ms` | Ordered KV-resize barrier time that delayed this queued request, or an overlapping GPU-writer resize interval |
 | `trim_ms` | Exclusive allocator-pool trim time that overlapped this request's inference-lock wait |
@@ -239,6 +239,30 @@ covers device input updates, cross-stream dependency setup, and native launch
 submission. The later external-yield device settlement remains
 `synchronization_ms` and is not double-counted as replay.
 
+CUDA and Metal use the same request envelope without deriving deltas from
+process-global counters. Each ordinary batching, behavior-logprob batching,
+or direct decode invocation opens an invocation-local graph phase scope on the
+calling thread. Native graph owners add their capture and replay wall time only
+to the innermost active scope, and the completed scope is merged into the token
+or terminal event produced by that invocation. A failed capture attempt is
+therefore retained when execution continues eagerly, while graph work outside
+an owned model invocation is not assigned to an unrelated request. Nested
+scopes are isolated, and ROCm and Vulkan builds compile this CUDA/Metal scope
+machinery out.
+
+For CUDA, capture surrounds the complete existing single-row or dormant
+batched capture attempt, including failure settlement. Replay surrounds the
+native `ReplayPlan` call, or the dormant batched graph launch plus its existing
+capture-stream completion wait. Input refresh ordering that completes before
+that replay boundary, eager LM-head work, sampling, and the later model
+external-yield settlement are excluded. For Metal, capture surrounds each
+participating attention layer's ICB record/build operation. Replay is the sum
+of the participating layer ICB operations, including their scalar argument
+updates, native replay, and existing completion wait. These timers add no
+device operation or synchronization. CUDA and Metal source boundaries are
+portable contract coverage; their runtime values remain unqualified until the
+required NVIDIA and Apple hardware campaigns pass.
+
 A batching-engine graph invocation is shared work. Its phase envelope is
 attached once to every ready request that supplied a row to that invocation so
 each request can explain the wall interval it overlapped. Prefilling,
@@ -278,8 +302,8 @@ pool mutation underneath live inference.
 Stable serving disables resize, trim, adapter mutation, and server training,
 so those fields normally remain `null` there. They are also `null` when a
 permitted operation did not overlap the request's relevant ownership boundary.
-Other-backend graph work and device routes without an independently owned
-readback boundary remain explicit nullable fields. Kiln never infers request
+Backends without graph execution and device routes without an independently
+owned readback boundary remain explicit nullable fields. Kiln never infers request
 time from unlocked process-global counters. A diagnostic consumer must preserve
 the difference between `null` (not observed or not measurable on this path) and
 `0` (measured below the reporting resolution).

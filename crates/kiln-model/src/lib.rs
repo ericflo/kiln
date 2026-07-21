@@ -11,6 +11,7 @@ mod cuda_training_policy;
 // is gone; the kt tape is the sole gradient producer.
 pub mod decode_buffers;
 pub mod engine;
+mod execution_phase;
 pub mod forward;
 pub mod fp8;
 mod full_attention_policy;

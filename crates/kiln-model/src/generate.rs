@@ -12,7 +12,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     mpsc,
 };
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
@@ -34,6 +34,12 @@ use crate::backend::{
 use crate::cancel::CancelHandle;
 use crate::cuda_graph::{CudaGraphExecutionPolicy, CudaGraphRunner};
 use crate::decode_buffers::{DecodeBufferConfig, DecodeBuffers, DecodeElementType};
+use crate::execution_phase::{
+    ProfiledDirectDecodeStep, ProfiledGraphValue, add_profiled_duration,
+    add_profiled_sampling_tail, merge_profiled_graph_direct_step, merge_profiled_graph_paged_step,
+    profile_graph_invocation,
+};
+pub use crate::execution_phase::{ProfiledPagedDecodeStep, StreamBackendPhaseDurations};
 use crate::forward::{
     GpuWeights, LinearAttentionState, PagedLayerForwardState, StreamingPrefillExecutionPolicy,
     model_forward_kt_with_policy, model_forward_paged, model_forward_paged_batched_decode_hidden,
@@ -53,8 +59,8 @@ use crate::forward::{
 };
 use crate::metal_graph::MetalGraphRunner;
 use crate::rocm_graph::{
-    RocmGraphExecutionPolicy, RocmGraphLiveTelemetry, RocmGraphProfiledValue, RocmGraphRunner,
-    RocmGraphStatsUnavailable, RocmGraphTelemetryHandle,
+    RocmGraphExecutionPolicy, RocmGraphLiveTelemetry, RocmGraphRunner, RocmGraphStatsUnavailable,
+    RocmGraphTelemetryHandle,
 };
 // (#1082) Native single-submit Vulkan-resident decode entry — only referenced
 // from the `#[cfg(feature = "vulkan")]` single-row fast path below.
@@ -997,52 +1003,6 @@ pub struct PagedBatchedDecodeState {
     pub id: u64,
 }
 
-/// Tokens and request-correlatable backend work from one paged decode step.
-///
-/// A phase remains `None` when its boundary is fused with the transformer
-/// forward or otherwise cannot be measured without inventing attribution.
-#[derive(Debug)]
-pub struct ProfiledPagedDecodeStep<T> {
-    pub tokens: Vec<T>,
-    pub sampling_duration: Option<Duration>,
-    pub readback_duration: Option<Duration>,
-    pub graph_capture_duration: Option<Duration>,
-    pub graph_replay_duration: Option<Duration>,
-}
-
-#[derive(Debug)]
-struct ProfiledDirectDecodeStep {
-    token: TokenId,
-    backend_phases: StreamBackendPhaseDurations,
-}
-
-impl ProfiledDirectDecodeStep {
-    fn without_distinct_backend_phase(token: TokenId) -> Self {
-        Self {
-            token,
-            backend_phases: StreamBackendPhaseDurations::default(),
-        }
-    }
-}
-
-fn add_profiled_duration(total: &mut Option<Duration>, duration: Duration) {
-    *total = Some(total.unwrap_or(Duration::ZERO).saturating_add(duration));
-}
-
-fn add_profiled_sampling_tail(
-    sampling_total: &mut Option<Duration>,
-    readback_total: &mut Option<Duration>,
-    total: Duration,
-    readback: Option<Duration>,
-) {
-    if let Some(readback) = readback {
-        add_profiled_duration(sampling_total, total.saturating_sub(readback));
-        add_profiled_duration(readback_total, readback);
-    } else {
-        add_profiled_duration(sampling_total, total);
-    }
-}
-
 fn capture_authoritative_prefix_snapshot(
     backend: &dyn BackendRuntime,
     resident_prefix_snapshot_suppression_count: &AtomicU64,
@@ -1563,38 +1523,6 @@ pub struct MtpGenerationOutput {
     pub draft_accepted_count: usize,
     /// How many MTP draft attempts were made (one per [`speculative_mtp_decode_step`] call).
     pub total_draft_attempts: usize,
-}
-
-/// Invocation-owned backend work carried with a direct model event.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct StreamBackendPhaseDurations {
-    pub sampling: Option<Duration>,
-    pub readback: Option<Duration>,
-    pub graph_capture: Option<Duration>,
-    pub graph_replay: Option<Duration>,
-    pub synchronization: Option<Duration>,
-}
-
-impl StreamBackendPhaseDurations {
-    fn add_observation(total: &mut Option<Duration>, duration: Duration) {
-        *total = Some(total.unwrap_or(Duration::ZERO).saturating_add(duration));
-    }
-
-    fn observe_sampling(&mut self, duration: Duration) {
-        Self::add_observation(&mut self.sampling, duration);
-    }
-
-    fn observe_graph_capture(&mut self, duration: Duration) {
-        Self::add_observation(&mut self.graph_capture, duration);
-    }
-
-    fn observe_graph_replay(&mut self, duration: Duration) {
-        Self::add_observation(&mut self.graph_replay, duration);
-    }
-
-    fn observe_synchronization(&mut self, duration: Duration) {
-        Self::add_observation(&mut self.synchronization, duration);
-    }
 }
 
 /// A single token emitted during streaming generation.
@@ -4950,6 +4878,18 @@ impl ModelRunner {
         params: &[SamplingParams],
         paged_cache: &PagedKvCache,
     ) -> Result<ProfiledPagedDecodeStep<TokenId>> {
+        let profiled = profile_graph_invocation(|| {
+            self.paged_batched_decode_step_profiled_inner(states, params, paged_cache)
+        })?;
+        Ok(merge_profiled_graph_paged_step(profiled))
+    }
+
+    fn paged_batched_decode_step_profiled_inner(
+        &self,
+        states: &mut [&mut PagedBatchedDecodeState],
+        params: &[SamplingParams],
+        paged_cache: &PagedKvCache,
+    ) -> Result<ProfiledPagedDecodeStep<TokenId>> {
         anyhow::ensure!(
             states.len() == params.len(),
             "decode state length {} != params length {}",
@@ -5791,6 +5731,22 @@ impl ModelRunner {
         params: &[SamplingParams],
         paged_cache: &PagedKvCache,
     ) -> Result<ProfiledPagedDecodeStep<SampledToken>> {
+        let profiled = profile_graph_invocation(|| {
+            self.paged_batched_decode_step_with_behavior_logprobs_profiled_inner(
+                states,
+                params,
+                paged_cache,
+            )
+        })?;
+        Ok(merge_profiled_graph_paged_step(profiled))
+    }
+
+    fn paged_batched_decode_step_with_behavior_logprobs_profiled_inner(
+        &self,
+        states: &mut [&mut PagedBatchedDecodeState],
+        params: &[SamplingParams],
+        paged_cache: &PagedKvCache,
+    ) -> Result<ProfiledPagedDecodeStep<SampledToken>> {
         anyhow::ensure!(
             states.len() == params.len(),
             "decode state length {} != params length {}",
@@ -6253,7 +6209,7 @@ impl ModelRunner {
         seq_lens: &[usize],
         linear_states: &mut [&mut LinearAttentionState],
         row_ids: Option<&[u64]>,
-    ) -> Result<RocmGraphProfiledValue<Vec<TokenId>>> {
+    ) -> Result<ProfiledGraphValue<Vec<TokenId>>> {
         let _resident_scope = GdnRecurrentResidentStateScope::new(&*self.backend);
         let batch = input_tokens.len();
         anyhow::ensure!(batch > 0, "batched decode requires at least one row");
@@ -6364,7 +6320,7 @@ impl ModelRunner {
                 }
             })
             .context("single-row greedy decode forward pass (paged) failed")?;
-            return Ok(RocmGraphProfiledValue::without_graph_work(vec![token]));
+            return Ok(ProfiledGraphValue::without_graph_work(vec![token]));
         }
 
         // #1082 PERF + CRASHER FIX (per-row contiguity partition).
@@ -6426,7 +6382,7 @@ impl ModelRunner {
                     };
                     tokens.push(token);
                 }
-                return Ok(RocmGraphProfiledValue::without_graph_work(tokens));
+                return Ok(ProfiledGraphValue::without_graph_work(tokens));
             } else if n_noncontig > 0 {
                 // MIXED: row-loop only the fragmented rows; batch the contiguous
                 // majority through the fast path (recurse on the all-contiguous
@@ -6492,7 +6448,7 @@ impl ModelRunner {
                 for (k, &row) in contig_idx.iter().enumerate() {
                     out[row] = contig_out.value[k];
                 }
-                return Ok(RocmGraphProfiledValue {
+                return Ok(ProfiledGraphValue {
                     value: out,
                     capture_duration: contig_out.capture_duration,
                     replay_duration: contig_out.replay_duration,
@@ -6578,7 +6534,7 @@ impl ModelRunner {
                     )
                 })?
             } else {
-                RocmGraphProfiledValue::without_graph_work(None)
+                ProfiledGraphValue::without_graph_work(None)
             };
             #[cfg(feature = "rocm")]
             let rocm_graph_tokens = if let Some(hidden) = rocm_graph_hidden.value {
@@ -6663,7 +6619,7 @@ impl ModelRunner {
             self.park_batched_state(state, ids);
         }
 
-        Ok(RocmGraphProfiledValue {
+        Ok(ProfiledGraphValue {
             value: tokens.0,
             capture_duration: tokens.1,
             replay_duration: tokens.2,
@@ -6945,7 +6901,7 @@ impl ModelRunner {
         seq_lens: &[usize],
         linear_states: &mut [&mut LinearAttentionState],
         row_ids: Option<&[u64]>,
-    ) -> Result<RocmGraphProfiledValue<kiln_tensor::Tensor>> {
+    ) -> Result<ProfiledGraphValue<kiln_tensor::Tensor>> {
         let _resident_scope = GdnRecurrentResidentStateScope::new(&*self.backend);
         let batch = input_tokens.len();
         anyhow::ensure!(batch > 0, "batched hidden decode requires at least one row");
@@ -7050,7 +7006,7 @@ impl ModelRunner {
                     )
                 })?
             } else {
-                RocmGraphProfiledValue::without_graph_work(None)
+                ProfiledGraphValue::without_graph_work(None)
             };
             let hidden = match graph_hidden.value {
                 Some(hidden) => hidden,
@@ -7084,7 +7040,7 @@ impl ModelRunner {
             self.park_batched_state(state, ids);
         }
 
-        Ok(RocmGraphProfiledValue {
+        Ok(ProfiledGraphValue {
             value: hidden.0,
             capture_duration: hidden.1,
             replay_duration: hidden.2,
@@ -7270,6 +7226,37 @@ impl ModelRunner {
     }
 
     fn decode_next_token_paged_interleaved(
+        &self,
+        params: &SamplingParams,
+        input_token: TokenId,
+        paged_cache: &PagedKvCache,
+        block_table: &BlockTable,
+        seq_len: usize,
+        linear_state: &mut LinearAttentionState,
+        step_seed: Option<u64>,
+        history: &[TokenId],
+        graph_row_id: u64,
+        skip_gdn_state_readback: bool,
+    ) -> Result<ProfiledDirectDecodeStep> {
+        let profiled = profile_graph_invocation(|| {
+            self.decode_next_token_paged_interleaved_inner(
+                params,
+                input_token,
+                paged_cache,
+                block_table,
+                seq_len,
+                linear_state,
+                step_seed,
+                history,
+                graph_row_id,
+                skip_gdn_state_readback,
+            )
+        })?;
+        Ok(merge_profiled_graph_direct_step(profiled))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decode_next_token_paged_interleaved_inner(
         &self,
         params: &SamplingParams,
         input_token: TokenId,
@@ -11000,62 +10987,6 @@ impl ModelRunner {
 mod tests {
     use super::*;
     use crate::backend::FallbackPolicy;
-
-    #[test]
-    fn profiled_decode_duration_preserves_unavailable_and_accumulates_observations() {
-        let mut duration = None;
-        assert_eq!(duration, None);
-        add_profiled_duration(&mut duration, Duration::from_millis(7));
-        add_profiled_duration(&mut duration, Duration::from_millis(11));
-        assert_eq!(duration, Some(Duration::from_millis(18)));
-    }
-
-    #[test]
-    fn profiled_sampling_tail_separates_existing_readback_without_double_counting() {
-        let mut sampling = None;
-        let mut readback = None;
-        add_profiled_sampling_tail(
-            &mut sampling,
-            &mut readback,
-            Duration::from_millis(25),
-            Some(Duration::from_millis(7)),
-        );
-        add_profiled_sampling_tail(
-            &mut sampling,
-            &mut readback,
-            Duration::from_millis(10),
-            None,
-        );
-        assert_eq!(sampling, Some(Duration::from_millis(28)));
-        assert_eq!(readback, Some(Duration::from_millis(7)));
-
-        let mut zero_sampling = None;
-        let mut zero_readback = None;
-        add_profiled_sampling_tail(
-            &mut zero_sampling,
-            &mut zero_readback,
-            Duration::ZERO,
-            Some(Duration::ZERO),
-        );
-        assert_eq!(zero_sampling, Some(Duration::ZERO));
-        assert_eq!(zero_readback, Some(Duration::ZERO));
-    }
-
-    #[test]
-    fn direct_stream_backend_phases_preserve_measured_zero_and_accumulate() {
-        let mut phases = StreamBackendPhaseDurations::default();
-        phases.observe_sampling(Duration::ZERO);
-        phases.observe_sampling(Duration::from_millis(9));
-        phases.observe_graph_capture(Duration::ZERO);
-        phases.observe_graph_capture(Duration::from_millis(7));
-        phases.observe_graph_replay(Duration::from_millis(3));
-        phases.observe_synchronization(Duration::from_millis(4));
-        assert_eq!(phases.sampling, Some(Duration::from_millis(9)));
-        assert_eq!(phases.readback, None);
-        assert_eq!(phases.graph_capture, Some(Duration::from_millis(7)));
-        assert_eq!(phases.graph_replay, Some(Duration::from_millis(3)));
-        assert_eq!(phases.synchronization, Some(Duration::from_millis(4)));
-    }
 
     #[test]
     fn model_runner_runtime_options_default_to_eager_rocm_execution() {

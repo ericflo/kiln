@@ -31,6 +31,7 @@ use kiln_core::config::ModelConfig;
 
 use crate::PagedKvCacheKt;
 use crate::backend::BackendRuntime;
+use crate::execution_phase::ProfiledGraphValue;
 use crate::forward::{
     GpuWeights, LinearAttentionState, model_forward_paged,
     model_forward_paged_batched_decode_hidden, model_forward_paged_next_token_greedy,
@@ -1392,24 +1393,6 @@ impl From<RocmGraphLiveTelemetry> for RocmGraphInvocationPhaseSnapshot {
     }
 }
 
-/// Value plus graph work that occurred during one graph-runner-lock-owned call.
-#[derive(Debug)]
-pub(crate) struct RocmGraphProfiledValue<T> {
-    pub value: T,
-    pub capture_duration: Option<std::time::Duration>,
-    pub replay_duration: Option<std::time::Duration>,
-}
-
-impl<T> RocmGraphProfiledValue<T> {
-    pub(crate) fn without_graph_work(value: T) -> Self {
-        Self {
-            value,
-            capture_duration: None,
-            replay_duration: None,
-        }
-    }
-}
-
 fn profiled_phase_duration(
     before_calls: u64,
     before_micros: u64,
@@ -1924,11 +1907,11 @@ impl RocmGraphRunner {
     pub(crate) fn profile_invocation<T>(
         &mut self,
         invocation: impl FnOnce(&mut Self) -> Result<T>,
-    ) -> Result<RocmGraphProfiledValue<T>> {
+    ) -> Result<ProfiledGraphValue<T>> {
         let before = RocmGraphInvocationPhaseSnapshot::from(self.phase_telemetry.snapshot());
         let value = invocation(self);
         let after = RocmGraphInvocationPhaseSnapshot::from(self.phase_telemetry.snapshot());
-        value.map(|value| RocmGraphProfiledValue {
+        value.map(|value| ProfiledGraphValue {
             value,
             capture_duration: profiled_phase_duration(
                 before.capture_calls,

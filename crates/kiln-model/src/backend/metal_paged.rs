@@ -32,6 +32,8 @@ use kiln_tensor::metal_types::{
     MTLResourceOptions, buffer_o_kt,
 };
 
+use crate::execution_phase::{GraphPhase, GraphPhaseTimer};
+
 #[allow(dead_code, clippy::too_many_arguments)]
 pub(crate) fn metal_record_paged_decode_icb_graph(
     q: &kiln_tensor::Tensor,
@@ -47,6 +49,7 @@ pub(crate) fn metal_record_paged_decode_icb_graph(
     page_block_size: usize,
     softmax_scale: f32,
 ) -> Result<MetalPagedDecodeIcbGraph> {
+    let _phase = GraphPhaseTimer::start(GraphPhase::Capture);
     let q_metal = kt_metal(q)?;
     let companion = q_metal.companion()?;
     let (batch, _, q_heads, _) = q.dims4()?;
@@ -157,6 +160,7 @@ pub(crate) fn metal_record_single_token_paged_decode_icb_graph(
     page_block_size: usize,
     softmax_scale: f32,
 ) -> Result<MetalSingleTokenPagedDecodeIcbGraph> {
+    let _phase = GraphPhaseTimer::start(GraphPhase::Capture);
     let q_metal = kt_metal(q)?;
     let companion = q_metal.companion()?;
     let (_, kv_heads, head_dim) = k_pool.dims3()?;

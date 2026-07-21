@@ -54,6 +54,8 @@ use kiln_core::config::ModelConfig;
 use crate::PagedKvCacheKt;
 use crate::backend::BackendRuntime;
 #[cfg(feature = "cuda")]
+use crate::execution_phase::{GraphPhase, GraphPhaseTimer};
+#[cfg(feature = "cuda")]
 use crate::forward::PagedDecodeGraphInputs;
 #[cfg(feature = "cuda")]
 use crate::forward::model_forward_paged_hidden_with_graph_inputs;
@@ -887,7 +889,10 @@ impl CudaGraphRunner {
                     return Ok(None);
                 }
             }
-            // Step (4): launch.
+            // Step (4): launch. The timer spans only the native replay launch
+            // and its existing completion boundary; eager LM-head/sampling work
+            // below remains outside graph replay attribution.
+            let graph_replay_phase = GraphPhaseTimer::start(GraphPhase::Replay);
             if let Err(e) = captured.graph.launch() {
                 tracing::warn!(
                     batch_size,
@@ -925,6 +930,7 @@ impl CudaGraphRunner {
                 );
                 return Ok(None);
             }
+            drop(graph_replay_phase);
             let replay_logits = match crate::forward::lm_head_from_batched_hidden_eager(
                 backend,
                 &captured.output_hidden,
@@ -996,17 +1002,21 @@ impl CudaGraphRunner {
         // wrong GDN recurrent/conv history. `try_capture_batched` now seeds
         // (and scatters back) exactly like the replay path above
         // (refresh_batched_state_from_rows_in_place / scatter back).
-        match self.try_capture_batched(
-            backend,
-            token_ids,
-            weights,
-            config,
-            paged_cache,
-            block_tables,
-            sequence_lengths,
-            linear_states,
-            lora,
-        ) {
+        let capture_result = {
+            let _phase = GraphPhaseTimer::start(GraphPhase::Capture);
+            self.try_capture_batched(
+                backend,
+                token_ids,
+                weights,
+                config,
+                paged_cache,
+                block_tables,
+                sequence_lengths,
+                linear_states,
+                lora,
+            )
+        };
+        match capture_result {
             Ok(tokens) => {
                 tracing::debug!(
                     batch_size,
@@ -1246,7 +1256,11 @@ impl CudaGraphRunner {
                     let replay_key = kiln_graph::ReplayPlan::key(&plan);
                     let replay_inputs =
                         ReplayInputs::new(&replay_key, &captured.replay_state.inputs);
-                    match kiln_graph::ReplayPlan::replay(&mut plan, replay_inputs) {
+                    let replay_result = {
+                        let _phase = GraphPhaseTimer::start(GraphPhase::Replay);
+                        kiln_graph::ReplayPlan::replay(&mut plan, replay_inputs)
+                    };
+                    match replay_result {
                         Ok(_) => {
                             tracing::debug!(
                                 max_seqlen_k = requested_key.max_seqlen_k,
@@ -1332,18 +1346,22 @@ impl CudaGraphRunner {
             }
 
             // Phase 2: capture
-            match self.try_capture(
-                backend,
-                owner,
-                token_id,
-                weights,
-                config,
-                paged_cache,
-                block_table,
-                seq_len,
-                linear_state,
-                lora,
-            ) {
+            let capture_result = {
+                let _phase = GraphPhaseTimer::start(GraphPhase::Capture);
+                self.try_capture(
+                    backend,
+                    owner,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
+                )
+            };
+            match capture_result {
                 Ok(logits) => return Ok(logits),
                 Err(e) => {
                     tracing::warn!("CUDA graph capture failed: {e:#}, using eager decode");
