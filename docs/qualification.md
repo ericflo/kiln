@@ -1829,6 +1829,32 @@ material-change correctness, 30-minute development, and benchmark gate. It does
 not replace the final 24-hour soak, characterize the variance distribution, or
 establish competitive large-batch performance.
 
+The later exact clean sampler-readback source `91f22bcc8` retained both sides of
+the same variance instead of selecting the faster row. Its development receipt
+at `qualification/receipts/rocm/strix-halo/20260721t121713716043z-rocm-strix-halo-serving-rocm-development-053e89eca9-v1.json`
+passed correctness, graph, fixed-capacity memory, thermal, shutdown, and residue
+gates over 1,816.003 measured seconds, but produced 12.775 aggregate output
+tokens/second, 13.05% below the immediately preceding 14.692 row. All 725
+requests published positive exact sampler readback totaling 376,397.090 ms, all
+371 ITL outliers had runtime-event attribution, KV stayed at 4,096 blocks,
+autoscaling and reclaim stayed disabled, and GPU growth remained zero. The
+receipt is therefore valid readback/safety evidence and a performance
+counterexample, not proof of a code regression or VRAM rebalance.
+
+The canonical `autoscale-off` exact-prompt discriminator at `610f8dc27` is
+retained at `qualification/receipts/rocm/strix-halo/20260721t131545614136z-rocm-strix-halo-serving-mixed-rocm-v1-184c082f9e-v1.json`.
+It produced 12.822 deterministic and 8.440 fused-sampled output tokens/second.
+Against the most recent same-variant pre-readback control at `14e3f3e4d`,
+12.568/8.576, those changes are +2.02%/-1.59%, both inside the existing 3%
+material source-effect threshold; p99 ITL improved from 779.484 to 653.534 ms.
+Every 10 deterministic and eight sampled measured requests reported positive
+readback, graph capture/replay succeeded 20/475 times without failure, and the
+run drained cleanly. The strict comparator does not issue a formal verdict
+because the expanded metric contract changed the committed workload hash. This
+is a manual same-variant source discriminator, not a cross-hash policy pass, and
+it does not erase the slower development receipt or characterize long-run
+variance.
+
 Five measured-window metrics close the cooperative-idle evidence. The configured
 gauge is `batching_actor_cycle_idle_ms_configured`. The monotonic count and
 elapsed-time deltas are `batching_actor_cycle_idle_count` and

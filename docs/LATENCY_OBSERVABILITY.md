@@ -252,6 +252,17 @@ an independently exposed `to_vec1` read can report that exact boundary. Greedy
 and native fused-forward routes still leave `sampling_ms` `null` when the
 transformer/sampler boundary itself is not independently observable.
 
+The exact clean Strix Halo ROCm development receipt at
+`qualification/receipts/rocm/strix-halo/20260721t121713716043z-rocm-strix-halo-serving-rocm-development-053e89eca9-v1.json`
+proves the production transport: all 725 measured requests carried positive
+readback for 376,397.090 ms total with zero missing phase metadata. The paired
+short exact-prompt receipt at
+`qualification/receipts/rocm/strix-halo/20260721t131545614136z-rocm-strix-halo-serving-mixed-rocm-v1-184c082f9e-v1.json`
+carried the boundary on all 10 deterministic and all eight fused-sampled
+requests. These are request-ownership results, not pure-transfer benchmarks;
+the qualification guide separately preserves the slow long-soak performance
+counterexample and its narrower source-effect discriminator.
+
 Qualified ROCm HIP-graph decode reports request-owned `graph_capture_ms` and
 `graph_replay_ms` on batching-engine streams. The graph runner
 holds its mutex across one decode invocation and snapshots the fixed phase
