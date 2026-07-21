@@ -221,6 +221,15 @@ class ServeRocmPublicMutationLifecycleTests(unittest.TestCase):
             with self.assertRaisesRegex(lifecycle.LifecycleError, "invalid adapter_ms"):
                 lifecycle.request_phase_ms(result, "adapter")
 
+    def test_base_identity_uses_the_shared_normalized_header_contract(self) -> None:
+        result = stream_result("same")
+        lifecycle.assert_base_response_identity(result, "base")
+
+        result.loaded_adapter = "fixture-adapter"
+        result.loaded_adapter_revision = "a" * 64
+        with self.assertRaisesRegex(lifecycle.LifecycleError, "named adapter identity"):
+            lifecycle.assert_base_response_identity(result, "base")
+
     def test_wait_actor_adapter_barrier_requires_typed_exclusive_signal(self) -> None:
         health = [
             {

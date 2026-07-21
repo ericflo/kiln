@@ -449,6 +449,13 @@ def assert_stream(
         raise LifecycleError(f"{label} did not preserve the fixed output denominator")
 
 
+def assert_base_response_identity(result: mixed.StreamResult, label: str) -> None:
+    # run_stream rejects missing/incomplete headers and normalizes the
+    # authoritative paired base sentinel to (None, None).
+    if result.loaded_adapter is not None or result.loaded_adapter_revision is not None:
+        raise LifecycleError(f"{label} response retained a named adapter identity")
+
+
 def request_phase_ms(
     result: mixed.StreamResult,
     phase: str,
@@ -636,12 +643,11 @@ def run_adapter_arm(
             seed=seed + 100,
             absolute_deadline=deadline,
         )
-        if (base_before.loaded_adapter, base_before.loaded_adapter_revision) != (
-            "base",
-            "base",
-        ):
+        try:
+            assert_base_response_identity(base_before, "base-before")
+        except LifecycleError:
             evidence.add_metric("request_failure_count")
-            raise LifecycleError("base-before response omitted the authoritative base headers")
+            raise
         evidence.details["base_before"] = canonical_semantic_hash(base_before)
         graph_before = mixed.graph_snapshot(wait_drained(port, deadline, "base-before"))
 
@@ -878,12 +884,11 @@ def run_adapter_arm(
         )
         after_hash = canonical_semantic_hash(base_after)
         evidence.details["base_after"] = after_hash
-        if (base_after.loaded_adapter, base_after.loaded_adapter_revision) != (
-            "base",
-            "base",
-        ):
+        try:
+            assert_base_response_identity(base_after, "base-after")
+        except LifecycleError:
             evidence.add_metric("request_failure_count")
-            raise LifecycleError("base-after response retained stale adapter headers")
+            raise
         before_hash = canonical_semantic_hash(base_before)
         if before_hash != after_hash:
             evidence.add_metric("base_output_mismatch_count")
