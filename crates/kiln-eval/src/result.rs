@@ -877,7 +877,13 @@ fn compute_reasoning_stats(samples: &[u32]) -> ReasoningLengthStats {
     }
 }
 
-fn pass_rate_confidence_interval(num_pass: u32, num_examples: u32) -> PassRateConfidenceInterval {
+/// Compute the canonical 95% Wilson interval used by eval aggregation and
+/// promotion gates. Keeping this public prevents policy consumers from
+/// reimplementing confidence arithmetic differently.
+pub fn pass_rate_confidence_interval(
+    num_pass: u32,
+    num_examples: u32,
+) -> PassRateConfidenceInterval {
     if num_examples == 0 {
         return PassRateConfidenceInterval {
             confidence_level: 0.95,

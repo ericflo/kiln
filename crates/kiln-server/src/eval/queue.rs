@@ -79,15 +79,13 @@ fn now_instant_default() -> std::time::Instant {
     std::time::Instant::now()
 }
 
-/// §8.7 promotion gate carried by a post-training eval job. When the run
-/// completes, the eval worker applies the verdict: accuracy >= threshold
-/// promotes (auto-loads) the adapter when training asked for that;
-/// accuracy below it renames the adapter dir to `<name>.failed` and the
-/// adapter is never promoted — "kiln must not make the model worse and
-/// silently keep serving it."
+/// §8.7 promotion gate carried by a paired post-training eval job. The worker
+/// applies the fixed `paired_wilson_v1` policy: sufficient independent pairs,
+/// an exact paired test, and confidence bounds. Point accuracy never promotes;
+/// incomplete evidence is explicitly inconclusive and remains unserved.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostEvalGate {
-    /// Aggregate-accuracy floor from `PostEvalConfig::min_accuracy`.
+    /// Candidate-accuracy floor applied to the 95% Wilson lower bound.
     pub min_accuracy: f32,
     /// distill_refresh §6.4: minimum FRACTIONAL recovery vs the baseline
     /// run (`new/baseline >= x`). `None` for ordinary gates.

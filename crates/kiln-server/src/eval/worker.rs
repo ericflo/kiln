@@ -234,22 +234,79 @@ async fn run_one_job_with_generator(
     // duplicate every ID.
 }
 
-/// Apply the §8.7 promotion gate carried by a post-training eval job.
-///
-/// - **Pass** (`accuracy >= min_accuracy`): promote the adapter into
-///   serving when training deferred its auto-load to this verdict.
-/// - **Fail**: rename the adapter dir to `<name>.failed` (the documented
-///   `PostEvalConfig::min_accuracy` contract), purge its cache entries,
-///   and never promote. The previously-active adapter simply stays
-///   active — it was never displaced, because training defers auto-load
-///   while a gate is pending.
-/// - **Eval errored/cancelled**: leave the adapter on disk but do NOT
-///   promote — an unmeasured adapter must not start serving. The verdict
-///   on the training job says exactly that.
+/// Fixed, versioned policy for automatic post-eval promotion. The minimum is
+/// deliberately not a request knob: allowing each caller to weaken the
+/// evidence threshold would turn a safety gate back into a point-estimate
+/// footgun. Wilson bounds still force larger suites when the requested
+/// accuracy floor is high (for example, 20/20 is not enough to prove 0.90).
+const POST_EVAL_PROMOTION_POLICY_VERSION: &str = "paired_wilson_v1";
+const POST_EVAL_SUITE_POLICY: &str = "single_versioned_suite";
+const POST_EVAL_MIN_PAIRED_EXAMPLES: u32 = 20;
+const POST_EVAL_EXACT_TEST_ALPHA: f64 = 0.05;
+
+fn gate_outcome_priority(outcome: &str) -> u8 {
+    match outcome {
+        "error" => 6,
+        "demoted" | "regression" => 5,
+        "inconclusive" => 4,
+        "promoted" => 3,
+        "kept" => 2,
+        // Preserve an unknown archived value rather than letting a newer
+        // success silently overwrite a classification this binary does not
+        // understand.
+        _ => 7,
+    }
+}
+
+fn aggregate_gate_outcome(existing: Option<&str>, new_outcome: &str) -> String {
+    match existing {
+        Some(existing) if gate_outcome_priority(existing) >= gate_outcome_priority(new_outcome) => {
+            existing.to_string()
+        }
+        _ => new_outcome.to_string(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatisticalGateDecision {
+    Pass,
+    Regression,
+    Demoted,
+    Inconclusive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PairedAggregateSummary {
+    paired_examples: u32,
+    improved: u32,
+    regressed: u32,
+    tied: u32,
+    baseline_pass: u32,
+    candidate_pass: u32,
+}
+
 fn paired_aggregate_flips(
     baseline: &kiln_eval::SuiteResult,
     candidate: &kiln_eval::SuiteResult,
-) -> Result<(u32, u32), String> {
+) -> Result<PairedAggregateSummary, String> {
+    if baseline.suite_name != candidate.suite_name {
+        return Err(format!(
+            "suite-name mismatch: baseline {:?} vs candidate {:?}",
+            baseline.suite_name, candidate.suite_name
+        ));
+    }
+    if baseline.suite_hash != candidate.suite_hash {
+        return Err(format!(
+            "suite-hash mismatch: baseline {} vs candidate {}",
+            baseline.suite_hash, candidate.suite_hash
+        ));
+    }
+    if baseline.effective_generation_hash != candidate.effective_generation_hash {
+        return Err(format!(
+            "generation-hash mismatch: baseline {} vs candidate {}",
+            baseline.effective_generation_hash, candidate.effective_generation_hash
+        ));
+    }
     if baseline.aggregation != candidate.aggregation {
         return Err(format!(
             "aggregation mismatch: baseline {} vs candidate {}",
@@ -264,14 +321,45 @@ fn paired_aggregate_flips(
             candidate.aggregated_outcomes.len()
         ));
     }
-    let candidate_by_id: std::collections::BTreeMap<_, _> = candidate
-        .aggregated_outcomes
-        .iter()
-        .map(|outcome| (outcome.example_id.as_str(), outcome))
-        .collect();
+    if baseline.aggregated_outcomes.is_empty() {
+        return Err("paired suite produced zero independent examples".to_string());
+    }
+    let mut candidate_by_id = std::collections::BTreeMap::new();
+    for outcome in &candidate.aggregated_outcomes {
+        if !outcome.score.is_finite() {
+            return Err(format!(
+                "candidate example {:?} has non-finite score",
+                outcome.example_id
+            ));
+        }
+        if candidate_by_id
+            .insert(outcome.example_id.as_str(), outcome)
+            .is_some()
+        {
+            return Err(format!(
+                "candidate contains duplicate example {:?}",
+                outcome.example_id
+            ));
+        }
+    }
+    let mut baseline_ids = std::collections::BTreeSet::new();
     let mut improved = 0u32;
     let mut regressed = 0u32;
+    let mut baseline_pass = 0u32;
+    let mut candidate_pass = 0u32;
     for baseline_outcome in &baseline.aggregated_outcomes {
+        if !baseline_outcome.score.is_finite() {
+            return Err(format!(
+                "baseline example {:?} has non-finite score",
+                baseline_outcome.example_id
+            ));
+        }
+        if !baseline_ids.insert(baseline_outcome.example_id.as_str()) {
+            return Err(format!(
+                "baseline contains duplicate example {:?}",
+                baseline_outcome.example_id
+            ));
+        }
         let Some(candidate_outcome) = candidate_by_id.get(baseline_outcome.example_id.as_str())
         else {
             return Err(format!(
@@ -284,8 +372,188 @@ fn paired_aggregate_flips(
         } else if candidate_outcome.score < baseline_outcome.score {
             regressed += 1;
         }
+        if baseline_outcome.kind == kiln_eval::EvalOutcomeKind::Pass {
+            baseline_pass += 1;
+        }
+        if candidate_outcome.kind == kiln_eval::EvalOutcomeKind::Pass {
+            candidate_pass += 1;
+        }
     }
-    Ok((improved, regressed))
+    let paired_examples = u32::try_from(baseline.aggregated_outcomes.len())
+        .map_err(|_| "paired example count exceeds u32".to_string())?;
+    Ok(PairedAggregateSummary {
+        paired_examples,
+        improved,
+        regressed,
+        tied: paired_examples - improved - regressed,
+        baseline_pass,
+        candidate_pass,
+    })
+}
+
+struct StatisticalGateResult {
+    decision: StatisticalGateDecision,
+    evidence: kiln_train::PostEvalGateEvidence,
+    reason: String,
+}
+
+fn evaluate_paired_promotion(
+    eval_job_id: &str,
+    gate: &crate::eval::queue::PostEvalGate,
+    baseline: &kiln_eval::SuiteResult,
+    candidate: &kiln_eval::SuiteResult,
+) -> Result<StatisticalGateResult, String> {
+    let paired = paired_aggregate_flips(baseline, candidate)?;
+    let sign_test = kiln_eval::result::sign_test(paired.improved, paired.regressed);
+    let baseline_ci = kiln_eval::result::pass_rate_confidence_interval(
+        paired.baseline_pass,
+        paired.paired_examples,
+    );
+    let candidate_ci = kiln_eval::result::pass_rate_confidence_interval(
+        paired.candidate_pass,
+        paired.paired_examples,
+    );
+    let baseline_accuracy = paired.baseline_pass as f32 / paired.paired_examples as f32;
+    let candidate_accuracy = paired.candidate_pass as f32 / paired.paired_examples as f32;
+    let relative_recovery_lower_bound = gate.relative_recovery.map(|_| {
+        if baseline_ci.upper > 0.0 {
+            candidate_ci.lower / baseline_ci.upper
+        } else {
+            1.0
+        }
+    });
+    let absolute_gain_lower_bound = gate
+        .absolute_gain
+        .map(|_| candidate_ci.lower - baseline_ci.upper);
+
+    let (decision, reason) = if paired.paired_examples < POST_EVAL_MIN_PAIRED_EXAMPLES {
+        (
+            StatisticalGateDecision::Inconclusive,
+            format!(
+                "only {} paired examples; policy requires at least {}",
+                paired.paired_examples, POST_EVAL_MIN_PAIRED_EXAMPLES
+            ),
+        )
+    } else if paired.regressed > paired.improved && sign_test.p_value < POST_EVAL_EXACT_TEST_ALPHA {
+        (
+            StatisticalGateDecision::Regression,
+            format!(
+                "candidate is significantly worse (improved {}, regressed {}, exact two-sided p={:.6})",
+                paired.improved, paired.regressed, sign_test.p_value
+            ),
+        )
+    } else if candidate_ci.upper < gate.min_accuracy {
+        (
+            StatisticalGateDecision::Demoted,
+            format!(
+                "candidate 95% Wilson upper bound {:.3} is below accuracy floor {:.3}",
+                candidate_ci.upper, gate.min_accuracy
+            ),
+        )
+    } else if candidate_ci.lower < gate.min_accuracy {
+        (
+            StatisticalGateDecision::Inconclusive,
+            format!(
+                "candidate 95% Wilson lower bound {:.3} does not reach accuracy floor {:.3}",
+                candidate_ci.lower, gate.min_accuracy
+            ),
+        )
+    } else if let (Some(required), Some(observed)) =
+        (gate.relative_recovery, relative_recovery_lower_bound)
+    {
+        if observed < required {
+            (
+                StatisticalGateDecision::Inconclusive,
+                format!("relative-recovery lower bound {observed:.3} does not reach {required:.3}"),
+            )
+        } else if let (Some(required_gain), Some(observed_gain)) =
+            (gate.absolute_gain, absolute_gain_lower_bound)
+        {
+            if observed_gain < required_gain {
+                (
+                    StatisticalGateDecision::Inconclusive,
+                    format!(
+                        "absolute-gain lower bound {observed_gain:+.3} does not reach {required_gain:+.3}"
+                    ),
+                )
+            } else {
+                (
+                    StatisticalGateDecision::Pass,
+                    "all paired confidence requirements passed".to_string(),
+                )
+            }
+        } else {
+            (
+                StatisticalGateDecision::Pass,
+                "all paired confidence requirements passed".to_string(),
+            )
+        }
+    } else if let (Some(required_gain), Some(observed_gain)) =
+        (gate.absolute_gain, absolute_gain_lower_bound)
+    {
+        if observed_gain < required_gain {
+            (
+                StatisticalGateDecision::Inconclusive,
+                format!(
+                    "absolute-gain lower bound {observed_gain:+.3} does not reach {required_gain:+.3}"
+                ),
+            )
+        } else {
+            (
+                StatisticalGateDecision::Pass,
+                "all paired confidence requirements passed".to_string(),
+            )
+        }
+    } else if paired.improved > paired.regressed && sign_test.p_value < POST_EVAL_EXACT_TEST_ALPHA {
+        (
+            StatisticalGateDecision::Pass,
+            "exact paired improvement and accuracy confidence floor passed".to_string(),
+        )
+    } else {
+        (
+            StatisticalGateDecision::Inconclusive,
+            format!(
+                "no significant paired improvement (improved {}, regressed {}, exact two-sided p={:.6})",
+                paired.improved, paired.regressed, sign_test.p_value
+            ),
+        )
+    };
+
+    Ok(StatisticalGateResult {
+        decision,
+        evidence: kiln_train::PostEvalGateEvidence {
+            policy_version: POST_EVAL_PROMOTION_POLICY_VERSION.to_string(),
+            suite_policy: POST_EVAL_SUITE_POLICY.to_string(),
+            eval_job_id: eval_job_id.to_string(),
+            suite_name: candidate.suite_name.clone(),
+            suite_hash: candidate.suite_hash.clone(),
+            effective_generation_hash: candidate.effective_generation_hash.clone(),
+            baseline_adapter: baseline.adapter.clone(),
+            candidate_adapter: gate.adapter_name.clone(),
+            aggregation: candidate.aggregation.label().to_string(),
+            minimum_paired_examples: POST_EVAL_MIN_PAIRED_EXAMPLES,
+            paired_examples: paired.paired_examples,
+            improved: paired.improved,
+            regressed: paired.regressed,
+            tied: paired.tied,
+            exact_sign_test_p_value: sign_test.p_value,
+            exact_sign_test_alpha: POST_EVAL_EXACT_TEST_ALPHA,
+            baseline_accuracy,
+            baseline_accuracy_lower_bound: baseline_ci.lower,
+            baseline_accuracy_upper_bound: baseline_ci.upper,
+            candidate_accuracy,
+            candidate_accuracy_lower_bound: candidate_ci.lower,
+            candidate_accuracy_upper_bound: candidate_ci.upper,
+            accuracy_confidence_level: candidate_ci.confidence_level,
+            minimum_accuracy: gate.min_accuracy,
+            required_relative_recovery: gate.relative_recovery,
+            relative_recovery_lower_bound,
+            required_absolute_gain: gate.absolute_gain,
+            absolute_gain_lower_bound,
+            outcome: String::new(),
+        },
+        reason,
+    })
 }
 
 async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::EvalJobInfo) {
@@ -294,40 +562,65 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
     };
     let job_id = snapshot.job_id.clone();
 
-    let stamp_verdict = |outcome: crate::state::GateOutcome, verdict: String| {
-        tracing::info!(
-            eval_job = %job_id,
-            training_job = %gate.training_job_id,
-            adapter = %gate.adapter_name,
-            outcome = %outcome.as_str(),
-            verdict = %verdict,
-            "post-eval gate verdict"
-        );
-        let snapshot = {
-            let mut jobs = state.training_jobs.write().unwrap();
-            jobs.get_mut(&gate.training_job_id).map(|job| {
-                job.post_eval_verdict = Some(verdict);
-                // Machine-readable twin of the prose verdict — persisted
-                // together everywhere the verdict persists so consumers
-                // never classify prose by substring.
-                job.gate_outcome = Some(outcome.as_str().to_string());
-                job.clone()
-            })
-        };
-        // Re-archive: finalize_job persisted the terminal job BEFORE the
-        // gate eval ran, so without this re-save the verdict only lived
-        // in memory and a restart showed the gated job verdict-less
-        // (round-5 quick win).
-        if let Some(job) = snapshot {
-            if let Err(e) = crate::training_history::save(&state.adapter_dir, &job) {
-                tracing::warn!(
-                    error = %e,
-                    training_job = %gate.training_job_id,
-                    "failed to persist gate verdict to training history"
-                );
+    let stamp_verdict =
+        |outcome: crate::state::GateOutcome,
+         verdict: String,
+         mut evidence: Option<kiln_train::PostEvalGateEvidence>| {
+            tracing::info!(
+                eval_job = %job_id,
+                training_job = %gate.training_job_id,
+                adapter = %gate.adapter_name,
+                outcome = %outcome.as_str(),
+                verdict = %verdict,
+                "post-eval gate verdict"
+            );
+            let snapshot = {
+                let mut jobs = state.training_jobs.write().unwrap();
+                jobs.get_mut(&gate.training_job_id).map(|job| {
+                    let new_outcome = outcome.as_str();
+                    let aggregate_outcome =
+                        aggregate_gate_outcome(job.gate_outcome.as_deref(), new_outcome);
+                    job.post_eval_verdict = Some(if aggregate_outcome == new_outcome {
+                        verdict
+                    } else {
+                        format!(
+                            "{} retained across independent gate evidence; latest result: {verdict}",
+                            aggregate_outcome.to_uppercase()
+                        )
+                    });
+                    // Machine-readable twin of the prose verdict — persisted
+                    // together everywhere the verdict persists so consumers
+                    // never classify prose by substring.
+                    job.gate_outcome = Some(aggregate_outcome);
+                    if let Some(mut evidence) = evidence.take() {
+                        evidence.outcome = outcome.as_str().to_string();
+                        if let Some(existing) = job
+                            .post_eval_gate_evidence
+                            .iter_mut()
+                            .find(|prior| prior.eval_job_id == evidence.eval_job_id)
+                        {
+                            *existing = evidence;
+                        } else {
+                            job.post_eval_gate_evidence.push(evidence);
+                        }
+                    }
+                    job.clone()
+                })
+            };
+            // Re-archive: finalize_job persisted the terminal job BEFORE the
+            // gate eval ran, so without this re-save the verdict only lived
+            // in memory and a restart showed the gated job verdict-less
+            // (round-5 quick win).
+            if let Some(job) = snapshot {
+                if let Err(e) = crate::training_history::save(&state.adapter_dir, &job) {
+                    tracing::warn!(
+                        error = %e,
+                        training_job = %gate.training_job_id,
+                        "failed to persist gate verdict to training history"
+                    );
+                }
             }
-        }
-    };
+        };
 
     if snapshot.state != EvalJobState::Completed {
         stamp_verdict(
@@ -336,161 +629,143 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
                 "post-eval did not complete (state: {:?}) — adapter `{}` left on disk, NOT promoted",
                 snapshot.state, gate.adapter_name
             ),
+            None,
         );
         return;
     }
 
-    let accuracy = snapshot
+    let Some(candidate_run) = snapshot
         .finished_runs
         .iter()
         .find(|run| run.adapter.as_deref() == Some(gate.adapter_name.as_str()))
-        .map(|run| run.metrics.accuracy)
-        .or(snapshot.headline_accuracy);
-    let Some(accuracy) = accuracy else {
+    else {
         stamp_verdict(
             crate::state::GateOutcome::Error,
             format!(
                 "post-eval produced no run for adapter `{}` — NOT promoted",
                 gate.adapter_name
             ),
+            None,
+        );
+        return;
+    };
+    let Some(baseline_run) = snapshot
+        .finished_runs
+        .iter()
+        .find(|run| run.adapter.as_deref() != Some(gate.adapter_name.as_str()))
+    else {
+        stamp_verdict(
+            crate::state::GateOutcome::Error,
+            format!(
+                "post-eval produced no paired baseline for adapter `{}` — NOT promoted",
+                gate.adapter_name
+            ),
+            None,
         );
         return;
     };
 
-    // Regression detection: gated runs are Compare jobs carrying the
-    // previous generation's run alongside the new adapter's. Pair the
-    // per-example outcomes and reject promotion when the new adapter is
-    // SIGNIFICANTLY worse (#1497 exact sign test) — a static floor alone
-    // happily promotes a regressed adapter as long as it clears the bar.
-    if let Some(baseline_run) = snapshot
-        .finished_runs
-        .iter()
-        .find(|run| run.adapter.as_deref() != Some(gate.adapter_name.as_str()))
-    {
-        if let Some(new_run) = snapshot
-            .finished_runs
-            .iter()
-            .find(|run| run.adapter.as_deref() == Some(gate.adapter_name.as_str()))
-        {
-            let (improved, regressed) = match paired_aggregate_flips(baseline_run, new_run) {
-                Ok(flips) => flips,
-                Err(error) => {
-                    stamp_verdict(
-                        crate::state::GateOutcome::Error,
-                        format!("post-eval {error} — NOT promoted"),
-                    );
-                    return;
-                }
-            };
-            let test = kiln_eval::result::sign_test(improved, regressed);
-            if regressed > improved && test.significant() {
-                stamp_verdict(
-                    crate::state::GateOutcome::Regression,
-                    format!(
-                        "REGRESSION: `{}` significantly worse than `{}` \
-                         (improved {improved}, regressed {regressed}, p={:.4}) — \
-                         NOT promoted despite accuracy {accuracy:.3}",
-                        gate.adapter_name,
-                        baseline_run.adapter.as_deref().unwrap_or("base"),
-                        test.p_value
-                    ),
-                );
-                return;
-            }
-
-            // distill_refresh §6.4 dual thresholds against the SAME
-            // baseline run: fractional recovery (new/baseline) and
-            // absolute gain (new − baseline).
-            let baseline_acc = baseline_run.metrics.accuracy;
-            if let Some(min_recovery) = gate.relative_recovery {
-                let recovery = if baseline_acc > 0.0 {
-                    accuracy / baseline_acc
-                } else {
-                    1.0
-                };
-                if recovery < min_recovery {
-                    stamp_verdict(
-                        crate::state::GateOutcome::Regression,
-                        format!(
-                            "RECOVERY FAILED: `{}` recovered only {recovery:.3} of `{}`'s \
-                             {baseline_acc:.3} (required {min_recovery:.2}) — NOT promoted",
-                            gate.adapter_name,
-                            baseline_run.adapter.as_deref().unwrap_or("base"),
-                        ),
-                    );
-                    return;
-                }
-            }
-            if let Some(min_gain) = gate.absolute_gain {
-                let gain = accuracy - baseline_acc;
-                if gain < min_gain {
-                    stamp_verdict(
-                        crate::state::GateOutcome::Regression,
-                        format!(
-                            "GAIN TOO SMALL: `{}` gained {gain:+.3} over `{}`'s \
-                             {baseline_acc:.3} (required {min_gain:+.2}) — NOT promoted",
-                            gate.adapter_name,
-                            baseline_run.adapter.as_deref().unwrap_or("base"),
-                        ),
-                    );
-                    return;
-                }
-            }
-        }
-    }
-
-    if accuracy >= gate.min_accuracy {
-        if gate.auto_load_on_pass {
-            let adapter_dir = state.adapter_dir.join(&gate.adapter_name);
-            match crate::adapter_swap::swap_runtime_adapter(
-                state,
-                crate::adapter_swap::SwapRequest {
-                    target: crate::adapter_swap::SwapTarget::Resolved {
-                        active_name: gate.adapter_name.clone(),
-                        dir: adapter_dir,
-                    },
-                    content_changed: true,
-                    default_adapter: crate::adapter_swap::DefaultAdapterUpdate::Replace(Some(
-                        gate.adapter_name.clone(),
-                    )),
-                    reason: "post_eval_gate_promotion",
-                },
-            )
-            .await
-            {
-                Ok(_) => {
-                    stamp_verdict(
-                        crate::state::GateOutcome::Promoted,
-                        format!(
-                            "PASSED: accuracy {accuracy:.3} >= {:.3}; adapter `{}` promoted to active",
-                            gate.min_accuracy, gate.adapter_name
-                        ),
-                    );
-                }
-                // The gate itself passed, but the system failed to apply
-                // the promotion — that is an operational error, not a
-                // measured success or failure.
-                Err(e) => stamp_verdict(
-                    crate::state::GateOutcome::Error,
-                    format!(
-                        "PASSED: accuracy {accuracy:.3} >= {:.3}, but promotion failed: {e}",
-                        gate.min_accuracy
-                    ),
-                ),
-            }
-        } else {
+    let statistical = match evaluate_paired_promotion(&job_id, &gate, baseline_run, candidate_run) {
+        Ok(result) => result,
+        Err(error) => {
             stamp_verdict(
-                crate::state::GateOutcome::Kept,
-                format!(
-                    "PASSED: accuracy {accuracy:.3} >= {:.3}; adapter `{}` kept (auto_load not requested)",
-                    gate.min_accuracy, gate.adapter_name
-                ),
+                crate::state::GateOutcome::Error,
+                format!("post-eval paired evidence is invalid: {error} — NOT promoted"),
+                None,
             );
+            return;
         }
-        return;
+    };
+    let accuracy = statistical.evidence.candidate_accuracy;
+    match statistical.decision {
+        StatisticalGateDecision::Regression => {
+            stamp_verdict(
+                crate::state::GateOutcome::Regression,
+                format!(
+                    "REGRESSION: `{}` vs `{}`: {} — NOT promoted",
+                    gate.adapter_name,
+                    baseline_run.adapter.as_deref().unwrap_or("base"),
+                    statistical.reason
+                ),
+                Some(statistical.evidence),
+            );
+            return;
+        }
+        StatisticalGateDecision::Inconclusive => {
+            stamp_verdict(
+                crate::state::GateOutcome::Inconclusive,
+                format!(
+                    "INCONCLUSIVE: `{}`: {}; adapter left on disk, NOT promoted",
+                    gate.adapter_name, statistical.reason
+                ),
+                Some(statistical.evidence),
+            );
+            return;
+        }
+        StatisticalGateDecision::Pass => {
+            if gate.auto_load_on_pass {
+                let adapter_dir = state.adapter_dir.join(&gate.adapter_name);
+                match crate::adapter_swap::swap_runtime_adapter(
+                    state,
+                    crate::adapter_swap::SwapRequest {
+                        target: crate::adapter_swap::SwapTarget::Resolved {
+                            active_name: gate.adapter_name.clone(),
+                            dir: adapter_dir,
+                        },
+                        content_changed: true,
+                        default_adapter: crate::adapter_swap::DefaultAdapterUpdate::Replace(Some(
+                            gate.adapter_name.clone(),
+                        )),
+                        reason: "post_eval_gate_promotion",
+                    },
+                )
+                .await
+                {
+                    Ok(_) => {
+                        stamp_verdict(
+                            crate::state::GateOutcome::Promoted,
+                            format!(
+                                "PASSED: {}; accuracy {accuracy:.3}, 95% lower bound {:.3} >= {:.3}; adapter `{}` promoted to active",
+                                statistical.reason,
+                                statistical.evidence.candidate_accuracy_lower_bound,
+                                gate.min_accuracy,
+                                gate.adapter_name
+                            ),
+                            Some(statistical.evidence.clone()),
+                        );
+                    }
+                    // The gate itself passed, but the system failed to apply
+                    // the promotion — that is an operational error, not a
+                    // measured success or failure.
+                    Err(e) => stamp_verdict(
+                        crate::state::GateOutcome::Error,
+                        format!(
+                            "STATISTICAL GATE PASSED: accuracy {accuracy:.3}, but promotion failed: {e}"
+                        ),
+                        Some(statistical.evidence.clone()),
+                    ),
+                }
+            } else {
+                stamp_verdict(
+                    crate::state::GateOutcome::Kept,
+                    format!(
+                        "PASSED: {}; accuracy {accuracy:.3}, 95% lower bound {:.3} >= {:.3}; adapter `{}` kept (auto_load not requested)",
+                        statistical.reason,
+                        statistical.evidence.candidate_accuracy_lower_bound,
+                        gate.min_accuracy,
+                        gate.adapter_name
+                    ),
+                    Some(statistical.evidence),
+                );
+            }
+            return;
+        }
+        StatisticalGateDecision::Demoted => {}
     }
 
-    // FAILED the gate. Own the same revision barrier as load, delete, upload,
+    let demotion_evidence = statistical.evidence;
+
+    // Conclusively failed the accuracy floor. Own the same revision barrier as load, delete, upload,
     // and training publication until the serving name has been removed. This
     // makes the loaded check, optional unload, default clear, rename, and cache
     // purge one serialized transaction.
@@ -503,6 +778,7 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
                     "FAILED: accuracy {accuracy:.3} < {:.3}, but adapter `{}` could not be demoted: {error}",
                     gate.min_accuracy, gate.adapter_name
                 ),
+                Some(demotion_evidence.clone()),
             );
             return;
         }
@@ -529,6 +805,7 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
                     "FAILED: accuracy {accuracy:.3} < {:.3}, but loaded adapter `{}` could not be swapped away: {error}",
                     gate.min_accuracy, gate.adapter_name
                 ),
+                Some(demotion_evidence.clone()),
             );
             return;
         }
@@ -557,6 +834,7 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
                 "FAILED: accuracy {accuracy:.3} < {:.3}, but adapter `{}` could not be renamed to .failed: {error}",
                 gate.min_accuracy, gate.adapter_name
             ),
+            Some(demotion_evidence.clone()),
         );
         return;
     }
@@ -569,9 +847,13 @@ async fn apply_post_eval_gate(state: &AppState, snapshot: &crate::eval::queue::E
     stamp_verdict(
         crate::state::GateOutcome::Demoted,
         format!(
-            "FAILED: accuracy {accuracy:.3} < {:.3}; adapter `{}` NOT promoted, {rename_note}",
-            gate.min_accuracy, gate.adapter_name
+            "FAILED: {}; accuracy {accuracy:.3}, 95% upper bound {:.3} < {:.3}; adapter `{}` NOT promoted, {rename_note}",
+            statistical.reason,
+            demotion_evidence.candidate_accuracy_upper_bound,
+            gate.min_accuracy,
+            gate.adapter_name
         ),
+        Some(demotion_evidence),
     );
 }
 
@@ -766,7 +1048,35 @@ mod tests {
             raw_outcome("e1", kiln_eval::EvalOutcomeKind::Fail),
         );
 
-        assert_eq!(paired_aggregate_flips(&baseline, &candidate), Ok((1, 0)));
+        assert_eq!(
+            paired_aggregate_flips(&baseline, &candidate),
+            Ok(PairedAggregateSummary {
+                paired_examples: 1,
+                improved: 1,
+                regressed: 0,
+                tied: 0,
+                baseline_pass: 0,
+                candidate_pass: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn independent_gate_outcomes_retain_the_strongest_failure() {
+        assert_eq!(
+            aggregate_gate_outcome(Some("regression"), "kept"),
+            "regression"
+        );
+        assert_eq!(
+            aggregate_gate_outcome(Some("kept"), "inconclusive"),
+            "inconclusive"
+        );
+        assert_eq!(
+            aggregate_gate_outcome(Some("inconclusive"), "demoted"),
+            "demoted"
+        );
+        assert_eq!(aggregate_gate_outcome(Some("regression"), "error"), "error");
+        assert_eq!(aggregate_gate_outcome(Some("kept"), "promoted"), "promoted");
     }
 
     struct PanicIfInvokedGenerator;
@@ -1009,6 +1319,7 @@ mod tests {
                 linked_eval_job_ids: Vec::new(),
                 post_eval_verdict: None,
                 gate_outcome: None,
+                post_eval_gate_evidence: Vec::new(),
                 loss_history: Vec::new(),
                 cancel_requested: Default::default(),
             },
@@ -1040,40 +1351,144 @@ mod tests {
         }
     }
 
+    fn synthetic_gate_run(
+        adapter: Option<&str>,
+        pass: bool,
+        examples: u32,
+    ) -> kiln_eval::SuiteResult {
+        synthetic_gate_run_with_passes(adapter, examples, if pass { examples } else { 0 })
+    }
+
+    fn synthetic_gate_run_with_passes(
+        adapter: Option<&str>,
+        examples: u32,
+        pass_count: u32,
+    ) -> kiln_eval::SuiteResult {
+        assert!(pass_count <= examples);
+        kiln_eval::SuiteResult {
+            suite_name: "gate-suite".into(),
+            adapter: adapter.map(str::to_string),
+            aggregation: kiln_eval::EvalAggregation::Single,
+            metrics: kiln_eval::AggregateMetrics::default(),
+            outcomes: Vec::new(),
+            aggregated_outcomes: (0..examples)
+                .map(|index| {
+                    let pass = index < pass_count;
+                    aggregate_outcome(
+                        &format!("e{index}"),
+                        if pass {
+                            kiln_eval::EvalOutcomeKind::Pass
+                        } else {
+                            kiln_eval::EvalOutcomeKind::Fail
+                        },
+                        if pass { 1.0 } else { 0.0 },
+                    )
+                })
+                .collect(),
+            started_at: "2026-07-20T00:00:00Z".into(),
+            finished_at: "2026-07-20T00:00:01Z".into(),
+            suite_hash: "sha256:gate-suite".into(),
+            effective_generation_hash: "sha256:gate-generation".into(),
+        }
+    }
+
+    fn test_gate(min_accuracy: f32) -> crate::eval::queue::PostEvalGate {
+        crate::eval::queue::PostEvalGate {
+            min_accuracy,
+            relative_recovery: None,
+            absolute_gain: None,
+            adapter_name: "candidate".into(),
+            training_job_id: "train".into(),
+            auto_load_on_pass: false,
+        }
+    }
+
+    #[test]
+    fn paired_policy_requires_significant_improvement_not_a_tied_point_pass() {
+        let baseline = synthetic_gate_run(None, true, 40);
+        let candidate = synthetic_gate_run(Some("candidate"), true, 40);
+        let result = evaluate_paired_promotion("eval", &test_gate(0.9), &baseline, &candidate)
+            .expect("valid paired evidence");
+
+        assert_eq!(result.decision, StatisticalGateDecision::Inconclusive);
+        assert_eq!(
+            (result.evidence.improved, result.evidence.regressed),
+            (0, 0)
+        );
+        assert_eq!(result.evidence.exact_sign_test_p_value, 1.0);
+        assert!(result.evidence.candidate_accuracy_lower_bound >= 0.9);
+    }
+
+    #[test]
+    fn paired_policy_rejects_significant_regression() {
+        let baseline = synthetic_gate_run(None, true, 40);
+        let candidate = synthetic_gate_run(Some("candidate"), false, 40);
+        let result = evaluate_paired_promotion("eval", &test_gate(0.0), &baseline, &candidate)
+            .expect("valid paired evidence");
+
+        assert_eq!(result.decision, StatisticalGateDecision::Regression);
+        assert_eq!(
+            (result.evidence.improved, result.evidence.regressed),
+            (0, 40)
+        );
+        assert!(result.evidence.exact_sign_test_p_value < POST_EVAL_EXACT_TEST_ALPHA);
+    }
+
+    #[test]
+    fn paired_policy_does_not_promote_when_only_point_accuracy_clears_floor() {
+        let baseline = synthetic_gate_run(None, false, 40);
+        let candidate = synthetic_gate_run_with_passes(Some("candidate"), 40, 38);
+        let result = evaluate_paired_promotion("eval", &test_gate(0.9), &baseline, &candidate)
+            .expect("valid paired evidence");
+
+        assert_eq!(result.evidence.candidate_accuracy, 0.95);
+        assert!(result.evidence.candidate_accuracy_lower_bound < 0.9);
+        assert!(result.evidence.candidate_accuracy_upper_bound >= 0.9);
+        assert_eq!(result.decision, StatisticalGateDecision::Inconclusive);
+    }
+
+    #[test]
+    fn paired_policy_uses_confidence_bound_for_relative_recovery() {
+        let baseline = synthetic_gate_run(None, true, 40);
+        let candidate = synthetic_gate_run(Some("candidate"), true, 40);
+        let mut gate = test_gate(0.0);
+        gate.relative_recovery = Some(0.9);
+        let result = evaluate_paired_promotion("eval", &gate, &baseline, &candidate)
+            .expect("valid paired evidence");
+
+        assert_eq!(result.decision, StatisticalGateDecision::Pass);
+        assert!(result.evidence.relative_recovery_lower_bound.unwrap() >= 0.9);
+        assert_eq!(result.evidence.exact_sign_test_p_value, 1.0);
+    }
+
     async fn run_gated_job(
         state: &crate::state::AppState,
-        suite: EvalSuite,
         gate: crate::eval::queue::PostEvalGate,
-        reply: &str,
+        baseline_pass: bool,
+        candidate_pass: bool,
+        examples: u32,
     ) {
         let job_id = format!("eval-{}", gate.adapter_name);
         let mut info = EvalJobInfo::queued(
             job_id.clone(),
-            suite.name.clone(),
-            vec![Some(gate.adapter_name.clone())],
+            "gate-suite".into(),
+            vec![None, Some(gate.adapter_name.clone())],
             EvalSubmissionKind::PostTraining,
             Some(gate.training_job_id.clone()),
             17,
         );
         info.post_eval_gate = Some(gate.clone());
+        info.state = kiln_eval::EvalJobState::Completed;
+        info.finished_runs = vec![
+            synthetic_gate_run(None, baseline_pass, examples),
+            synthetic_gate_run(Some(&gate.adapter_name), candidate_pass, examples),
+        ];
         state
             .eval_jobs
             .write()
             .unwrap()
-            .insert(job_id.clone(), info);
-        let entry = EvalQueueEntry {
-            job_id,
-            effective_seed: 17,
-            job: QueuedEvalJob::Inline {
-                suite: Box::new(suite),
-                adapter: Some(gate.adapter_name.clone()),
-                generation_override: None,
-            },
-        };
-        let generator =
-            Arc::new(crate::eval::MockEvalGenerator::new().with_force_reply(reply.to_string()))
-                as Arc<dyn crate::eval::generator::EvalGenerator>;
-        run_one_job_with_generator(state.clone(), entry, generator).await;
+            .insert(job_id, info.clone());
+        apply_post_eval_gate(state, &info).await;
     }
 
     fn verdict_of(state: &crate::state::AppState, training_job: &str) -> String {
@@ -1097,6 +1512,19 @@ mod tests {
             .expect("gate_outcome stamped")
     }
 
+    fn evidence_of(
+        state: &crate::state::AppState,
+        training_job: &str,
+    ) -> kiln_train::PostEvalGateEvidence {
+        state
+            .training_jobs
+            .read()
+            .unwrap()
+            .get(training_job)
+            .and_then(|job| job.post_eval_gate_evidence.first().cloned())
+            .expect("post_eval_gate_evidence stamped")
+    }
+
     /// Gate FAIL: the adapter directory is renamed `<name>.failed` (the
     /// documented PostEvalConfig::min_accuracy contract) and the verdict
     /// lands on the training job. Before this, min_accuracy was parsed,
@@ -1114,7 +1542,6 @@ mod tests {
 
         run_gated_job(
             &state,
-            gate_suite("phrase-the-reply-never-contains"),
             crate::eval::queue::PostEvalGate {
                 min_accuracy: 0.9,
                 relative_recovery: None,
@@ -1123,7 +1550,9 @@ mod tests {
                 training_job_id: "train-1".into(),
                 auto_load_on_pass: false,
             },
-            "mock reply",
+            false,
+            false,
+            40,
         )
         .await;
 
@@ -1139,6 +1568,11 @@ mod tests {
         assert!(verdict.contains("FAILED"), "{verdict}");
         assert!(verdict.contains("gated.failed"), "{verdict}");
         assert_eq!(outcome_of(&state, "train-1"), "demoted");
+        let evidence = evidence_of(&state, "train-1");
+        assert_eq!(evidence.policy_version, "paired_wilson_v1");
+        assert_eq!(evidence.paired_examples, 40);
+        assert_eq!(evidence.outcome, "demoted");
+        assert!(evidence.candidate_accuracy_upper_bound < 0.9);
         assert!(
             state.active_adapter_name.read().unwrap().is_none(),
             "demotion must clear a rejected server default even when a request override is loaded"
@@ -1160,7 +1594,6 @@ mod tests {
 
         run_gated_job(
             &state,
-            gate_suite("mock"),
             crate::eval::queue::PostEvalGate {
                 min_accuracy: 0.9,
                 relative_recovery: None,
@@ -1169,7 +1602,9 @@ mod tests {
                 training_job_id: "train-2".into(),
                 auto_load_on_pass: false,
             },
-            "a mock reply that matches",
+            false,
+            true,
+            40,
         )
         .await;
 
@@ -1181,6 +1616,43 @@ mod tests {
         // `promoted` so the dashboard never paints it as a warning by
         // substring-sniffing the prose.
         assert_eq!(outcome_of(&state, "train-2"), "kept");
+        let evidence = evidence_of(&state, "train-2");
+        assert_eq!((evidence.improved, evidence.regressed), (40, 0));
+        assert!(evidence.exact_sign_test_p_value < 0.05);
+        assert!(evidence.candidate_accuracy_lower_bound >= 0.9);
+        assert_eq!(evidence.outcome, "kept");
+    }
+
+    #[tokio::test]
+    async fn gate_with_too_few_pairs_is_inconclusive_and_keeps_serving_name() {
+        let (state, _dir) = gate_test_state();
+        seed_training_job(&state, "train-small", "small");
+        std::fs::create_dir(state.adapter_dir.join("small")).unwrap();
+
+        run_gated_job(
+            &state,
+            crate::eval::queue::PostEvalGate {
+                min_accuracy: 0.5,
+                relative_recovery: None,
+                absolute_gain: None,
+                adapter_name: "small".into(),
+                training_job_id: "train-small".into(),
+                auto_load_on_pass: true,
+            },
+            false,
+            true,
+            POST_EVAL_MIN_PAIRED_EXAMPLES - 1,
+        )
+        .await;
+
+        assert_eq!(outcome_of(&state, "train-small"), "inconclusive");
+        assert!(state.adapter_dir.join("small").exists());
+        assert!(!state.adapter_dir.join("small.failed").exists());
+        assert!(state.active_adapter_name.read().unwrap().is_none());
+        let evidence = evidence_of(&state, "train-small");
+        assert_eq!(evidence.paired_examples, 19);
+        assert_eq!(evidence.minimum_paired_examples, 20);
+        assert_eq!(evidence.outcome, "inconclusive");
     }
 
     /// An errored eval must leave the adapter on disk and NOT promote it —
@@ -1254,7 +1726,6 @@ mod tests {
 
         run_gated_job(
             &state,
-            gate_suite("mock"),
             crate::eval::queue::PostEvalGate {
                 min_accuracy: 0.9,
                 relative_recovery: None,
@@ -1263,7 +1734,9 @@ mod tests {
                 training_job_id: "train-api".into(),
                 auto_load_on_pass: false,
             },
-            "a mock reply that matches",
+            false,
+            true,
+            40,
         )
         .await;
 
@@ -1290,6 +1763,14 @@ mod tests {
             .find(|j| j["job_id"] == "train-api")
             .expect("gated training job present in /v1/train/queue");
         assert_eq!(job["gate_outcome"], "kept", "payload: {job}");
+        assert_eq!(
+            job["post_eval_gate_evidence"][0]["policy_version"], "paired_wilson_v1",
+            "payload: {job}"
+        );
+        assert_eq!(
+            job["post_eval_gate_evidence"][0]["paired_examples"], 40,
+            "payload: {job}"
+        );
         assert!(
             job["post_eval_verdict"]
                 .as_str()

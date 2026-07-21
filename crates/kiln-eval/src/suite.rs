@@ -562,14 +562,16 @@ pub struct PostEvalConfig {
     /// Optional generation override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<EvalGenerationParams>,
-    /// When set and the aggregate accuracy is strictly below this threshold,
-    /// the produced adapter is unloaded and renamed with a `.failed` suffix.
-    /// Use this as a "promote-only-if-good" gate after fine-tuning.
+    /// When set, enables the server's fixed paired-evidence promotion policy.
+    /// The candidate must clear the configured floor by its 95% Wilson lower
+    /// bound and satisfy the paired exact-test policy; point accuracy alone
+    /// never promotes. A conclusive floor failure is renamed with a `.failed`
+    /// suffix, while insufficient evidence is retained but not promoted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_accuracy: Option<f32>,
-    /// If true and `min_accuracy` is set, runs the eval against the base
-    /// model as a baseline before scoring the trained adapter. Both results
-    /// land on the training job's `EvalRunRef`.
+    /// If true, adds a standalone base-model result for browsing. A gate
+    /// always creates its own paired comparison against the previously active
+    /// adapter (or base), independent of this display-oriented option.
     #[serde(default)]
     pub include_baseline: bool,
 }

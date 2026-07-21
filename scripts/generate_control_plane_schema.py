@@ -496,7 +496,7 @@ def build_opd_types() -> None:
             "background_chat": ref("String"), "require_if_eval_recovery": ref("FiniteNumber"), "require_internal_qa_gain": ref("FiniteNumber"),
             "config": ref("OpdConfig"), "post_eval": nullable(ref("PostEvalConfig")), "if_eval_suite": nullable(ref("String")), "new_knowledge_eval_suite": nullable(ref("String")),
         },
-        "Two-phase new-knowledge training and instruction-following recovery request.",
+        "Two-phase new-knowledge training and instruction-following recovery request. Automatic loading accepts at most one gated suite across post_eval, if_eval_suite, and new_knowledge_eval_suite; set config.auto_load=false for independent multi-suite diagnostics or compose one versioned suite.",
         optional=("background_chat", "require_if_eval_recovery", "require_internal_qa_gain", "config", "post_eval", "if_eval_suite", "new_knowledge_eval_suite"),
         open_input=True,
     )
@@ -544,6 +544,49 @@ def build_training_responses() -> None:
     add_enum("TrainingState", "kiln_train::TrainingState", ["queued", "running", "completed", "failed"], "Training-job lifecycle state.")
     add_enum("TrainingJobType", "crate::state::TrainingJobType", ["sft", "grpo", "opd"], "Native training pipeline identity.")
     add_object(
+        "PostEvalGateEvidence",
+        "kiln_train::PostEvalGateEvidence",
+        {
+            "policy_version": ref("NonEmptyString"),
+            "suite_policy": ref("NonEmptyString"),
+            "eval_job_id": ref("NonEmptyString"),
+            "suite_name": ref("NonEmptyString"),
+            "suite_hash": ref("NonEmptyString"),
+            "effective_generation_hash": ref("NonEmptyString"),
+            "baseline_adapter": ref("String"),
+            "candidate_adapter": ref("NonEmptyString"),
+            "aggregation": ref("NonEmptyString"),
+            "minimum_paired_examples": ref("PositiveInteger"),
+            "paired_examples": ref("PositiveInteger"),
+            "improved": ref("NonNegativeInteger"),
+            "regressed": ref("NonNegativeInteger"),
+            "tied": ref("NonNegativeInteger"),
+            "exact_sign_test_p_value": ref("FiniteNumber"),
+            "exact_sign_test_alpha": ref("FiniteNumber"),
+            "baseline_accuracy": ref("FiniteNumber"),
+            "baseline_accuracy_lower_bound": ref("FiniteNumber"),
+            "baseline_accuracy_upper_bound": ref("FiniteNumber"),
+            "candidate_accuracy": ref("FiniteNumber"),
+            "candidate_accuracy_lower_bound": ref("FiniteNumber"),
+            "candidate_accuracy_upper_bound": ref("FiniteNumber"),
+            "accuracy_confidence_level": ref("FiniteNumber"),
+            "minimum_accuracy": ref("FiniteNumber"),
+            "required_relative_recovery": ref("FiniteNumber"),
+            "relative_recovery_lower_bound": ref("FiniteNumber"),
+            "required_absolute_gain": ref("FiniteNumber"),
+            "absolute_gain_lower_bound": ref("FiniteNumber"),
+            "outcome": {"enum": ["promoted", "kept", "regression", "demoted", "inconclusive", "error"]},
+        },
+        "Persisted paired-test and confidence-bound evidence for one post-eval promotion decision.",
+        optional=(
+            "baseline_adapter",
+            "required_relative_recovery",
+            "relative_recovery_lower_bound",
+            "required_absolute_gain",
+            "absolute_gain_lower_bound",
+        ),
+    )
+    add_object(
         "TrainingDataProvenance",
         "kiln_train::TrainingDataProvenance",
         {
@@ -563,9 +606,10 @@ def build_training_responses() -> None:
         "current_loss": nullable(ref("FiniteNumber")), "adapter_name": nullable(ref("String")), "effective_seed": ref("DecimalU64"),
         "started_at": ref("String"), "elapsed_secs": ref("FiniteNumber"), "submitted_unix_ms": ref("NonNegativeInteger"),
         "finished_unix_ms": ref("NonNegativeInteger"), "job_type": ref("TrainingJobType"), "training_data": ref("TrainingDataProvenance"), "error": ref("String"),
-        "post_eval_verdict": ref("String"), "gate_outcome": {"enum": ["promoted", "kept", "regression", "demoted", "error"]},
+        "post_eval_verdict": ref("String"), "gate_outcome": {"enum": ["promoted", "kept", "regression", "demoted", "inconclusive", "error"]},
+        "post_eval_gate_evidence": array(ref("PostEvalGateEvidence")),
     }
-    status_optional = ("effective_seed", "submitted_unix_ms", "finished_unix_ms", "job_type", "training_data", "error", "post_eval_verdict", "gate_outcome")
+    status_optional = ("effective_seed", "submitted_unix_ms", "finished_unix_ms", "job_type", "training_data", "error", "post_eval_verdict", "gate_outcome", "post_eval_gate_evidence")
     add_object("TrainingStatus", "TrainingStatus", status_fields, "Live or archived training-job status.", optional=status_optional)
     add_definition("Vec_TrainingStatus", "Vec<TrainingStatus>", array(ref("TrainingStatus")), "All retained training statuses.")
     add_object("TrainingResponse", "TrainingResponse", {"job_id": ref("NonEmptyString"), "state": {"const": "queued"}, "effective_seed": ref("DecimalU64"), "message": ref("String")}, "Immutable training admission receipt.")

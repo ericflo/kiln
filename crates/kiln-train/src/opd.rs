@@ -440,10 +440,11 @@ pub enum NewKnowledgeSource {
 ///    on Tulu3-flavoured prompts. The instruction-following is
 ///    restored without losing the new knowledge.
 ///
-/// Both phases pre-eval (baseline) and post-eval (after each phase),
-/// gated on the two thresholds. The new adapter is only published
-/// when both gates pass; otherwise the run is marked failed and the
-/// previous adapter remains active. §8.7 auto-rollback contract.
+/// Optional IF-recovery and new-knowledge suites produce independent paired
+/// confidence evidence. Automatic publication deliberately accepts only one
+/// versioned held-out suite: configure one gate for `auto_load`, or set
+/// `auto_load=false` and review both diagnostics. Callers that require one
+/// automatic decision across both domains must compose them into one suite.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistillRefreshRequest {
     /// Name of the existing adapter being refreshed. The new adapter
@@ -462,12 +463,13 @@ pub struct DistillRefreshRequest {
     #[serde(default = "default_background_chat")]
     pub background_chat: String,
     /// Required fractional recovery on the instruction-following
-    /// eval suite before the refreshed adapter is published.
+    /// eval suite before a singly-gated refreshed adapter is published.
     /// `0.95` (default) means "IF-eval after refresh must be ≥ 95%
     /// of the pre-refresh score" — Lu's recipe target.
     #[serde(default = "default_require_if_eval_recovery")]
     pub require_if_eval_recovery: f64,
-    /// Required absolute gain on the new-knowledge eval suite.
+    /// Required confidence-bounded absolute gain on the new-knowledge eval
+    /// suite.
     /// `0.05` (default) = 5 percentage points.
     #[serde(default = "default_require_new_knowledge_gain")]
     pub require_internal_qa_gain: f64,
@@ -484,16 +486,17 @@ pub struct DistillRefreshRequest {
     /// Name of the registered eval suite used to measure
     /// instruction-following recovery. When set, the refreshed
     /// adapter is queued for a post-training eval against this suite
-    /// with `min_accuracy = baseline * require_if_eval_recovery`
-    /// (the prior adapter `name` is the baseline). On failure, the
-    /// refreshed adapter is renamed with `.failed` — §8.7 auto-
-    /// rollback contract.
+    /// using the candidate-lower / baseline-upper Wilson ratio. It may be the
+    /// sole automatic gate, or an independent diagnostic when auto-load is
+    /// disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub if_eval_suite: Option<String>,
     /// Name of the registered eval suite used to measure new-knowledge
     /// gain on the mid-trained material. When set, the refreshed
     /// adapter is queued for a post-training eval against this suite
-    /// with `min_accuracy = baseline + require_internal_qa_gain`.
+    /// using candidate-lower minus baseline-upper. It may be the sole
+    /// automatic gate, or an independent diagnostic when auto-load is
+    /// disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_knowledge_eval_suite: Option<String>,
 }

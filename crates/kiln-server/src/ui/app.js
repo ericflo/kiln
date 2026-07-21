@@ -3949,7 +3949,7 @@ async function pollTraining() {
       // 'completed', and failed jobs carry an error message. Key on their
       // presence too, or the verdict pill / error line never repaints
       // until some unrelated change touches the list.
-      (data.completed || []).map(j => `${j.job_id}:${j.state}:${j.gate_outcome || (j.post_eval_verdict ? 'v' : '')}:${j.error ? 'e' : ''}`).join(','),
+      (data.completed || []).map(j => `${j.job_id}:${j.state}:${j.gate_outcome || (j.post_eval_verdict ? 'v' : '')}:${Array.isArray(j.post_eval_gate_evidence) ? j.post_eval_gate_evidence.length : 0}:${j.error ? 'e' : ''}`).join(','),
     ].join('|');
     if (key !== lastTrainingKey) {
       lastTrainingKey = key;
@@ -4121,13 +4121,14 @@ function renderTrainingCard(j, state) {
   //   kept              → amber chip with a CHECK icon — a pass without a
   //                       requested promotion is a success, not a warning
   //   regression/demoted → red (rejected vs baseline / demoted to .failed)
-  //   error             → amber + warning icon (gate couldn't measure)
+  //   inconclusive/error → amber + warning icon (insufficient evidence or
+  //                        gate couldn't measure)
   // Pill text stays the prose verdict. Rendered whenever the backend
   // stamped a verdict so a silent demotion can't hide.
   let gateLine = '';
   if (j.post_eval_verdict || j.gate_outcome) {
     const v = String(j.post_eval_verdict || j.gate_outcome);
-    const OUTCOME_CLS = { promoted: 'ok', kept: 'warn', regression: 'err', demoted: 'err', error: 'warn' };
+    const OUTCOME_CLS = { promoted: 'ok', kept: 'warn', regression: 'err', demoted: 'err', inconclusive: 'warn', error: 'warn' };
     let cls = OUTCOME_CLS[j.gate_outcome] || '';
     if (!cls) {
       // Fallback ONLY for jobs archived before `gate_outcome` existed
@@ -4138,7 +4139,15 @@ function renderTrainingCard(j, state) {
         : (v.includes('.failed') || v.includes('demoted') || v.includes('REGRESSION')) ? 'err' : 'warn';
     }
     const iconName = (cls === 'ok' || j.gate_outcome === 'kept') ? 'check' : 'warning';
-    gateLine = `<div class="training-card-gate gate-${cls}" title="${escapeHtml(v)}">${icon(iconName, 'icn-sm')} ${escapeHtml(v.slice(0, 160))}</div>`;
+    const evidenceRows = Array.isArray(j.post_eval_gate_evidence) ? j.post_eval_gate_evidence : [];
+    const evidence = evidenceRows.length ? evidenceRows[evidenceRows.length - 1] : null;
+    const evidenceSummary = evidence
+      ? `${evidenceRows.length > 1 ? ` · gates=${evidenceRows.length}` : ''} · n=${Number(evidence.paired_examples || 0).toLocaleString()} · p=${Number(evidence.exact_sign_test_p_value).toPrecision(3)} · LB=${Number(evidence.candidate_accuracy_lower_bound).toFixed(3)}`
+      : '';
+    const evidenceTitle = evidence
+      ? `${v}\n${evidenceRows.map((row) => `Policy ${row.policy_version}; suite ${row.suite_name} (${row.suite_hash}); outcome ${row.outcome}; improved ${row.improved}, regressed ${row.regressed}, tied ${row.tied}; 95% CI [${Number(row.candidate_accuracy_lower_bound).toFixed(3)}, ${Number(row.candidate_accuracy_upper_bound).toFixed(3)}]`).join('\n')}`
+      : v;
+    gateLine = `<div class="training-card-gate gate-${cls}" title="${escapeHtml(evidenceTitle)}">${icon(iconName, 'icn-sm')} ${escapeHtml(v.slice(0, 140))}${escapeHtml(evidenceSummary)}</div>`;
   }
   const errLine = (stateNormForActions === 'failed' && j.error)
     ? `<div class="training-card-error">${icon('warning', 'icn-sm')} ${escapeHtml(String(j.error).slice(0, 220))}</div>`

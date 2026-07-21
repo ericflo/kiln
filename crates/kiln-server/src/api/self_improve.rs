@@ -534,6 +534,7 @@ fn prepare_agent_job(
         linked_eval_job_ids: Vec::new(),
         post_eval_verdict: None,
         gate_outcome: None,
+        post_eval_gate_evidence: Vec::new(),
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };

@@ -129,6 +129,7 @@ fn enqueue_corrections_job(state: &AppState, job_id: &str, correction_ids: Vec<S
         linked_eval_job_ids: Vec::new(),
         post_eval_verdict: None,
         gate_outcome: None,
+        post_eval_gate_evidence: Vec::new(),
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };

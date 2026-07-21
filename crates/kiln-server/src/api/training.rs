@@ -1503,6 +1503,17 @@ fn validate_distill_refresh_at_submit(
         // target even when the recovery phase samples on-policy.
         validate_opd_prompts_at_submit("distill/refresh", examples, true)?;
     }
+    let automatic_gate_count = usize::from(
+        req.post_eval
+            .as_ref()
+            .is_some_and(|post_eval| post_eval.min_accuracy.is_some()),
+    ) + usize::from(req.if_eval_suite.is_some())
+        + usize::from(req.new_knowledge_eval_suite.is_some());
+    if req.config.auto_load && automatic_gate_count > 1 {
+        return Err(ApiError::training_invalid_request(format!(
+            "distill/refresh automatic promotion accepts one versioned held-out suite, but {automatic_gate_count} gated suites were configured; compose the required domains into one suite or set config.auto_load=false and review the independent diagnostics"
+        )));
+    }
     Ok(())
 }
 
@@ -1677,6 +1688,7 @@ pub(crate) async fn admit_sft_request(
         linked_eval_job_ids: Vec::new(),
         post_eval_verdict: None,
         gate_outcome: None,
+        post_eval_gate_evidence: Vec::new(),
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
@@ -1851,6 +1863,7 @@ async fn submit_grpo(
         linked_eval_job_ids: Vec::new(),
         post_eval_verdict: None,
         gate_outcome: None,
+        post_eval_gate_evidence: Vec::new(),
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
@@ -2059,6 +2072,7 @@ async fn submit_opd(
         linked_eval_job_ids: Vec::new(),
         post_eval_verdict: None,
         gate_outcome: None,
+        post_eval_gate_evidence: Vec::new(),
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
@@ -2195,6 +2209,7 @@ async fn submit_distill_refresh(
         linked_eval_job_ids: Vec::new(),
         post_eval_verdict: None,
         gate_outcome: None,
+        post_eval_gate_evidence: Vec::new(),
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
@@ -2420,6 +2435,13 @@ pub(crate) fn validate_post_eval_suite(
     let Some(cfg) = post_eval else {
         return Ok(());
     };
+    if let Some(min_accuracy) = cfg.min_accuracy
+        && !(0.0..=1.0).contains(&min_accuracy)
+    {
+        return Err(ApiError::training_invalid_request(
+            "post_eval.min_accuracy must be finite and in [0.0, 1.0]",
+        ));
+    }
     if cfg.data_scope == kiln_eval::PostEvalDataScope::TrainSetEval && cfg.min_accuracy.is_some() {
         return Err(ApiError::training_invalid_request(
             "post_eval.data_scope \"train-set-eval\" is diagnostic only and cannot set min_accuracy",
@@ -4118,6 +4140,7 @@ fn register_and_enqueue_distill(
         linked_eval_job_ids: Vec::new(),
         post_eval_verdict: None,
         gate_outcome: None,
+        post_eval_gate_evidence: Vec::new(),
         loss_history: Vec::new(),
         cancel_requested: Default::default(),
     };
@@ -4163,6 +4186,7 @@ fn training_status_from_info(j: &crate::state::TrainingJobInfo) -> TrainingStatu
         error: j.error.clone(),
         post_eval_verdict: j.post_eval_verdict.clone(),
         gate_outcome: j.gate_outcome.clone(),
+        post_eval_gate_evidence: j.post_eval_gate_evidence.clone(),
     }
 }
 
@@ -5343,6 +5367,7 @@ mod tests {
             linked_eval_job_ids: Vec::new(),
             post_eval_verdict: None,
             gate_outcome: None,
+            post_eval_gate_evidence: Vec::new(),
             loss_history: Vec::new(),
             cancel_requested: Default::default(),
         };
@@ -5493,6 +5518,24 @@ mod tests {
         let error = validate_post_eval_suite(&state, Some(&config)).unwrap_err();
         assert_eq!(error.code, "training_invalid_request");
         assert!(error.message.contains("diagnostic only"));
+    }
+
+    #[test]
+    fn promotion_accuracy_floor_must_match_the_published_unit_interval() {
+        let state = teacher_binding_test_state();
+        for min_accuracy in [-0.01, 1.01, f32::NAN] {
+            let config = kiln_eval::PostEvalConfig {
+                suite: "held-out".to_string(),
+                data_scope: kiln_eval::PostEvalDataScope::HeldOut,
+                generation: None,
+                min_accuracy: Some(min_accuracy),
+                include_baseline: false,
+            };
+
+            let error = validate_post_eval_suite(&state, Some(&config)).unwrap_err();
+            assert_eq!(error.code, "training_invalid_request");
+            assert!(error.message.contains("finite and in [0.0, 1.0]"));
+        }
     }
 
     #[test]
@@ -6601,5 +6644,47 @@ mod tests {
         assert_eq!(req.background_chat, "tulu3");
         assert!((req.require_if_eval_recovery - 0.95).abs() < 1e-9);
         assert!((req.require_internal_qa_gain - 0.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn distill_refresh_rejects_multi_suite_automatic_promotion() {
+        let mut req: DistillRefreshRequest = serde_json::from_str(
+            r#"{
+                "name": "company-assistant",
+                "new_data": {"dataset": "q4-2026"},
+                "behavioural_teacher": "company-assistant@v17",
+                "if_eval_suite": "if-held-out-v3",
+                "new_knowledge_eval_suite": "qa-held-out-v3"
+            }"#,
+        )
+        .unwrap();
+
+        let error = validate_distill_refresh_at_submit(&req).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("automatic promotion accepts one versioned held-out suite"),
+            "{error}"
+        );
+
+        req.config.auto_load = false;
+        validate_distill_refresh_at_submit(&req)
+            .expect("independent multi-suite diagnostics are allowed without auto-load");
+    }
+
+    #[test]
+    fn distill_refresh_accepts_one_automatic_promotion_suite() {
+        let req: DistillRefreshRequest = serde_json::from_str(
+            r#"{
+                "name": "company-assistant",
+                "new_data": {"dataset": "q4-2026"},
+                "behavioural_teacher": "company-assistant@v17",
+                "if_eval_suite": "if-held-out-v3"
+            }"#,
+        )
+        .unwrap();
+
+        validate_distill_refresh_at_submit(&req)
+            .expect("one paired suite owns automatic promotion");
     }
 }

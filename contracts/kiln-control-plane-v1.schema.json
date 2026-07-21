@@ -1391,7 +1391,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Two-phase new-knowledge training and instruction-following recovery request.",
+      "description": "Two-phase new-knowledge training and instruction-following recovery request. Automatic loading accepts at most one gated suite across post_eval, if_eval_suite, and new_knowledge_eval_suite; set config.auto_load=false for independent multi-suite diagnostics or compose one versioned suite.",
       "x-kiln-rust-type": "DistillRefreshRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3534,6 +3534,135 @@
       "x-kiln-rust-type": "kiln_eval::PostEvalDataScope",
       "x-kiln-field-schema-status": "complete"
     },
+    "PostEvalGateEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_version",
+        "suite_policy",
+        "eval_job_id",
+        "suite_name",
+        "suite_hash",
+        "effective_generation_hash",
+        "candidate_adapter",
+        "aggregation",
+        "minimum_paired_examples",
+        "paired_examples",
+        "improved",
+        "regressed",
+        "tied",
+        "exact_sign_test_p_value",
+        "exact_sign_test_alpha",
+        "baseline_accuracy",
+        "baseline_accuracy_lower_bound",
+        "baseline_accuracy_upper_bound",
+        "candidate_accuracy",
+        "candidate_accuracy_lower_bound",
+        "candidate_accuracy_upper_bound",
+        "accuracy_confidence_level",
+        "minimum_accuracy",
+        "outcome"
+      ],
+      "properties": {
+        "policy_version": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "suite_policy": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "eval_job_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "suite_name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "suite_hash": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "effective_generation_hash": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "baseline_adapter": {
+          "$ref": "#/$defs/String"
+        },
+        "candidate_adapter": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "aggregation": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "minimum_paired_examples": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "paired_examples": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "improved": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "regressed": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "tied": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "exact_sign_test_p_value": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "exact_sign_test_alpha": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "baseline_accuracy": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "baseline_accuracy_lower_bound": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "baseline_accuracy_upper_bound": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "candidate_accuracy": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "candidate_accuracy_lower_bound": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "candidate_accuracy_upper_bound": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "accuracy_confidence_level": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "minimum_accuracy": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "required_relative_recovery": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "relative_recovery_lower_bound": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "required_absolute_gain": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "absolute_gain_lower_bound": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "outcome": {
+          "enum": [
+            "promoted",
+            "kept",
+            "regression",
+            "demoted",
+            "inconclusive",
+            "error"
+          ]
+        }
+      },
+      "description": "Persisted paired-test and confidence-bound evidence for one post-eval promotion decision.",
+      "x-kiln-rust-type": "kiln_train::PostEvalGateEvidence",
+      "x-kiln-field-schema-status": "complete"
+    },
     "PromptsSource": {
       "oneOf": [
         {
@@ -5178,8 +5307,15 @@
             "kept",
             "regression",
             "demoted",
+            "inconclusive",
             "error"
           ]
+        },
+        "post_eval_gate_evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PostEvalGateEvidence"
+          }
         },
         "epoch": {
           "anyOf": [
@@ -5435,8 +5571,15 @@
             "kept",
             "regression",
             "demoted",
+            "inconclusive",
             "error"
           ]
+        },
+        "post_eval_gate_evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PostEvalGateEvidence"
+          }
         }
       },
       "description": "Live or archived training-job status.",

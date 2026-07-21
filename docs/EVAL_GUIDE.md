@@ -828,6 +828,77 @@ when requested, its base-model comparison, then back-links eval IDs on the
 training status through `linked_eval_job_ids`. Use `include_baseline: false`
 to skip the base-model run.
 
+### Automatic promotion policy
+
+Setting `post_eval.min_accuracy` changes the post-eval into a fail-closed
+promotion gate. Kiln always runs one paired `Compare` job against the adapter
+that was active before training (or the base model when no adapter was active),
+using the same suite, effective generation settings, seed derivation, and
+reduced per-example aggregation for both arms. This comparison is required
+even when `include_baseline` is false; `include_baseline` only controls the
+additional standalone baseline result linked for browsing.
+
+Automatic promotion uses the fixed `paired_wilson_v1` policy:
+
+1. The baseline and candidate must have identical suite hashes, effective
+   generation hashes, aggregation modes, example counts, and unique example
+   IDs. Missing, duplicate, non-finite, or mismatched evidence is an error.
+2. The suite must contain at least 20 independent examples *after* its
+   declared `single`, `mean@k`, `pass@k`, or `majority@k` reduction. Raw
+   completions are not independent samples for this requirement.
+3. Kiln computes a two-sided exact binomial sign test over per-example score
+   improvements and regressions at `alpha = 0.05`.
+4. Kiln recomputes candidate accuracy from the reduced outcomes and computes
+   its 95% Wilson interval. An ordinary gate passes only when the candidate is
+   significantly better than the paired baseline **and** the Wilson lower
+   bound is at least `min_accuracy`. The point estimate alone is never a pass.
+5. Internal recovery/gain gates use conservative confidence bounds rather than
+   point ratios: candidate-lower / baseline-upper for relative recovery, and
+   candidate-lower - baseline-upper for absolute gain. A significant paired
+   regression still rejects them.
+
+Twenty examples is a hard minimum, not a promise that twenty is sufficient.
+For example, 20/20 has a 95% Wilson lower bound of about 0.84 and therefore
+cannot satisfy `min_accuracy: 0.90`; a larger held-out suite is required.
+
+The gate outcome is explicit:
+
+| `gate_outcome` | Meaning | Adapter action |
+|---|---|---|
+| `promoted` | Statistical policy passed and deferred auto-load succeeded. | Active in serving. |
+| `kept` | Statistical policy passed but auto-load was not requested. | Retained under its original name. |
+| `regression` | Candidate was significantly worse in the paired exact test. | Never promoted; retained for investigation. |
+| `demoted` | With at least 20 pairs, even the Wilson upper bound was below the accuracy floor. | Renamed to `<name>.failed` and removed from serving/default state. |
+| `inconclusive` | Evidence could neither pass nor conclusively reject: too few pairs, no significant improvement, or a lower bound below a required threshold. | Retained under its original name, never promoted. |
+| `error` | The eval, evidence contract, archive update, or adapter swap failed. | Never promoted. |
+
+`GET /v1/train/status`, `GET /v1/train/status/{job_id}`, and
+`GET /v1/train/queue` expose the human-readable `post_eval_verdict`, the stable
+`gate_outcome`, and `post_eval_gate_evidence[]`. Each evidence row persists the
+policy and suite identities, baseline/candidate labels, aggregation, minimum
+and observed paired counts, improved/regressed/tied counts, exact-test p-value
+and alpha, both Wilson intervals, configured thresholds, conservative
+recovery/gain bounds, and final outcome. The dashboard shows the paired count,
+p-value, and candidate lower bound directly on the training job.
+
+Automatic promotion deliberately has a **single-versioned-suite policy**.
+Kiln does not average independent suites, accept an OR across suites, or let a
+passing suite erase a failing one. Put every required domain into one
+registered held-out suite, use tags for domain-level slices, version that
+composition, and set one promotion floor. Independent suite runs remain useful
+diagnostics but do not compose into an automatic promotion decision.
+
+The same rule is enforced for `distill_refresh`. Across a gated `post_eval`,
+`if_eval_suite`, and `new_knowledge_eval_suite`, `config.auto_load: true`
+accepts at most one configured gate. Requests with several are rejected before
+training. Set `auto_load: false` to retain several independent diagnostic
+evidence rows for operator review, or compose the domains into one held-out
+suite for one automatic decision.
+When several diagnostic gates finish, every evidence row remains available and
+the training job's summary `gate_outcome` retains the strongest fail-closed
+classification, so a later passing diagnostic cannot erase an earlier error,
+regression, demotion, or inconclusive result.
+
 An intentional training-data diagnostic must set
 `"data_scope":"train-set-eval"`. That label permits overlap but is rejected
 when combined with `min_accuracy`, so it cannot masquerade as a promotion
@@ -911,9 +982,11 @@ Every example record (`outcomes[]`) carries:
 kiln-eval compare --suite math-smoke --adapter "" --adapter math-v1 --watch
 ```
 
-**Gate a promotion behind eval accuracy.** Use `post_eval.min_accuracy`
-on your training request. Trained adapters below the threshold are still
-saved to disk so you can inspect them, but kiln won't auto-load them.
+**Gate a promotion behind paired evidence.** Use `post_eval.min_accuracy` on
+your training request. A point accuracy above the floor is insufficient: the
+fixed paired exact-test and Wilson-lower-bound policy above must pass. A
+conclusive floor failure is renamed with `.failed`; inconclusive or regressed
+adapters remain on disk for investigation but are never auto-loaded.
 
 **JSON-shape gate for tool-call models.** Use a composite scorer:
 ```json

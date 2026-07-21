@@ -4286,6 +4286,26 @@ fn publish_training_checkpoints_locked(
     }
 }
 
+fn stamp_gate_enqueue_error(state: &AppState, job_id: &str, verdict: String) {
+    let snapshot = {
+        let mut jobs = state.training_jobs.write().unwrap();
+        jobs.get_mut(job_id).map(|job| {
+            job.post_eval_verdict = Some(verdict);
+            job.gate_outcome = Some(crate::state::GateOutcome::Error.as_str().to_string());
+            job.clone()
+        })
+    };
+    if let Some(job) = snapshot {
+        if let Err(error) = crate::training_history::save(&state.adapter_dir, &job) {
+            tracing::warn!(
+                job_id,
+                %error,
+                "failed to persist post-eval gate enqueue error"
+            );
+        }
+    }
+}
+
 /// Execute a single training job (runs on a blocking thread).
 fn execute_job(state: AppState, mut entry: QueueEntry) {
     let training_runtime = state.training_runtime;
@@ -4422,9 +4442,31 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
         QueuedJob::DistillPump(req) => req.post_eval.clone(),
         QueuedJob::DistillSelf(req) => req.post_eval.clone(),
     };
-    let promotion_gate_pending = post_eval
-        .as_ref()
-        .is_some_and(|cfg| cfg.min_accuracy.is_some());
+    // Internal distill-refresh evaluations are independent diagnostics when
+    // more than one suite is configured. Admission rejects automatic loading
+    // for that shape; one internal suite may own the same deferred-promotion
+    // path as an ordinary post_eval gate.
+    let distill_refresh_dual: Option<(Option<String>, Option<String>, f64, f64)> = match &entry.job
+    {
+        QueuedJob::DistillRefresh(req) => Some((
+            req.if_eval_suite.clone(),
+            req.new_knowledge_eval_suite.clone(),
+            req.require_if_eval_recovery,
+            req.require_internal_qa_gain,
+        )),
+        _ => None,
+    };
+    let automatic_gate_count = usize::from(
+        post_eval
+            .as_ref()
+            .is_some_and(|cfg| cfg.min_accuracy.is_some()),
+    ) + distill_refresh_dual.as_ref().map_or(
+        0,
+        |(if_suite, qa_suite, _, _)| {
+            usize::from(if_suite.is_some()) + usize::from(qa_suite.is_some())
+        },
+    );
+    let promotion_gate_pending = automatic_gate_count > 0;
     let publication = prepare_training_publication(&state, &adapter_name, !promotion_gate_pending);
 
     let metric_type = match job_type {
@@ -4473,21 +4515,6 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
     let server_checkpoint_interval = state.checkpoint_interval;
 
     let base_model = trainer::default_base_model(&state.model_config);
-
-    // §8.7 distill_refresh dual eval gate: capture the IF-eval and
-    // new-knowledge suite names so we can enqueue dual evals after
-    // training completes. The thresholds from the request become
-    // min_accuracy on each PostEvalConfig.
-    let distill_refresh_dual: Option<(Option<String>, Option<String>, f64, f64)> = match &entry.job
-    {
-        QueuedJob::DistillRefresh(req) => Some((
-            req.if_eval_suite.clone(),
-            req.new_knowledge_eval_suite.clone(),
-            req.require_if_eval_recovery,
-            req.require_internal_qa_gain,
-        )),
-        _ => None,
-    };
 
     // A queued path/selector may have waited for hours. Revalidate streamed
     // identities and require every dynamic source to have its submit-time
@@ -4867,7 +4894,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     tracing::info!(job_id = %job_id, "auto-loaded trained adapter");
                 }
             } else {
-                if promotion_gate_pending {
+                if auto_load && promotion_gate_pending {
                     tracing::info!(
                         job_id = %job_id,
                         adapter = %adapter_name,
@@ -4890,52 +4917,41 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     &adapter_name,
                     cfg,
                     auto_load && canary_ok,
+                    None,
+                    None,
                 ) {
                     tracing::warn!(job_id = %job_id, error = %e, "post-training eval enqueue failed");
                     // The gate could not be installed — an auto_load that
                     // was deferred to it would otherwise be lost silently.
                     if promotion_gate_pending {
-                        let mut jobs = state.training_jobs.write().unwrap();
-                        if let Some(job) = jobs.get_mut(&job_id) {
-                            job.post_eval_verdict = Some(format!(
+                        stamp_gate_enqueue_error(
+                            &state,
+                            &job_id,
+                            format!(
                                 "post-eval gate could not be enqueued ({e}) — adapter `{adapter_name}` left on disk, NOT promoted"
-                            ));
-                            // Machine-readable twin (see GateOutcome): the
-                            // gate never ran, so this is an error, not a
-                            // measured pass/fail.
-                            job.gate_outcome =
-                                Some(crate::state::GateOutcome::Error.as_str().to_string());
-                        }
+                            ),
+                        );
                     }
                 }
             }
 
-            // §8.7 distill_refresh dual eval gate: when the
-            // DistillRefresh request named explicit IF-eval and
-            // new-knowledge suites, enqueue dual eval runs with
-            // baseline so the dashboard shows pre/post deltas and
-            // the existing PostEvalConfig.min_accuracy mechanism
-            // gates promotion. `require_if_eval_recovery` is a
-            // *fractional* recovery threshold relative to baseline
-            // (computed by the eval worker against the prior
-            // adapter), and `require_internal_qa_gain` is an
-            // *absolute* gain threshold; both translate to
-            // PostEvalConfig knobs the eval worker already honours.
+            // §8.7 distill_refresh eval evidence. One configured suite may
+            // own deferred automatic promotion. Two suites are admitted only
+            // with auto_load off and remain independent diagnostics; the API
+            // never averages or ORs their outcomes. Recovery and gain are
+            // applied to conservative Wilson bounds by the eval worker.
             if let Some((if_suite, qa_suite, frac_recovery, qa_gain)) =
                 distill_refresh_dual.as_ref()
             {
-                // §6.4 dual gates, ENFORCED (round-5 discovery: these
-                // thresholds were validated then silently discarded — the
-                // recipe advertised a 0.95/0.05 safety net that gated
-                // nothing). Each suite enqueues as a GATED comparison:
+                // Each suite enqueues as a paired comparison:
                 // min_accuracy 0.0 makes the run a Compare job
                 // [previous-active/base, refreshed] and the gate's new
                 // relative_recovery / absolute_gain thresholds apply
                 // against the baseline run in apply_post_eval_gate.
-                let mut enqueue_gated = |suite: &String,
-                                         relative_recovery: Option<f32>,
-                                         absolute_gain: Option<f32>,
-                                         label: &str| {
+                let enqueue_gated = |suite: &String,
+                                     relative_recovery: Option<f32>,
+                                     absolute_gain: Option<f32>,
+                                     label: &str| {
                     let cfg = kiln_eval::PostEvalConfig {
                         suite: suite.clone(),
                         data_scope: Default::default(),
@@ -4943,25 +4959,28 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                         min_accuracy: Some(0.0),
                         include_baseline: false,
                     };
-                    match enqueue_post_training_eval(&state, &job_id, &adapter_name, &cfg, false) {
+                    match enqueue_post_training_eval(
+                        &state,
+                        &job_id,
+                        &adapter_name,
+                        &cfg,
+                        auto_load && automatic_gate_count == 1 && canary_ok,
+                        relative_recovery,
+                        absolute_gain,
+                    ) {
                         Err(e) => {
-                            tracing::warn!(job_id = %job_id, suite = %suite, error = %e, "distill_refresh {label} enqueue failed")
+                            tracing::warn!(job_id = %job_id, suite = %suite, error = %e, "distill_refresh {label} enqueue failed");
+                            if auto_load && automatic_gate_count == 1 {
+                                stamp_gate_enqueue_error(
+                                    &state,
+                                    &job_id,
+                                    format!(
+                                        "distill_refresh promotion gate could not be enqueued ({e}) — adapter `{adapter_name}` left on disk, NOT promoted"
+                                    ),
+                                );
+                            }
                         }
                         Ok(()) => {
-                            // Stamp the dual thresholds onto the gate the
-                            // standard enqueue just installed.
-                            let mut jobs = state.eval_jobs.write().unwrap();
-                            if let Some((_, job)) = jobs.iter_mut().find(|(_, j)| {
-                                j.post_eval_gate
-                                    .as_ref()
-                                    .is_some_and(|g| g.training_job_id == job_id)
-                                    && j.suite_name == *suite
-                            }) {
-                                if let Some(gate) = job.post_eval_gate.as_mut() {
-                                    gate.relative_recovery = relative_recovery;
-                                    gate.absolute_gain = absolute_gain;
-                                }
-                            }
                             tracing::info!(job_id = %job_id, suite = %suite, "distill_refresh {label} queued (gated)");
                         }
                     }
@@ -5016,14 +5035,23 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
 /// `cfg.include_baseline` is set, also enqueues a baseline run against the
 /// base model so a side-by-side delta is computable. Returns Err only when
 /// the eval queue is at capacity or no suite registry is configured;
-/// individual eval failures are reported via the eval-job tracking map.
+/// individual eval failures are reported via the eval-job tracking map. Gate
+/// thresholds are admitted together with the tracked job before its queue
+/// entry becomes visible to the worker.
 pub fn enqueue_post_training_eval(
     state: &AppState,
     training_job_id: &str,
     adapter_name: &str,
     cfg: &kiln_eval::PostEvalConfig,
     auto_load_on_pass: bool,
+    relative_recovery: Option<f32>,
+    absolute_gain: Option<f32>,
 ) -> Result<(), String> {
+    if cfg.min_accuracy.is_none() && (relative_recovery.is_some() || absolute_gain.is_some()) {
+        return Err(
+            "relative-recovery and absolute-gain thresholds require a promotion gate".to_string(),
+        );
+    }
     if state.suite_registry.is_none() {
         return Err("server has no eval suite registry".to_string());
     }
@@ -5063,9 +5091,8 @@ pub fn enqueue_post_training_eval(
         Ok(admitted.job_id)
     };
 
-    let mut linked_ids: Vec<String> = Vec::new();
     if cfg.include_baseline {
-        linked_ids.push(push(None)?);
+        push(None)?;
     }
     // Regression detection (round-4 discovery): a gated run compares the
     // new adapter against the CURRENT ACTIVE adapter (the previous
@@ -5083,7 +5110,7 @@ pub fn enqueue_post_training_eval(
     } else {
         None
     };
-    let adapter_eval_id = if cfg.min_accuracy.is_some() {
+    if let Some(min_accuracy) = cfg.min_accuracy {
         let baseline_slot = baseline_for_gate.clone().unwrap_or_default();
         let job = crate::eval::queue::QueuedEvalJob::Compare(kiln_eval::EvalCompareSpec {
             suite: cfg.suite.clone(),
@@ -5091,62 +5118,32 @@ pub fn enqueue_post_training_eval(
             seed: paired_seed.get(),
             generation: cfg.generation.clone(),
         });
-        let admitted = match paired_seed.get() {
-            Some(seed) => state.enqueue_eval_with_effective_seed(
+        let adapters = vec![
+            Some(baseline_slot).filter(|s| !s.is_empty()),
+            Some(adapter_name.to_string()),
+        ];
+        let gate = crate::eval::queue::PostEvalGate {
+            min_accuracy,
+            relative_recovery,
+            absolute_gain,
+            adapter_name: adapter_name.to_string(),
+            training_job_id: training_job_id.to_string(),
+            auto_load_on_pass,
+        };
+        let admitted = state
+            .enqueue_gated_eval(
                 cfg.suite.clone(),
-                vec![
-                    Some(baseline_slot.clone()).filter(|s| !s.is_empty()),
-                    Some(adapter_name.to_string()),
-                ],
+                adapters,
                 crate::eval::queue::EvalSubmissionKind::PostTraining,
                 Some(training_job_id.to_string()),
                 job,
-                seed,
-            ),
-            None => state.enqueue_eval(
-                cfg.suite.clone(),
-                vec![
-                    Some(baseline_slot).filter(|s| !s.is_empty()),
-                    Some(adapter_name.to_string()),
-                ],
-                crate::eval::queue::EvalSubmissionKind::PostTraining,
-                Some(training_job_id.to_string()),
-                job,
-            ),
-        }
-        .map_err(|error| format!("post-training eval admission failed: {error:#}"))?;
+                paired_seed.get(),
+                gate,
+            )
+            .map_err(|error| format!("post-training eval admission failed: {error:#}"))?;
         paired_seed.set(Some(admitted.effective_seed));
-        admitted.job_id
     } else {
-        push(Some(adapter_name.to_string()))?
-    };
-    linked_ids.push(adapter_eval_id.clone());
-
-    // §8.7 promotion gate: when the request set `min_accuracy`, the
-    // adapter's run (never the baseline's) carries the gate. The eval
-    // worker applies the verdict at terminal time — promote on pass,
-    // rename to `<name>.failed` on fail.
-    if let Some(min_accuracy) = cfg.min_accuracy {
-        let mut jobs = state.eval_jobs.write().unwrap();
-        if let Some(job) = jobs.get_mut(&adapter_eval_id) {
-            job.post_eval_gate = Some(crate::eval::queue::PostEvalGate {
-                min_accuracy,
-                relative_recovery: None,
-                absolute_gain: None,
-                adapter_name: adapter_name.to_string(),
-                training_job_id: training_job_id.to_string(),
-                auto_load_on_pass,
-            });
-        }
-    }
-
-    // Back-link the eval job IDs onto the training job so dashboards can
-    // find them quickly.
-    {
-        let mut jobs = state.training_jobs.write().unwrap();
-        if let Some(job) = jobs.get_mut(training_job_id) {
-            job.linked_eval_job_ids = linked_ids;
-        }
+        push(Some(adapter_name.to_string()))?;
     }
     Ok(())
 }
@@ -6684,6 +6681,7 @@ mod tests {
             linked_eval_job_ids: Vec::new(),
             post_eval_verdict: None,
             gate_outcome: None,
+            post_eval_gate_evidence: Vec::new(),
             loss_history: Vec::new(),
             cancel_requested: Default::default(),
         }
@@ -7216,6 +7214,7 @@ mod tests {
         };
         reg.save(&suite, false).unwrap();
         state.suite_registry = Some(Arc::new(reg));
+        state.adapter_dir = dir.path().join("adapters");
         // The tempdir would otherwise drop and remove the suite — leak it.
         std::mem::forget(dir);
         state
@@ -7224,6 +7223,10 @@ mod tests {
     #[test]
     fn enqueue_post_training_eval_adds_one_job_when_no_baseline() {
         let state = mk_post_eval_state();
+        state.training_jobs.write().unwrap().insert(
+            "train-job-1".into(),
+            tracked_job("train-job-1", "trained-adapter", Vec::new()),
+        );
         let cfg = kiln_eval::PostEvalConfig {
             suite: "smoke".into(),
             data_scope: Default::default(),
@@ -7231,7 +7234,16 @@ mod tests {
             min_accuracy: None,
             include_baseline: false,
         };
-        enqueue_post_training_eval(&state, "train-job-1", "trained-adapter", &cfg, false).unwrap();
+        enqueue_post_training_eval(
+            &state,
+            "train-job-1",
+            "trained-adapter",
+            &cfg,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(state.eval_queue.lock().unwrap().len(), 1);
         assert_eq!(state.eval_jobs.read().unwrap().len(), 1);
     }
@@ -7239,6 +7251,10 @@ mod tests {
     #[test]
     fn enqueue_post_training_eval_adds_two_jobs_with_baseline() {
         let state = mk_post_eval_state();
+        state.training_jobs.write().unwrap().insert(
+            "train-job-2".into(),
+            tracked_job("train-job-2", "trained-adapter", Vec::new()),
+        );
         let cfg = kiln_eval::PostEvalConfig {
             suite: "smoke".into(),
             data_scope: Default::default(),
@@ -7246,7 +7262,16 @@ mod tests {
             min_accuracy: None,
             include_baseline: true,
         };
-        enqueue_post_training_eval(&state, "train-job-2", "trained-adapter", &cfg, false).unwrap();
+        enqueue_post_training_eval(
+            &state,
+            "train-job-2",
+            "trained-adapter",
+            &cfg,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(state.eval_queue.lock().unwrap().len(), 2);
         let jobs = state.eval_jobs.read().unwrap();
         assert_eq!(jobs.len(), 2);
@@ -7262,8 +7287,18 @@ mod tests {
     }
 
     #[test]
-    fn enqueue_post_training_eval_installs_gate_on_adapter_job_only() {
+    fn enqueue_post_training_eval_atomically_installs_complete_gate_on_adapter_job_only() {
         let state = mk_post_eval_state();
+        let mut training_job = tracked_job("train-gated", "trained-adapter", Vec::new());
+        training_job.state = TrainingState::Completed;
+        training_job.progress = 1.0;
+        training_job.finished_at = Some(std::time::Instant::now());
+        training_job.finished_unix_ms = Some(2);
+        state
+            .training_jobs
+            .write()
+            .unwrap()
+            .insert("train-gated".into(), training_job);
         let cfg = kiln_eval::PostEvalConfig {
             suite: "smoke".into(),
             data_scope: Default::default(),
@@ -7271,7 +7306,16 @@ mod tests {
             min_accuracy: Some(0.8),
             include_baseline: true,
         };
-        enqueue_post_training_eval(&state, "train-gated", "trained-adapter", &cfg, true).unwrap();
+        enqueue_post_training_eval(
+            &state,
+            "train-gated",
+            "trained-adapter",
+            &cfg,
+            true,
+            Some(0.9),
+            Some(0.05),
+        )
+        .unwrap();
 
         let jobs = state.eval_jobs.read().unwrap();
         assert_eq!(jobs.len(), 2);
@@ -7291,6 +7335,8 @@ mod tests {
                     .as_ref()
                     .expect("adapter compare job carries the §8.7 gate");
                 assert_eq!(gate.min_accuracy, 0.8);
+                assert_eq!(gate.relative_recovery, Some(0.9));
+                assert_eq!(gate.absolute_gain, Some(0.05));
                 assert_eq!(gate.training_job_id, "train-gated");
                 assert!(gate.auto_load_on_pass);
                 assert_eq!(
@@ -7307,6 +7353,19 @@ mod tests {
             }
         }
         assert_eq!(gated, 1);
+        let eval_job_ids = jobs
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        drop(jobs);
+        let training_jobs = state.training_jobs.read().unwrap();
+        let linked = training_jobs["train-gated"].linked_eval_job_ids.clone();
+        assert_eq!(linked.len(), 2);
+        assert!(linked.iter().all(|job_id| eval_job_ids.contains(job_id)));
+        drop(training_jobs);
+        let archived = crate::training_history::load_all(&state.adapter_dir);
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].linked_eval_job_ids, linked);
     }
 
     #[test]
@@ -7320,8 +7379,139 @@ mod tests {
             min_accuracy: None,
             include_baseline: false,
         };
-        let err = enqueue_post_training_eval(&state, "j", "a", &cfg, false).unwrap_err();
+        let err =
+            enqueue_post_training_eval(&state, "j", "a", &cfg, false, None, None).unwrap_err();
         assert!(err.contains("no eval suite registry"));
+    }
+
+    #[test]
+    fn enqueue_post_training_eval_rejects_special_threshold_without_gate() {
+        let state = mk_post_eval_state();
+        let cfg = kiln_eval::PostEvalConfig {
+            suite: "smoke".into(),
+            data_scope: Default::default(),
+            generation: None,
+            min_accuracy: None,
+            include_baseline: false,
+        };
+
+        let error = enqueue_post_training_eval(
+            &state,
+            "train-ungated",
+            "trained-adapter",
+            &cfg,
+            false,
+            Some(0.9),
+            None,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("require a promotion gate"));
+        assert!(state.eval_queue.lock().unwrap().is_empty());
+        assert!(state.eval_jobs.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn enqueue_post_training_eval_rejects_orphaned_training_backlink() {
+        let state = mk_post_eval_state();
+        let cfg = kiln_eval::PostEvalConfig {
+            suite: "smoke".into(),
+            data_scope: Default::default(),
+            generation: None,
+            min_accuracy: Some(0.8),
+            include_baseline: false,
+        };
+
+        let error = enqueue_post_training_eval(
+            &state,
+            "missing-training-job",
+            "trained-adapter",
+            &cfg,
+            true,
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("refusing an orphaned backlink"));
+        assert!(state.eval_queue.lock().unwrap().is_empty());
+        assert!(state.eval_jobs.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn enqueue_post_training_eval_rolls_back_when_backlink_archive_fails() {
+        let mut state = mk_post_eval_state();
+        let dir = tempfile::tempdir().unwrap();
+        let invalid_adapter_dir = dir.path().join("not-a-directory");
+        std::fs::write(&invalid_adapter_dir, b"occupied").unwrap();
+        state.adapter_dir = invalid_adapter_dir;
+        let mut training_job = tracked_job("train-archive-fail", "trained-adapter", Vec::new());
+        training_job.state = TrainingState::Completed;
+        training_job.progress = 1.0;
+        training_job.finished_at = Some(std::time::Instant::now());
+        training_job.finished_unix_ms = Some(2);
+        state
+            .training_jobs
+            .write()
+            .unwrap()
+            .insert("train-archive-fail".into(), training_job);
+        let cfg = kiln_eval::PostEvalConfig {
+            suite: "smoke".into(),
+            data_scope: Default::default(),
+            generation: None,
+            min_accuracy: Some(0.8),
+            include_baseline: false,
+        };
+
+        let error = enqueue_post_training_eval(
+            &state,
+            "train-archive-fail",
+            "trained-adapter",
+            &cfg,
+            true,
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("failed to persist eval backlink"));
+        assert!(state.eval_queue.lock().unwrap().is_empty());
+        assert!(state.eval_jobs.read().unwrap().is_empty());
+        assert!(
+            state.training_jobs.read().unwrap()["train-archive-fail"]
+                .linked_eval_job_ids
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn gate_enqueue_error_is_persisted_with_machine_outcome() {
+        let mut state = mk_post_eval_state();
+        let adapter_dir = tempfile::tempdir().unwrap();
+        state.adapter_dir = adapter_dir.path().to_path_buf();
+        let mut job = tracked_job("train-enqueue-error", "candidate", Vec::new());
+        job.state = TrainingState::Completed;
+        state
+            .training_jobs
+            .write()
+            .unwrap()
+            .insert(job.job_id.clone(), job);
+
+        stamp_gate_enqueue_error(
+            &state,
+            "train-enqueue-error",
+            "promotion gate could not be enqueued — NOT promoted".into(),
+        );
+
+        let archived = crate::training_history::load_all(adapter_dir.path());
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].gate_outcome.as_deref(), Some("error"));
+        assert!(
+            archived[0]
+                .post_eval_verdict
+                .as_deref()
+                .is_some_and(|verdict| verdict.contains("NOT promoted"))
+        );
     }
 
     #[test]

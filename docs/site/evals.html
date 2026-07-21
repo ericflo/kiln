@@ -448,6 +448,7 @@
       "suite": "trajectories-suite",
       "data_scope": "held-out",
       "include_baseline": true,
+      "min_accuracy": 0.85,
       "generation": { "temperature": 0.0, "max_tokens": 256, "seed": 42 }
     }
   }' \
@@ -455,6 +456,38 @@
         </section>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">
           The same <code>post_eval</code> shape is supported on <code>/v1/train/grpo</code>. Intentional training-data measurement must use <code>data_scope: "train-set-eval"</code>; that diagnostic label cannot be combined with <code>min_accuracy</code>. See <a href="docs/dataset-splits/">Dataset Splits and Train/Eval Separation</a> and the generated <a href="docs/control-plane-api-schema/">control-plane schema</a> for the full contract.
+        </p>
+        <h3 class="font-semibold mt-7 mb-3">Fail-closed promotion evidence</h3>
+        <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
+          <code>min_accuracy</code> enables the fixed <code>paired_wilson_v1</code> policy. Kiln compares the candidate with the previously active adapter, or the base model, under the same versioned suite, generation identity, seed derivation, and reduced per-example aggregation. It requires at least 20 independent reduced examples, runs a two-sided exact sign test at <code>alpha=0.05</code>, and requires the candidate&rsquo;s 95% Wilson lower bound to reach <code>min_accuracy</code>. A point estimate never promotes an adapter.
+        </p>
+        <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
+          The minimum is deliberately fixed rather than caller-configurable, and it is only a floor: 20 passes from 20 examples have a Wilson lower bound of about 0.84, so they cannot prove a 0.90 accuracy requirement. Multi-sample suites reduce to one independent result per example before this calculation.
+        </p>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm" style="border-collapse: collapse;">
+            <thead><tr><th class="text-left py-2 pr-4">Outcome</th><th class="text-left py-2">Effect</th></tr></thead>
+            <tbody style="color: var(--fg-dim);">
+              <tr><td class="py-2 pr-4"><code>promoted</code></td><td>Evidence passed and deferred auto-load succeeded.</td></tr>
+              <tr><td class="py-2 pr-4"><code>kept</code></td><td>Evidence passed; auto-load was not requested.</td></tr>
+              <tr><td class="py-2 pr-4"><code>regression</code></td><td>The paired exact test found a significant regression; the adapter is not served.</td></tr>
+              <tr><td class="py-2 pr-4"><code>demoted</code></td><td>The Wilson upper bound is below the floor; the adapter is renamed with <code>.failed</code>.</td></tr>
+              <tr><td class="py-2 pr-4"><code>inconclusive</code></td><td>Coverage or confidence is insufficient; the adapter stays on disk but is not served.</td></tr>
+              <tr><td class="py-2 pr-4"><code>error</code></td><td>Evaluation, evidence validation, persistence, or the serving swap failed closed.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="leading-relaxed mt-4" style="color: var(--fg-dim);">
+          Training status responses persist <code>post_eval_gate_evidence[]</code> with the suite and generation hashes, paired sample and flip counts, exact p-value, baseline and candidate Wilson intervals, all configured confidence thresholds, and the final classification. The dashboard surfaces <code>n</code>, <code>p</code>, and the candidate lower bound without parsing verdict prose.
+        </p>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">
+          Automatic promotion accepts one versioned held-out suite. Compose required domains into that suite and use tags for slices; Kiln does not average independent suites or accept a passing suite as an OR over a failing one. <code>include_baseline</code> controls an additional browseable base result, not the gate&rsquo;s mandatory paired comparison.
+        </p>
+        <p class="text-sm mt-3" style="color: var(--fg-mute);">
+          <code>distill_refresh</code> enforces the same boundary across gated <code>post_eval</code>, <code>if_eval_suite</code>, and <code>new_knowledge_eval_suite</code> fields. Automatic loading with more than one configured gate is rejected before training; set <code>config.auto_load=false</code> for independent diagnostic evidence or compose one held-out suite.
+        </p>
+        <p class="text-sm mt-3" style="color: var(--fg-mute);">
+          Multiple diagnostic evidence rows are retained individually, while the training summary keeps the strongest fail-closed outcome. A later pass cannot hide an earlier error, regression, demotion, or inconclusive result.
         </p>
       </article>
 

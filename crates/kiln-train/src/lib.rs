@@ -2091,6 +2091,54 @@ pub struct TrainingDataProvenance {
     pub rows: u64,
 }
 
+/// Persisted statistical evidence for one post-eval promotion decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PostEvalGateEvidence {
+    /// Stable statistical policy implemented by the server. Consumers must
+    /// not infer policy from prose verdicts.
+    pub policy_version: String,
+    /// Current automatic-promotion composition policy. Kiln evaluates one
+    /// versioned held-out suite per gate; callers that need several domains
+    /// must compose them into that suite rather than average independent
+    /// point estimates.
+    pub suite_policy: String,
+    pub eval_job_id: String,
+    pub suite_name: String,
+    pub suite_hash: String,
+    pub effective_generation_hash: String,
+    /// `None` denotes the resident base model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_adapter: Option<String>,
+    pub candidate_adapter: String,
+    pub aggregation: String,
+    pub minimum_paired_examples: u32,
+    pub paired_examples: u32,
+    pub improved: u32,
+    pub regressed: u32,
+    pub tied: u32,
+    pub exact_sign_test_p_value: f64,
+    pub exact_sign_test_alpha: f64,
+    pub baseline_accuracy: f32,
+    pub baseline_accuracy_lower_bound: f32,
+    pub baseline_accuracy_upper_bound: f32,
+    pub candidate_accuracy: f32,
+    pub candidate_accuracy_lower_bound: f32,
+    pub candidate_accuracy_upper_bound: f32,
+    pub accuracy_confidence_level: f32,
+    pub minimum_accuracy: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_relative_recovery: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_recovery_lower_bound: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_absolute_gain: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub absolute_gain_lower_bound: Option<f32>,
+    /// Same stable lowercase classification vocabulary as
+    /// `TrainingStatus::gate_outcome`.
+    pub outcome: String,
+}
+
 /// Status of an ongoing training job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainingStatus {
@@ -2131,12 +2179,20 @@ pub struct TrainingStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_eval_verdict: Option<String>,
     /// Machine-readable classification of `post_eval_verdict`:
-    /// `promoted | kept | regression | demoted | error`. Additive twin of
+    /// `promoted | kept | regression | demoted | inconclusive | error`.
+    /// Additive twin of
     /// the prose verdict so consumers (dashboard pill, scripts) never
     /// classify prose by substring. Absent for ungated jobs and for
-    /// verdicts archived before the field existed.
+    /// verdicts archived before the field existed. Multiple independent
+    /// diagnostic gates retain their strongest fail-closed classification.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_outcome: Option<String>,
+    /// Auditable statistical inputs and bounds for every completed gate.
+    /// A vector prevents multi-eval workflows from overwriting earlier
+    /// evidence even though automatic promotion itself has a single-suite
+    /// policy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_eval_gate_evidence: Vec<PostEvalGateEvidence>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

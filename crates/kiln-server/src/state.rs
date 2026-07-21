@@ -354,6 +354,10 @@ pub enum GateOutcome {
     Regression,
     /// Failed the accuracy floor: adapter demoted to `<name>.failed`.
     Demoted,
+    /// The evaluation completed but did not carry enough statistical
+    /// evidence to accept or conclusively reject the candidate. The adapter
+    /// remains on disk under its original name and is never promoted.
+    Inconclusive,
     /// The gate could not measure or apply: eval errored/cancelled,
     /// produced no run, or the promotion swap itself failed.
     Error,
@@ -368,6 +372,7 @@ impl GateOutcome {
             GateOutcome::Kept => "kept",
             GateOutcome::Regression => "regression",
             GateOutcome::Demoted => "demoted",
+            GateOutcome::Inconclusive => "inconclusive",
             GateOutcome::Error => "error",
         }
     }
@@ -443,15 +448,22 @@ pub struct TrainingJobInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_eval_verdict: Option<String>,
     /// Machine-readable classification of `post_eval_verdict`:
-    /// `promoted | kept | regression | demoted | error` (see
+    /// `promoted | kept | regression | demoted | inconclusive | error` (see
     /// [`GateOutcome`]). Stamped together with the prose verdict so API
     /// consumers and the dashboard pill never have to classify prose by
     /// substring. `None` for ungated jobs and for archives stamped
-    /// before the field existed. Stored as a plain string (not the enum)
+    /// before the field existed. Independent diagnostic gates retain the
+    /// strongest fail-closed classification here while their individual
+    /// outcomes remain in `post_eval_gate_evidence`. Stored as a plain string (not the enum)
     /// so a future outcome value never fails deserialization of an
     /// archived job file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_outcome: Option<String>,
+    /// Machine-readable paired-test and confidence-bound evidence. One entry
+    /// per completed gate, retained across restarts and exposed by the
+    /// training status API.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_eval_gate_evidence: Vec<kiln_train::PostEvalGateEvidence>,
     /// Cooperative cancellation flag for a RUNNING job: set by
     /// `DELETE /v1/train/queue/{id}`, read by the training worker's
     /// per-step progress callback, which then returns
@@ -3070,12 +3082,11 @@ impl AppState {
         Ok(())
     }
 
-    /// Register a new eval job: insert the `EvalJobInfo::queued` record
-    /// into `eval_jobs` and push the corresponding `EvalQueueEntry` onto
-    /// the worker queue. Returns the generated `job_id`. The two-write
-    /// pattern was previously open-coded at four submission sites; keeping
-    /// it here makes the cap checks easy to enforce and prevents the
-    /// tracking map and the queue from drifting out of sync.
+    /// Register a new eval job: insert the `EvalJobInfo::queued` record,
+    /// install its training-job backlink when present, and then push the
+    /// corresponding `EvalQueueEntry` onto the worker queue. Returns the
+    /// generated `job_id`. Queue visibility is deliberately last so the
+    /// worker cannot observe a partially admitted job.
     pub fn enqueue_eval(
         &self,
         suite_name: String,
@@ -3090,6 +3101,7 @@ impl AppState {
             kind,
             source_training_job_id,
             job,
+            None,
             None,
         )
     }
@@ -3114,6 +3126,32 @@ impl AppState {
             source_training_job_id,
             job,
             Some(effective_seed),
+            None,
+        )
+    }
+
+    /// Atomically admit a post-training comparison with its promotion gate.
+    /// The complete gate is installed in the tracked job before the queue
+    /// entry becomes visible to the worker, so no scheduling interleaving can
+    /// execute a gated comparison as an ordinary eval.
+    pub(crate) fn enqueue_gated_eval(
+        &self,
+        suite_name: String,
+        adapters: Vec<Option<String>>,
+        kind: crate::eval::queue::EvalSubmissionKind,
+        source_training_job_id: Option<String>,
+        job: crate::eval::queue::QueuedEvalJob,
+        forced_effective_seed: Option<u64>,
+        post_eval_gate: crate::eval::queue::PostEvalGate,
+    ) -> anyhow::Result<crate::eval::queue::EvalEnqueueReceipt> {
+        self.enqueue_eval_inner(
+            suite_name,
+            adapters,
+            kind,
+            source_training_job_id,
+            job,
+            forced_effective_seed,
+            Some(post_eval_gate),
         )
     }
 
@@ -3125,6 +3163,7 @@ impl AppState {
         source_training_job_id: Option<String>,
         job: crate::eval::queue::QueuedEvalJob,
         forced_effective_seed: Option<u64>,
+        post_eval_gate: Option<crate::eval::queue::PostEvalGate>,
     ) -> anyhow::Result<crate::eval::queue::EvalEnqueueReceipt> {
         self.ensure_inference_admission_allowed()?;
         let real_backend = matches!(self.backend.as_ref(), ModelBackend::Real { .. });
@@ -3178,6 +3217,7 @@ impl AppState {
         let effective_seed = forced_effective_seed
             .or(requested_seed)
             .unwrap_or_else(rand::random);
+        let backlink_training_job_id = source_training_job_id.clone();
         let mut info = crate::eval::queue::EvalJobInfo::queued(
             job_id.clone(),
             suite_name,
@@ -3188,7 +3228,41 @@ impl AppState {
         );
         info.base_weight_shard_manifest = self.base_weight_shard_manifest.as_deref().cloned();
         info.execution_provenance = self.execution_provenance.as_deref().cloned();
+        info.post_eval_gate = post_eval_gate;
         self.eval_jobs.write().unwrap().insert(job_id.clone(), info);
+        let training_snapshot = if let Some(training_job_id) = backlink_training_job_id.as_deref() {
+            let mut training_jobs = self.training_jobs.write().unwrap();
+            let Some(training_job) = training_jobs.get_mut(training_job_id) else {
+                drop(training_jobs);
+                self.eval_jobs.write().unwrap().remove(&job_id);
+                anyhow::bail!(
+                    "eval source training job `{training_job_id}` is not tracked; refusing an orphaned backlink"
+                );
+            };
+            if !training_job.linked_eval_job_ids.contains(&job_id) {
+                training_job.linked_eval_job_ids.push(job_id.clone());
+            }
+            Some(training_job.clone())
+        } else {
+            None
+        };
+        if let Some(training_job) = training_snapshot
+            && let Err(error) = crate::training_history::save(&self.adapter_dir, &training_job)
+        {
+            self.eval_jobs.write().unwrap().remove(&job_id);
+            if let Some(training_job_id) = backlink_training_job_id.as_deref()
+                && let Some(training_job) =
+                    self.training_jobs.write().unwrap().get_mut(training_job_id)
+            {
+                training_job
+                    .linked_eval_job_ids
+                    .retain(|linked| linked != &job_id);
+            }
+            anyhow::bail!(
+                "failed to persist eval backlink for training job `{}`: {error}",
+                training_job.job_id
+            );
+        }
         self.eval_queue
             .lock()
             .unwrap()

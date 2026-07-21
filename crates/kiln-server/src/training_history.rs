@@ -152,8 +152,43 @@ mod tests {
             linked_eval_job_ids: vec![],
             post_eval_verdict: None,
             gate_outcome: None,
+            post_eval_gate_evidence: Vec::new(),
             loss_history: vec![],
             cancel_requested: Default::default(),
+        }
+    }
+
+    fn sample_gate_evidence() -> kiln_train::PostEvalGateEvidence {
+        kiln_train::PostEvalGateEvidence {
+            policy_version: "paired_wilson_v1".into(),
+            suite_policy: "single_versioned_suite".into(),
+            eval_job_id: "eval-gated".into(),
+            suite_name: "held-out-v3".into(),
+            suite_hash: "suite-hash".into(),
+            effective_generation_hash: "generation-hash".into(),
+            baseline_adapter: None,
+            candidate_adapter: "adapter-gated".into(),
+            aggregation: "single".into(),
+            minimum_paired_examples: 20,
+            paired_examples: 40,
+            improved: 40,
+            regressed: 0,
+            tied: 0,
+            exact_sign_test_p_value: 1.0 / (1u64 << 39) as f64,
+            exact_sign_test_alpha: 0.05,
+            baseline_accuracy: 0.0,
+            baseline_accuracy_lower_bound: 0.0,
+            baseline_accuracy_upper_bound: 0.087_621_6,
+            candidate_accuracy: 1.0,
+            candidate_accuracy_lower_bound: 0.912_378_4,
+            candidate_accuracy_upper_bound: 1.0,
+            accuracy_confidence_level: 0.95,
+            minimum_accuracy: 0.9,
+            required_relative_recovery: None,
+            relative_recovery_lower_bound: None,
+            required_absolute_gain: None,
+            absolute_gain_lower_bound: None,
+            outcome: "promoted".into(),
         }
     }
 
@@ -171,9 +206,9 @@ mod tests {
     }
 
     /// The §8.7 gate stamps BOTH the prose verdict and its
-    /// machine-readable `gate_outcome` twin; the re-archive after
-    /// stamping must round-trip both, or a restart strips the pill's
-    /// color source and the UI falls back to substring-classifying prose.
+    /// machine-readable outcome and statistical evidence; the re-archive
+    /// after stamping must round-trip all three, or a restart strips the
+    /// actual basis for the promotion decision.
     #[test]
     fn gate_verdict_and_outcome_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
@@ -181,6 +216,7 @@ mod tests {
         job.post_eval_verdict =
             Some("PASSED: accuracy 0.913 >= 0.850; adapter `a` promoted to active".into());
         job.gate_outcome = Some(crate::state::GateOutcome::Promoted.as_str().to_string());
+        job.post_eval_gate_evidence = vec![sample_gate_evidence()];
         save(tmp.path(), &job).unwrap();
         let loaded = load_all(tmp.path());
         assert_eq!(loaded.len(), 1);
@@ -189,6 +225,10 @@ mod tests {
             Some("PASSED: accuracy 0.913 >= 0.850; adapter `a` promoted to active")
         );
         assert_eq!(loaded[0].gate_outcome.as_deref(), Some("promoted"));
+        assert_eq!(
+            loaded[0].post_eval_gate_evidence,
+            vec![sample_gate_evidence()]
+        );
     }
 
     #[test]

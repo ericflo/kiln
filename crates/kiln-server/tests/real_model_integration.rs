@@ -680,6 +680,7 @@ fn enqueue_empty_sft_job(state: &AppState, job_id: &str) {
             linked_eval_job_ids: Vec::new(),
             post_eval_verdict: None,
             gate_outcome: None,
+            post_eval_gate_evidence: Vec::new(),
             cancel_requested: Default::default(),
             loss_history: Vec::new(),
         },
