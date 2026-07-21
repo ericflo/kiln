@@ -1,0 +1,147 @@
+{
+  "artifacts": [
+    {
+      "bytes": 18411,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260721t145304600107z-rocm-strix-halo-local-environment-v1-1579593a70-v1/environment.json",
+      "sha256": "sha256:3d948c688928dd54b1beaeeb71b7961efdceddebe3da4e0ca47222c249b4d476"
+    },
+    {
+      "bytes": 65,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260721t145304600107z-rocm-strix-halo-local-environment-v1-1579593a70-v1/cases/001-environment-capture-r001/stdout.log",
+      "sha256": "sha256:90ed4a568525d76260e74e52c3dc63b01085a839836ad16103b8f9208ff93022"
+    },
+    {
+      "bytes": 0,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260721t145304600107z-rocm-strix-halo-local-environment-v1-1579593a70-v1/cases/001-environment-capture-r001/stderr.log",
+      "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 647,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260721t145304600107z-rocm-strix-halo-local-environment-v1-1579593a70-v1/cases/001-environment-capture-r001/case-result.json",
+      "sha256": "sha256:19e9e7d5b6710042cae663bbd693aa0b2afc304243c049847e60214decfb4aed"
+    },
+    {
+      "bytes": 4318,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260721t145304600107z-rocm-strix-halo-local-environment-v1-1579593a70-v1/run-config.json",
+      "sha256": "sha256:abb1386118f557a68db5d119e5b4433f1231eb897f58c73b72fa3ab4df3f29d9"
+    }
+  ],
+  "created_at_utc": "2026-07-21T14:53:05.281Z",
+  "effective_config": {},
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+      "hipcc": "HIP version: 7.2.53211-9999",
+      "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)"
+    },
+    "device": {
+      "architecture": "gfx1151",
+      "compute_capability": null,
+      "compute_units": 40,
+      "device_uuid": null,
+      "driver": "amdgpu kernel 7.0.14-arch1-1",
+      "logical_index": null,
+      "memory_available_bytes": 101930213376,
+      "memory_bytes": 103079215104,
+      "name": "AMD Radeon 8060S Graphics",
+      "pci_bus_id": null,
+      "unified_memory": true
+    },
+    "host_id": "strix-halo",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "7.0.14-arch1-1",
+      "name": "EndeavourOS",
+      "version": "2025.03.19"
+    },
+    "runtime": {
+      "execution_environment_sha256": "sha256:4e2f59070351a66c62498c8952245ba078b66548fd1f7b7b4083b32b2ab41a93",
+      "hipcc": "HIP version: 7.2.53211-9999",
+      "hsa": "1.18",
+      "rocm": "7.2.4"
+    }
+  },
+  "metrics": [],
+  "model": null,
+  "notes": [],
+  "qualification": {
+    "backend": "rocm",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "--variant",
+      "rocm",
+      "--host-id",
+      "strix-halo",
+      "--var",
+      "output_path=.qualification/environment/20260721t145304z-strix-halo-rocm.json",
+      "qualification/workloads/environment-v1.json"
+    ],
+    "duration_seconds": 0.6810210510157049,
+    "finished_at_utc": "2026-07-21T14:53:05.281Z",
+    "kind": "environment",
+    "profile": "local-environment-v1",
+    "started_at_utc": "2026-07-21T14:53:04.600Z",
+    "verdict": "passed"
+  },
+  "receipt_id": "20260721t145304600107z-rocm-strix-halo-local-environment-v1-1579593a70-v1",
+  "results": [
+    {
+      "details": null,
+      "duration_seconds": 0.3018044320633635,
+      "id": "environment-capture",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "4ba7a1cb74e1e2c134d936175df286be853aa2ce",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:07caf38315007d3f5e84e137f77a651a5ad64573e89b91b5ce702331a5027186",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "local-environment-v1",
+    "parameters": {
+      "output_path": ".qualification/environment/20260721t145304z-strix-halo-rocm.json",
+      "variant_id": "rocm"
+    },
+    "seed": null,
+    "sha256": "sha256:33bab5720a03cd5c6af7f626b132408eb479f1689a536a2465f274d951981c9a"
+  }
+}
