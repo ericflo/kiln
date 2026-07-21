@@ -1872,6 +1872,20 @@ class ServingBenchmarkTests(unittest.TestCase):
                 ):
                     bench.compare_reference(broken_candidate, path)
 
+    def test_historical_v17_graph_discriminator_keeps_v6_diagnostics(self) -> None:
+        receipt = ROOT / (
+            "benchmarks/receipts/rocm/strix-halo/"
+            "20260720t031650-rocm-strix-halo-parity-graphs-v17-c8.kiln.json"
+        )
+        validated = bench.validate_benchmark_receipt_path(receipt)
+        self.assertEqual(validated["driver_version"], "17")
+        self.assertTrue(
+            all(
+                row["server"]["schema"] == bench.SERVER_DIAGNOSTICS_SCHEMA_V6
+                for row in validated["runs"]
+            )
+        )
+
     def test_model_fingerprint_runs_in_guarded_closed_worker(self) -> None:
         raw_identity = {
             "id": "test-model",

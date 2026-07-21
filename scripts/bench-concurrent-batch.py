@@ -4295,9 +4295,14 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                     raise BenchmarkError(
                         "graph/eager discriminator does not use one runtime artifact"
                     )
+                expected_server_schema = (
+                    SERVER_DIAGNOSTICS_SCHEMA
+                    if driver_version in ACTOR_ONLY_DIAGNOSTICS_DRIVER_VERSIONS
+                    else SERVER_DIAGNOSTICS_SCHEMA_V6
+                )
                 if not runs or not all(
                     isinstance(row.get("server"), dict)
-                    and row["server"].get("schema") == SERVER_DIAGNOSTICS_SCHEMA
+                    and row["server"].get("schema") == expected_server_schema
                     and row["server"]["rocm_graphs"]["capture_requested"] is True
                     and server_rocm_graph_execution_accounted(row["server"])
                     and server_rocm_graph_capture_parity_accounted(row["server"])

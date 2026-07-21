@@ -2670,28 +2670,6 @@ async function evalDrillTabbableState(page, focusTarget = null) {
   }, focusTarget);
 }
 
-async function expectDirectDecodeRendezvousRuntimeConfig(page, scenarioLabel) {
-  const prefix = `${scenarioLabel} runtime config`;
-  const selector = '#runtime-config-body';
-  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Scope[\s\S]*direct streaming greedy only/, `${prefix} should identify the fallback's narrow scope`);
-  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Backend[\s\S]*available/, `${prefix} should render backend availability`);
-  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Primary actor gate[\s\S]*active/, `${prefix} should render the primary actor state used by fallback routing`);
-  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Worker[\s\S]*active/, `${prefix} should render fallback worker activity`);
-  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Route[\s\S]*unavailable[\s\S]*shadowed by primary actor/, `${prefix} should distinguish a shadowed worker from an available route`);
-  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Mode configured[\s\S]*enabled[\s\S]*environment/, `${prefix} should render configured fallback mode and source`);
-  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Mode backend[\s\S]*on[\s\S]*backend_policy/, `${prefix} should render backend fallback mode and source`);
-  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Mode effective[\s\S]*on[\s\S]*environment/, `${prefix} should render effective fallback mode and source`);
-  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Max batch configured[\s\S]*32[\s\S]*config_file/, `${prefix} should render configured fallback width and source`);
-  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Max batch backend[\s\S]*64[\s\S]*backend_policy/, `${prefix} should render backend fallback width and source`);
-  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Max batch effective[\s\S]*16[\s\S]*effective_decode_width/, `${prefix} should render bounded fallback width and source`);
-  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Wait configured[\s\S]*auto[\s\S]*default/, `${prefix} should render automatic fallback wait and source`);
-  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Wait backend[\s\S]*5,000 us[\s\S]*backend_policy/, `${prefix} should render backend fallback wait and source`);
-  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Wait effective[\s\S]*5,000 us[\s\S]*backend_policy/, `${prefix} should render effective fallback wait and source`);
-  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Mixed lengths configured[\s\S]*off[\s\S]*config_file/, `${prefix} should render configured mixed-length policy and source`);
-  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Mixed lengths backend[\s\S]*on[\s\S]*backend_policy/, `${prefix} should render backend mixed-length policy and source`);
-  await waitForPanelText(page, selector, /Direct-stream greedy fallback[\s\S]*Mixed lengths effective[\s\S]*off[\s\S]*config_file/, `${prefix} should render effective mixed-length policy and source`);
-}
-
 async function expectRocmMatmulRuntimeConfig(page, scenarioLabel) {
   const prefix = `${scenarioLabel} ROCm matmul runtime config`;
   const selector = '#runtime-config-body';
@@ -3234,7 +3212,6 @@ async function runMobileOnboardingSmoke(baseUrl) {
     await expectMobilePanelFlow(page);
     await goToPrimaryTab(page, 'overview');
     await clickAndWait(page, '#runtime-config > summary', 'Could not open the runtime config expander on mobile');
-    await expectDirectDecodeRendezvousRuntimeConfig(page, 'Mobile');
     await expectCheckpointBoundaryRuntimeConfig(page, 'Mobile');
     await expectCheckpointBoundaryRuntimeConfigLayout(page, 'Mobile');
     await expectNoMobileOverflow(page);
@@ -3322,7 +3299,6 @@ async function runModelColdStartSmoke(baseUrl, { setModelsCold, getModelsRequest
     if (!coldSnippets.includes('Qwen3.5-4B')) fail('Connect snippets should render the fallback model id during cold start');
     if (coldSnippets.includes('Qwen3.5-4B-resolved')) fail('Connect snippets must not know the real model id before /v1/models answers');
     await clickAndWait(page, '#runtime-config > summary', 'Could not open the runtime config expander during model cold start');
-    await expectDirectDecodeRendezvousRuntimeConfig(page, 'Cold-start');
     await expectCheckpointBoundaryRuntimeConfig(page, 'Cold-start');
 
     // Heal. The piggybacked retry on the 2s health poll must upgrade the
@@ -3454,7 +3430,6 @@ async function runSmoke(baseUrl, {
         await page.click('#runtime-config [data-rc-refresh]')
           .catch(() => fail('Could not click the runtime config Retry button after the APIs healed'));
         await waitForPanelText(page, '#runtime-config-body', /linux-drm-sysfs-unified/, 'Runtime config did not recover after Retry');
-        await expectDirectDecodeRendezvousRuntimeConfig(page, 'Recovered failure');
         await expectCheckpointBoundaryRuntimeConfig(page, 'Recovered failure');
         await recoverPanel('#decode-perf-panel', /No recent token gaps/i, 'Decode panel did not recover after the APIs healed');
         await recoverPanel('#recent-requests-panel', /No recent requests yet\./, 'Recent requests did not recover after the APIs healed');
@@ -4210,14 +4185,11 @@ async function runSmoke(baseUrl, {
     await waitForPanelText(page, '#runtime-config-body', /1,024/, 'Runtime config should render the KV cache block count');
     await waitForPanelText(page, '#runtime-config-body', /FP8 cache/, 'Runtime config should render the fp8 cache mode');
     await waitForPanelText(page, '#runtime-config-body', /Primary actor[\s\S]*active/, 'Runtime config should render primary batching actor activity');
-    await waitForPanelText(page, '#runtime-config-body', /Mode configured[\s\S]*auto[\s\S]*default/, 'Runtime config should render configured batching mode and source');
-    await waitForPanelText(page, '#runtime-config-body', /Mode effective[\s\S]*on[\s\S]*backend_policy/, 'Runtime config should render effective batching mode and source');
     await waitForPanelText(page, '#runtime-config-body', /Prefix admission[\s\S]*on[\s\S]*environment/, 'Runtime config should render prefix-aware admission and source');
     await waitForPanelText(page, '#runtime-config-body', /Prefill configured[\s\S]*32[\s\S]*config_file/, 'Runtime config should render configured prefill admission quantum and source');
     await waitForPanelText(page, '#runtime-config-body', /Prefill effective[\s\S]*16[\s\S]*effective_decode_width/, 'Runtime config should render bounded effective prefill quantum and source');
     await waitForPanelText(page, '#runtime-config-body', /Cycle idle[\s\S]*75 ms[\s\S]*config_file[\s\S]*poll 5 ms/, 'Runtime config should render cooperative actor-cycle idle, source, and command polling bound');
     await waitForPanelText(page, '#runtime-config-body', /Burst prefill[\s\S]*on/, 'Runtime config should render backend burst-prefill policy');
-    await expectDirectDecodeRendezvousRuntimeConfig(page, 'Desktop');
     await expectRocmMatmulRuntimeConfig(page, 'Desktop');
     await expectStreamingPrefillRuntimeConfig(page, 'Desktop');
     await expectCheckpointBoundaryRuntimeConfig(page, 'Desktop');

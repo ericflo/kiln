@@ -2389,6 +2389,27 @@ portable ownership checkpoint.
 - [ ] Establish a reviewed production-file size budget. Exceptions require a
   specific rationale, not generated-code-style growth.
 
+Embedded-test extraction checkpoint (2026-07-20): the complete unit suites for
+`forward.rs`, `completions.rs`, and `trainer.rs` now live in conventional
+`<module>/tests/mod.rs` children. This removes 27,195 test lines from the three
+production implementation files while retaining parent-private access and
+making the repository environment scanner classify their direct test-only
+accesses without inferring context across files. Production line counts fall
+from 34,736 to 25,995, 20,812 to 10,430, and 24,864 to 16,795 respectively.
+All 358 model, 1,092 server, and 518 runnable training library tests pass; the
+single ignored training test retains its prior status. This is structural
+preparation for the behavior-owned splits above and does not close any of the
+five checkboxes yet.
+
+The same checkpoint repaired two regressions found immediately by the cheap
+push workflows after the actor-only change. Historical driver-v17 graph/eager
+receipts now retain their v6 server-diagnostics authority while current v18
+receipts require actor-only v7 diagnostics, with an executable retained-receipt
+regression. The rendered dashboard smoke no longer waits for deleted batching
+mode or direct-rendezvous rows. All 51 historical benchmark receipts and all
+663 qualification-tooling tests pass locally; rendered browser confirmation is
+left to the inexpensive UI workflow because this host has no Chromium.
+
 ### 8.4 Replace verification theater
 
 - [x] Inventory source-string and ad hoc Rust-source parsing tests.

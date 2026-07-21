@@ -960,7 +960,7 @@
       "count": 2,
       "language": "rust",
       "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
+      "path": "crates/kiln-model/src/forward/tests/mod.rs",
       "phase": "runtime",
       "surface": "unit-test"
     },
@@ -973,7 +973,7 @@
       "count": 2,
       "language": "rust",
       "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
+      "path": "crates/kiln-model/src/forward/tests/mod.rs",
       "phase": "runtime",
       "surface": "unit-test"
     },
@@ -986,7 +986,7 @@
       "count": 1,
       "language": "rust",
       "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
+      "path": "crates/kiln-model/src/forward/tests/mod.rs",
       "phase": "runtime",
       "surface": "unit-test"
     },
@@ -999,7 +999,7 @@
       "count": 1,
       "language": "rust",
       "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
+      "path": "crates/kiln-model/src/forward/tests/mod.rs",
       "phase": "runtime",
       "surface": "unit-test"
     },
@@ -1012,7 +1012,7 @@
       "count": 5,
       "language": "rust",
       "operation": "read",
-      "path": "crates/kiln-model/src/forward.rs",
+      "path": "crates/kiln-model/src/forward/tests/mod.rs",
       "phase": "runtime",
       "surface": "unit-test"
     },
@@ -2591,6 +2591,19 @@
     },
     {
       "api": "var",
+      "argument": "KILN_TENSOR_VULKAN_TEST",
+      "argument_kind": "literal",
+      "classification": "test_only",
+      "classification_basis": "integration-test source surface",
+      "count": 1,
+      "language": "rust",
+      "operation": "read",
+      "path": "crates/kiln-train/src/trainer/tests/mod.rs",
+      "phase": "runtime",
+      "surface": "integration-test"
+    },
+    {
+      "api": "var",
       "argument": "KILN_QUALIFICATION",
       "argument_kind": "literal",
       "classification": "test_only",
@@ -2598,7 +2611,7 @@
       "count": 5,
       "language": "rust",
       "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
+      "path": "crates/kiln-train/src/trainer/tests/mod.rs",
       "phase": "runtime",
       "surface": "unit-test"
     },
@@ -2608,10 +2621,10 @@
       "argument_kind": "literal",
       "classification": "test_only",
       "classification_basis": "unit-test source surface",
-      "count": 3,
+      "count": 2,
       "language": "rust",
       "operation": "read",
-      "path": "crates/kiln-train/src/trainer.rs",
+      "path": "crates/kiln-train/src/trainer/tests/mod.rs",
       "phase": "runtime",
       "surface": "unit-test"
     },
@@ -2892,6 +2905,6 @@
       "startup_safety": 1,
       "test_only": 93
     },
-    "read_entries": 203
+    "read_entries": 204
   }
 }
