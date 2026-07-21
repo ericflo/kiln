@@ -2807,6 +2807,19 @@ all failure counters. This gate proves one controlled lifecycle at one source
 revision; it does not replace concurrent mixed-load stress, the graduated
 concurrency gate, or the long soak.
 
+The current retained Strix Halo ROCm evidence is
+`20260721t141928678273z-rocm-strix-halo-serving-rocm-public-muta-1437dc4bd3-v1`.
+It is bound to clean pushed source `fe15f555f`, passed strict current-source,
+local-artifact, and known-commit validation, and completed both arms. The active
+request retained `adapter_ms: null`; the queued request reported 3,530.155 ms
+of adapter time inside 3,531.217 ms of actor queue, and both headers matched the
+same revision. The run retained three ordered adapter transitions, five graph
+invalidations, exact base restoration, and a 4,096-to-1 block resize releasing
+8,587,837,440 bytes. Request, revision-header, base-output, device, shutdown,
+and snapshot-residue failure counts were all zero. This is positive mutation
+and maintenance-lifecycle evidence, not a throughput, soak, parity, or release
+claim.
+
 Command-result evidence is accumulated at each completed boundary rather than
 synthesized only after both arms pass. A failed result therefore retains any
 completed binary build, copied adapter identity, public load or unload,
