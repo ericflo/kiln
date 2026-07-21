@@ -1008,6 +1008,21 @@ pub struct ProfiledPagedDecodeStep<T> {
     pub readback_duration: Option<Duration>,
 }
 
+#[derive(Debug)]
+struct ProfiledDirectDecodeStep {
+    token: TokenId,
+    backend_phases: StreamBackendPhaseDurations,
+}
+
+impl ProfiledDirectDecodeStep {
+    fn without_distinct_backend_phase(token: TokenId) -> Self {
+        Self {
+            token,
+            backend_phases: StreamBackendPhaseDurations::default(),
+        }
+    }
+}
+
 fn add_profiled_duration(total: &mut Option<Duration>, duration: Duration) {
     *total = Some(total.unwrap_or(Duration::ZERO).saturating_add(duration));
 }
@@ -1548,6 +1563,28 @@ pub struct MtpGenerationOutput {
     pub total_draft_attempts: usize,
 }
 
+/// Invocation-owned backend work carried with a direct model event.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StreamBackendPhaseDurations {
+    pub sampling: Option<Duration>,
+    pub readback: Option<Duration>,
+    pub synchronization: Option<Duration>,
+}
+
+impl StreamBackendPhaseDurations {
+    fn add_observation(total: &mut Option<Duration>, duration: Duration) {
+        *total = Some(total.unwrap_or(Duration::ZERO).saturating_add(duration));
+    }
+
+    fn observe_sampling(&mut self, duration: Duration) {
+        Self::add_observation(&mut self.sampling, duration);
+    }
+
+    fn observe_synchronization(&mut self, duration: Duration) {
+        Self::add_observation(&mut self.synchronization, duration);
+    }
+}
+
 /// A single token emitted during streaming generation.
 #[derive(Debug, Clone)]
 pub struct StreamToken {
@@ -1558,6 +1595,9 @@ pub struct StreamToken {
     /// Monotonic time immediately before the model producer publishes this
     /// accepted token to its stream channel.
     pub ready_at: Instant,
+    /// Invocation-owned backend phases since the preceding emitted token, or
+    /// since request start for the first token.
+    pub backend_phases: StreamBackendPhaseDurations,
 }
 
 /// Final event sent when streaming generation completes.
@@ -1571,6 +1611,9 @@ pub struct StreamDone {
     /// holdback) that became safe to emit only at end-of-stream. Empty
     /// after a stop match (the held text WAS the stop) and on error paths.
     pub trailing_text: String,
+    /// Backend work completed after the final emitted token, such as a decode
+    /// that selected EOS. Empty when the final token consumed every phase.
+    pub backend_phases: StreamBackendPhaseDurations,
 }
 
 /// Events emitted during streaming generation.
@@ -2748,6 +2791,7 @@ fn emit_stream_token(
     gate: &mut StreamTextGate,
     generated_tokens: &mut Vec<TokenId>,
     token: TokenId,
+    backend_phases: StreamBackendPhaseDurations,
 ) -> Result<StreamTokenDisposition> {
     generated_tokens.push(token);
 
@@ -2771,6 +2815,7 @@ fn emit_stream_token(
             token_id: token,
             text: scan.emit,
             ready_at,
+            backend_phases,
         }))
         .is_err()
     {
@@ -3793,6 +3838,7 @@ impl ModelRunner {
                 &mut gate,
                 &mut generated_tokens,
                 next_token,
+                StreamBackendPhaseDurations::default(),
             )? {
                 StreamTokenDisposition::ReceiverDropped => return Ok(rx),
                 StreamTokenDisposition::Finished(reason) => {
@@ -3800,6 +3846,7 @@ impl ModelRunner {
                         finish_reason: reason,
                         completion_tokens: generated_tokens.len(),
                         trailing_text: String::new(),
+                        backend_phases: StreamBackendPhaseDurations::default(),
                     }));
                     return Ok(rx);
                 }
@@ -3840,6 +3887,7 @@ impl ModelRunner {
             finish_reason,
             completion_tokens: generated_tokens.len(),
             trailing_text,
+            backend_phases: StreamBackendPhaseDurations::default(),
         }));
 
         Ok(rx)
@@ -6587,18 +6635,20 @@ impl ModelRunner {
 
                 let skip_gdn_state_readback = skip_final_gdn_state_readback_enabled()
                     && generated_tokens.len() + 1 >= params.max_tokens;
-                next_token = self.decode_next_token_paged_interleaved(
-                    params,
-                    next_token,
-                    paged_cache,
-                    block_table,
-                    seq_len,
-                    linear_state,
-                    step_seed,
-                    &generated_tokens,
-                    rocm_owner.row_id(),
-                    skip_gdn_state_readback,
-                )?;
+                next_token = self
+                    .decode_next_token_paged_interleaved(
+                        params,
+                        next_token,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        step_seed,
+                        &generated_tokens,
+                        rocm_owner.row_id(),
+                        skip_gdn_state_readback,
+                    )?
+                    .token;
                 seq_len += 1;
             }
 
@@ -7641,7 +7691,7 @@ impl ModelRunner {
         history: &[TokenId],
         graph_row_id: u64,
         skip_gdn_state_readback: bool,
-    ) -> Result<TokenId> {
+    ) -> Result<ProfiledDirectDecodeStep> {
         let _resident_scope = GdnRecurrentResidentStateScope::new(&*self.backend);
         let _skip_scope =
             crate::forward::VulkanSkipGdnStateReadbackScope::new(skip_gdn_state_readback);
@@ -7664,7 +7714,9 @@ impl ModelRunner {
                 if skip_gdn_state_readback {
                     linear_state.evict_gdn_recurrent_resident_states(&*self.backend);
                 }
-                return Ok(token);
+                return Ok(ProfiledDirectDecodeStep::without_distinct_backend_phase(
+                    token,
+                ));
             }
             let pc_guard = lock_paged_cache(paged_cache)?;
             let token = {
@@ -7703,7 +7755,9 @@ impl ModelRunner {
             if skip_gdn_state_readback {
                 linear_state.evict_gdn_recurrent_resident_states(&*self.backend);
             }
-            return Ok(token);
+            return Ok(ProfiledDirectDecodeStep::without_distinct_backend_phase(
+                token,
+            ));
         }
 
         if !params.is_effectively_greedy()
@@ -7735,7 +7789,9 @@ impl ModelRunner {
                 if skip_gdn_state_readback {
                     linear_state.evict_gdn_recurrent_resident_states(&*self.backend);
                 }
-                return Ok(token);
+                return Ok(ProfiledDirectDecodeStep::without_distinct_backend_phase(
+                    token,
+                ));
             }
         }
 
@@ -7777,15 +7833,21 @@ impl ModelRunner {
                 }
             };
             if let Some(logits) = maybe_logits {
+                let sampling_started = Instant::now();
                 let token = if params.is_effectively_greedy() {
                     greedy_sample(&logits)
                 } else {
                     sample_step(&logits, params, step_seed, history)
                 }?;
+                let mut backend_phases = StreamBackendPhaseDurations::default();
+                backend_phases.observe_sampling(sampling_started.elapsed());
                 if skip_gdn_state_readback {
                     linear_state.evict_gdn_recurrent_resident_states(&*self.backend);
                 }
-                return Ok(token);
+                return Ok(ProfiledDirectDecodeStep {
+                    token,
+                    backend_phases,
+                });
             }
         }
 
@@ -7807,15 +7869,21 @@ impl ModelRunner {
         };
         // (#1082) forward returns kt logits; sampler is kt — no bridge.
 
+        let sampling_started = Instant::now();
         let token = if params.is_effectively_greedy() {
             greedy_sample(&logits)
         } else {
             sample_step(&logits, params, step_seed, history)
         }?;
+        let mut backend_phases = StreamBackendPhaseDurations::default();
+        backend_phases.observe_sampling(sampling_started.elapsed());
         if skip_gdn_state_readback {
             linear_state.evict_gdn_recurrent_resident_states(&*self.backend);
         }
-        Ok(token)
+        Ok(ProfiledDirectDecodeStep {
+            token,
+            backend_phases,
+        })
     }
 
     fn decode_next_token_paged_interleaved_or_batched(
@@ -7831,7 +7899,7 @@ impl ModelRunner {
         history: &[TokenId],
         graph_row_id: u64,
         skip_gdn_state_readback: bool,
-    ) -> Result<TokenId> {
+    ) -> Result<ProfiledDirectDecodeStep> {
         if params.is_effectively_greedy()
             && let Some(batcher) = decode_batcher
         {
@@ -7842,7 +7910,11 @@ impl ModelRunner {
                 linear_state,
                 skip_gdn_state_readback,
             )? {
-                DecodeBatcherDecode::Decoded(token) => return Ok(token),
+                DecodeBatcherDecode::Decoded(token) => {
+                    return Ok(ProfiledDirectDecodeStep::without_distinct_backend_phase(
+                        token,
+                    ));
+                }
                 DecodeBatcherDecode::RunnerBusy => {}
             }
         }
@@ -8045,18 +8117,20 @@ impl ModelRunner {
 
                 let skip_gdn_state_readback = skip_final_gdn_state_readback_enabled()
                     && generated_tokens.len() + 1 >= params.max_tokens;
-                next_token = self.decode_next_token_paged_interleaved(
-                    params,
-                    next_token,
-                    paged_cache,
-                    block_table,
-                    seq_len,
-                    &mut linear_state,
-                    step_seed,
-                    &generated_tokens,
-                    rocm_owner.row_id(),
-                    skip_gdn_state_readback,
-                )?;
+                next_token = self
+                    .decode_next_token_paged_interleaved(
+                        params,
+                        next_token,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        &mut linear_state,
+                        step_seed,
+                        &generated_tokens,
+                        rocm_owner.row_id(),
+                        skip_gdn_state_readback,
+                    )?
+                    .token;
                 seq_len += 1;
             }
 
@@ -9293,6 +9367,7 @@ impl ModelRunner {
                 &mut gate,
                 &mut generated_tokens,
                 last_token,
+                StreamBackendPhaseDurations::default(),
             )? {
                 StreamTokenDisposition::Continue => {}
                 StreamTokenDisposition::Finished(reason) => {
@@ -9301,6 +9376,7 @@ impl ModelRunner {
                         finish_reason: reason,
                         completion_tokens,
                         trailing_text: String::new(),
+                        backend_phases: StreamBackendPhaseDurations::default(),
                     }));
                     return Ok(rx);
                 }
@@ -9348,6 +9424,7 @@ impl ModelRunner {
                     &mut gate,
                     &mut generated_tokens,
                     token,
+                    StreamBackendPhaseDurations::default(),
                 )? {
                     StreamTokenDisposition::Continue => {}
                     StreamTokenDisposition::Finished(reason) => {
@@ -9356,6 +9433,7 @@ impl ModelRunner {
                             finish_reason: reason,
                             completion_tokens,
                             trailing_text: String::new(),
+                            backend_phases: StreamBackendPhaseDurations::default(),
                         }));
                         return Ok(rx);
                     }
@@ -9392,6 +9470,7 @@ impl ModelRunner {
             finish_reason,
             completion_tokens: generated_tokens.len(),
             trailing_text: gate_trailing,
+            backend_phases: StreamBackendPhaseDurations::default(),
         }));
 
         Ok(rx)
@@ -9532,6 +9611,7 @@ impl ModelRunner {
                 &mut gate,
                 &mut generated_tokens,
                 last_token,
+                StreamBackendPhaseDurations::default(),
             )? {
                 StreamTokenDisposition::Continue => {}
                 StreamTokenDisposition::Finished(reason) => {
@@ -9540,6 +9620,7 @@ impl ModelRunner {
                         finish_reason: reason,
                         completion_tokens,
                         trailing_text: String::new(),
+                        backend_phases: StreamBackendPhaseDurations::default(),
                     }));
                     return Ok(rx);
                 }
@@ -9588,6 +9669,7 @@ impl ModelRunner {
                     &mut gate,
                     &mut generated_tokens,
                     token,
+                    StreamBackendPhaseDurations::default(),
                 )? {
                     StreamTokenDisposition::Continue => {}
                     StreamTokenDisposition::Finished(reason) => {
@@ -9596,6 +9678,7 @@ impl ModelRunner {
                             finish_reason: reason,
                             completion_tokens,
                             trailing_text: String::new(),
+                            backend_phases: StreamBackendPhaseDurations::default(),
                         }));
                         return Ok(rx);
                     }
@@ -9632,6 +9715,7 @@ impl ModelRunner {
             finish_reason,
             completion_tokens: generated_tokens.len(),
             trailing_text: gate_trailing,
+            backend_phases: StreamBackendPhaseDurations::default(),
         }));
 
         Ok(rx)
@@ -9830,14 +9914,22 @@ impl ModelRunner {
                         }
                     };
                     check_cancelled(Some(&cancel))?;
+                    let sampling_started = Instant::now();
                     let next_token = sample_first_decode_token(&logits, &params)?;
-                    Ok((next_token, logits))
+                    let mut backend_phases = StreamBackendPhaseDurations::default();
+                    backend_phases.observe_sampling(sampling_started.elapsed());
+                    Ok((next_token, logits, backend_phases))
                 })();
+                let synchronization_started = Instant::now();
                 let synchronized =
                     runner_guard.synchronize_external_yield("threaded streaming prefill");
+                let synchronization_duration = synchronization_started.elapsed();
                 drop(runner_guard);
                 match synchronized {
-                    Ok(()) => result,
+                    Ok(()) => result.map(|(next_token, logits, mut backend_phases)| {
+                        backend_phases.observe_synchronization(synchronization_duration);
+                        (next_token, logits, backend_phases)
+                    }),
                     Err(err) => {
                         std::mem::forget(result);
                         Err(err)
@@ -9845,7 +9937,7 @@ impl ModelRunner {
                 }
             },
         )?;
-        let (next_token, logits) = match prefill_result {
+        let (next_token, logits, initial_backend_phases) = match prefill_result {
             Ok(result) => result,
             Err(err) => {
                 if backend_health.snapshot().quarantined {
@@ -9902,6 +9994,7 @@ impl ModelRunner {
                         let result = runner_guard.run_stream_decode_loop_with_first(
                             tx,
                             next_token,
+                            initial_backend_phases,
                             seq_len,
                             &params,
                             pc_for_thread.as_ref(),
@@ -10050,6 +10143,7 @@ impl ModelRunner {
                     Option<PagedPrefixRegistration>,
                     Vec<PagedPrefixRegistration>,
                     Option<kiln_tensor::Tensor>,
+                    StreamBackendPhaseDurations,
                 )> {
                     runner_guard.ensure_backend_healthy()?;
                     check_cancelled(Some(&cancel))?;
@@ -10077,15 +10171,25 @@ impl ModelRunner {
                     if let Some(next_token) = exact_next_token {
                         return match next_token {
                             PagedPrefixNextToken::Logits(logits) => {
+                                let sampling_started = Instant::now();
                                 let token = sample_first_decode_token(&logits, &params)?;
-                                Ok((token, None, Vec::new(), Some(logits)))
+                                let mut backend_phases =
+                                    StreamBackendPhaseDurations::default();
+                                backend_phases.observe_sampling(sampling_started.elapsed());
+                                Ok((token, None, Vec::new(), Some(logits), backend_phases))
                             }
                             PagedPrefixNextToken::GreedyToken(token) => {
                                 anyhow::ensure!(
                                     params.temperature == 0.0,
                                     "greedy cached first token cannot serve non-greedy sampling"
                                 );
-                                Ok((token, None, Vec::new(), None))
+                                Ok((
+                                    token,
+                                    None,
+                                    Vec::new(),
+                                    None,
+                                    StreamBackendPhaseDurations::default(),
+                                ))
                             }
                         };
                     }
@@ -10207,19 +10311,42 @@ impl ModelRunner {
                     ) {
                         extra_registrations.push(reg);
                     }
+                    let sampling_started = Instant::now();
                     let next_token = sample_first_decode_token(&logits, &params)?;
+                    let mut backend_phases = StreamBackendPhaseDurations::default();
+                    backend_phases.observe_sampling(sampling_started.elapsed());
                     Ok((
                         next_token,
                         registration,
                         extra_registrations,
                         Some(logits),
+                        backend_phases,
                     ))
                 })();
+                let synchronization_started = Instant::now();
                 let synchronized = runner_guard
                     .synchronize_external_yield("prefix streaming prefill and first-token sample");
+                let synchronization_duration = synchronization_started.elapsed();
                 drop(runner_guard);
                 match synchronized {
-                    Ok(()) => result,
+                    Ok(()) => result.map(
+                        |(
+                            next_token,
+                            registration,
+                            extra_registrations,
+                            logits,
+                            mut backend_phases,
+                        )| {
+                            backend_phases.observe_synchronization(synchronization_duration);
+                            (
+                                next_token,
+                                registration,
+                                extra_registrations,
+                                logits,
+                                backend_phases,
+                            )
+                        },
+                    ),
                     Err(err) => {
                         std::mem::forget(result);
                         Err(err)
@@ -10227,7 +10354,13 @@ impl ModelRunner {
                 }
             },
         )?;
-        let (next_token, registration, extra_registrations, logits_keepalive) = match prepared {
+        let (
+            next_token,
+            registration,
+            extra_registrations,
+            logits_keepalive,
+            initial_backend_phases,
+        ) = match prepared {
             Ok(prepared) => prepared,
             Err(err) => {
                 if backend_health.snapshot().quarantined {
@@ -10284,6 +10417,7 @@ impl ModelRunner {
                         let result = runner_guard.run_stream_decode_loop_with_first(
                             tx,
                             next_token,
+                            initial_backend_phases,
                             seq_len,
                             &params,
                             pc_for_thread.as_ref(),
@@ -10737,16 +10871,22 @@ impl ModelRunner {
         // entry points. The receiver is fully populated by the time we return.
         // Threaded callers should use [`run_stream_decode_loop_with_first`]
         // directly so they can sample the first token before spawning.
+        let sampling_started = Instant::now();
         let sampled = sample_first_decode_token(&logits, params);
+        let mut initial_backend_phases = StreamBackendPhaseDurations::default();
+        initial_backend_phases.observe_sampling(sampling_started.elapsed());
+        let synchronization_started = Instant::now();
         if let Err(sync_err) = self.synchronize_external_yield("direct streaming prefill") {
             std::mem::forget(logits);
             std::mem::forget(sampled);
             return Err(sync_err);
         }
+        initial_backend_phases.observe_synchronization(synchronization_started.elapsed());
         let next_token = sampled?;
         let done = self.run_stream_decode_loop_with_first(
             &tx,
             next_token,
+            initial_backend_phases,
             seq_len,
             params,
             paged_cache,
@@ -10771,6 +10911,7 @@ impl ModelRunner {
         &self,
         tx: &mpsc::Sender<StreamEvent>,
         mut next_token: TokenId,
+        mut pending_backend_phases: StreamBackendPhaseDurations,
         mut seq_len: usize,
         params: &SamplingParams,
         paged_cache: &PagedKvCache,
@@ -10803,6 +10944,7 @@ impl ModelRunner {
                 &mut gate,
                 &mut generated_tokens,
                 next_token,
+                std::mem::take(&mut pending_backend_phases),
             )? {
                 StreamTokenDisposition::Continue => {}
                 StreamTokenDisposition::Finished(reason) => {
@@ -10839,8 +10981,16 @@ impl ModelRunner {
                 rocm_owner.row_id(),
                 skip_gdn_state_readback,
             );
-            self.synchronize_external_yield("direct streaming decode step")?;
-            next_token = decode_result?;
+            let synchronization_started = Instant::now();
+            let synchronized = self.synchronize_external_yield("direct streaming decode step");
+            let synchronization_duration = synchronization_started.elapsed();
+            synchronized?;
+            let mut decoded = decode_result?;
+            decoded
+                .backend_phases
+                .observe_synchronization(synchronization_duration);
+            next_token = decoded.token;
+            pending_backend_phases = decoded.backend_phases;
             seq_len += 1;
         }
 
@@ -10853,6 +11003,7 @@ impl ModelRunner {
             finish_reason,
             completion_tokens: generated_tokens.len(),
             trailing_text: gate_trailing,
+            backend_phases: pending_backend_phases,
         }))
     }
 
@@ -10935,6 +11086,7 @@ impl ModelRunner {
                 &mut gate,
                 &mut generated_tokens,
                 last_token,
+                StreamBackendPhaseDurations::default(),
             )? {
                 StreamTokenDisposition::Continue => {}
                 StreamTokenDisposition::Finished(reason) => {
@@ -10989,6 +11141,7 @@ impl ModelRunner {
                     &mut gate,
                     &mut generated_tokens,
                     token,
+                    StreamBackendPhaseDurations::default(),
                 )? {
                     StreamTokenDisposition::Continue => {}
                     StreamTokenDisposition::Finished(reason) => {
@@ -11027,6 +11180,7 @@ impl ModelRunner {
             finish_reason,
             completion_tokens: generated_tokens.len(),
             trailing_text: gate_trailing,
+            backend_phases: StreamBackendPhaseDurations::default(),
         }));
 
         Ok(rx)
@@ -11174,6 +11328,7 @@ impl ModelRunner {
                         &mut gate,
                         &mut generated_tokens,
                         next_token,
+                        StreamBackendPhaseDurations::default(),
                     )? {
                         StreamTokenDisposition::ReceiverDropped => return Ok(rx),
                         StreamTokenDisposition::Finished(reason) => {
@@ -11181,6 +11336,7 @@ impl ModelRunner {
                                 finish_reason: reason,
                                 completion_tokens: generated_tokens.len(),
                                 trailing_text: String::new(),
+                                backend_phases: StreamBackendPhaseDurations::default(),
                             }));
                             return Ok(rx);
                         }
@@ -11276,6 +11432,7 @@ impl ModelRunner {
                     finish_reason,
                     completion_tokens: generated_tokens.len(),
                     trailing_text: gate_trailing,
+                    backend_phases: StreamBackendPhaseDurations::default(),
                 }));
                 Ok(rx)
             },
@@ -11340,6 +11497,17 @@ mod tests {
         );
         assert_eq!(zero_sampling, Some(Duration::ZERO));
         assert_eq!(zero_readback, Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn direct_stream_backend_phases_preserve_measured_zero_and_accumulate() {
+        let mut phases = StreamBackendPhaseDurations::default();
+        phases.observe_sampling(Duration::ZERO);
+        phases.observe_sampling(Duration::from_millis(9));
+        phases.observe_synchronization(Duration::from_millis(4));
+        assert_eq!(phases.sampling, Some(Duration::from_millis(9)));
+        assert_eq!(phases.readback, None);
+        assert_eq!(phases.synchronization, Some(Duration::from_millis(4)));
     }
 
     #[test]
@@ -11497,6 +11665,7 @@ mod tests {
                     finish_reason: FinishReason::Eos,
                     completion_tokens: 3,
                     trailing_text: "tail".to_string(),
+                    backend_phases: StreamBackendPhaseDurations::default(),
                 })))
             },
             move |_| {

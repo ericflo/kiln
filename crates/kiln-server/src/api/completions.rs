@@ -32,7 +32,8 @@ use std::path::{Path, PathBuf};
 use crate::batching_engine::{EngineActionTokenSource, EngineEvent, EngineRequest};
 use crate::error::ApiError;
 use crate::latency_observability::{
-    EngineTokenTiming, RequestLatencyDiagnostics, RequestLatencyTracker, TokenPhaseDurations,
+    BackendPhaseDurations, EngineTokenTiming, RequestLatencyDiagnostics, RequestLatencyTracker,
+    TokenPhaseDurations,
 };
 use crate::memory_observability::CachedMemoryGovernorObservation;
 use crate::metrics::RequestStatus;
@@ -8452,6 +8453,7 @@ fn stream_with_terminal(
 struct DirectModelStream {
     events: std::sync::mpsc::Receiver<StreamEvent>,
     settled: Option<std::sync::mpsc::Receiver<()>>,
+    gpu_lock_wait: Option<std::time::Duration>,
 }
 
 #[derive(Debug)]
@@ -8459,6 +8461,21 @@ struct BridgedDirectModelEvent {
     event: StreamEvent,
     /// Time the blocking bridge received the event from the model producer.
     producer_delivered_at: std::time::Instant,
+    /// Server-owned wait attached exactly once, to the first model event.
+    gpu_lock_wait: Option<std::time::Duration>,
+}
+
+fn direct_stream_backend_phases(
+    phases: kiln_model::StreamBackendPhaseDurations,
+    gpu_lock_wait: Option<std::time::Duration>,
+) -> BackendPhaseDurations {
+    BackendPhaseDurations {
+        sampling: phases.sampling,
+        readback: phases.readback,
+        gpu_lock_wait,
+        synchronization: phases.synchronization,
+        ..BackendPhaseDurations::default()
+    }
 }
 
 struct DirectPrefixLookupOwnership<G, P, B> {
@@ -8534,10 +8551,14 @@ fn run_direct_prefix_lookup_with_panic_fence<G, P, B, T>(
 }
 
 impl DirectModelStream {
-    fn threaded(output: kiln_model::ThreadedStreamingOutput) -> Self {
+    fn threaded(
+        output: kiln_model::ThreadedStreamingOutput,
+        gpu_lock_wait: std::time::Duration,
+    ) -> Self {
         Self {
             events: output.receiver,
             settled: Some(output.settled),
+            gpu_lock_wait: Some(gpu_lock_wait),
         }
     }
 
@@ -8546,6 +8567,7 @@ impl DirectModelStream {
         Self {
             events,
             settled: None,
+            gpu_lock_wait: None,
         }
     }
 }
@@ -8562,6 +8584,7 @@ fn bridge_direct_model_stream(
         let DirectModelStream {
             events,
             mut settled,
+            mut gpu_lock_wait,
         } = stream;
         let mut consumer_open = true;
 
@@ -8571,12 +8594,14 @@ fn bridge_direct_model_stream(
                     break BridgedDirectModelEvent {
                         event,
                         producer_delivered_at: std::time::Instant::now(),
+                        gpu_lock_wait: gpu_lock_wait.take(),
                     };
                 }
                 Ok(event) => {
                     let event = BridgedDirectModelEvent {
                         event,
                         producer_delivered_at: std::time::Instant::now(),
+                        gpu_lock_wait: gpu_lock_wait.take(),
                     };
                     if consumer_open && tx.blocking_send(event).is_err() {
                         consumer_open = false;
@@ -8938,7 +8963,9 @@ async fn generate_real_streaming(
                     if cancel_for_prefill.is_cancelled() {
                         anyhow::bail!("direct streaming prefill cancelled before GPU ownership");
                     }
+                    let gpu_lock_wait_started = std::time::Instant::now();
                     let gpu_guard = gpu_coordination_read_guard(&gpu_lock);
+                    let gpu_lock_wait = gpu_lock_wait_started.elapsed();
                     let loaded = loaded_adapter.read().map_err(|error| {
                         anyhow::anyhow!("loaded adapter identity lock poisoned: {error}")
                     })?;
@@ -8969,7 +8996,7 @@ async fn generate_real_streaming(
                             cancel_for_prefill.clone(),
                             gpu_guard,
                         )?;
-                        return Ok(DirectModelStream::threaded(output));
+                        return Ok(DirectModelStream::threaded(output, gpu_lock_wait));
                     }
 
                     let runner_guard = runner.read().map_err(|error| {
@@ -9008,7 +9035,7 @@ async fn generate_real_streaming(
                             cancel_for_prefill.clone(),
                             gpu_guard,
                         )?;
-                        return Ok(DirectModelStream::threaded(output));
+                        return Ok(DirectModelStream::threaded(output, gpu_lock_wait));
                     }
                     *prefix_cache_diagnostic_for_prefill.lock().unwrap() =
                         if hit.is_some() { "hit" } else { "miss" };
@@ -9042,7 +9069,7 @@ async fn generate_real_streaming(
                                         Ok(())
                                     },
                                 )?;
-                    Ok(DirectModelStream::threaded(output))
+                    Ok(DirectModelStream::threaded(output, gpu_lock_wait))
                 },
             );
 
@@ -9133,10 +9160,15 @@ async fn generate_real_streaming(
                     Some(BridgedDirectModelEvent {
                         event: StreamEvent::Token(token),
                         producer_delivered_at,
+                        gpu_lock_wait,
                     }) => {
                         let handler_received_at = std::time::Instant::now();
                         first_token_ready_at.get_or_insert(token.ready_at);
                         let mut phases = TokenPhaseDurations::default();
+                        phases.add_backend(direct_stream_backend_phases(
+                            token.backend_phases,
+                            gpu_lock_wait,
+                        ));
                         if let Some(previous) =
                             previous_direct_token_ready_at.replace(token.ready_at)
                         {
@@ -9220,6 +9252,7 @@ async fn generate_real_streaming(
                     }
                     Some(BridgedDirectModelEvent {
                         event: StreamEvent::Done(done),
+                        gpu_lock_wait,
                         ..
                     }) => {
                         let bridge_result = tokio::select! {
@@ -9248,6 +9281,10 @@ async fn generate_real_streaming(
                             record("error".to_string(), &completion_buf, completion_token_count);
                             return;
                         }
+
+                        latency_tracker.lock().unwrap().record_backend_phases(
+                            direct_stream_backend_phases(done.backend_phases, gpu_lock_wait),
+                        );
 
                         let finish = match done.finish_reason {
                             kiln_model::FinishReason::Eos => "stop",
@@ -9483,8 +9520,15 @@ async fn generate_real_streaming(
                     }
                     Some(BridgedDirectModelEvent {
                         event: StreamEvent::Error(mut error),
+                        gpu_lock_wait,
                         ..
                     }) => {
+                        latency_tracker.lock().unwrap().record_backend_phases(
+                            direct_stream_backend_phases(
+                                kiln_model::StreamBackendPhaseDurations::default(),
+                                gpu_lock_wait,
+                            ),
+                        );
                         match bridge_handle
                             .take()
                             .expect("direct model bridge consumed once")
@@ -14034,6 +14078,7 @@ mod tests {
             finish_reason: kiln_model::FinishReason::MaxTokens,
             completion_tokens: 0,
             trailing_text: String::new(),
+            backend_phases: kiln_model::StreamBackendPhaseDurations::default(),
         });
         let selected = select_direct_stream_before_deadline(
             deadline,
@@ -14046,6 +14091,31 @@ mod tests {
             selected,
             DirectStreamSelection::DeadlineElapsed(None)
         ));
+    }
+
+    #[test]
+    fn direct_stream_phase_mapping_preserves_owned_boundaries_and_nulls() {
+        let mapped = direct_stream_backend_phases(
+            kiln_model::StreamBackendPhaseDurations {
+                sampling: Some(std::time::Duration::from_millis(9)),
+                readback: Some(std::time::Duration::ZERO),
+                synchronization: Some(std::time::Duration::from_millis(4)),
+            },
+            Some(std::time::Duration::from_millis(3)),
+        );
+        assert_eq!(mapped.sampling, Some(std::time::Duration::from_millis(9)));
+        assert_eq!(mapped.readback, Some(std::time::Duration::ZERO));
+        assert_eq!(
+            mapped.gpu_lock_wait,
+            Some(std::time::Duration::from_millis(3))
+        );
+        assert_eq!(
+            mapped.synchronization,
+            Some(std::time::Duration::from_millis(4))
+        );
+        assert_eq!(mapped.graph_capture, None);
+        assert_eq!(mapped.graph_replay, None);
+        assert_eq!(mapped.resize, None);
     }
 
     #[test]
@@ -14138,6 +14208,7 @@ mod tests {
         let (mut events, bridge) = bridge_direct_model_stream(DirectModelStream {
             events: model_rx,
             settled: Some(settled_rx),
+            gpu_lock_wait: Some(std::time::Duration::from_millis(13)),
         });
 
         let ready_at = std::time::Instant::now();
@@ -14146,6 +14217,7 @@ mod tests {
                 token_id: 7,
                 text: "token".to_string(),
                 ready_at,
+                backend_phases: kiln_model::StreamBackendPhaseDurations::default(),
             }))
             .unwrap();
         model_tx
@@ -14153,6 +14225,7 @@ mod tests {
                 finish_reason: kiln_model::FinishReason::MaxTokens,
                 completion_tokens: 1,
                 trailing_text: String::new(),
+                backend_phases: kiln_model::StreamBackendPhaseDurations::default(),
             }))
             .unwrap();
 
@@ -14161,9 +14234,11 @@ mod tests {
             Ok(Some(BridgedDirectModelEvent {
                 event: StreamEvent::Token(token),
                 producer_delivered_at,
+                gpu_lock_wait,
             })) if token.token_id == 7
                 && token.ready_at == ready_at
                 && producer_delivered_at >= ready_at
+                && gpu_lock_wait == Some(std::time::Duration::from_millis(13))
         ));
         tokio::task::yield_now().await;
         assert!(matches!(
@@ -14177,8 +14252,9 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_secs(1), events.recv()).await,
             Ok(Some(BridgedDirectModelEvent {
                 event: StreamEvent::Done(done),
+                gpu_lock_wait,
                 ..
-            })) if done.completion_tokens == 1
+            })) if done.completion_tokens == 1 && gpu_lock_wait.is_none()
         ));
         assert!(bridge.await.unwrap().is_ok());
     }
@@ -14205,12 +14281,14 @@ mod tests {
         let (mut events, bridge) = bridge_direct_model_stream(DirectModelStream {
             events: model_rx,
             settled: Some(settled_rx),
+            gpu_lock_wait: None,
         });
         model_tx
             .send(StreamEvent::Done(kiln_model::StreamDone {
                 finish_reason: kiln_model::FinishReason::MaxTokens,
                 completion_tokens: 0,
                 trailing_text: String::new(),
+                backend_phases: kiln_model::StreamBackendPhaseDurations::default(),
             }))
             .unwrap();
         drop(settled_tx);
@@ -14230,6 +14308,7 @@ mod tests {
         let (mut events, bridge) = bridge_direct_model_stream(DirectModelStream {
             events: model_rx,
             settled: Some(settled_rx),
+            gpu_lock_wait: None,
         });
         model_tx
             .send(StreamEvent::Error("cancelled".to_string()))
@@ -14261,6 +14340,7 @@ mod tests {
             Ok(DirectModelStream {
                 events: model_rx,
                 settled: Some(settled_rx),
+                gpu_lock_wait: None,
             })
         });
 

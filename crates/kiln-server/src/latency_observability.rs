@@ -601,6 +601,10 @@ impl RequestLatencyTracker {
             .saturating_add(body_enqueued_at.saturating_duration_since(handler_received_at));
     }
 
+    pub fn record_backend_phases(&mut self, phases: BackendPhaseDurations) {
+        self.phase_totals.add_backend(phases);
+    }
+
     pub fn diagnostics(&self) -> RequestLatencyDiagnostics {
         let mut sorted_ms: Vec<f64> = self
             .retained_gaps
@@ -978,6 +982,39 @@ mod tests {
         assert!(diagnostics.phases.actor_admission_ms.is_none());
         assert!(diagnostics.phases.prefill_ms.is_none());
         assert!(diagnostics.phases.decode_ms.is_none());
+    }
+
+    #[test]
+    fn direct_tracker_retains_event_and_terminal_backend_phases() {
+        let start = Instant::now();
+        let mut tracker = RequestLatencyTracker::direct(start, None);
+        let mut event_backend = BackendPhaseDurations::default();
+        event_backend.observe_sampling(Duration::from_millis(5));
+        event_backend.observe_gpu_lock_wait(Duration::from_millis(3));
+        event_backend.observe_synchronization(Duration::from_millis(7));
+        tracker.record_token(
+            EngineTokenTiming::ready(
+                start + Duration::from_millis(20),
+                TokenPhaseDurations {
+                    backend: event_backend,
+                    ..TokenPhaseDurations::default()
+                },
+            ),
+            start + Duration::from_millis(20),
+        );
+
+        let mut terminal_backend = BackendPhaseDurations::default();
+        terminal_backend.observe_readback(Duration::ZERO);
+        terminal_backend.observe_synchronization(Duration::from_millis(11));
+        tracker.record_backend_phases(terminal_backend);
+
+        let phases = tracker.diagnostics().phases;
+        assert_eq!(phases.sampling_ms, Some(5.0));
+        assert_eq!(phases.readback_ms, Some(0.0));
+        assert_eq!(phases.gpu_lock_wait_ms, Some(3.0));
+        assert_eq!(phases.synchronization_ms, Some(18.0));
+        assert_eq!(phases.actor_queue_ms, None);
+        assert_eq!(phases.decode_ms, None);
     }
 
     #[test]

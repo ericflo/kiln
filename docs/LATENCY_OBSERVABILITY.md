@@ -150,7 +150,7 @@ The currently measured batching path exposes:
 | `actor_cycle_idle_ms` | Configured cooperative post-work idle elapsed while the request remained active |
 | `sampling_ms` | Post-transformer final norm, LM head, penalties/filters, and selection when that tail has a distinct boundary; excludes separately measured readback |
 | `readback_ms` | Existing device-to-host token transfer when the backend exposes that exact boundary without another synchronization |
-| `gpu_lock_wait_ms` | Time waiting to acquire the shared inference GPU-coordination guard for a decode step |
+| `gpu_lock_wait_ms` | Time waiting to acquire the shared inference GPU-coordination guard for a batching decode step or the direct request lifetime |
 | `synchronization_ms` | Time spent settling the decode step at the backend's external-yield boundary |
 | `response_delivery_ms` | Producer-ready to bounded-channel enqueue or bridge receipt |
 | `handler_queue_ms` | Producer delivery to handler receipt |
@@ -189,12 +189,26 @@ and can become the dominant `actor_cycle_idle` stall reason; it is not folded
 into actor decode or left as unexplained wall time. Direct streaming measures
 `tokenization_ms`, model-ready-to-bridge
 `response_delivery_ms`, bridge-to-handler `handler_queue_ms`, response-body
-enqueue `client_delivery_ms`, and request-local `unexplained_ms`. Its
+enqueue `client_delivery_ms`, request-local `unexplained_ms`, and the
+invocation-owned backend phases described below. Its
 `actor_queue_ms`, `actor_admission_ms`, `prefill_ms`, and `decode_ms` fields are
 `null`, as is `actor_cycle_idle_ms`, because that path does not expose actor
-phase boundaries; its backend
-subphase fields also remain `null` until the direct model path returns the same
-invocation-owned timing envelope.
+phase boundaries. The direct model event envelope carries its distinct sampler
+tail and external-yield synchronization wait with the token they produced. A
+decode that selects EOS instead of emitting another token carries those phases
+on the terminal event, so successful request totals do not discard the final
+backend invocation. The server attaches its request-lifetime GPU-lock wait
+exactly once, to the first model event. Measured zero remains distinct from an
+unsupported `null` phase.
+
+Direct `sampling_ms` is a caller-wall-time candidate around the existing
+sampler operation. Because accelerator work may be asynchronous, it can include
+completion of work submitted immediately before that sampler; it is not claimed
+as isolated GPU-kernel time and is not added to another broad phase. Kiln does
+not insert a synchronization to manufacture a cleaner number. Direct fused
+token routes leave sampling `null` when they do not expose a separate sampler
+boundary, and direct readback remains `null` until that route's backend owner
+can split the existing transfer exactly.
 
 Qualified ROCm W8 sampled paged decode reports `sampling_ms` for the distinct
 post-transformer tail and `readback_ms` for the existing token-index
@@ -204,11 +218,11 @@ envelope subtracts the exact readback duration from sampling before both are
 published, so the two candidates do not double-count. The bounded top-k batch
 and single-row full-distribution Gumbel routes both carry this envelope.
 
-Other sampled paths, including behavior-logprob capture, report their distinct
-sampling boundary but leave `readback_ms` `null` until their backend owner can
-split the existing transfer honestly. Greedy and native fused-forward routes
-leave sampling `null` when the transformer/sampler boundary is not independently
-observable.
+Other sampled paths, including behavior-logprob capture and the direct sampler
+tail described above, report their distinct sampling boundary but leave
+`readback_ms` `null` until their backend owner can split the existing transfer
+honestly. Greedy and native fused-forward routes leave sampling `null` when the
+transformer/sampler boundary is not independently observable.
 
 Non-W8 device readback, graph capture/replay, resize, trim, adapter, and
 training remain explicit nullable fields. Their aggregate subsystems have

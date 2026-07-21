@@ -26242,12 +26242,12 @@ mod tests {
             ],
             (1, 2, 3, 4),
         )?;
-        let expected = gqa_sdpa_materialized_default(&q_cpu, &k_cpu, &v_cpu, 1, 3, 2.0, false)?
+        let expected = gqa_sdpa_materialized_default(&q_cpu, &k_cpu, &v_cpu, 1, 3, 2.0)?
             .flatten_all()?
             .to_vec1::<f32>()?;
         let q_vulkan = q_cpu.to_device(Device::Vulkan(0))?;
 
-        let actual = gqa_sdpa_materialized_default(&q_vulkan, &k_cpu, &v_cpu, 1, 3, 2.0, false)?;
+        let actual = gqa_sdpa_materialized_default(&q_vulkan, &k_cpu, &v_cpu, 1, 3, 2.0)?;
         assert_eq!(actual.device(), Device::Vulkan(0));
         let actual = actual
             .to_device(Device::Cpu)?
