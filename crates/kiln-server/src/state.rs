@@ -5147,13 +5147,9 @@ fn register_backend_memory_reclaimer(
             if matches!(device, kiln_tensor::Device::Vulkan(_)) {
                 kiln_memory::MemoryGovernor::global().register_reclaimer(move |target| {
                     let stats = kiln_model::vulkan_buffer_pool_stats().unwrap_or_default();
-                    let (active_decode, active_prefill) = batching_engine
-                        .as_ref()
-                        .map(|engine| {
-                            let snapshot = engine.cached_snapshot();
-                            (snapshot.active_decode, snapshot.active_prefill)
-                        })
-                        .unwrap_or_default();
+                    let snapshot = batching_engine.cached_snapshot();
+                    let (active_decode, active_prefill) =
+                        (snapshot.active_decode, snapshot.active_prefill);
                     if stats.free_bytes == 0 || active_decode > 0 || active_prefill > 0 {
                         tracing::debug!(
                             reason = if stats.free_bytes == 0 {
@@ -5197,13 +5193,9 @@ fn register_backend_memory_reclaimer(
                         );
                         return 0;
                     }
-                    let (active_decode, active_prefill) = batching_engine
-                        .as_ref()
-                        .map(|engine| {
-                            let snapshot = engine.cached_snapshot();
-                            (snapshot.active_decode, snapshot.active_prefill)
-                        })
-                        .unwrap_or_default();
+                    let snapshot = batching_engine.cached_snapshot();
+                    let (active_decode, active_prefill) =
+                        (snapshot.active_decode, snapshot.active_prefill);
                     let before = kiln_model::vulkan_buffer_pool_stats().unwrap_or_default();
                     if before.free_bytes == 0 || active_decode > 0 || active_prefill > 0 {
                         return 0;

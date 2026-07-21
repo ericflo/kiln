@@ -14,7 +14,23 @@ const uiDir = resolve(repoRoot, 'crates/kiln-server/src/ui');
 const uiIndexPath = resolve(uiDir, 'index.html');
 const uiStylesPath = resolve(uiDir, 'styles.css');
 const uiDemoJsPath = resolve(uiDir, 'demo.js');
-const uiAppJsPath = resolve(uiDir, 'app.js');
+const uiAppFragmentPaths = [
+  'shell.js',
+  'adapters.js',
+  'training.js',
+  'playground.js',
+  'evaluations.js',
+  'command_palette.js',
+  'charts.js',
+  'adapter_drill.js',
+  'training_drill.js',
+  'playground_compare.js',
+  'terminal.js',
+  'distillation.js',
+  'agents.js',
+  'preflight.js',
+  'bootstrap.js',
+].map((name) => resolve(uiDir, 'app', name));
 const thinkingBudgetContractPath = resolve(repoRoot, 'contracts/thinking-budget-v1.conformance.json');
 const thinkingBudgetContract = JSON.parse(await readFile(thinkingBudgetContractPath, 'utf8'));
 const GIB = 1024 ** 3;
@@ -56,6 +72,13 @@ const forbiddenPublicityTerms = [
 
 function fail(message) {
   throw new Error(message);
+}
+
+async function readUiAppBundle() {
+  const fragments = await Promise.all(
+    uiAppFragmentPaths.map((path) => readFile(path, 'utf8')),
+  );
+  return `(function() {\n'use strict';\n\n${fragments.join('')}\n})();\n`;
 }
 
 function checkThinkingBudgetParserContract(source) {
@@ -1133,7 +1156,7 @@ async function startServer({
   const uiHtml = await readFile(uiIndexPath, 'utf8');
   const uiStyles = await readFile(uiStylesPath, 'utf8');
   const uiDemoJs = await readFile(uiDemoJsPath, 'utf8');
-  const uiAppJs = await readFile(uiAppJsPath, 'utf8');
+  const uiAppJs = await readUiAppBundle();
   availableAdapters = availableAdapters.map((adapter) => ({ ...adapter }));
   let activeAdapter = availableAdapters.find((adapter) => adapter.active)?.name || null;
   const completedTrainingJobs = [];
@@ -5671,7 +5694,7 @@ async function runSmoke(baseUrl, {
   }
 }
 
-const uiAppSource = await readFile(uiAppJsPath, 'utf8');
+const uiAppSource = await readUiAppBundle();
 const uiIndexSource = await readFile(uiIndexPath, 'utf8');
 const uiDemoSource = await readFile(uiDemoJsPath, 'utf8');
 checkThinkingBudgetParserContract(uiAppSource);

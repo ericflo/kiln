@@ -49,18 +49,13 @@
     },
     {
       "path": "crates/kiln-server/src/state.rs",
-      "max_lines": 8369,
+      "max_lines": 8361,
       "rationale": "Application state still owns multiple cache and memory authorities; this cap blocks new ownership domains until existing state is split deliberately."
     },
     {
       "path": "crates/kiln-server/src/training_queue.rs",
       "max_lines": 7826,
       "rationale": "Training admission, execution, and publication are coupled by transactional invariants; the exception permits no growth while those owners are separated."
-    },
-    {
-      "path": "crates/kiln-server/src/ui/app.js",
-      "max_lines": 12984,
-      "rationale": "The Phase 8.3 browser modularization is active under the existing embedded build; this exact ceiling prevents additional behavior from entering the monolith."
     },
     {
       "path": "crates/kiln-tensor/src/cuda_storage.rs",

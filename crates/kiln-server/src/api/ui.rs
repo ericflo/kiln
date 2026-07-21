@@ -8,7 +8,28 @@ use axum::{
 const UI_INDEX_HTML: &str = include_str!("../ui/index.html");
 const UI_STYLES_CSS: &str = include_str!("../ui/styles.css");
 const UI_DEMO_JS: &str = include_str!("../ui/demo.js");
-const UI_APP_JS: &str = include_str!("../ui/app.js");
+// Preserve one classic-script closure and one /ui/app.js response while the
+// source is owned by behavior-specific files. Fragment order is execution
+// order; each fragment is also valid JavaScript on its own for syntax checks.
+const UI_APP_JS: &str = concat!(
+    "(function() {\n'use strict';\n\n",
+    include_str!("../ui/app/shell.js"),
+    include_str!("../ui/app/adapters.js"),
+    include_str!("../ui/app/training.js"),
+    include_str!("../ui/app/playground.js"),
+    include_str!("../ui/app/evaluations.js"),
+    include_str!("../ui/app/command_palette.js"),
+    include_str!("../ui/app/charts.js"),
+    include_str!("../ui/app/adapter_drill.js"),
+    include_str!("../ui/app/training_drill.js"),
+    include_str!("../ui/app/playground_compare.js"),
+    include_str!("../ui/app/terminal.js"),
+    include_str!("../ui/app/distillation.js"),
+    include_str!("../ui/app/agents.js"),
+    include_str!("../ui/app/preflight.js"),
+    include_str!("../ui/app/bootstrap.js"),
+    "\n})();\n",
+);
 // Vendored terminal renderer (xterm.js, MIT) for the embedded pi terminal.
 // Served as separate routes so index.html stays readable; everything is still
 // compiled into the binary — the dashboard works fully offline.
