@@ -409,6 +409,44 @@ records the actual installed driver and toolkit. These bounded tests do not
 claim full-model correctness, graph/resize behavior, memory-pressure safety,
 serving performance, or soak completion.
 
+### CUDA Memory Lifecycle Handoff
+
+After the environment and core-correctness receipts pass, run the memory
+lifecycle variant for the same 4090 class and exact clean pushed source.
+
+RTX 4090 Laptop GPU, 16 GB:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" \
+python3 scripts/qualification/run.py \
+  --variant cuda-rtx4090-laptop-16gb \
+  --host-id rtx4090-laptop \
+  qualification/workloads/cuda-memory-lifecycle-v1.json
+```
+
+Desktop RTX 4090, 24 GB:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" \
+python3 scripts/qualification/run.py \
+  --variant cuda-rtx4090-desktop-24gb \
+  --host-id rtx4090-desktop \
+  qualification/workloads/cuda-memory-lifecycle-v1.json
+```
+
+The allocator case requires at least 4 GiB free before it starts. It first
+allocates and trims 1 GiB, then configures the stream-ordered pool to retain a
+freed 2 GiB allocation and requires an explicit trim to return at least 1 GiB
+to device-visible free memory. The paged-KV case requires at least 3 GiB free,
+allocates a four-layer BF16 cache, and preserves an exact marker through a
+4,000-to-500 shrink and 500-to-4,000 grow. The largest replacement interval is
+about 1.1 GiB. Both cases are serial, bounded, and fail on a skip diagnostic.
+
+This is a healthy-headroom allocator and replacement-lifecycle gate. It is not
+the laptop low-memory admission gate: it does not load the public model, drive
+serving near the 16 GB limit, or prove typed rejection and recovery under
+model-resident pressure.
+
 ROCm core correctness:
 
 ```bash

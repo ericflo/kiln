@@ -138,6 +138,39 @@ class WorkloadTests(unittest.TestCase):
         self.assertIn("Apple M1", metal_probe["output_assertions"][0]["pattern"])
         self.assertIn("8", metal_probe["output_assertions"][1]["pattern"])
 
+    def test_cuda_memory_lifecycle_is_bounded_and_fail_closed(self) -> None:
+        path = ROOT / "qualification/workloads/cuda-memory-lifecycle-v1.json"
+        workload = workload_module.load_workload(path)
+        variants = {variant["id"]: variant for variant in workload["variants"]}
+        self.assertEqual(
+            sorted(variants),
+            ["cuda-rtx4090-desktop-24gb", "cuda-rtx4090-laptop-16gb"],
+        )
+        for variant in variants.values():
+            self.assertEqual(variant["backend"], "cuda")
+            self.assertEqual(variant["device_requirement"], "required")
+            self.assertEqual(variant["skip_policy"], "fail")
+            cases = {case["id"]: case for case in variant["cases"]}
+            self.assertEqual(
+                sorted(cases),
+                ["allocator-reclaim", "device-probe", "paged-kv-resize"],
+            )
+            for case_id in ("allocator-reclaim", "paged-kv-resize"):
+                case = cases[case_id]
+                self.assertEqual(case["environment"]["KILN_QUALIFICATION"], "1")
+                self.assertEqual(case["environment"]["KILN_CUDA_ARCHS"], "89")
+                forbidden = [
+                    assertion["pattern"]
+                    for assertion in case["output_assertions"]
+                    if assertion["match"] == "forbidden"
+                ]
+                self.assertTrue(any("skip" in pattern.lower() for pattern in forbidden))
+
+        desktop_probe = variants["cuda-rtx4090-desktop-24gb"]["cases"][0]
+        laptop_probe = variants["cuda-rtx4090-laptop-16gb"]["cases"][0]
+        self.assertIn("RTX 4090\\s", desktop_probe["output_assertions"][0]["pattern"])
+        self.assertIn("RTX 4090 Laptop GPU", laptop_probe["output_assertions"][0]["pattern"])
+
     def test_workload_cases_cannot_invoke_raw_cargo(self) -> None:
         value = valid_performance_workload()
         value["variants"][0]["cases"][0]["command"] = ["/usr/bin/cargo", "test"]

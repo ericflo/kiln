@@ -1090,6 +1090,19 @@
       "count": 1,
       "language": "rust",
       "operation": "read",
+      "path": "crates/kiln-model/tests/cuda_kv_physical_resize.rs",
+      "phase": "runtime",
+      "surface": "integration-test"
+    },
+    {
+      "api": "var",
+      "argument": "KILN_QUALIFICATION",
+      "argument_kind": "literal",
+      "classification": "test_only",
+      "classification_basis": "integration-test source surface",
+      "count": 1,
+      "language": "rust",
+      "operation": "read",
       "path": "crates/kiln-model/tests/cuda_sft_step_proof.rs",
       "phase": "runtime",
       "surface": "integration-test"
@@ -2338,6 +2351,19 @@
       "count": 1,
       "language": "rust",
       "operation": "read",
+      "path": "crates/kiln-tensor/tests/cuda_reclaim_smoke.rs",
+      "phase": "runtime",
+      "surface": "integration-test"
+    },
+    {
+      "api": "var",
+      "argument": "KILN_QUALIFICATION",
+      "argument_kind": "literal",
+      "classification": "test_only",
+      "classification_basis": "integration-test source surface",
+      "count": 1,
+      "language": "rust",
+      "operation": "read",
       "path": "crates/kiln-tensor/tests/cuda_resize_copy_primitives.rs",
       "phase": "runtime",
       "surface": "integration-test"
@@ -2928,7 +2954,7 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 111,
+    "literal_kiln_read_call_sites": 113,
     "literal_kiln_read_names": 31,
     "literal_kiln_read_names_by_classification": {
       "build_time": 6,
@@ -2948,15 +2974,15 @@
       "test_only": 11
     },
     "process_mutation_entries": 16,
-    "read_call_sites": 431,
+    "read_call_sites": 433,
     "read_call_sites_by_classification": {
       "build_time": 326,
       "credential_provider": 1,
       "experimental_debug": 0,
       "public_stable": 6,
       "startup_safety": 1,
-      "test_only": 97
+      "test_only": 99
     },
-    "read_entries": 208
+    "read_entries": 210
   }
 }

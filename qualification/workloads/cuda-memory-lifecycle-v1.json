@@ -1,0 +1,313 @@
+{
+  "schema_version": 1,
+  "workload_id": "cuda-memory-lifecycle-v1",
+  "kind": "correctness",
+  "description": "Run bounded fail-closed CUDA allocator reclaim and full paged-KV physical shrink/grow lifecycle gates on either named RTX 4090 machine.",
+  "determinism": {
+    "seed": 20260721,
+    "seed_delivery": "fixed_fixture",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [],
+  "variants": [
+    {
+      "id": "cuda-rtx4090-desktop-24gb",
+      "description": "Require the desktop RTX 4090, then prove bounded CUDA mempool reclaim and full paged-KV replacement on logical device zero.",
+      "backend": "cuda",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {},
+      "cases": [
+        {
+          "id": "device-probe",
+          "description": "Require CUDA logical device zero to be the desktop NVIDIA GeForce RTX 4090 selected by the environment receipt.",
+          "required": true,
+          "command": [
+            "nvidia-smi",
+            "-i",
+            "0",
+            "--query-gpu=name",
+            "--format=csv,noheader"
+          ],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 60,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "(?m)^NVIDIA GeForce RTX 4090\\s*$"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no devices were found|skipp(?:ed|ing))"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "allocator-reclaim",
+          "description": "Require explicit CUDA mempool hoarding, observe a two-GiB retained allocation, trim it, and verify at least one GiB returns to device-visible free memory.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-tensor",
+            "--no-default-features",
+            "--features",
+            "cuda",
+            "--test",
+            "cuda_reclaim_smoke",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "CUDARC_CUDA_VERSION": "12080",
+            "KILN_CUDA_ARCHS": "89",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[cuda-reclaim\\] OK: cuda_mem_get_info \\+ cuda_trim_pool run on real CUDA hardware"
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[hoard\\] OK: release-threshold hoards freed VRAM; cuda_trim_pool reclaims it"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(skip.*cuda|no CUDA device|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "paged-kv-resize",
+          "description": "Allocate a four-layer BF16 CUDA paged-KV cache, preserve a marker through 4,000-to-500 shrink and 500-to-4,000 grow replacements, and verify final capacity.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-model",
+            "--no-default-features",
+            "--features",
+            "cuda",
+            "--test",
+            "cuda_kv_physical_resize",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "CUDARC_CUDA_VERSION": "12080",
+            "KILN_CUDA_ARCHS": "89",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[cuda-resize\\] OK: marker preserved across shrink 4000->500->4000"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(skip.*cuda|no CUDA device|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "cuda-rtx4090-laptop-16gb",
+      "description": "Require the laptop RTX 4090, then prove the same bounded CUDA mempool reclaim and full paged-KV replacement on logical device zero.",
+      "backend": "cuda",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {},
+      "cases": [
+        {
+          "id": "device-probe",
+          "description": "Require CUDA logical device zero to be the laptop NVIDIA GeForce RTX 4090 selected by the environment receipt.",
+          "required": true,
+          "command": [
+            "nvidia-smi",
+            "-i",
+            "0",
+            "--query-gpu=name",
+            "--format=csv,noheader"
+          ],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 60,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "(?m)^NVIDIA GeForce RTX 4090 Laptop GPU\\s*$"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no devices were found|skipp(?:ed|ing))"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "allocator-reclaim",
+          "description": "Require explicit CUDA mempool hoarding, observe a two-GiB retained allocation, trim it, and verify at least one GiB returns to device-visible free memory.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-tensor",
+            "--no-default-features",
+            "--features",
+            "cuda",
+            "--test",
+            "cuda_reclaim_smoke",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "CUDARC_CUDA_VERSION": "12080",
+            "KILN_CUDA_ARCHS": "89",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[cuda-reclaim\\] OK: cuda_mem_get_info \\+ cuda_trim_pool run on real CUDA hardware"
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[hoard\\] OK: release-threshold hoards freed VRAM; cuda_trim_pool reclaims it"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(skip.*cuda|no CUDA device|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "paged-kv-resize",
+          "description": "Allocate a four-layer BF16 CUDA paged-KV cache, preserve a marker through 4,000-to-500 shrink and 500-to-4,000 grow replacements, and verify final capacity.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-model",
+            "--no-default-features",
+            "--features",
+            "cuda",
+            "--test",
+            "cuda_kv_physical_resize",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "CUDARC_CUDA_VERSION": "12080",
+            "KILN_CUDA_ARCHS": "89",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[cuda-resize\\] OK: marker preserved across shrink 4000->500->4000"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(skip.*cuda|no CUDA device|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        }
+      ]
+    }
+  ],
+  "comparison_policy": {
+    "mode": "self_contained_correctness",
+    "variant_pairs": [],
+    "backend_pairs": [],
+    "metric_rules": []
+  }
+}

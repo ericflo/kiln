@@ -1,19 +1,44 @@
 //! #28 — On-box proof that the CUDA governor-reclaim primitives run on real
 //! NVIDIA hardware: `cuda_mem_get_info` returns plausible `(free, total)` and
 //! `cuda_trim_pool` succeeds (device-sync + cuMemPoolTrimTo). Mirrors the ROCm
-//! `rocm_trim_pool`/`rocm_mem_get_info` path. Skips without a CUDA device.
+//! `rocm_trim_pool`/`rocm_mem_get_info` path. Normal runs skip without CUDA;
+//! qualification runs fail on missing hardware or insufficient free VRAM.
 //!
 //! Run: `cargo test -p kiln-tensor --no-default-features --features cuda \
 //!        --test cuda_reclaim_smoke -- --nocapture --test-threads=1`
 #![cfg(feature = "cuda")]
 
-#[test]
-fn cuda_mem_get_info_and_trim_pool_run() {
+const MIB: usize = 1024 * 1024;
+const GIB: usize = 1024 * MIB;
+
+fn qualification_required(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+fn cuda_memory_or_skip(test: &str, minimum_free_bytes: usize) -> Option<(usize, usize)> {
     if !kiln_tensor::cuda_is_available() {
-        eprintln!("skip cuda_reclaim_smoke: no CUDA device");
-        return;
+        if qualification_required(std::env::var("KILN_QUALIFICATION").ok().as_deref()) {
+            panic!("CUDA device unavailable while KILN_QUALIFICATION=1 ({test})");
+        }
+        eprintln!("skip {test}: no CUDA device");
+        return None;
     }
     let (free, total) = kiln_tensor::cuda_mem_get_info(0).expect("cuda_mem_get_info");
+    assert!(
+        free >= minimum_free_bytes,
+        "{test} requires at least {} MiB free, observed {} MiB of {} MiB",
+        minimum_free_bytes / MIB,
+        free / MIB,
+        total / MIB
+    );
+    Some((free, total))
+}
+
+#[test]
+fn cuda_mem_get_info_and_trim_pool_run() {
+    let Some((free, total)) = cuda_memory_or_skip("cuda_reclaim_smoke", 3 * GIB) else {
+        return;
+    };
     eprintln!(
         "[cuda-reclaim] mem_get_info: free={} MiB total={} MiB",
         free / (1024 * 1024),
@@ -25,8 +50,8 @@ fn cuda_mem_get_info_and_trim_pool_run() {
     // Allocate ~1GB, drop it, then trim — trim must succeed (it device-syncs and
     // best-effort releases the pool). On a discrete card free should not shrink
     // after the trim (memory returned, not leaked).
-    let buf = kiln_tensor::cuda_zeros_ctx(0, kiln_tensor::DType::BF16, (1024 * 1024 * 1024) / 2)
-        .expect("cuda alloc");
+    let buf =
+        kiln_tensor::cuda_zeros_ctx(0, kiln_tensor::DType::BF16, GIB / 2).expect("cuda alloc");
     drop(buf);
     kiln_tensor::cuda_trim_pool(0, 0).expect("cuda_trim_pool");
     let (free_after, _) = kiln_tensor::cuda_mem_get_info(0).expect("cuda_mem_get_info post-trim");
@@ -38,7 +63,7 @@ fn cuda_mem_get_info_and_trim_pool_run() {
     // The trim must not have LOST memory (free should be >= a 1GB-below-start
     // floor — i.e. the buffer was reclaimed, not leaked).
     assert!(
-        free_after + (1024 * 1024 * 1024) >= free.saturating_sub(256 * 1024 * 1024),
+        free_after + GIB >= free.saturating_sub(256 * MIB),
         "trim should reclaim the freed buffer, not leak it (free {free} -> {free_after})"
     );
     eprintln!("[cuda-reclaim] OK: cuda_mem_get_info + cuda_trim_pool run on real CUDA hardware");
@@ -55,18 +80,15 @@ fn cuda_mem_get_info_and_trim_pool_run() {
 /// so the free-VRAM delta is the direct signal.
 #[test]
 fn cuda_pool_hoards_with_threshold_and_trim_reclaims() {
-    if !kiln_tensor::cuda_is_available() {
-        eprintln!("skip cuda_pool_hoards: no CUDA device");
+    let Some((free0, _)) = cuda_memory_or_skip("cuda_pool_hoards", 4 * GIB) else {
         return;
-    }
-    const MB: usize = 1024 * 1024;
-    const GB2: usize = 2 * 1024 * MB;
+    };
+    const GB2: usize = 2 * GIB;
 
     // Hoard mode (#32): the pool keeps freed pages until explicitly trimmed.
     kiln_tensor::cuda_set_pool_release_threshold(0, u64::MAX)
         .expect("cuda_set_pool_release_threshold");
 
-    let (free0, _) = kiln_tensor::cuda_mem_get_info(0).unwrap();
     let buf = kiln_tensor::cuda_zeros_ctx(0, kiln_tensor::DType::U8, GB2).expect("alloc 2GB");
     kiln_tensor::cuda_synchronize_default_stream(0).ok();
     let (free_alloc, _) = kiln_tensor::cuda_mem_get_info(0).unwrap();
@@ -75,9 +97,9 @@ fn cuda_pool_hoards_with_threshold_and_trim_reclaims() {
     let (free_dropped, _) = kiln_tensor::cuda_mem_get_info(0).unwrap();
     eprintln!(
         "[hoard] free0={} alloc={} dropped(no-trim)={} MiB",
-        free0 / MB,
-        free_alloc / MB,
-        free_dropped / MB
+        free0 / MIB,
+        free_alloc / MIB,
+        free_dropped / MIB
     );
     // The freed 2 GB must STAY held (threshold=MAX): free VRAM is still > 1 GB
     // below the pre-alloc baseline, i.e. the pool did NOT auto-release on sync.
@@ -92,8 +114,8 @@ fn cuda_pool_hoards_with_threshold_and_trim_reclaims() {
     let (free_trim, _) = kiln_tensor::cuda_mem_get_info(0).unwrap();
     eprintln!(
         "[hoard] after trim free={} MiB (recovered {} MiB)",
-        free_trim / MB,
-        free_trim.saturating_sub(free_dropped) / MB
+        free_trim / MIB,
+        free_trim.saturating_sub(free_dropped) / MIB
     );
     assert!(
         free_trim >= free_dropped + (GB2 / 2),
@@ -101,4 +123,13 @@ fn cuda_pool_hoards_with_threshold_and_trim_reclaims() {
          (dropped={free_dropped} trim={free_trim})"
     );
     eprintln!("[hoard] OK: release-threshold hoards freed VRAM; cuda_trim_pool reclaims it");
+}
+
+#[test]
+fn qualification_mode_is_exact_opt_in() {
+    assert!(qualification_required(Some("1")));
+    assert!(!qualification_required(None));
+    assert!(!qualification_required(Some("")));
+    assert!(!qualification_required(Some("0")));
+    assert!(!qualification_required(Some("true")));
 }

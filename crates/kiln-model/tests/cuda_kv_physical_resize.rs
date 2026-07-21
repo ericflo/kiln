@@ -2,7 +2,8 @@
 //! `PagedKvCacheKt::physical_resize_to` preserves live KV byte-for-byte across a
 //! shrink AND a grow on a real `Device::Cuda` device, exercising the CUDA arm of
 //! `alloc_pool_pair` (`cuda_zeros_ctx`) + the device-agnostic narrow/slice_set
-//! copy + the entry/zero-fill device syncs. Skips unless a CUDA device exists.
+//! copy + the entry/zero-fill device syncs. Normal runs skip without CUDA;
+//! qualification runs fail on missing hardware or insufficient free VRAM.
 //!
 //! Run: `cargo test -p kiln-model --no-default-features --features cuda \
 //!        --test cuda_kv_physical_resize -- --nocapture --test-threads=1`
@@ -17,13 +18,36 @@ const HEAD_DIM: usize = 128;
 const BLOCK_SIZE: usize = 16;
 const NUM_BLOCKS: usize = 4000;
 const SHRUNK_BLOCKS: usize = 500;
+const MINIMUM_FREE_BYTES: usize = 3 * 1024 * 1024 * 1024;
+
+fn qualification_required(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+fn cuda_available_or_skip() -> bool {
+    if kiln_tensor::cuda_is_available() {
+        return true;
+    }
+    if qualification_required(std::env::var("KILN_QUALIFICATION").ok().as_deref()) {
+        panic!("CUDA device unavailable while KILN_QUALIFICATION=1");
+    }
+    eprintln!("skip cuda_physical_resize: no CUDA device");
+    false
+}
 
 #[test]
 fn cuda_physical_resize_preserves_kv() {
-    if !kiln_tensor::cuda_is_available() {
-        eprintln!("skip cuda_physical_resize: no CUDA device");
+    if !cuda_available_or_skip() {
         return;
     }
+    let (free, total) = kiln_tensor::cuda_mem_get_info(0).expect("read CUDA memory capacity");
+    assert!(
+        free >= MINIMUM_FREE_BYTES,
+        "cuda_physical_resize requires at least {} MiB free, observed {} MiB of {} MiB",
+        MINIMUM_FREE_BYTES / (1024 * 1024),
+        free / (1024 * 1024),
+        total / (1024 * 1024)
+    );
     let dev = Device::Cuda(0);
 
     let cache = PagedKvCacheKt::new(
@@ -97,4 +121,13 @@ fn cuda_physical_resize_preserves_kv() {
     eprintln!(
         "[cuda-resize] OK: marker preserved across shrink {NUM_BLOCKS}->{SHRUNK_BLOCKS}->{NUM_BLOCKS}"
     );
+}
+
+#[test]
+fn qualification_mode_is_exact_opt_in() {
+    assert!(qualification_required(Some("1")));
+    assert!(!qualification_required(None));
+    assert!(!qualification_required(Some("")));
+    assert!(!qualification_required(Some("0")));
+    assert!(!qualification_required(Some("true")));
 }
