@@ -153,9 +153,18 @@ class WorkloadTests(unittest.TestCase):
             cases = {case["id"]: case for case in variant["cases"]}
             self.assertEqual(
                 sorted(cases),
-                ["allocator-reclaim", "device-probe", "paged-kv-resize"],
+                [
+                    "allocator-reclaim",
+                    "device-probe",
+                    "paged-kv-resize",
+                    "server-admission-rejection",
+                ],
             )
-            for case_id in ("allocator-reclaim", "paged-kv-resize"):
+            for case_id in (
+                "allocator-reclaim",
+                "paged-kv-resize",
+                "server-admission-rejection",
+            ):
                 case = cases[case_id]
                 self.assertEqual(case["environment"]["KILN_QUALIFICATION"], "1")
                 self.assertEqual(case["environment"]["KILN_CUDA_ARCHS"], "89")
@@ -165,6 +174,16 @@ class WorkloadTests(unittest.TestCase):
                     if assertion["match"] == "forbidden"
                 ]
                 self.assertTrue(any("skip" in pattern.lower() for pattern in forbidden))
+            admission = cases["server-admission-rejection"]
+            self.assertIn("kiln-server", admission["command"])
+            self.assertIn("--exact", admission["command"])
+            self.assertTrue(
+                any(
+                    "before allocation" in assertion["pattern"]
+                    for assertion in admission["output_assertions"]
+                    if assertion["match"] == "required"
+                )
+            )
 
         desktop_probe = variants["cuda-rtx4090-desktop-24gb"]["cases"][0]
         laptop_probe = variants["cuda-rtx4090-laptop-16gb"]["cases"][0]

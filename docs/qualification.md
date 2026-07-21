@@ -437,15 +437,21 @@ python3 scripts/qualification/run.py \
 The allocator case requires at least 4 GiB free before it starts. It first
 allocates and trims 1 GiB, then configures the stream-ordered pool to retain a
 freed 2 GiB allocation and requires an explicit trim to return at least 1 GiB
-to device-visible free memory. The paged-KV case requires at least 3 GiB free,
-allocates a four-layer BF16 cache, and preserves an exact marker through a
-4,000-to-500 shrink and 500-to-4,000 grow. The largest replacement interval is
-about 1.1 GiB. Both cases are serial, bounded, and fail on a skip diagnostic.
+to device-visible free memory. The server-admission case performs no large
+allocation: it reads the real `cuMemGetInfo` ceiling, retains a 1 GiB safety
+floor, asks the exact server paged-KV admission gate for one 1 MiB block beyond
+that ceiling, and requires the typed remediation error before cache
+construction. The paged-KV case requires at least 3 GiB free, allocates a
+four-layer BF16 cache, and preserves an exact marker through a 4,000-to-500
+shrink and 500-to-4,000 grow. The largest replacement interval is about 1.1
+GiB. All cases are serial, bounded, and fail on a skip diagnostic.
 
-This is a healthy-headroom allocator and replacement-lifecycle gate. It is not
-the laptop low-memory admission gate: it does not load the public model, drive
-serving near the 16 GB limit, or prove typed rejection and recovery under
-model-resident pressure.
+This proves the allocator-aware server gate rejects an oversized KV request
+without inducing an OOM, plus healthy-headroom allocator and replacement
+lifecycle. It is not the complete laptop low-memory gate: it does not load the
+public model, drive serving near the 16 GB limit, or prove recovery under
+model-resident pressure. Keep that later hardware run bounded by a declared
+free-memory floor; do not fill the card merely to manufacture an OOM.
 
 ROCm core correctness:
 

@@ -8294,9 +8294,7 @@ mod tests {
 
     #[test]
     fn oom_message_handles_unknown_vram() {
-        // total_vram = 0 path (e.g. detection failed) — the message must
-        // still render something sensible without panicking on the GiB
-        // formatting.
+        // A missing VRAM signal must still render without panicking.
         let failure = AutoSizeFailure {
             attempts: vec![(0.85, 100, "CUDA OOM".to_string())],
         };
@@ -8315,4 +8313,6 @@ mod tests {
             "should print 0.0 GiB when unknown: {msg}"
         );
     }
+    #[cfg(feature = "cuda")]
+    include!("state_cuda_admission_tests.rs");
 }

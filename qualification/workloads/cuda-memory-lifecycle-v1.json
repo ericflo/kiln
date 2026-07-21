@@ -109,6 +109,55 @@
           }
         },
         {
+          "id": "server-admission-rejection",
+          "description": "Query the real CUDA allocator ceiling and require the server's exact paged-KV admission gate to reject a request one block beyond it before any pool allocation.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-server",
+            "--no-default-features",
+            "--features",
+            "cuda",
+            "--lib",
+            "state::tests::cuda_live_allocator_rejects_oversized_kv_before_allocation",
+            "--",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "CUDARC_CUDA_VERSION": "12080",
+            "KILN_CUDA_ARCHS": "89",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[cuda-admission\\] OK: rejected num_blocks=[0-9]+ above live ceiling=[0-9]+ before allocation"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(skip.*cuda|no CUDA device|test result: FAILED|out of memory)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
           "id": "paged-kv-resize",
           "description": "Allocate a four-layer BF16 CUDA paged-KV cache, preserve a marker through 4,000-to-500 shrink and 500-to-4,000 grow replacements, and verify final capacity.",
           "required": true,
@@ -244,6 +293,55 @@
               "stream": "combined",
               "match": "forbidden",
               "pattern": "(?i)(skip.*cuda|no CUDA device|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "server-admission-rejection",
+          "description": "Query the real CUDA allocator ceiling and require the server's exact paged-KV admission gate to reject a request one block beyond it before any pool allocation.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-server",
+            "--no-default-features",
+            "--features",
+            "cuda",
+            "--lib",
+            "state::tests::cuda_live_allocator_rejects_oversized_kv_before_allocation",
+            "--",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "CUDARC_CUDA_VERSION": "12080",
+            "KILN_CUDA_ARCHS": "89",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[cuda-admission\\] OK: rejected num_blocks=[0-9]+ above live ceiling=[0-9]+ before allocation"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(skip.*cuda|no CUDA device|test result: FAILED|out of memory)"
             }
           ],
           "result_protocol": {
