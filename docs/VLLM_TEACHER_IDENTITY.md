@@ -546,8 +546,10 @@ route.
 
 This JSON is not a runtime manifest and does not pin an installed vLLM wheel by
 itself. On each NVIDIA machine, install an explicit reviewed CUDA-compatible
-version in the ignored venv, emit `--manifest-only` through the exact launch
-arguments twice, require byte-identical results, and commit that machine's
+version in the ignored venv, then run
+`scripts/qualification/capture_vllm_runtime_manifest.py` against this launch
+JSON. The tool inserts only `--manifest-only`, requires two byte-identical
+strict-valid results, and publishes without overwrite. Commit that machine's
 manifest under `qualification/runtime/vllm/cuda/<machine>/` before startup.
 The accelerator identity must match the environment receipt's 4090 class,
 `sm_89`, capacity, and selected logical device. The benchmark then binds the
@@ -556,6 +558,12 @@ the NVML selector, and the same host thermal policy/memory ceiling used by the
 Kiln reference. See [Serving Benchmark
 Protocol](SERVING_BENCHMARK_PROTOCOL.md#rtx-4090-serving-bootstrap) for the
 complete machine sequence and failure gates.
+
+Owned benchmark mode independently enforces the same boundary: the command
+must resolve the tracked teacher script, use inherited process-group ownership,
+carry each identity/cache/model option exactly once before one explicit `--`,
+and match the runtime manifest's served model, top-K, and model-length fields.
+This check occurs before model hashing or process creation.
 
 ### Retained Strix Halo ROCm baseline
 

@@ -479,6 +479,10 @@ environment fields. The complete policy-materialization, bounded CUDA build,
 typed-config preview, immutable vLLM runtime-manifest, NVML UUID selection,
 single-concurrency bootstrap, comparison, failure, and expansion procedure is
 in [Serving Benchmark Protocol](SERVING_BENCHMARK_PROTOCOL.md#rtx-4090-serving-bootstrap).
+Use `scripts/qualification/capture_vllm_runtime_manifest.py` with the tracked
+vLLM launch JSON; do not retype its inference arguments. The tool requires a
+clean commit, two byte-identical strict-valid captures, bounded child output,
+and a new destination before it publishes the exact runtime manifest.
 
 The initial Kiln inputs are stable-profile, eager-only baselines. They are not
 an optimality claim and must not be edited in place after a receipt binds them.

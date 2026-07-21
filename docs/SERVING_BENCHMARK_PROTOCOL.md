@@ -115,6 +115,15 @@ has already made it the leader of an isolated Linux process group. Detached
 vLLM children cannot satisfy listener ownership and are never thermally guarded
 by implication from their parent.
 
+The driver enforces that statement before model hashing. The second argv entry
+must resolve directly to the tracked non-symlink teacher script. The launcher
+options for model, served ID, process-group mode, snapshot root, cache root,
+top-K bound, and model-length bound must each occur exactly once before one
+explicit `--` boundary. Manifest, dry-run, and precomputed-identity modes are
+forbidden. The parsed served ID, top-K bound, and model-length bound must match
+the immutable runtime manifest. An arbitrary server command cannot satisfy an
+owned vLLM run merely by returning a syntactically valid system fingerprint.
+
 The vLLM wrapper owns its runtime cache through the typed `--cache-root` option.
 Each real launch derives a unique empty `VLLM_CACHE_ROOT`, and removes it after
 the supervised process group exits. Tracked launch documents should name an
@@ -252,14 +261,30 @@ target/release/kiln config \
 
 For vLLM, create `.qualification/vllm-cuda-venv`, install one explicit reviewed
 CUDA-compatible vLLM version rather than a floating package, and copy the
-resolved venv interpreter to `bin/python-kiln`. Generate the immutable runtime
-manifest from the exact arguments in
-`vllm-cuda-rtx4090-serving-bootstrap-v1.json` using `--manifest-only`; repeat
-the capture and require byte equality before committing it below
-`qualification/runtime/vllm/cuda/<machine>/`. The manifest must identify the
-expected RTX 4090 class, `sm_89`, model and tokenizer content, interpreter,
-Python/native packages, CUDA runtime, and every inference option. Any package,
-driver, accelerator, model, environment, or option change invalidates it.
+resolved venv interpreter to `bin/python-kiln`. From the resulting clean source
+tree, create the empty machine directory and capture through the launch JSON:
+
+```bash
+mkdir -p qualification/runtime/vllm/cuda/rtx4090-laptop
+python3 scripts/qualification/capture_vllm_runtime_manifest.py \
+  --server-launch-config qualification/server-launch/vllm-cuda-rtx4090-serving-bootstrap-v1.json \
+  --output qualification/runtime/vllm/cuda/rtx4090-laptop/bootstrap-v1.json
+```
+
+The capture tool validates the owned-launch contract, inserts only
+`--manifest-only` before the existing vLLM argument boundary, and executes it
+twice with bounded output and a per-capture deadline. It requires two
+byte-identical strict-valid results under the benchmark driver's manifest plus
+launch-binding validators. It publishes the exact repeated bytes
+with fsync and no overwrite, and reports the source commit, manifest hash,
+runtime-content hash, system fingerprint, and both stderr hashes. A dirty tree,
+existing output, nonzero/timeout child, oversized output, invalid manifest, or
+repeat mismatch fails without publication. Commit the manifest before startup.
+
+The manifest must identify the expected RTX 4090 class, `sm_89`, model and
+tokenizer content, interpreter, Python/native packages, CUDA runtime, and every
+inference option. Any package, driver, accelerator, model, environment, or
+option change invalidates it and requires a new source-bound capture.
 
 For the first Kiln campaign, use the exact UUID from
 `.environment.device.device_uuid` in the environment receipt, the matching

@@ -36,6 +36,8 @@ def valid_vllm_manifest(model: str = "test-model") -> dict:
         "schema": "kiln.teacher-identity.v1",
         "served_model_id": model,
         "implementation": "vllm:0.25.0",
+        "max_top_k": 20,
+        "max_model_len": 32_768,
     }
     canonical_json = json.dumps(
         identity, ensure_ascii=False, allow_nan=False, separators=(",", ":")
@@ -907,6 +909,51 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertIn("--gpu-memory-utilization=0.75", command)
         self.assertIn("--max-num-seqs=64", command)
         self.assertIn("--language-model-only", command)
+        args = bench.validate_vllm_owned_launch(
+            launch,
+            valid_vllm_manifest("Qwen3.5-4B"),
+        )
+        self.assertEqual(args.served_model_id, "Qwen3.5-4B")
+        self.assertEqual(args.process_group_mode, "inherited")
+
+    def test_vllm_owned_launch_rejects_provenance_and_argument_drift(self) -> None:
+        launch_path = (
+            ROOT
+            / "qualification"
+            / "server-launch"
+            / "vllm-cuda-rtx4090-serving-bootstrap-v1.json"
+        )
+        raw = bench.strict_json_loads(launch_path.read_bytes())
+
+        def parsed(value: dict) -> bench.ServerLaunchConfig:
+            return bench.validate_server_launch_config_value(
+                value,
+                config_directory=launch_path.parent,
+                label="fixture",
+                require_local_paths=False,
+            )
+
+        wrong_script = json.loads(json.dumps(raw))
+        wrong_script["command"][1] = "scripts/run-serving-benchmark-campaign.py"
+        with self.assertRaisesRegex(bench.BenchmarkError, "tracked scripts/vllm_teacher"):
+            bench.validate_vllm_owned_launch(parsed(wrong_script))
+
+        detached = json.loads(json.dumps(raw))
+        index = detached["command"].index("--process-group-mode=inherited")
+        detached["command"][index] = "--process-group-mode=detached"
+        with self.assertRaisesRegex(bench.BenchmarkError, "process-group-mode=inherited"):
+            bench.validate_vllm_owned_launch(parsed(detached))
+
+        duplicate = json.loads(json.dumps(raw))
+        boundary = duplicate["command"].index("--")
+        duplicate["command"].insert(boundary, "--served-model-id=other")
+        with self.assertRaisesRegex(bench.BenchmarkError, "exactly one --served-model-id"):
+            bench.validate_vllm_owned_launch(parsed(duplicate))
+
+        with self.assertRaisesRegex(bench.BenchmarkError, "max_model_len disagrees"):
+            manifest = valid_vllm_manifest("Qwen3.5-4B")
+            manifest["identity"]["max_model_len"] = 16_384
+            bench.validate_vllm_owned_launch(parsed(raw), manifest)
 
     def test_model_fingerprint_read_rate_is_bounded(self) -> None:
         for value in (64, 256, 16_384):
@@ -2570,9 +2617,20 @@ class ServingBenchmarkTests(unittest.TestCase):
                     {
                         "schema": bench.SERVER_LAUNCH_SCHEMA,
                         "id": "fixture-failing-server-v1",
-                        "command": ["./failing-server.py"],
-                        "working_directory": ".",
-                        "log_directory": "logs",
+                        "command": [
+                            str(executable),
+                            "scripts/vllm_teacher.py",
+                            f"--model-path={root / 'model'}",
+                            "--served-model-id=test-model",
+                            "--process-group-mode=inherited",
+                            f"--snapshot-root={root / 'snapshots'}",
+                            f"--cache-root={root / 'caches'}",
+                            "--max-top-k=20",
+                            "--max-model-len=32768",
+                            "--",
+                        ],
+                        "working_directory": str(ROOT),
+                        "log_directory": str(root / "logs"),
                         "readiness_poll_interval_ms": 10,
                         "startup_timeout_seconds": 2.0,
                         "shutdown_timeout_seconds": 1.0,

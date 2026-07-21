@@ -3517,6 +3517,65 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     return args
 
 
+OWNED_LAUNCH_REQUIRED_OPTIONS = (
+    "--model-path",
+    "--served-model-id",
+    "--process-group-mode",
+    "--snapshot-root",
+    "--cache-root",
+    "--max-top-k",
+    "--max-model-len",
+)
+OWNED_LAUNCH_OPTIONAL_SINGLETONS = (
+    "--adapter-path",
+    "--max-prompt-logprob-candidates",
+)
+
+
+def validate_owned_launch_args(argv: Sequence[str]) -> argparse.Namespace:
+    """Validate one real owned-server argv without reading model/runtime state."""
+
+    values = list(argv)
+    if values.count("--") != 1:
+        raise TeacherLaunchError(
+            "owned vLLM launch arguments require exactly one explicit -- boundary"
+        )
+    boundary = values.index("--")
+    launcher_args = values[:boundary]
+
+    def occurrences(option: str) -> int:
+        return sum(
+            argument == option or argument.startswith(option + "=")
+            for argument in launcher_args
+        )
+
+    for option in OWNED_LAUNCH_REQUIRED_OPTIONS:
+        if occurrences(option) != 1:
+            raise TeacherLaunchError(
+                f"owned vLLM launch requires exactly one {option} option"
+            )
+    for option in OWNED_LAUNCH_OPTIONAL_SINGLETONS:
+        if occurrences(option) > 1:
+            raise TeacherLaunchError(
+                f"owned vLLM launch permits at most one {option} option"
+            )
+    for option in ("--identity-input", "--manifest-only", "--dry-run"):
+        if occurrences(option):
+            raise TeacherLaunchError(f"owned vLLM launch forbids {option}")
+
+    args = parse_args(values)
+    _validate_requested_limits(args)
+    validate_extra_vllm_args(args.vllm_args)
+    if args.process_group_mode != PROCESS_GROUP_MODE_INHERITED:
+        raise TeacherLaunchError(
+            "owned vLLM launch requires --process-group-mode=inherited"
+        )
+    if args.model_path is None:
+        raise TeacherLaunchError("owned vLLM launch requires --model-path")
+    _validate_runtime_cache_separation(args)
+    return args
+
+
 def _validate_requested_limits(args: argparse.Namespace) -> None:
     if (
         isinstance(args.max_top_k, bool)

@@ -15,6 +15,7 @@ import binascii
 import dataclasses
 import datetime as dt
 import hashlib
+import io
 import json
 import math
 import os
@@ -31,6 +32,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import redirect_stderr
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -108,6 +110,8 @@ OUTPUT_EVIDENCE_MAX_UTF8_BYTES_PER_REQUEST = 1024 * 1024
 LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
 PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v1"
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 QUALIFICATION_DIR = ROOT / "scripts" / "qualification"
 if str(QUALIFICATION_DIR) not in sys.path:
     sys.path.insert(0, str(QUALIFICATION_DIR))
@@ -115,6 +119,7 @@ if str(QUALIFICATION_DIR) not in sys.path:
 import hf_thermal_supervisor as fingerprint_supervisor  # noqa: E402
 import host_thermal_guard as thermal  # noqa: E402
 import host_thermal_policy as thermal_policy_file  # noqa: E402
+from scripts import vllm_teacher as teacher  # noqa: E402
 from device_memory_sampler import (  # noqa: E402
     DeviceMemoryError,
     MemorySampler,
@@ -860,6 +865,52 @@ def load_server_launch_config(path: Path) -> ServerLaunchConfig:
         config_directory=path.resolve().parent,
         label="server launch config",
     )
+
+
+def validate_vllm_owned_launch(
+    config: ServerLaunchConfig,
+    runtime_manifest: dict[str, Any] | None = None,
+) -> argparse.Namespace:
+    """Bind an owned vLLM launch to the tracked immutable teacher boundary."""
+
+    command = list(config.command)
+    if len(command) < 3:
+        raise BenchmarkError("owned vLLM launch command is incomplete")
+    script_path = Path(command[1])
+    candidate = (
+        script_path
+        if script_path.is_absolute()
+        else config.working_directory / script_path
+    )
+    if candidate.is_symlink() or not candidate.is_file():
+        raise BenchmarkError(
+            f"owned vLLM launch teacher is not a regular non-symlink file: {candidate}"
+        )
+    if candidate.resolve() != (ROOT / "scripts" / "vllm_teacher.py").resolve():
+        raise BenchmarkError(
+            "owned vLLM launch must execute the tracked scripts/vllm_teacher.py"
+        )
+    parser_error = io.StringIO()
+    try:
+        with redirect_stderr(parser_error):
+            args = teacher.validate_owned_launch_args(command[2:])
+    except (SystemExit, teacher.TeacherLaunchError) as exc:
+        details = parser_error.getvalue().strip()
+        suffix = f": {details}" if details else f": {exc}"
+        raise BenchmarkError("invalid owned vLLM launch arguments" + suffix) from exc
+    if runtime_manifest is not None:
+        identity = runtime_manifest["identity"]
+        expected = {
+            "served_model_id": args.served_model_id,
+            "max_top_k": args.max_top_k,
+            "max_model_len": args.max_model_len,
+        }
+        for field, value in expected.items():
+            if identity.get(field) != value:
+                raise BenchmarkError(
+                    f"owned vLLM launch {field} disagrees with runtime manifest"
+                )
+    return args
 
 
 @dataclasses.dataclass
@@ -6478,6 +6529,30 @@ def main(argv: list[str] | None = None) -> int:
                 args.runtime_identity = f"kiln-git:{repo['commit']}"
             else:
                 raise BenchmarkError("--runtime-identity is required for this engine/source state")
+        runtime_artifact = fingerprint_runtime_artifact(args.runtime_artifact)
+        runtime_manifest = (
+            load_vllm_runtime_manifest(args.runtime_artifact)
+            if args.engine == "vllm"
+            else None
+        )
+        if (
+            runtime_manifest is not None
+            and runtime_manifest["identity"]["served_model_id"] != args.model
+        ):
+            raise BenchmarkError("vLLM runtime manifest model disagrees with --model")
+        launch_config: ServerLaunchConfig | None = None
+        if args.server_launch_config is not None:
+            launch_config = load_server_launch_config(args.server_launch_config)
+            require_owned_base_url_unbound(args.base_url)
+            if args.engine == "kiln":
+                if Path(runtime_artifact["path"]).resolve() != Path(
+                    launch_config.command[0]
+                ):
+                    raise BenchmarkError(
+                        "owned Kiln launch executable must equal --runtime-artifact"
+                    )
+            else:
+                validate_vllm_owned_launch(launch_config, runtime_manifest)
         try:
             initial_model_identity, initial_fingerprint_thermal = (
                 fingerprint_model_with_thermal_containment(
@@ -6507,24 +6582,11 @@ def main(argv: list[str] | None = None) -> int:
             if initial_fingerprint_thermal is not None
             else None
         )
-        runtime_artifact = fingerprint_runtime_artifact(args.runtime_artifact)
-        runtime_manifest = (
-            load_vllm_runtime_manifest(args.runtime_artifact)
-            if args.engine == "vllm"
-            else None
-        )
-        if (
-            runtime_manifest is not None
-            and runtime_manifest["identity"]["served_model_id"] != args.model
-        ):
-            raise BenchmarkError("vLLM runtime manifest model disagrees with --model")
-
         thermal_startup_error: BenchmarkError | None = None
         thermal_policy_record: dict[str, Any] | None = None
         thermal_policy: thermal.HostThermalPolicy | None = None
         thermal_settlement_timeout = 0.0
         attached_process: AttachedProcessGroup | None = None
-        launch_config: ServerLaunchConfig | None = None
         if args.host_thermal_policy is not None:
             thermal_policy_record, thermal_policy, thermal_settlement_timeout = (
                 load_host_thermal_policy(args.host_thermal_policy)
@@ -6542,16 +6604,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
             if args.server_launch_config is not None:
-                launch_config = load_server_launch_config(args.server_launch_config)
-                require_owned_base_url_unbound(args.base_url)
-                if (
-                    args.engine == "kiln"
-                    and Path(runtime_artifact["path"]).resolve()
-                    != Path(launch_config.command[0])
-                ):
-                    raise BenchmarkError(
-                        "owned Kiln launch executable must equal --runtime-artifact"
-                    )
+                assert launch_config is not None
                 prelaunch_cooldown = wait_for_prelaunch_cooldown(
                     thermal_policy,
                     trace_callback=trace_host_thermal,

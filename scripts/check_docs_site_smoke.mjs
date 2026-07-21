@@ -138,8 +138,11 @@ const generatedDocsPages = [
       'kiln-cuda-rtx4090-desktop-serving-bootstrap-v1.toml',
       'vllm-cuda-rtx4090-serving-bootstrap-v1.json',
       'prepare_host_thermal_policy.py',
+      'capture_vllm_runtime_manifest.py',
       '--host-thermal-policy',
       'bootstrap baselines, not performance recommendations',
+      'two byte-identical strict-valid results',
+      'before model hashing',
     ],
   },
   {
