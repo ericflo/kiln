@@ -187,11 +187,11 @@ pub fn matmul_bf16(_x: &kiln_tensor::Tensor, _w: &RocmW8Proj) -> Result<kiln_ten
 pub fn argmax_bf16(x: &kiln_tensor::Tensor, w: &RocmW8Proj) -> Result<u32> {
     let idx = kiln_tensor::rocm_w8a16_gemv_argmax_bf16(x, &w.q_weight, &w.scales)
         .map_err(|e| anyhow::anyhow!("rocm_w8_proj: gemv_argmax: {e}"))?;
-    let values = idx
-        .flatten_all()
-        .context("rocm_w8_proj: flatten argmax")?
-        .to_vec1::<i64>()
-        .context("rocm_w8_proj: read argmax")?;
+    let flattened = idx.flatten_all().context("rocm_w8_proj: flatten argmax")?;
+    let values = crate::execution_phase::profile_accelerator_readback(flattened.device(), || {
+        flattened.to_vec1::<i64>()
+    })
+    .context("rocm_w8_proj: read argmax")?;
     Ok(values[0] as u32)
 }
 
@@ -268,7 +268,7 @@ pub fn sample_batch_bf16(
     min_p: &[f32],
     seeds: &[u64],
 ) -> Result<Vec<u32>> {
-    sample_batch_bf16_profiled(
+    let profiled = sample_batch_bf16_profiled(
         x,
         w,
         history_rows,
@@ -282,8 +282,9 @@ pub fn sample_batch_bf16(
         top_p,
         min_p,
         seeds,
-    )
-    .map(|profiled| profiled.value)
+    )?;
+    crate::execution_phase::observe_profiled_readback(profiled.readback_duration);
+    Ok(profiled.value)
 }
 
 #[cfg(feature = "rocm")]
@@ -375,8 +376,9 @@ fn read_batch_tokens(
     vocab_size: usize,
     operation: &str,
 ) -> Result<Vec<u32>> {
-    read_batch_tokens_profiled(indices, expected_rows, vocab_size, operation)
-        .map(|profiled| profiled.value)
+    let profiled = read_batch_tokens_profiled(indices, expected_rows, vocab_size, operation)?;
+    crate::execution_phase::observe_profiled_readback(profiled.readback_duration);
+    Ok(profiled.value)
 }
 
 #[cfg(feature = "rocm")]
@@ -446,7 +448,7 @@ pub fn gumbel_sample_bf16(
     temperature: f32,
     seed: u64,
 ) -> Result<u32> {
-    gumbel_sample_bf16_profiled(
+    let profiled = gumbel_sample_bf16_profiled(
         x,
         w,
         history_indices,
@@ -456,8 +458,9 @@ pub fn gumbel_sample_bf16(
         frequency_penalty,
         temperature,
         seed,
-    )
-    .map(|profiled| profiled.value)
+    )?;
+    crate::execution_phase::observe_profiled_readback(profiled.readback_duration);
+    Ok(profiled.value)
 }
 
 #[cfg(feature = "rocm")]
@@ -574,6 +577,39 @@ mod tests {
         )?;
         let profiled = read_batch_tokens_profiled(indices, 4, 8, "profile test")?;
         assert_eq!(profiled.value, vec![3, 1, 4, 1]);
+        Ok(())
+    }
+
+    #[test]
+    fn w8_greedy_argmax_reports_request_owned_readback() -> Result<()> {
+        if !kiln_tensor::rocm_is_available() {
+            eprintln!("no ROCm device available; skipping W8 greedy readback test");
+            return Ok(());
+        }
+        let device = kiln_tensor::Device::Rocm(0);
+        let mut weight = vec![0.0_f32; 8 * 8];
+        for index in 0..8 {
+            weight[index * 8 + index] = 1.0;
+        }
+        let weight = kiln_tensor::Tensor::new(weight.as_slice(), &device)?
+            .reshape((8, 8))?
+            .to_dtype(kiln_tensor::DType::BF16)?;
+        let packed = pack_from_bf16_rows(&weight)?.context("pack W8 identity")?;
+        let activation =
+            kiln_tensor::Tensor::new(&[0.0_f32, 1.0, 2.0, 7.0, 3.0, 4.0, 5.0, 6.0], &device)?
+                .reshape((1, 1, 8))?
+                .to_dtype(kiln_tensor::DType::BF16)?;
+
+        let profiled = crate::execution_phase::profile_readback_invocation(|| {
+            argmax_bf16(&activation, &packed)
+        })?;
+        assert_eq!(profiled.value, 3);
+        assert!(
+            profiled
+                .readback_duration
+                .is_some_and(|duration| !duration.is_zero()),
+            "W8 greedy argmax must expose its existing scalar readback"
+        );
         Ok(())
     }
 }

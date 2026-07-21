@@ -312,8 +312,10 @@ pub(crate) fn metal_lm_head_argmax_bf16(
     drop(encoder);
 
     if let Some(final_index) = final_index {
-        let token = final_index
-            .to_vec1::<f32>()
+        let token =
+            crate::execution_phase::profile_accelerator_readback(final_index.device(), || {
+                final_index.to_vec1::<f32>()
+            })
             .context("read metal lm head argmax final index")?
             .into_iter()
             .next()
@@ -321,11 +323,15 @@ pub(crate) fn metal_lm_head_argmax_bf16(
         return Ok(token as u32);
     }
 
-    let scores = partial_scores
-        .to_vec1::<f32>()
+    let scores =
+        crate::execution_phase::profile_accelerator_readback(partial_scores.device(), || {
+            partial_scores.to_vec1::<f32>()
+        })
         .context("read metal lm head argmax partial scores")?;
-    let indices = partial_indices
-        .to_vec1::<f32>()
+    let indices =
+        crate::execution_phase::profile_accelerator_readback(partial_indices.device(), || {
+            partial_indices.to_vec1::<f32>()
+        })
         .context("read metal lm head argmax partial indices")?;
 
     let mut best_score = f32::NEG_INFINITY;
@@ -520,12 +526,13 @@ pub(crate) fn metal_lm_head_sample_bf16(
 
     drop(encoder);
 
-    let token = final_index
-        .to_vec1::<f32>()
-        .context("read metal lm head sampled final index")?
-        .into_iter()
-        .next()
-        .context("metal lm head sampled final index missing")?;
+    let token = crate::execution_phase::profile_accelerator_readback(final_index.device(), || {
+        final_index.to_vec1::<f32>()
+    })
+    .context("read metal lm head sampled final index")?
+    .into_iter()
+    .next()
+    .context("metal lm head sampled final index missing")?;
     Ok(token as u32)
 }
 
@@ -647,21 +654,26 @@ pub(crate) fn metal_lm_head_argmax_rows_bf16(
     drop(encoder);
 
     if let Some(final_indices) = final_indices {
-        return Ok(final_indices
-            .to_vec1::<f32>()
-            .context("read metal lm head row argmax final indices")?
-            .into_iter()
-            .map(|idx| idx as u32)
-            .collect());
+        return Ok(crate::execution_phase::profile_accelerator_readback(
+            final_indices.device(),
+            || final_indices.to_vec1::<f32>(),
+        )
+        .context("read metal lm head row argmax final indices")?
+        .into_iter()
+        .map(|idx| idx as u32)
+        .collect());
     }
 
-    let scores = partial_scores
-        .flatten_all()?
-        .to_vec1::<f32>()
-        .context("read metal lm head row argmax partial scores")?;
-    let indices = partial_indices
-        .flatten_all()?
-        .to_vec1::<f32>()
+    let scores_flat = partial_scores.flatten_all()?;
+    let scores = crate::execution_phase::profile_accelerator_readback(scores_flat.device(), || {
+        scores_flat.to_vec1::<f32>()
+    })
+    .context("read metal lm head row argmax partial scores")?;
+    let indices_flat = partial_indices.flatten_all()?;
+    let indices =
+        crate::execution_phase::profile_accelerator_readback(indices_flat.device(), || {
+            indices_flat.to_vec1::<f32>()
+        })
         .context("read metal lm head row argmax partial indices")?;
     let mut out = Vec::with_capacity(batch);
     for row in 0..batch {

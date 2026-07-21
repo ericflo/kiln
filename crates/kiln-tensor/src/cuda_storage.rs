@@ -33,6 +33,7 @@
 
 use std::any::Any;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use cudarc::driver::CudaContext;
 use cudarc::driver::CudaSlice;
@@ -4162,30 +4163,23 @@ pub fn cuda_argmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     )
 }
 
-/// #1082 perf-fix H9 — on-device top-k over the trailing axis of a
-/// rank-1 CUDA tensor, returning only the top-`k` `(value, index)` pairs
-/// to host.
-///
-/// This is the on-device replacement for the pre-flip
-/// `sort_last_dim(desc) → slice top-k` path. The full `[V]` logits row
-/// stays resident on the device; the kernel selects the top-`k` ranked
-/// elements (descending value, ties broken by lower index — matching the
-/// host fallback `topk_via_host_sort`) into a tiny `[k]` value buffer and
-/// `[k]` index buffer, and only those `~k * (4 + 8)` bytes are copied
-/// back over PCIe.
-///
-/// For Qwen3.5-4B decode (`V = 248320`, `k = 20`) this is ~240 bytes of
-/// D2H per token instead of the ~970 KB full-vocab f32 transfer the
-/// `topk_via_host_sort` fallback pays via `to_vec1::<f32>()` EVERY token.
-///
-/// Returns `(values, indices)` of length `k.min(vocab)` in descending
-/// rank order. `values` are F32; `indices` are `u32` (vocab fits in
-/// u32). Input must be a contiguous rank-1 CUDA tensor of dtype
-/// F32/BF16/F16.
-///
-/// Routes through `kiln_topk_last_axis_async` in `csrc/topk_last_axis.cu`.
+/// Select top-k `(value, index)` pairs from a contiguous rank-1 CUDA
+/// F32/BF16/F16 tensor. The full vocabulary stays resident; only `k` F32
+/// values and I64 indices cross to the host. Ranking is descending by value
+/// with lower-index tie breaking, matching the host fallback.
 #[cfg(feature = "cuda")]
 pub fn cuda_topk_last_axis(x: &crate::Tensor, k: usize) -> Result<(Vec<f32>, Vec<u32>)> {
+    let (values, indices, _) = cuda_topk_last_axis_profiled(x, k)?;
+    Ok((values, indices))
+}
+
+/// [`cuda_topk_last_axis`] plus the summed wall time of its two existing D2H
+/// copies, excluding kernel launch and host decoding.
+#[cfg(feature = "cuda")]
+pub fn cuda_topk_last_axis_profiled(
+    x: &crate::Tensor,
+    k: usize,
+) -> Result<(Vec<f32>, Vec<u32>, Duration)> {
     use cudarc::driver::DevicePtr;
 
     let in_dtype = x.dtype();
@@ -4212,11 +4206,11 @@ pub fn cuda_topk_last_axis(x: &crate::Tensor, k: usize) -> Result<(Vec<f32>, Vec
     }
     let vocab = x.dims()[0];
     if vocab == 0 {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Duration::ZERO));
     }
     let k = k.min(vocab);
     if k == 0 {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Duration::ZERO));
     }
 
     let n_cols = vocab as i64;
@@ -4294,13 +4288,17 @@ pub fn cuda_topk_last_axis(x: &crate::Tensor, k: usize) -> Result<(Vec<f32>, Vec
     };
 
     let mut vals_bytes = vec![0u8; k * 4];
+    let values_readback_started = Instant::now();
     stream
         .memcpy_dtoh(vals_slice, &mut vals_bytes)
         .map_err(|e| crate::Error::Msg(format!("cuda_topk_last_axis: values D2H failed: {e:?}")))?;
+    let mut readback_duration = values_readback_started.elapsed();
     let mut idx_bytes = vec![0u8; k * 8];
+    let indices_readback_started = Instant::now();
     stream.memcpy_dtoh(idx_slice, &mut idx_bytes).map_err(|e| {
         crate::Error::Msg(format!("cuda_topk_last_axis: indices D2H failed: {e:?}"))
     })?;
+    readback_duration = readback_duration.saturating_add(indices_readback_started.elapsed());
 
     let mut values = Vec::with_capacity(k);
     for chunk in vals_bytes.chunks_exact(4) {
@@ -4314,7 +4312,7 @@ pub fn cuda_topk_last_axis(x: &crate::Tensor, k: usize) -> Result<(Vec<f32>, Vec
         indices.push(i64v as u32);
     }
 
-    Ok((values, indices))
+    Ok((values, indices, readback_duration))
 }
 
 /// Select compact prompt-logprob rows without copying full vocabulary rows.

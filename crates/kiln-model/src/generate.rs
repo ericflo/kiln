@@ -36,8 +36,7 @@ use crate::cuda_graph::{CudaGraphExecutionPolicy, CudaGraphRunner};
 use crate::decode_buffers::{DecodeBufferConfig, DecodeBuffers, DecodeElementType};
 use crate::execution_phase::{
     ProfiledDirectDecodeStep, ProfiledGraphValue, add_profiled_duration,
-    add_profiled_sampling_tail, merge_profiled_graph_direct_step, merge_profiled_graph_paged_step,
-    profile_graph_invocation,
+    add_profiled_sampling_tail, profile_direct_decode_invocation, profile_paged_decode_invocation,
 };
 pub use crate::execution_phase::{ProfiledPagedDecodeStep, StreamBackendPhaseDurations};
 use crate::forward::{
@@ -75,7 +74,8 @@ use crate::packed_weight_registry::GpuPackedWeightRegistry;
 // agent resolves to the same kt cache) converge on one type.
 use crate::paged_kv_cache_kt::PagedKvCacheKt as PagedKvCache;
 use crate::sampling::{
-    SampledToken, greedy_sample, sample_step, sample_step_with_logprob, sample_with_full_params,
+    SampledToken, greedy_sample, sample_seed_for_batch_row, sample_step, sample_step_with_logprob,
+    sample_with_full_params, unique_history_counts_for_batch_sample,
 };
 use crate::speculative::{
     SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
@@ -1949,33 +1949,6 @@ fn run_legacy_lm_head_sample_batch(
         sampled.push(token);
     }
     Ok(sampled)
-}
-
-fn unique_history_counts_for_batch_sample(history: &[u32]) -> (Vec<u32>, Vec<u32>) {
-    let mut counts: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
-    for &token in history {
-        *counts.entry(token).or_default() += 1;
-    }
-    let mut indices = Vec::with_capacity(counts.len());
-    let mut values = Vec::with_capacity(counts.len());
-    for (token, count) in counts {
-        indices.push(token);
-        values.push(count);
-    }
-    (indices, values)
-}
-
-fn sample_seed_for_batch_row(step_seed: Option<u64>, history: &[u32]) -> u64 {
-    step_seed.unwrap_or_else(|| {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-        let history_hash = history.iter().fold(0xCBF29CE484222325u64, |acc, &token| {
-            (acc ^ token as u64).wrapping_mul(0x100000001B3)
-        });
-        nanos.wrapping_add(history_hash)
-    })
 }
 
 fn run_lm_head_sample_batch_with_contexts(
@@ -4878,10 +4851,9 @@ impl ModelRunner {
         params: &[SamplingParams],
         paged_cache: &PagedKvCache,
     ) -> Result<ProfiledPagedDecodeStep<TokenId>> {
-        let profiled = profile_graph_invocation(|| {
+        profile_paged_decode_invocation(|| {
             self.paged_batched_decode_step_profiled_inner(states, params, paged_cache)
-        })?;
-        Ok(merge_profiled_graph_paged_step(profiled))
+        })
     }
 
     fn paged_batched_decode_step_profiled_inner(
@@ -5731,14 +5703,13 @@ impl ModelRunner {
         params: &[SamplingParams],
         paged_cache: &PagedKvCache,
     ) -> Result<ProfiledPagedDecodeStep<SampledToken>> {
-        let profiled = profile_graph_invocation(|| {
+        profile_paged_decode_invocation(|| {
             self.paged_batched_decode_step_with_behavior_logprobs_profiled_inner(
                 states,
                 params,
                 paged_cache,
             )
-        })?;
-        Ok(merge_profiled_graph_paged_step(profiled))
+        })
     }
 
     fn paged_batched_decode_step_with_behavior_logprobs_profiled_inner(
@@ -7238,7 +7209,7 @@ impl ModelRunner {
         graph_row_id: u64,
         skip_gdn_state_readback: bool,
     ) -> Result<ProfiledDirectDecodeStep> {
-        let profiled = profile_graph_invocation(|| {
+        profile_direct_decode_invocation(|| {
             self.decode_next_token_paged_interleaved_inner(
                 params,
                 input_token,
@@ -7251,8 +7222,7 @@ impl ModelRunner {
                 graph_row_id,
                 skip_gdn_state_readback,
             )
-        })?;
-        Ok(merge_profiled_graph_direct_step(profiled))
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -459,7 +459,11 @@ pub(super) fn lm_head_argmax_with_backend(
     // #1082: kt `argmax` returns I64 indices (candle returned U32). Read i64 and
     // narrow to the u32 token id. (The CUDA fast paths above return early; this
     // fallback runs on the no-CUDA / kt-API-off path.)
-    Ok(logits_1d.argmax(0)?.flatten_all()?.to_vec1::<i64>()?[0] as u32)
+    let index = logits_1d.argmax(0)?.flatten_all()?;
+    let values = crate::execution_phase::profile_accelerator_readback(index.device(), || {
+        index.to_vec1::<i64>()
+    })?;
+    Ok(values[0] as u32)
 }
 
 pub(super) fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32> {
@@ -532,7 +536,10 @@ pub(super) fn try_kt_lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Resu
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let token_i64 = argmax_kt.flatten_all()?.to_vec1::<i64>()?[0];
+    let index = argmax_kt.flatten_all()?;
+    let token_i64 = crate::execution_phase::profile_accelerator_readback(index.device(), || {
+        index.to_vec1::<i64>()
+    })?[0];
     Ok(Some(token_i64 as u32))
 }
 
@@ -567,7 +574,10 @@ pub(crate) fn try_kt_argmax_1d(x: &Tensor) -> Result<Option<u32>> {
     };
     // kt_argmax returns I64; cuda_argmax_last_axis on a rank-1 input
     // yields a rank-0 scalar tensor — flatten to rank-1 [1] and read.
-    let token_i64 = out_kt.flatten_all()?.to_vec1::<i64>()?[0];
+    let index = out_kt.flatten_all()?;
+    let token_i64 = crate::execution_phase::profile_accelerator_readback(index.device(), || {
+        index.to_vec1::<i64>()
+    })?[0];
     Ok(Some(token_i64 as u32))
 }
 
@@ -637,7 +647,11 @@ pub(crate) fn try_kt_sampling_argmax_rows(logits: &Tensor) -> Result<Option<Vec<
     // cuda_argmax_last_axis on a rank-N input yields a rank-(N-1) I64
     // tensor; flatten and cast each element to u32 to match the
     // existing greedy_sample_rows return type.
-    let ids_i64: Vec<i64> = out.flatten_all()?.to_vec1::<i64>()?;
+    let indices = out.flatten_all()?;
+    let ids_i64: Vec<i64> =
+        crate::execution_phase::profile_accelerator_readback(indices.device(), || {
+            indices.to_vec1::<i64>()
+        })?;
     Ok(Some(ids_i64.into_iter().map(|v| v as u32).collect()))
 }
 
@@ -678,10 +692,15 @@ pub fn lm_head_sample_backend_decode_if(
     step_seed: Option<u64>,
     history: &[u32],
 ) -> Result<Option<u32>> {
-    lm_head_sample_backend_decode_profiled_if(
+    let profiled = lm_head_sample_backend_decode_profiled_if(
         backend, hidden, weights, config, params, step_seed, history,
-    )
-    .map(|sample| sample.map(|profiled| profiled.value))
+    )?;
+    Ok(profiled.map(|profiled| {
+        if let Some(duration) = profiled.readback_duration {
+            crate::execution_phase::observe_profiled_readback(duration);
+        }
+        profiled.value
+    }))
 }
 
 #[derive(Debug)]

@@ -1,10 +1,23 @@
-#[cfg(any(feature = "cuda", feature = "metal", test))]
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "rocm",
+    feature = "vulkan",
+    test
+))]
 use std::cell::RefCell;
 use std::time::Duration;
-#[cfg(any(feature = "cuda", feature = "metal", test))]
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "rocm",
+    feature = "vulkan",
+    test
+))]
 use std::time::Instant;
 
 use kiln_core::token::TokenId;
+use kiln_tensor::Device;
 
 /// Tokens and request-correlatable backend work from one paged decode step.
 ///
@@ -36,6 +49,10 @@ impl StreamBackendPhaseDurations {
 
     pub(crate) fn observe_sampling(&mut self, duration: Duration) {
         Self::add_observation(&mut self.sampling, duration);
+    }
+
+    pub(crate) fn observe_readback(&mut self, duration: Duration) {
+        Self::add_observation(&mut self.readback, duration);
     }
 
     pub(crate) fn observe_graph_capture(&mut self, duration: Duration) {
@@ -108,6 +125,217 @@ pub(crate) fn merge_profiled_graph_direct_step(
         step.backend_phases.observe_graph_replay(duration);
     }
     step
+}
+
+fn merge_profiled_readback_paged_step<T>(
+    mut step: ProfiledPagedDecodeStep<T>,
+    readback_duration: Option<Duration>,
+) -> ProfiledPagedDecodeStep<T> {
+    if let Some(duration) = readback_duration {
+        if let Some(sampling) = step.sampling_duration.as_mut() {
+            *sampling = sampling.saturating_sub(duration);
+        }
+        add_profiled_duration(&mut step.readback_duration, duration);
+    }
+    step
+}
+
+fn merge_profiled_readback_direct_step(
+    mut step: ProfiledDirectDecodeStep,
+    readback_duration: Option<Duration>,
+) -> ProfiledDirectDecodeStep {
+    if let Some(duration) = readback_duration {
+        if let Some(sampling) = step.backend_phases.sampling.as_mut() {
+            *sampling = sampling.saturating_sub(duration);
+        }
+        step.backend_phases.observe_readback(duration);
+    }
+    step
+}
+
+pub(crate) fn profile_paged_decode_invocation<T>(
+    operation: impl FnOnce() -> anyhow::Result<ProfiledPagedDecodeStep<T>>,
+) -> anyhow::Result<ProfiledPagedDecodeStep<T>> {
+    let profiled = profile_readback_invocation(|| profile_graph_invocation(operation))?;
+    Ok(merge_profiled_readback_paged_step(
+        merge_profiled_graph_paged_step(profiled.value),
+        profiled.readback_duration,
+    ))
+}
+
+pub(crate) fn profile_direct_decode_invocation(
+    operation: impl FnOnce() -> anyhow::Result<ProfiledDirectDecodeStep>,
+) -> anyhow::Result<ProfiledDirectDecodeStep> {
+    let profiled = profile_readback_invocation(|| profile_graph_invocation(operation))?;
+    Ok(merge_profiled_readback_direct_step(
+        merge_profiled_graph_direct_step(profiled.value),
+        profiled.readback_duration,
+    ))
+}
+
+#[derive(Debug)]
+pub(crate) struct ProfiledReadbackValue<T> {
+    pub(crate) value: T,
+    pub(crate) readback_duration: Option<Duration>,
+}
+
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "rocm",
+    feature = "vulkan",
+    test
+))]
+thread_local! {
+    static ACTIVE_READBACK_INVOCATIONS: RefCell<Vec<Option<Duration>>> = const {
+        RefCell::new(Vec::new())
+    };
+}
+
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "rocm",
+    feature = "vulkan",
+    test
+))]
+struct ReadbackInvocationScope {
+    active: bool,
+}
+
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "rocm",
+    feature = "vulkan",
+    test
+))]
+impl ReadbackInvocationScope {
+    fn begin() -> Self {
+        ACTIVE_READBACK_INVOCATIONS.with(|scopes| scopes.borrow_mut().push(None));
+        Self { active: true }
+    }
+
+    fn finish(mut self) -> Option<Duration> {
+        self.active = false;
+        ACTIVE_READBACK_INVOCATIONS.with(|scopes| {
+            scopes
+                .borrow_mut()
+                .pop()
+                .expect("readback invocation scope stack must be balanced")
+        })
+    }
+}
+
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "rocm",
+    feature = "vulkan",
+    test
+))]
+impl Drop for ReadbackInvocationScope {
+    fn drop(&mut self) {
+        if self.active {
+            ACTIVE_READBACK_INVOCATIONS.with(|scopes| {
+                scopes.borrow_mut().pop();
+            });
+        }
+    }
+}
+
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "rocm",
+    feature = "vulkan",
+    test
+))]
+pub(crate) fn profile_readback_invocation<T>(
+    operation: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<ProfiledReadbackValue<T>> {
+    let scope = ReadbackInvocationScope::begin();
+    let result = operation();
+    let readback_duration = scope.finish();
+    result.map(|value| ProfiledReadbackValue {
+        value,
+        readback_duration,
+    })
+}
+
+#[cfg(not(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "rocm",
+    feature = "vulkan",
+    test
+)))]
+pub(crate) fn profile_readback_invocation<T>(
+    operation: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<ProfiledReadbackValue<T>> {
+    operation().map(|value| ProfiledReadbackValue {
+        value,
+        readback_duration: None,
+    })
+}
+
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "rocm",
+    feature = "vulkan",
+    test
+))]
+pub(crate) fn observe_profiled_readback(duration: Duration) {
+    ACTIVE_READBACK_INVOCATIONS.with(|scopes| {
+        if let Some(active) = scopes.borrow_mut().last_mut() {
+            *active = Some(active.unwrap_or(Duration::ZERO).saturating_add(duration));
+        }
+    });
+}
+
+#[cfg(not(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "rocm",
+    feature = "vulkan",
+    test
+)))]
+pub(crate) fn observe_profiled_readback(_duration: Duration) {}
+
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "rocm",
+    feature = "vulkan",
+    test
+))]
+pub(crate) fn profile_accelerator_readback<T, E>(
+    device: Device,
+    operation: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    let started = (device.is_gpu()
+        && ACTIVE_READBACK_INVOCATIONS.with(|scopes| !scopes.borrow().is_empty()))
+    .then(Instant::now);
+    let result = operation();
+    if let Some(started) = started {
+        observe_profiled_readback(started.elapsed());
+    }
+    result
+}
+
+#[cfg(not(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "rocm",
+    feature = "vulkan",
+    test
+)))]
+pub(crate) fn profile_accelerator_readback<T, E>(
+    _device: Device,
+    operation: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    operation()
 }
 
 #[cfg(any(feature = "cuda", feature = "metal", test))]
@@ -313,12 +541,14 @@ mod tests {
         let mut phases = StreamBackendPhaseDurations::default();
         phases.observe_sampling(Duration::ZERO);
         phases.observe_sampling(Duration::from_millis(9));
+        phases.observe_readback(Duration::ZERO);
+        phases.observe_readback(Duration::from_millis(2));
         phases.observe_graph_capture(Duration::ZERO);
         phases.observe_graph_capture(Duration::from_millis(7));
         phases.observe_graph_replay(Duration::from_millis(3));
         phases.observe_synchronization(Duration::from_millis(4));
         assert_eq!(phases.sampling, Some(Duration::from_millis(9)));
-        assert_eq!(phases.readback, None);
+        assert_eq!(phases.readback, Some(Duration::from_millis(2)));
         assert_eq!(phases.graph_capture, Some(Duration::from_millis(7)));
         assert_eq!(phases.graph_replay, Some(Duration::from_millis(3)));
         assert_eq!(phases.synchronization, Some(Duration::from_millis(4)));
@@ -377,6 +607,97 @@ mod tests {
         let next = profile_graph_invocation(|| Ok(())).unwrap();
         assert_eq!(next.capture_duration, None);
         assert_eq!(next.replay_duration, None);
+    }
+
+    #[test]
+    fn readback_profile_preserves_null_zero_and_sums_current_invocation() {
+        let unsupported = profile_readback_invocation(|| Ok(7_u32)).unwrap();
+        assert_eq!(unsupported.value, 7);
+        assert_eq!(unsupported.readback_duration, None);
+
+        let profiled = profile_readback_invocation(|| {
+            observe_profiled_readback(Duration::ZERO);
+            observe_profiled_readback(Duration::from_millis(5));
+            Ok(11_u32)
+        })
+        .unwrap();
+        assert_eq!(profiled.value, 11);
+        assert_eq!(profiled.readback_duration, Some(Duration::from_millis(5)));
+    }
+
+    #[test]
+    fn accelerator_readback_times_only_gpu_operations_inside_a_scope() {
+        let profiled = profile_readback_invocation(|| {
+            profile_accelerator_readback(Device::Cpu, || Ok::<_, anyhow::Error>(()))?;
+            profile_accelerator_readback(Device::Cuda(0), || {
+                std::thread::yield_now();
+                Ok::<_, anyhow::Error>(())
+            })?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(profiled.readback_duration.is_some());
+
+        profile_accelerator_readback(Device::Cuda(0), || Ok::<_, anyhow::Error>(())).unwrap();
+        let next = profile_readback_invocation(|| Ok(())).unwrap();
+        assert_eq!(next.readback_duration, None);
+    }
+
+    #[test]
+    fn nested_readback_profiles_do_not_contaminate_their_parent() {
+        let outer = profile_readback_invocation(|| {
+            observe_profiled_readback(Duration::from_millis(2));
+            let inner = profile_readback_invocation(|| {
+                observe_profiled_readback(Duration::from_millis(11));
+                Ok(())
+            })?;
+            assert_eq!(inner.readback_duration, Some(Duration::from_millis(11)));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(outer.readback_duration, Some(Duration::from_millis(2)));
+    }
+
+    #[test]
+    fn failed_readback_profile_does_not_leak_scope() {
+        let failed = profile_readback_invocation::<()>(|| {
+            observe_profiled_readback(Duration::from_millis(3));
+            anyhow::bail!("expected")
+        });
+        assert!(failed.is_err());
+        let next = profile_readback_invocation(|| Ok(())).unwrap();
+        assert_eq!(next.readback_duration, None);
+    }
+
+    #[test]
+    fn decode_invocation_separates_readback_from_sampling_without_double_counting() {
+        let paged = profile_paged_decode_invocation(|| {
+            observe_profiled_readback(Duration::from_millis(7));
+            Ok(ProfiledPagedDecodeStep {
+                tokens: vec![17_u32],
+                sampling_duration: Some(Duration::from_millis(25)),
+                readback_duration: Some(Duration::from_millis(3)),
+                graph_capture_duration: None,
+                graph_replay_duration: None,
+            })
+        })
+        .unwrap();
+        assert_eq!(paged.sampling_duration, Some(Duration::from_millis(18)));
+        assert_eq!(paged.readback_duration, Some(Duration::from_millis(10)));
+
+        let direct = profile_direct_decode_invocation(|| {
+            observe_profiled_readback(Duration::ZERO);
+            let mut step = ProfiledDirectDecodeStep::without_distinct_backend_phase(23);
+            step.backend_phases
+                .observe_sampling(Duration::from_millis(9));
+            Ok(step)
+        })
+        .unwrap();
+        assert_eq!(
+            direct.backend_phases.sampling,
+            Some(Duration::from_millis(9))
+        );
+        assert_eq!(direct.backend_phases.readback, Some(Duration::ZERO));
     }
 
     #[test]

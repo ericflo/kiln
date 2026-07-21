@@ -1,5 +1,6 @@
 //! ROCm wrapper for the `topk_last_axis` kernel (R.5b — sampling top-k).
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::{DType, Device, Error, Layout, Result, RocmStorage, Tensor, TensorId};
 
@@ -32,6 +33,18 @@ unsafe extern "C" {
 /// per-pass argmax reduction uses explicit 32-lane subgroups, so it is
 /// wave32/64-correct.
 pub fn rocm_topk_last_axis(x: &Tensor, k: usize) -> Result<(Vec<f32>, Vec<u32>)> {
+    let (values, indices, _) = rocm_topk_last_axis_profiled(x, k)?;
+    Ok((values, indices))
+}
+
+/// The same operation as [`rocm_topk_last_axis`], plus the summed wall time of
+/// its two existing device-to-host reads. Kernel launch and host index
+/// conversion are excluded; synchronization inherent in each read remains
+/// included.
+pub fn rocm_topk_last_axis_profiled(
+    x: &Tensor,
+    k: usize,
+) -> Result<(Vec<f32>, Vec<u32>, Duration)> {
     let in_dtype = x.dtype();
     let dtype_tag: i32 = match in_dtype {
         DType::F32 => 0,
@@ -56,11 +69,11 @@ pub fn rocm_topk_last_axis(x: &Tensor, k: usize) -> Result<(Vec<f32>, Vec<u32>)>
     }
     let vocab = x.dims()[0];
     if vocab == 0 {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Duration::ZERO));
     }
     let k = k.min(vocab);
     if k == 0 {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Duration::ZERO));
     }
 
     let x_storage = x
@@ -122,11 +135,12 @@ pub fn rocm_topk_last_axis(x: &Tensor, k: usize) -> Result<(Vec<f32>, Vec<u32>)>
         Layout::contiguous(vec![k]),
         TensorId::next(),
     )?;
+    let values_readback_started = Instant::now();
     let values = vals_t.to_vec1::<f32>()?;
-    let indices: Vec<u32> = idx_t
-        .to_vec1::<i64>()?
-        .into_iter()
-        .map(|v| v as u32)
-        .collect();
-    Ok((values, indices))
+    let mut readback_duration = values_readback_started.elapsed();
+    let indices_readback_started = Instant::now();
+    let raw_indices = idx_t.to_vec1::<i64>()?;
+    readback_duration = readback_duration.saturating_add(indices_readback_started.elapsed());
+    let indices: Vec<u32> = raw_indices.into_iter().map(|v| v as u32).collect();
+    Ok((values, indices, readback_duration))
 }

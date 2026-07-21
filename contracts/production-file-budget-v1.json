@@ -14,7 +14,7 @@
     },
     {
       "path": "crates/kiln-model/src/generate.rs",
-      "max_lines": 12199,
+      "max_lines": 12169,
       "rationale": "The inference state machine still combines prefill, decode, cache, and sampling orchestration; splitting it requires preserving request-lifecycle invariants."
     },
     {
@@ -59,7 +59,7 @@
     },
     {
       "path": "crates/kiln-tensor/src/cuda_storage.rs",
-      "max_lines": 6723,
+      "max_lines": 6721,
       "rationale": "CUDA storage and operation dispatch remain coupled to backend resource ownership; this reviewed ceiling prevents further unrelated backend behavior here."
     },
     {

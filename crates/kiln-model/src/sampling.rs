@@ -49,6 +49,27 @@ impl SampledToken {
     }
 }
 
+pub(crate) fn unique_history_counts_for_batch_sample(history: &[u32]) -> (Vec<u32>, Vec<u32>) {
+    let mut counts = std::collections::BTreeMap::<u32, u32>::new();
+    for &token in history {
+        *counts.entry(token).or_default() += 1;
+    }
+    counts.into_iter().unzip()
+}
+
+pub(crate) fn sample_seed_for_batch_row(step_seed: Option<u64>, history: &[u32]) -> u64 {
+    step_seed.unwrap_or_else(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos() as u64)
+            .unwrap_or(0);
+        let history_hash = history.iter().fold(0xCBF29CE484222325u64, |acc, &token| {
+            (acc ^ token as u64).wrapping_mul(0x100000001B3)
+        });
+        nanos.wrapping_add(history_hash)
+    })
+}
+
 /// Extract the last-position logits from a `[..., vocab_size]` tensor and flatten
 /// them to a 1-D `[vocab_size]` tensor that still lives on the original device.
 fn last_position_logits(logits: &Tensor) -> Result<Tensor> {
@@ -93,13 +114,20 @@ pub fn greedy_sample(logits: &Tensor) -> Result<u32> {
     // Reading the I64 scalar directly is a single D2H, no upload.
     #[cfg(feature = "rocm")]
     if matches!(flat.device(), kiln_tensor::Device::Rocm(_)) {
-        let idx_i64 = flat.argmax(0)?.flatten_all()?.to_vec1::<i64>()?;
+        let indices = flat.argmax(0)?.flatten_all()?;
+        let idx_i64 =
+            crate::execution_phase::profile_accelerator_readback(indices.device(), || {
+                indices.to_vec1::<i64>()
+            })?;
         return Ok(idx_i64[0] as u32);
     }
     // Argmax stays on device; only the scalar token ID is transferred to
     // host. kt `argmax` yields an I64 index tensor (no implicit cast on
     // readback), so cast to U32 before the `to_scalar::<u32>()` host read.
-    let idx = flat.argmax(0)?.to_dtype(DType::U32)?.to_scalar::<u32>()?;
+    let index = flat.argmax(0)?.to_dtype(DType::U32)?;
+    let idx = crate::execution_phase::profile_accelerator_readback(index.device(), || {
+        index.to_scalar::<u32>()
+    })?;
     Ok(idx)
 }
 
@@ -132,7 +160,11 @@ pub fn greedy_sample_rows(logits: &Tensor) -> Result<Vec<u32>> {
     // host-side instead.
     #[cfg(feature = "rocm")]
     if matches!(logits.device(), kiln_tensor::Device::Rocm(_)) {
-        let ids_i64 = logits.argmax(vocab_dim)?.flatten_all()?.to_vec1::<i64>()?;
+        let indices = logits.argmax(vocab_dim)?.flatten_all()?;
+        let ids_i64 =
+            crate::execution_phase::profile_accelerator_readback(indices.device(), || {
+                indices.to_vec1::<i64>()
+            })?;
         return Ok(ids_i64.into_iter().map(|v| v as u32).collect());
     }
     // kt `argmax` yields an I64 index tensor; cast to U32 to preserve the
@@ -141,7 +173,10 @@ pub fn greedy_sample_rows(logits: &Tensor) -> Result<Vec<u32>> {
         .argmax(vocab_dim)?
         .flatten_all()?
         .to_dtype(DType::U32)?;
-    Ok(ids.to_vec1::<u32>()?)
+    Ok(crate::execution_phase::profile_accelerator_readback(
+        ids.device(),
+        || ids.to_vec1::<u32>(),
+    )?)
 }
 
 /// Sample one decode step with full Qwen3.5 sampling support. Wraps
@@ -365,7 +400,11 @@ fn apply_penalties_on_device(
 
     // Gather current logit values for those token ids.
     let indices = Tensor::new(unique.as_slice(), &device)?;
-    let current: Vec<f32> = flat.index_select(&indices, 0)?.to_vec1()?;
+    let selected = flat.index_select(&indices, 0)?;
+    let current: Vec<f32> =
+        crate::execution_phase::profile_accelerator_readback(selected.device(), || {
+            selected.to_vec1()
+        })?;
     let deltas = penalty_deltas(&unique, &counts, &current, repetition, presence, frequency);
 
     let delta_tensor = Tensor::new(deltas.as_slice(), &device)?;
@@ -460,7 +499,10 @@ fn try_kt_apply_penalties_on_device(
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let current: Vec<f32> = current_kt.to_vec1()?;
+    let current: Vec<f32> =
+        crate::execution_phase::profile_accelerator_readback(current_kt.device(), || {
+            current_kt.to_vec1()
+        })?;
     let deltas = penalty_deltas(&unique, &counts, &current, repetition, presence, frequency);
     let delta_kt = Tensor::new(deltas.as_slice(), &device)?;
     if kiln_tensor::cuda_scatter_add_dim0(&out_kt, &indices_kt, &delta_kt).is_err() {
@@ -500,7 +542,10 @@ fn sample_from_adjusted_logits(
         && matches!(scaled.device(), Device::Cuda(_) | Device::Metal(_))
     {
         let sampled = kiln_tensor::ops::gumbel_softmax_sample(&scaled, 1.0, 0)?;
-        return Ok(sampled.to_scalar::<u32>()?);
+        return Ok(crate::execution_phase::profile_accelerator_readback(
+            sampled.device(),
+            || sampled.to_scalar::<u32>(),
+        )?);
     }
     if SP::top_p_disables_nucleus_filter(top_p)
         && (top_k == 0 || top_k as usize >= vocab_size)
@@ -736,7 +781,8 @@ fn full_distribution_weights(scaled: &Tensor) -> Result<(Option<Vec<f32>>, u32)>
         return Ok((Some(weights), fallback_idx));
     }
 
-    let values: Vec<f32> = scaled.to_vec1()?;
+    let values: Vec<f32> =
+        crate::execution_phase::profile_accelerator_readback(scaled.device(), || scaled.to_vec1())?;
     if values.is_empty() {
         anyhow::bail!("empty logits distribution");
     }
@@ -866,7 +912,10 @@ fn try_kt_full_distribution_probs(scaled: &Tensor) -> Result<Option<Vec<f32>>> {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    Ok(Some(probs_kt.to_vec1::<f32>()?))
+    Ok(Some(crate::execution_phase::profile_accelerator_readback(
+        probs_kt.device(),
+        || probs_kt.to_vec1::<f32>(),
+    )?))
 }
 
 /// Select the top-k of `scaled` on-device, transferring only the `k`
@@ -899,7 +948,9 @@ pub fn try_topk_on_device(scaled: &Tensor, top_k: usize) -> Result<Vec<(u32, f32
             && matches!(scaled.dtype(), DType::F32 | DType::BF16 | DType::F16)
         {
             kiln_nvtx::range!(c"kiln/sampling_topk_kt");
-            let (values, indices) = kiln_tensor::cuda_topk_last_axis(scaled, top_k)?;
+            let (values, indices, readback_duration) =
+                kiln_tensor::cuda_topk_last_axis_profiled(scaled, top_k)?;
+            crate::execution_phase::observe_profiled_readback(readback_duration);
             let pairs: Vec<(u32, f32)> = indices
                 .into_iter()
                 .zip(values)
@@ -919,7 +970,9 @@ pub fn try_topk_on_device(scaled: &Tensor, top_k: usize) -> Result<Vec<(u32, f32
             && scaled.rank() == 1
             && matches!(scaled.dtype(), DType::F32 | DType::BF16 | DType::F16)
         {
-            let (values, indices) = kiln_tensor::rocm_topk_last_axis(scaled, top_k)?;
+            let (values, indices, readback_duration) =
+                kiln_tensor::rocm_topk_last_axis_profiled(scaled, top_k)?;
+            crate::execution_phase::observe_profiled_readback(readback_duration);
             let pairs: Vec<(u32, f32)> = indices
                 .into_iter()
                 .zip(values)
@@ -945,7 +998,8 @@ pub fn try_topk_on_device(scaled: &Tensor, top_k: usize) -> Result<Vec<(u32, f32
 /// `try_topk_on_device` which never reaches this fallback under normal
 /// operation.
 fn topk_via_host_sort(scaled: &Tensor, top_k: Option<usize>) -> Result<Vec<(u32, f32)>> {
-    let values: Vec<f32> = scaled.to_vec1()?;
+    let values: Vec<f32> =
+        crate::execution_phase::profile_accelerator_readback(scaled.device(), || scaled.to_vec1())?;
     let vocab = values.len();
 
     // Heap-based partial selection. Only worth the bookkeeping when
@@ -1557,6 +1611,30 @@ mod tests {
                 expected.logprob
             );
         }
+
+        params.seed = Some(91);
+        let expected = sample_with_full_params_and_logprob(&cpu_logits, &params, &history)?;
+        let profiled = crate::execution_phase::profile_readback_invocation(|| {
+            sample_with_full_params_and_logprob(&rocm_logits, &params, &history)
+        })?;
+        assert_eq!(profiled.value.token_id, expected.token_id);
+        assert!(
+            profiled
+                .readback_duration
+                .is_some_and(|duration| !duration.is_zero()),
+            "ROCm penalty/top-k sampling must expose its existing readbacks"
+        );
+
+        let expected_greedy = greedy_sample(&cpu_logits)?;
+        let profiled_greedy =
+            crate::execution_phase::profile_readback_invocation(|| greedy_sample(&rocm_logits))?;
+        assert_eq!(profiled_greedy.value, expected_greedy);
+        assert!(
+            profiled_greedy
+                .readback_duration
+                .is_some_and(|duration| !duration.is_zero()),
+            "ROCm greedy sampling must expose its existing scalar readback"
+        );
         Ok(())
     }
 

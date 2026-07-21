@@ -222,11 +222,35 @@ envelope subtracts the exact readback duration from sampling before both are
 published, so the two candidates do not double-count. The bounded top-k batch
 and single-row full-distribution Gumbel routes both carry this envelope.
 
-Other sampled paths, including behavior-logprob capture and the model sampler
-tail described above, report their distinct sampling boundary but leave
-`readback_ms` `null` until their backend owner can split the existing transfer
-honestly. Greedy and native fused-forward routes leave sampling `null` when the
-transformer/sampler boundary is not independently observable.
+Every profiled ordinary-batching, behavior-logprob, and direct decode invocation
+also owns a nested-safe readback scope. Exact existing accelerator host reads
+inside that scope contribute only to its result. This covers generic greedy
+scalar and row argmax, penalty gathers, Gumbel token reads, full-distribution
+and host-top-k reads, CUDA softmax and scalar argmax reads, CUDA/ROCm device
+top-k pair reads, ROCm W8 greedy reads, and Metal LM-head greedy, row, and
+sampled-token reads. Value-only W8 convenience APIs forward their backend-owned
+duration into the scope; APIs that return an explicit profiled duration do not,
+so the caller can merge it once. Nested invocations write only to the innermost
+scope, failed invocations remove their scope, and reads outside an owned decode
+invocation are not assigned to a request.
+
+The timer surrounds only an existing host-transfer call. CUDA and ROCm device
+top-k sum the two existing value/index reads while excluding kernel launch and
+host conversion. Because those calls establish an existing completion boundary,
+their wall time can include waiting for earlier asynchronous work on the same
+stream; `readback_ms` is therefore an owned host-read boundary, not pure DMA
+engine time. No timer inserts a copy, wait, or synchronization. When a sampler
+wall candidate exists, the invocation merge subtracts these exact readback
+durations before adding them to `readback_ms`; explicit ROCm W8 sampled
+durations and scope observations remain single-counted.
+
+Vulkan's native fused token samplers remain deliberately `null`: their one
+submission combines compute, device-to-host copy, completion wait, and mapped
+host access, so host wall timing cannot isolate the copy without device
+timestamps or another synchronization. A generic Vulkan sampler fallback with
+an independently exposed `to_vec1` read can report that exact boundary. Greedy
+and native fused-forward routes still leave `sampling_ms` `null` when the
+transformer/sampler boundary itself is not independently observable.
 
 Qualified ROCm HIP-graph decode reports request-owned `graph_capture_ms` and
 `graph_replay_ms` on batching-engine streams. The graph runner
@@ -247,8 +271,9 @@ to the innermost active scope, and the completed scope is merged into the token
 or terminal event produced by that invocation. A failed capture attempt is
 therefore retained when execution continues eagerly, while graph work outside
 an owned model invocation is not assigned to an unrelated request. Nested
-scopes are isolated, and ROCm and Vulkan builds compile this CUDA/Metal scope
-machinery out.
+scopes are isolated. ROCm and Vulkan builds compile the CUDA/Metal graph scope
+machinery out; their separate readback scope remains available for exact sampler
+host reads.
 
 For CUDA, capture surrounds the complete existing single-row or dormant
 batched capture attempt, including failure settlement. Replay surrounds the
