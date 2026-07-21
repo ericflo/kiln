@@ -1015,6 +1015,8 @@ def build_definitions() -> None:
     batch_snapshot_fields["stream_stall_grace_source"] = ref("ConfigValueSource")
     batch_snapshot_fields["actor_cycle_idle_source"] = ref("ConfigValueSource")
     batch_snapshot_fields["actor_cycle_idle_active"] = ref("Boolean")
+    batch_snapshot_fields["actor_barrier_adapter_active"] = ref("Boolean")
+    batch_snapshot_fields["actor_barrier_resize_active"] = ref("Boolean")
     batch_snapshot_fields["accepting"] = ref("Boolean")
     batch_snapshot_fields["max_batch_tokens_source"] = ref("ConfigValueSource")
     batch_snapshot_fields["max_prefill_tokens_per_cycle_source"] = ref("ConfigValueSource")

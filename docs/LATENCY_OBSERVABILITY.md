@@ -321,6 +321,17 @@ completion and are not charged for the later barrier. This makes a non-null
 `resize_ms` or `adapter_ms` a causal explanation for queued request latency,
 not a process-global event correlation.
 
+The cached health and trusted-debug batching snapshots expose the live bounded
+gauges `actor_barrier_resize_active` and `actor_barrier_adapter_active`.
+Prometheus publishes the same state as
+`kiln_batching_engine_actor_barrier_resize_active` and
+`kiln_batching_engine_actor_barrier_adapter_active`. A gauge is true from actor
+command acceptance through active-request drain and mutation completion. It is
+an operator-visible coordination signal, not request attribution: a request
+that was already active remains uncharged, while only a later request whose
+enqueue-to-admission boundary overlaps the interval receives non-null phase
+time.
+
 Resize, trim, and server-training writers also use a distinct GPU-ownership
 timeline. An inference acquisition first tries the shared lock without
 touching telemetry. Only after contention does it snapshot the writer timeline,

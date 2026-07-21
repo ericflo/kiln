@@ -34,7 +34,7 @@
     },
     {
       "path": "crates/kiln-server/src/batching_engine.rs",
-      "max_lines": 8862,
+      "max_lines": 8736,
       "rationale": "The sole production scheduler intentionally owns one state machine, but its policy and resource helpers still need reviewed extraction before this exception can shrink."
     },
     {

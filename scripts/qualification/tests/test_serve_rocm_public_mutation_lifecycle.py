@@ -105,6 +105,16 @@ class ServeRocmPublicMutationLifecycleTests(unittest.TestCase):
             lifecycle.EFFECTIVE_CONFIG["workload"]["build_reuse"],
             "one_source_bound_binary_for_both_arms",
         )
+        self.assertEqual(
+            lifecycle.EFFECTIVE_CONFIG["workload"]["adapter_reload"],
+            "same_revision_between_requests_barrier",
+        )
+        self.assertEqual(
+            lifecycle.EFFECTIVE_CONFIG["workload"][
+                "adapter_overlap_active_max_tokens"
+            ],
+            lifecycle.OVERLAP_ACTIVE_MAX_TOKENS,
+        )
 
     def test_semantic_hash_ignores_dynamic_envelope_but_binds_content(self) -> None:
         first = stream_result("same")
@@ -200,6 +210,83 @@ class ServeRocmPublicMutationLifecycleTests(unittest.TestCase):
             with self.assertRaisesRegex(lifecycle.LifecycleError, "identity"):
                 lifecycle.adapter_state(1234, lifecycle.ADAPTER_NAME, revision)
 
+    def test_request_phase_preserves_null_and_requires_finite_nonnegative_ms(self) -> None:
+        result = stream_result("same")
+        result.latency_phases = {"adapter_ms": None}
+        self.assertIsNone(lifecycle.request_phase_ms(result, "adapter"))
+        result.latency_phases["adapter_ms"] = 12.5
+        self.assertEqual(lifecycle.request_phase_ms(result, "adapter"), 12.5)
+        for invalid in (-1.0, float("nan"), True, "12"):
+            result.latency_phases["adapter_ms"] = invalid
+            with self.assertRaisesRegex(lifecycle.LifecycleError, "invalid adapter_ms"):
+                lifecycle.request_phase_ms(result, "adapter")
+
+    def test_wait_actor_adapter_barrier_requires_typed_exclusive_signal(self) -> None:
+        health = [
+            {
+                "sequence": 1,
+                "decode_runtime": {
+                    "batching_engine": {
+                        "actor_barrier_adapter_active": False,
+                        "actor_barrier_resize_active": False,
+                    }
+                },
+            },
+            {
+                "sequence": 2,
+                "decode_runtime": {
+                    "batching_engine": {
+                        "actor_barrier_adapter_active": True,
+                        "actor_barrier_resize_active": False,
+                    }
+                },
+            },
+        ]
+        with (
+            mock.patch.object(
+                lifecycle.mixed,
+                "json_request",
+                side_effect=health,
+            ),
+            mock.patch.object(
+                lifecycle.mixed,
+                "batching_snapshot",
+                return_value={},
+            ),
+            mock.patch.object(lifecycle.time, "sleep"),
+        ):
+            observed = lifecycle.wait_actor_adapter_barrier(
+                1234,
+                lifecycle.time.monotonic() + 1.0,
+            )
+        self.assertEqual(observed, health[1])
+
+        with (
+            mock.patch.object(
+                lifecycle.mixed,
+                "json_request",
+                return_value={
+                    "sequence": 3,
+                    "decode_runtime": {
+                        "batching_engine": {
+                            "actor_barrier_adapter_active": True,
+                            "actor_barrier_resize_active": True,
+                        }
+                    },
+                },
+            ),
+            mock.patch.object(
+                lifecycle.mixed,
+                "batching_snapshot",
+                return_value={},
+            ),
+        ):
+            with self.assertRaisesRegex(lifecycle.LifecycleError, "overlapped"):
+                lifecycle.wait_actor_adapter_barrier(
+                    1234,
+                    lifecycle.time.monotonic() + 1.0,
+                )
+
     def test_maintenance_readiness_accepts_only_structured_503_health(self) -> None:
         health = {
             "status": "maintenance",
@@ -248,19 +335,24 @@ class ServeRocmPublicMutationLifecycleTests(unittest.TestCase):
         digest = "sha256:" + "a" * 64
         binary = ROOT / "target" / "release" / "kiln"
         adapter = lifecycle.AdapterArm(
-            digest,
-            digest,
-            128,
-            digest,
-            digest,
-            digest,
-            digest,
-            digest,
-            1.0,
-            2.0,
-            1,
-            2,
-            0,
+            config_sha256=digest,
+            weights_sha256=digest,
+            weights_bytes=128,
+            content_revision=digest,
+            generated_config_sha256=digest,
+            base_before_sha256=digest,
+            adapter_output_sha256=digest,
+            base_after_sha256=digest,
+            load_ms=1.0,
+            unload_ms=2.0,
+            graph_invalidation_evictions=1,
+            transition_count=3,
+            device_fault_count=0,
+            reload_ms=3.0,
+            overlap_active_adapter_ms=None,
+            overlap_queued_adapter_ms=10.0,
+            overlap_queued_actor_queue_ms=11.0,
+            overlap_revision_header_matches=2,
         )
         maintenance = lifecycle.MaintenanceArm(
             digest,
@@ -299,6 +391,9 @@ class ServeRocmPublicMutationLifecycleTests(unittest.TestCase):
         details = evidence.serialized_details()
         by_name = {record["name"]: record["value"] for record in metrics}
         self.assertEqual(by_name["binary_build_count"], 1)
+        self.assertEqual(by_name["adapter_reload_count"], 1)
+        self.assertEqual(by_name["adapter_overlap_active_adapter_phase_count"], 0)
+        self.assertEqual(by_name["adapter_overlap_queued_adapter_phase_count"], 1)
         self.assertEqual(by_name["forced_resize_actual_blocks"], 1)
         self.assertEqual(json.loads(details)["kiln_binary"], digest)
 

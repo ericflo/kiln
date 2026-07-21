@@ -1269,6 +1269,8 @@
             "stream_stall_grace_source": "default",
             "actor_cycle_idle_source": "default",
             "actor_cycle_idle_active": false,
+            "actor_barrier_adapter_active": false,
+            "actor_barrier_resize_active": false,
             "accepting": false,
             "max_batch_tokens_source": "default",
             "max_prefill_tokens_per_cycle_source": "default",
@@ -1955,6 +1957,8 @@
             "stream_stall_grace_source": "default",
             "actor_cycle_idle_source": "default",
             "actor_cycle_idle_active": false,
+            "actor_barrier_adapter_active": false,
+            "actor_barrier_resize_active": false,
             "accepting": false,
             "max_batch_tokens_source": "default",
             "max_prefill_tokens_per_cycle_source": "default",
@@ -2919,6 +2923,8 @@
         "stream_stall_grace_source",
         "actor_cycle_idle_source",
         "actor_cycle_idle_active",
+        "actor_barrier_adapter_active",
+        "actor_barrier_resize_active",
         "accepting",
         "max_batch_tokens_source",
         "max_prefill_tokens_per_cycle_source",
@@ -3139,6 +3145,12 @@
           "$ref": "#/$defs/ConfigValueSource"
         },
         "actor_cycle_idle_active": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "actor_barrier_adapter_active": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "actor_barrier_resize_active": {
           "$ref": "#/$defs/Boolean"
         },
         "accepting": {

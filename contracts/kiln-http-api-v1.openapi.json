@@ -4810,7 +4810,7 @@
       },
       "LoadAdapterRequest": {
         "$ref": "kiln-artifacts-v1.schema.json#/$defs/LoadAdapterRequest",
-        "description": "Load an installed adapter, optionally overriding quarantine admission.",
+        "description": "Load an installed adapter, optionally overriding quarantine admission or forcing the already-live exact on-disk revision through a between-requests reload.",
         "x-kiln-field-schema-status": "complete",
         "x-kiln-rust-type": "LoadAdapterRequest"
       },

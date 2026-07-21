@@ -654,7 +654,7 @@ open inputs and include validated examples for every public entrypoint.
 | POST | `/v1/agent/runs/{id}/abort` | Abort a queued or running run |
 | GET | `/v1/adapters` | List saved/available LoRA adapters, identify the active adapter, and report the exact loaded name/content revision |
 | GET | `/v1/adapters/{name}/detail` | Files + training history + eval history for one adapter |
-| POST | `/v1/adapters/load` | Load adapter from disk and return its exact content revision |
+| POST | `/v1/adapters/load` | Load an adapter from disk, or explicitly reload its already-live revision at the request barrier, and return the exact content revision |
 | POST | `/v1/adapters/unload` | Unload active adapter |
 | DELETE | `/v1/adapters/{name}` | Delete an idle adapter; active or physically loaded adapters return 409 |
 | POST | `/v1/adapters/upload` | Stage and atomically publish a multipart tar.gz adapter import |
@@ -958,6 +958,18 @@ returns `content_revision`; `GET /v1/adapters` publishes the authoritative
 `loaded_adapter_identity` tuple, and `/health` plus debug state expose
 `loaded_adapter_revision`. Completion responses carry the same value in
 `x-kiln-loaded-adapter-revision` (`base` when no LoRA is loaded).
+
+The load body is `{"name":"<adapter>","allow_quarantined":false,"reload":false}`;
+both booleans default to false. Set `reload` to true to re-read and republish an
+already-live adapter from disk. The exact revision is loaded outside the actor
+barrier, then the weight flip and affected-cache invalidation wait for active
+requests to finish. Ordinary repeated loads remain no-ops. During the ordered
+boundary, health and trusted debug state report
+`actor_barrier_adapter_active=true`; Prometheus exposes
+`kiln_batching_engine_actor_barrier_adapter_active`. The corresponding resize
+fields use `actor_barrier_resize_active`. These are bounded live gauges, not
+proof that an individual request waited; use that request's nullable
+`metadata.performance.latency.phases.adapter_ms` for causal attribution.
 
 The revision is a canonical SHA-256 over the exact PEFT config and safetensor
 identities consumed by the loader. It is published with the runner's weight

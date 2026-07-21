@@ -1742,10 +1742,14 @@
         "allow_quarantined": {
           "type": "boolean",
           "default": false
+        },
+        "reload": {
+          "type": "boolean",
+          "default": false
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Load an installed adapter, optionally overriding quarantine admission.",
+      "description": "Load an installed adapter, optionally overriding quarantine admission or forcing the already-live exact on-disk revision through a between-requests reload.",
       "x-kiln-rust-type": "LoadAdapterRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3476,6 +3480,10 @@
     "LoadAdapterRequest": [
       {
         "name": "reasoning-v1"
+      },
+      {
+        "name": "reasoning-v1",
+        "reload": true
       }
     ],
     "LoadAdapterResponse": [

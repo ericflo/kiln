@@ -298,9 +298,13 @@ def build_adapter_definitions() -> None:
     add_object(
         "LoadAdapterRequest",
         "LoadAdapterRequest",
-        {"name": ref("AdapterName"), "allow_quarantined": {"type": "boolean", "default": False}},
-        "Load an installed adapter, optionally overriding quarantine admission.",
-        optional=("allow_quarantined",),
+        {
+            "name": ref("AdapterName"),
+            "allow_quarantined": {"type": "boolean", "default": False},
+            "reload": {"type": "boolean", "default": False},
+        },
+        "Load an installed adapter, optionally overriding quarantine admission or forcing the already-live exact on-disk revision through a between-requests reload.",
+        optional=("allow_quarantined", "reload"),
         open_input=True,
     )
     add_object(
@@ -1106,7 +1110,10 @@ def build_examples() -> dict[str, list[Any]]:
             "content_revision": hashes("6", prefixed=False), "used_exported_reference_script": True,
             "size_bytes": 4096, "files": 3,
         }],
-        "LoadAdapterRequest": [{"name": "reasoning-v1"}],
+        "LoadAdapterRequest": [
+            {"name": "reasoning-v1"},
+            {"name": "reasoning-v1", "reload": True},
+        ],
         "LoadAdapterResponse": [{"status": "loaded", "name": "reasoning-v1", "content_revision": hashes("b", prefixed=False)}],
         "MergeAdapterRequest": [{
             "sources": [{"name": "math-v1", "weight": 0.6}, {"name": "code-v1", "weight": 0.4}],

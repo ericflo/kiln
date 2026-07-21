@@ -2,7 +2,7 @@
   "schema_version": 1,
   "kind": "correctness",
   "workload_id": "serving-rocm-public-mutation-lifecycle-v1",
-  "description": "Build one source-bound ROCm server binary, prove public adapter load/inference/unload identity and base restoration, then prove an exact typed maintenance-only KV resize and fail-closed inference admission.",
+  "description": "Build one source-bound ROCm server binary, prove public adapter load/same-revision reload/inference/unload identity, request-local mutation-barrier attribution, and base restoration, then prove an exact typed maintenance-only KV resize and fail-closed inference admission.",
   "determinism": {
     "seed": 20260713,
     "seed_delivery": "argv",
@@ -115,6 +115,9 @@
           },
           "adapter_input_attestation": "source_and_private_copy_sha256_in_result_details",
           "adapter_name": "qualification-adapter",
+          "adapter_reload": "same_revision_between_requests_barrier",
+          "adapter_overlap_active_max_tokens": 64,
+          "adapter_overlap_attribution": "active_request_null_queued_request_positive",
           "arm_order": {
             "arm_0": "adapter",
             "arm_1": "maintenance_resize"
@@ -132,7 +135,8 @@
             "endpoint_1": "GET /v1/adapters",
             "endpoint_2": "POST /v1/chat/completions",
             "endpoint_3": "POST /v1/adapters/unload",
-            "endpoint_4": "GET /v1/config"
+            "endpoint_4": "GET /v1/config",
+            "endpoint_5": "GET /health"
           },
           "warmup_attempts": 8
         }
@@ -140,7 +144,7 @@
       "cases": [
         {
           "id": "rocm-public-mutation-lifecycle",
-          "description": "Require exact adapter source identity, response revision headers, deterministic base restoration, graph invalidation, a typed maintenance resize to one block, inference rejection before model work, zero device faults, and clean teardown.",
+          "description": "Require exact adapter source identity, same-revision barrier reload, active-versus-queued request-local adapter attribution, response revision headers, deterministic base restoration, graph invalidation, a typed maintenance resize to one block, inference rejection before model work, zero device faults, and clean teardown.",
           "required": true,
           "command": [
             "python3",
@@ -176,6 +180,16 @@
             "declared_metrics": [
               "adapter_load_count",
               "adapter_load_ms",
+              "adapter_overlap_active_adapter_phase_count",
+              "adapter_overlap_active_request_count",
+              "adapter_overlap_pending_observation_count",
+              "adapter_overlap_queued_actor_queue_ms",
+              "adapter_overlap_queued_adapter_ms",
+              "adapter_overlap_queued_adapter_phase_count",
+              "adapter_overlap_queued_request_count",
+              "adapter_overlap_revision_header_match_count",
+              "adapter_reload_count",
+              "adapter_reload_ms",
               "adapter_revision_header_mismatch_count",
               "adapter_transition_count",
               "adapter_unload_count",

@@ -727,6 +727,8 @@ struct BatchingEngineInfo {
     actor_cycle_idle_count: u64,
     total_actor_cycle_idle_ms: f64,
     max_actor_cycle_idle_ms: f64,
+    actor_barrier_adapter_active: bool,
+    actor_barrier_resize_active: bool,
     accepting: bool,
     queue_depth: usize,
     active_decode: usize,
@@ -1368,6 +1370,8 @@ impl From<BatchingEngineSnapshot> for BatchingEngineInfo {
             actor_cycle_idle_count: snapshot.actor_cycle_idle_count,
             total_actor_cycle_idle_ms: snapshot.total_actor_cycle_idle_ms,
             max_actor_cycle_idle_ms: snapshot.max_actor_cycle_idle_ms,
+            actor_barrier_adapter_active: snapshot.actor_barrier_adapter_active,
+            actor_barrier_resize_active: snapshot.actor_barrier_resize_active,
             accepting: snapshot.accepting,
             queue_depth: snapshot.queue_depth,
             active_decode: snapshot.active_decode,
@@ -1814,6 +1818,8 @@ mod tests {
             actor_cycle_idle_count: 4,
             total_actor_cycle_idle_ms: 300.0,
             max_actor_cycle_idle_ms: 78.0,
+            actor_barrier_adapter_active: true,
+            actor_barrier_resize_active: false,
             active_prefill: 2,
             prefix_cache_enabled: true,
             resident_prefill_enabled: true,
@@ -1876,6 +1882,8 @@ mod tests {
         assert_eq!(json["actor_cycle_idle_count"], 4);
         assert_eq!(json["total_actor_cycle_idle_ms"], 300.0);
         assert_eq!(json["max_actor_cycle_idle_ms"], 78.0);
+        assert_eq!(json["actor_barrier_adapter_active"], true);
+        assert_eq!(json["actor_barrier_resize_active"], false);
         assert_eq!(json["active_prefill"], 2);
         assert_eq!(json["prefix_cache_enabled"], true);
         assert_eq!(json["resident_prefill_enabled"], true);

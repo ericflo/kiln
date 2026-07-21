@@ -220,6 +220,11 @@ impl BlockingBackendPhaseTracker {
         }
     }
 
+    pub(crate) fn is_active(&self, phase: BlockingBackendPhase) -> bool {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.active_count[phase.index()] > 0
+    }
+
     pub(crate) fn observed_since(
         &self,
         before: BlockingBackendPhaseSnapshot,

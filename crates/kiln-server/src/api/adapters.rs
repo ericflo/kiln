@@ -109,6 +109,11 @@ struct LoadAdapterRequest {
     /// Allow loading an adapter whose canary status is quarantined.
     #[serde(default)]
     allow_quarantined: bool,
+    /// Re-read and republish the exact on-disk revision even when this adapter
+    /// is already live. The weight flip and cache invalidation still occur at
+    /// the between-requests barrier.
+    #[serde(default)]
+    reload: bool,
 }
 
 /// Response for POST /v1/adapters/load.
@@ -209,7 +214,7 @@ async fn load_adapter(
 ) -> Result<Json<LoadAdapterResponse>, ApiError> {
     ensure_adapter_mutation_admission(&state)?;
     validate_adapter_name(&req.name)?;
-    if state.loaded_adapter_name().as_deref() != Some(req.name.as_str()) {
+    if req.reload || state.loaded_adapter_name().as_deref() != Some(req.name.as_str()) {
         ensure_adapter_weight_transition_admission(&state)?;
     }
     let serial = crate::adapter_swap::adapter_mutation_guard(&state)
@@ -289,11 +294,15 @@ async fn load_adapter(
                 active_name: req.name.clone(),
                 dir: resolved_adapter_path.clone(),
             },
-            content_changed: false,
+            content_changed: req.reload,
             default_adapter: crate::adapter_swap::DefaultAdapterUpdate::Replace(Some(
                 req.name.clone(),
             )),
-            reason: "adapter_load_endpoint",
+            reason: if req.reload {
+                "adapter_reload_endpoint"
+            } else {
+                "adapter_load_endpoint"
+            },
         },
         &serial,
     )
@@ -1942,6 +1951,23 @@ mod tests {
         let serialized =
             safetensors::tensor::serialize([("ignored.weight", tensor)], None).unwrap();
         std::fs::write(path.join("adapter_model.safetensors"), serialized).unwrap();
+    }
+
+    #[test]
+    fn load_request_reload_is_explicit_and_defaults_off() {
+        let ordinary: LoadAdapterRequest =
+            serde_json::from_value(json!({"name": "fixture"})).unwrap();
+        assert!(!ordinary.allow_quarantined);
+        assert!(!ordinary.reload);
+
+        let reload: LoadAdapterRequest = serde_json::from_value(json!({
+            "name": "fixture",
+            "allow_quarantined": true,
+            "reload": true
+        }))
+        .unwrap();
+        assert!(reload.allow_quarantined);
+        assert!(reload.reload);
     }
 
     fn write_quarantined_canary(adapter_dir: &Path, name: &str, reason: &str) {

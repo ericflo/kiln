@@ -1664,6 +1664,25 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_batching_engine_actor_barrier_adapter_active Whether an ordered adapter mutation is waiting for active requests to drain or executing at the between-requests barrier.\n");
+        out.push_str("# TYPE kiln_batching_engine_actor_barrier_adapter_active gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_actor_barrier_adapter_active {}",
+                u8::from(gauges.batching_engine.actor_barrier_adapter_active)
+            ),
+        );
+        out.push_str("# HELP kiln_batching_engine_actor_barrier_resize_active Whether an ordered KV resize is waiting for active requests to drain or executing at the between-requests barrier.\n");
+        out.push_str("# TYPE kiln_batching_engine_actor_barrier_resize_active gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_actor_barrier_resize_active {}",
+                u8::from(gauges.batching_engine.actor_barrier_resize_active)
+            ),
+        );
+
         out.push_str("# HELP kiln_batching_engine_queue_depth Requests waiting inside the real-model batching engine.\n");
         out.push_str("# TYPE kiln_batching_engine_queue_depth gauge\n");
         push_line(
@@ -3999,6 +4018,8 @@ mod tests {
                 actor_cycle_idle_count: 5,
                 total_actor_cycle_idle_ms: 375.0,
                 max_actor_cycle_idle_ms: 80.0,
+                actor_barrier_adapter_active: true,
+                actor_barrier_resize_active: false,
                 queue_depth: 2,
                 active_decode: 3,
                 active_prefill: 2,
@@ -4360,6 +4381,8 @@ mod tests {
         assert!(output.contains("kiln_batching_engine_actor_cycle_idles_total 5"));
         assert!(output.contains("kiln_batching_engine_actor_cycle_idle_seconds_total 0.375000"));
         assert!(output.contains("kiln_batching_engine_actor_cycle_idle_max_seconds 0.080000"));
+        assert!(output.contains("kiln_batching_engine_actor_barrier_adapter_active 1"));
+        assert!(output.contains("kiln_batching_engine_actor_barrier_resize_active 0"));
         assert!(output.contains("kiln_batching_engine_queue_depth 2"));
         assert!(output.contains("kiln_batching_engine_active_decode 3"));
         assert!(output.contains("kiln_batching_engine_active_prefill 2"));

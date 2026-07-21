@@ -1,5 +1,171 @@
 use super::*;
 
+async fn wait_for_actor_barrier(
+    handle: &BatchingEngineHandle,
+    adapter: bool,
+    resize: bool,
+) -> BatchingEngineSnapshot {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = handle.cached_snapshot();
+        if snapshot.actor_barrier_adapter_active == adapter
+            && snapshot.actor_barrier_resize_active == resize
+        {
+            return snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "actor barrier did not publish: {snapshot:?}"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test]
+async fn adapter_swap_waits_for_active_request_and_pauses_admission() {
+    let events = Arc::new(StdMutex::new(Vec::new()));
+    let (forward, release) = GatedForward::new(events.clone());
+    let handle = BatchingEngineHandle::start_with_options(Arc::new(forward), 8);
+
+    let mut active = handle.enqueue(request(100, 3)).await.unwrap();
+    release.send(()).unwrap();
+    assert!(matches!(
+        active.recv().await,
+        Some(EngineEvent::Token { .. })
+    ));
+
+    let swap_events = events.clone();
+    let swap_task = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .swap_adapter(Box::new(move || {
+                    swap_events.lock().unwrap().push("swap".to_string());
+                    Ok(())
+                }))
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    release.send(()).unwrap();
+    assert!(matches!(
+        active.recv().await,
+        Some(EngineEvent::Token { .. })
+    ));
+    wait_for_actor_barrier(&handle, true, false).await;
+    let mut waiting = handle.enqueue(request(200, 1)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    release.send(()).unwrap();
+    release.send(()).unwrap();
+    swap_task.await.unwrap().unwrap();
+    for response in [&mut active, &mut waiting] {
+        loop {
+            match response.recv().await {
+                Some(EngineEvent::Done { .. }) => break,
+                Some(EngineEvent::Token { .. }) => {}
+                Some(EngineEvent::Error(error)) => panic!("request failed: {error}"),
+                None => panic!("request channel closed before completion"),
+            }
+        }
+    }
+
+    let log = events.lock().unwrap().clone();
+    let swap_idx = log.iter().position(|event| event == "swap").unwrap();
+    let waiting_idx = log.iter().position(|event| event == "prepare:200").unwrap();
+    assert!(
+        swap_idx < waiting_idx,
+        "waiting request preceded swap: {log:?}"
+    );
+    assert_eq!(
+        log[..swap_idx]
+            .iter()
+            .filter(|event| event.as_str() == "decode")
+            .count(),
+        3,
+        "active request did not drain before swap: {log:?}"
+    );
+    let completed = handle.cached_snapshot();
+    assert!(!completed.actor_barrier_adapter_active);
+    assert!(!completed.actor_barrier_resize_active);
+    handle.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn kv_resize_waits_for_active_request_and_pauses_admission() {
+    let events = Arc::new(StdMutex::new(Vec::new()));
+    let (forward, release) = GatedForward::new(events.clone());
+    let handle = BatchingEngineHandle::start_with_options(Arc::new(forward), 8);
+
+    let mut active = handle.enqueue(request(100, 3)).await.unwrap();
+    release.send(()).unwrap();
+    assert!(matches!(
+        active.recv().await,
+        Some(EngineEvent::Token { .. })
+    ));
+
+    let resize_task = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.resize_kv(17).await })
+    };
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    release.send(()).unwrap();
+    assert!(matches!(
+        active.recv().await,
+        Some(EngineEvent::Token { .. })
+    ));
+    wait_for_actor_barrier(&handle, false, true).await;
+    let mut waiting = handle.enqueue(request(200, 1)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert!(!resize_task.is_finished(), "resize ran before active drain");
+    let before_drain = events.lock().unwrap().clone();
+    assert!(!before_drain.iter().any(|event| event == "resize:17"));
+    assert!(!before_drain.iter().any(|event| event == "prepare:200"));
+
+    release.send(()).unwrap();
+    release.send(()).unwrap();
+    assert_eq!(resize_task.await.unwrap().unwrap(), 17);
+    for response in [&mut active, &mut waiting] {
+        loop {
+            match response.recv().await {
+                Some(EngineEvent::Done { .. }) => break,
+                Some(EngineEvent::Token { .. }) => {}
+                Some(EngineEvent::Error(error)) => panic!("request failed: {error}"),
+                None => panic!("request channel closed before completion"),
+            }
+        }
+    }
+
+    let log = events.lock().unwrap().clone();
+    let resize_idx = log
+        .iter()
+        .position(|event| event == "resize:17")
+        .expect("resize ran");
+    assert!(log.iter().any(|event| event == "resize_reason:maintenance"));
+    assert!(
+        log.iter()
+            .any(|event| event == "resize_barrier_wait:positive")
+    );
+    let waiting_idx = log.iter().position(|event| event == "prepare:200").unwrap();
+    assert!(
+        resize_idx < waiting_idx,
+        "waiting request preceded resize: {log:?}"
+    );
+    assert_eq!(
+        log[..resize_idx]
+            .iter()
+            .filter(|event| event.as_str() == "decode")
+            .count(),
+        3,
+        "active request did not drain before resize: {log:?}"
+    );
+    let completed = handle.cached_snapshot();
+    assert!(!completed.actor_barrier_adapter_active);
+    assert!(!completed.actor_barrier_resize_active);
+    handle.stop().await.unwrap();
+}
+
 #[tokio::test]
 async fn dropping_final_handle_stops_actor_and_delivery_worker() {
     let events = Arc::new(StdMutex::new(Vec::new()));

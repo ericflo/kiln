@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import dataclasses
 import hashlib
 import http.client
@@ -12,6 +13,7 @@ import math
 import os
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,7 @@ FORCED_KV_BLOCKS = 1
 GRAPH_CACHE_ENTRIES = 8
 GRAPH_CACHE_MAX_BYTES = 1 << 30
 MAX_TOKENS = 16
+OVERLAP_ACTIVE_MAX_TOKENS = 64
 PROMPT_WORDS = 64
 WARMUP_ATTEMPTS = 8
 OVERALL_TIMEOUT_SECONDS = 1800.0
@@ -95,6 +98,9 @@ EFFECTIVE_CONFIG: dict[str, Any] = {
             "source_and_private_copy_sha256_in_result_details"
         ),
         "adapter_name": ADAPTER_NAME,
+        "adapter_reload": "same_revision_between_requests_barrier",
+        "adapter_overlap_active_max_tokens": OVERLAP_ACTIVE_MAX_TOKENS,
+        "adapter_overlap_attribution": "active_request_null_queued_request_positive",
         "arm_order": {f"arm_{index}": name for index, name in enumerate(ARM_ORDER)},
         "base_output_restore": "exact_canonical_streamed_semantic_deltas",
         "build_reuse": "one_source_bound_binary_for_both_arms",
@@ -110,6 +116,7 @@ EFFECTIVE_CONFIG: dict[str, Any] = {
             "endpoint_2": "POST /v1/chat/completions",
             "endpoint_3": "POST /v1/adapters/unload",
             "endpoint_4": "GET /v1/config",
+            "endpoint_5": "GET /health",
         },
         "warmup_attempts": WARMUP_ATTEMPTS,
     },
@@ -119,6 +126,16 @@ EFFECTIVE_CONFIG: dict[str, Any] = {
 METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "adapter_load_count": ("count", "sum", False),
     "adapter_load_ms": ("ms", "exact", True),
+    "adapter_overlap_active_adapter_phase_count": ("count", "sum", True),
+    "adapter_overlap_active_request_count": ("count", "sum", False),
+    "adapter_overlap_pending_observation_count": ("count", "sum", False),
+    "adapter_overlap_queued_actor_queue_ms": ("ms", "exact", True),
+    "adapter_overlap_queued_adapter_ms": ("ms", "exact", True),
+    "adapter_overlap_queued_adapter_phase_count": ("count", "sum", False),
+    "adapter_overlap_queued_request_count": ("count", "sum", False),
+    "adapter_overlap_revision_header_match_count": ("count", "sum", False),
+    "adapter_reload_count": ("count", "sum", False),
+    "adapter_reload_ms": ("ms", "exact", True),
     "adapter_revision_header_mismatch_count": ("count", "sum", True),
     "adapter_transition_count": ("count", "sum", False),
     "adapter_unload_count": ("count", "sum", False),
@@ -156,6 +173,11 @@ class AdapterArm:
     graph_invalidation_evictions: int
     transition_count: int
     device_fault_count: int
+    reload_ms: float
+    overlap_active_adapter_ms: float | None
+    overlap_queued_adapter_ms: float
+    overlap_queued_actor_queue_ms: float
+    overlap_revision_header_matches: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -181,20 +203,44 @@ class RunEvidence:
     details: dict[str, Any] = dataclasses.field(default_factory=dict)
     arms_started: list[str] = dataclasses.field(default_factory=list)
     arms_completed: list[str] = dataclasses.field(default_factory=list)
+    _metric_lock: threading.Lock = dataclasses.field(
+        default_factory=threading.Lock,
+        repr=False,
+    )
 
     def set_metric(self, name: str, value: float | int) -> None:
         if name not in METRIC_DEFINITIONS:
             raise LifecycleError(f"unknown lifecycle metric {name!r}")
-        self.values[name] = value
+        with self._metric_lock:
+            self.values[name] = value
 
     def add_metric(self, name: str, value: float | int = 1) -> None:
-        self.set_metric(name, self.values[name] + value)
+        if name not in METRIC_DEFINITIONS:
+            raise LifecycleError(f"unknown lifecycle metric {name!r}")
+        with self._metric_lock:
+            self.values[name] += value
 
     def record_adapter(self, arm: AdapterArm) -> None:
         self.values.update(
             {
                 "adapter_load_count": 1,
                 "adapter_load_ms": arm.load_ms,
+                "adapter_overlap_active_adapter_phase_count": int(
+                    arm.overlap_active_adapter_ms is not None
+                ),
+                "adapter_overlap_active_request_count": 1,
+                "adapter_overlap_pending_observation_count": 1,
+                "adapter_overlap_queued_actor_queue_ms": (
+                    arm.overlap_queued_actor_queue_ms
+                ),
+                "adapter_overlap_queued_adapter_ms": arm.overlap_queued_adapter_ms,
+                "adapter_overlap_queued_adapter_phase_count": 1,
+                "adapter_overlap_queued_request_count": 1,
+                "adapter_overlap_revision_header_match_count": (
+                    arm.overlap_revision_header_matches
+                ),
+                "adapter_reload_count": 1,
+                "adapter_reload_ms": arm.reload_ms,
                 "adapter_transition_count": arm.transition_count,
                 "adapter_unload_count": 1,
                 "adapter_unload_ms": arm.unload_ms,
@@ -211,6 +257,13 @@ class RunEvidence:
                 "adapter_content_revision": arm.content_revision,
                 "adapter_arm_config": arm.generated_config_sha256,
                 "adapter_output": arm.adapter_output_sha256,
+                "adapter_overlap_active_adapter_ms": (
+                    arm.overlap_active_adapter_ms
+                ),
+                "adapter_overlap_queued_adapter_ms": arm.overlap_queued_adapter_ms,
+                "adapter_overlap_queued_actor_queue_ms": (
+                    arm.overlap_queued_actor_queue_ms
+                ),
                 "base_after": arm.base_after_sha256,
                 "base_before": arm.base_before_sha256,
             }
@@ -384,11 +437,63 @@ def copy_adapter(source: Path, destination_root: Path) -> tuple[str, str, int]:
     )
 
 
-def assert_stream(result: mixed.StreamResult, label: str) -> None:
+def assert_stream(
+    result: mixed.StreamResult,
+    label: str,
+    *,
+    expected_tokens: int = MAX_TOKENS,
+) -> None:
     if not result.success:
         raise LifecycleError(f"{label} failed: {result.error or result.finish_reason}")
-    if result.finish_reason != "length" or result.completion_tokens != MAX_TOKENS:
+    if result.finish_reason != "length" or result.completion_tokens != expected_tokens:
         raise LifecycleError(f"{label} did not preserve the fixed output denominator")
+
+
+def request_phase_ms(
+    result: mixed.StreamResult,
+    phase: str,
+) -> float | None:
+    phases = result.latency_phases
+    if phases is None:
+        raise LifecycleError(f"{result.name} omitted request latency phases")
+    field = f"{phase}_ms"
+    if field not in phases:
+        raise LifecycleError(f"{result.name} omitted request latency phase {field}")
+    value = phases[field]
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) < 0
+    ):
+        raise LifecycleError(f"{result.name} emitted invalid {field}: {value!r}")
+    return float(value)
+
+
+def wait_actor_adapter_barrier(
+    port: int,
+    deadline: float,
+) -> dict[str, Any]:
+    last: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        last = mixed.json_request(port, "GET", "/health")
+        mixed.batching_snapshot(last)
+        runtime = last.get("decode_runtime")
+        batching = runtime.get("batching_engine") if isinstance(runtime, dict) else None
+        if not isinstance(batching, dict):
+            raise LifecycleError("health omitted the batching-engine snapshot")
+        adapter_active = batching.get("actor_barrier_adapter_active")
+        resize_active = batching.get("actor_barrier_resize_active")
+        if not isinstance(adapter_active, bool) or not isinstance(resize_active, bool):
+            raise LifecycleError("health omitted typed actor-barrier activity")
+        if adapter_active:
+            if resize_active:
+                raise LifecycleError("adapter and resize actor barriers overlapped")
+            return last
+        time.sleep(0.02)
+    raise TimeoutError(f"adapter actor barrier did not become active: {last!r}")
 
 
 def adapter_state(
@@ -430,7 +535,11 @@ def required_stream(
 ) -> mixed.StreamResult:
     try:
         result = mixed.run_stream(*args, **kwargs)
-        assert_stream(result, label)
+        assert_stream(
+            result,
+            label,
+            expected_tokens=int(kwargs.get("max_tokens", MAX_TOKENS)),
+        )
         return result
     except Exception:
         evidence.add_metric("request_failure_count")
@@ -587,6 +696,160 @@ def run_adapter_arm(
             )
         wait_drained(port, deadline, "adapter inference")
 
+        first_token = threading.Event()
+
+        def reload_live_adapter() -> tuple[int, Any, float]:
+            reload_started = time.monotonic()
+            status, _, body = json_response(
+                port,
+                "POST",
+                "/v1/adapters/load",
+                {
+                    "name": ADAPTER_NAME,
+                    "allow_quarantined": False,
+                    "reload": True,
+                },
+                timeout=mixed.remaining_until(deadline, "adapter reload", 120.0),
+            )
+            return status, body, (time.monotonic() - reload_started) * 1000.0
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            active_future = executor.submit(
+                required_stream,
+                evidence,
+                "adapter overlap active request",
+                port,
+                name="lifecycle-adapter-overlap-active",
+                marker=mixed.workload_marker(seed, "lifecycle-adapter-overlap-active"),
+                prompt_words=PROMPT_WORDS,
+                max_tokens=OVERLAP_ACTIVE_MAX_TOKENS,
+                seed=seed + 200,
+                first_token_event=first_token,
+                absolute_deadline=deadline,
+                adapter=ADAPTER_NAME,
+            )
+            first_token_timeout = mixed.remaining_until(
+                deadline,
+                "adapter overlap first token",
+                60.0,
+            )
+            if not first_token.wait(first_token_timeout):
+                raise TimeoutError("adapter overlap active request emitted no first token")
+
+            reload_future = executor.submit(reload_live_adapter)
+            barrier_health = wait_actor_adapter_barrier(port, deadline)
+            evidence.set_metric("adapter_overlap_pending_observation_count", 1)
+            barrier_runtime = barrier_health["decode_runtime"]
+            barrier_batching = barrier_runtime["batching_engine"]
+            snapshot_age_ms = barrier_batching.get("snapshot_age_ms")
+            if (
+                isinstance(snapshot_age_ms, bool)
+                or not isinstance(snapshot_age_ms, int)
+                or snapshot_age_ms < 0
+            ):
+                raise LifecycleError(
+                    "adapter barrier snapshot age must be a nonnegative integer"
+                )
+            evidence.details["adapter_overlap_pending_snapshot_age_ms"] = snapshot_age_ms
+
+            queued_future = executor.submit(
+                required_stream,
+                evidence,
+                "adapter overlap queued request",
+                port,
+                name="lifecycle-adapter-overlap-queued",
+                marker=mixed.workload_marker(seed, "lifecycle-adapter-overlap-queued"),
+                prompt_words=PROMPT_WORDS,
+                max_tokens=MAX_TOKENS,
+                seed=seed + 201,
+                absolute_deadline=deadline,
+                adapter=ADAPTER_NAME,
+            )
+
+            active_overlap = active_future.result(
+                timeout=mixed.remaining_until(deadline, "active overlap request", 120.0)
+            )
+            reload_status, reload, reload_ms = reload_future.result(
+                timeout=mixed.remaining_until(deadline, "adapter reload result", 120.0)
+            )
+            queued_overlap = queued_future.result(
+                timeout=mixed.remaining_until(deadline, "queued overlap request", 120.0)
+            )
+
+        evidence.set_metric("adapter_reload_ms", reload_ms)
+        if reload_status != 200 or not isinstance(reload, dict):
+            raise LifecycleError(
+                f"adapter reload returned HTTP {reload_status}: {reload!r}"
+            )
+        if reload != {
+            "status": "loaded",
+            "name": ADAPTER_NAME,
+            "content_revision": content_revision,
+        }:
+            raise LifecycleError(
+                "same-revision adapter reload changed its public identity: "
+                f"{reload!r}"
+            )
+        evidence.set_metric("adapter_reload_count", 1)
+
+        overlap_results = (active_overlap, queued_overlap)
+        revision_matches = sum(
+            (result.loaded_adapter, result.loaded_adapter_revision)
+            == (ADAPTER_NAME, content_revision)
+            for result in overlap_results
+        )
+        evidence.set_metric(
+            "adapter_overlap_revision_header_match_count",
+            revision_matches,
+        )
+        if revision_matches != len(overlap_results):
+            evidence.add_metric(
+                "adapter_revision_header_mismatch_count",
+                len(overlap_results) - revision_matches,
+            )
+            raise LifecycleError("adapter overlap responses changed loaded revision identity")
+
+        active_adapter_ms = request_phase_ms(active_overlap, "adapter")
+        queued_adapter_ms = request_phase_ms(queued_overlap, "adapter")
+        if active_adapter_ms is not None:
+            raise LifecycleError(
+                "request active before the adapter barrier was incorrectly charged "
+                f"{active_adapter_ms:.3f} ms"
+            )
+        if queued_adapter_ms is None or queued_adapter_ms <= 0:
+            raise LifecycleError(
+                "request queued during the adapter barrier had no positive adapter phase"
+            )
+        queued_actor_queue_ms = queued_overlap.actor_queue_ms
+        if queued_actor_queue_ms is None or queued_actor_queue_ms <= 0:
+            raise LifecycleError(
+                "request queued during the adapter barrier had no positive actor queue"
+            )
+        if queued_adapter_ms > queued_actor_queue_ms + 1.0:
+            raise LifecycleError(
+                "queued adapter phase exceeded its actor-queue envelope: "
+                f"adapter={queued_adapter_ms:.3f} ms, "
+                f"actor_queue={queued_actor_queue_ms:.3f} ms"
+            )
+        evidence.set_metric("adapter_overlap_active_request_count", 1)
+        evidence.set_metric("adapter_overlap_active_adapter_phase_count", 0)
+        evidence.set_metric("adapter_overlap_queued_request_count", 1)
+        evidence.set_metric("adapter_overlap_queued_adapter_phase_count", 1)
+        evidence.set_metric("adapter_overlap_queued_adapter_ms", queued_adapter_ms)
+        evidence.set_metric(
+            "adapter_overlap_queued_actor_queue_ms",
+            queued_actor_queue_ms,
+        )
+        evidence.details.update(
+            {
+                "adapter_overlap_active_adapter_ms": active_adapter_ms,
+                "adapter_overlap_queued_adapter_ms": queued_adapter_ms,
+                "adapter_overlap_queued_actor_queue_ms": queued_actor_queue_ms,
+            }
+        )
+        adapter_state(port, ADAPTER_NAME, content_revision)
+        wait_drained(port, deadline, "adapter overlap")
+
         unload_started = time.monotonic()
         status, _, unload = json_response(
             port,
@@ -647,7 +910,11 @@ def run_adapter_arm(
         events = server_log.events_since(started)
         transitions = [event for event in events if event.category == "adapter_transition"]
         reasons = [event.fields.get("reason") for event in transitions]
-        if reasons != ["adapter_load_endpoint", "adapter_unload_endpoint"]:
+        if reasons != [
+            "adapter_load_endpoint",
+            "adapter_reload_endpoint",
+            "adapter_unload_endpoint",
+        ]:
             raise LifecycleError(f"adapter transition log reasons drifted: {reasons!r}")
         device_faults = sum(event.category == "device_fault" for event in events)
         if device_faults:
@@ -668,6 +935,11 @@ def run_adapter_arm(
             graph_invalidation_evictions=invalidations,
             transition_count=len(transitions),
             device_fault_count=device_faults,
+            reload_ms=reload_ms,
+            overlap_active_adapter_ms=active_adapter_ms,
+            overlap_queued_adapter_ms=queued_adapter_ms,
+            overlap_queued_actor_queue_ms=queued_actor_queue_ms,
+            overlap_revision_header_matches=revision_matches,
         )
     finally:
         shutdown = mixed.terminate_process(process)

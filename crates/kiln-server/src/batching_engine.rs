@@ -340,6 +340,12 @@ pub struct BatchingEngineSnapshot {
     pub total_actor_cycle_idle_ms: f64,
     /// Largest observed cooperative wait wall time.
     pub max_actor_cycle_idle_ms: f64,
+    /// True while an ordered adapter-weight mutation is waiting for active
+    /// requests to drain or executing at the between-requests barrier.
+    pub actor_barrier_adapter_active: bool,
+    /// True while an ordered KV resize is waiting for active requests to
+    /// drain or executing at the between-requests barrier.
+    pub actor_barrier_resize_active: bool,
     pub accepting: bool,
     pub queue_depth: usize,
     pub active_decode: usize,
@@ -2144,9 +2150,11 @@ impl BatchingEngineHandle {
             .send(EngineCommand::Snapshot { reply })
             .await
             .map_err(|_| anyhow::anyhow!("batching engine stopped"))?;
-        rx.await
+        let snapshot = rx
+            .await
             .map_err(|_| anyhow::anyhow!("batching engine stopped before snapshot"))?
-            .map_err(anyhow::Error::msg)
+            .map_err(anyhow::Error::msg)?;
+        Ok(self.with_actor_barrier_activity(snapshot))
     }
 
     /// Return the latest snapshot published by the actor without enqueueing a
@@ -2164,6 +2172,20 @@ impl BatchingEngineHandle {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut snapshot = published.snapshot.clone();
         snapshot.snapshot_age_ms = duration_millis_saturating(published.published_at.elapsed());
+        drop(published);
+        self.with_actor_barrier_activity(snapshot)
+    }
+
+    fn with_actor_barrier_activity(
+        &self,
+        mut snapshot: BatchingEngineSnapshot,
+    ) -> BatchingEngineSnapshot {
+        snapshot.actor_barrier_adapter_active = self
+            .actor_barrier_phases
+            .is_active(BlockingBackendPhase::Adapter);
+        snapshot.actor_barrier_resize_active = self
+            .actor_barrier_phases
+            .is_active(BlockingBackendPhase::Resize);
         snapshot
     }
 
@@ -6359,154 +6381,6 @@ mod tests {
             second_output.actor_prefill_wall_duration.is_some(),
             "the first sampled token must close admitted-prefill wall timing"
         );
-        handle.stop().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn adapter_swap_waits_for_active_request_and_pauses_admission() {
-        let events: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
-        let (forward, release) = GatedForward::new(events.clone());
-        let handle = BatchingEngineHandle::start_with_options(Arc::new(forward), 8);
-
-        // Request A needs two decode steps; hold it mid-generation after
-        // the first release.
-        let mut rx_a = handle.enqueue(request(100, 2)).await.unwrap();
-        release.send(()).unwrap(); // A's first step runs; A stays active.
-        assert!(matches!(rx_a.recv().await, Some(EngineEvent::Token { .. })));
-
-        // With A mid-generation: queue a swap, then request B behind it.
-        let swap_events = events.clone();
-        let swap_task = {
-            let handle = handle.clone();
-            tokio::spawn(async move {
-                handle
-                    .swap_adapter(Box::new(move || {
-                        swap_events.lock().unwrap().push("swap".to_string());
-                        Ok(())
-                    }))
-                    .await
-            })
-        };
-        // Give the swap command time to land in the actor's pending queue
-        // while A is still blocked on the gate.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let mut rx_b = handle.enqueue(request(200, 1)).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Release everything: A's second step, then B's step after the swap.
-        release.send(()).unwrap();
-        release.send(()).unwrap();
-
-        swap_task.await.unwrap().unwrap();
-        loop {
-            match rx_a.recv().await {
-                Some(EngineEvent::Done { .. }) => break,
-                Some(_) => {}
-                None => panic!("request A channel closed before Done"),
-            }
-        }
-        loop {
-            match rx_b.recv().await {
-                Some(EngineEvent::Done { .. }) => break,
-                Some(_) => {}
-                None => panic!("request B channel closed before Done"),
-            }
-        }
-
-        let log = events.lock().unwrap().clone();
-        let swap_idx = log.iter().position(|e| e == "swap").expect("swap ran");
-        let prepare_b_idx = log
-            .iter()
-            .position(|e| e == "prepare:200")
-            .expect("B admitted");
-        // The swap executed only after A's final decode step (both steps
-        // precede it), and B was admitted only after the swap — so no
-        // request ever spans a weight change.
-        assert!(
-            swap_idx < prepare_b_idx,
-            "B must be admitted after the swap: {log:?}"
-        );
-        let decodes_before_swap = log[..swap_idx].iter().filter(|e| *e == "decode").count();
-        assert_eq!(
-            decodes_before_swap, 2,
-            "both of A's decode steps precede the swap: {log:?}"
-        );
-
-        handle.stop().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn kv_resize_waits_for_active_request_and_pauses_admission() {
-        let events: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
-        let (forward, release) = GatedForward::new(events.clone());
-        let handle = BatchingEngineHandle::start_with_options(Arc::new(forward), 8);
-
-        let mut active = handle.enqueue(request(100, 2)).await.unwrap();
-        release.send(()).unwrap();
-        assert!(matches!(
-            active.recv().await,
-            Some(EngineEvent::Token { .. })
-        ));
-
-        let resize_task = {
-            let handle = handle.clone();
-            tokio::spawn(async move { handle.resize_kv(17).await })
-        };
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let mut waiting = handle.enqueue(request(200, 1)).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        assert!(!resize_task.is_finished(), "resize ran before active drain");
-        let before_drain = events.lock().unwrap().clone();
-        assert!(!before_drain.iter().any(|event| event == "resize:17"));
-        assert!(!before_drain.iter().any(|event| event == "prepare:200"));
-
-        release.send(()).unwrap();
-        release.send(()).unwrap();
-        assert_eq!(resize_task.await.unwrap().unwrap(), 17);
-
-        for response in [&mut active, &mut waiting] {
-            loop {
-                match response.recv().await {
-                    Some(EngineEvent::Done { .. }) => break,
-                    Some(EngineEvent::Token { .. }) => {}
-                    Some(EngineEvent::Error(error)) => panic!("request failed: {error}"),
-                    None => panic!("request channel closed before completion"),
-                }
-            }
-        }
-
-        let log = events.lock().unwrap().clone();
-        let resize_idx = log
-            .iter()
-            .position(|event| event == "resize:17")
-            .expect("resize ran");
-        assert!(
-            log.iter().any(|event| event == "resize_reason:maintenance"),
-            "public resize must carry a bounded maintenance reason: {log:?}"
-        );
-        assert!(
-            log.iter()
-                .any(|event| event == "resize_barrier_wait:positive"),
-            "resize must carry its actor-barrier wait: {log:?}"
-        );
-        let waiting_prepare_idx = log
-            .iter()
-            .position(|event| event == "prepare:200")
-            .expect("waiting request admitted");
-        assert!(
-            resize_idx < waiting_prepare_idx,
-            "resize must precede admission: {log:?}"
-        );
-        assert_eq!(
-            log[..resize_idx]
-                .iter()
-                .filter(|event| event.as_str() == "decode")
-                .count(),
-            2,
-            "the active request must finish before resize: {log:?}"
-        );
-
         handle.stop().await.unwrap();
     }
 

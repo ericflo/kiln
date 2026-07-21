@@ -2759,12 +2759,24 @@ must return `x-kiln-loaded-adapter: base` and revision `base`. Public
 trusted debug state, and `GET /v1/adapters` must all publish that same
 name/revision. The adapter inference request explicitly sends
 `"adapter": "qualification-adapter"`; its response headers must bind that exact
-name/revision. Base probes explicitly send `"adapter": null`. The driver then
-calls the public unload
+name/revision. The driver then starts a 64-token named-adapter request and waits
+for its first token before issuing `POST /v1/adapters/load` with
+`"reload": true`. That operation must re-read the already-live exact revision,
+and the cached health snapshot must report
+`actor_barrier_adapter_active=true` and
+`actor_barrier_resize_active=false` before a second named-adapter request is
+submitted. Both responses must retain the same content-revision headers. The
+request active before the barrier must retain `adapter_ms: null`; the request
+queued after the positive gauge must report positive `adapter_ms` inside its
+positive actor-queue envelope. This distinguishes causal request ownership
+from a process-global mutation timestamp without changing adapter bytes.
+
+Base probes explicitly send `"adapter": null`. The driver then calls the public unload
 endpoint, requires every surface and response header to return to base, and
 compares canonical streamed semantic deltas from identical pre-load and
 post-unload base requests exactly. Dynamic IDs and creation timestamps are the
-only excluded envelope fields. Both barrier-swap reasons must appear in order,
+only excluded envelope fields. Load, same-revision reload, and unload
+barrier-swap reasons must appear in order,
 at least one captured graph must be invalidated, and the actor, graph slots,
 owners, process, and snapshot directory must drain cleanly.
 
@@ -2787,7 +2799,9 @@ Either arm fails on an HTTP or stream error, malformed identity, stale adapter
 header, changed base output, missing graph invalidation, wrong resize target,
 inference work in maintenance, device-fault signature, forced/nonzero shutdown,
 or private snapshot residue. The receipt publishes transition and rejection
-counts, adapter bytes, load/unload latency, graph invalidations, resize source
+counts, adapter bytes, load/reload/unload latency, active and queued overlap
+populations, the queued request's exact adapter and actor-queue milliseconds,
+revision-header matches, the positive barrier observation, graph invalidations, resize source
 and target blocks, released bytes, coordination wait, mutation duration, and
 all failure counters. This gate proves one controlled lifecycle at one source
 revision; it does not replace concurrent mixed-load stress, the graduated

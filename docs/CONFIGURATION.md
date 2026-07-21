@@ -1138,14 +1138,21 @@ mock mode reports no production actor snapshot.
 When the actor exists, the live health/debug snapshot reports
 `actor_cycle_idle_ms`, `actor_cycle_idle_source`, `actor_cycle_idle_active`,
 `actor_cycle_idle_count`, `total_actor_cycle_idle_ms`, and
-`max_actor_cycle_idle_ms`. Prometheus exports the same process-lifetime state as
+`max_actor_cycle_idle_ms`. The same snapshot reports
+`actor_barrier_adapter_active` and `actor_barrier_resize_active` while an
+ordered mutation is waiting for the active batch to drain or executing at the
+between-requests boundary. Prometheus exports the same process-lifetime state as
 `kiln_batching_engine_actor_cycle_idle_configured_seconds`,
 `kiln_batching_engine_actor_cycle_idle_active`,
 `kiln_batching_engine_actor_cycle_idles_total`,
 `kiln_batching_engine_actor_cycle_idle_seconds_total`, and
-`kiln_batching_engine_actor_cycle_idle_max_seconds`. These counters make an
+`kiln_batching_engine_actor_cycle_idle_max_seconds`, plus the live gauges
+`kiln_batching_engine_actor_barrier_adapter_active` and
+`kiln_batching_engine_actor_barrier_resize_active`. These counters make an
 intentional duty-cycle delay distinguishable from an unexplained inference
-stall. Serving benchmark driver v18 records the actor as the only request
+stall, while the barrier gauges distinguish an intentional model/KV mutation
+from ordinary actor work without adding a control-plane wait. They do not
+replace request-local `adapter_ms` or `resize_ms`. Serving benchmark driver v18 records the actor as the only request
 route, snapshots an idle boundary outside each
 measured request window and fails its `actor_cycle_idle_accounted` gate when the
 source, count, elapsed time, maximum, or final active state contradicts the
