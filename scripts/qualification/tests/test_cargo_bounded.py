@@ -12,6 +12,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = ROOT / "scripts" / "cargo-bounded.sh"
 QUALIFICATION_SCRIPT = ROOT / "scripts" / "qualification" / "cargo-test-bounded.sh"
+THERMAL_POLICY_SCRIPT = (
+    ROOT / "scripts" / "qualification" / "prepare_host_thermal_policy.py"
+)
 
 
 class BoundedCargoTests(unittest.TestCase):
@@ -30,6 +33,7 @@ class BoundedCargoTests(unittest.TestCase):
         self.assertIn("KILN_CARGO_CPU_QUOTA_PERCENT", completed.stdout)
         self.assertIn("KILN_CARGO_MAX_MEMORY_GIB", completed.stdout)
         self.assertIn("closed-qualification-test-v1", completed.stdout)
+        self.assertIn("--host-thermal-policy", completed.stdout)
 
     def test_qualification_launcher_pins_the_host_safety_contract(self) -> None:
         self.assertTrue(os.access(QUALIFICATION_SCRIPT, os.X_OK))
@@ -215,6 +219,88 @@ class BoundedCargoTests(unittest.TestCase):
             self.assertIn("--scope", arguments)
             self.assertIn("CPUQuota=250%", arguments)
             self.assertIn("cpu_quota=250%", completed.stderr)
+
+    def test_content_hashed_policy_drives_the_cargo_thermal_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tool_dir = root / "tools"
+            tool_dir.mkdir()
+            (tool_dir / "systemd-run").write_text(
+                "#!/bin/sh\nexit 0\n", encoding="utf-8"
+            )
+            (tool_dir / "systemctl").write_text(
+                "#!/bin/sh\nexit 0\n", encoding="utf-8"
+            )
+            (tool_dir / "systemd-run").chmod(0o755)
+            (tool_dir / "systemctl").chmod(0o755)
+            hwmon = root / "hwmon" / "hwmon8"
+            hwmon.mkdir(parents=True)
+            (hwmon / "name").write_text("coretemp\n", encoding="utf-8")
+            (hwmon / "temp1_label").write_text(
+                "Package id 0\n", encoding="utf-8"
+            )
+            (hwmon / "temp1_input").write_text("41000\n", encoding="utf-8")
+            policy_path = root / "host-policy.json"
+            prepared = subprocess.run(
+                [
+                    "python3",
+                    str(THERMAL_POLICY_SCRIPT),
+                    "--hwmon-root",
+                    str(root / "hwmon"),
+                    "create",
+                    "--id",
+                    "rtx4090-laptop-serving-hard-limit-v1",
+                    "--hwmon-name",
+                    "coretemp",
+                    "--label",
+                    "Package id 0",
+                    "--limit-millicelsius",
+                    "90000",
+                    "--poll-interval-ms",
+                    "50",
+                    "--safe-handoff-target-millicelsius",
+                    "60000",
+                    "--safe-handoff-stable-samples",
+                    "1",
+                    "--output",
+                    str(policy_path),
+                ],
+                cwd=ROOT,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+
+            environment = dict(os.environ)
+            environment.update(
+                {
+                    "CARGO": "/bin/true",
+                    "KILN_CARGO_HWMON_ROOT": str(root / "hwmon"),
+                    "KILN_CARGO_MIN_AVAILABLE_GIB": "1",
+                    "PATH": f"{tool_dir}:{environment['PATH']}",
+                }
+            )
+            completed = subprocess.run(
+                [
+                    str(SCRIPT),
+                    "--host-thermal-policy",
+                    str(policy_path),
+                    "check",
+                ],
+                cwd=ROOT,
+                check=False,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn(
+                f"thermal=policy:{policy_path}:coretemp/Package id 0:90000mC@50ms",
+                completed.stderr,
+            )
 
     def test_invalid_cpu_quota_is_rejected_before_launch(self) -> None:
         environment = dict(os.environ)

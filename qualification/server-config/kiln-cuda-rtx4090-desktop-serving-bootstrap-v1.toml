@@ -1,0 +1,75 @@
+# Conservative source-bound CUDA baseline for the 24 GiB desktop RTX 4090.
+# Establish eager correctness and memory behavior before adding tuned variants.
+
+[server]
+serving_profile = "stable"
+deterministic = false
+host = "127.0.0.1"
+port = 8420
+request_timeout_secs = 600
+terminal_access = "disabled"
+shutdown_timeout_secs = 5
+http_send_buffer_bytes = 1048576
+stream_stall_grace_ms = 2000
+max_batch_tokens = 8192
+max_prefill_tokens_per_cycle = 1024
+max_prefill_layers_per_cycle = 8
+max_decode_batch = 32
+debug_model_state = true
+default_thinking_enabled = false
+chat_performance_metadata = true
+chat_config_hash_metadata = true
+slow_request_warn_secs = 30
+
+[accelerator]
+kt_api_mode = "auto"
+full_attention_score_budget_mib = 2048
+vulkan_device_index = "auto"
+vulkan_validation = false
+cuda_kernel_profile = "native_default"
+cuda_marlin_profile = "disabled"
+cuda_flash_backward_mode = "fast"
+metal_kernel_profile = "native_default"
+rocm_synchronization_mode = "legacy_host_barriers"
+rocm_strided_batched_matmul_mode = "auto"
+rocm_bf16_matmul_output_mode = "auto"
+rocm_kernel_profile = "qualified"
+rocm_graph_mode = "disabled"
+rocm_graph_cache_entries = 8
+rocm_graph_cache_max_bytes = 1073741824
+
+[batching]
+rowwise_decode = false
+prefix_aware_admission = true
+prefill_admission_quantum = "auto"
+
+[model]
+path = "Qwen3.5-4B"
+model_id = "Qwen/Qwen3.5-4B"
+served_model_id = "Qwen3.5-4B"
+adapter_dir = ".qualification/cuda-rtx4090-desktop/adapters"
+snapshot_dir = ".qualification/cuda-rtx4090-desktop/snapshots"
+checkpoint_read_mib_per_second = 256
+accelerator_weight_upload_mib_per_second = 256
+vulkan_decode_weight_prewarm = false
+vulkan_decode_weight_prewarm_mib_per_second = 512
+
+[memory]
+gpu_memory_gb = 23.0
+inference_memory_fraction = 0.7
+vulkan_buffer_pool_gb = 0.0
+floor_gb = 2.0
+probe_ms = 500
+reclaim_mode = "off"
+kv_autoscale = false
+kv_force_blocks = 0
+kv_cache_fp8 = false
+cuda_graphs = false
+cuda_graph_cache_entries = 8
+
+[prefix_cache]
+enabled = true
+
+[logging]
+format = "json"
+level = "info"

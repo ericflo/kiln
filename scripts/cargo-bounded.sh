@@ -5,12 +5,15 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: scripts/cargo-bounded.sh <cargo-subcommand> [args...]
+Usage: scripts/cargo-bounded.sh [--host-thermal-policy PATH] <cargo-subcommand> [args...]
 
 Runs Cargo with one build job after checking Linux MemAvailable. A transient
 systemd scope, or a transient service for PID-namespaced callers, places Cargo
 and every compiler/linker child under one aggregate memory ceiling with swap
 disabled. It also refuses to overlap another Cargo or rustc process.
+
+  --host-thermal-policy PATH      Reuse a content-hashed hard-limit-only
+                                  kiln.host-thermal-policy.v1 document.
 
 Overrides:
   CARGO                           Cargo executable/name (default: PATH, then ~/.cargo/bin/cargo)
@@ -38,6 +41,30 @@ EOF
 if [[ $# -eq 0 || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     usage
     [[ $# -gt 0 ]] && exit 0
+    exit 2
+fi
+
+host_thermal_policy=""
+case "${1:-}" in
+    --host-thermal-policy)
+        if [[ $# -lt 3 || -z "${2:-}" ]]; then
+            echo "error: --host-thermal-policy requires a path before the Cargo subcommand" >&2
+            exit 2
+        fi
+        host_thermal_policy="$2"
+        shift 2
+        ;;
+    --host-thermal-policy=*)
+        host_thermal_policy="${1#*=}"
+        if [[ -z "$host_thermal_policy" ]]; then
+            echo "error: --host-thermal-policy requires a nonempty path" >&2
+            exit 2
+        fi
+        shift
+        ;;
+esac
+if [[ $# -eq 0 ]]; then
+    echo "error: a Cargo subcommand is required" >&2
     exit 2
 fi
 
@@ -193,9 +220,45 @@ if (( thermal_fields_set != 0 && thermal_fields_set != 4 )); then
     echo "error: all four KILN_CARGO_HOST_THERMAL_* fields must be set together" >&2
     exit 2
 fi
+hwmon_root="${KILN_CARGO_HWMON_ROOT:-/sys/class/hwmon}"
+thermal_config_source="explicit"
+if [[ -n "$host_thermal_policy" ]]; then
+    if (( thermal_fields_set != 0 )); then
+        echo "error: --host-thermal-policy conflicts with KILN_CARGO_HOST_THERMAL_* fields" >&2
+        exit 2
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "error: --host-thermal-policy requires python3" >&2
+        exit 2
+    fi
+    script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+    policy_helper="$script_directory/qualification/prepare_host_thermal_policy.py"
+    if [[ ! -f "$policy_helper" ]]; then
+        echo "error: host thermal policy helper is missing: $policy_helper" >&2
+        exit 2
+    fi
+    if ! policy_output="$(
+        python3 "$policy_helper" \
+            --hwmon-root "$hwmon_root" \
+            cargo-fields \
+            --policy "$host_thermal_policy"
+    )"; then
+        exit 2
+    fi
+    mapfile -t policy_fields <<< "$policy_output"
+    if (( ${#policy_fields[@]} != 4 )); then
+        echo "error: host thermal policy helper returned ${#policy_fields[@]} fields, expected 4" >&2
+        exit 2
+    fi
+    thermal_sensor_name="${policy_fields[0]}"
+    thermal_sensor_label="${policy_fields[1]}"
+    thermal_limit_millicelsius="${policy_fields[2]}"
+    thermal_poll_milliseconds="${policy_fields[3]}"
+    thermal_fields_set=4
+    thermal_config_source="policy:$host_thermal_policy"
+fi
 thermal_sensor_path=""
 thermal_poll_seconds=""
-thermal_config_source="explicit"
 if (( thermal_fields_set == 0 )); then
     thermal_sensor_name="k10temp"
     thermal_sensor_label="Tctl"
@@ -214,7 +277,6 @@ if (( thermal_fields_set == 4 )) || [[ "$thermal_config_source" == "automatic" ]
         echo "error: KILN_CARGO_HOST_THERMAL_POLL_MILLISECONDS must be in 50..=60000, got '$thermal_poll_milliseconds'" >&2
         exit 2
     fi
-    hwmon_root="${KILN_CARGO_HWMON_ROOT:-/sys/class/hwmon}"
     thermal_matches=()
     for hwmon_dir in "$hwmon_root"/hwmon*; do
         [[ -d "$hwmon_dir" && -r "$hwmon_dir/name" ]] || continue

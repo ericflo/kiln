@@ -131,9 +131,8 @@ and
 `qualification/server-launch/kiln-rocm-strix-halo-serving-comparison-v1.json`.
 They pin the qualified ROCm kernel policy, graph bounds, fixed KV behavior,
 batching limits, model path/served ID, debug evidence surface, and private
-snapshot roots used by the retained comparison receipts. Other machines must
-create their own source-bound inputs rather than treating these absolute paths
-or host policy as portable.
+snapshot roots used by the retained comparison receipts. Do not treat its
+absolute model path or host policy as portable.
 
 Equivalent local Kiln launch document structure:
 
@@ -155,6 +154,149 @@ Equivalent local Kiln launch document structure:
   "acceptable_exit_codes": [0]
 }
 ```
+
+### RTX 4090 serving bootstrap
+
+The repository also carries bounded source inputs for the first serving run on
+each NVIDIA host:
+
+| Machine/runtime | Tracked input | Initial contract |
+|---|---|---|
+| 16 GiB RTX 4090 Laptop GPU, Kiln | `qualification/server-config/kiln-cuda-rtx4090-laptop-serving-bootstrap-v1.toml` plus its same-name launch JSON | Stable eager profile, 15 GiB capacity cap, 1.5 GiB live floor, decode width 16, no reclaim, physical KV resize, FP8 KV, Marlin, or CUDA graph capture. |
+| 24 GiB desktop RTX 4090, Kiln | `qualification/server-config/kiln-cuda-rtx4090-desktop-serving-bootstrap-v1.toml` plus its same-name launch JSON | Stable eager profile, 23 GiB capacity cap, 2 GiB live floor, decode width 32, and the same disabled mutation/experimental routes. |
+| Either RTX 4090, vLLM | `qualification/server-launch/vllm-cuda-rtx4090-serving-bootstrap-v1.json` | BF16, 32K context/batch-token bound, 64 sequence slots, 75 percent device-memory utilization, isolated per-launch caches, prefix caching, FCFS, seed zero, and text-only serving. |
+
+Both Kiln configs use repository-relative `Qwen3.5-4B`, adapter, and snapshot
+paths. The launch documents own the process group, loopback port, readiness
+deadline, shutdown deadline, and exclusive log root. The vLLM document uses no
+ROCm-only attention override; vLLM must resolve a CUDA-supported backend from
+the exact recorded runtime. It launches through a regular copied interpreter at
+`.qualification/vllm-cuda-venv/bin/python-kiln`, not a venv symlink which would
+canonicalize to the base interpreter and break runtime identity.
+
+These are bootstrap baselines, not performance recommendations. First retain a
+passing environment receipt, core-correctness receipt, memory-lifecycle receipt,
+and eager serving receipt. A tuned scheduler, graph-enabled Kiln input, Marlin
+input, different vLLM memory fraction, or different concurrency ceiling is a
+new source-bound candidate. Change one causal family at a time and compare it
+against the unchanged bootstrap artifact; never edit the bootstrap file in
+place after it has a retained receipt.
+
+On the NVIDIA machine, begin from a clean fast-forward of `origin/main` and run
+the matching environment, correctness, and lifecycle variants in [Local
+Hardware Qualification](qualification.md#cuda-and-metal-core-handoff).
+Commit and push each passing receipt before proceeding. Then inventory the
+actual host-package sensors:
+
+```bash
+python3 scripts/qualification/prepare_host_thermal_policy.py inventory
+```
+
+Choose a uniquely resolving CPU/package sensor, a hard limit supported by the
+machine or CPU vendor, and a conservative idle handoff target observed to be
+reachable on that host. A GPU-edge sensor alone is insufficient because source
+builds, model hashing, tokenization, and server supervision also heat the host.
+Do not copy the Strix Halo thresholds or guess an `hwmonN` number. Materialize
+the selected policy without overwrite; the example values are placeholders and
+must be replaced before execution:
+
+```bash
+python3 scripts/qualification/prepare_host_thermal_policy.py create \
+  --id rtx4090-laptop-serving-hard-limit-v1 \
+  --hwmon-name '<inventory hwmon_name>' \
+  --label '<inventory label>' \
+  --limit-millicelsius '<vendor-supported hard limit>' \
+  --safe-handoff-target-millicelsius '<measured idle target>' \
+  --output qualification/host-policies/rtx4090-laptop-serving-hard-limit-v1.json
+```
+
+The writer accepts only `hard_limit_only`, validates all relationships through
+the production policy parser, resolves exactly one current input, requires a
+valid reading below the hard limit, adds the canonical content hash, fsyncs the
+new file, and refuses replacement. Duplicate names/labels are visibly marked
+non-unique by the inventory. Review and commit this machine input before a long
+build or accelerator run. The desktop uses its own ID and output file because
+its CPU, chassis, cooling, and safe threshold may differ.
+
+Build the exact CUDA server through the same policy. The wrapper derives its
+selector, hard limit, cadence, and stable prelaunch handoff from the
+content-hashed document; the
+remaining bounds are build-resource policy rather than product configuration:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" \
+CUDARC_CUDA_VERSION=12080 \
+KILN_CARGO_CPU_QUOTA_PERCENT=50 \
+KILN_CARGO_MIN_AVAILABLE_GIB=12 \
+scripts/cargo-bounded.sh \
+  --host-thermal-policy qualification/host-policies/rtx4090-laptop-serving-hard-limit-v1.json \
+  build --locked --release -p kiln-server --bin kiln --features cuda
+```
+
+Set the available-memory floor for the actual host; do not lower it merely to
+force a build through. `cargo-bounded.sh` still supplies one build job, an
+aggregate memory cgroup, zero swap allowance, optional CPU quota, overlap
+refusal, stable cool-start gate, process-group cleanup, and a thermal trip exit.
+The cool-start gate rejects a reading at or above the hard limit immediately
+instead of waiting beneath an unsafe ceiling. An explicit policy
+conflicts with the four legacy `KILN_CARGO_HOST_THERMAL_*` fields instead of
+silently choosing one authority.
+
+Validate the typed server input before loading the model:
+
+```bash
+target/release/kiln config \
+  --file qualification/server-config/kiln-cuda-rtx4090-laptop-serving-bootstrap-v1.toml \
+  --backend cuda --json
+```
+
+For vLLM, create `.qualification/vllm-cuda-venv`, install one explicit reviewed
+CUDA-compatible vLLM version rather than a floating package, and copy the
+resolved venv interpreter to `bin/python-kiln`. Generate the immutable runtime
+manifest from the exact arguments in
+`vllm-cuda-rtx4090-serving-bootstrap-v1.json` using `--manifest-only`; repeat
+the capture and require byte equality before committing it below
+`qualification/runtime/vllm/cuda/<machine>/`. The manifest must identify the
+expected RTX 4090 class, `sm_89`, model and tokenizer content, interpreter,
+Python/native packages, CUDA runtime, and every inference option. Any package,
+driver, accelerator, model, environment, or option change invalidates it.
+
+For the first Kiln campaign, use the exact UUID from
+`.environment.device.device_uuid` in the environment receipt, the matching
+bootstrap launch JSON, and `target/release/kiln` as `--runtime-artifact`. Use a
+machine-reviewed memory ceiling below the selected device's reported capacity:
+
+```bash
+python3 scripts/run-serving-benchmark-campaign.py \
+  --engine kiln \
+  --base-url http://127.0.0.1:8420 \
+  --model Qwen3.5-4B \
+  --model-path Qwen3.5-4B \
+  --runtime-identity "kiln-git:$(git rev-parse HEAD)" \
+  --runtime-artifact target/release/kiln \
+  --campaign-id cuda-rtx4090-laptop-bootstrap-attempt-001 \
+  --prompt-set-id cuda-rtx4090-bootstrap-v1 \
+  --out-dir .qualification/serving/cuda-rtx4090-laptop-bootstrap-v1 \
+  --sizes 1 \
+  --memory-source nvml \
+  --memory-device-uuid '<environment receipt GPU UUID>' \
+  --memory-limit-bytes '<reviewed whole-device ceiling>' \
+  --model-fingerprint-read-mib-per-second 256 \
+  --host-thermal-policy qualification/host-policies/rtx4090-laptop-serving-hard-limit-v1.json \
+  --server-launch-config qualification/server-launch/kiln-cuda-rtx4090-laptop-serving-bootstrap-v1.json \
+  --output-evidence hashes
+```
+
+Run vLLM only after its manifest is committed. Change `--engine`, loopback port,
+runtime artifact, campaign/output IDs, and launch JSON; point `--reference-dir`
+at the matching accepted Kiln profile receipts. Keep model, prompt-set identity,
+sampling contract, output length, UUID, memory ceiling, thermal policy, and
+sample cadence identical. A startup failure, model mismatch, nonzero request
+error, output mismatch, thermal trip, forced shutdown, NVML error, process
+residue, or memory-ceiling violation rejects the arm. Start at concurrency one
+and expand only through rows that preserve these gates. Commit failed compact
+counterevidence when it reveals a product or harness defect; fix that defect
+before widening the workload.
 
 ## Thermal Contract
 

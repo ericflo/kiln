@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 from scripts.qualification.tests.generated_toml import parse_generated_toml
+from scripts import vllm_teacher
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -819,6 +820,93 @@ class ServingBenchmarkTests(unittest.TestCase):
             "decode-batch-4-actor-cycle-idle-100ms-prefill-layers-32-"
             "graph-disabled-v1",
         )
+
+    def test_cuda_4090_bootstrap_inputs_are_bounded_portable_and_closed(self) -> None:
+        config_root = ROOT / "qualification" / "server-config"
+        launch_root = ROOT / "qualification" / "server-launch"
+        laptop_name = "kiln-cuda-rtx4090-laptop-serving-bootstrap-v1"
+        desktop_name = "kiln-cuda-rtx4090-desktop-serving-bootstrap-v1"
+        laptop = self._parse_server_config(config_root / f"{laptop_name}.toml")
+        desktop = self._parse_server_config(config_root / f"{desktop_name}.toml")
+
+        for name, config, expected in (
+            (laptop_name, laptop, (15.0, 1.5, 4_096, 512, 16)),
+            (desktop_name, desktop, (23.0, 2.0, 8_192, 1_024, 32)),
+        ):
+            gpu_gib, floor_gib, batch_tokens, prefill_tokens, decode_batch = expected
+            self.assertEqual(config["server"]["serving_profile"], "stable")
+            self.assertEqual(config["server"]["max_batch_tokens"], batch_tokens)
+            self.assertEqual(
+                config["server"]["max_prefill_tokens_per_cycle"], prefill_tokens
+            )
+            self.assertEqual(config["server"]["max_decode_batch"], decode_batch)
+            self.assertEqual(config["accelerator"]["cuda_kernel_profile"], "native_default")
+            self.assertEqual(config["accelerator"]["cuda_marlin_profile"], "disabled")
+            self.assertEqual(config["accelerator"]["rocm_graph_mode"], "disabled")
+            self.assertEqual(config["memory"]["gpu_memory_gb"], gpu_gib)
+            self.assertEqual(config["memory"]["floor_gb"], floor_gib)
+            self.assertEqual(config["memory"]["reclaim_mode"], "off")
+            self.assertFalse(config["memory"]["kv_autoscale"])
+            self.assertFalse(config["memory"]["cuda_graphs"])
+            self.assertFalse(Path(config["model"]["path"]).is_absolute())
+            self.assertFalse(Path(config["model"]["adapter_dir"]).is_absolute())
+            self.assertFalse(Path(config["model"]["snapshot_dir"]).is_absolute())
+
+            launch_path = launch_root / f"{name}.json"
+            launch = bench.validate_server_launch_config_value(
+                bench.strict_json_loads(launch_path.read_bytes()),
+                config_directory=launch_path.parent,
+                label=name,
+                require_local_paths=False,
+            )
+            self.assertEqual(launch.record["id"], name)
+            self.assertEqual(
+                launch.record["command"],
+                [
+                    "./target/release/kiln",
+                    "serve",
+                    "--config",
+                    f"qualification/server-config/{name}.toml",
+                ],
+            )
+
+        laptop["server"].update(
+            max_batch_tokens=8_192,
+            max_prefill_tokens_per_cycle=1_024,
+            max_decode_batch=32,
+        )
+        laptop["model"]["adapter_dir"] = desktop["model"]["adapter_dir"]
+        laptop["model"]["snapshot_dir"] = desktop["model"]["snapshot_dir"]
+        laptop["memory"]["gpu_memory_gb"] = 23.0
+        laptop["memory"]["floor_gb"] = 2.0
+        self.assertEqual(laptop, desktop)
+
+    def test_cuda_vllm_bootstrap_launch_uses_reviewed_immutable_options(self) -> None:
+        launch_path = (
+            ROOT
+            / "qualification"
+            / "server-launch"
+            / "vllm-cuda-rtx4090-serving-bootstrap-v1.json"
+        )
+        launch = bench.validate_server_launch_config_value(
+            bench.strict_json_loads(launch_path.read_bytes()),
+            config_directory=launch_path.parent,
+            label=launch_path.stem,
+            require_local_paths=False,
+        )
+        command = launch.record["command"]
+        self.assertEqual(command[0], "./.qualification/vllm-cuda-venv/bin/python-kiln")
+        self.assertIn("--process-group-mode=inherited", command)
+        self.assertIn("--cache-root=.qualification/vllm-runtime-caches", command)
+        self.assertNotIn("--attention-backend=TRITON_ATTN", command)
+        separator = command.index("--")
+        self.assertEqual(
+            vllm_teacher.validate_extra_vllm_args(command[separator + 1 :]),
+            command[separator + 1 :],
+        )
+        self.assertIn("--gpu-memory-utilization=0.75", command)
+        self.assertIn("--max-num-seqs=64", command)
+        self.assertIn("--language-model-only", command)
 
     def test_model_fingerprint_read_rate_is_bounded(self) -> None:
         for value in (64, 256, 16_384):
@@ -2276,6 +2364,31 @@ class ServingBenchmarkTests(unittest.TestCase):
                         policy,
                         hwmon_root=Path(directory),
                     )
+
+    def test_prelaunch_cooldown_rejects_the_hard_limit_immediately(self) -> None:
+        _record, policy, _timeout = bench.validate_host_thermal_policy_value(
+            valid_host_thermal_policy(), "fixture"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            hwmon = Path(directory) / "hwmon0"
+            hwmon.mkdir()
+            (hwmon / "name").write_text("fixture\n")
+            (hwmon / "temp1_label").write_text("package\n")
+            (hwmon / "temp1_input").write_text("90000\n")
+            events: list[str] = []
+            with self.assertRaisesRegex(bench.BenchmarkError, "hard limit is 90000"):
+                bench.wait_for_prelaunch_cooldown(
+                    policy,
+                    hwmon_root=Path(directory),
+                    trace_callback=lambda event, **_fields: events.append(event),
+                )
+        self.assertEqual(
+            events,
+            [
+                "host_thermal_prelaunch_cooldown_started",
+                "host_thermal_prelaunch_cooldown_hard_limit_reached",
+            ],
+        )
 
     def test_attached_process_group_binds_proc_identity_and_detects_reuse(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

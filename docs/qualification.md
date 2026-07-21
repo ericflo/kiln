@@ -457,6 +457,37 @@ public model, drive serving near the 16 GB limit, or prove recovery under
 model-resident pressure. Keep that later hardware run bounded by a declared
 free-memory floor; do not fill the card merely to manufacture an OOM.
 
+### CUDA Serving Bootstrap Handoff
+
+After the environment, core-correctness, and memory-lifecycle receipts pass and
+are pushed, materialize that machine's host thermal policy and build the CUDA
+server. Do not reuse Strix Halo sensor names or thresholds. The checked-in Kiln
+bootstrap inputs are:
+
+- `kiln-cuda-rtx4090-laptop-serving-bootstrap-v1` for the 16 GiB Laptop GPU;
+- `kiln-cuda-rtx4090-desktop-serving-bootstrap-v1` for the 24 GiB desktop GPU;
+  and
+- `vllm-cuda-rtx4090-serving-bootstrap-v1` for the common bounded vLLM arm.
+
+Run the labeled-sensor inventory first. Create a content-hashed
+`hard_limit_only` policy from the unique host-package selector and reviewed
+machine limits, then commit it. Pass that same policy to
+`scripts/cargo-bounded.sh --host-thermal-policy` so source compilation also
+waits for the policy's stable handoff target and remains thermally contained.
+The wrapper rejects a conflicting set of legacy thermal
+environment fields. The complete policy-materialization, bounded CUDA build,
+typed-config preview, immutable vLLM runtime-manifest, NVML UUID selection,
+single-concurrency bootstrap, comparison, failure, and expansion procedure is
+in [Serving Benchmark Protocol](SERVING_BENCHMARK_PROTOCOL.md#rtx-4090-serving-bootstrap).
+
+The initial Kiln inputs are stable-profile, eager-only baselines. They are not
+an optimality claim and must not be edited in place after a receipt binds them.
+Land a new source-bound candidate for graph capture, scheduler widening,
+quantization, or another vLLM memory fraction, and change one causal family at
+a time. Commit and push the environment receipt, thermal policy, guarded build
+and config checkpoint, first c1 receipt, each defect/fix, each wider accepted
+matrix, and final soak separately.
+
 ROCm core correctness:
 
 ```bash

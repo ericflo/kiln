@@ -532,6 +532,31 @@ Then qualify each ROCm, CUDA, and other intended machine locally:
    intended batch sizes. Identity qualification proves provenance and limits;
    it does not prove numerical parity or performance.
 
+### RTX 4090 bootstrap launch
+
+`qualification/server-launch/vllm-cuda-rtx4090-serving-bootstrap-v1.json` is
+the source-bound first-launch contract for both named 4090 machines. It uses a
+regular copied `.qualification/vllm-cuda-venv/bin/python-kiln` interpreter,
+private snapshot and per-launch cache roots, inherited benchmark process-group
+ownership, BF16, a 32,768-token context/batch-token bound, 64 sequence slots,
+75 percent device-memory utilization, FCFS, seed zero, prefix caching, and the
+text-only model surface. It deliberately omits the ROCm-only `TRITON_ATTN`
+choice; the captured CUDA runtime must report its actual supported attention
+route.
+
+This JSON is not a runtime manifest and does not pin an installed vLLM wheel by
+itself. On each NVIDIA machine, install an explicit reviewed CUDA-compatible
+version in the ignored venv, emit `--manifest-only` through the exact launch
+arguments twice, require byte-identical results, and commit that machine's
+manifest under `qualification/runtime/vllm/cuda/<machine>/` before startup.
+The accelerator identity must match the environment receipt's 4090 class,
+`sm_89`, capacity, and selected logical device. The benchmark then binds the
+manifest as `--runtime-artifact`, the environment receipt's stable GPU UUID as
+the NVML selector, and the same host thermal policy/memory ceiling used by the
+Kiln reference. See [Serving Benchmark
+Protocol](SERVING_BENCHMARK_PROTOCOL.md#rtx-4090-serving-bootstrap) for the
+complete machine sequence and failure gates.
+
 ### Retained Strix Halo ROCm baseline
 
 The repository retains the current machine-specific inputs for the local

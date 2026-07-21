@@ -262,6 +262,21 @@ def wait_for_prelaunch_cooldown(
         assert peak_temperature is not None
         peak_temperature = max(peak_temperature, temperature)
         end_temperature = temperature
+        if temperature >= policy.limit_millicelsius:
+            trace(
+                "host_thermal_prelaunch_cooldown_hard_limit_reached",
+                elapsed_seconds=time.monotonic() - started,
+                limit_millicelsius=policy.limit_millicelsius,
+                sample_count=sample_count,
+                sensor_path=str(input_path),
+                temperature_millicelsius=temperature,
+                temperature_peak_millicelsius=peak_temperature,
+                temperature_start_millicelsius=start_temperature,
+            )
+            raise error_type(
+                f"host thermal prelaunch cooldown reached {temperature} "
+                f"millicelsius; hard limit is {policy.limit_millicelsius}"
+            )
         stable_samples = (
             stable_samples + 1
             if temperature <= policy.cooldown_target_millicelsius

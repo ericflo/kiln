@@ -133,6 +133,13 @@ const generatedDocsPages = [
       'multi_row_batch_unsupported',
       'rocm_graph_execution_accounted',
       'backend_without_graph_runner',
+      'RTX 4090 serving bootstrap',
+      'kiln-cuda-rtx4090-laptop-serving-bootstrap-v1.toml',
+      'kiln-cuda-rtx4090-desktop-serving-bootstrap-v1.toml',
+      'vllm-cuda-rtx4090-serving-bootstrap-v1.json',
+      'prepare_host_thermal_policy.py',
+      '--host-thermal-policy',
+      'bootstrap baselines, not performance recommendations',
     ],
   },
   {
@@ -926,6 +933,9 @@ const generatedDocsPages = [
       '25 measured requests',
       'ordered canonical',
       'It does not close the CPU/HF oracle comparison',
+      'CUDA Serving Bootstrap Handoff',
+      'content-hashed hard_limit_only policy',
+      'Commit and push the environment receipt, thermal policy, guarded build',
     ],
   },
 ];
