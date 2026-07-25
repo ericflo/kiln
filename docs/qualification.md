@@ -185,7 +185,7 @@ Toolkit provenance is descriptive: recording CUDA 12.4 does not by itself
 establish the workload manifests' cudarc CUDA 12.8 API contract or any
 accelerator correctness.
 
-#### Current WSL2 RTX 4090 Laptop environment result
+#### WSL2 RTX 4090 Laptop environment results
 
 The first source-bound laptop environment run passed from clean pushed commit
 `c55bff4a76ced998bd51ebc3098822383d5f28d1` and tree hash
@@ -217,6 +217,21 @@ the content-hashed Windows/NVML thermal supervisor and the repaired user-scope
 boundary described above. A new run must retain its own raw preflight,
 continuous samples, final CPU/memory/PID counters, cooldown, and scope-removal
 evidence.
+
+The post-repair environment run passed from clean pushed commit
+`b77f10c9aa07befd6c7a5c47b3dbec1468f1aec3` and tree hash
+`sha256:3a8c73bc786a40136d05fd6cad159c503914fc65031d13041a8cae4cc44334ea`.
+Its retained outer receipt is
+`qualification/receipts/cuda/rtx4090-laptop/20260725t051116746290z-cuda-rtx4090-laptop-local-environment-v1-df3e8fee15-v1.json`.
+All 16 platform capabilities are `available` and `unsupported` is empty. The
+case ran inside the required Landlock boundary and a removed user scope with a
+10 GiB memory ceiling, zero swap, 512-PID ceiling, and settled 50-percent
+aggregate CPU allowance. Its outer thermal supervisor continuously observed
+the exact Windows thermal zone and GPU UUID, reached 86.05 C host and 63 C GPU,
+stayed below the 95/85 C hard limits, and completed the required safe handoff.
+This second receipt proves that the repaired safeguards compose around the
+environment workload. It does not establish any CUDA correctness, model,
+pressure, serving, performance, or endurance claim.
 
 New environment receipts retain the common device fields and may additionally
 carry these closed optional fields:
