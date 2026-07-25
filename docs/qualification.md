@@ -918,6 +918,34 @@ revised workload is
 If WSL2 does not expose the peer allocation through global accounting, the run
 still fails without pressure acceptance.
 
+The exact-source rerun from
+`8d645066cb1016503658301e0fd2362a96e36345` reached readiness after one
+67,108,864-byte allocation. Global peer free memory was 1,042,284,544 bytes at
+readiness, never fell below 975,175,680 bytes while held, and recovered to
+1,290,797,056 bytes after a clean release. The pressure request completed all
+32 tokens with HTTP 200. The server sampler independently reported only
+252,706,816 bytes free, so the driver correctly rejected corroboration before
+the recovery request.
+
+The retained failed receipt is
+`20260725t152359537452z-cuda-rtx4090-laptop-serving-cuda-low-memory--647fb2a614-v1`
+with file
+`sha256:afcb43b9b11834b0f1920df5dc0164cf943f6e4a56473e93b417868266545c08`.
+It is strict current-source, local-artifact, and known-commit valid. The exact
+10,737,418,240-byte scope peak produced 2,995 limit events but no OOM event;
+server, peer, snapshot, and scope cleanup completed, and thermal supervision
+handed off after 92.05/69 C host/GPU peaks.
+
+This is capacity-contract counterevidence, not a pressure failure hidden by a
+tolerance. The device reports a 16,376 MiB physical total, while the bootstrap
+caps the governor at 15,360 MiB. Kiln projects the global used count onto that
+smaller total, so server health has 1,016 MiB less free capacity than the raw
+peer observation despite retaining `nvidia-smi` provenance. The documented
+raw 1,024/768 MiB pressure envelope and cap-adjusted health sampler therefore
+cannot represent the same contract. The low-memory gate remains open until a
+source repair removes that contradiction and an exact clean pushed-source run
+completes sampler corroboration and deterministic recovery.
+
 ### CUDA Serving Bootstrap Handoff
 
 After the environment, core-correctness, and memory-lifecycle receipts pass and
