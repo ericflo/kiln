@@ -966,6 +966,33 @@ bind the correction. Runtime model attestation also requires the server's
 requires `kv_cache_bytes=130023424`. This is still a source contract until a
 clean pushed run passes the complete gate.
 
+The exact rerun from
+`6725896cf3147cec121e825b9e2a93cec8bd1498` proved that the server now used
+the full physical capacity and retained the exact 62-block/130,023,424-byte KV
+allocation. The peer allocated 195,035,136 bytes, reached exactly
+1,073,741,824 bytes free, observed a 1,006,632,960-byte minimum while held, and
+released cleanly to 1,451,229,184 bytes. The pressure request again completed
+all 32 tokens with HTTP 200.
+
+The server sampler reported 1,349,517,312 bytes free, which is 7 MiB above the
+existing target-plus-256 MiB corroboration allowance. The driver rejected it;
+the recovery request did not run. The strict current-source, local-artifact,
+and known-commit valid receipt is
+`20260725t154633387643z-cuda-rtx4090-laptop-serving-cuda-low-memory--647fb2a614-v1`
+with file
+`sha256:d7a65609398c748c72bf0b1edc15751b9402e94dd02a54e1af0549f8bd2f826c`.
+The 10,737,418,240-byte scope peak produced 2,857 limit events and zero OOM
+events; server, peer, scope, and snapshot cleanup completed, and thermal
+handoff passed after 93.05/68 C host/GPU peaks.
+
+This second discrepancy is inside the `nvidia-smi` probe semantics. Kiln
+currently queries `memory.total,memory.used` and synthesizes free as their
+difference, while the peer queries `memory.free` directly. WSL2 reports a
+reserved gap, so those values are not additive. The remedy is not a wider
+tolerance: server sampling must query all three counters, retain their raw
+diagnostics, and use the conservative minimum of reported free and
+`total - used` as effective free. The low-memory gate remains open.
+
 ### CUDA Serving Bootstrap Handoff
 
 After the environment, core-correctness, and memory-lifecycle receipts pass and
