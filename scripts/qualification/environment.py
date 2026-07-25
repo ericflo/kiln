@@ -20,6 +20,7 @@ from typing import Any
 
 from receipt import atomic_write_json, validate_receipt
 from source_tree_hash import HASH_FORMAT, SourceTreeHashError, source_tree_hash
+import wsl_platform
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -915,6 +916,14 @@ def main(argv: list[str] | None = None) -> int:
     device, runtime, compiler, results = collect_backend(
         args.backend, raw, device_index=args.device_index
     )
+    platform_value: dict[str, Any] | None = None
+    unsupported: list[str] = []
+    if args.backend == "cuda":
+        platform_value, platform_results, unsupported = wsl_platform.collect(
+            device,
+            raw,
+        )
+        results.extend(platform_results)
     expectation = device_expectation_result(
         device,
         expected_name_regex=args.expected_device_name_regex,
@@ -969,6 +978,7 @@ def main(argv: list[str] | None = None) -> int:
             "device": device,
             "runtime": runtime,
             "compiler": compiler,
+            **({"platform": platform_value} if platform_value is not None else {}),
         },
         "model": None,
         "workload": None,
@@ -992,7 +1002,7 @@ def main(argv: list[str] | None = None) -> int:
                 "bytes": len(raw_bytes),
             }
         ],
-        "unsupported": [],
+        "unsupported": unsupported,
         "notes": [],
     }
     errors = validate_receipt(receipt, root=ROOT, require_local_artifacts=True)

@@ -67,8 +67,29 @@ QUALIFICATION_KEYS = {
     "duration_seconds",
     "command",
 }
-ENVIRONMENT_KEYS = {"host_id", "os", "device", "runtime", "compiler"}
+ENVIRONMENT_REQUIRED_KEYS = {"host_id", "os", "device", "runtime", "compiler"}
+ENVIRONMENT_KEYS = ENVIRONMENT_REQUIRED_KEYS | {"platform"}
 OS_KEYS = {"name", "version", "kernel", "architecture"}
+PLATFORM_KEYS = {"kind", "capabilities", "details"}
+WSL2_CAPABILITY_KEYS = {
+    "wsl_identity",
+    "windows_identity",
+    "driver_identity",
+    "cuda_driver_bridge",
+    "cuda_toolkit",
+    "cuda_runtime",
+    "nvml",
+    "filesystem_semantics",
+    "network_containment",
+    "process_containment",
+    "systemd_system",
+    "systemd_user_transient",
+    "cgroup_memory_delegation",
+    "memory_accounting",
+    "host_thermal_guard",
+    "gpu_temperature",
+}
+CAPABILITY_STATUSES = {"available", "unavailable"}
 DEVICE_REQUIRED_KEYS = {
     "name",
     "architecture",
@@ -388,8 +409,12 @@ def validate_receipt(
         if created_at is not None and created_at < finished_at:
             errors.append("receipt.created_at_utc precedes qualification completion")
 
-    environment = _check_exact_keys(
-        errors, top.get("environment"), ENVIRONMENT_KEYS, "receipt.environment"
+    environment = _check_required_keys(
+        errors,
+        top.get("environment"),
+        ENVIRONMENT_REQUIRED_KEYS,
+        ENVIRONMENT_KEYS,
+        "receipt.environment",
     )
     host_id = _check_string(errors, environment.get("host_id"), "receipt.environment.host_id")
     if host_id and not HOST_ID_RE.fullmatch(host_id):
@@ -447,6 +472,33 @@ def validate_receipt(
             )
     _check_string_map(errors, environment.get("runtime"), "receipt.environment.runtime")
     _check_string_map(errors, environment.get("compiler"), "receipt.environment.compiler")
+    if "platform" in environment:
+        platform_value = environment.get("platform")
+        platform_object = _check_exact_keys(
+            errors,
+            platform_value,
+            PLATFORM_KEYS,
+            "receipt.environment.platform",
+        )
+        if platform_object.get("kind") != "wsl2":
+            errors.append("receipt.environment.platform.kind must be 'wsl2'")
+        capabilities = _check_exact_keys(
+            errors,
+            platform_object.get("capabilities"),
+            WSL2_CAPABILITY_KEYS,
+            "receipt.environment.platform.capabilities",
+        )
+        for key, status in capabilities.items():
+            if status not in CAPABILITY_STATUSES:
+                errors.append(
+                    f"receipt.environment.platform.capabilities.{key} must be one of "
+                    f"{sorted(CAPABILITY_STATUSES)}"
+                )
+        _check_string_map(
+            errors,
+            platform_object.get("details"),
+            "receipt.environment.platform.details",
+        )
 
     model = top.get("model")
     workload = top.get("workload")

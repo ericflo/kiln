@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import environment as environment_module
+import wsl_platform
 from model_fingerprint import ModelFingerprintError, fingerprint_model
 from receipt import MAX_RESULT_DETAIL_CHARACTERS, validate_receipt
 from result_details import compact_details, join_details
@@ -52,6 +53,7 @@ LINUX_NAMESPACE_EXEC = ROOT / "scripts" / "qualification" / "linux_namespace_exe
 WORKLOAD_DIRECTORY = Path("qualification/workloads")
 RESULT_PATH_ENVIRONMENT_VARIABLE = "KILN_QUALIFICATION_CASE_RESULT"
 VARIANT_ID_ENVIRONMENT_VARIABLE = "KILN_QUALIFICATION_VARIANT_ID"
+NETWORK_ISOLATION_ENVIRONMENT_VARIABLE = wsl_platform.NETWORK_ISOLATION_ENV
 CASE_ENVIRONMENT_POLICY = "closed-qualification-case-v1"
 MACOS_NETWORK_SANDBOX_PROFILE = """(version 1)
 (allow default)
@@ -120,6 +122,7 @@ class EnvironmentCapture:
     environment: dict[str, Any]
     probe_results: list[dict[str, Any]]
     raw: dict[str, Any]
+    unsupported: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -586,6 +589,26 @@ def capture_backend_environment(backend: str, host_id: str, root: Path) -> Envir
         device, runtime, compiler, results = environment_module.collect_backend(backend, raw)
     except Exception as exc:  # The failure must become evidence, not erase the run.
         return _unavailable_environment(backend, host_id, f"environment capture failed: {exc}")
+    platform_value: dict[str, Any] | None = None
+    unsupported: list[str] = []
+    if backend == "cuda":
+        try:
+            platform_value, platform_results, unsupported = wsl_platform.collect(
+                device,
+                raw,
+            )
+            results.extend(platform_results)
+        except Exception as exc:
+            results.append(
+                {
+                    "id": "wsl2-platform-collector",
+                    "required": True,
+                    "status": "failed",
+                    "duration_seconds": 0.0,
+                    "metrics": [],
+                    "details": f"WSL2 platform collection failed: {exc}",
+                }
+            )
     return EnvironmentCapture(
         environment={
             "host_id": host_id,
@@ -593,9 +616,11 @@ def capture_backend_environment(backend: str, host_id: str, root: Path) -> Envir
             "device": device,
             "runtime": runtime,
             "compiler": compiler,
+            **({"platform": platform_value} if platform_value is not None else {}),
         },
         probe_results=results,
         raw=raw,
+        unsupported=tuple(unsupported),
     )
 
 
@@ -642,7 +667,8 @@ def establish_network_isolation(root: Path) -> NetworkIsolation:
         raise QualificationRunError(
             f"network isolation is not implemented on {sys.platform}"
         )
-    bubblewrap = shutil.which("bwrap")
+    wsl2 = "microsoft-standard-wsl2" in platform.release().lower()
+    bubblewrap = None if wsl2 else shutil.which("bwrap")
     if bubblewrap is not None:
         prefix = (
             bubblewrap,
@@ -693,9 +719,9 @@ def establish_network_isolation(root: Path) -> NetworkIsolation:
             str(LINUX_NAMESPACE_EXEC),
             "--",
         )
-        mechanism = "util-linux-unshare-user-net-pid-v1"
+        mechanism = "util-linux-unshare-user-net-pid-landlock-v1"
         failure_label = "util-linux unshare"
-    probe = (
+    probe_parts = [
         "import errno,socket,threading; "
         "names={name for _,name in socket.if_nameindex()}; "
         "assert names <= {'lo'} and 'lo' in names; "
@@ -706,7 +732,18 @@ def establish_network_isolation(root: Path) -> NetworkIsolation:
         "external=socket.socket(); external.settimeout(.5); "
         "result=external.connect_ex(('192.0.2.1',9)); "
         "assert result in {errno.ENETUNREACH,errno.EHOSTUNREACH}, result"
-    )
+    ]
+    if wsl2:
+        probe_parts.append(
+            "; import subprocess; "
+            "windows='/mnt/c/Windows/System32/cmd.exe'; "
+            "assert __import__('os').path.isfile(windows); "
+            "blocked=False; "
+            "\ntry:\n subprocess.run([windows,'/d','/c','ver'],check=False)\n"
+            "except PermissionError:\n blocked=True\n"
+            "assert blocked, 'Windows interop execution escaped the sandbox'"
+        )
+    probe = "".join(probe_parts)
     try:
         completed = subprocess.run(
             [*prefix, sys.executable, "-c", probe],
@@ -1667,6 +1704,14 @@ def _run_qualification_impl(
         capture = _unavailable_environment(
             variant["backend"], host_id, f"environment capture failed: {exc}"
         )
+    platform_value = capture.environment.get("platform")
+    if isinstance(platform_value, dict):
+        wsl_platform.bind_containment(
+            platform_value,
+            capture.probe_results,
+            network_isolation.mechanism,
+        )
+        capture.raw["runner_containment"] = network_isolation.mechanism
     infrastructure_failures.extend(_normalize_probe_failures(capture))
     runtime = capture.environment.get("runtime")
     if isinstance(runtime, dict):
@@ -1739,6 +1784,9 @@ def _run_qualification_impl(
             process_environment.update(overrides)
             process_environment[RESULT_PATH_ENVIRONMENT_VARIABLE] = str(command_result_path)
             process_environment[VARIANT_ID_ENVIRONMENT_VARIABLE] = variant_id
+            process_environment[NETWORK_ISOLATION_ENVIRONMENT_VARIABLE] = (
+                network_isolation.mechanism
+            )
             run_config_cases.append(
                 {
                     "case_id": case["id"],
@@ -1749,6 +1797,9 @@ def _run_qualification_impl(
                     "environment_overrides": overrides,
                     "runner_environment": {
                         VARIANT_ID_ENVIRONMENT_VARIABLE: variant_id,
+                        NETWORK_ISOLATION_ENVIRONMENT_VARIABLE: (
+                            network_isolation.mechanism
+                        ),
                     },
                     "case_result_path": command_result_path.relative_to(root).as_posix(),
                     "process_environment_sha256": _canonical_hash(process_environment),
@@ -2076,7 +2127,7 @@ def _run_qualification_impl(
         "results": results,
         "metrics": [],
         "artifacts": artifacts,
-        "unsupported": [],
+        "unsupported": list(capture.unsupported),
         "notes": [],
     }
     strict_errors = validate_receipt(

@@ -125,6 +125,43 @@ shell. The Metal variant requires the complete `Apple M1` device name, exactly
 eight reported GPU cores, positive physical-memory total, explicit Metal-family
 support, and `unified_memory=true`.
 
+On WSL2, the CUDA environment contains an additional closed `platform` object.
+The outer runner capture binds all of the following to the receipt:
+
+- WSL application/kernel and Windows OS versions;
+- Windows CIM GPU name, PNP identity, and display-driver version, cross-checked
+  against both `nvidia-smi` and NVML;
+- hashes and resolved paths for the WSL `libcuda`, NVML, and `nvidia-smi`
+  bridge files;
+- `/usr/local/cuda` manifest, `nvcc`, concrete `libcudart`, and independent
+  CUDA driver/runtime API calls;
+- native-ext4 mount identity plus fsync, atomic replace, case, hardlink, and
+  symlink semantics;
+- `/proc/meminfo`, cgroup v2 controller identity, and a create/write/read/remove
+  probe beneath the delegated user `app.slice`;
+- system and user-systemd state, Linux host-temperature inputs, and direct NVML
+  GPU temperature telemetry; and
+- the runner's accepted network/PID containment mechanism.
+
+The WSL2 runner always uses the util-linux namespace path even if bubblewrap is
+installed. Its tracked launcher requires Landlock, permits native toolchain
+execution, and denies WSL's root-level `/init` interpreter. Preflight must
+prove private loopback, an unreachable external route, and a real permission
+denial for `cmd.exe`; otherwise no run artifacts are created. The contained
+environment case repeats the interface, route, user-map, and Windows-interop
+checks. A caller-provided environment variable alone cannot attest containment.
+
+Capability values are exactly `available` or `unavailable`; an unavailable
+safeguard is also named in `unsupported` and is never converted into a passing
+probe. On the current laptop, NVML GPU temperature is observable, but the
+existing hard-limit guard has no readable Linux host-temperature input.
+The system systemd manager is usable, while the user manager cannot create a
+transient unit without a user D-Bus session. Qualification that requires either
+host thermal enforcement or a user transient unit must fail closed until that
+capability is installed and recaptured. Toolkit provenance is descriptive:
+recording CUDA 12.4 does not by itself establish the workload manifests'
+cudarc CUDA 12.8 API contract or any accelerator correctness.
+
 New environment receipts retain the common device fields and may additionally
 carry these closed optional fields:
 
@@ -145,14 +182,17 @@ arguments and output hash, selected class constraints, and redacted relevant
 backend environment. Sensitive variable names are hashed; ambient controls do
 not enter the closed case.
 
-Linux cases prefer bubblewrap network and PID namespaces. When bubblewrap is
-not installed, including the current WSL2 laptop, the runner uses util-linux
+Native Linux cases prefer bubblewrap network and PID namespaces. When
+bubblewrap is not installed, the runner uses util-linux
 `unshare` with a mapped private user namespace, a private mount/proc view, a
 private network namespace, and a private PID namespace whose supervisor uses
 `--kill-child=SIGKILL`. A tracked helper enables `lo` before executing the case.
+WSL2 always takes this helper path because it additionally requires Landlock
+to deny Windows-interoperability execution.
 Both routes first prove that loopback can carry traffic, that the namespace has
 no interface other than `lo`, and that an external test-net address is
-unreachable. The live containment regression also launches a signal-ignoring
+unreachable. WSL2 also proves a real Windows executable is denied. The live
+containment regression launches a signal-ignoring
 `setsid` child and proves it cannot survive either normal parent exit or a
 runner timeout. On macOS the runner first proves that its `sandbox-exec`
 profile preserves loopback while an external test-net connection is denied,

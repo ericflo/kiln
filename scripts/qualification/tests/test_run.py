@@ -335,7 +335,8 @@ class RunnerTests(unittest.TestCase):
             isolation = run_module.establish_network_isolation(Path("/tmp"))
 
         self.assertEqual(
-            isolation.mechanism, "util-linux-unshare-user-net-pid-v1"
+            isolation.mechanism,
+            "util-linux-unshare-user-net-pid-landlock-v1",
         )
         self.assertIn("--map-root-user", isolation.argv_prefix)
         self.assertIn("--kill-child=SIGKILL", isolation.argv_prefix)
@@ -344,6 +345,8 @@ class RunnerTests(unittest.TestCase):
         probe = invoked.call_args.args[0]
         self.assertIn("127.0.0.1", probe[-1])
         self.assertIn("192.0.2.1", probe[-1])
+        if "microsoft-standard-wsl2" in run_module.platform.release().lower():
+            self.assertIn("/mnt/c/Windows/System32/cmd.exe", probe[-1])
 
     def test_linux_network_isolation_fails_closed_without_complete_mechanism(
         self,
@@ -631,7 +634,10 @@ class RunnerTests(unittest.TestCase):
         run_config = json.loads((repository.root / config_artifact["path"]).read_text())
         self.assertEqual(
             run_config["cases"][0]["runner_environment"],
-            {"KILN_QUALIFICATION_VARIANT_ID": "rocm"},
+            {
+                "KILN_QUALIFICATION_NETWORK_ISOLATION": "unit-test-no-network",
+                "KILN_QUALIFICATION_VARIANT_ID": "rocm",
+            },
         )
         self.assert_valid(outcome, repository.root)
 

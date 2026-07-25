@@ -145,7 +145,56 @@
           }
         },
         "runtime": { "$ref": "#/$defs/nonemptyStringMap" },
-        "compiler": { "$ref": "#/$defs/nonemptyStringMap" }
+        "compiler": { "$ref": "#/$defs/nonemptyStringMap" },
+        "platform": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "capabilities", "details"],
+          "properties": {
+            "kind": { "const": "wsl2" },
+            "capabilities": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "wsl_identity",
+                "windows_identity",
+                "driver_identity",
+                "cuda_driver_bridge",
+                "cuda_toolkit",
+                "cuda_runtime",
+                "nvml",
+                "filesystem_semantics",
+                "network_containment",
+                "process_containment",
+                "systemd_system",
+                "systemd_user_transient",
+                "cgroup_memory_delegation",
+                "memory_accounting",
+                "host_thermal_guard",
+                "gpu_temperature"
+              ],
+              "properties": {
+                "wsl_identity": { "$ref": "#/$defs/capabilityStatus" },
+                "windows_identity": { "$ref": "#/$defs/capabilityStatus" },
+                "driver_identity": { "$ref": "#/$defs/capabilityStatus" },
+                "cuda_driver_bridge": { "$ref": "#/$defs/capabilityStatus" },
+                "cuda_toolkit": { "$ref": "#/$defs/capabilityStatus" },
+                "cuda_runtime": { "$ref": "#/$defs/capabilityStatus" },
+                "nvml": { "$ref": "#/$defs/capabilityStatus" },
+                "filesystem_semantics": { "$ref": "#/$defs/capabilityStatus" },
+                "network_containment": { "$ref": "#/$defs/capabilityStatus" },
+                "process_containment": { "$ref": "#/$defs/capabilityStatus" },
+                "systemd_system": { "$ref": "#/$defs/capabilityStatus" },
+                "systemd_user_transient": { "$ref": "#/$defs/capabilityStatus" },
+                "cgroup_memory_delegation": { "$ref": "#/$defs/capabilityStatus" },
+                "memory_accounting": { "$ref": "#/$defs/capabilityStatus" },
+                "host_thermal_guard": { "$ref": "#/$defs/capabilityStatus" },
+                "gpu_temperature": { "$ref": "#/$defs/capabilityStatus" }
+              }
+            },
+            "details": { "$ref": "#/$defs/nonemptyStringMap" }
+          }
+        }
       }
     },
     "model": {
@@ -224,6 +273,9 @@
     }
   ],
   "$defs": {
+    "capabilityStatus": {
+      "enum": ["available", "unavailable"]
+    },
     "configValue": {
       "oneOf": [
         { "type": ["string", "number", "boolean", "null"] },

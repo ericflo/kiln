@@ -86,6 +86,24 @@ class ReceiptTests(unittest.TestCase):
     def test_valid_environment_receipt(self) -> None:
         self.assertEqual(receipt_module.validate_receipt(valid_receipt()), [])
 
+    def test_wsl2_platform_capabilities_are_closed_and_typed(self) -> None:
+        value = valid_receipt()
+        value["environment"]["platform"] = {
+            "kind": "wsl2",
+            "capabilities": {
+                key: "available" for key in receipt_module.WSL2_CAPABILITY_KEYS
+            },
+            "details": {"wsl_identity": "WSL 2.5.9.0"},
+        }
+        self.assertEqual(receipt_module.validate_receipt(value), [])
+        value["environment"]["platform"]["capabilities"][
+            "host_thermal_guard"
+        ] = "skipped"
+        value["environment"]["platform"]["capabilities"]["surprise"] = "available"
+        errors = receipt_module.validate_receipt(value)
+        self.assertTrue(any("host_thermal_guard" in error for error in errors))
+        self.assertTrue(any("unknown keys: surprise" in error for error in errors))
+
     def test_optional_device_capability_fields_are_typed_and_bounded(self) -> None:
         value = valid_receipt()
         value["environment"]["device"].update(
@@ -313,7 +331,6 @@ class ReceiptTests(unittest.TestCase):
         object_contracts = [
             (schema["properties"]["source"], receipt_module.SOURCE_KEYS),
             (schema["properties"]["qualification"], receipt_module.QUALIFICATION_KEYS),
-            (schema["properties"]["environment"], receipt_module.ENVIRONMENT_KEYS),
             (schema["properties"]["environment"]["properties"]["os"], receipt_module.OS_KEYS),
             (schema["$defs"]["model"], receipt_module.MODEL_KEYS),
             (schema["$defs"]["weightFile"], receipt_module.WEIGHT_KEYS),
@@ -327,6 +344,41 @@ class ReceiptTests(unittest.TestCase):
                 self.assertFalse(contract["additionalProperties"])
                 self.assertEqual(set(contract["required"]), expected_keys)
                 self.assertEqual(set(contract["properties"]), expected_keys)
+
+        environment_contract = schema["properties"]["environment"]
+        self.assertFalse(environment_contract["additionalProperties"])
+        self.assertEqual(
+            set(environment_contract["required"]),
+            receipt_module.ENVIRONMENT_REQUIRED_KEYS,
+        )
+        self.assertEqual(
+            set(environment_contract["properties"]),
+            receipt_module.ENVIRONMENT_KEYS,
+        )
+        platform_contract = environment_contract["properties"]["platform"]
+        self.assertFalse(platform_contract["additionalProperties"])
+        self.assertEqual(
+            set(platform_contract["required"]),
+            receipt_module.PLATFORM_KEYS,
+        )
+        self.assertEqual(
+            set(platform_contract["properties"]),
+            receipt_module.PLATFORM_KEYS,
+        )
+        capability_contract = platform_contract["properties"]["capabilities"]
+        self.assertFalse(capability_contract["additionalProperties"])
+        self.assertEqual(
+            set(capability_contract["required"]),
+            receipt_module.WSL2_CAPABILITY_KEYS,
+        )
+        self.assertEqual(
+            set(capability_contract["properties"]),
+            receipt_module.WSL2_CAPABILITY_KEYS,
+        )
+        self.assertEqual(
+            set(schema["$defs"]["capabilityStatus"]["enum"]),
+            receipt_module.CAPABILITY_STATUSES,
+        )
 
         device_contract = schema["properties"]["environment"]["properties"]["device"]
         self.assertFalse(device_contract["additionalProperties"])
