@@ -91,7 +91,7 @@ ADMISSION_RECEIPT = (
     "cuda-memory-lifecycle-v1-61a2e68c95-v1.json"
 )
 SERVER_CONFIG_SHA256 = (
-    "sha256:15b23cf0edf997bb24c0ab1ba7ec3cb82a36bf0a1be91cdc9cdc786c84961f9f"
+    "sha256:a55467d566cde26021b9fcd49ba960f522dad1d01c26f53c9e8d2e342fa3e915"
 )
 SERVER_LAUNCH_SHA256 = (
     "sha256:62c237b2cc5209ff834d2aac655d196af128aa7990556cb45cbf287ad4f60889"
@@ -180,6 +180,7 @@ EFFECTIVE_CONFIG: dict[str, Any] = {
     "server": {
         "config_sha256": SERVER_CONFIG_SHA256,
         "floor_gib": 1.0,
+        "http_send_buffer_bytes": 212992,
         "inference_memory_fraction": 0.1,
         "launch_sha256": SERVER_LAUNCH_SHA256,
         "serving_profile": "stable",
@@ -362,6 +363,9 @@ def validate_server_config_contract(config: dict[str, dict[str, Any]]) -> None:
         ("server", "serving_profile"): "stable",
         ("server", "host"): "127.0.0.1",
         ("server", "port"): 8420,
+        ("server", "http_send_buffer_bytes"): EFFECTIVE_CONFIG["server"][
+            "http_send_buffer_bytes"
+        ],
         ("model", "model_id"): MODEL_SOURCE_ID,
         ("model", "served_model_id"): MODEL_ID,
         ("model", "checkpoint_read_mib_per_second"): 256,

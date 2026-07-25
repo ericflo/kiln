@@ -105,6 +105,7 @@ class ServeCudaLowMemoryTests(unittest.TestCase):
             low_memory.SERVER_CONFIG.read_text()
         )
         self.assertEqual(parsed["server"]["port"], 8420)
+        self.assertEqual(parsed["server"]["http_send_buffer_bytes"], 212992)
         self.assertEqual(parsed["memory"]["floor_gb"], 1.0)
         self.assertEqual(parsed["memory"]["inference_memory_fraction"], 0.1)
         with self.assertRaisesRegex(
@@ -126,6 +127,16 @@ class ServeCudaLowMemoryTests(unittest.TestCase):
         with self.assertRaisesRegex(
             low_memory.mixed.QualificationError,
             "inference_memory_fraction",
+        ):
+            low_memory.validate_server_config_contract(parsed)
+
+        parsed = low_memory.parse_closed_toml(
+            low_memory.SERVER_CONFIG.read_text()
+        )
+        parsed["server"]["http_send_buffer_bytes"] = 1048576
+        with self.assertRaisesRegex(
+            low_memory.mixed.QualificationError,
+            "http_send_buffer_bytes",
         ):
             low_memory.validate_server_config_contract(parsed)
 

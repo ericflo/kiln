@@ -832,18 +832,31 @@ class ServingBenchmarkTests(unittest.TestCase):
         desktop = self._parse_server_config(config_root / f"{desktop_name}.toml")
 
         for name, config, expected in (
-            (laptop_name, laptop, (15.0, 1.0, 0.1, 4_096, 512, 16)),
-            (desktop_name, desktop, (23.0, 2.0, 0.7, 8_192, 1_024, 32)),
+            (
+                laptop_name,
+                laptop,
+                (15.0, 1.0, 0.1, 212_992, 4_096, 512, 16),
+            ),
+            (
+                desktop_name,
+                desktop,
+                (23.0, 2.0, 0.7, 1_048_576, 8_192, 1_024, 32),
+            ),
         ):
             (
                 gpu_gib,
                 floor_gib,
                 inference_fraction,
+                http_send_buffer_bytes,
                 batch_tokens,
                 prefill_tokens,
                 decode_batch,
             ) = expected
             self.assertEqual(config["server"]["serving_profile"], "stable")
+            self.assertEqual(
+                config["server"]["http_send_buffer_bytes"],
+                http_send_buffer_bytes,
+            )
             self.assertEqual(config["server"]["max_batch_tokens"], batch_tokens)
             self.assertEqual(
                 config["server"]["max_prefill_tokens_per_cycle"], prefill_tokens
@@ -893,6 +906,7 @@ class ServingBenchmarkTests(unittest.TestCase):
         laptop["memory"]["gpu_memory_gb"] = 23.0
         laptop["memory"]["floor_gb"] = 2.0
         laptop["memory"]["inference_memory_fraction"] = 0.7
+        laptop["server"]["http_send_buffer_bytes"] = 1_048_576
         self.assertEqual(laptop, desktop)
 
     def test_cuda_vllm_bootstrap_launch_uses_reviewed_immutable_options(self) -> None:

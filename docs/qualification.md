@@ -839,6 +839,32 @@ A direct executable regression passes the checked-in TOML through that
 validation function and proves that restoring 0.7 is rejected. This preflight
 failure contains no build, model, KV, peer, request, or recovery evidence.
 
+The next exact pushed-source run, receipt
+`20260725t143631678533z-cuda-rtx4090-laptop-serving-cuda-low-memory--647fb2a614-v1`,
+proved the cache and KV repair and then failed closed at the HTTP listener
+preflight. The source cache released both verified shards, CUDA reported
+2,231,185,408 allocator bytes free, and the server allocated 58 BF16 KV blocks,
+121,634,816 bytes, on its first attempt. Before readiness, Linux returned a
+425,984-byte raw `SO_SNDBUF`, or 212,992 effective bytes, for the configured
+1,048,576-byte request. The server rejected the clamp and removed its private
+snapshot before exit. The strict current-source/local-artifact/known-commit
+receipt has file
+`sha256:99b910665cbfede4a955c5fd2da82beb99986d5c93df867595e27217db94b724`.
+Its scope peaked at the exact 10,737,418,240-byte host limit, recorded 7,715
+limit events and zero OOM events, removed cleanly, and completed thermal
+handoff after 91.05/67 C host/GPU peaks. No readiness, baseline request,
+pressure peer, pressure request, or recovery request ran.
+
+The laptop config now requests the host's attested 212,992-byte effective send
+buffer without disabling the listener preflight. That value and config hash
+`sha256:a55467d566cde26021b9fcd49ba960f522dad1d01c26f53c9e8d2e342fa3e915`
+are part of the driver's effective contract and must exactly match the workload
+manifest. A direct regression rejects restoration of the incompatible 1 MiB
+request, while the desktop bootstrap retains its separate 1 MiB contract. The
+revised low-memory workload is
+`sha256:a0cec58ef62ac01a7210cc2001e9302581fbb4ada0bff7e91f8e2e8b4be057ac`.
+Only a clean pushed-source rerun may close the low-memory gate.
+
 ### CUDA Serving Bootstrap Handoff
 
 After the environment, core-correctness, and memory-lifecycle receipts pass and

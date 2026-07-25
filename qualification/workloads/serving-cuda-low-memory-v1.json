@@ -71,8 +71,9 @@
           "timeout_seconds": 300
         },
         "server": {
-          "config_sha256": "sha256:15b23cf0edf997bb24c0ab1ba7ec3cb82a36bf0a1be91cdc9cdc786c84961f9f",
+          "config_sha256": "sha256:a55467d566cde26021b9fcd49ba960f522dad1d01c26f53c9e8d2e342fa3e915",
           "floor_gib": 1.0,
+          "http_send_buffer_bytes": 212992,
           "inference_memory_fraction": 0.1,
           "launch_sha256": "sha256:62c237b2cc5209ff834d2aac655d196af128aa7990556cb45cbf287ad4f60889",
           "serving_profile": "stable"
