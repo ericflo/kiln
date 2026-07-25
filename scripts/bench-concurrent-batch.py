@@ -141,7 +141,9 @@ from strict_json import loads as strict_json_loads  # noqa: E402
 
 HOST_THERMAL_POLICY_SCHEMA = thermal_policy_file.SCHEMA
 WSL2_THERMAL_POLICY_SCHEMA = wsl_thermal_exec.SCHEMA
+WSL2_THERMAL_POLICY_SCHEMAS = wsl_thermal_exec.SCHEMAS
 WSL2_THERMAL_POLICY_ENV = wsl_thermal_exec.POLICY_ENV
+WSL2_THERMAL_PACING_POLICY_ENV = wsl_thermal_exec.PACING_POLICY_ENV
 WSL2_SCOPE_BOUNDARY_ENV = "KILN_WSL2_SCOPE_BOUNDARY"
 WSL2_SCOPE_MEMORY_MAX_ENV = "KILN_WSL2_SCOPE_MEMORY_MAX_BYTES"
 WSL2_SCOPE_PIDS_MAX_ENV = "KILN_WSL2_SCOPE_PIDS_MAX"
@@ -867,6 +869,15 @@ def load_external_wsl2_boundary(
     if os.environ.get(WSL2_THERMAL_POLICY_ENV) != policy.content_sha256:
         raise BenchmarkError(
             "external WSL2 thermal policy does not match the outer supervisor binding"
+        )
+    pacing_binding = os.environ.get(WSL2_THERMAL_PACING_POLICY_ENV)
+    if policy.pacing is not None and pacing_binding != policy.content_sha256:
+        raise BenchmarkError(
+            "external WSL2 pacing policy does not match the scope-controller binding"
+        )
+    if policy.pacing is None and pacing_binding is not None:
+        raise BenchmarkError(
+            "external WSL2 pacing binding is set for a policy without pacing"
         )
     expected_environment = {
         WSL2_SCOPE_BOUNDARY_ENV: WSL2_SCOPE_BOUNDARY,
@@ -1668,7 +1679,7 @@ def validate_run_host_thermal(
     if (
         driver_version in EXTERNAL_WSL2_THERMAL_DRIVER_VERSIONS
         and policy_record is not None
-        and policy_record.get("schema") == WSL2_THERMAL_POLICY_SCHEMA
+        and policy_record.get("schema") in WSL2_THERMAL_POLICY_SCHEMAS
     ):
         _exact_keys(evidence, RUN_EXTERNAL_WSL2_THERMAL_KEYS, label)
         if evidence["phase"] != phase:
@@ -3694,7 +3705,7 @@ def validate_server_lifecycle(
             )
         if (
             driver_version in EXTERNAL_WSL2_THERMAL_DRIVER_VERSIONS
-            and host_thermal_policy.get("schema") == WSL2_THERMAL_POLICY_SCHEMA
+            and host_thermal_policy.get("schema") in WSL2_THERMAL_POLICY_SCHEMAS
         ):
             if lifecycle["prelaunch_cooldown"] is not None:
                 raise BenchmarkError(

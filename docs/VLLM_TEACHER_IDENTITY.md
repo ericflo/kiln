@@ -574,8 +574,15 @@ independently and rejects an omitted policy automatically, uncommitted policy
 or helper bytes, and missing, tripped, or incomplete thermal evidence. Every
 pass also runs within a separate 10 GiB/zero-swap/512-PID systemd user scope,
 50-percent aggregate CPU feedback control, private network/PID/mount namespace,
-and Landlock-denied WSL interop. Publication requires strict ordered scope
-events, zero memory-limit/OOM events, bounded CPU accounting, and scope removal.
+and Landlock-denied WSL interop. The required v2 policy freezes that complete
+scope at 80/75 C host/GPU and resumes only after three samples at or below
+75/70 C; each pause must complete within 300 seconds. The outer supervisor is
+the sole Windows/NVML probe owner and streams strict sequenced samples to the
+scope controller over an inherited pipe that is closed before the contained
+payload starts. Publication requires strict ordered scope events, a matching
+inactive pacing lifecycle with sub-limit peaks, zero memory-limit/OOM events,
+bounded CPU accounting, and scope removal. The outer 95/85 C trip guard remains
+independently active.
 The accelerator identity must match the environment receipt's 4090 class,
 `sm_89`, capacity, and selected logical device. The benchmark then binds the
 manifest as `--runtime-artifact`, the environment receipt's stable GPU UUID as

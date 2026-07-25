@@ -76,10 +76,14 @@ def valid_host_thermal_policy() -> dict:
     }
 
 
-def valid_wsl2_thermal_policy() -> dict:
+def valid_wsl2_thermal_policy(*, pacing: bool = False) -> dict:
     policy = {
-        "schema": bench.WSL2_THERMAL_POLICY_SCHEMA,
-        "id": "test-wsl2-policy-v1",
+        "schema": (
+            bench.wsl_thermal_exec.SCHEMA_V2
+            if pacing
+            else bench.WSL2_THERMAL_POLICY_SCHEMA
+        ),
+        "id": "test-wsl2-policy-v2" if pacing else "test-wsl2-policy-v1",
         "content_sha256": "",
         "host": {
             "cpu_name": "Test CPU",
@@ -100,6 +104,16 @@ def valid_wsl2_thermal_policy() -> dict:
             "timeout_seconds": 5,
         },
     }
+    if pacing:
+        policy["pacing"] = {
+            "mode": "cgroup_freeze",
+            "host_start_millicelsius": 80_000,
+            "host_resume_millicelsius": 72_000,
+            "gpu_start_millicelsius": 75_000,
+            "gpu_resume_millicelsius": 70_000,
+            "resume_stable_samples": 2,
+            "timeout_seconds": 5,
+        }
     hashed = dict(policy)
     hashed.pop("content_sha256")
     payload = json.dumps(
@@ -2548,7 +2562,7 @@ class ServingBenchmarkTests(unittest.TestCase):
                 )
 
     def test_external_wsl2_boundary_revalidates_the_live_runner(self) -> None:
-        policy = valid_wsl2_thermal_policy()
+        policy = valid_wsl2_thermal_policy(pacing=True)
         unit = "kiln-wsl-scope-" + "c" * 32
         host_uid = 1000
         cgroup = Path(
@@ -2563,6 +2577,7 @@ class ServingBenchmarkTests(unittest.TestCase):
         }
         environment = {
             bench.WSL2_THERMAL_POLICY_ENV: policy["content_sha256"],
+            bench.WSL2_THERMAL_PACING_POLICY_ENV: policy["content_sha256"],
             bench.WSL2_SCOPE_BOUNDARY_ENV: bench.WSL2_SCOPE_BOUNDARY,
             bench.WSL2_SCOPE_MEMORY_MAX_ENV: str(
                 bench.WSL2_SCOPE_MEMORY_MAX_BYTES

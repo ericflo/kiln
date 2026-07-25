@@ -364,6 +364,42 @@ class RunnerTests(unittest.TestCase):
             ):
                 run_module.establish_network_isolation(Path("/tmp"))
 
+    def test_wsl_supervision_forwards_the_same_v2_policy_to_scope_pacing(
+        self,
+    ) -> None:
+        policy_path = (
+            QUALIFICATION_DIR.parents[1]
+            / "qualification/host-policies/"
+            "rtx4090-laptop-wsl2-cgroup-pacing-v2.json"
+        )
+        policy = run_module.wsl_thermal_exec.load_policy(policy_path)
+        command = run_module._wsl_supervised_argv(
+            ["/usr/bin/unshare", "--", "/bin/true"],
+            policy_path,
+            policy,
+            30.0,
+        )
+        self.assertEqual(command[1], str(run_module.WSL_THERMAL_EXEC))
+        pacing_index = command.index("--thermal-pacing-policy")
+        self.assertEqual(command[pacing_index + 1], str(policy_path))
+        self.assertEqual(command.count(str(policy_path)), 2)
+
+        v1_path = (
+            QUALIFICATION_DIR.parents[1]
+            / "qualification/host-policies/"
+            "rtx4090-laptop-wsl2-boundary-v1.json"
+        )
+        with self.assertRaisesRegex(
+            run_module.QualificationRunError,
+            "requires a v2",
+        ):
+            run_module._wsl_supervised_argv(
+                ["/bin/true"],
+                v1_path,
+                run_module.wsl_thermal_exec.load_policy(v1_path),
+                30.0,
+            )
+
     def test_inherited_auth_payloads_are_hashed_before_local_capture(self) -> None:
         captured = run_module._redacted_environment(
             {

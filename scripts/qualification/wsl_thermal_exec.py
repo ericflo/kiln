@@ -19,8 +19,14 @@ from pathlib import Path
 from typing import Any, Sequence
 
 
-SCHEMA = "kiln.wsl2-thermal-policy.v1"
+SCHEMA_V1 = "kiln.wsl2-thermal-policy.v1"
+SCHEMA_V2 = "kiln.wsl2-thermal-policy.v2"
+SCHEMA = SCHEMA_V1
+SCHEMAS = frozenset({SCHEMA_V1, SCHEMA_V2})
 POLICY_ENV = "KILN_WSL2_THERMAL_POLICY_SHA256"
+PACING_POLICY_ENV = "KILN_WSL2_CGROUP_THERMAL_PACING_POLICY_SHA256"
+TELEMETRY_FD_ENV = "KILN_WSL2_THERMAL_TELEMETRY_FD"
+TELEMETRY_SCHEMA = "kiln.wsl2-thermal-sample.v1"
 POWERSHELL = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
 NVIDIA_SMI = Path("/usr/lib/wsl/lib/nvidia-smi")
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -33,6 +39,7 @@ POLICY_KEYS = {
     "poll_interval_ms",
     "safe_handoff",
 }
+POLICY_V2_KEYS = POLICY_KEYS | {"pacing"}
 HOST_KEYS = {
     "cpu_name",
     "thermal_zone_name",
@@ -46,6 +53,15 @@ HANDOFF_KEYS = {
     "stable_samples",
     "timeout_seconds",
 }
+PACING_KEYS = {
+    "mode",
+    "host_start_millicelsius",
+    "host_resume_millicelsius",
+    "gpu_start_millicelsius",
+    "gpu_resume_millicelsius",
+    "resume_stable_samples",
+    "timeout_seconds",
+}
 
 
 class ThermalGuardError(RuntimeError):
@@ -53,7 +69,19 @@ class ThermalGuardError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class ThermalPacingPolicy:
+    mode: str
+    host_start_millicelsius: int
+    host_resume_millicelsius: int
+    gpu_start_millicelsius: int
+    gpu_resume_millicelsius: int
+    resume_stable_samples: int
+    timeout_seconds: float
+
+
+@dataclass(frozen=True)
 class ThermalPolicy:
+    schema: str
     policy_id: str
     content_sha256: str
     cpu_name: str
@@ -68,6 +96,7 @@ class ThermalPolicy:
     handoff_gpu_millicelsius: int
     handoff_stable_samples: int
     handoff_timeout_seconds: float
+    pacing: ThermalPacingPolicy | None
 
 
 @dataclass(frozen=True)
@@ -146,9 +175,19 @@ def _canonical_policy_hash(raw: dict[str, Any]) -> str:
 
 
 def validate_policy(raw: Any) -> ThermalPolicy:
-    root = _exact_object(raw, POLICY_KEYS, "WSL2 thermal policy")
-    if root["schema"] != SCHEMA:
-        raise ThermalGuardError(f"WSL2 thermal policy schema must be {SCHEMA!r}")
+    if not isinstance(raw, dict):
+        raise ThermalGuardError("WSL2 thermal policy must be an object")
+    schema = raw.get("schema")
+    if schema not in SCHEMAS:
+        raise ThermalGuardError(
+            "WSL2 thermal policy schema must be one of "
+            + ", ".join(repr(value) for value in sorted(SCHEMAS))
+        )
+    root = _exact_object(
+        raw,
+        POLICY_KEYS if schema == SCHEMA_V1 else POLICY_V2_KEYS,
+        "WSL2 thermal policy",
+    )
     policy_id = _string(root["id"], "policy id")
     content_sha256 = _string(root["content_sha256"], "policy content_sha256")
     if not SHA256_RE.fullmatch(content_sha256):
@@ -196,7 +235,68 @@ def validate_policy(raw: Any) -> ThermalPolicy:
     )
     if host_target >= host_limit or gpu_target >= gpu_limit:
         raise ThermalGuardError("safe-handoff targets must be below their hard limits")
+    pacing: ThermalPacingPolicy | None = None
+    if schema == SCHEMA_V2:
+        pacing_value = _exact_object(root["pacing"], PACING_KEYS, "policy pacing")
+        if pacing_value["mode"] != "cgroup_freeze":
+            raise ThermalGuardError("policy pacing mode must be 'cgroup_freeze'")
+        host_start = _integer(
+            pacing_value["host_start_millicelsius"],
+            "pacing host start",
+            1,
+            200_000,
+        )
+        host_resume = _integer(
+            pacing_value["host_resume_millicelsius"],
+            "pacing host resume",
+            1,
+            200_000,
+        )
+        gpu_start = _integer(
+            pacing_value["gpu_start_millicelsius"],
+            "pacing GPU start",
+            1,
+            200_000,
+        )
+        gpu_resume = _integer(
+            pacing_value["gpu_resume_millicelsius"],
+            "pacing GPU resume",
+            1,
+            200_000,
+        )
+        if not host_resume < host_start < host_limit:
+            raise ThermalGuardError(
+                "pacing host resume must be below start, and start below the hard limit"
+            )
+        if not gpu_resume < gpu_start < gpu_limit:
+            raise ThermalGuardError(
+                "pacing GPU resume must be below start, and start below the hard limit"
+            )
+        if host_resume > host_target or gpu_resume > gpu_target:
+            raise ThermalGuardError(
+                "pacing resume targets must not exceed safe-handoff targets"
+            )
+        pacing = ThermalPacingPolicy(
+            mode="cgroup_freeze",
+            host_start_millicelsius=host_start,
+            host_resume_millicelsius=host_resume,
+            gpu_start_millicelsius=gpu_start,
+            gpu_resume_millicelsius=gpu_resume,
+            resume_stable_samples=_integer(
+                pacing_value["resume_stable_samples"],
+                "pacing resume_stable_samples",
+                1,
+                10_000,
+            ),
+            timeout_seconds=_number(
+                pacing_value["timeout_seconds"],
+                "pacing timeout_seconds",
+                1.0,
+                3600.0,
+            ),
+        )
     return ThermalPolicy(
+        schema=schema,
         policy_id=policy_id,
         content_sha256=content_sha256,
         cpu_name=_string(host["cpu_name"], "host cpu_name"),
@@ -226,6 +326,7 @@ def validate_policy(raw: Any) -> ThermalPolicy:
             1.0,
             3600.0,
         ),
+        pacing=pacing,
     )
 
 
@@ -406,6 +507,41 @@ def _emit(event: str, policy: ThermalPolicy, **fields: Any) -> None:
     )
 
 
+def _send_telemetry_sample(
+    descriptor: int,
+    policy: ThermalPolicy,
+    sequence: int,
+    value: ThermalSample,
+) -> None:
+    payload = (
+        json.dumps(
+            {
+                "schema": TELEMETRY_SCHEMA,
+                "policy_sha256": policy.content_sha256,
+                "sequence": sequence,
+                "monotonic_seconds": value.monotonic_seconds,
+                "host_millicelsius": value.host_millicelsius,
+                "gpu_millicelsius": value.gpu_millicelsius,
+            },
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("ascii")
+    try:
+        written = os.write(descriptor, payload)
+    except (BlockingIOError, BrokenPipeError, OSError) as exc:
+        raise ThermalGuardError(
+            f"cannot deliver thermal telemetry to the scope controller: {exc}"
+        ) from exc
+    if written != len(payload):
+        raise ThermalGuardError(
+            "thermal telemetry pipe accepted only a partial sample"
+        )
+
+
 def _check_limits(value: ThermalSample, policy: ThermalPolicy) -> None:
     if value.host_millicelsius >= policy.host_limit_millicelsius:
         raise ThermalGuardError(
@@ -475,9 +611,65 @@ def _safe_handoff(
         current = None
 
 
+def _validate_pacing_scope_command(
+    policy: ThermalPolicy,
+    command: Sequence[str],
+) -> None:
+    if policy.pacing is None:
+        return
+    trusted_scope = Path(__file__).with_name("wsl_scope_exec.py")
+    if (
+        len(command) < 5
+        or command[0] != sys.executable
+        or Path(command[1]).is_symlink()
+    ):
+        raise ThermalGuardError(
+            "a pacing policy requires the trusted WSL2 scope supervisor"
+        )
+    try:
+        scope_matches = Path(command[1]).samefile(trusted_scope)
+    except OSError as exc:
+        raise ThermalGuardError(
+            f"cannot verify the WSL2 scope supervisor: {exc}"
+        ) from exc
+    if not scope_matches:
+        raise ThermalGuardError(
+            "a pacing policy requires the trusted WSL2 scope supervisor"
+        )
+    try:
+        scope_boundary = command.index("--", 2)
+    except ValueError as exc:
+        raise ThermalGuardError(
+            "the WSL2 scope supervisor command has no argument boundary"
+        ) from exc
+    positions = [
+        index
+        for index, value in enumerate(command[2:scope_boundary], start=2)
+        if value == "--thermal-pacing-policy"
+    ]
+    if len(positions) != 1 or positions[0] + 1 >= scope_boundary:
+        raise ThermalGuardError(
+            "the WSL2 scope supervisor must receive exactly one thermal pacing policy"
+        )
+    pacing_path = Path(command[positions[0] + 1])
+    if pacing_path.is_symlink() or not pacing_path.is_file():
+        raise ThermalGuardError(
+            "the WSL2 scope thermal pacing policy must be a regular non-symlink file"
+        )
+    pacing_policy = load_policy(pacing_path)
+    if (
+        pacing_policy.pacing is None
+        or pacing_policy.content_sha256 != policy.content_sha256
+    ):
+        raise ThermalGuardError(
+            "the WSL2 scope thermal pacing policy does not match the outer policy"
+        )
+
+
 def supervise(policy: ThermalPolicy, command: Sequence[str]) -> int:
     if not command:
         raise ThermalGuardError("a supervised command is required")
+    _validate_pacing_scope_command(policy, command)
     verify_host_identity(policy)
     starting = sample(policy)
     _check_limits(starting, policy)
@@ -491,10 +683,44 @@ def supervise(policy: ThermalPolicy, command: Sequence[str]) -> int:
     )
     child_environment = dict(os.environ)
     child_environment[POLICY_ENV] = policy.content_sha256
+    telemetry_read_fd: int | None = None
+    telemetry_write_fd: int | None = None
+    if policy.pacing is not None:
+        child_environment[PACING_POLICY_ENV] = policy.content_sha256
+        telemetry_read_fd, telemetry_write_fd = os.pipe2(os.O_CLOEXEC)
+        os.set_blocking(telemetry_write_fd, False)
+        child_environment[TELEMETRY_FD_ENV] = str(telemetry_read_fd)
     try:
-        process = subprocess.Popen(list(command), env=child_environment)
+        process = subprocess.Popen(
+            list(command),
+            env=child_environment,
+            pass_fds=(
+                ()
+                if telemetry_read_fd is None
+                else (telemetry_read_fd,)
+            ),
+        )
     except OSError as exc:
+        if telemetry_read_fd is not None:
+            os.close(telemetry_read_fd)
+        if telemetry_write_fd is not None:
+            os.close(telemetry_write_fd)
         raise ThermalGuardError(f"cannot launch supervised command: {exc}") from exc
+    if telemetry_read_fd is not None:
+        os.close(telemetry_read_fd)
+    telemetry_sequence = 0
+    if telemetry_write_fd is not None:
+        try:
+            _send_telemetry_sample(
+                telemetry_write_fd,
+                policy,
+                telemetry_sequence,
+                starting,
+            )
+        except ThermalGuardError:
+            _terminate(process)
+            os.close(telemetry_write_fd)
+            raise
 
     interrupted_signal: int | None = None
 
@@ -528,6 +754,19 @@ def supervise(policy: ThermalPolicy, command: Sequence[str]) -> int:
             except ThermalGuardError as exc:
                 failure = exc
                 break
+            telemetry_sequence += 1
+            if telemetry_write_fd is not None:
+                try:
+                    _send_telemetry_sample(
+                        telemetry_write_fd,
+                        policy,
+                        telemetry_sequence,
+                        current,
+                    )
+                except ThermalGuardError as exc:
+                    if process.poll() is None:
+                        failure = exc
+                    break
         if failure is not None:
             _emit("trip", policy, reason=str(failure))
             _terminate(process)
@@ -543,6 +782,8 @@ def supervise(policy: ThermalPolicy, command: Sequence[str]) -> int:
     finally:
         for signum, handler in old_handlers.items():
             signal.signal(signum, handler)
+        if telemetry_write_fd is not None:
+            os.close(telemetry_write_fd)
 
     samples += handoff.sample_count
     peak_host = max(peak_host, handoff.peak_host_millicelsius)

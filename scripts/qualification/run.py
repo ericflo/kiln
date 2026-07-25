@@ -379,6 +379,44 @@ def _committed_wsl_thermal_policy(
     return resolved, parsed
 
 
+def _wsl_supervised_argv(
+    contained_argv: list[str],
+    policy_path: Path,
+    policy: wsl_thermal_exec.ThermalPolicy,
+    runtime_max_seconds: float,
+) -> list[str]:
+    if policy.pacing is None:
+        raise QualificationRunError(
+            "WSL2 CUDA qualification requires a v2 cgroup thermal pacing policy"
+        )
+    scoped_argv = [
+        sys.executable,
+        str(WSL_SCOPE_EXEC),
+        "--memory-max-bytes",
+        str(WSL_SCOPE_MEMORY_MAX_BYTES),
+        "--pids-max",
+        str(WSL_SCOPE_PIDS_MAX),
+        "--cpu-quota-percent",
+        str(WSL_SCOPE_CPU_QUOTA_PERCENT),
+        "--cpu-poll-interval-ms",
+        str(WSL_SCOPE_CPU_POLL_INTERVAL_MS),
+        "--runtime-max-seconds",
+        str(runtime_max_seconds),
+        "--thermal-pacing-policy",
+        str(policy_path),
+        "--",
+        *contained_argv,
+    ]
+    return [
+        sys.executable,
+        str(WSL_THERMAL_EXEC),
+        "--policy",
+        str(policy_path),
+        "--",
+        *scoped_argv,
+    ]
+
+
 def _parse_variable_value(raw: str, definition: dict[str, Any]) -> Any:
     variable_type = definition["type"]
     name = definition["name"]
@@ -1715,6 +1753,10 @@ def _run_qualification_impl(
         wsl_thermal_policy_path, wsl_thermal_policy_value = (
             _committed_wsl_thermal_policy(root, wsl2_thermal_policy)
         )
+        if wsl_thermal_policy_value.pacing is None:
+            raise QualificationRunError(
+                "WSL2 CUDA qualification requires a v2 cgroup thermal pacing policy"
+            )
 
     try:
         preflight_tree_hash, _ = source_tree_hash(root)
@@ -1854,30 +1896,16 @@ def _run_qualification_impl(
             if wsl_thermal_policy_path is None:
                 executed_argv = contained_argv
             else:
-                scoped_argv = [
-                    sys.executable,
-                    str(WSL_SCOPE_EXEC),
-                    "--memory-max-bytes",
-                    str(WSL_SCOPE_MEMORY_MAX_BYTES),
-                    "--pids-max",
-                    str(WSL_SCOPE_PIDS_MAX),
-                    "--cpu-quota-percent",
-                    str(WSL_SCOPE_CPU_QUOTA_PERCENT),
-                    "--cpu-poll-interval-ms",
-                    str(WSL_SCOPE_CPU_POLL_INTERVAL_MS),
-                    "--runtime-max-seconds",
-                    str(case["timeout_seconds"]),
-                    "--",
-                    *contained_argv,
-                ]
-                executed_argv = [
-                    sys.executable,
-                    str(WSL_THERMAL_EXEC),
-                    "--policy",
-                    str(wsl_thermal_policy_path),
-                    "--",
-                    *scoped_argv,
-                ]
+                if wsl_thermal_policy_value is None:
+                    raise QualificationRunError(
+                        "WSL2 thermal policy was not retained after validation"
+                    )
+                executed_argv = _wsl_supervised_argv(
+                    contained_argv,
+                    wsl_thermal_policy_path,
+                    wsl_thermal_policy_value,
+                    case["timeout_seconds"],
+                )
             working_directory = _within_root(root / case["working_directory"], root)
             if not working_directory.is_dir():
                 raise QualificationRunError(
@@ -2419,8 +2447,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--wsl2-thermal-policy",
         type=Path,
         help=(
-            "committed WSL2 host/GPU hard-limit policy; required for contained "
-            "WSL2 CUDA qualification"
+            "committed WSL2 host/GPU hard-limit and cgroup-pacing policy; "
+            "required for contained WSL2 CUDA qualification"
         ),
     )
     parser.add_argument(

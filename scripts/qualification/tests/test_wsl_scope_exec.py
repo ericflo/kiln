@@ -25,6 +25,13 @@ SPEC.loader.exec_module(scope)
 
 
 class WslScopeExecTests(unittest.TestCase):
+    def pacing_policy(self) -> object:
+        return scope.wsl_thermal_exec.load_policy(
+            QUALIFICATION_DIR.parents[1]
+            / "qualification/host-policies/"
+            "rtx4090-laptop-wsl2-cgroup-pacing-v2.json"
+        )
+
     def test_missing_runtime_unit_directory_is_created_with_private_mode(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory)
@@ -140,6 +147,144 @@ class WslScopeExecTests(unittest.TestCase):
     def test_empty_host_build_inventory_is_accepted(self) -> None:
         with mock.patch.object(scope.Path, "iterdir", return_value=[]):
             self.assertEqual(scope._active_host_builds(), [])
+
+    def test_cgroup_freeze_waits_for_kernel_state_and_times_out_closed(self) -> None:
+        cgroup = Path("/fixture/cgroup")
+        with mock.patch.object(scope, "_write") as write, mock.patch.object(
+            scope,
+            "_read",
+            return_value="1",
+        ), mock.patch.object(
+            scope,
+            "_events",
+            return_value={"frozen": 1},
+        ):
+            scope._set_frozen(cgroup, True)
+        write.assert_called_once_with(cgroup / "cgroup.freeze", "1")
+
+        with mock.patch.object(scope, "_write"), mock.patch.object(
+            scope,
+            "_read",
+            return_value="1",
+        ), mock.patch.object(
+            scope,
+            "_events",
+            return_value={"frozen": 0},
+        ), mock.patch.object(
+            scope.time,
+            "monotonic",
+            side_effect=[0.0, 2.0],
+        ):
+            with self.assertRaisesRegex(scope.ScopeExecError, "did not freeze"):
+                scope._set_frozen(cgroup, True)
+
+    def test_thermal_pacing_starts_at_threshold_and_requires_stable_resume(
+        self,
+    ) -> None:
+        policy = self.pacing_policy()
+        state = scope.ThermalPacingState(policy)
+        sample = scope.wsl_thermal_exec.ThermalSample
+        self.assertFalse(state.observe(sample(0.0, 79_000, 74_000), 1.0))
+        self.assertTrue(state.observe(sample(0.0, 80_000, 74_000), 10.0))
+        self.assertTrue(state.observe(sample(0.0, 72_000, 70_000), 11.0))
+        self.assertTrue(state.observe(sample(0.0, 72_000, 70_000), 12.0))
+        self.assertFalse(state.observe(sample(0.0, 72_000, 70_000), 13.0))
+        record = state.record()
+        self.assertEqual(record["pause_count"], 1)
+        self.assertEqual(record["completed_pause_count"], 1)
+        self.assertEqual(record["total_pause_seconds"], 3.0)
+        self.assertFalse(record["active"])
+
+    def test_thermal_pacing_timeout_and_hard_limit_fail_closed(self) -> None:
+        policy = self.pacing_policy()
+        sample = scope.wsl_thermal_exec.ThermalSample
+        state = scope.ThermalPacingState(policy)
+        self.assertTrue(state.observe(sample(0.0, 80_000, 60_000), 10.0))
+        with self.assertRaisesRegex(scope.ScopeExecError, "exceeded 300 seconds"):
+            state.observe(sample(0.0, 73_000, 60_000), 310.0)
+
+        state = scope.ThermalPacingState(policy)
+        with self.assertRaisesRegex(scope.ScopeExecError, "hard limit"):
+            state.observe(sample(0.0, 95_000, 60_000), 1.0)
+
+    def test_thermal_pacing_policy_requires_both_outer_hash_bindings(self) -> None:
+        policy_path = (
+            QUALIFICATION_DIR.parents[1]
+            / "qualification/host-policies/"
+            "rtx4090-laptop-wsl2-cgroup-pacing-v2.json"
+        )
+        policy = self.pacing_policy()
+        with mock.patch.dict(
+            os.environ,
+            {
+                scope.POLICY_ENV: policy.content_sha256,
+                scope.PACING_POLICY_ENV: policy.content_sha256,
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                scope._load_thermal_pacing_policy(
+                    policy_path,
+                    policy.content_sha256,
+                ),
+                policy,
+            )
+        with mock.patch.dict(
+            os.environ,
+            {scope.PACING_POLICY_ENV: "sha256:" + "0" * 64},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(scope.ScopeExecError, "both outer"):
+                scope._load_thermal_pacing_policy(
+                    policy_path,
+                    policy.content_sha256,
+                )
+
+    def test_thermal_telemetry_pipe_preserves_policy_sequence_and_samples(
+        self,
+    ) -> None:
+        policy = self.pacing_policy()
+        read_descriptor, write_descriptor = os.pipe()
+        reader = scope.ThermalTelemetryReader(read_descriptor, policy)
+        try:
+            first = scope.wsl_thermal_exec.ThermalSample(1.0, 75_000, 60_000)
+            second = scope.wsl_thermal_exec.ThermalSample(2.0, 80_000, 61_000)
+            scope.wsl_thermal_exec._send_telemetry_sample(
+                write_descriptor,
+                policy,
+                0,
+                first,
+            )
+            scope.wsl_thermal_exec._send_telemetry_sample(
+                write_descriptor,
+                policy,
+                1,
+                second,
+            )
+            self.assertEqual(reader.read_available(), [first, second])
+            reader.require_fresh(3.0)
+            with self.assertRaisesRegex(scope.ScopeExecError, "stale"):
+                reader.require_fresh(8.1)
+        finally:
+            reader.close()
+            os.close(write_descriptor)
+
+    def test_thermal_telemetry_pipe_rejects_wrong_sequence(self) -> None:
+        policy = self.pacing_policy()
+        read_descriptor, write_descriptor = os.pipe()
+        reader = scope.ThermalTelemetryReader(read_descriptor, policy)
+        try:
+            scope.wsl_thermal_exec._send_telemetry_sample(
+                write_descriptor,
+                policy,
+                1,
+                scope.wsl_thermal_exec.ThermalSample(1.0, 75_000, 60_000),
+            )
+            with self.assertRaisesRegex(scope.ScopeExecError, "sequence"):
+                reader.read_available()
+        finally:
+            reader.close()
+            os.close(write_descriptor)
 
 
 if __name__ == "__main__":

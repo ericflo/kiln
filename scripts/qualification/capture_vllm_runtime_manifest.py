@@ -48,7 +48,7 @@ WSL_SCOPE_CPU_POLL_INTERVAL_MS = 5
 WSL_THERMAL_EVENT_PREFIX = "wsl2-thermal: "
 WSL_THERMAL_EVENT_SCHEMA = "kiln.wsl2-thermal-event.v1"
 WSL_SCOPE_EVENT_PREFIX = "wsl2-scope: "
-WSL_SCOPE_EVENT_SCHEMA = "kiln.wsl2-scope-event.v1"
+WSL_SCOPE_EVENT_SCHEMA = "kiln.wsl2-scope-event.v2"
 WSL_THERMAL_PREFLIGHT_KEYS = {
     "schema",
     "event",
@@ -90,6 +90,7 @@ WSL_SCOPE_START_KEYS = {
     "cpu_poll_interval_ms",
     "runtime_max_seconds",
     "thermal_policy_sha256",
+    "thermal_pacing",
 }
 WSL_SCOPE_COMPLETE_KEYS = {
     "schema",
@@ -105,6 +106,33 @@ WSL_SCOPE_COMPLETE_KEYS = {
     "scope_removed",
     "child_returncode",
     "reason",
+    "thermal_pacing",
+}
+WSL_SCOPE_PACING_START_KEYS = {
+    "policy_sha256",
+    "mode",
+    "telemetry_source",
+    "freeze_verification",
+    "host_start_millicelsius",
+    "host_resume_millicelsius",
+    "gpu_start_millicelsius",
+    "gpu_resume_millicelsius",
+    "resume_stable_samples",
+    "timeout_seconds",
+}
+WSL_SCOPE_PACING_COMPLETE_KEYS = {
+    "policy_sha256",
+    "mode",
+    "active",
+    "sample_count",
+    "pause_count",
+    "completed_pause_count",
+    "total_pause_seconds",
+    "longest_pause_seconds",
+    "peak_host_millicelsius",
+    "peak_gpu_millicelsius",
+    "ending_host_millicelsius",
+    "ending_gpu_millicelsius",
 }
 
 
@@ -253,6 +281,10 @@ def load_wsl2_thermal_supervision(path: Path) -> Wsl2ThermalSupervision:
         policy = benchmark.wsl_thermal_exec.load_policy(absolute)
     except benchmark.wsl_thermal_exec.ThermalGuardError as exc:
         raise CaptureError(f"invalid WSL2 thermal policy: {exc}") from exc
+    if policy.pacing is None:
+        raise CaptureError(
+            "WSL2 manifest capture requires a v2 cgroup thermal pacing policy"
+        )
     return Wsl2ThermalSupervision(
         path=absolute,
         repository_path=repository_path,
@@ -317,6 +349,8 @@ def supervised_manifest_command(
         str(WSL_SCOPE_CPU_POLL_INTERVAL_MS),
         "--runtime-max-seconds",
         f"{scope_runtime_seconds:g}",
+        "--thermal-pacing-policy",
+        os.fspath(supervision.path),
         "--",
         *namespaced_command,
     ]
@@ -511,6 +545,103 @@ def _scope_number(value: Any, label: str, *, minimum: float = 0) -> float:
     return float(value)
 
 
+def _validate_scope_thermal_pacing(
+    start_value: Any,
+    complete_value: Any,
+    supervision: Wsl2ThermalSupervision,
+) -> dict[str, Any]:
+    if (
+        not isinstance(start_value, dict)
+        or set(start_value) != WSL_SCOPE_PACING_START_KEYS
+    ):
+        raise CaptureError("WSL2 scope thermal pacing start fields are invalid")
+    if (
+        not isinstance(complete_value, dict)
+        or set(complete_value) != WSL_SCOPE_PACING_COMPLETE_KEYS
+    ):
+        raise CaptureError("WSL2 scope thermal pacing complete fields are invalid")
+    policy = supervision.policy
+    pacing = policy.pacing
+    if pacing is None:
+        raise CaptureError("WSL2 scope thermal pacing policy is unavailable")
+    expected_start = {
+        "policy_sha256": policy.content_sha256,
+        "mode": pacing.mode,
+        "telemetry_source": "outer-supervisor-inherited-pipe-v1",
+        "freeze_verification": "cgroup-freeze-and-events-roundtrip-v1",
+        "host_start_millicelsius": pacing.host_start_millicelsius,
+        "host_resume_millicelsius": pacing.host_resume_millicelsius,
+        "gpu_start_millicelsius": pacing.gpu_start_millicelsius,
+        "gpu_resume_millicelsius": pacing.gpu_resume_millicelsius,
+        "resume_stable_samples": pacing.resume_stable_samples,
+        "timeout_seconds": pacing.timeout_seconds,
+    }
+    if start_value != expected_start:
+        raise CaptureError("WSL2 scope thermal pacing start does not match the policy")
+    if (
+        complete_value.get("policy_sha256") != policy.content_sha256
+        or complete_value.get("mode") != pacing.mode
+        or complete_value.get("active") is not False
+    ):
+        raise CaptureError("WSL2 scope thermal pacing did not finish inactive")
+    integer_values = {
+        field: _thermal_integer(
+            complete_value.get(field),
+            f"WSL2 scope thermal pacing {field}",
+            minimum=minimum,
+        )
+        for field, minimum in (
+            ("sample_count", 1),
+            ("pause_count", 0),
+            ("completed_pause_count", 0),
+            ("peak_host_millicelsius", 1),
+            ("peak_gpu_millicelsius", 1),
+            ("ending_host_millicelsius", 1),
+            ("ending_gpu_millicelsius", 1),
+        )
+    }
+    if integer_values["pause_count"] != integer_values["completed_pause_count"]:
+        raise CaptureError("WSL2 scope thermal pacing has an incomplete pause")
+    total_pause = _scope_number(
+        complete_value.get("total_pause_seconds"),
+        "WSL2 scope thermal pacing total pause",
+    )
+    longest_pause = _scope_number(
+        complete_value.get("longest_pause_seconds"),
+        "WSL2 scope thermal pacing longest pause",
+    )
+    if longest_pause > total_pause:
+        raise CaptureError("WSL2 scope thermal pacing pause durations are invalid")
+    if integer_values["pause_count"] == 0 and (
+        total_pause != 0 or longest_pause != 0
+    ):
+        raise CaptureError("WSL2 scope thermal pacing reported time without a pause")
+    if integer_values["pause_count"] > 0 and (
+        longest_pause <= 0 or longest_pause >= pacing.timeout_seconds
+    ):
+        raise CaptureError("WSL2 scope thermal pacing pause duration is invalid")
+    if (
+        integer_values["peak_host_millicelsius"]
+        >= policy.host_limit_millicelsius
+        or integer_values["peak_gpu_millicelsius"]
+        >= policy.gpu_limit_millicelsius
+    ):
+        raise CaptureError("WSL2 scope thermal pacing peak reached a hard limit")
+    for sensor in ("host", "gpu"):
+        if (
+            integer_values[f"peak_{sensor}_millicelsius"]
+            < integer_values[f"ending_{sensor}_millicelsius"]
+        ):
+            raise CaptureError(
+                f"WSL2 scope thermal pacing {sensor} peak is below its ending sample"
+            )
+    return {
+        **complete_value,
+        "total_pause_seconds": total_pause,
+        "longest_pause_seconds": longest_pause,
+    }
+
+
 def validate_wsl2_scope_stderr(
     stderr_payload: bytes,
     supervision: Wsl2ThermalSupervision,
@@ -565,6 +696,11 @@ def validate_wsl2_scope_stderr(
     for field, expected in expected_start.items():
         if start.get(field) != expected:
             raise CaptureError(f"WSL2 scope start {field} is invalid")
+    pacing_evidence = _validate_scope_thermal_pacing(
+        start.get("thermal_pacing"),
+        complete.get("thermal_pacing"),
+        supervision,
+    )
     runtime_max_seconds = _scope_number(
         start.get("runtime_max_seconds"),
         "WSL2 scope runtime maximum",
@@ -651,6 +787,7 @@ def validate_wsl2_scope_stderr(
         "cpu_allowed_usec": cpu_allowed,
         "duration_seconds": duration_seconds,
         "scope_removed": True,
+        "thermal_pacing": pacing_evidence,
     }
 
 
@@ -848,8 +985,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--wsl2-thermal-policy",
         type=Path,
         help=(
-            "content-hashed repository policy used to supervise and cool each "
-            "capture independently"
+            "content-hashed repository v2 policy used to pace, supervise, and "
+            "cool each capture independently"
         ),
     )
     parser.add_argument(

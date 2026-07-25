@@ -23,10 +23,10 @@ sys.modules[SPEC.name] = thermal
 SPEC.loader.exec_module(thermal)
 
 
-def policy_document() -> dict[str, object]:
+def policy_document(*, pacing: bool = False) -> dict[str, object]:
     value: dict[str, object] = {
-        "schema": thermal.SCHEMA,
-        "id": "test-wsl2-policy-v1",
+        "schema": thermal.SCHEMA_V2 if pacing else thermal.SCHEMA_V1,
+        "id": "test-wsl2-policy-v2" if pacing else "test-wsl2-policy-v1",
         "content_sha256": "",
         "host": {
             "cpu_name": "Test CPU",
@@ -47,6 +47,16 @@ def policy_document() -> dict[str, object]:
             "timeout_seconds": 5,
         },
     }
+    if pacing:
+        value["pacing"] = {
+            "mode": "cgroup_freeze",
+            "host_start_millicelsius": 80_000,
+            "host_resume_millicelsius": 72_000,
+            "gpu_start_millicelsius": 75_000,
+            "gpu_resume_millicelsius": 70_000,
+            "resume_stable_samples": 2,
+            "timeout_seconds": 5,
+        }
     hashed = dict(value)
     hashed.pop("content_sha256")
     payload = json.dumps(
@@ -92,6 +102,54 @@ class WslThermalExecTests(unittest.TestCase):
         unknown["disabled"] = True
         with self.assertRaisesRegex(thermal.ThermalGuardError, "unknown disabled"):
             thermal.validate_policy(unknown)
+
+    def test_v2_pacing_policy_is_closed_and_hysteretic(self) -> None:
+        parsed = thermal.validate_policy(policy_document(pacing=True))
+        self.assertEqual(parsed.schema, thermal.SCHEMA_V2)
+        self.assertIsNotNone(parsed.pacing)
+        assert parsed.pacing is not None
+        self.assertEqual(parsed.pacing.host_start_millicelsius, 80_000)
+
+        invalid = policy_document(pacing=True)
+        assert isinstance(invalid["pacing"], dict)
+        invalid["pacing"]["host_resume_millicelsius"] = 81_000
+        invalid["content_sha256"] = thermal._canonical_policy_hash(invalid)
+        with self.assertRaisesRegex(thermal.ThermalGuardError, "below start"):
+            thermal.validate_policy(invalid)
+
+        missing = policy_document(pacing=True)
+        assert isinstance(missing["pacing"], dict)
+        del missing["pacing"]["timeout_seconds"]
+        missing["content_sha256"] = thermal._canonical_policy_hash(missing)
+        with self.assertRaisesRegex(thermal.ThermalGuardError, "missing timeout_seconds"):
+            thermal.validate_policy(missing)
+
+    def test_v2_outer_supervisor_requires_matching_scope_pacing_binding(self) -> None:
+        policy = thermal.validate_policy(policy_document(pacing=True))
+        with self.assertRaisesRegex(
+            thermal.ThermalGuardError,
+            "trusted WSL2 scope supervisor",
+        ):
+            thermal._validate_pacing_scope_command(policy, ["/bin/true"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "policy.json"
+            path.write_text(json.dumps(policy_document(pacing=True)), encoding="ascii")
+            command = [
+                sys.executable,
+                str(QUALIFICATION_DIR / "wsl_scope_exec.py"),
+                "--thermal-pacing-policy",
+                str(path),
+                "--",
+                "/bin/true",
+            ]
+            thermal._validate_pacing_scope_command(policy, command)
+            different = policy_document(pacing=True)
+            different["id"] = "different-policy"
+            different["content_sha256"] = thermal._canonical_policy_hash(different)
+            path.write_text(json.dumps(different), encoding="ascii")
+            with self.assertRaisesRegex(thermal.ThermalGuardError, "does not match"):
+                thermal._validate_pacing_scope_command(policy, command)
 
     def test_windows_high_precision_temperature_is_tenths_kelvin(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

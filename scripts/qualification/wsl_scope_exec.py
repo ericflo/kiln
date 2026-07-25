@@ -15,11 +15,19 @@ import sys
 import tempfile
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
 import wsl_platform
-from wsl_thermal_exec import POLICY_ENV, SHA256_RE
+import wsl_thermal_exec
+from wsl_thermal_exec import (
+    PACING_POLICY_ENV,
+    POLICY_ENV,
+    SHA256_RE,
+    TELEMETRY_FD_ENV,
+    TELEMETRY_SCHEMA,
+)
 
 
 BOUNDARY_ENV = "KILN_WSL2_SCOPE_BOUNDARY"
@@ -29,6 +37,9 @@ CPU_QUOTA_ENV = "KILN_WSL2_SCOPE_CPU_QUOTA_PERCENT"
 UNIT_ENV = "KILN_WSL2_SCOPE_UNIT"
 HOST_UID_ENV = "KILN_WSL2_SCOPE_HOST_UID"
 BOUNDARY_VALUE = "systemd-user-scope-feedback-v1"
+SCOPE_EVENT_SCHEMA_V1 = "kiln.wsl2-scope-event.v1"
+SCOPE_EVENT_SCHEMA_V2 = "kiln.wsl2-scope-event.v2"
+THERMAL_TELEMETRY_SOURCE = "outer-supervisor-inherited-pipe-v1"
 SCOPE_PAYLOAD = Path(__file__).with_name("wsl_scope_payload.py")
 SOCKET_UNIT = "dbus.socket"
 SERVICE_UNIT = "dbus.service"
@@ -54,6 +65,240 @@ ExecReload=/usr/bin/dbus-send --print-reply --session --type=method_call --dest=
 
 class ScopeExecError(RuntimeError):
     """The WSL2 user-scope boundary could not be established or verified."""
+
+
+@dataclass
+class ThermalPacingState:
+    policy: wsl_thermal_exec.ThermalPolicy
+    active: bool = False
+    pause_started_seconds: float | None = None
+    stable_samples: int = 0
+    sample_count: int = 0
+    pause_count: int = 0
+    completed_pause_count: int = 0
+    total_pause_seconds: float = 0.0
+    longest_pause_seconds: float = 0.0
+    peak_host_millicelsius: int = 0
+    peak_gpu_millicelsius: int = 0
+    ending_host_millicelsius: int | None = None
+    ending_gpu_millicelsius: int | None = None
+
+    def observe(
+        self,
+        value: wsl_thermal_exec.ThermalSample,
+        now_seconds: float,
+    ) -> bool:
+        pacing = self.policy.pacing
+        if pacing is None:
+            raise ScopeExecError("thermal pacing state lacks a pacing policy")
+        try:
+            wsl_thermal_exec._check_limits(value, self.policy)
+        except wsl_thermal_exec.ThermalGuardError as exc:
+            raise ScopeExecError(f"thermal pacing reached a hard limit: {exc}") from exc
+        self.sample_count += 1
+        self.peak_host_millicelsius = max(
+            self.peak_host_millicelsius,
+            value.host_millicelsius,
+        )
+        self.peak_gpu_millicelsius = max(
+            self.peak_gpu_millicelsius,
+            value.gpu_millicelsius,
+        )
+        self.ending_host_millicelsius = value.host_millicelsius
+        self.ending_gpu_millicelsius = value.gpu_millicelsius
+        if not self.active:
+            if (
+                value.host_millicelsius >= pacing.host_start_millicelsius
+                or value.gpu_millicelsius >= pacing.gpu_start_millicelsius
+            ):
+                self.active = True
+                self.pause_started_seconds = now_seconds
+                self.stable_samples = 0
+                self.pause_count += 1
+            return self.active
+
+        if self.pause_started_seconds is None:
+            raise ScopeExecError("active thermal pacing has no pause start")
+        pause_seconds = now_seconds - self.pause_started_seconds
+        if pause_seconds >= pacing.timeout_seconds:
+            raise ScopeExecError(
+                f"thermal pacing pause exceeded {pacing.timeout_seconds:g} seconds"
+            )
+        below_resume = (
+            value.host_millicelsius <= pacing.host_resume_millicelsius
+            and value.gpu_millicelsius <= pacing.gpu_resume_millicelsius
+        )
+        self.stable_samples = self.stable_samples + 1 if below_resume else 0
+        if self.stable_samples >= pacing.resume_stable_samples:
+            self.active = False
+            self.pause_started_seconds = None
+            self.stable_samples = 0
+            self.completed_pause_count += 1
+            self.total_pause_seconds += pause_seconds
+            self.longest_pause_seconds = max(
+                self.longest_pause_seconds,
+                pause_seconds,
+            )
+        return self.active
+
+    def record(self, now_seconds: float | None = None) -> dict[str, Any]:
+        pacing = self.policy.pacing
+        if pacing is None:
+            raise ScopeExecError("thermal pacing state lacks a pacing policy")
+        total_pause_seconds = self.total_pause_seconds
+        longest_pause_seconds = self.longest_pause_seconds
+        if self.active:
+            if self.pause_started_seconds is None or now_seconds is None:
+                raise ScopeExecError(
+                    "active thermal pacing evidence requires the current time"
+                )
+            active_pause_seconds = max(
+                0.0,
+                now_seconds - self.pause_started_seconds,
+            )
+            total_pause_seconds += active_pause_seconds
+            longest_pause_seconds = max(
+                longest_pause_seconds,
+                active_pause_seconds,
+            )
+        return {
+            "policy_sha256": self.policy.content_sha256,
+            "mode": pacing.mode,
+            "active": self.active,
+            "sample_count": self.sample_count,
+            "pause_count": self.pause_count,
+            "completed_pause_count": self.completed_pause_count,
+            "total_pause_seconds": total_pause_seconds,
+            "longest_pause_seconds": longest_pause_seconds,
+            "peak_host_millicelsius": self.peak_host_millicelsius,
+            "peak_gpu_millicelsius": self.peak_gpu_millicelsius,
+            "ending_host_millicelsius": self.ending_host_millicelsius,
+            "ending_gpu_millicelsius": self.ending_gpu_millicelsius,
+        }
+
+
+class ThermalTelemetryReader:
+    KEYS = {
+        "schema",
+        "policy_sha256",
+        "sequence",
+        "monotonic_seconds",
+        "host_millicelsius",
+        "gpu_millicelsius",
+    }
+
+    def __init__(
+        self,
+        descriptor: int,
+        policy: wsl_thermal_exec.ThermalPolicy,
+    ) -> None:
+        try:
+            metadata = os.fstat(descriptor)
+        except OSError as exc:
+            raise ScopeExecError(f"cannot inspect thermal telemetry pipe: {exc}") from exc
+        if not stat.S_ISFIFO(metadata.st_mode):
+            raise ScopeExecError("thermal telemetry descriptor is not a pipe")
+        os.set_blocking(descriptor, False)
+        self.descriptor = descriptor
+        self.policy = policy
+        self.buffer = b""
+        self.next_sequence = 0
+        self.last_monotonic_seconds: float | None = None
+
+    @staticmethod
+    def _decode(payload: bytes) -> dict[str, Any]:
+        def object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            value: dict[str, Any] = {}
+            for name, item in pairs:
+                if name in value:
+                    raise ScopeExecError(
+                        f"thermal telemetry repeats field {name!r}"
+                    )
+                value[name] = item
+            return value
+
+        try:
+            value = json.loads(payload, object_pairs_hook=object_pairs)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ScopeExecError(f"thermal telemetry is malformed JSON: {exc}") from exc
+        if not isinstance(value, dict) or set(value) != ThermalTelemetryReader.KEYS:
+            raise ScopeExecError("thermal telemetry violates its exact schema")
+        return value
+
+    def read_available(self) -> list[wsl_thermal_exec.ThermalSample]:
+        while True:
+            try:
+                chunk = os.read(self.descriptor, 65_536)
+            except BlockingIOError:
+                break
+            except OSError as exc:
+                raise ScopeExecError(f"cannot read thermal telemetry: {exc}") from exc
+            if not chunk:
+                raise ScopeExecError("outer thermal telemetry pipe closed early")
+            self.buffer += chunk
+            if len(self.buffer) > 65_536:
+                raise ScopeExecError("thermal telemetry exceeded its buffer bound")
+
+        samples: list[wsl_thermal_exec.ThermalSample] = []
+        while b"\n" in self.buffer:
+            payload, self.buffer = self.buffer.split(b"\n", 1)
+            value = self._decode(payload)
+            if (
+                value["schema"] != TELEMETRY_SCHEMA
+                or value["policy_sha256"] != self.policy.content_sha256
+                or value["sequence"] != self.next_sequence
+            ):
+                raise ScopeExecError(
+                    "thermal telemetry schema, policy, or sequence is invalid"
+                )
+            monotonic = value["monotonic_seconds"]
+            host = value["host_millicelsius"]
+            gpu = value["gpu_millicelsius"]
+            if (
+                isinstance(monotonic, bool)
+                or not isinstance(monotonic, (int, float))
+                or not math.isfinite(monotonic)
+                or monotonic < 0
+                or isinstance(host, bool)
+                or not isinstance(host, int)
+                or host < -50_000
+                or host > 200_000
+                or isinstance(gpu, bool)
+                or not isinstance(gpu, int)
+                or gpu <= 0
+                or gpu > 200_000
+            ):
+                raise ScopeExecError("thermal telemetry sample values are invalid")
+            monotonic_value = float(monotonic)
+            if (
+                self.last_monotonic_seconds is not None
+                and monotonic_value <= self.last_monotonic_seconds
+            ):
+                raise ScopeExecError("thermal telemetry time did not advance")
+            self.next_sequence += 1
+            self.last_monotonic_seconds = monotonic_value
+            samples.append(
+                wsl_thermal_exec.ThermalSample(
+                    monotonic_seconds=monotonic_value,
+                    host_millicelsius=host,
+                    gpu_millicelsius=gpu,
+                )
+            )
+        return samples
+
+    def require_fresh(self, now_seconds: float) -> None:
+        maximum_age = max(5.0, self.policy.poll_interval_ms / 1000.0 * 3)
+        if (
+            self.last_monotonic_seconds is None
+            or now_seconds - self.last_monotonic_seconds > maximum_age
+        ):
+            raise ScopeExecError("outer thermal telemetry is missing or stale")
+
+    def close(self) -> None:
+        try:
+            os.close(self.descriptor)
+        except OSError as exc:
+            raise ScopeExecError(f"cannot close thermal telemetry pipe: {exc}") from exc
 
 
 def _run(
@@ -218,6 +463,25 @@ def _write(path: Path, value: str) -> None:
         raise ScopeExecError(f"cannot write {path}: {exc}") from exc
 
 
+def _set_frozen(cgroup: Path, frozen: bool, timeout_seconds: float = 1.0) -> None:
+    expected = "1" if frozen else "0"
+    _write(cgroup / "cgroup.freeze", expected)
+    if _read(cgroup / "cgroup.freeze") != expected:
+        raise ScopeExecError("cgroup.freeze did not round-trip")
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        observed = _events(cgroup / "cgroup.events").get("frozen")
+        if observed == int(frozen):
+            return
+        if observed not in {0, 1}:
+            raise ScopeExecError("cgroup.events lacks a valid frozen state")
+        if time.monotonic() >= deadline:
+            raise ScopeExecError(
+                f"cgroup did not {'freeze' if frozen else 'resume'}"
+            )
+        time.sleep(0.001)
+
+
 def _events(path: Path) -> dict[str, int]:
     values: dict[str, int] = {}
     for line in _read(path).splitlines():
@@ -242,12 +506,17 @@ def _cpu_usage(cgroup: Path) -> int:
     return values["usage_usec"]
 
 
-def _emit(event: str, **fields: Any) -> None:
+def _emit(
+    event: str,
+    *,
+    schema: str = SCOPE_EVENT_SCHEMA_V1,
+    **fields: Any,
+) -> None:
     print(
         "wsl2-scope: "
         + json.dumps(
             {
-                "schema": "kiln.wsl2-scope-event.v1",
+                "schema": schema,
                 "event": event,
                 **fields,
             },
@@ -259,6 +528,77 @@ def _emit(event: str, **fields: Any) -> None:
         file=sys.stderr,
         flush=True,
     )
+
+
+def _load_thermal_pacing_policy(
+    path: Path | None,
+    outer_policy_sha256: str,
+) -> wsl_thermal_exec.ThermalPolicy | None:
+    pacing_sha256 = os.environ.get(PACING_POLICY_ENV)
+    if path is None:
+        if pacing_sha256 is not None:
+            raise ScopeExecError(
+                f"{PACING_POLICY_ENV} is set without --thermal-pacing-policy"
+            )
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise ScopeExecError(
+            "thermal pacing policy must be a regular non-symlink file"
+        )
+    try:
+        policy = wsl_thermal_exec.load_policy(path)
+    except wsl_thermal_exec.ThermalGuardError as exc:
+        raise ScopeExecError(f"invalid thermal pacing policy: {exc}") from exc
+    if policy.pacing is None:
+        raise ScopeExecError("thermal pacing policy must use the v2 pacing schema")
+    if (
+        policy.content_sha256 != outer_policy_sha256
+        or pacing_sha256 != policy.content_sha256
+    ):
+        raise ScopeExecError(
+            "thermal pacing policy does not match both outer policy bindings"
+        )
+    return policy
+
+
+def _load_thermal_telemetry(
+    policy: wsl_thermal_exec.ThermalPolicy | None,
+) -> ThermalTelemetryReader | None:
+    raw_descriptor = os.environ.get(TELEMETRY_FD_ENV)
+    if policy is None:
+        if raw_descriptor is not None:
+            raise ScopeExecError(
+                f"{TELEMETRY_FD_ENV} is set without a thermal pacing policy"
+            )
+        return None
+    if raw_descriptor is None or not raw_descriptor.isdecimal():
+        raise ScopeExecError(
+            f"{TELEMETRY_FD_ENV} must bind the inherited telemetry pipe"
+        )
+    descriptor = int(raw_descriptor)
+    if descriptor <= 2:
+        raise ScopeExecError("thermal telemetry descriptor must be above stderr")
+    return ThermalTelemetryReader(descriptor, policy)
+
+
+def _thermal_pacing_start_record(
+    policy: wsl_thermal_exec.ThermalPolicy,
+) -> dict[str, Any]:
+    pacing = policy.pacing
+    if pacing is None:
+        raise ScopeExecError("thermal pacing policy has no pacing configuration")
+    return {
+        "policy_sha256": policy.content_sha256,
+        "mode": pacing.mode,
+        "telemetry_source": THERMAL_TELEMETRY_SOURCE,
+        "freeze_verification": "cgroup-freeze-and-events-roundtrip-v1",
+        "host_start_millicelsius": pacing.host_start_millicelsius,
+        "host_resume_millicelsius": pacing.host_resume_millicelsius,
+        "gpu_start_millicelsius": pacing.gpu_start_millicelsius,
+        "gpu_resume_millicelsius": pacing.gpu_resume_millicelsius,
+        "resume_stable_samples": pacing.resume_stable_samples,
+        "timeout_seconds": pacing.timeout_seconds,
+    }
 
 
 def _scope_path(unit: str) -> Path:
@@ -352,7 +692,21 @@ def execute(args: argparse.Namespace) -> int:
     thermal_sha256 = os.environ.get(POLICY_ENV, "")
     if not SHA256_RE.fullmatch(thermal_sha256):
         raise ScopeExecError(f"{POLICY_ENV} does not bind the outer thermal policy")
+    thermal_policy = _load_thermal_pacing_policy(
+        args.thermal_pacing_policy,
+        thermal_sha256,
+    )
+    thermal_pacing = (
+        None if thermal_policy is None else ThermalPacingState(thermal_policy)
+    )
+    thermal_telemetry = _load_thermal_telemetry(thermal_policy)
+    event_schema = (
+        SCOPE_EVENT_SCHEMA_V1
+        if thermal_pacing is None
+        else SCOPE_EVENT_SCHEMA_V2
+    )
     environment = ensure_user_bus()
+    environment.pop(TELEMETRY_FD_ENV, None)
     if SCOPE_PAYLOAD.is_symlink() or not SCOPE_PAYLOAD.is_file():
         raise ScopeExecError(f"trusted scope payload is unavailable: {SCOPE_PAYLOAD}")
     unit = f"kiln-wsl-scope-{uuid.uuid4().hex}"
@@ -439,8 +793,32 @@ def execute(args: argparse.Namespace) -> int:
             )
         baseline_cpu = _cpu_usage(cgroup)
         controlled_started = time.monotonic()
+        if thermal_pacing is not None:
+            if thermal_telemetry is None:
+                raise ScopeExecError("thermal pacing lacks outer telemetry")
+            initial_deadline = time.monotonic() + max(
+                5.0,
+                thermal_pacing.policy.poll_interval_ms / 1000.0 * 3,
+            )
+            initial_samples: list[wsl_thermal_exec.ThermalSample] = []
+            while not initial_samples:
+                initial_samples = thermal_telemetry.read_available()
+                if not initial_samples and time.monotonic() >= initial_deadline:
+                    raise ScopeExecError("timed out waiting for outer thermal telemetry")
+                if not initial_samples:
+                    time.sleep(0.005)
+            for current_thermal in initial_samples:
+                thermal_pacing.observe(
+                    current_thermal,
+                    current_thermal.monotonic_seconds,
+                )
+            thermal_telemetry.require_fresh(time.monotonic())
+            if thermal_pacing.active:
+                _set_frozen(cgroup, True)
+                frozen = True
         _emit(
             "start",
+            schema=event_schema,
             unit=unit,
             cgroup=str(cgroup),
             containment=os.environ[wsl_platform.NETWORK_ISOLATION_ENV],
@@ -452,6 +830,15 @@ def execute(args: argparse.Namespace) -> int:
             cpu_poll_interval_ms=args.cpu_poll_interval_ms,
             runtime_max_seconds=args.runtime_max_seconds,
             thermal_policy_sha256=thermal_sha256,
+            **(
+                {}
+                if thermal_policy is None
+                else {
+                    "thermal_pacing": _thermal_pacing_start_record(
+                        thermal_policy
+                    )
+                }
+            ),
         )
 
         poll_seconds = args.cpu_poll_interval_ms / 1000.0
@@ -459,12 +846,13 @@ def execute(args: argparse.Namespace) -> int:
             1,
             int(args.cpu_poll_interval_ms * 1000 * args.cpu_quota_percent / 100),
         )
-        while not status_path.exists():
+        while True:
             if process.poll() is not None:
                 raise ScopeExecError(
                     f"scope payload exited {process.returncode} before status handoff"
                 )
-            elapsed = time.monotonic() - controlled_started
+            now = time.monotonic()
+            elapsed = now - controlled_started
             if interrupted is not None:
                 failure = ScopeExecError(f"received signal {interrupted}")
                 break
@@ -473,15 +861,32 @@ def execute(args: argparse.Namespace) -> int:
                     f"runtime exceeded {args.runtime_max_seconds:g} seconds"
                 )
                 break
+            status_ready = status_path.exists()
+            if thermal_pacing is not None:
+                if thermal_telemetry is None:
+                    raise ScopeExecError("thermal pacing lost outer telemetry")
+                for current_thermal in thermal_telemetry.read_available():
+                    thermal_pacing.observe(
+                        current_thermal,
+                        current_thermal.monotonic_seconds,
+                    )
+                thermal_telemetry.require_fresh(time.monotonic())
             usage = _cpu_usage(cgroup) - baseline_cpu
             allowance = int(elapsed * 1_000_000 * args.cpu_quota_percent / 100)
-            should_freeze = usage > allowance + burst_usec
+            cpu_should_freeze = usage > allowance + burst_usec
+            should_freeze = cpu_should_freeze or (
+                thermal_pacing is not None and thermal_pacing.active
+            )
             if should_freeze != frozen:
-                _write(cgroup / "cgroup.freeze", "1" if should_freeze else "0")
+                _set_frozen(cgroup, should_freeze)
                 frozen = should_freeze
             peak_memory = max(peak_memory, _integer(cgroup / "memory.peak"))
             peak_pids = max(peak_pids, _integer(cgroup / "pids.peak"))
             last_memory_events = _events(cgroup / "memory.events")
+            if status_ready and not (
+                thermal_pacing is not None and thermal_pacing.active
+            ):
+                break
             time.sleep(poll_seconds)
 
         if failure is not None:
@@ -502,7 +907,7 @@ def execute(args: argparse.Namespace) -> int:
                 raise ScopeExecError("scope payload status violates its exact schema")
             child_returncode = status_value["returncode"]
         if frozen and cgroup.is_dir():
-            _write(cgroup / "cgroup.freeze", "0")
+            _set_frozen(cgroup, False)
             frozen = False
         if failure is None:
             settlement_deadline = time.monotonic() + 5.0
@@ -546,6 +951,16 @@ def execute(args: argparse.Namespace) -> int:
     finally:
         for signum, handler in old_handlers.items():
             signal.signal(signum, handler)
+        if thermal_telemetry is not None and failure is not None:
+            try:
+                thermal_telemetry.close()
+            except ScopeExecError as telemetry_close_error:
+                if failure is None:
+                    failure = telemetry_close_error
+                else:
+                    failure = ScopeExecError(
+                        f"{failure}; {telemetry_close_error}"
+                    )
         try:
             _run(
                 ["/usr/bin/systemctl", "--user", "stop", f"{unit}.scope"],
@@ -560,6 +975,7 @@ def execute(args: argparse.Namespace) -> int:
     duration = time.monotonic() - controlled_started
     _emit(
         "complete" if failure is None else "failed",
+        schema=event_schema,
         unit=unit,
         duration_seconds=duration,
         cpu_usage_usec=usage,
@@ -573,7 +989,14 @@ def execute(args: argparse.Namespace) -> int:
         scope_removed=not cgroup.exists(),
         child_returncode=child_returncode,
         reason=None if failure is None else str(failure),
+        **(
+            {}
+            if thermal_pacing is None
+            else {"thermal_pacing": thermal_pacing.record(time.monotonic())}
+        ),
     )
+    if thermal_telemetry is not None:
+        thermal_telemetry.close()
     if interrupted is not None:
         return 128 + interrupted
     if failure is not None:
@@ -594,6 +1017,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cpu-quota-percent", type=int, required=True)
     parser.add_argument("--cpu-poll-interval-ms", type=int, default=5)
     parser.add_argument("--runtime-max-seconds", type=float, required=True)
+    parser.add_argument("--thermal-pacing-policy", type=Path)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     if args.command and args.command[0] == "--":

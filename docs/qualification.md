@@ -91,7 +91,7 @@ PATH="$HOME/.cargo/bin:$PATH" python3 scripts/qualification/run.py \
 PATH="$HOME/.cargo/bin:$PATH" python3 scripts/qualification/run.py \
   --variant cuda-rtx4090-laptop-16gb \
   --host-id rtx4090-laptop \
-  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-boundary-v1.json \
+  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json \
   --var output_path=.qualification/environment/rtx4090-laptop-cuda.json \
   qualification/workloads/environment-v1.json
 ```
@@ -512,7 +512,7 @@ PATH="$HOME/.cargo/bin:$PATH" \
 python3 scripts/qualification/run.py \
   --variant cuda-rtx4090-laptop-16gb \
   --host-id rtx4090-laptop \
-  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-boundary-v1.json \
+  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json \
   qualification/workloads/cuda-metal-core-correctness-v1.json
 ```
 
@@ -639,7 +639,7 @@ PATH="$HOME/.cargo/bin:$PATH" \
 python3 scripts/qualification/run.py \
   --variant cuda-rtx4090-laptop-16gb \
   --host-id rtx4090-laptop \
-  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-boundary-v1.json \
+  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json \
   qualification/workloads/cuda-memory-lifecycle-v1.json
 ```
 
@@ -713,7 +713,7 @@ python3 scripts/qualification/run.py \
   --host-id rtx4090-laptop \
   --model "$(pwd)/Qwen3.5-4B" \
   --model-id Qwen/Qwen3.5-4B \
-  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-boundary-v1.json \
+  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json \
   qualification/workloads/serving-cuda-low-memory-v1.json
 ```
 
@@ -1054,7 +1054,7 @@ in [Serving Benchmark Protocol](SERVING_BENCHMARK_PROTOCOL.md#rtx-4090-serving-b
 
 The WSL2 laptop is the explicit exception to the Linux-hwmon preparation step:
 use the already reviewed
-`qualification/host-policies/rtx4090-laptop-wsl2-boundary-v1.json` with the
+`qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json` with the
 qualification runner. Its outer Windows/NVML supervisor also contains the
 source build. Do not pass this WSL policy to
 `cargo-bounded.sh --host-thermal-policy`, whose schema intentionally accepts
@@ -1082,9 +1082,22 @@ timeout, or incomplete cooldown prevents publication.
 Each pass also uses the same reviewed WSL2 private network/PID/mount namespace,
 Landlock interop denial, 10 GiB memory/zero-swap/512-PID user scope, group OOM
 handling, and 50-percent usage-feedback CPU controller as the qualification
-runner. The capture result retains both scope records. Missing or reordered
-scope events, a control mismatch, excess CPU accounting, any memory-limit/OOM
-event, nonzero child, or scope residue prevents publication.
+runner. The v2 policy makes that controller freeze the complete scope at
+80 C host or 75 C GPU and resume only after three consecutive samples at or
+below 75/70 C. Each pause has a 300-second deadline. The independent outer
+supervisor retains the unchanged 95/85 C hard limits and post-exit handoff,
+and streams its accepted samples over a one-way inherited pipe. The scope
+controller does not duplicate the expensive Windows/NVML probes, and the
+contained payload does not inherit the pipe descriptor. Every transition must
+round-trip both the requested `cgroup.freeze` value and the kernel-reported
+`cgroup.events` frozen state.
+The capture result retains both scope records, including pacing samples,
+pause counts and durations, peaks, and inactive completion. Missing or
+reordered scope events, a policy-binding or control mismatch, an incomplete
+or timed-out pause, excess CPU accounting, any memory-limit/OOM event,
+nonzero child, or scope residue prevents publication. The v1 hard-limit-only
+document remains parseable for historical receipts but is rejected for new
+WSL2 CUDA qualification and manifest capture.
 The laptop performance launch pins
 `--max-provenance-read-mib-per-second=32`, cumulatively pacing all
 launcher-owned model/snapshot/adapter/runtime hashing and applying the same

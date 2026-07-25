@@ -260,12 +260,14 @@ python3 scripts/qualification/prepare_host_thermal_policy.py inventory
 That inventory/policy path applies to native Linux. The current WSL2 laptop has
 no readable Linux package sensor and must not convert that absence into a
 disabled guard. Its committed
-`qualification/host-policies/rtx4090-laptop-wsl2-boundary-v1.json` instead
+`qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json` instead
 binds the exact Windows `\_TZ.THRM` formatted thermal zone and exact NVML GPU
 UUID. Pass it as `--wsl2-thermal-policy` to every CUDA qualification command.
 The runner supervises Windows/NVML outside Landlock and places the full private
 namespace in the repaired user scope. A WSL run without that policy is rejected
-before artifacts are created.
+before artifacts are created. The v2 policy adds cgroup pacing at 80/75 C
+host/GPU with 75/70 C three-sample resume targets and a 300-second pause
+deadline; its outer 95/85 C hard-trip boundary remains independent.
 
 After a hard trip, `wsl_thermal_exec.py` terminates the complete supervised
 child, continues sampling with no workload alive until the configured stable
@@ -367,7 +369,7 @@ JSON:
 mkdir -p qualification/runtime/vllm/cuda/rtx4090-laptop
 python3 scripts/qualification/capture_vllm_runtime_manifest.py \
   --server-launch-config qualification/server-launch/vllm-cuda-rtx4090-laptop-serving-performance-v1.json \
-  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-boundary-v1.json \
+  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json \
   --output qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json
 ```
 
@@ -385,18 +387,30 @@ content-hashed repository policy and supervisor have the same file and commit
 binding. Each pass is nested inside the existing root-owned util-linux private
 network/PID/mount/Landlock boundary and a distinct verified systemd user scope
 with a 10 GiB memory maximum, zero swap, 512-PID maximum, group OOM handling,
-and the 50-percent usage-feedback CPU controller. The policy wraps that complete
-scope independently. The tool requires exactly one successful
+and the 50-percent usage-feedback CPU controller. The same scope controller
+adds policy-bound thermal pacing: it freezes the complete cgroup at 80 C host
+or 75 C GPU, and resumes only after three consecutive samples at or below
+75/70 C. A pause that reaches 300 seconds, telemetry loss, a hard-limit sample,
+or failure to leave the scope unfrozen fails closed. The independent outer
+supervisor keeps the unchanged 95/85 C hard limits and safe handoff. It is the
+sole Windows/NVML probe owner and sends strict sequenced samples over an
+inherited pipe that the scope controller consumes and does not pass to the
+contained payload. Freeze and resume each require both the requested
+`cgroup.freeze` value and the kernel's `cgroup.events` state to agree. The tool
+requires exactly one successful
 `preflight`/`complete` pair per pass, peaks below both hard limits, and the
 configured stable handoff before starting the next pass. It also requires
 ordered scope start/completion evidence, the exact policy and cgroup controls,
-CPU usage within allowance, no memory-limit/OOM events, successful child exit,
-and scope removal. A dirty tree, existing output, source or commit change during
-capture, nonzero/timeout child, missing or malformed thermal/scope evidence,
-scope residue, oversized output, invalid manifest, or repeat mismatch fails
-without publication. A timeout or interruption terminates the complete capture
-session, kills the cgroup through its controller, and waits for the wrapper's
-handoff before escalation.
+CPU usage within allowance, a matching v2 pacing record with complete pause
+counts/durations and sub-limit peaks, no memory-limit/OOM events, successful
+child exit, and scope removal. The earlier v1 policy remains valid historical
+input but cannot start a new WSL2 qualification or manifest capture. A dirty
+tree, existing output, source or commit change during capture, nonzero/timeout
+child, missing or malformed thermal/scope evidence, scope residue, oversized
+output, invalid manifest, or repeat mismatch fails without publication. A
+timeout or interruption terminates the complete capture session, kills the
+cgroup through its controller, and waits for the wrapper's handoff before
+escalation.
 Commit the manifest before startup.
 The tracked laptop launch makes both captures use the explicit 32 MiB/s
 cumulative provenance-read ceiling; do not remove or override it to accelerate
@@ -428,7 +442,7 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --memory-device-uuid '<environment receipt GPU UUID>' \
   --memory-limit-bytes '<reviewed whole-device ceiling>' \
   --model-fingerprint-read-mib-per-second 256 \
-  --external-wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-boundary-v1.json \
+  --external-wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json \
   --server-launch-config qualification/server-launch/kiln-cuda-rtx4090-laptop-serving-performance-v1.json \
   --output-evidence hashes
 ```
