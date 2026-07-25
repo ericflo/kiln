@@ -167,17 +167,27 @@ owned user transient unit. A fresh WSL user manager can also omit
 0700 only after the runtime and `systemd` parents prove they are real
 directories owned by the current user and not group/world-writable. A symlink,
 wrong owner, writable parent, publication conflict, missing bus socket, or
-failed transient-unit proof aborts the case. It reads the Windows
-`Win32_PerfFormattedData_Counters_ThermalZoneInformation` zone
-`\_TZ.THRM`, cross-checks whole- and tenth-Kelvin fields, and converts the
-high-precision field to millicelsius. The checked
+failed transient-unit proof aborts the case. Capability discovery reads the
+Windows `Win32_PerfFormattedData_Counters_ThermalZoneInformation` class once.
+Continuous supervision then opens one persistent Windows
+`Thermal Zone Information` performance-counter process, resolves exactly one
+`\_TZ.THRM` instance and all four expected counters, and exchanges bounded,
+strictly sequenced request/response records over pipes. Each sample
+cross-checks whole- and tenth-Kelvin fields and converts the high-precision
+field to millicelsius. The GPU side holds one initialized NVML handle selected
+by exact UUID and reads temperature in process. It does not launch PowerShell,
+WMI, or `nvidia-smi` for every sample. The checked
 `rtx4090-laptop-wsl2-boundary-v1` policy binds that source to the exact
 `Intel(R) Core(TM) Ultra 9 185H`, uses a 95 C hard limit below Intel's 110 C
 Tjunction, and independently binds the exact GPU UUID/name to an 85 C limit.
 The outer supervisor treats either telemetry read failure or either inclusive
 limit as a trip, terminates the complete inner scope, and requires three
 post-exit samples at or below 85 C host and 75 C GPU. It injects only the
-content hash into the child.
+content hash into the child. Missing counter identity, malformed or reordered
+records, a ten-second sensor response timeout, NVML failure, nonzero sensor
+exit, stderr, trailing output, or cleanup failure is fatal. Closing the
+supervisor closes the counter's sole stdin writer, and the Windows process must
+exit cleanly before evidence can complete.
 
 Every WSL2 CUDA case is also placed in a user scope before `unshare`. The scope
 round-trips a 10 GiB aggregate `memory.max`, zero `memory.swap.max`, group OOM
@@ -1260,6 +1270,30 @@ counterevidence, not a model, device, request, or c1 performance result. The
 host approached its hard limit and then could not reach the unchanged resume
 boundary within 300 seconds; do not immediately retry the same laptop path or
 weaken the policy to force progress.
+
+Reviewing that rejection exposed an observer effect outside the measured
+scope. The fingerprint itself used only 4.184 CPU-seconds over 714.265 seconds,
+but the outer guard launched a new PowerShell process, formatted-data WMI
+query, and `nvidia-smi` process for every one-second sample. A Windows process
+snapshot immediately after a probe showed `WmiPrvSE` at 21 percent CPU, and an
+idle eight-sample trend oscillated from 73.05 to 83.05 C. The source now keeps
+one exact-instance Windows performance-counter process and one exact-UUID NVML
+handle alive for the complete preflight/runtime/handoff lifecycle. It preserves
+the policy content hash, one-second cadence, 80/75 C pacing, 75/70 C resume,
+95/85 C hard limits, telemetry schema, and three-sample safe handoff.
+
+A 60-sample live sampler probe completed in 60.182 seconds. The persistent
+PowerShell bridge accumulated 0.000 WSL-visible CPU-seconds, the complete host
+range was 73.05-81.05 C, displayed samples 15/30/45/60 read
+73.05/74.05/74.05/73.05 C, GPU temperature remained 63 C, and the sensor
+process exited without residue. A separate live guarded no-op exercised the
+exact outer supervisor, inherited telemetry pipe,
+10 GiB/zero-swap/512-PID user scope, 50-percent feedback controller, private
+namespace, pacing state, child handoff, and scope removal. It started at
+75.05/63 C, recorded an 84.05/63 C outer peak, completed at 75.05/63 C after
+five samples, and left no process, PowerShell, or user-unit residue. These are
+live dirty-source boundary probes, not qualification receipts or c1 evidence.
+Commit and push the repair before another exact c1 attempt.
 
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file

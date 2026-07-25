@@ -4,19 +4,23 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import math
 import os
 import platform
 import re
+import select
 import signal
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
+
+from device_memory_sampler import DeviceMemoryError, NvmlMemoryCounter
 
 
 SCHEMA_V1 = "kiln.wsl2-thermal-policy.v1"
@@ -29,7 +33,101 @@ TELEMETRY_FD_ENV = "KILN_WSL2_THERMAL_TELEMETRY_FD"
 TELEMETRY_SCHEMA = "kiln.wsl2-thermal-sample.v1"
 POWERSHELL = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
 NVIDIA_SMI = Path("/usr/lib/wsl/lib/nvidia-smi")
+NVIDIA_NVML = Path("/usr/lib/wsl/lib/libnvidia-ml.so.1")
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+HOST_COUNTER_SCHEMA = "kiln.wsl2-host-thermal-counter.v1"
+HOST_COUNTER_NAMES = (
+    "Temperature",
+    "High Precision Temperature",
+    "% Passive Limit",
+    "Throttle Reasons",
+)
+HOST_COUNTER_READY_KEYS = {"Schema", "Name", "CounterNames"}
+HOST_COUNTER_SAMPLE_KEYS = {
+    "Schema",
+    "Sequence",
+    "Name",
+    "Temperature",
+    "HighPrecisionTemperature",
+    "PercentPassiveLimit",
+    "ThrottleReasons",
+}
+HOST_COUNTER_LINE_LIMIT = 4096
+HOST_COUNTER_TIMEOUT_SECONDS = 10.0
+HOST_COUNTER_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$zone = [System.Text.Encoding]::UTF8.GetString(
+    [System.Convert]::FromBase64String($zoneBase64)
+)
+$category = [System.Diagnostics.PerformanceCounterCategory]::new(
+    'Thermal Zone Information'
+)
+$instances = @($category.GetInstanceNames() | Where-Object { $_ -ceq $zone })
+if ($instances.Count -ne 1) {
+    throw "thermal zone '$zone' matched $($instances.Count) performance-counter instances"
+}
+$allCounters = @($category.GetCounters($zone))
+function Resolve-Counter([string]$name) {
+    $matches = @($allCounters | Where-Object { $_.CounterName -ceq $name })
+    if ($matches.Count -ne 1) {
+        throw "thermal counter '$name' matched $($matches.Count) counters"
+    }
+    return $matches[0]
+}
+$temperature = Resolve-Counter 'Temperature'
+$highPrecisionTemperature = Resolve-Counter 'High Precision Temperature'
+$percentPassiveLimit = Resolve-Counter '% Passive Limit'
+$throttleReasons = Resolve-Counter 'Throttle Reasons'
+function Read-IntegerCounter($counter, [string]$name) {
+    $value = [double]$counter.NextValue()
+    if ([double]::IsNaN($value) -or [double]::IsInfinity($value)) {
+        throw "thermal counter '$name' returned a non-finite value"
+    }
+    $rounded = [math]::Round($value)
+    if ([math]::Abs($value - $rounded) -gt 0.001) {
+        throw "thermal counter '$name' returned a non-integer value"
+    }
+    return [long]$rounded
+}
+$writer = [Console]::Out
+$reader = [Console]::In
+$ready = [ordered]@{
+    Schema = 'kiln.wsl2-host-thermal-counter.v1'
+    Name = $zone
+    CounterNames = @(
+        'Temperature',
+        'High Precision Temperature',
+        '% Passive Limit',
+        'Throttle Reasons'
+    )
+}
+$writer.WriteLine(($ready | ConvertTo-Json -Compress))
+$writer.Flush()
+while ($null -ne ($line = $reader.ReadLine())) {
+    if ($line -cnotmatch '^(0|[1-9][0-9]*)$') {
+        throw "invalid thermal sample sequence '$line'"
+    }
+    $sequence = [long]::Parse(
+        $line,
+        [System.Globalization.CultureInfo]::InvariantCulture
+    )
+    $sample = [ordered]@{
+        Schema = 'kiln.wsl2-host-thermal-counter.v1'
+        Sequence = $sequence
+        Name = $zone
+        Temperature = Read-IntegerCounter $temperature 'Temperature'
+        HighPrecisionTemperature = Read-IntegerCounter `
+            $highPrecisionTemperature 'High Precision Temperature'
+        PercentPassiveLimit = Read-IntegerCounter `
+            $percentPassiveLimit '% Passive Limit'
+        ThrottleReasons = Read-IntegerCounter $throttleReasons 'Throttle Reasons'
+    }
+    $writer.WriteLine(($sample | ConvertTo-Json -Compress))
+    $writer.Flush()
+}
+"""
 POLICY_KEYS = {
     "schema",
     "id",
@@ -387,6 +485,8 @@ def verify_host_identity(policy: ThermalPolicy) -> None:
         raise ThermalGuardError(f"Windows PowerShell is unavailable: {POWERSHELL}")
     if not NVIDIA_SMI.is_file():
         raise ThermalGuardError(f"WSL NVIDIA SMI is unavailable: {NVIDIA_SMI}")
+    if not NVIDIA_NVML.is_file():
+        raise ThermalGuardError(f"WSL NVML is unavailable: {NVIDIA_NVML}")
     value = _powershell_json(
         "(Get-CimInstance -ClassName Win32_Processor | "
         "Select-Object -ExpandProperty Name) | ConvertTo-Json -Compress",
@@ -398,26 +498,12 @@ def verify_host_identity(policy: ThermalPolicy) -> None:
         )
 
 
-def _host_temperature(policy: ThermalPolicy) -> int:
-    raw = _powershell_json(
-        "Get-CimInstance -ClassName "
-        "Win32_PerfFormattedData_Counters_ThermalZoneInformation | "
-        "Select-Object Name,Temperature,HighPrecisionTemperature,"
-        "PercentPassiveLimit,ThrottleReasons | ConvertTo-Json -Compress",
-        "Windows thermal-zone probe",
-    )
-    rows = raw if isinstance(raw, list) else [raw]
-    matches = [
-        row
-        for row in rows
-        if isinstance(row, dict) and row.get("Name") == policy.thermal_zone_name
-    ]
-    if len(matches) != 1:
-        raise ThermalGuardError(
-            f"thermal zone {policy.thermal_zone_name!r} matched {len(matches)} rows"
-        )
+def _parse_host_temperature(
+    policy: ThermalPolicy,
+    raw: Any,
+) -> int:
     row = _exact_object(
-        matches[0],
+        raw,
         {
             "Name",
             "Temperature",
@@ -426,6 +512,23 @@ def _host_temperature(policy: ThermalPolicy) -> int:
             "ThrottleReasons",
         },
         "Windows thermal-zone row",
+    )
+    if row["Name"] != policy.thermal_zone_name:
+        raise ThermalGuardError(
+            f"thermal zone identity mismatch: observed {row['Name']!r}, "
+            f"expected {policy.thermal_zone_name!r}"
+        )
+    _integer(
+        row["PercentPassiveLimit"],
+        "thermal PercentPassiveLimit",
+        0,
+        100,
+    )
+    _integer(
+        row["ThrottleReasons"],
+        "thermal ThrottleReasons",
+        0,
+        2**32 - 1,
     )
     kelvin = _integer(row["Temperature"], "thermal Temperature", 1, 1000)
     tenths_kelvin = _integer(
@@ -446,43 +549,381 @@ def _host_temperature(policy: ThermalPolicy) -> int:
     return temperature
 
 
-def _gpu_temperature(policy: ThermalPolicy) -> int:
-    text = _run(
-        [
-            str(NVIDIA_SMI),
-            "--query-gpu=name,uuid,temperature.gpu",
-            "--format=csv,noheader,nounits",
-        ],
-        "WSL NVML temperature probe",
-    )
-    rows = [row.strip() for row in text.splitlines() if row.strip()]
-    parsed: list[tuple[str, str, int]] = []
-    for row in rows:
-        fields = [field.strip() for field in row.split(",")]
-        if len(fields) != 3 or not re.fullmatch(r"[0-9]+", fields[2]):
-            raise ThermalGuardError(f"malformed WSL NVML temperature row: {row!r}")
-        parsed.append((fields[0], fields[1], int(fields[2])))
-    matches = [row for row in parsed if row[1] == policy.gpu_uuid]
-    if len(matches) != 1:
-        raise ThermalGuardError(
-            f"GPU UUID {policy.gpu_uuid!r} matched {len(matches)} devices"
-        )
-    name, _uuid, celsius = matches[0]
-    if name != policy.gpu_name:
-        raise ThermalGuardError(
-            f"GPU identity mismatch: observed {name!r}, expected {policy.gpu_name!r}"
-        )
-    if celsius <= 0 or celsius > 200:
-        raise ThermalGuardError(f"GPU returned implausible {celsius} C")
-    return celsius * 1000
+def _strict_json_loads(text: str, label: str) -> Any:
+    def closed_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate key {key!r}")
+            value[key] = item
+        return value
 
+    try:
+        return json.loads(text, object_pairs_hook=closed_object)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ThermalGuardError(f"{label} returned malformed JSON: {exc}") from exc
+
+
+class WindowsThermalCounter:
+    """Persistent query-response channel to the Windows performance counters."""
+
+    def __init__(
+        self,
+        policy: ThermalPolicy,
+        *,
+        process_factory: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+    ) -> None:
+        zone_base64 = base64.b64encode(
+            policy.thermal_zone_name.encode("utf-8")
+        ).decode("ascii")
+        script = f"$zoneBase64 = '{zone_base64}'\n" + HOST_COUNTER_SCRIPT
+        try:
+            self._process = process_factory(
+                [
+                    str(POWERSHELL),
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    script,
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+        except OSError as exc:
+            raise ThermalGuardError(
+                f"cannot start persistent Windows thermal counter: {exc}"
+            ) from exc
+        self._policy = policy
+        self._stdout_buffer = b""
+        self._next_sequence = 0
+        self._closed = False
+        try:
+            ready = self._read_json_line("Windows thermal-counter initialization")
+            ready = _exact_object(
+                ready,
+                HOST_COUNTER_READY_KEYS,
+                "Windows thermal-counter ready record",
+            )
+            if (
+                ready["Schema"] != HOST_COUNTER_SCHEMA
+                or ready["Name"] != policy.thermal_zone_name
+                or ready["CounterNames"] != list(HOST_COUNTER_NAMES)
+            ):
+                raise ThermalGuardError(
+                    "Windows thermal-counter ready record violates its exact identity"
+                )
+        except Exception as exc:
+            try:
+                self.close()
+            except ThermalGuardError as close_exc:
+                raise ThermalGuardError(f"{exc}; cleanup failed: {close_exc}") from exc
+            raise
+
+    def _process_detail(self) -> str:
+        returncode = self._process.poll()
+        detail = "still running" if returncode is None else f"exited {returncode}"
+        if returncode is not None and self._process.stderr is not None:
+            try:
+                raw = self._process.stderr.read(HOST_COUNTER_LINE_LIMIT + 1)
+            except OSError:
+                raw = b""
+            if raw:
+                if len(raw) > HOST_COUNTER_LINE_LIMIT:
+                    return detail + " with oversized stderr"
+                detail += ": " + raw.decode("utf-8", errors="replace").strip()
+        return detail
+
+    def _read_line(self, label: str) -> str:
+        if self._process.stdout is None:
+            raise ThermalGuardError("Windows thermal-counter stdout is unavailable")
+        deadline = time.monotonic() + HOST_COUNTER_TIMEOUT_SECONDS
+        while b"\n" not in self._stdout_buffer:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ThermalGuardError(
+                    f"{label} timed out; counter process {self._process_detail()}"
+                )
+            try:
+                readable, _, _ = select.select(
+                    [self._process.stdout.fileno()],
+                    [],
+                    [],
+                    remaining,
+                )
+            except (OSError, ValueError) as exc:
+                raise ThermalGuardError(f"{label} cannot poll stdout: {exc}") from exc
+            if not readable:
+                continue
+            try:
+                chunk = os.read(self._process.stdout.fileno(), 1024)
+            except OSError as exc:
+                raise ThermalGuardError(f"{label} cannot read stdout: {exc}") from exc
+            if not chunk:
+                raise ThermalGuardError(
+                    f"{label} reached EOF; counter process {self._process_detail()}"
+                )
+            self._stdout_buffer += chunk
+            if len(self._stdout_buffer) > HOST_COUNTER_LINE_LIMIT:
+                raise ThermalGuardError(f"{label} exceeded its line-size bound")
+        raw, self._stdout_buffer = self._stdout_buffer.split(b"\n", 1)
+        raw = raw.removesuffix(b"\r")
+        try:
+            return raw.decode("utf-8-sig", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise ThermalGuardError(f"{label} is not UTF-8: {exc}") from exc
+
+    def _read_json_line(self, label: str) -> Any:
+        return _strict_json_loads(self._read_line(label), label)
+
+    def read_millicelsius(self) -> int:
+        if self._closed:
+            raise ThermalGuardError("Windows thermal counter is closed")
+        if self._process.stdin is None:
+            raise ThermalGuardError("Windows thermal-counter stdin is unavailable")
+        sequence = self._next_sequence
+        try:
+            self._process.stdin.write(f"{sequence}\n".encode("ascii"))
+            self._process.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            raise ThermalGuardError(
+                "cannot request a Windows thermal sample: "
+                f"{exc}; counter process {self._process_detail()}"
+            ) from exc
+        raw = self._read_json_line("Windows thermal-counter sample")
+        row = _exact_object(
+            raw,
+            HOST_COUNTER_SAMPLE_KEYS,
+            "Windows thermal-counter sample",
+        )
+        observed_sequence = _integer(
+            row["Sequence"],
+            "Windows thermal-counter sample Sequence",
+            0,
+            2**63 - 1,
+        )
+        if (
+            row["Schema"] != HOST_COUNTER_SCHEMA
+            or observed_sequence != sequence
+        ):
+            raise ThermalGuardError(
+                "Windows thermal-counter sample violates its schema or sequence"
+            )
+        self._next_sequence += 1
+        return _parse_host_temperature(
+            self._policy,
+            {
+                "Name": row["Name"],
+                "Temperature": row["Temperature"],
+                "HighPrecisionTemperature": row["HighPrecisionTemperature"],
+                "PercentPassiveLimit": row["PercentPassiveLimit"],
+                "ThrottleReasons": row["ThrottleReasons"],
+            },
+        )
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        errors: list[str] = []
+        if self._process.stdin is not None:
+            try:
+                self._process.stdin.close()
+            except OSError as exc:
+                errors.append(f"cannot close stdin: {exc}")
+        try:
+            returncode = self._process.wait(timeout=HOST_COUNTER_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            errors.append("counter process did not exit after stdin closed")
+            self._process.terminate()
+            try:
+                returncode = self._process.wait(timeout=HOST_COUNTER_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+                returncode = self._process.wait()
+        if returncode != 0:
+            errors.append(f"counter process exited {returncode}")
+        if self._stdout_buffer:
+            errors.append("counter process left an unconsumed partial stdout record")
+        if self._process.stdout is not None:
+            try:
+                trailing_stdout = self._process.stdout.read(HOST_COUNTER_LINE_LIMIT + 1)
+            except OSError as exc:
+                errors.append(f"cannot read trailing stdout: {exc}")
+            else:
+                if trailing_stdout:
+                    errors.append("counter process emitted unexpected trailing stdout")
+            self._process.stdout.close()
+        if self._process.stderr is not None:
+            try:
+                trailing_stderr = self._process.stderr.read(
+                    HOST_COUNTER_LINE_LIMIT + 1
+                )
+            except OSError as exc:
+                errors.append(f"cannot read trailing stderr: {exc}")
+            else:
+                if trailing_stderr:
+                    detail = trailing_stderr.decode(
+                        "utf-8", errors="replace"
+                    ).strip()
+                    errors.append(f"counter process emitted stderr: {detail}")
+            self._process.stderr.close()
+        if errors:
+            raise ThermalGuardError(
+                "persistent Windows thermal-counter cleanup failed: "
+                + "; ".join(errors)
+            )
+
+    def __enter__(self) -> WindowsThermalCounter:
+        return self
+
+    def __exit__(
+        self,
+        exception_type: type[BaseException] | None,
+        exception: BaseException | None,
+        traceback: Any,
+    ) -> bool:
+        try:
+            self.close()
+        except ThermalGuardError as close_exc:
+            if exception is not None:
+                raise ThermalGuardError(
+                    f"{exception}; thermal-counter cleanup failed: {close_exc}"
+                ) from exception
+            raise
+        return False
+
+
+class NvmlTemperatureCounter:
+    """Persistent exact-UUID NVML temperature counter."""
+
+    def __init__(
+        self,
+        policy: ThermalPolicy,
+        *,
+        counter_factory: Callable[..., NvmlMemoryCounter] = NvmlMemoryCounter,
+    ) -> None:
+        self._counter: NvmlMemoryCounter | None = None
+        try:
+            counter = counter_factory(
+                None,
+                device_uuid=policy.gpu_uuid,
+                library_name=str(NVIDIA_NVML),
+            )
+            self._counter = counter
+            identity = counter.receipt_identity()["device"]
+            if (
+                identity["uuid"] != policy.gpu_uuid
+                or identity["name"] != policy.gpu_name
+            ):
+                raise ThermalGuardError(
+                    "NVML GPU identity does not match the thermal policy"
+                )
+        except (DeviceMemoryError, KeyError, TypeError, ThermalGuardError) as exc:
+            cleanup_error: DeviceMemoryError | None = None
+            if self._counter is not None:
+                try:
+                    self._counter.close()
+                except DeviceMemoryError as close_exc:
+                    cleanup_error = close_exc
+                self._counter = None
+            suffix = (
+                f"; cleanup failed: {cleanup_error}"
+                if cleanup_error is not None
+                else ""
+            )
+            raise ThermalGuardError(
+                "cannot initialize persistent WSL NVML temperature counter: "
+                f"{exc}{suffix}"
+            ) from exc
+
+    def read_millicelsius(self) -> int:
+        if self._counter is None:
+            raise ThermalGuardError("persistent WSL NVML temperature counter is closed")
+        try:
+            return self._counter.read_temperature_millicelsius()
+        except DeviceMemoryError as exc:
+            raise ThermalGuardError(
+                f"cannot read persistent WSL NVML temperature: {exc}"
+            ) from exc
+
+    def close(self) -> None:
+        if self._counter is None:
+            return
+        counter = self._counter
+        self._counter = None
+        try:
+            counter.close()
+        except DeviceMemoryError as exc:
+            raise ThermalGuardError(
+                f"cannot close persistent WSL NVML temperature counter: {exc}"
+            ) from exc
+
+
+class PersistentThermalSampler:
+    """Lifecycle-bound host and GPU sampler used by the outer supervisor."""
+
+    def __init__(self, policy: ThermalPolicy) -> None:
+        self._host = WindowsThermalCounter(policy)
+        try:
+            self._gpu = NvmlTemperatureCounter(policy)
+        except Exception as exc:
+            try:
+                self._host.close()
+            except ThermalGuardError as close_exc:
+                raise ThermalGuardError(f"{exc}; cleanup failed: {close_exc}") from exc
+            raise
+        self._closed = False
+
+    def sample(self) -> ThermalSample:
+        if self._closed:
+            raise ThermalGuardError("persistent thermal sampler is closed")
+        monotonic_seconds = time.monotonic()
+        return ThermalSample(
+            monotonic_seconds=monotonic_seconds,
+            host_millicelsius=self._host.read_millicelsius(),
+            gpu_millicelsius=self._gpu.read_millicelsius(),
+        )
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        errors: list[str] = []
+        for label, counter in (("host", self._host), ("GPU", self._gpu)):
+            try:
+                counter.close()
+            except ThermalGuardError as exc:
+                errors.append(f"{label}: {exc}")
+        if errors:
+            raise ThermalGuardError(
+                "persistent thermal sampler cleanup failed: " + "; ".join(errors)
+            )
+
+    def __enter__(self) -> PersistentThermalSampler:
+        return self
+
+    def __exit__(
+        self,
+        exception_type: type[BaseException] | None,
+        exception: BaseException | None,
+        traceback: Any,
+    ) -> bool:
+        try:
+            self.close()
+        except ThermalGuardError as close_exc:
+            if exception is not None:
+                raise ThermalGuardError(
+                    f"{exception}; thermal sampler cleanup failed: {close_exc}"
+                ) from exception
+            raise
+        return False
 
 def sample(policy: ThermalPolicy) -> ThermalSample:
-    return ThermalSample(
-        monotonic_seconds=time.monotonic(),
-        host_millicelsius=_host_temperature(policy),
-        gpu_millicelsius=_gpu_temperature(policy),
-    )
+    with PersistentThermalSampler(policy) as sampler:
+        return sampler.sample()
 
 
 def _emit(event: str, policy: ThermalPolicy, **fields: Any) -> None:
@@ -571,16 +1012,18 @@ def _safe_handoff(
     policy: ThermalPolicy,
     *,
     first: ThermalSample | None = None,
+    sample_reader: Callable[[], ThermalSample] | None = None,
 ) -> HandoffResult:
     deadline = time.monotonic() + policy.handoff_timeout_seconds
     stable = 0
     current = first
+    read_sample = sample_reader or (lambda: sample(policy))
     sample_count = 0
     peak_host = 0
     peak_gpu = 0
     limit_failure: ThermalGuardError | None = None
     while True:
-        current = current or sample(policy)
+        current = current or read_sample()
         sample_count += 1
         peak_host = max(peak_host, current.host_millicelsius)
         peak_gpu = max(peak_gpu, current.gpu_millicelsius)
@@ -671,7 +1114,16 @@ def supervise(policy: ThermalPolicy, command: Sequence[str]) -> int:
         raise ThermalGuardError("a supervised command is required")
     _validate_pacing_scope_command(policy, command)
     verify_host_identity(policy)
-    starting = sample(policy)
+    with PersistentThermalSampler(policy) as sampler:
+        return _supervise_with_sampler(policy, command, sampler)
+
+
+def _supervise_with_sampler(
+    policy: ThermalPolicy,
+    command: Sequence[str],
+    sampler: PersistentThermalSampler,
+) -> int:
+    starting = sampler.sample()
     _check_limits(starting, policy)
     _emit(
         "preflight",
@@ -746,7 +1198,7 @@ def supervise(policy: ThermalPolicy, command: Sequence[str]) -> int:
                 break
             time.sleep(policy.poll_interval_ms / 1000.0)
             try:
-                current = sample(policy)
+                current = sampler.sample()
                 samples += 1
                 peak_host = max(peak_host, current.host_millicelsius)
                 peak_gpu = max(peak_gpu, current.gpu_millicelsius)
@@ -772,7 +1224,7 @@ def supervise(policy: ThermalPolicy, command: Sequence[str]) -> int:
             _terminate(process)
         returncode = process.wait()
         try:
-            handoff = _safe_handoff(policy)
+            handoff = _safe_handoff(policy, sample_reader=sampler.sample)
         except ThermalGuardError as exc:
             if failure is not None:
                 raise ThermalGuardError(

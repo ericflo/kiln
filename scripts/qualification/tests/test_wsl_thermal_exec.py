@@ -161,33 +161,240 @@ class WslThermalExecTests(unittest.TestCase):
                 "PercentPassiveLimit": 100,
                 "ThrottleReasons": 0,
             }
-            with mock.patch.object(thermal, "_powershell_json", return_value=row):
-                self.assertEqual(thermal._host_temperature(policy), 72_050)
+            self.assertEqual(thermal._parse_host_temperature(policy, row), 72_050)
             row["HighPrecisionTemperature"] = 3600
-            with mock.patch.object(thermal, "_powershell_json", return_value=row):
-                with self.assertRaisesRegex(
-                    thermal.ThermalGuardError, "disagree"
-                ):
-                    thermal._host_temperature(policy)
+            with self.assertRaisesRegex(
+                thermal.ThermalGuardError, "disagree"
+            ):
+                thermal._parse_host_temperature(policy, row)
+
+    def test_persistent_counter_json_rejects_duplicate_keys(self) -> None:
+        with self.assertRaisesRegex(
+            thermal.ThermalGuardError, "duplicate key"
+        ):
+            thermal._strict_json_loads(
+                '{"Schema":"first","Schema":"second"}',
+                "fixture counter",
+            )
 
     def test_gpu_uuid_and_name_are_both_bound(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             policy = thermal.load_policy(self.write_policy(Path(directory)))
-            with mock.patch.object(
-                thermal,
-                "_run",
-                return_value="Test GPU, GPU-test, 63",
+
+            class Counter:
+                def __init__(self, name: str = "Test GPU") -> None:
+                    self.name = name
+                    self.closed = False
+
+                def receipt_identity(self) -> dict[str, object]:
+                    return {
+                        "device": {
+                            "uuid": "GPU-test",
+                            "name": self.name,
+                        }
+                    }
+
+                def read_temperature_millicelsius(self) -> int:
+                    return 63_000
+
+                def close(self) -> None:
+                    self.closed = True
+
+            accepted = Counter()
+            temperature = thermal.NvmlTemperatureCounter(
+                policy,
+                counter_factory=lambda *_args, **_kwargs: accepted,
+            )
+            self.assertEqual(temperature.read_millicelsius(), 63_000)
+            temperature.close()
+            self.assertTrue(accepted.closed)
+
+            rejected = Counter("Different GPU")
+            with self.assertRaisesRegex(
+                thermal.ThermalGuardError, "identity"
             ):
-                self.assertEqual(thermal._gpu_temperature(policy), 63_000)
+                thermal.NvmlTemperatureCounter(
+                    policy,
+                    counter_factory=lambda *_args, **_kwargs: rejected,
+                )
+            self.assertTrue(rejected.closed)
+
+    def test_persistent_host_counter_is_sequence_checked_and_reused(self) -> None:
+        policy = thermal.validate_policy(policy_document())
+        fixture = r"""
+import json
+import sys
+
+print(json.dumps({
+    "Schema": "kiln.wsl2-host-thermal-counter.v1",
+    "Name": "\\_TZ.THRM",
+    "CounterNames": [
+        "Temperature",
+        "High Precision Temperature",
+        "% Passive Limit",
+        "Throttle Reasons",
+    ],
+}), flush=True)
+for line in sys.stdin:
+    sequence = int(line)
+    print(json.dumps({
+        "Schema": "kiln.wsl2-host-thermal-counter.v1",
+        "Sequence": sequence,
+        "Name": "\\_TZ.THRM",
+        "Temperature": 345,
+        "HighPrecisionTemperature": 3452,
+        "PercentPassiveLimit": 100,
+        "ThrottleReasons": 0,
+    }), flush=True)
+"""
+
+        def process_factory(*_args, **kwargs):
+            return thermal.subprocess.Popen(
+                [sys.executable, "-c", fixture],
+                stdin=kwargs["stdin"],
+                stdout=kwargs["stdout"],
+                stderr=kwargs["stderr"],
+                bufsize=kwargs["bufsize"],
+            )
+
+        with thermal.WindowsThermalCounter(
+            policy,
+            process_factory=process_factory,
+        ) as counter:
+            self.assertEqual(counter.read_millicelsius(), 72_050)
+            self.assertEqual(counter.read_millicelsius(), 72_050)
+
+    def test_persistent_host_counter_rejects_wrong_sequence(self) -> None:
+        policy = thermal.validate_policy(policy_document())
+        fixture = r"""
+import json
+import sys
+
+print(json.dumps({
+    "Schema": "kiln.wsl2-host-thermal-counter.v1",
+    "Name": "\\_TZ.THRM",
+    "CounterNames": [
+        "Temperature",
+        "High Precision Temperature",
+        "% Passive Limit",
+        "Throttle Reasons",
+    ],
+}), flush=True)
+for _line in sys.stdin:
+    print(json.dumps({
+        "Schema": "kiln.wsl2-host-thermal-counter.v1",
+        "Sequence": 99,
+        "Name": "\\_TZ.THRM",
+        "Temperature": 345,
+        "HighPrecisionTemperature": 3452,
+        "PercentPassiveLimit": 100,
+        "ThrottleReasons": 0,
+    }), flush=True)
+"""
+
+        def process_factory(*_args, **kwargs):
+            return thermal.subprocess.Popen(
+                [sys.executable, "-c", fixture],
+                stdin=kwargs["stdin"],
+                stdout=kwargs["stdout"],
+                stderr=kwargs["stderr"],
+                bufsize=kwargs["bufsize"],
+            )
+
+        with thermal.WindowsThermalCounter(
+            policy,
+            process_factory=process_factory,
+        ) as counter:
+            with self.assertRaisesRegex(
+                thermal.ThermalGuardError, "schema or sequence"
+            ):
+                counter.read_millicelsius()
+
+    def test_persistent_host_counter_response_timeout_fails_closed(self) -> None:
+        policy = thermal.validate_policy(policy_document())
+        fixture = r"""
+import json
+import sys
+
+print(json.dumps({
+    "Schema": "kiln.wsl2-host-thermal-counter.v1",
+    "Name": "\\_TZ.THRM",
+    "CounterNames": [
+        "Temperature",
+        "High Precision Temperature",
+        "% Passive Limit",
+        "Throttle Reasons",
+    ],
+}), flush=True)
+for _line in sys.stdin:
+    pass
+"""
+
+        def process_factory(*_args, **kwargs):
+            return thermal.subprocess.Popen(
+                [sys.executable, "-c", fixture],
+                stdin=kwargs["stdin"],
+                stdout=kwargs["stdout"],
+                stderr=kwargs["stderr"],
+                bufsize=kwargs["bufsize"],
+            )
+
+        counter = thermal.WindowsThermalCounter(
+            policy,
+            process_factory=process_factory,
+        )
+        try:
             with mock.patch.object(
                 thermal,
-                "_run",
-                return_value="Different GPU, GPU-test, 63",
+                "HOST_COUNTER_TIMEOUT_SECONDS",
+                0.01,
             ):
                 with self.assertRaisesRegex(
-                    thermal.ThermalGuardError, "identity mismatch"
+                    thermal.ThermalGuardError, "timed out"
                 ):
-                    thermal._gpu_temperature(policy)
+                    counter.read_millicelsius()
+        finally:
+            counter.close()
+
+    def test_persistent_sampler_closes_host_when_nvml_initialization_fails(self) -> None:
+        policy = thermal.validate_policy(policy_document())
+        host = mock.Mock()
+        with mock.patch.object(
+            thermal,
+            "WindowsThermalCounter",
+            return_value=host,
+        ), mock.patch.object(
+            thermal,
+            "NvmlTemperatureCounter",
+            side_effect=thermal.ThermalGuardError("fixture NVML failure"),
+        ):
+            with self.assertRaisesRegex(
+                thermal.ThermalGuardError, "fixture NVML failure"
+            ):
+                thermal.PersistentThermalSampler(policy)
+        host.close.assert_called_once_with()
+
+    def test_persistent_sampler_samples_and_closes_both_sources(self) -> None:
+        policy = thermal.validate_policy(policy_document())
+        host = mock.Mock()
+        host.read_millicelsius.return_value = 72_050
+        gpu = mock.Mock()
+        gpu.read_millicelsius.return_value = 63_000
+        with mock.patch.object(
+            thermal,
+            "WindowsThermalCounter",
+            return_value=host,
+        ), mock.patch.object(
+            thermal,
+            "NvmlTemperatureCounter",
+            return_value=gpu,
+        ):
+            with thermal.PersistentThermalSampler(policy) as sampler:
+                observed = sampler.sample()
+                self.assertEqual(observed.host_millicelsius, 72_050)
+                self.assertEqual(observed.gpu_millicelsius, 63_000)
+        host.close.assert_called_once_with()
+        gpu.close.assert_called_once_with()
 
     def test_limits_are_inclusive_and_cannot_be_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -212,14 +419,17 @@ class WslThermalExecTests(unittest.TestCase):
             thermal.ThermalSample(0.4, 84_000, 61_000),
             thermal.ThermalSample(0.5, 84_000, 61_000),
         ]
+        sampler = mock.MagicMock()
+        sampler.__enter__.return_value = sampler
+        sampler.sample.side_effect = observed
         stderr = io.StringIO()
         with mock.patch.object(
             thermal,
             "verify_host_identity",
         ), mock.patch.object(
             thermal,
-            "sample",
-            side_effect=observed,
+            "PersistentThermalSampler",
+            return_value=sampler,
         ), mock.patch.object(
             thermal.subprocess,
             "Popen",

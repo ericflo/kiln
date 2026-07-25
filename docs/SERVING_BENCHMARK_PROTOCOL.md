@@ -395,7 +395,14 @@ or failure to leave the scope unfrozen fails closed. The independent outer
 supervisor keeps the unchanged 95/85 C hard limits and safe handoff. It is the
 sole Windows/NVML probe owner and sends strict sequenced samples over an
 inherited pipe that the scope controller consumes and does not pass to the
-contained payload. Freeze and resume each require both the requested
+contained payload. The supervisor holds one exact-instance Windows
+`Thermal Zone Information` performance-counter process and one exact-UUID NVML
+handle for the complete lifecycle. It does not launch a new PowerShell/WMI
+query or `nvidia-smi` process at the one-second cadence. The Windows
+request/response channel binds a monotonically increasing sequence and exact
+four-counter schema; missing identity, malformed or reordered data, timeout,
+unexpected output, nonzero exit, or cleanup failure is fatal. Freeze and
+resume each require both the requested
 `cgroup.freeze` value and the kernel's `cgroup.events` state to agree. The tool
 requires exactly one successful
 `preflight`/`complete` pair per pass, peaks below both hard limits, and the
@@ -606,6 +613,21 @@ receipt still has `model: null`, unavailable environment identity, empty
 effective config, and an unexecuted failed c1 result. It is pre-model thermal
 counterevidence only. Do not cite it as performance evidence or weaken the
 thermal policy for another retry.
+
+That failure also exposed observer work outside the measured scope. The
+fingerprint used only 4.184 CPU-seconds while the former outer guard launched a
+new PowerShell/WMI query and `nvidia-smi` process for each of its 534 samples.
+A post-failure Windows counter snapshot showed `WmiPrvSE` at 21 percent CPU,
+and a read-only idle trend oscillated from 73.05 to 83.05 C. The repaired
+supervisor keeps both sensor sources open. A 60-sample live dirty-source probe
+completed in 60.182 seconds with 0.000 WSL-visible CPU-seconds in the
+persistent PowerShell bridge, a 73.05-81.05 C host range, displayed samples
+15/30/45/60 at 73.05/74.05/74.05/73.05 C, fixed 63 C GPU readings, and no
+sensor-process residue. An exact guarded no-op then passed the telemetry, paced scope,
+namespace, accounting, cleanup, and stable-handoff lifecycle with a
+75.05/63 C start, 84.05/63 C outer peak, and 75.05/63 C end. Neither probe is a
+serving receipt. Push the repair before rerunning fixed c1; every thermal
+threshold and workload semantic remains unchanged.
 
 For the first Kiln campaign, use the exact UUID from
 `.environment.device.device_uuid` in the environment receipt, the matching

@@ -199,6 +199,11 @@ class NvmlMemoryCounter:
             ("nvmlDeviceGetUUID",),
             [ctypes.c_void_p, ctypes.POINTER(ctypes.c_char), ctypes.c_uint],
         )
+        self._device_temperature = _nvml_function(
+            self._library,
+            ("nvmlDeviceGetTemperature",),
+            [ctypes.c_void_p, ctypes.c_uint, ctypes.POINTER(ctypes.c_uint)],
+        )
         self._memory_info = _nvml_function(
             self._library,
             ("nvmlDeviceGetMemoryInfo",),
@@ -288,6 +293,20 @@ class NvmlMemoryCounter:
         if self._closed:
             raise DeviceMemoryError("NVML memory counter is closed")
         return self._get_memory_info().used
+
+    def read_temperature_millicelsius(self) -> int:
+        if self._closed:
+            raise DeviceMemoryError("NVML memory counter is closed")
+        temperature = ctypes.c_uint()
+        self._check(
+            self._device_temperature(self._handle, 0, ctypes.byref(temperature)),
+            "nvmlDeviceGetTemperature",
+        )
+        if temperature.value <= 0 or temperature.value > 200:
+            raise DeviceMemoryError(
+                f"NVML returned implausible GPU temperature {temperature.value} C"
+            )
+        return temperature.value * 1000
 
     def receipt_identity(self) -> dict[str, Any]:
         return {"source": self.source, "path": None, "device": dict(self._identity)}

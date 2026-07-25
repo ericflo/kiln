@@ -53,6 +53,7 @@ class FakeNvml:
         )
         self.nvmlDeviceGetUUID = FakeFunction(self._get_uuid)
         self.nvmlDeviceGetMemoryInfo = FakeFunction(self._get_memory)
+        self.nvmlDeviceGetTemperature = FakeFunction(self._get_temperature)
         self.nvmlSystemGetNVMLVersion = FakeFunction(
             lambda target, size: self._write_string(target, size, b"13.580.65")
         )
@@ -107,6 +108,11 @@ class FakeNvml:
         info.used = 4 * 1024**3 + self.memory_reads
         return 0
 
+    @staticmethod
+    def _get_temperature(_handle, _sensor, target):
+        ctypes.cast(target, ctypes.POINTER(ctypes.c_uint)).contents.value = 63
+        return 0
+
 
 class DeviceMemorySamplerTests(unittest.TestCase):
     def test_nvml_counter_records_stable_device_identity(self) -> None:
@@ -116,6 +122,7 @@ class DeviceMemorySamplerTests(unittest.TestCase):
         )
         identity = counter.receipt_identity()
         used = counter.read_bytes()
+        temperature = counter.read_temperature_millicelsius()
         counter.close()
 
         self.assertEqual(identity["source"], "nvml_used")
@@ -127,6 +134,7 @@ class DeviceMemorySamplerTests(unittest.TestCase):
         self.assertTrue(identity["device"]["uuid"].startswith("GPU-"))
         self.assertEqual(identity["device"]["total_bytes"], 24 * 1024**3)
         self.assertGreater(used, 4 * 1024**3)
+        self.assertEqual(temperature, 63_000)
         self.assertEqual(library.shutdowns, 1)
 
     def test_nvml_multi_gpu_auto_selection_fails_and_shuts_down(self) -> None:
@@ -136,6 +144,24 @@ class DeviceMemorySamplerTests(unittest.TestCase):
         ):
             memory.NvmlMemoryCounter(None, library_loader=lambda _name: library)
         self.assertEqual(library.shutdowns, 1)
+
+    def test_nvml_temperature_error_and_closed_counter_fail_closed(self) -> None:
+        library = FakeNvml()
+        library.nvmlDeviceGetTemperature = FakeFunction(
+            lambda _handle, _sensor, _target: 999
+        )
+        counter = memory.NvmlMemoryCounter(
+            None, library_loader=lambda _name: library
+        )
+        with self.assertRaisesRegex(
+            memory.DeviceMemoryError, "fixture-999"
+        ):
+            counter.read_temperature_millicelsius()
+        counter.close()
+        with self.assertRaisesRegex(
+            memory.DeviceMemoryError, "closed"
+        ):
+            counter.read_temperature_millicelsius()
 
     def test_explicit_nvml_index_is_bound_in_identity(self) -> None:
         library = FakeNvml(device_count=2)
