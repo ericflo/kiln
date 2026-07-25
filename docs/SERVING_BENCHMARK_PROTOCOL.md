@@ -493,6 +493,20 @@ descriptor. The controller now closes it exactly once and preserves the causal
 pacing error. Commit and push the receipt and repair before retrying the
 unchanged c1 workload.
 
+The unchanged retry from exact clean pushed source
+`1715532c56bc7241797691ba2ee8df38f3e28be6` failed even earlier because the
+idle host could not satisfy the pacing resume threshold. The initial
+fingerprint scope remained verifiably frozen for 300.520 seconds, peaked at
+82.05/65 C host/GPU, and failed at the unchanged per-pause bound before
+substantive model reads. The outer supervisor completed its stable handoff at
+75.05/63 C after 228 samples. The scope was removed and no child or campaign
+root remained. Because initial fingerprint rejection precedes run creation,
+this is non-receipt console counterevidence, not a performance artifact. It
+also verifies that the corrected failure path reports the causal pacing error
+without the former descriptor-close error. Allow the host to cool independently
+before another unchanged clean-source attempt; do not weaken the resume or
+per-pause limits to obtain a row.
+
 For the first Kiln campaign, use the exact UUID from
 `.environment.device.device_uuid` in the environment receipt, the matching
 bootstrap launch JSON, and `target/release/kiln` as `--runtime-artifact`. Use a

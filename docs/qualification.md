@@ -1182,6 +1182,21 @@ telemetry descriptor after the causal failed event. The controller now closes
 that descriptor exactly once and preserves the primary failure. Commit and
 push this checkpoint before an unchanged exact c1 retry.
 
+The unchanged retry from exact clean pushed source
+`1715532c56bc7241797691ba2ee8df38f3e28be6` was rejected before substantive
+fingerprint reads. Its initial scope remained in a verified thermal freeze for
+300.520 seconds and failed at the same unchanged per-pause limit. Pacing peaked
+at 82.05/65 C host/GPU; the independent outer supervisor completed stable
+handoff at 75.05/63 C after 228 samples. The Linux scope was removed and no
+child, campaign root, or source change remained. The corrected failure output
+preserved the pacing cause without the former descriptor-close diagnostic.
+The runner does not create a receipt until its initial fingerprint succeeds,
+so this is explicitly non-receipt console counterevidence and makes no model,
+server, request, or performance claim. Do not rerun while the idle host cannot
+reach the reviewed resume threshold. Allow an independent cooldown, then retry
+the unchanged c1 workload from another clean pushed checkpoint without raising
+the thermal thresholds or timeout.
+
 The initial Kiln inputs are stable-profile, eager-only baselines. They are not
 an optimality claim and must not be edited in place after a receipt binds them.
 Land a new source-bound candidate for graph capture, scheduler widening,
