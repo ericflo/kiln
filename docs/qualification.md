@@ -754,6 +754,15 @@ PIDs, was removed cleanly, and completed thermal handoff after 92.05 C host
 and 66 C GPU peaks. This is retained counterevidence for cold-cache build
 completion within the current limit; the low-memory gate remains open.
 
+A clean cache-warm restart, receipt
+`20260725t081034583702z-cuda-rtx4090-laptop-serving-cuda-low-memory--647fb2a614-v1`,
+then failed before compilation because the nested Cargo preflight observed 13
+whole GiB available against the unchanged 14 GiB admission floor. Its scope
+ran for 0.356 seconds, peaked at 42,921,984 bytes and seven PIDs, reported zero
+memory-limit or OOM events, and was removed cleanly. This second receipt also
+contains no model or pressure evidence; wait for the declared host-memory
+floor rather than weakening it.
+
 ### CUDA Serving Bootstrap Handoff
 
 After the environment, core-correctness, and memory-lifecycle receipts pass and
