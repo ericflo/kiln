@@ -24,12 +24,13 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 import environment as environment_module
 import wsl_platform
+import wsl_thermal_exec
 from model_fingerprint import ModelFingerprintError, fingerprint_model
 from receipt import MAX_RESULT_DETAIL_CHARACTERS, validate_receipt
 from result_details import compact_details, join_details
@@ -50,7 +51,10 @@ from workload import (
 
 ROOT = Path(__file__).resolve().parents[2]
 LINUX_NAMESPACE_EXEC = ROOT / "scripts" / "qualification" / "linux_namespace_exec.py"
+WSL_THERMAL_EXEC = ROOT / "scripts" / "qualification" / "wsl_thermal_exec.py"
+WSL_SCOPE_EXEC = ROOT / "scripts" / "qualification" / "wsl_scope_exec.py"
 WORKLOAD_DIRECTORY = Path("qualification/workloads")
+WSL_THERMAL_POLICY_DIRECTORY = Path("qualification/host-policies")
 RESULT_PATH_ENVIRONMENT_VARIABLE = "KILN_QUALIFICATION_CASE_RESULT"
 VARIANT_ID_ENVIRONMENT_VARIABLE = "KILN_QUALIFICATION_VARIANT_ID"
 NETWORK_ISOLATION_ENVIRONMENT_VARIABLE = wsl_platform.NETWORK_ISOLATION_ENV
@@ -103,6 +107,10 @@ MAX_RUN_STRUCTURED_BYTES = 64 * 1024 * 1024
 MAX_TERMINATION_GRACE_SECONDS = 75.0
 DEFAULT_TERMINATION_GRACE_SECONDS = 65.0
 SUCCESS_DESCENDANT_SETTLEMENT_SECONDS = 1.0
+WSL_SCOPE_MEMORY_MAX_BYTES = 10 * 1024 * 1024 * 1024
+WSL_SCOPE_PIDS_MAX = 512
+WSL_SCOPE_CPU_QUOTA_PERCENT = 50
+WSL_SCOPE_CPU_POLL_INTERVAL_MS = 5
 
 
 class QualificationRunError(RuntimeError):
@@ -334,6 +342,41 @@ def _committed_workload(root: Path, path: Path) -> tuple[dict[str, Any], bytes, 
             f"workload does not exactly match its committed HEAD bytes: {relative.as_posix()}"
         )
     return workload, raw, sha256_bytes(raw)
+
+
+def _committed_wsl_thermal_policy(
+    root: Path, path: Path
+) -> tuple[Path, wsl_thermal_exec.ThermalPolicy]:
+    candidate = path if path.is_absolute() else root / path
+    resolved = _within_root(candidate, root)
+    try:
+        relative = resolved.relative_to(root)
+        relative.relative_to(WSL_THERMAL_POLICY_DIRECTORY)
+    except ValueError as exc:
+        raise QualificationRunError(
+            "WSL2 thermal policy must resolve under "
+            f"{root / WSL_THERMAL_POLICY_DIRECTORY}"
+        ) from exc
+    if resolved.suffix != ".json" or not resolved.is_file() or resolved.is_symlink():
+        raise QualificationRunError(
+            "WSL2 thermal policy must be a regular, non-symlink JSON file"
+        )
+    try:
+        committed = _git(root, "show", f"HEAD:{relative.as_posix()}")
+        working = resolved.read_bytes()
+    except OSError as exc:
+        raise QualificationRunError(
+            f"cannot read WSL2 thermal policy {relative}: {exc}"
+        ) from exc
+    if committed != working:
+        raise QualificationRunError(
+            f"WSL2 thermal policy must match HEAD exactly: {relative.as_posix()}"
+        )
+    try:
+        parsed = wsl_thermal_exec.load_policy(resolved)
+    except wsl_thermal_exec.ThermalGuardError as exc:
+        raise QualificationRunError(f"invalid WSL2 thermal policy: {exc}") from exc
+    return resolved, parsed
 
 
 def _parse_variable_value(raw: str, definition: dict[str, Any]) -> Any:
@@ -1553,6 +1596,7 @@ def _run_qualification_impl(
     model_id: str | None = None,
     output: Path | None = None,
     receipt_id: str | None = None,
+    wsl2_thermal_policy: Path | None = None,
     root: Path = ROOT,
     invocation: list[str] | None = None,
     hooks: RunnerHooks = DEFAULT_HOOKS,
@@ -1642,6 +1686,25 @@ def _run_qualification_impl(
             raise QualificationRunError(f"model fingerprint failed: {exc}") from exc
     resolved_model_path = model["path"] if model is not None else None
     network_isolation = hooks.network_isolation(root)
+    wsl_thermal_policy_path: Path | None = None
+    wsl_thermal_policy_value: wsl_thermal_exec.ThermalPolicy | None = None
+    wsl_thermal_required = (
+        variant["backend"] == "cuda"
+        and network_isolation.mechanism in wsl_platform.WSL_CONTAINMENT_MECHANISMS
+    )
+    if wsl_thermal_required and wsl2_thermal_policy is None:
+        raise QualificationRunError(
+            "WSL2 CUDA qualification requires --wsl2-thermal-policy; "
+            "the host thermal safeguard cannot be disabled"
+        )
+    if wsl2_thermal_policy is not None:
+        if not wsl_thermal_required:
+            raise QualificationRunError(
+                "--wsl2-thermal-policy is only valid for contained WSL2 CUDA qualification"
+            )
+        wsl_thermal_policy_path, wsl_thermal_policy_value = (
+            _committed_wsl_thermal_policy(root, wsl2_thermal_policy)
+        )
 
     try:
         preflight_tree_hash, _ = source_tree_hash(root)
@@ -1734,6 +1797,15 @@ def _run_qualification_impl(
         },
     )
     artifacts = [_artifact(root, environment_raw_path, "environment_probes")]
+    if wsl_thermal_policy_path is not None:
+        thermal_policy_snapshot = run_directory / "wsl2-thermal-policy.json"
+        _atomic_write_json_new(
+            thermal_policy_snapshot,
+            json.loads(wsl_thermal_policy_path.read_bytes()),
+        )
+        artifacts.append(
+            _artifact(root, thermal_policy_snapshot, "wsl2_thermal_policy")
+        )
     run_config_cases: list[dict[str, Any]] = []
     results: list[dict[str, Any]] = []
     effective_config_verified = True
@@ -1768,7 +1840,34 @@ def _run_qualification_impl(
                 _resolve_text(item, variables, seed, resolved_model_path, host_id)
                 for item in case["command"]
             ]
-            executed_argv = [*network_isolation.argv_prefix, *argv]
+            contained_argv = [*network_isolation.argv_prefix, *argv]
+            if wsl_thermal_policy_path is None:
+                executed_argv = contained_argv
+            else:
+                scoped_argv = [
+                    sys.executable,
+                    str(WSL_SCOPE_EXEC),
+                    "--memory-max-bytes",
+                    str(WSL_SCOPE_MEMORY_MAX_BYTES),
+                    "--pids-max",
+                    str(WSL_SCOPE_PIDS_MAX),
+                    "--cpu-quota-percent",
+                    str(WSL_SCOPE_CPU_QUOTA_PERCENT),
+                    "--cpu-poll-interval-ms",
+                    str(WSL_SCOPE_CPU_POLL_INTERVAL_MS),
+                    "--runtime-max-seconds",
+                    str(case["timeout_seconds"]),
+                    "--",
+                    *contained_argv,
+                ]
+                executed_argv = [
+                    sys.executable,
+                    str(WSL_THERMAL_EXEC),
+                    "--policy",
+                    str(wsl_thermal_policy_path),
+                    "--",
+                    *scoped_argv,
+                ]
             working_directory = _within_root(root / case["working_directory"], root)
             if not working_directory.is_dir():
                 raise QualificationRunError(
@@ -1801,6 +1900,37 @@ def _run_qualification_impl(
                             network_isolation.mechanism
                         ),
                     },
+                    "wsl2_thermal_supervision": (
+                        None
+                        if wsl_thermal_policy_value is None
+                        else {
+                            "mechanism": "windows-thermal-zone-nvml-supervisor-v1",
+                            "policy_path": wsl_thermal_policy_path.relative_to(
+                                root
+                            ).as_posix(),
+                            "policy_sha256": (
+                                wsl_thermal_policy_value.content_sha256
+                            ),
+                            "child_environment": {
+                                wsl_thermal_exec.POLICY_ENV: (
+                                    wsl_thermal_policy_value.content_sha256
+                                )
+                            },
+                            "scope": {
+                                "mechanism": "systemd-user-scope-feedback-v1",
+                                "memory_max_bytes": WSL_SCOPE_MEMORY_MAX_BYTES,
+                                "memory_swap_max_bytes": 0,
+                                "pids_max": WSL_SCOPE_PIDS_MAX,
+                                "cpu_quota_percent": (
+                                    WSL_SCOPE_CPU_QUOTA_PERCENT
+                                ),
+                                "cpu_poll_interval_ms": (
+                                    WSL_SCOPE_CPU_POLL_INTERVAL_MS
+                                ),
+                                "runtime_max_seconds": case["timeout_seconds"],
+                            },
+                        }
+                    ),
                     "case_result_path": command_result_path.relative_to(root).as_posix(),
                     "process_environment_sha256": _canonical_hash(process_environment),
                     "timeout_seconds": case["timeout_seconds"],
@@ -2067,6 +2197,23 @@ def _run_qualification_impl(
             "variables": variables,
             "determinism": workload["determinism"],
             "network_isolation": network_isolation.mechanism,
+            "wsl2_thermal_supervision": (
+                None
+                if wsl_thermal_policy_value is None
+                else {
+                    "mechanism": "windows-thermal-zone-nvml-supervisor-v1",
+                    "policy_path": wsl_thermal_policy_path.relative_to(root).as_posix(),
+                    "policy_sha256": wsl_thermal_policy_value.content_sha256,
+                    "scope": {
+                        "mechanism": "systemd-user-scope-feedback-v1",
+                        "memory_max_bytes": WSL_SCOPE_MEMORY_MAX_BYTES,
+                        "memory_swap_max_bytes": 0,
+                        "pids_max": WSL_SCOPE_PIDS_MAX,
+                        "cpu_quota_percent": WSL_SCOPE_CPU_QUOTA_PERCENT,
+                        "cpu_poll_interval_ms": WSL_SCOPE_CPU_POLL_INTERVAL_MS,
+                    },
+                }
+            ),
             "case_execution_count": execution_count,
             "per_stream_output_limit_bytes": per_stream_output_limit,
             "max_run_capture_bytes": MAX_RUN_CAPTURE_BYTES,
@@ -2081,8 +2228,8 @@ def _run_qualification_impl(
     )
     artifacts.append(_artifact(root, run_config_path, "effective_run_config"))
 
-    finished_at = utc_now()
     duration = time.monotonic() - started_monotonic
+    finished_at = started_at + timedelta(seconds=duration)
     passed = all(not result["required"] or result["status"] == "passed" for result in results)
     effective_invocation = invocation or [
         sys.executable,
@@ -2180,6 +2327,7 @@ def run_qualification(
     model_id: str | None = None,
     output: Path | None = None,
     receipt_id: str | None = None,
+    wsl2_thermal_policy: Path | None = None,
     root: Path = ROOT,
     invocation: list[str] | None = None,
     hooks: RunnerHooks = DEFAULT_HOOKS,
@@ -2196,6 +2344,7 @@ def run_qualification(
             model_id=model_id,
             output=output,
             receipt_id=receipt_id,
+            wsl2_thermal_policy=wsl2_thermal_policy,
             root=root,
             invocation=invocation,
             hooks=hooks,
@@ -2257,6 +2406,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="explicit unique receipt ID (normally generated with a UTC timestamp)",
     )
     parser.add_argument(
+        "--wsl2-thermal-policy",
+        type=Path,
+        help=(
+            "committed WSL2 host/GPU hard-limit policy; required for contained "
+            "WSL2 CUDA qualification"
+        ),
+    )
+    parser.add_argument(
         "--term-grace-seconds",
         type=float,
         default=DEFAULT_TERMINATION_GRACE_SECONDS,
@@ -2282,6 +2439,7 @@ def main(argv: list[str] | None = None) -> int:
             model_id=args.model_id,
             output=args.output,
             receipt_id=args.receipt_id,
+            wsl2_thermal_policy=args.wsl2_thermal_policy,
             invocation=invocation,
             termination_grace_seconds=args.term_grace_seconds,
         )

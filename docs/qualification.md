@@ -91,6 +91,7 @@ PATH="$HOME/.cargo/bin:$PATH" python3 scripts/qualification/run.py \
 PATH="$HOME/.cargo/bin:$PATH" python3 scripts/qualification/run.py \
   --variant cuda-rtx4090-laptop-16gb \
   --host-id rtx4090-laptop \
+  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-boundary-v1.json \
   --var output_path=.qualification/environment/rtx4090-laptop-cuda.json \
   qualification/workloads/environment-v1.json
 ```
@@ -139,8 +140,8 @@ The outer runner capture binds all of the following to the receipt:
   symlink semantics;
 - `/proc/meminfo`, cgroup v2 controller identity, and a create/write/read/remove
   probe beneath the delegated user `app.slice`;
-- system and user-systemd state, Linux host-temperature inputs, and direct NVML
-  GPU temperature telemetry; and
+- system and user-systemd state, Linux or Windows formatted thermal-zone
+  telemetry, and direct NVML GPU temperature telemetry; and
 - the runner's accepted network/PID containment mechanism.
 
 The WSL2 runner always uses the util-linux namespace path even if bubblewrap is
@@ -153,14 +154,36 @@ checks. A caller-provided environment variable alone cannot attest containment.
 
 Capability values are exactly `available` or `unavailable`; an unavailable
 safeguard is also named in `unsupported` and is never converted into a passing
-probe. On the current laptop, NVML GPU temperature is observable, but the
-existing hard-limit guard has no readable Linux host-temperature input.
-The system systemd manager is usable, while the user manager cannot create a
-transient unit without a user D-Bus session. Qualification that requires either
-host thermal enforcement or a user transient unit must fail closed until that
-capability is installed and recaptured. Toolkit provenance is descriptive:
-recording CUDA 12.4 does not by itself establish the workload manifests'
-cudarc CUDA 12.8 API contract or any accelerator correctness.
+probe. The current WSL2 boundary creates exact runtime `dbus.socket` and
+`dbus.service` units when the distribution omitted the user bus, then proves an
+owned user transient unit. It reads the Windows
+`Win32_PerfFormattedData_Counters_ThermalZoneInformation` zone
+`\_TZ.THRM`, cross-checks whole- and tenth-Kelvin fields, and converts the
+high-precision field to millicelsius. The checked
+`rtx4090-laptop-wsl2-boundary-v1` policy binds that source to the exact
+`Intel(R) Core(TM) Ultra 9 185H`, uses a 95 C hard limit below Intel's 110 C
+Tjunction, and independently binds the exact GPU UUID/name to an 85 C limit.
+The outer supervisor treats either telemetry read failure or either inclusive
+limit as a trip, terminates the complete inner scope, and requires three
+post-exit samples at or below 85 C host and 75 C GPU. It injects only the
+content hash into the child.
+
+Every WSL2 CUDA case is also placed in a user scope before `unshare`. The scope
+round-trips a 10 GiB aggregate `memory.max`, zero `memory.swap.max`, group OOM
+kill, and 512-PID limit. This WSL systemd delegation exposes no CPU controller,
+so the trusted outer controller reads aggregate `cpu.stat`, freezes/unfreezes
+the complete scope against a 50% budget, and retains a sentinel until final CPU
+use is no greater than the elapsed allowance. Missing bus units, an inert
+limit, malformed telemetry, absent containment, accounting failure, timeout,
+or scope residue fails the case. The outer process inventory also rejects an
+already-running host Cargo/rustc process before the private PID namespace can
+hide it. User-manager launch is deliberately not attempted inside Landlock
+because the manager would execute the requested process outside the private
+namespaces.
+
+Toolkit provenance is descriptive: recording CUDA 12.4 does not by itself
+establish the workload manifests' cudarc CUDA 12.8 API contract or any
+accelerator correctness.
 
 #### Current WSL2 RTX 4090 Laptop environment result
 
@@ -187,6 +210,13 @@ only. The receipt explicitly leaves `systemd_user_transient` and
 `host_thermal_guard` unavailable. It does not establish CUDA kernel
 correctness, the cudarc 12.8 workload contract, model loading, low-memory
 recovery, serving performance, or endurance.
+
+Those two unavailable values remain truthful for the historical `c55bff4a7`
+receipt. Later source repairs do not rewrite it: current-source runs require
+the content-hashed Windows/NVML thermal supervisor and the repaired user-scope
+boundary described above. A new run must retain its own raw preflight,
+continuous samples, final CPU/memory/PID counters, cooldown, and scope-removal
+evidence.
 
 New environment receipts retain the common device fields and may additionally
 carry these closed optional fields:
@@ -248,13 +278,19 @@ No checked-in qualification case may invoke Cargo directly. Workload validation
 rejects `cargo` by basename, including an absolute path. Standalone Rust test
 cases use `scripts/qualification/cargo-test-bounded.sh`, which pins one job, a
 50% aggregate CPU quota (at most half of one logical CPU on average), the
-unchanged 15 GiB admission floor, offline Cargo, transient-service execution,
-zero service swap, private networking, and a 1,740-second service cap. Its
+platform floor (14 GiB on the 15.3 GiB WSL VM, 15 GiB on the existing native
+Linux hosts), offline Cargo, zero scope/service swap, private networking, and
+a 1,740-second cap. WSL2 re-verifies its current scope, exact memory/swap/PID/OOM
+files, CPU-policy marker, thermal-policy hash, live loopback-only namespace,
+private user map, and denied Windows execution before Cargo starts. Native
+Linux continues to use the transient-service path.
+Its
 `closed-qualification-test-v1` environment is the source-build allowlist plus
-only the non-secret `KILN_QUALIFICATION` required-device gate; credentials,
-ambient compiler flags, target directories, and unrelated `KILN_*` values do
-not enter the service. The wrapper path and arguments remain part of the
-committed workload and effective run artifact.
+the non-secret `KILN_QUALIFICATION` required-device gate, model/oracle paths,
+and committed `CUDARC_CUDA_VERSION` and `KILN_CUDA_ARCHS` build controls;
+credentials, ambient compiler flags, target directories, and unrelated
+`KILN_*` values do not enter the process. The wrapper path and arguments remain
+part of the committed workload and effective run artifact.
 
 Source-building ROCm and Vulkan serving drivers likewise select an immutable
 backend build specification, resolve the
@@ -450,6 +486,7 @@ PATH="$HOME/.cargo/bin:$PATH" \
 python3 scripts/qualification/run.py \
   --variant cuda-rtx4090-laptop-16gb \
   --host-id rtx4090-laptop \
+  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-boundary-v1.json \
   qualification/workloads/cuda-metal-core-correctness-v1.json
 ```
 
@@ -500,6 +537,7 @@ PATH="$HOME/.cargo/bin:$PATH" \
 python3 scripts/qualification/run.py \
   --variant cuda-rtx4090-laptop-16gb \
   --host-id rtx4090-laptop \
+  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-boundary-v1.json \
   qualification/workloads/cuda-memory-lifecycle-v1.json
 ```
 
@@ -554,6 +592,14 @@ environment fields. The complete policy-materialization, bounded CUDA build,
 typed-config preview, immutable vLLM runtime-manifest, NVML UUID selection,
 single-concurrency bootstrap, comparison, failure, and expansion procedure is
 in [Serving Benchmark Protocol](SERVING_BENCHMARK_PROTOCOL.md#rtx-4090-serving-bootstrap).
+
+The WSL2 laptop is the explicit exception to the Linux-hwmon preparation step:
+use the already reviewed
+`qualification/host-policies/rtx4090-laptop-wsl2-boundary-v1.json` with the
+qualification runner. Its outer Windows/NVML supervisor also contains the
+source build. Do not pass this WSL policy to
+`cargo-bounded.sh --host-thermal-policy`, whose schema intentionally accepts
+only a Linux hwmon selector.
 Use `scripts/qualification/capture_vllm_runtime_manifest.py` with the tracked
 vLLM launch JSON; do not retype its inference arguments. The tool requires a
 clean commit, two byte-identical strict-valid captures, bounded child output,

@@ -12,6 +12,7 @@ import platform
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import tempfile
 import time
@@ -87,6 +88,76 @@ def decode_windows_output(value: bytes) -> str:
     if b"\x00" in value[:256]:
         return value.decode("utf-16-le").lstrip("\ufeff")
     return value.decode("utf-8-sig")
+
+
+def parse_windows_thermal_zones(text: str) -> list[dict[str, Any]]:
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise PlatformProbeError(
+            f"Windows formatted thermal telemetry is malformed JSON: {exc}"
+        ) from exc
+    rows = raw if isinstance(raw, list) else [raw]
+    if not rows:
+        raise PlatformProbeError("Windows formatted thermal telemetry is empty")
+    normalized: list[dict[str, Any]] = []
+    names: set[str] = set()
+    keys = {
+        "Name",
+        "Temperature",
+        "HighPrecisionTemperature",
+        "PercentPassiveLimit",
+        "ThrottleReasons",
+    }
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict) or set(row) != keys:
+            raise PlatformProbeError(
+                f"Windows formatted thermal row {index} has invalid keys"
+            )
+        name = row["Name"]
+        integer_fields = {
+            key: row[key]
+            for key in keys - {"Name"}
+        }
+        if (
+            not isinstance(name, str)
+            or not name
+            or name in names
+            or any(
+                not isinstance(value, int) or isinstance(value, bool)
+                for value in integer_fields.values()
+            )
+        ):
+            raise PlatformProbeError(
+                f"Windows formatted thermal row {index} has invalid values"
+            )
+        kelvin = integer_fields["Temperature"]
+        tenths_kelvin = integer_fields["HighPrecisionTemperature"]
+        if not 1 <= kelvin <= 1000 or not 1 <= tenths_kelvin <= 10_000:
+            raise PlatformProbeError(
+                f"Windows formatted thermal row {index} is implausible"
+            )
+        if abs(kelvin * 10 - tenths_kelvin) > 10:
+            raise PlatformProbeError(
+                f"Windows formatted thermal row {index} precision fields disagree"
+            )
+        millicelsius = tenths_kelvin * 100 - 273_150
+        if not -50_000 <= millicelsius <= 200_000:
+            raise PlatformProbeError(
+                f"Windows formatted thermal row {index} converted implausibly"
+            )
+        names.add(name)
+        normalized.append(
+            {
+                "name": name,
+                "temperature_kelvin": kelvin,
+                "high_precision_temperature_tenths_kelvin": tenths_kelvin,
+                "temperature_millicelsius": millicelsius,
+                "percent_passive_limit": integer_fields["PercentPassiveLimit"],
+                "throttle_reasons": integer_fields["ThrottleReasons"],
+            }
+        )
+    return normalized
 
 
 def parse_wsl_version(text: str) -> dict[str, str]:
@@ -1085,35 +1156,51 @@ def collect(
         unsupported.append("wsl2_systemd_system: " + details["systemd_system"])
 
     started = time.monotonic()
-    try:
-        state = _command(
-            "wsl2-systemd-user-state",
-            ["/usr/bin/systemctl", "--user", "is-system-running"],
-            platform_raw,
-        ).strip()
-        if state != "running":
-            raise PlatformProbeError(f"user manager state is {state!r}")
-        _command(
-            "wsl2-systemd-user-transient",
-            [
-                "/usr/bin/systemd-run",
-                "--user",
-                "--wait",
-                "--pipe",
-                "--collect",
-                "--",
-                "/usr/bin/true",
-            ],
-            platform_raw,
-        )
-        capabilities["systemd_user_transient"] = "available"
+    if contained:
         details["systemd_user_transient"] = (
-            "user manager running; transient unit passed"
+            "user-manager launch is intentionally forbidden inside the "
+            "contained case because it would execute outside Landlock and the "
+            "private namespaces"
         )
-        user_passed = True
-    except PlatformProbeError as exc:
-        details["systemd_user_transient"] = str(exc)
         user_passed = False
+    else:
+        try:
+            state = _command(
+                "wsl2-systemd-user-state",
+                ["/usr/bin/systemctl", "--user", "is-system-running"],
+                platform_raw,
+            ).strip()
+            if state != "running":
+                raise PlatformProbeError(f"user manager state is {state!r}")
+            user_bus = Path(f"/run/user/{os.getuid()}/bus")
+            metadata = user_bus.stat()
+            if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.getuid():
+                raise PlatformProbeError(
+                    f"user bus is not an owned socket: {user_bus}"
+                )
+            _command(
+                "wsl2-systemd-user-transient",
+                [
+                    "/usr/bin/env",
+                    f"DBUS_SESSION_BUS_ADDRESS=unix:path={user_bus}",
+                    "/usr/bin/systemd-run",
+                    "--user",
+                    "--wait",
+                    "--pipe",
+                    "--collect",
+                    "--",
+                    "/usr/bin/true",
+                ],
+                platform_raw,
+            )
+            capabilities["systemd_user_transient"] = "available"
+            details["systemd_user_transient"] = (
+                "user manager running; owned user bus and transient unit passed"
+            )
+            user_passed = True
+        except (OSError, PlatformProbeError) as exc:
+            details["systemd_user_transient"] = str(exc)
+            user_passed = False
     results.append(
         _result(
             "wsl2-systemd-user-transient",
@@ -1138,40 +1225,49 @@ def collect(
             f"{len(sensors)} readable Linux hwmon temperatures"
         )
         thermal_passed = True
-    else:
-        windows_thermal_detail = (
-            "Windows ACPI probe intentionally blocked inside the contained case"
+    elif not contained:
+        script = (
+            "$ErrorActionPreference='Stop';"
+            "Get-CimInstance -ClassName "
+            "Win32_PerfFormattedData_Counters_ThermalZoneInformation|"
+            "Select-Object Name,Temperature,HighPrecisionTemperature,"
+            "PercentPassiveLimit,ThrottleReasons|"
+            "ConvertTo-Json -Compress -Depth 3"
         )
-        if not contained:
-            script = (
-                "$ErrorActionPreference='Stop';"
-                "@(Get-CimInstance -Namespace root/wmi "
-                "-ClassName MSAcpi_ThermalZoneTemperature|"
-                "Select-Object InstanceName,CurrentTemperature)|"
-                "ConvertTo-Json -Compress -Depth 3"
-            )
-            try:
-                thermal_text = _command(
-                    "wsl2-windows-acpi-temperature",
-                    [
-                        str(POWERSHELL),
-                        "-NoLogo",
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-Command",
-                        script,
-                    ],
-                    platform_raw,
-                ).strip()
-                windows_thermal_detail = (
-                    "Windows ACPI values were observable but are unsupported by "
-                    f"the Linux hard-limit guard: {thermal_text[:256]}"
+        try:
+            thermal_text = _command(
+                "wsl2-windows-formatted-temperature",
+                [
+                    str(POWERSHELL),
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    script,
+                ],
+                platform_raw,
+            ).strip()
+            windows_sensors = parse_windows_thermal_zones(thermal_text)
+            platform_raw["windows_thermal_zones"] = windows_sensors
+            capabilities["host_thermal_guard"] = "available"
+            details["host_thermal_guard"] = (
+                "Windows formatted thermal provider: "
+                + ", ".join(
+                    f"{sensor['name']}={sensor['temperature_millicelsius']}mC"
+                    for sensor in windows_sensors
                 )
-            except PlatformProbeError as exc:
-                windows_thermal_detail = f"Windows ACPI probe unavailable: {exc}"
+            )
+            thermal_passed = True
+        except PlatformProbeError as exc:
+            details["host_thermal_guard"] = (
+                "no readable Linux hwmon temperature inputs; "
+                f"Windows formatted thermal provider unavailable: {exc}"
+            )
+            thermal_passed = False
+    else:
         details["host_thermal_guard"] = (
-            "no readable Linux hwmon temperature inputs; "
-            + windows_thermal_detail
+            "Windows thermal execution is intentionally blocked inside the "
+            "contained case; the outer runner owns host supervision"
         )
         thermal_passed = False
     results.append(

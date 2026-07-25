@@ -41,10 +41,10 @@ class BoundedCargoTests(unittest.TestCase):
         for assignment in (
             "CARGO_NET_OFFLINE=true",
             "KILN_CARGO_ENVIRONMENT_POLICY=closed-qualification-test-v1",
-            "KILN_CARGO_EXECUTION_MODE=transient-service",
+            "KILN_CARGO_EXECUTION_MODE=delegated-cgroup",
             "KILN_CARGO_JOBS=1",
             "KILN_CARGO_CPU_QUOTA_PERCENT=50",
-            "KILN_CARGO_MIN_AVAILABLE_GIB=15",
+            "KILN_CARGO_MIN_AVAILABLE_GIB=14",
             "KILN_CARGO_PRIVATE_NETWORK=1",
             "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS=1740",
         ):
@@ -112,12 +112,18 @@ class BoundedCargoTests(unittest.TestCase):
             )
             (tool_dir / "systemd-run").chmod(0o755)
             (tool_dir / "systemctl").chmod(0o755)
+            hwmon = tool_dir / "hwmon" / "hwmon1"
+            hwmon.mkdir(parents=True)
+            (hwmon / "name").write_text("k10temp\n", encoding="utf-8")
+            (hwmon / "temp1_label").write_text("Tctl\n", encoding="utf-8")
+            (hwmon / "temp1_input").write_text("40000\n", encoding="utf-8")
             environment = dict(os.environ)
             environment.update(
                 {
                     "CARGO": "/bin/true",
                     "KILN_CARGO_EXECUTION_MODE": "transient-service",
                     "KILN_CARGO_CPU_QUOTA_PERCENT": "50",
+                    "KILN_CARGO_HWMON_ROOT": str(tool_dir / "hwmon"),
                     "KILN_CARGO_MIN_AVAILABLE_GIB": "1",
                     "KILN_CARGO_PRIVATE_NETWORK": "1",
                     "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS": "300",
@@ -193,7 +199,11 @@ class BoundedCargoTests(unittest.TestCase):
             (tool_dir / "systemd-run").chmod(0o755)
             (tool_dir / "systemctl").chmod(0o755)
             empty_hwmon = root / "hwmon"
-            empty_hwmon.mkdir()
+            hwmon = empty_hwmon / "hwmon1"
+            hwmon.mkdir(parents=True)
+            (hwmon / "name").write_text("k10temp\n", encoding="utf-8")
+            (hwmon / "temp1_label").write_text("Tctl\n", encoding="utf-8")
+            (hwmon / "temp1_input").write_text("40000\n", encoding="utf-8")
             environment = dict(os.environ)
             environment.update(
                 {
@@ -427,7 +437,11 @@ class BoundedCargoTests(unittest.TestCase):
             (tool_dir / "systemd-run").chmod(0o755)
             (tool_dir / "systemctl").chmod(0o755)
             empty_hwmon = root / "hwmon"
-            empty_hwmon.mkdir()
+            hwmon = empty_hwmon / "hwmon1"
+            hwmon.mkdir(parents=True)
+            (hwmon / "name").write_text("k10temp\n", encoding="utf-8")
+            (hwmon / "temp1_label").write_text("Tctl\n", encoding="utf-8")
+            (hwmon / "temp1_input").write_text("40000\n", encoding="utf-8")
             environment = dict(os.environ)
             environment.update(
                 {

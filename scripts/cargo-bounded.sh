@@ -8,9 +8,9 @@ usage() {
 Usage: scripts/cargo-bounded.sh [--host-thermal-policy PATH] <cargo-subcommand> [args...]
 
 Runs Cargo with one build job after checking Linux MemAvailable. A transient
-systemd scope, or a transient service for PID-namespaced callers, places Cargo
-and every compiler/linker child under one aggregate memory ceiling with swap
-disabled. It also refuses to overlap another Cargo or rustc process.
+systemd scope/service, or a WSL2 delegated cgroup for contained qualification,
+places Cargo and every compiler/linker child under one aggregate memory ceiling
+with swap disabled. It also refuses to overlap another Cargo or rustc process.
 
   --host-thermal-policy PATH      Reuse a content-hashed hard-limit-only
                                   kiln.host-thermal-policy.v1 document.
@@ -22,8 +22,8 @@ Overrides:
   KILN_CARGO_MIN_AVAILABLE_GIB    Preflight floor (default: 2/3 host RAM, min 8)
   KILN_CARGO_HOST_RESERVE_GIB     Memory kept outside each child (default: 1/4 host RAM, min 4)
   KILN_CARGO_MAX_MEMORY_GIB       Explicit aggregate ceiling (default: available minus reserve)
-  KILN_CARGO_EXECUTION_MODE       scope (default) or transient-service
-  KILN_CARGO_PRIVATE_NETWORK      1 requires a private network in transient-service mode
+  KILN_CARGO_EXECUTION_MODE       scope (default), transient-service, or delegated-cgroup
+  KILN_CARGO_PRIVATE_NETWORK      1 requires private-network containment in service/cgroup mode
   KILN_CARGO_ENVIRONMENT_POLICY   closed-source-build-v1 (transient-service default),
                                   closed-qualification-test-v1, or inherit
   KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS
@@ -35,6 +35,9 @@ Overrides:
                                   Package-temperature guard for scopes and services. All four
                                   fields must be set together. If omitted, a unique
                                   k10temp/Tctl sensor enables a 97000 mC, 250 ms guard.
+  KILN_WSL2_THERMAL_POLICY_SHA256
+                                  Required outer thermal supervisor binding in
+                                  delegated-cgroup mode.
 EOF
 }
 
@@ -69,12 +72,20 @@ if [[ $# -eq 0 ]]; then
 fi
 
 execution_mode="${KILN_CARGO_EXECUTION_MODE:-scope}"
-if [[ "$execution_mode" != "scope" && "$execution_mode" != "transient-service" ]]; then
-    echo "error: KILN_CARGO_EXECUTION_MODE must be scope or transient-service, got '$execution_mode'" >&2
+if [[ "$execution_mode" != "scope" \
+    && "$execution_mode" != "transient-service" \
+    && "$execution_mode" != "delegated-cgroup" ]]; then
+    echo "error: KILN_CARGO_EXECUTION_MODE must be scope, transient-service, or delegated-cgroup, got '$execution_mode'" >&2
     exit 2
 fi
 
-for tool in awk ps sleep systemctl systemd-run; do
+required_tools=(awk ps sleep)
+if [[ "$execution_mode" != "delegated-cgroup" ]]; then
+    required_tools+=(systemctl systemd-run)
+else
+    required_tools+=(python3)
+fi
+for tool in "${required_tools[@]}"; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "error: required tool '$tool' is not available" >&2
         exit 2
@@ -186,9 +197,13 @@ if [[ "$execution_mode" == "scope" && "$private_network" != "0" ]]; then
     echo "error: KILN_CARGO_PRIVATE_NETWORK=1 requires transient-service mode" >&2
     exit 2
 fi
+if [[ "$execution_mode" == "delegated-cgroup" && "$private_network" != "1" ]]; then
+    echo "error: delegated-cgroup mode requires KILN_CARGO_PRIVATE_NETWORK=1" >&2
+    exit 2
+fi
 environment_policy="${KILN_CARGO_ENVIRONMENT_POLICY:-}"
 if [[ -z "$environment_policy" ]]; then
-    if [[ "$execution_mode" == "transient-service" ]]; then
+    if [[ "$execution_mode" == "transient-service" || "$execution_mode" == "delegated-cgroup" ]]; then
         environment_policy="closed-source-build-v1"
     else
         environment_policy="inherit"
@@ -222,7 +237,18 @@ if (( thermal_fields_set != 0 && thermal_fields_set != 4 )); then
 fi
 hwmon_root="${KILN_CARGO_HWMON_ROOT:-/sys/class/hwmon}"
 thermal_config_source="explicit"
-if [[ -n "$host_thermal_policy" ]]; then
+external_thermal_policy_sha256="${KILN_WSL2_THERMAL_POLICY_SHA256:-}"
+if [[ "$execution_mode" == "delegated-cgroup" ]]; then
+    if [[ -n "$host_thermal_policy" ]] || (( thermal_fields_set != 0 )); then
+        echo "error: delegated-cgroup mode requires the outer WSL2 thermal supervisor, not a Linux hwmon policy" >&2
+        exit 2
+    fi
+    if [[ ! "$external_thermal_policy_sha256" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+        echo "error: delegated-cgroup mode requires a valid KILN_WSL2_THERMAL_POLICY_SHA256 binding" >&2
+        exit 2
+    fi
+    thermal_config_source="external-wsl2-policy:$external_thermal_policy_sha256"
+elif [[ -n "$host_thermal_policy" ]]; then
     if (( thermal_fields_set != 0 )); then
         echo "error: --host-thermal-policy conflicts with KILN_CARGO_HOST_THERMAL_* fields" >&2
         exit 2
@@ -259,7 +285,7 @@ if [[ -n "$host_thermal_policy" ]]; then
 fi
 thermal_sensor_path=""
 thermal_poll_seconds=""
-if (( thermal_fields_set == 0 )); then
+if (( thermal_fields_set == 0 )) && [[ "$execution_mode" != "delegated-cgroup" ]]; then
     thermal_sensor_name="k10temp"
     thermal_sensor_label="Tctl"
     thermal_limit_millicelsius="97000"
@@ -292,6 +318,10 @@ if (( thermal_fields_set == 4 )) || [[ "$thermal_config_source" == "automatic" ]
         done
     done
     if (( ${#thermal_matches[@]} == 0 )) && [[ "$thermal_config_source" == "automatic" ]]; then
+        if [[ "$(cat /proc/sys/kernel/osrelease 2>/dev/null || true)" == *microsoft-standard-WSL2* ]]; then
+            echo "error: WSL2 exposes no Linux package-temperature sensor; use delegated-cgroup mode under the required outer thermal supervisor" >&2
+            exit 2
+        fi
         thermal_sensor_name=""
         thermal_sensor_label=""
         thermal_limit_millicelsius=""
@@ -318,6 +348,8 @@ fi
 thermal_summary="disabled"
 if [[ -n "$thermal_sensor_path" ]]; then
     thermal_summary="${thermal_config_source}:${thermal_sensor_name}/${thermal_sensor_label}:${thermal_limit_millicelsius}mC@${thermal_poll_milliseconds}ms"
+elif [[ "$execution_mode" == "delegated-cgroup" ]]; then
+    thermal_summary="$thermal_config_source"
 fi
 cpu_quota_args=()
 cpu_quota_summary="disabled"
@@ -329,9 +361,129 @@ echo "bounded-cargo: mode=$execution_mode jobs=$jobs cpu_quota=$cpu_quota_summar
 read -r bounded_uuid < /proc/sys/kernel/random/uuid
 if [[ "$execution_mode" == "scope" ]]; then
     bounded_unit="kiln-cargo-bounded-${bounded_uuid//-/}.scope"
-else
+elif [[ "$execution_mode" == "transient-service" ]]; then
     bounded_unit="kiln-cargo-bounded-${bounded_uuid//-/}.service"
+else
+    bounded_unit=""
 fi
+
+if [[ "$execution_mode" == "delegated-cgroup" ]]; then
+    if [[ -z "$cpu_quota_percent" ]]; then
+        echo "error: delegated-cgroup mode requires KILN_CARGO_CPU_QUOTA_PERCENT" >&2
+        exit 2
+    fi
+    if (( cpu_quota_percent > 100 )); then
+        echo "error: delegated-cgroup CPU quota must be in 1..=100 percent" >&2
+        exit 2
+    fi
+    pids_max="${KILN_CARGO_PIDS_MAX:-512}"
+    if [[ ! "$pids_max" =~ ^[1-9][0-9]*$ ]]; then
+        echo "error: KILN_CARGO_PIDS_MAX must be a positive decimal integer" >&2
+        exit 2
+    fi
+    if [[ "${KILN_WSL2_SCOPE_BOUNDARY:-}" != "systemd-user-scope-feedback-v1" ]]; then
+        echo "error: delegated-cgroup mode is not inside the required WSL2 user scope" >&2
+        exit 2
+    fi
+    scope_unit="${KILN_WSL2_SCOPE_UNIT:-}"
+    if [[ ! "$scope_unit" =~ ^kiln-wsl-scope-[0-9a-f]{32}$ ]]; then
+        echo "error: invalid or missing KILN_WSL2_SCOPE_UNIT" >&2
+        exit 2
+    fi
+    scope_memory_max="${KILN_WSL2_SCOPE_MEMORY_MAX_BYTES:-}"
+    scope_pids_max="${KILN_WSL2_SCOPE_PIDS_MAX:-}"
+    scope_cpu_quota="${KILN_WSL2_SCOPE_CPU_QUOTA_PERCENT:-}"
+    scope_host_uid="${KILN_WSL2_SCOPE_HOST_UID:-}"
+    if [[ ! "$scope_memory_max" =~ ^[1-9][0-9]*$ ]] \
+        || [[ ! "$scope_pids_max" =~ ^[1-9][0-9]*$ ]] \
+        || [[ ! "$scope_host_uid" =~ ^[1-9][0-9]*$ ]] \
+        || [[ "$scope_cpu_quota" != "$cpu_quota_percent" ]]; then
+        echo "error: malformed WSL2 scope resource binding" >&2
+        exit 2
+    fi
+    current_cgroup="$(awk -F: '$1 == "0" { print $3 }' /proc/self/cgroup)"
+    expected_cgroup="/user.slice/user-${scope_host_uid}.slice/user@${scope_host_uid}.service/app.slice/${scope_unit}.scope"
+    if [[ "$current_cgroup" != "$expected_cgroup" ]]; then
+        echo "error: Cargo cgroup '$current_cgroup' does not match '$expected_cgroup'" >&2
+        exit 2
+    fi
+    scope_cgroup="/sys/fs/cgroup$current_cgroup"
+    IFS= read -r observed_memory_max < "$scope_cgroup/memory.max" || observed_memory_max=""
+    IFS= read -r observed_swap_max < "$scope_cgroup/memory.swap.max" || observed_swap_max=""
+    IFS= read -r observed_pids_max < "$scope_cgroup/pids.max" || observed_pids_max=""
+    IFS= read -r observed_oom_group < "$scope_cgroup/memory.oom.group" || observed_oom_group=""
+    if [[ "$observed_memory_max" != "$scope_memory_max" ]] \
+        || (( observed_memory_max > limit_gib * 1024 * 1024 * 1024 )); then
+        echo "error: outer WSL2 scope memory.max '$observed_memory_max' exceeds or contradicts the Cargo ceiling" >&2
+        exit 2
+    fi
+    if [[ "$observed_swap_max" != "0" ]] \
+        || [[ "$observed_pids_max" != "$scope_pids_max" ]] \
+        || (( observed_pids_max > pids_max )) \
+        || [[ "$observed_oom_group" != "1" ]]; then
+        echo "error: outer WSL2 scope swap/PID/OOM limits do not match the required boundary" >&2
+        exit 2
+    fi
+    script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+    wsl_platform_helper="$script_directory/qualification/wsl_platform.py"
+    if [[ ! -f "$wsl_platform_helper" ]]; then
+        echo "error: WSL2 platform helper is missing: $wsl_platform_helper" >&2
+        exit 2
+    fi
+    if ! python3 - "$wsl_platform_helper" <<'PY'
+import importlib.util
+import os
+import sys
+
+path = sys.argv[1]
+spec = importlib.util.spec_from_file_location("kiln_wsl_platform", path)
+if spec is None or spec.loader is None:
+    raise SystemExit("cannot load WSL2 platform helper")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.verify_contained_case(os.environ.get(module.NETWORK_ISOLATION_ENV))
+PY
+    then
+        echo "error: Cargo could not reverify the live WSL2 containment boundary" >&2
+        exit 2
+    fi
+    closed_environment_names=(
+        CARGO_BUILD_JOBS
+        CARGO_HOME
+        CARGO_NET_OFFLINE
+        HOME
+        KILN_ROCM_ARCHS
+        LANG
+        LC_ALL
+        LC_CTYPE
+        LOGNAME
+        PATH
+        ROCM_PATH
+        RUSTUP_HOME
+        SHELL
+        TMPDIR
+        USER
+    )
+    if [[ "$environment_policy" == "closed-qualification-test-v1" ]]; then
+        closed_environment_names+=(
+            CUDARC_CUDA_VERSION
+            KILN_CUDA_ARCHS
+            KILN_QUALIFICATION
+            KILN_QUALIFICATION_HF_LOGITS_PATH
+            KILN_QUALIFICATION_MODEL_PATH
+        )
+    elif [[ "$environment_policy" == "inherit" ]]; then
+        exec "$cargo_executable" "$@"
+    fi
+    closed_environment=()
+    for name in "${closed_environment_names[@]}"; do
+        if [[ -v "$name" ]]; then
+            closed_environment+=("$name=${!name}")
+        fi
+    done
+    exec env -i "${closed_environment[@]}" "$cargo_executable" "$@"
+fi
+
 bounded_runner_pid=""
 thermal_watchdog_pid=""
 thermal_trip_file="${TMPDIR:-/tmp}/kiln-cargo-bounded-${bounded_uuid//-/}.thermal-trip"
@@ -453,6 +605,8 @@ else
         # Runner-owned test controls derived from the committed qualification
         # manifest. Product/runtime KILN_* settings remain excluded.
         closed_source_build_environment+=(
+            CUDARC_CUDA_VERSION
+            KILN_CUDA_ARCHS
             KILN_QUALIFICATION
             KILN_QUALIFICATION_HF_LOGITS_PATH
             KILN_QUALIFICATION_MODEL_PATH

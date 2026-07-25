@@ -201,6 +201,16 @@ actual host-package sensors:
 python3 scripts/qualification/prepare_host_thermal_policy.py inventory
 ```
 
+That inventory/policy path applies to native Linux. The current WSL2 laptop has
+no readable Linux package sensor and must not convert that absence into a
+disabled guard. Its committed
+`qualification/host-policies/rtx4090-laptop-wsl2-boundary-v1.json` instead
+binds the exact Windows `\_TZ.THRM` formatted thermal zone and exact NVML GPU
+UUID. Pass it as `--wsl2-thermal-policy` to every CUDA qualification command.
+The runner supervises Windows/NVML outside Landlock and places the full private
+namespace in the repaired user scope. A WSL run without that policy is rejected
+before artifacts are created.
+
 Choose a uniquely resolving CPU/package sensor, a hard limit supported by the
 machine or CPU vendor, and a conservative idle handoff target observed to be
 reachable on that host. A GPU-edge sensor alone is insufficient because source
@@ -250,6 +260,13 @@ The cool-start gate rejects a reading at or above the hard limit immediately
 instead of waiting beneath an unsafe ceiling. An explicit policy
 conflicts with the four legacy `KILN_CARGO_HOST_THERMAL_*` fields instead of
 silently choosing one authority.
+
+Do not use the Linux `--host-thermal-policy` build example on WSL2.
+`cargo-test-bounded.sh` accepts the WSL boundary only after the qualification
+runner has established and bound the outer thermal supervisor and user scope.
+A standalone WSL `cargo-bounded.sh` invocation therefore fails closed. Use a
+committed qualification workload for any source build whose output will support
+WSL evidence.
 
 Validate the typed server input before loading the model:
 
