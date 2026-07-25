@@ -774,6 +774,16 @@ It does not raise compiler capacity or change any GPU pressure, thermal,
 network, process, filesystem, or cleanup limit. A new clean pushed-source
 receipt must still pass before this gate closes.
 
+The first run with the revised boundary, receipt
+`20260725t081814165066z-cuda-rtx4090-laptop-serving-cuda-low-memory--647fb2a614-v1`,
+admitted Cargo and completed all six BF16 causal FlashAttention CUDA objects
+plus the FlashAttention crate. It then reached the unchanged 1,800-second
+build limit while compiling later Rust dependencies, before server launch.
+The scope peaked at 7,146,455,040 bytes and 30 PIDs, reported zero
+memory-limit or OOM events, removed cleanly, and completed thermal handoff
+after 90.05 C host and 66 C GPU peaks. This timeout is retained separately;
+it still contains no model or pressure evidence.
+
 ### CUDA Serving Bootstrap Handoff
 
 After the environment, core-correctness, and memory-lifecycle receipts pass and
