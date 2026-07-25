@@ -132,7 +132,8 @@ The driver enforces that statement before model hashing. The second argv entry
 must resolve directly to the tracked non-symlink teacher script. The launcher
 options for model, served ID, process-group mode, snapshot root, cache root,
 top-K bound, and model-length bound must each occur exactly once before one
-explicit `--` boundary. Manifest, dry-run, and precomputed-identity modes are
+explicit `--` boundary. The optional cumulative provenance-read ceiling may
+occur at most once. Manifest, dry-run, and precomputed-identity modes are
 forbidden. The parsed served ID, top-K bound, and model-length bound must match
 the immutable runtime manifest. An arbitrary server command cannot satisfy an
 owned vLLM run merely by returning a syntactically valid system fingerprint.
@@ -225,6 +226,13 @@ bytes and strict model fingerprints to agree. This avoids a persistent 9.3 GB
 duplicate on the laptop while preserving per-launch immutable snapshot copies,
 initial/final benchmark fingerprints, and source-change detection.
 
+The vLLM performance launch also pins
+`--max-provenance-read-mib-per-second=256`. One cumulative launcher schedule
+covers model/snapshot/adapter/runtime hashing, and the fresh child runtime
+recheck receives the same ceiling. This pacing is outside request timing. It
+does not rate-limit vLLM's later accelerator upload, which remains under the
+outer WSL2 thermal supervisor and must fail closed if unsafe.
+
 These are bootstrap baselines, not performance recommendations. First retain a
 passing environment receipt, core-correctness receipt, memory-lifecycle receipt,
 and eager serving receipt. A tuned scheduler, graph-enabled Kiln input, Marlin
@@ -252,6 +260,12 @@ UUID. Pass it as `--wsl2-thermal-policy` to every CUDA qualification command.
 The runner supervises Windows/NVML outside Landlock and places the full private
 namespace in the repaired user scope. A WSL run without that policy is rejected
 before artifacts are created.
+
+After a hard trip, `wsl_thermal_exec.py` terminates the complete supervised
+child, continues sampling with no workload alive until the configured stable
+handoff target is reached, emits the final safe temperatures, and only then
+returns failure. A trip can never be reclassified as success; telemetry loss or
+handoff timeout remains a failure and no receipt may claim completed handoff.
 
 Choose a uniquely resolving CPU/package sensor, a hard limit supported by the
 machine or CPU vendor, and a conservative idle handoff target observed to be
@@ -359,6 +373,9 @@ with fsync and no overwrite, and reports the source commit, manifest hash,
 runtime-content hash, system fingerprint, and both stderr hashes. A dirty tree,
 existing output, nonzero/timeout child, oversized output, invalid manifest, or
 repeat mismatch fails without publication. Commit the manifest before startup.
+The tracked laptop launch makes both captures use the explicit 256 MiB/s
+cumulative provenance-read ceiling; do not remove or override it to accelerate
+capture.
 
 The manifest must identify the expected RTX 4090 class, `sm_89`, model and
 tokenizer content, interpreter, Python/native packages, CUDA runtime, and every

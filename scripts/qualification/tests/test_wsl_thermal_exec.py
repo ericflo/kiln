@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import sys
 import tempfile
@@ -139,6 +140,65 @@ class WslThermalExecTests(unittest.TestCase):
             at_gpu_limit = thermal.ThermalSample(0.0, 80_000, 85_000)
             with self.assertRaisesRegex(thermal.ThermalGuardError, "GPU temperature"):
                 thermal._check_limits(at_gpu_limit, policy)
+
+    def test_trip_terminates_child_and_completes_safe_handoff(self) -> None:
+        policy = thermal.validate_policy(policy_document())
+        process = mock.Mock()
+        process.poll.side_effect = [None, None, 3, 3]
+        process.wait.return_value = 3
+        observed = [
+            thermal.ThermalSample(0.0, 80_000, 60_000),
+            thermal.ThermalSample(0.1, 95_000, 61_000),
+            thermal.ThermalSample(0.2, 95_000, 61_000),
+            thermal.ThermalSample(0.3, 90_000, 61_000),
+            thermal.ThermalSample(0.4, 84_000, 61_000),
+            thermal.ThermalSample(0.5, 84_000, 61_000),
+        ]
+        stderr = io.StringIO()
+        with mock.patch.object(
+            thermal,
+            "verify_host_identity",
+        ), mock.patch.object(
+            thermal,
+            "sample",
+            side_effect=observed,
+        ), mock.patch.object(
+            thermal.subprocess,
+            "Popen",
+            return_value=process,
+        ), mock.patch.object(
+            thermal.time,
+            "sleep",
+        ), mock.patch.object(
+            thermal.signal,
+            "signal",
+            return_value=thermal.signal.SIG_DFL,
+        ), mock.patch.object(
+            thermal,
+            "_terminate",
+            wraps=thermal._terminate,
+        ) as terminate, mock.patch(
+            "sys.stderr",
+            stderr,
+        ):
+            with self.assertRaisesRegex(
+                thermal.ThermalGuardError,
+                "host temperature",
+            ):
+                thermal.supervise(policy, ["fixture"])
+
+        terminate.assert_called_once_with(process)
+        events = [
+            json.loads(line.removeprefix("wsl2-thermal: "))
+            for line in stderr.getvalue().splitlines()
+        ]
+        self.assertEqual([item["event"] for item in events], ["preflight", "trip", "complete"])
+        complete = events[-1]
+        self.assertEqual(complete["supervision_outcome"], "thermal_trip")
+        self.assertEqual(complete["sample_count"], 6)
+        self.assertEqual(complete["peak_host_millicelsius"], 95_000)
+        self.assertEqual(complete["ending_host_millicelsius"], 84_000)
+        self.assertEqual(complete["safe_handoff_stable_samples"], 2)
 
 
 if __name__ == "__main__":

@@ -122,6 +122,7 @@ python3 scripts/vllm_teacher.py \
   --max-top-k=20 \
   --max-model-len=32768 \
   --max-prompt-logprob-candidates=500000 \
+  --max-provenance-read-mib-per-second=256 \
   -- \
   --host=127.0.0.1 \
   --port=8000 \
@@ -153,6 +154,16 @@ extra file is still included in the full snapshot digest.
 
 The launcher prints the fingerprint and snapshot path immediately before
 spawn. Kiln must receive that exact fingerprint in every scoring response.
+
+`--max-provenance-read-mib-per-second` accepts `1..=16384`. One limiter spans
+launcher-owned snapshot copying and verification, source snapshot hashing,
+base-model and optional-adapter fingerprinting, and installed Python/runtime
+content hashing. It does not reset at a file, shard, pass, or phase boundary.
+The fresh child runtime-content recheck runs in another process under the same
+numeric ceiling. The option changes startup pacing, not semantic identity or
+timed request behavior; omission preserves the historical unlimited mode.
+Thermally qualified launch documents must choose an explicit host-reviewed
+value rather than relying on omission.
 
 ## Process-group ownership
 
@@ -543,6 +554,12 @@ ownership, BF16, a 32,768-token context/batch-token bound, 64 sequence slots,
 text-only model surface. It deliberately omits the ROCm-only `TRITON_ATTN`
 choice; the captured CUDA runtime must report its actual supported attention
 route.
+
+The separate laptop performance launch selects a cumulative 256 MiB/s
+provenance-read ceiling. Its manifest-only captures and real launches therefore
+pace model/snapshot/runtime hashing under the same reviewed limit. Historical
+bootstrap and ROCm launch documents remain unchanged evidence inputs; they do
+not acquire this policy retroactively.
 
 This JSON is not a runtime manifest and does not pin an installed vLLM wheel by
 itself. On each NVIDIA machine, install an explicit reviewed CUDA-compatible

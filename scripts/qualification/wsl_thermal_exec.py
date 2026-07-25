@@ -77,6 +77,15 @@ class ThermalSample:
     gpu_millicelsius: int
 
 
+@dataclass(frozen=True)
+class HandoffResult:
+    ending: ThermalSample
+    sample_count: int
+    peak_host_millicelsius: int
+    peak_gpu_millicelsius: int
+    limit_failure: ThermalGuardError | None
+
+
 def _exact_object(value: Any, keys: set[str], context: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ThermalGuardError(f"{context} must be an object")
@@ -426,20 +435,37 @@ def _safe_handoff(
     policy: ThermalPolicy,
     *,
     first: ThermalSample | None = None,
-) -> ThermalSample:
+) -> HandoffResult:
     deadline = time.monotonic() + policy.handoff_timeout_seconds
     stable = 0
     current = first
+    sample_count = 0
+    peak_host = 0
+    peak_gpu = 0
+    limit_failure: ThermalGuardError | None = None
     while True:
         current = current or sample(policy)
-        _check_limits(current, policy)
+        sample_count += 1
+        peak_host = max(peak_host, current.host_millicelsius)
+        peak_gpu = max(peak_gpu, current.gpu_millicelsius)
+        try:
+            _check_limits(current, policy)
+        except ThermalGuardError as exc:
+            if limit_failure is None:
+                limit_failure = exc
         below = (
             current.host_millicelsius <= policy.handoff_host_millicelsius
             and current.gpu_millicelsius <= policy.handoff_gpu_millicelsius
         )
         stable = stable + 1 if below else 0
         if stable >= policy.handoff_stable_samples:
-            return current
+            return HandoffResult(
+                ending=current,
+                sample_count=sample_count,
+                peak_host_millicelsius=peak_host,
+                peak_gpu_millicelsius=peak_gpu,
+                limit_failure=limit_failure,
+            )
         if time.monotonic() >= deadline:
             raise ThermalGuardError(
                 "safe handoff timed out: "
@@ -484,6 +510,7 @@ def supervise(policy: ThermalPolicy, command: Sequence[str]) -> int:
     peak_gpu = starting.gpu_millicelsius
     samples = 1
     failure: ThermalGuardError | None = None
+    handoff: HandoffResult
     try:
         while process.poll() is None:
             if interrupted_signal is not None:
@@ -505,32 +532,50 @@ def supervise(policy: ThermalPolicy, command: Sequence[str]) -> int:
             _emit("trip", policy, reason=str(failure))
             _terminate(process)
         returncode = process.wait()
+        try:
+            handoff = _safe_handoff(policy)
+        except ThermalGuardError as exc:
+            if failure is not None:
+                raise ThermalGuardError(
+                    f"{failure}; safe handoff failed: {exc}"
+                ) from exc
+            raise
     finally:
         for signum, handler in old_handlers.items():
             signal.signal(signum, handler)
 
-    if interrupted_signal is not None:
-        return 128 + interrupted_signal
-    if failure is not None:
-        raise failure
-
-    ending = _safe_handoff(policy)
-    samples += policy.handoff_stable_samples
-    peak_host = max(peak_host, ending.host_millicelsius)
-    peak_gpu = max(peak_gpu, ending.gpu_millicelsius)
+    samples += handoff.sample_count
+    peak_host = max(peak_host, handoff.peak_host_millicelsius)
+    peak_gpu = max(peak_gpu, handoff.peak_gpu_millicelsius)
+    if handoff.limit_failure is not None and failure is None:
+        failure = handoff.limit_failure
+        _emit("trip", policy, reason=str(failure))
+    outcome = (
+        "interrupted"
+        if interrupted_signal is not None
+        else "thermal_trip"
+        if failure is not None
+        else "child_exit"
+    )
     _emit(
         "complete",
         policy,
+        supervision_outcome=outcome,
+        failure_reason=None if failure is None else str(failure),
         child_returncode=returncode,
         sample_count=samples,
         starting_host_millicelsius=starting.host_millicelsius,
         starting_gpu_millicelsius=starting.gpu_millicelsius,
         peak_host_millicelsius=peak_host,
         peak_gpu_millicelsius=peak_gpu,
-        ending_host_millicelsius=ending.host_millicelsius,
-        ending_gpu_millicelsius=ending.gpu_millicelsius,
+        ending_host_millicelsius=handoff.ending.host_millicelsius,
+        ending_gpu_millicelsius=handoff.ending.gpu_millicelsius,
         safe_handoff_stable_samples=policy.handoff_stable_samples,
     )
+    if interrupted_signal is not None:
+        return 128 + interrupted_signal
+    if failure is not None:
+        raise failure
     return returncode
 
 

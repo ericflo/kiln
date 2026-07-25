@@ -222,6 +222,12 @@ installed vLLM/torch/Transformers/tokenizers content into
 before spawn. Dynamic LoRA mutation is disabled and stock `vllm-*`
 fingerprints are rejected.
 
+`--max-provenance-read-mib-per-second` applies one cumulative schedule to the
+launcher-owned snapshot, model, adapter, and installed-runtime content reads.
+The fresh child runtime recheck receives the same ceiling. Omit it only when
+the host has an independently reviewed unlimited-I/O policy; tracked thermal
+qualification inputs should select it explicitly.
+
 ```bash
 python3 scripts/vllm_teacher.py \
   --model-path=/models/Qwen3.5-4B \
@@ -229,6 +235,7 @@ python3 scripts/vllm_teacher.py \
   --max-top-k=32 \
   --max-model-len=32768 \
   --max-prompt-logprob-candidates=1000000 \
+  --max-provenance-read-mib-per-second=256 \
   -- --host=127.0.0.1 --port=8000
 
 curl -X POST http://localhost:8420/v1/teachers \

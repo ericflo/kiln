@@ -374,10 +374,16 @@ def fingerprint_model(
     model_id: str | None = None,
     *,
     max_read_mib_per_second: int | None = None,
+    read_rate_limiter: _ReadRateLimiter | None = None,
 ) -> dict[str, Any]:
     """Return the strict receipt ``model`` object for a local checkpoint."""
 
-    read_rate_limiter = _ReadRateLimiter(max_read_mib_per_second)
+    if max_read_mib_per_second is not None and read_rate_limiter is not None:
+        raise ModelFingerprintError(
+            "provide either max_read_mib_per_second or read_rate_limiter, not both"
+        )
+    if read_rate_limiter is None:
+        read_rate_limiter = _ReadRateLimiter(max_read_mib_per_second)
     root = _absolute_model_root(model_path)
     resolved_id = root.name if model_id is None else model_id
     if not isinstance(resolved_id, str) or not resolved_id:

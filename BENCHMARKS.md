@@ -300,6 +300,7 @@ python3 scripts/vllm_teacher.py \
   --served-model-id Qwen3.5-4B \
   --max-top-k 20 \
   --max-model-len 32768 \
+  --max-provenance-read-mib-per-second 256 \
   -- --dtype=bfloat16 \
   > /tmp/vllm-runtime-manifest.json
 ```

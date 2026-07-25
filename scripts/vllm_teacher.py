@@ -89,6 +89,8 @@ MAX_RUNTIME_CONTENT_DEPTH = 128
 MAX_RUNTIME_CONTENT_PATH_BYTES = 4096
 MAX_RUNTIME_CONTENT_PATH_METADATA_BYTES = 64 * 1024**2
 RUNTIME_CONTENT_PROBE_TIMEOUT_SECONDS = 600
+MIN_PROVENANCE_READ_MIB_PER_SECOND = _model_fingerprint.MIN_READ_MIB_PER_SECOND
+MAX_PROVENANCE_READ_MIB_PER_SECOND = _model_fingerprint.MAX_READ_MIB_PER_SECOND
 
 IDENTITY_FIELDS = (
     "schema",
@@ -543,7 +545,10 @@ class ImmutableSnapshot:
     _snapshot_device: int
     _cleaned: bool = False
 
-    def verify(self) -> None:
+    def verify(
+        self,
+        read_rate_limiter: _model_fingerprint._ReadRateLimiter | None = None,
+    ) -> None:
         """Re-hash the complete published snapshot and reject any mutation."""
 
         try:
@@ -583,6 +588,7 @@ class ImmutableSnapshot:
             root / SNAPSHOT_MANIFEST,
             SNAPSHOT_MANIFEST,
             require_read_only=True,
+            read_rate_limiter=read_rate_limiter,
         )
         if manifest_hash != self.manifest_sha256:
             raise TeacherLaunchError("published snapshot manifest digest changed")
@@ -597,6 +603,7 @@ class ImmutableSnapshot:
             require_read_only=True,
             budget=budget,
             directories=observed_directories,
+            read_rate_limiter=read_rate_limiter,
         )
         if self.adapter_path is not None:
             _scan_snapshot_tree(
@@ -606,13 +613,18 @@ class ImmutableSnapshot:
                 require_read_only=True,
                 budget=budget,
                 directories=observed_directories,
+                read_rate_limiter=read_rate_limiter,
             )
         observed.sort()
         observed_directories.sort(key=lambda value: value.encode("utf-8"))
         if tuple(observed_directories) != self.directories or tuple(observed) != self.files:
             raise TeacherLaunchError("published snapshot content does not match its manifest")
 
-        manifest = _read_strict_regular_file(root / SNAPSHOT_MANIFEST, SNAPSHOT_MANIFEST)
+        manifest = _read_strict_regular_file(
+            root / SNAPSHOT_MANIFEST,
+            SNAPSHOT_MANIFEST,
+            read_rate_limiter,
+        )
         expected_manifest = _snapshot_manifest_bytes(
             self.files,
             self.adapter_path is not None,
@@ -877,7 +889,11 @@ def _snapshot_filesystem_capacity(path: Path) -> tuple[int, int | None, int]:
     return info.f_bavail * block_size, available_inodes, block_size
 
 
-def _hash_fd(fd: int, expected_len: int | None = None) -> tuple[str, int]:
+def _hash_fd(
+    fd: int,
+    expected_len: int | None = None,
+    read_rate_limiter: _model_fingerprint._ReadRateLimiter | None = None,
+) -> tuple[str, int]:
     os.lseek(fd, 0, os.SEEK_SET)
     digest = hashlib.sha256()
     byte_len = 0
@@ -890,10 +906,16 @@ def _hash_fd(fd: int, expected_len: int | None = None) -> tuple[str, int]:
             if expected_len is not None and byte_len != expected_len:
                 raise TeacherLaunchError("snapshot file became shorter while being read")
             break
+        if read_rate_limiter is not None:
+            read_rate_limiter.account(len(chunk))
         digest.update(chunk)
         byte_len += len(chunk)
-    if expected_len is not None and os.read(fd, 1):
-        raise TeacherLaunchError("snapshot file became larger while being read")
+    if expected_len is not None:
+        extra = os.read(fd, 1)
+        if extra:
+            if read_rate_limiter is not None:
+                read_rate_limiter.account(len(extra))
+            raise TeacherLaunchError("snapshot file became larger while being read")
     return digest.hexdigest(), byte_len
 
 
@@ -935,6 +957,8 @@ def _copy_regular_file(
     relative_path: str,
     budget: SnapshotBudget,
     depth: int,
+    *,
+    read_rate_limiter: _model_fingerprint._ReadRateLimiter | None = None,
 ) -> SnapshotFile:
     source_flags = (
         os.O_RDONLY
@@ -969,16 +993,27 @@ def _copy_regular_file(
                     raise TeacherLaunchError(
                         f"snapshot source became shorter while copied: {relative_path!r}"
                     )
+                if read_rate_limiter is not None:
+                    read_rate_limiter.account(len(chunk))
                 _write_all(destination_fd, chunk)
                 remaining -= len(chunk)
-            if os.read(source_fd, 1):
+            extra = os.read(source_fd, 1)
+            if extra:
+                if read_rate_limiter is not None:
+                    read_rate_limiter.account(len(extra))
                 raise TeacherLaunchError(
                     f"snapshot source became larger while copied: {relative_path!r}"
                 )
         os.fsync(destination_fd)
-        source_hash, source_len = _hash_fd(source_fd, source_initial.st_size)
+        source_hash, source_len = _hash_fd(
+            source_fd,
+            source_initial.st_size,
+            read_rate_limiter,
+        )
         destination_hash, destination_len = _hash_fd(
-            destination_fd, source_initial.st_size
+            destination_fd,
+            source_initial.st_size,
+            read_rate_limiter,
         )
         if (source_hash, source_len) != (destination_hash, destination_len):
             raise TeacherLaunchError(f"snapshot copy mismatch for {relative_path!r}")
@@ -1012,6 +1047,7 @@ def _copy_snapshot_tree(
     budget: SnapshotBudget,
     *,
     depth: int = 0,
+    read_rate_limiter: _model_fingerprint._ReadRateLimiter | None = None,
 ) -> None:
     try:
         source_info = source.lstat()
@@ -1074,6 +1110,7 @@ def _copy_snapshot_tree(
                     directories,
                     budget,
                     depth=depth + 1,
+                    read_rate_limiter=read_rate_limiter,
                 )
             elif stat.S_ISREG(entry_info.st_mode):
                 records.append(
@@ -1083,6 +1120,7 @@ def _copy_snapshot_tree(
                         child_logical,
                         budget,
                         depth + 1,
+                        read_rate_limiter=read_rate_limiter,
                     )
                 )
             else:
@@ -1122,7 +1160,12 @@ def _snapshot_manifest_bytes(
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
-def snapshot_content_fingerprint(model_path: Path, adapter_path: Path | None) -> str:
+def snapshot_content_fingerprint(
+    model_path: Path,
+    adapter_path: Path | None,
+    *,
+    read_rate_limiter: _model_fingerprint._ReadRateLimiter | None = None,
+) -> str:
     records: list[SnapshotFile] = []
     directories: list[str] = []
     budget = SnapshotBudget()
@@ -1133,6 +1176,7 @@ def snapshot_content_fingerprint(model_path: Path, adapter_path: Path | None) ->
         require_read_only=False,
         budget=budget,
         directories=directories,
+        read_rate_limiter=read_rate_limiter,
     )
     if adapter_path is not None:
         _scan_snapshot_tree(
@@ -1142,6 +1186,7 @@ def snapshot_content_fingerprint(model_path: Path, adapter_path: Path | None) ->
             require_read_only=False,
             budget=budget,
             directories=directories,
+            read_rate_limiter=read_rate_limiter,
         )
     records.sort()
     directories.sort(key=lambda value: value.encode("utf-8"))
@@ -1204,6 +1249,7 @@ def _hash_snapshot_file(
     relative_path: str,
     *,
     require_read_only: bool,
+    read_rate_limiter: _model_fingerprint._ReadRateLimiter | None = None,
 ) -> tuple[str, int]:
     flags = (
         os.O_RDONLY
@@ -1221,7 +1267,11 @@ def _hash_snapshot_file(
             raise TeacherLaunchError(f"snapshot entry is not a regular file: {relative_path!r}")
         if require_read_only and initial.st_mode & 0o222:
             raise TeacherLaunchError(f"snapshot file is writable: {relative_path!r}")
-        digest, byte_len = _hash_fd(fd, initial.st_size)
+        digest, byte_len = _hash_fd(
+            fd,
+            initial.st_size,
+            read_rate_limiter,
+        )
         after = os.fstat(fd)
         path_after = path.stat(follow_symlinks=False)
         identity = _model_fingerprint._stat_identity(initial)
@@ -1246,6 +1296,7 @@ def _scan_snapshot_tree(
     budget: SnapshotBudget | None = None,
     directories: list[str] | None = None,
     depth: int = 0,
+    read_rate_limiter: _model_fingerprint._ReadRateLimiter | None = None,
 ) -> None:
     if budget is None:
         budget = SnapshotBudget()
@@ -1280,12 +1331,14 @@ def _scan_snapshot_tree(
                 budget=budget,
                 directories=directories,
                 depth=depth + 1,
+                read_rate_limiter=read_rate_limiter,
             )
         elif stat.S_ISREG(info.st_mode):
             digest, byte_len = _hash_snapshot_file(
                 Path(entry.path),
                 child_logical,
                 require_read_only=require_read_only,
+                read_rate_limiter=read_rate_limiter,
             )
             budget.add_file(child_logical, byte_len, depth + 1)
             records.append(SnapshotFile(child_logical, byte_len, digest))
@@ -1293,7 +1346,11 @@ def _scan_snapshot_tree(
             raise TeacherLaunchError(f"snapshot contains special file: {child_logical!r}")
 
 
-def _read_strict_regular_file(path: Path, label: str) -> bytes:
+def _read_strict_regular_file(
+    path: Path,
+    label: str,
+    read_rate_limiter: _model_fingerprint._ReadRateLimiter | None = None,
+) -> bytes:
     flags = (
         os.O_RDONLY
         | getattr(os, "O_CLOEXEC", 0)
@@ -1314,9 +1371,14 @@ def _read_strict_regular_file(path: Path, label: str) -> bytes:
             chunk = os.read(fd, min(1024 * 1024, remaining))
             if not chunk:
                 raise TeacherLaunchError(f"{label} became shorter while being read")
+            if read_rate_limiter is not None:
+                read_rate_limiter.account(len(chunk))
             chunks.append(chunk)
             remaining -= len(chunk)
-        if os.read(fd, 1):
+        extra = os.read(fd, 1)
+        if extra:
+            if read_rate_limiter is not None:
+                read_rate_limiter.account(len(extra))
             raise TeacherLaunchError(f"{label} became larger while being read")
         after = os.fstat(fd)
         path_after = path.stat(follow_symlinks=False)
@@ -1449,6 +1511,8 @@ def create_immutable_snapshot(
     model_source: Path,
     adapter_source: Path | None,
     snapshot_root: Path,
+    *,
+    read_rate_limiter: _model_fingerprint._ReadRateLimiter | None = None,
 ) -> ImmutableSnapshot:
     model = _normal_directory(model_source, "model source")
     adapter = (
@@ -1540,6 +1604,7 @@ def create_immutable_snapshot(
             records,
             directories,
             copy_budget,
+            read_rate_limiter=read_rate_limiter,
         )
         if adapter is not None:
             _copy_snapshot_tree(
@@ -1549,6 +1614,7 @@ def create_immutable_snapshot(
                 records,
                 directories,
                 copy_budget,
+                read_rate_limiter=read_rate_limiter,
             )
         if (
             copy_budget.files != inventory_budget.files
@@ -1576,6 +1642,7 @@ def create_immutable_snapshot(
             require_read_only=False,
             budget=source_budget,
             directories=source_directories,
+            read_rate_limiter=read_rate_limiter,
         )
         if adapter is not None:
             _scan_snapshot_tree(
@@ -1585,6 +1652,7 @@ def create_immutable_snapshot(
                 require_read_only=False,
                 budget=source_budget,
                 directories=source_directories,
+                read_rate_limiter=read_rate_limiter,
             )
         source_records.sort()
         source_directories.sort(key=lambda value: value.encode("utf-8"))
@@ -1621,7 +1689,7 @@ def create_immutable_snapshot(
             ),
             _snapshot_device=root_info.st_dev,
         )
-        candidate.verify()
+        candidate.verify(read_rate_limiter)
         os.rename(
             building_name,
             ready_name,
@@ -1638,7 +1706,7 @@ def create_immutable_snapshot(
         candidate._snapshot_identity = _model_fingerprint._stat_identity(
             os.stat(ready_name, dir_fd=root_fd, follow_symlinks=False)
         )
-        candidate.verify()
+        candidate.verify(read_rate_limiter)
         return candidate
     except BaseException:
         try:
@@ -1910,7 +1978,12 @@ def _collect_runtime_content(
     return inventory
 
 
-def _hash_runtime_content_file(label: str, original: Path, resolved: Path) -> RuntimeContentRecord:
+def _hash_runtime_content_file(
+    label: str,
+    original: Path,
+    resolved: Path,
+    read_rate_limiter: _model_fingerprint._ReadRateLimiter | None = None,
+) -> RuntimeContentRecord:
     flags = (
         os.O_RDONLY
         | getattr(os, "O_CLOEXEC", 0)
@@ -1929,7 +2002,11 @@ def _hash_runtime_content_file(label: str, original: Path, resolved: Path) -> Ru
             raise TeacherLaunchError(
                 f"Python runtime file exceeds the logical-size safety limit: {label!r}"
             )
-        digest, byte_len = _hash_fd(fd, initial.st_size)
+        digest, byte_len = _hash_fd(
+            fd,
+            initial.st_size,
+            read_rate_limiter,
+        )
         after = os.fstat(fd)
         path_after = resolved.stat(follow_symlinks=False)
         identity = _model_fingerprint._stat_identity(initial)
@@ -1951,6 +2028,7 @@ def capture_runtime_content(
     *,
     python_executable: Path | None = None,
     package_names: Sequence[str] = RUNTIME_PACKAGES,
+    read_rate_limiter: _model_fingerprint._ReadRateLimiter | None = None,
 ) -> RuntimeContentSnapshot:
     executable = _resolve_runtime_path(
         Path(sys.executable) if python_executable is None else python_executable,
@@ -1963,7 +2041,12 @@ def capture_runtime_content(
     for label, (original, resolved) in sorted(inventory.files.items()):
         cached = hashed_paths.get(resolved)
         if cached is None:
-            record = _hash_runtime_content_file(label, original, resolved)
+            record = _hash_runtime_content_file(
+                label,
+                original,
+                resolved,
+                read_rate_limiter,
+            )
             cached = (record.sha256, record.byte_len)
             hashed_paths[resolved] = cached
         else:
@@ -2011,9 +2094,18 @@ def capture_runtime_content(
     )
 
 
-def _hash_regular_file(root: Path, relative: str, label: str) -> tuple[str, int]:
+def _hash_regular_file(
+    root: Path,
+    relative: str,
+    label: str,
+    read_rate_limiter: _model_fingerprint._ReadRateLimiter | None = None,
+) -> tuple[str, int]:
     try:
-        opened = _model_fingerprint._open_regular(root, relative)
+        opened = _model_fingerprint._open_regular(
+            root,
+            relative,
+            read_rate_limiter,
+        )
     except _model_fingerprint.ModelFingerprintError as exc:
         raise TeacherLaunchError(f"cannot fingerprint {label}: {exc}") from exc
     try:
@@ -2038,12 +2130,18 @@ def _verify_opened_unchanged(opened: Any, label: str) -> None:
         raise TeacherLaunchError(f"{label} changed while it was being read")
 
 
-def fingerprint_base_model_details(model_path: Path) -> tuple[str, str]:
+def fingerprint_base_model_details(
+    model_path: Path,
+    read_rate_limiter: _model_fingerprint._ReadRateLimiter | None = None,
+) -> tuple[str, str]:
     """Return the Rust-loader-compatible weight digest and model-config digest."""
 
     root = _normal_directory(model_path, "model path")
     try:
-        model = _model_fingerprint.fingerprint_model(root)
+        model = _model_fingerprint.fingerprint_model(
+            root,
+            read_rate_limiter=read_rate_limiter,
+        )
     except _model_fingerprint.ModelFingerprintError as exc:
         raise TeacherLaunchError(f"base-model fingerprint failed: {exc}") from exc
 
@@ -2074,8 +2172,11 @@ def fingerprint_base_model_details(model_path: Path) -> tuple[str, str]:
     return digest.hexdigest(), config_hash
 
 
-def fingerprint_base_model(model_path: Path) -> str:
-    return fingerprint_base_model_details(model_path)[0]
+def fingerprint_base_model(
+    model_path: Path,
+    read_rate_limiter: _model_fingerprint._ReadRateLimiter | None = None,
+) -> str:
+    return fingerprint_base_model_details(model_path, read_rate_limiter)[0]
 
 
 def tokenizer_config_fingerprint(backend_tokenizer_json: str) -> str:
@@ -2175,10 +2276,18 @@ def _model_vocab_size(model_config: Mapping[str, Any]) -> int:
     return candidates[0][1]
 
 
-def fingerprint_adapter(adapter_path: Path, name: str) -> dict[str, Any]:
+def fingerprint_adapter(
+    adapter_path: Path,
+    name: str,
+    read_rate_limiter: _model_fingerprint._ReadRateLimiter | None = None,
+) -> dict[str, Any]:
     root = _normal_directory(adapter_path, "adapter path")
     try:
-        config_input = _model_fingerprint._open_regular(root, "adapter_config.json")
+        config_input = _model_fingerprint._open_regular(
+            root,
+            "adapter_config.json",
+            read_rate_limiter,
+        )
     except _model_fingerprint.ModelFingerprintError as exc:
         raise TeacherLaunchError(f"cannot fingerprint adapter_config.json: {exc}") from exc
     try:
@@ -2205,7 +2314,12 @@ def fingerprint_adapter(adapter_path: Path, name: str) -> dict[str, Any]:
             "adapter path contains both safetensors and bin weights; the loader input is ambiguous"
         )
     filename = candidates[0]
-    weight_hash, byte_count = _hash_regular_file(root, filename, filename)
+    weight_hash, byte_count = _hash_regular_file(
+        root,
+        filename,
+        filename,
+        read_rate_limiter,
+    )
     if byte_count <= 0:
         raise TeacherLaunchError(f"adapter weight file is empty: {filename}")
 
@@ -2222,10 +2336,17 @@ def fingerprint_adapter(adapter_path: Path, name: str) -> dict[str, Any]:
     }
 
 
-def adapter_max_rank(adapter_path: Path) -> int:
+def adapter_max_rank(
+    adapter_path: Path,
+    read_rate_limiter: _model_fingerprint._ReadRateLimiter | None = None,
+) -> int:
     root = _normal_directory(adapter_path, "adapter path")
     try:
-        config_input = _model_fingerprint._open_regular(root, "adapter_config.json")
+        config_input = _model_fingerprint._open_regular(
+            root,
+            "adapter_config.json",
+            read_rate_limiter,
+        )
     except _model_fingerprint.ModelFingerprintError as exc:
         raise TeacherLaunchError(f"cannot inspect adapter rank: {exc}") from exc
     try:
@@ -2329,8 +2450,13 @@ def installed_runtime_versions(vllm_version: str | None = None) -> dict[str, str
     return _validate_runtime_versions(versions)
 
 
-def runtime_contract_probe_payload() -> dict[str, Any]:
-    content = capture_runtime_content()
+def runtime_contract_probe_payload(
+    max_provenance_read_mib_per_second: int | None = None,
+) -> dict[str, Any]:
+    limiter = _model_fingerprint._ReadRateLimiter(
+        max_provenance_read_mib_per_second
+    )
+    content = capture_runtime_content(read_rate_limiter=limiter)
     return {
         "schema": RUNTIME_CONTENT_SCHEMA,
         "runtime_versions": installed_runtime_versions(),
@@ -2374,6 +2500,7 @@ def verify_child_runtime_contract(
     expected_versions: Mapping[str, str],
     expected_content_sha256: str,
     environment: Mapping[str, str],
+    max_provenance_read_mib_per_second: int | None = None,
 ) -> None:
     launcher_path = os.fspath(Path(__file__).resolve())
     probe = (
@@ -2383,7 +2510,9 @@ def verify_child_runtime_contract(
         "m=importlib.util.module_from_spec(s);"
         "sys.modules[s.name]=m;"
         "s.loader.exec_module(m);"
-        "print(json.dumps(m.runtime_contract_probe_payload(),separators=(',',':')))"
+        "print(json.dumps("
+        f"m.runtime_contract_probe_payload({max_provenance_read_mib_per_second!r}),"
+        "separators=(',',':')))"
     )
     try:
         completed = subprocess.run(
@@ -3499,6 +3628,14 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="combined response candidate cap (default: min(1,000,000, context * row width))",
     )
     parser.add_argument(
+        "--max-provenance-read-mib-per-second",
+        type=int,
+        help=(
+            "optional cumulative ceiling for launcher-owned model, snapshot, "
+            "adapter, and runtime-content reads"
+        ),
+    )
+    parser.add_argument(
         "--identity-input",
         type=Path,
         help="strict precomputed inputs; allowed only for non-launch test/dry-run modes",
@@ -3529,6 +3666,7 @@ OWNED_LAUNCH_REQUIRED_OPTIONS = (
 OWNED_LAUNCH_OPTIONAL_SINGLETONS = (
     "--adapter-path",
     "--max-prompt-logprob-candidates",
+    "--max-provenance-read-mib-per-second",
 )
 
 
@@ -3599,9 +3737,25 @@ def _validate_requested_limits(args: argparse.Namespace) -> None:
         raise TeacherLaunchError(
             "--max-prompt-logprob-candidates is outside the requested context/K bounds"
         )
+    provenance_rate = args.max_provenance_read_mib_per_second
+    if provenance_rate is not None and (
+        isinstance(provenance_rate, bool)
+        or not isinstance(provenance_rate, int)
+        or not MIN_PROVENANCE_READ_MIB_PER_SECOND
+        <= provenance_rate
+        <= MAX_PROVENANCE_READ_MIB_PER_SECOND
+    ):
+        raise TeacherLaunchError(
+            "--max-provenance-read-mib-per-second must be in "
+            f"{MIN_PROVENANCE_READ_MIB_PER_SECOND}"
+            f"..={MAX_PROVENANCE_READ_MIB_PER_SECOND}"
+        )
 
 
-def _identity_inputs(args: argparse.Namespace) -> dict[str, Any]:
+def _identity_inputs(
+    args: argparse.Namespace,
+    read_rate_limiter: _model_fingerprint._ReadRateLimiter | None = None,
+) -> dict[str, Any]:
     if args.identity_input is not None:
         if not (args.manifest_only or args.dry_run):
             raise TeacherLaunchError("--identity-input is forbidden for a real launch")
@@ -3611,9 +3765,16 @@ def _identity_inputs(args: argparse.Namespace) -> dict[str, Any]:
     model_path = _normal_directory(args.model_path, "model path")
     snapshot_hash = getattr(args, "snapshot_content_sha256", None)
     if snapshot_hash is None:
-        snapshot_hash = snapshot_content_fingerprint(model_path, args.adapter_path)
+        snapshot_hash = snapshot_content_fingerprint(
+            model_path,
+            args.adapter_path,
+            read_rate_limiter=read_rate_limiter,
+        )
     _raw_sha256(snapshot_hash, "snapshot_content_sha256")
-    base_hash, model_config_hash = fingerprint_base_model_details(model_path)
+    base_hash, model_config_hash = fingerprint_base_model_details(
+        model_path,
+        read_rate_limiter,
+    )
     vocab, backend_tokenizer_json, vocab_size = _load_tokenizer_contract(model_path)
     tokenizer_config_hash = tokenizer_config_fingerprint(backend_tokenizer_json)
     vocab_hash, pair_count = tokenizer_vocab_fingerprint(vocab)
@@ -3623,7 +3784,11 @@ def _identity_inputs(args: argparse.Namespace) -> dict[str, Any]:
             f"{pair_count} != {vocab_size}"
         )
     model_config = _strict_json_object(
-        _read_strict_regular_file(model_path / "config.json", "config.json"),
+        _read_strict_regular_file(
+            model_path / "config.json",
+            "config.json",
+            read_rate_limiter,
+        ),
         "config.json",
     )
     model_vocab_size = _model_vocab_size(model_config)
@@ -3639,15 +3804,24 @@ def _identity_inputs(args: argparse.Namespace) -> dict[str, Any]:
             f"{max_token_id} >= {model_vocab_size}"
         )
     if args.adapter_path is not None:
-        adapter = fingerprint_adapter(args.adapter_path, args.served_model_id)
-        max_adapter_rank = adapter_max_rank(args.adapter_path)
+        adapter = fingerprint_adapter(
+            args.adapter_path,
+            args.served_model_id,
+            read_rate_limiter,
+        )
+        max_adapter_rank = adapter_max_rank(
+            args.adapter_path,
+            read_rate_limiter,
+        )
     else:
         adapter = None
         max_adapter_rank = None
     vllm_version = _installed_vllm_version()
     runtime_versions = installed_runtime_versions(vllm_version)
     accelerator = probe_accelerator()
-    runtime_content = capture_runtime_content()
+    runtime_content = capture_runtime_content(
+        read_rate_limiter=read_rate_limiter
+    )
     return {
         "base_model_sha256": base_hash,
         "snapshot_content_sha256": snapshot_hash,
@@ -3691,6 +3865,9 @@ def _execute(args: argparse.Namespace) -> int:
     runtime_environment = launch_environment()
     extra_args = validate_extra_vllm_args(args.vllm_args)
     real_launch = not args.manifest_only and not args.dry_run
+    read_rate_limiter = _model_fingerprint._ReadRateLimiter(
+        args.max_provenance_read_mib_per_second
+    )
     snapshot: ImmutableSnapshot | None = None
     runtime_cache: PrivateRuntimeCache | None = None
     effective_args = args
@@ -3707,13 +3884,17 @@ def _execute(args: argparse.Namespace) -> int:
                 args.model_path,
                 args.adapter_path,
                 args.snapshot_root,
+                read_rate_limiter=read_rate_limiter,
             )
             effective_args = argparse.Namespace(**vars(args))
             effective_args.model_path = snapshot.model_path
             effective_args.adapter_path = snapshot.adapter_path
             effective_args.snapshot_content_sha256 = snapshot.manifest_sha256
 
-        inputs = _identity_inputs(effective_args)
+        inputs = _identity_inputs(
+            effective_args,
+            read_rate_limiter,
+        )
         adapter = inputs["adapter"]
         max_adapter_rank = inputs["adapter_max_rank"]
         row_width = min(args.max_top_k + 1, inputs["vocab_size"])
@@ -3798,12 +3979,13 @@ def _execute(args: argparse.Namespace) -> int:
         assert command is not None
         assert snapshot is not None
         assert runtime_cache is not None
-        snapshot.verify()
+        snapshot.verify(read_rate_limiter)
         runtime_cache.verify()
         verify_child_runtime_contract(
             inputs["runtime_versions"],
             inputs["runtime_content_sha256"],
             runtime_environment,
+            args.max_provenance_read_mib_per_second,
         )
         print(
             json.dumps(

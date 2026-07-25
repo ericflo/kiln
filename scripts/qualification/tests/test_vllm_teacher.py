@@ -355,6 +355,22 @@ class FilesystemFingerprintTests(unittest.TestCase):
             first_snapshot_hash,
         )
 
+    def test_shared_provenance_limiter_accounts_snapshot_and_model_passes(self) -> None:
+        limiter = vllm_teacher._model_fingerprint._ReadRateLimiter(None)
+        expected_snapshot_bytes = sum(
+            path.stat().st_size for path in self.root.iterdir() if path.is_file()
+        )
+        vllm_teacher.snapshot_content_fingerprint(
+            self.root,
+            None,
+            read_rate_limiter=limiter,
+        )
+        self.assertEqual(limiter.total_bytes, expected_snapshot_bytes)
+
+        before_model = limiter.total_bytes
+        vllm_teacher.fingerprint_base_model(self.root, limiter)
+        self.assertGreater(limiter.total_bytes, before_model)
+
     def test_tokenizer_config_hashes_canonical_backend_json_and_root_symlinks_fail(self) -> None:
         backend_json = '{"version":"1.0","model":{"type":"BPE"}}'
         self.assertEqual(
@@ -571,8 +587,17 @@ class ImmutableSnapshotTests(unittest.TestCase):
             relative_path: str,
             budget: object,
             depth: int,
+            *,
+            read_rate_limiter: object | None = None,
         ) -> object:
-            result = original(source, destination, relative_path, budget, depth)
+            result = original(
+                source,
+                destination,
+                relative_path,
+                budget,
+                depth,
+                read_rate_limiter=read_rate_limiter,
+            )
             if relative_path == "model/a.safetensors":
                 (coherent / "a.safetensors").write_bytes(b"new-a")
                 (coherent / "b.safetensors").write_bytes(b"new-b")
@@ -959,6 +984,12 @@ class RuntimeContractTests(unittest.TestCase):
                 python_executable=executable_link,
                 package_names=("vllm",),
             )
+            limiter = vllm_teacher._model_fingerprint._ReadRateLimiter(None)
+            bounded = vllm_teacher.capture_runtime_content(
+                python_executable=executable_link,
+                package_names=("vllm",),
+                read_rate_limiter=limiter,
+            )
             source.write_text("VALUE = 'other'\n")
             changed_source = vllm_teacher.capture_runtime_content(
                 python_executable=executable_link,
@@ -978,6 +1009,8 @@ class RuntimeContractTests(unittest.TestCase):
             )
 
         self.assertEqual(first, repeated)
+        self.assertEqual(first, bounded)
+        self.assertGreater(limiter.total_bytes, 0)
         self.assertEqual(first.python_executable, executable.resolve())
         self.assertNotEqual(first.sha256, changed_source.sha256)
         self.assertNotEqual(first.sha256, changed_native.sha256)
@@ -1073,6 +1106,35 @@ class RuntimeContractTests(unittest.TestCase):
                 )
         self.assertFalse(run.call_args.kwargs["shell"])
         self.assertEqual(run.call_args.kwargs["cwd"], os.path.abspath(os.sep))
+
+    def test_child_runtime_preflight_forwards_provenance_read_ceiling(self) -> None:
+        observed = {
+            "schema": vllm_teacher.RUNTIME_CONTENT_SCHEMA,
+            "runtime_versions": RUNTIME_VERSIONS,
+            "runtime_content_sha256": E_HASH,
+            "file_count": 10,
+            "directory_count": 5,
+            "logical_bytes": 1000,
+        }
+        completed = vllm_teacher.subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps(observed).encode(),
+            stderr=b"",
+        )
+        with mock.patch.object(
+            vllm_teacher.subprocess,
+            "run",
+            return_value=completed,
+        ) as run:
+            vllm_teacher.verify_child_runtime_contract(
+                RUNTIME_VERSIONS,
+                E_HASH,
+                {"PYTHONDONTWRITEBYTECODE": "1"},
+                256,
+            )
+        probe = run.call_args.args[0][-1]
+        self.assertIn("runtime_contract_probe_payload(256)", probe)
 
     def test_child_runtime_revalidation_rejects_same_version_content_mutation(self) -> None:
         observed = {
@@ -1617,6 +1679,32 @@ class MainTests(unittest.TestCase):
             inherited.process_group_mode, vllm_teacher.PROCESS_GROUP_MODE_INHERITED
         )
 
+    def test_provenance_read_ceiling_is_typed_and_closed(self) -> None:
+        parsed = vllm_teacher.parse_args(
+            [
+                *self._common(),
+                "--max-provenance-read-mib-per-second=256",
+                "--manifest-only",
+            ]
+        )
+        vllm_teacher._validate_requested_limits(parsed)
+        self.assertEqual(parsed.max_provenance_read_mib_per_second, 256)
+
+        for value in (0, 16_385):
+            with self.subTest(value=value):
+                invalid = vllm_teacher.parse_args(
+                    [
+                        *self._common(),
+                        f"--max-provenance-read-mib-per-second={value}",
+                        "--manifest-only",
+                    ]
+                )
+                with self.assertRaisesRegex(
+                    vllm_teacher.TeacherLaunchError,
+                    "max-provenance-read",
+                ):
+                    vllm_teacher._validate_requested_limits(invalid)
+
     def test_manifest_only_is_dependency_free_json(self) -> None:
         stdout = io.StringIO()
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
@@ -1672,7 +1760,11 @@ class MainTests(unittest.TestCase):
     def test_real_launch_uses_verified_snapshot_until_supervised_child_exits(self) -> None:
         called: dict[str, object] = {}
 
-        def fake_inputs(args: object) -> dict[str, object]:
+        def fake_inputs(
+            args: object,
+            read_rate_limiter: object | None = None,
+        ) -> dict[str, object]:
+            self.assertIsNotNone(read_rate_limiter)
             called["staged_model"] = args.model_path
             self.assertTrue(args.model_path.parent.name.startswith("ready-"))
             self.assertNotEqual(args.model_path, self.model)
@@ -1712,11 +1804,15 @@ class MainTests(unittest.TestCase):
             return 23
 
         def fake_verify(
-            versions: dict[str, str], digest: str, environment: dict[str, str]
+            versions: dict[str, str],
+            digest: str,
+            environment: dict[str, str],
+            max_provenance_read_mib_per_second: int | None,
         ) -> None:
             self.assertEqual(versions, RUNTIME_VERSIONS)
             self.assertEqual(digest, E_HASH)
             self.assertEqual(environment["PYTHONDONTWRITEBYTECODE"], "1")
+            self.assertIsNone(max_provenance_read_mib_per_second)
             called["runtime_verified"] = True
 
         args = [
