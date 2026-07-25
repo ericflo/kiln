@@ -258,9 +258,10 @@
             "properties": {
               "kind": {
                 "enum": ["serving", "performance", "training", "eval", "soak"]
-              }
+              },
+              "verdict": { "const": "passed" }
             },
-            "required": ["kind"]
+            "required": ["kind", "verdict"]
           }
         },
         "required": ["qualification"]

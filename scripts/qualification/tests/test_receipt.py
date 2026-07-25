@@ -181,6 +181,24 @@ class ReceiptTests(unittest.TestCase):
         self.assertTrue(any("model is required" in error for error in errors))
         self.assertTrue(any("workload is required" in error for error in errors))
 
+    def test_failed_model_preflight_receipt_can_omit_model_identity(self) -> None:
+        value = valid_receipt()
+        value["qualification"]["kind"] = "performance"
+        value["qualification"]["verdict"] = "failed"
+        value["model"] = None
+        value["workload"] = {
+            "id": "performance-v1",
+            "sha256": HASH,
+            "seed": 1,
+            "parameters": {"variant_id": "c1"},
+        }
+        value["results"][0]["status"] = "failed"
+
+        errors = receipt_module.validate_receipt(value)
+
+        self.assertFalse(any("model is required" in error for error in errors))
+        self.assertEqual(errors, [])
+
     def test_correctness_receipt_requires_workload_but_not_model(self) -> None:
         value = valid_receipt()
         value["qualification"]["kind"] = "correctness"
@@ -308,6 +326,17 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(
             schema["allOf"][1]["then"]["properties"]["model"]["$ref"],
             "#/$defs/model",
+        )
+        model_condition = schema["allOf"][1]["if"]["properties"][
+            "qualification"
+        ]
+        self.assertEqual(
+            model_condition["properties"]["verdict"],
+            {"const": "passed"},
+        )
+        self.assertEqual(
+            set(model_condition["required"]),
+            {"kind", "verdict"},
         )
 
     def test_atomic_write_json_replaces_complete_document(self) -> None:

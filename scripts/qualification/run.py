@@ -120,7 +120,7 @@ WSL_MODEL_FINGERPRINT_STDERR_MAX_BYTES = 4 * 1024 * 1024
 
 
 class QualificationRunError(RuntimeError):
-    """A preflight or runner-integrity failure that prevents a receipt."""
+    """A preflight or runner-integrity failure outside a retainable run."""
 
 
 class CaseResultError(RuntimeError):
@@ -1559,6 +1559,230 @@ def _atomic_write_json_new(path: Path, value: Any) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def _retain_initial_model_failure(
+    *,
+    root: Path,
+    run_directory: Path,
+    receipt_path: Path,
+    receipt_id: str,
+    workload_path: Path,
+    workload: dict[str, Any],
+    workload_hash: str,
+    variant: dict[str, Any],
+    variant_id: str,
+    variables: dict[str, Any],
+    host_id: str,
+    commit: str,
+    tree_hash: str,
+    started_at: datetime,
+    started_monotonic: float,
+    invocation: list[str] | None,
+    network_isolation: NetworkIsolation,
+    execution_environment_hash: str,
+    case_base_environment: dict[str, str],
+    wsl_thermal_policy_path: Path | None,
+    wsl_thermal_policy_value: wsl_thermal_exec.ThermalPolicy | None,
+    supervised_wsl_model_fingerprint: bool,
+    fingerprint_artifacts: list[tuple[Path, str]],
+    failure: str,
+    active_run_directories: list[Path],
+) -> RunOutcome:
+    infrastructure_failures = [failure]
+    try:
+        final_commit = _git_commit(root)
+        final_clean = _git_clean(root)
+        final_tree_hash, _ = source_tree_hash(root)
+    except (QualificationRunError, SourceTreeHashError) as exc:
+        infrastructure_failures.append(f"final source verification failed: {exc}")
+    else:
+        if final_commit != commit:
+            infrastructure_failures.append(
+                f"Git HEAD changed during qualification: {commit} -> {final_commit}"
+            )
+        if final_tree_hash != tree_hash:
+            infrastructure_failures.append(
+                f"source tree changed during qualification: {tree_hash} -> {final_tree_hash}"
+            )
+        if not final_clean:
+            infrastructure_failures.append(
+                "Git worktree became dirty during qualification"
+            )
+    detail = _join_details(*infrastructure_failures)
+    assert detail is not None
+
+    capture = _unavailable_environment(
+        variant["backend"],
+        host_id,
+        "environment capture was not started after initial model fingerprint failure",
+    )
+    capture.environment["runtime"]["execution_environment_sha256"] = (
+        execution_environment_hash
+    )
+    environment_raw_path = run_directory / "environment.json"
+    _atomic_write_json_new(
+        environment_raw_path,
+        {
+            "environment": capture.environment,
+            "probe_results": capture.probe_results,
+            "raw": capture.raw,
+        },
+    )
+    artifacts = [_artifact(root, environment_raw_path, "environment_probes")]
+    for artifact_path, artifact_kind in fingerprint_artifacts:
+        if artifact_path.is_file() and not artifact_path.is_symlink():
+            artifacts.append(_artifact(root, artifact_path, artifact_kind))
+    if wsl_thermal_policy_path is not None:
+        thermal_policy_snapshot = run_directory / "wsl2-thermal-policy.json"
+        _atomic_write_json_new(
+            thermal_policy_snapshot,
+            json.loads(wsl_thermal_policy_path.read_bytes()),
+        )
+        artifacts.append(
+            _artifact(root, thermal_policy_snapshot, "wsl2_thermal_policy")
+        )
+
+    results = [
+        {
+            "id": case["id"],
+            "required": case["required"],
+            "status": "failed" if case["required"] else "skipped",
+            "duration_seconds": 0.0,
+            "metrics": [],
+            "details": detail,
+        }
+        for case in variant["cases"]
+    ]
+    run_config_path = run_directory / "run-config.json"
+    _atomic_write_json_new(
+        run_config_path,
+        {
+            "schema_version": 1,
+            "receipt_id": receipt_id,
+            "workload_id": workload["workload_id"],
+            "workload_sha256": workload_hash,
+            "variant_id": variant_id,
+            "backend": variant["backend"],
+            "variables": variables,
+            "determinism": workload["determinism"],
+            "network_isolation": network_isolation.mechanism,
+            "wsl2_thermal_supervision": (
+                None
+                if wsl_thermal_policy_value is None
+                else {
+                    "mechanism": "windows-thermal-zone-nvml-supervisor-v1",
+                    "policy_path": (
+                        wsl_thermal_policy_path.relative_to(root).as_posix()
+                    ),
+                    "policy_sha256": wsl_thermal_policy_value.content_sha256,
+                    "scope": {
+                        "mechanism": "systemd-user-scope-feedback-v1",
+                        "memory_max_bytes": WSL_SCOPE_MEMORY_MAX_BYTES,
+                        "memory_swap_max_bytes": 0,
+                        "pids_max": WSL_SCOPE_PIDS_MAX,
+                        "cpu_quota_percent": WSL_SCOPE_CPU_QUOTA_PERCENT,
+                        "cpu_poll_interval_ms": WSL_SCOPE_CPU_POLL_INTERVAL_MS,
+                    },
+                }
+            ),
+            "model_fingerprint_supervision": (
+                None
+                if not supervised_wsl_model_fingerprint
+                else {
+                    "mode": "independent-initial-and-final-wsl2-lifecycles-v1",
+                    "network_containment": network_isolation.mechanism,
+                    "read_mib_per_second": (
+                        WSL_MODEL_FINGERPRINT_READ_MIB_PER_SECOND
+                    ),
+                    "runtime_max_seconds": (
+                        WSL_MODEL_FINGERPRINT_RUNTIME_MAX_SECONDS
+                    ),
+                    "scope": {
+                        "memory_max_bytes": WSL_SCOPE_MEMORY_MAX_BYTES,
+                        "memory_swap_max_bytes": 0,
+                        "pids_max": WSL_SCOPE_PIDS_MAX,
+                        "cpu_quota_percent": WSL_SCOPE_CPU_QUOTA_PERCENT,
+                        "cpu_poll_interval_ms": WSL_SCOPE_CPU_POLL_INTERVAL_MS,
+                    },
+                }
+            ),
+            "case_execution_count": 0,
+            "per_stream_output_limit_bytes": 0,
+            "max_run_capture_bytes": MAX_RUN_CAPTURE_BYTES,
+            "per_case_result_limit_bytes": 0,
+            "max_run_structured_bytes": MAX_RUN_STRUCTURED_BYTES,
+            "case_environment_policy": CASE_ENVIRONMENT_POLICY,
+            "case_base_environment_sha256": execution_environment_hash,
+            "case_base_environment": _redacted_environment(case_base_environment),
+            "infrastructure_failures": infrastructure_failures,
+            "cases": [],
+            "pre_case_failure": "initial_model_fingerprint",
+        },
+    )
+    artifacts.append(_artifact(root, run_config_path, "effective_run_config"))
+
+    duration = time.monotonic() - started_monotonic
+    finished_at = started_at + timedelta(seconds=duration)
+    effective_invocation = invocation or [
+        sys.executable,
+        "scripts/qualification/run.py",
+        str(workload_path.relative_to(root)),
+        "--variant",
+        variant_id,
+        "--host-id",
+        host_id,
+    ]
+    receipt = {
+        "schema_version": 1,
+        "receipt_id": receipt_id,
+        "created_at_utc": utc_text(finished_at),
+        "source": {
+            "tree_hash_format": HASH_FORMAT,
+            "tree_hash": tree_hash,
+            "git_commit": commit,
+            "git_worktree_clean": True,
+        },
+        "qualification": {
+            "kind": workload["kind"],
+            "backend": variant["backend"],
+            "profile": workload["workload_id"][:128],
+            "verdict": "failed",
+            "started_at_utc": utc_text(started_at),
+            "finished_at_utc": utc_text(finished_at),
+            "duration_seconds": duration,
+            "command": effective_invocation,
+        },
+        "environment": capture.environment,
+        "model": None,
+        "workload": {
+            "id": workload["workload_id"],
+            "sha256": workload_hash,
+            "seed": workload["determinism"]["seed"],
+            "parameters": {"variant_id": variant_id, **variables},
+        },
+        "effective_config": {},
+        "results": results,
+        "metrics": [],
+        "artifacts": artifacts,
+        "unsupported": list(capture.unsupported),
+        "notes": [
+            "Model identity is absent because the initial model fingerprint failed."
+        ],
+    }
+    strict_errors = validate_receipt(
+        receipt,
+        root=root,
+        require_local_artifacts=True,
+    )
+    if strict_errors:
+        raise QualificationRunError(
+            "generated initial-model-failure receipt is invalid:\n  - "
+            + "\n  - ".join(strict_errors)
+        )
+    _atomic_write_json_new(receipt_path, receipt)
+    active_run_directories.remove(run_directory)
+    return RunOutcome(receipt_path=receipt_path, receipt=receipt, exit_code=1)
+
+
 def _normalize_probe_failures(capture: EnvironmentCapture) -> list[str]:
     failures: list[str] = []
     for raw in capture.probe_results:
@@ -1908,6 +2132,15 @@ def _run_qualification_impl(
                 assert wsl_thermal_policy_value is not None
                 initial_stdout = run_directory / "model-fingerprint-initial.json"
                 initial_stderr = run_directory / "model-fingerprint-initial.stderr"
+                model_fingerprint_artifacts.extend(
+                    (
+                        (initial_stdout, "model_fingerprint_initial"),
+                        (
+                            initial_stderr,
+                            "model_fingerprint_initial_wsl2_supervision",
+                        ),
+                    )
+                )
                 model = _supervised_wsl_model_fingerprint(
                     model_path,
                     model_id,
@@ -1918,19 +2151,38 @@ def _run_qualification_impl(
                     stderr_path=initial_stderr,
                     environment=model_fingerprint_environment,
                 )
-                model_fingerprint_artifacts.extend(
-                    (
-                        (initial_stdout, "model_fingerprint_initial"),
-                        (
-                            initial_stderr,
-                            "model_fingerprint_initial_wsl2_supervision",
-                        ),
-                    )
-                )
             else:
                 model = hooks.fingerprint_model(model_path, model_id)
         except (ModelFingerprintError, OSError, QualificationRunError) as exc:
-            raise QualificationRunError(f"model fingerprint failed: {exc}") from exc
+            return _retain_initial_model_failure(
+                root=root,
+                run_directory=run_directory,
+                receipt_path=receipt_path,
+                receipt_id=resolved_receipt_id,
+                workload_path=path,
+                workload=workload,
+                workload_hash=workload_hash,
+                variant=variant,
+                variant_id=variant_id,
+                variables=variables,
+                host_id=host_id,
+                commit=commit,
+                tree_hash=tree_hash,
+                started_at=started_at,
+                started_monotonic=started_monotonic,
+                invocation=invocation,
+                network_isolation=network_isolation,
+                execution_environment_hash=execution_environment_hash,
+                case_base_environment=case_base_environment,
+                wsl_thermal_policy_path=wsl_thermal_policy_path,
+                wsl_thermal_policy_value=wsl_thermal_policy_value,
+                supervised_wsl_model_fingerprint=(
+                    supervised_wsl_model_fingerprint
+                ),
+                fingerprint_artifacts=model_fingerprint_artifacts,
+                failure=f"initial model fingerprint failed: {exc}",
+                active_run_directories=active_run_directories,
+            )
     resolved_model_path = model["path"] if model is not None else None
 
     infrastructure_failures: list[str] = []

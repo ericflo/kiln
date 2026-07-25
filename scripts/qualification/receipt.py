@@ -506,9 +506,14 @@ def validate_receipt(
         _validate_model(errors, model, "receipt.model")
     if workload is not None:
         _validate_workload(errors, workload, "receipt.workload")
-    if kind in {"serving", "performance", "training", "eval", "soak"}:
-        if model is None:
-            errors.append(f"receipt.model is required for qualification kind {kind!r}")
+    if (
+        kind in {"serving", "performance", "training", "eval", "soak"}
+        and verdict == "passed"
+        and model is None
+    ):
+        errors.append(
+            f"receipt.model is required for passed qualification kind {kind!r}"
+        )
     if kind in KINDS - {"environment"}:
         if workload is None:
             errors.append(f"receipt.workload is required for qualification kind {kind!r}")

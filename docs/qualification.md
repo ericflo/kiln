@@ -1197,6 +1197,26 @@ reach the reviewed resume threshold. Allow an independent cooldown, then retry
 the unchanged c1 workload from another clean pushed checkpoint without raising
 the thermal thresholds or timeout.
 
+After a five-minute independent cooldown, an unchanged invocation from exact
+clean pushed source `8444359ccb5cd8d70bb912c20bef68ada61f91fb` advanced to an
+observed 807,174,144-byte fingerprint scope peak before freezing. Its complete
+three-PID scope stayed frozen for 300.851 seconds and failed at the unchanged
+per-pause limit. Host/GPU peaks were 85.05/64 C, and the outer lifecycle
+completed stable handoff at 76.05/63 C after 246 samples. No case, receipt,
+campaign root, process, scope, or source residue remained. This is a second
+consecutive idle-host rejection and does not justify an immediate rerun.
+
+Initial fingerprint failures now retain a strict failed parent receipt rather
+than deleting the run directory. The receipt records `model: null` because no
+complete fingerprint exists, marks environment identity unavailable because
+the collector was deliberately not started, fails every declared required
+case without executing it, leaves effective config empty, and retains the
+exact source/workload binding, policy snapshot, bounded fingerprint stdout,
+complete supervision stderr, and run config. Passed model-bearing receipts
+still require the full weight/config/tokenizer/template identity. A failed
+receipt with no model is pre-model boundary evidence only; it cannot be cited
+for model integrity, device identity, case execution, or performance.
+
 The initial Kiln inputs are stable-profile, eager-only baselines. They are not
 an optimality claim and must not be edited in place after a receipt binds them.
 Land a new source-bound candidate for graph capture, scheduler widening,
@@ -2354,6 +2374,12 @@ Model-serving workloads additionally require `--model` with the exact local
 model directory and `--model-id` with its public identity. Select each declared
 A/B arm explicitly; the manifest, not an ambient environment variable, owns
 the effective configuration recorded in the receipt.
+Every passed serving, performance, training, eval, or soak receipt contains the
+complete validated model identity. If the initial fingerprint fails after a
+run identity has been created, the failed receipt instead records
+`model: null`, fails its declared cases without executing them, and retains the
+bounded fingerprint evidence. That pre-model receipt proves only the failed
+boundary and cleanup; it is never model or workload-execution evidence.
 
 The source-bound serving drivers materialize that declared policy as a private TOML
 file inside the ignored run directory and start `kiln serve --config <file>`.

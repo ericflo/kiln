@@ -1278,6 +1278,155 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(self.hook_calls, {"environment": 0, "model": 0, "network": 0})
         self.assertFalse((repository.root / ".qualification").exists())
 
+    def test_initial_model_fingerprint_failure_retains_failed_receipt(self) -> None:
+        repository = Repository(performance_ab_workload())
+        self.addCleanup(repository.close)
+        model_path = repository.root / "model"
+        model_path.mkdir()
+
+        def fail_model(_path: Path, _model_id: str | None) -> dict[str, Any]:
+            self.hook_calls["model"] += 1
+            raise run_module.ModelFingerprintError("synthetic fingerprint failure")
+
+        hooks = run_module.RunnerHooks(
+            capture_environment=self.fake_environment,
+            fingerprint_model=fail_model,
+            network_isolation=self.fake_network,
+        )
+        outcome = run_module.run_qualification(
+            repository.workload_path,
+            variant_id="baseline",
+            host_id="test-host",
+            model_path=model_path,
+            model_id="fixture-model",
+            receipt_id="runner-initial-model-failure-v1",
+            root=repository.root,
+            invocation=["qualification-runner-test", "initial-model-failure"],
+            hooks=hooks,
+        )
+
+        self.assertEqual(outcome.exit_code, 1)
+        self.assertEqual(
+            self.hook_calls,
+            {"environment": 0, "model": 1, "network": 1},
+        )
+        self.assertIsNone(outcome.receipt["model"])
+        self.assertEqual(outcome.receipt["effective_config"], {})
+        self.assertEqual(outcome.receipt["qualification"]["verdict"], "failed")
+        self.assertEqual(
+            [result["id"] for result in outcome.receipt["results"]],
+            ["smoke-case"],
+        )
+        self.assertIn(
+            "initial model fingerprint failed",
+            outcome.receipt["results"][0]["details"],
+        )
+        self.assertEqual(
+            {artifact["kind"] for artifact in outcome.receipt["artifacts"]},
+            {"environment_probes", "effective_run_config"},
+        )
+        self.assertTrue(
+            (
+                repository.root
+                / ".qualification/runs/runner-initial-model-failure-v1"
+                / "run-config.json"
+            ).is_file()
+        )
+        self.assert_valid(outcome, repository.root)
+
+    def test_supervised_initial_fingerprint_failure_retains_raw_boundary(self) -> None:
+        workload = performance_ab_workload()
+        for variant in workload["variants"]:
+            variant["backend"] = "cuda"
+        repository = Repository(workload)
+        self.addCleanup(repository.close)
+        policy_relative = Path(
+            "qualification/host-policies/"
+            "rtx4090-laptop-wsl2-cgroup-pacing-v2.json"
+        )
+        policy_path = repository.root / policy_relative
+        policy_path.parent.mkdir(parents=True)
+        shutil.copyfile(
+            QUALIFICATION_DIR.parents[1] / policy_relative,
+            policy_path,
+        )
+        subprocess.run(
+            ["git", "add", policy_relative.as_posix()],
+            cwd=repository.root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-qm", "add thermal policy"],
+            cwd=repository.root,
+            check=True,
+        )
+        model_path = repository.root / ".qualification/model"
+        model_path.mkdir(parents=True)
+        isolation = run_module.NetworkIsolation(
+            "util-linux-unshare-user-net-pid-landlock-v1",
+            ("/usr/bin/unshare", "--"),
+        )
+        hooks = run_module.RunnerHooks(
+            capture_environment=self.fake_environment,
+            fingerprint_model=self.fake_model,
+            network_isolation=lambda _root: isolation,
+        )
+
+        def fail_supervised(
+            _model_path: Path,
+            _model_id: str | None,
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            kwargs["stdout_path"].write_bytes(b"")
+            kwargs["stderr_path"].write_bytes(
+                b'wsl2-scope: {"event":"failed","scope_removed":true}\n'
+                b'wsl2-thermal: {"event":"complete","child_returncode":2}\n'
+            )
+            raise run_module.QualificationRunError(
+                "thermal pacing pause exceeded 300 seconds"
+            )
+
+        with mock.patch.object(
+            run_module,
+            "DEFAULT_HOOKS",
+            hooks,
+        ), mock.patch.object(
+            run_module,
+            "_supervised_wsl_model_fingerprint",
+            side_effect=fail_supervised,
+        ):
+            outcome = run_module.run_qualification(
+                repository.workload_path,
+                variant_id="baseline",
+                host_id="test-host",
+                model_path=model_path,
+                model_id="fixture-model",
+                receipt_id="runner-supervised-model-failure-v1",
+                wsl2_thermal_policy=policy_relative,
+                root=repository.root,
+                invocation=["qualification-runner-test", "supervised-failure"],
+                hooks=hooks,
+            )
+
+        self.assertEqual(outcome.exit_code, 1)
+        self.assertEqual(self.hook_calls["environment"], 0)
+        self.assertIsNone(outcome.receipt["model"])
+        self.assertEqual(
+            {artifact["kind"] for artifact in outcome.receipt["artifacts"]},
+            {
+                "effective_run_config",
+                "environment_probes",
+                "model_fingerprint_initial",
+                "model_fingerprint_initial_wsl2_supervision",
+                "wsl2_thermal_policy",
+            },
+        )
+        self.assertIn(
+            "thermal pacing pause exceeded 300 seconds",
+            outcome.receipt["results"][0]["details"],
+        )
+        self.assert_valid(outcome, repository.root)
+
     def test_model_change_and_refingerprint_failure_downgrade_receipt(self) -> None:
         mutations = {
             "changed": (

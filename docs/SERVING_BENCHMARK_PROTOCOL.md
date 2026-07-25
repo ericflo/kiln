@@ -507,6 +507,27 @@ without the former descriptor-close error. Allow the host to cool independently
 before another unchanged clean-source attempt; do not weaken the resume or
 per-pause limits to obtain a row.
 
+After a five-minute independent cooldown, the next exact invocation from clean
+pushed source `8444359ccb5cd8d70bb912c20bef68ada61f91fb` reached an observed
+807,174,144-byte fingerprint scope peak before its first freeze. The complete
+three-PID scope then stayed frozen for 300.851 seconds and failed at the
+unchanged bound. Host/GPU peaks were 85.05/64 C, and the outer supervisor
+completed stable handoff at 76.05/63 C after 246 samples. No case, receipt,
+campaign root, process, scope, or source residue remained. This second
+consecutive idle-host rejection makes another immediate retry unjustified.
+
+The runner now retains failures that occur after the run directory and receipt
+identity exist. An initial fingerprint failure publishes a failed parent
+receipt with `model: null`, an explicit unavailable environment record, empty
+effective config, every declared case failed without execution, and the exact
+source, workload, policy snapshot, bounded fingerprint stdout, complete
+supervision stderr, and run config. It does not run the environment collector,
+case, or final fingerprint after that boundary failure. Receipt v1 permits the
+missing model identity only for failed receipts; every passed serving,
+performance, training, eval, or soak receipt still requires the complete
+fingerprint. This closes evidence retention, not host thermal availability or
+performance acceptance.
+
 For the first Kiln campaign, use the exact UUID from
 `.environment.device.device_uuid` in the environment receipt, the matching
 bootstrap launch JSON, and `target/release/kiln` as `--runtime-artifact`. Use a
