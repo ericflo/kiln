@@ -590,6 +590,23 @@ process survived. The receipt and all five local artifacts pass strict
 known-commit/local-artifact validation, but `model: null` and the failed
 unexecuted c1 result make it boundary counterevidence only.
 
+The next exact c1 invocation from clean pushed source
+`04d2c229bab5c5d668b77166b7900fbac5717342` retained failed receipt
+`qualification/receipts/cuda/rtx4090-laptop/20260725t231031150626z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`,
+file
+`sha256:d77cfb5a1a9838c83b8ac5addb184aa87989b53530e4a88c4a95bcf417caabfd`.
+The formal preflight read 78.05/63 C host/GPU. Its initial fingerprint scope
+ran for 714.265 seconds, reached 4,264,914,944 bytes and four PIDs, used
+4,184,272 of 357,132,684 allowed CPU microseconds, and recorded zero memory
+limit or OOM events. Four pauses totaled 709.341 seconds; three completed, and
+the fourth reached 300.648 seconds at a 94.05/66 C peak before the unchanged
+per-pause bound rejected it. Scope removal and the 78.05/64 C outer stable
+handoff completed, with no process or campaign residue. The strict-valid
+receipt still has `model: null`, unavailable environment identity, empty
+effective config, and an unexecuted failed c1 result. It is pre-model thermal
+counterevidence only. Do not cite it as performance evidence or weaken the
+thermal policy for another retry.
+
 For the first Kiln campaign, use the exact UUID from
 `.environment.device.device_uuid` in the environment receipt, the matching
 bootstrap launch JSON, and `target/release/kiln` as `--runtime-artifact`. Use a

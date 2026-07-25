@@ -1235,6 +1235,32 @@ artifacts. Its `model: null`, unavailable environment, empty effective config,
 and failed unexecuted c1 result make it retained thermal-boundary
 counterevidence only, not a model or performance result.
 
+After the portable endurance handoff was pushed, a policy probe read 74.05/63 C
+host/GPU and the exact c1 invocation from clean pushed source
+`04d2c229bab5c5d668b77166b7900fbac5717342` was allowed to proceed. Its formal
+preflight read 78.05/63 C, and it retained failed parent receipt
+`qualification/receipts/cuda/rtx4090-laptop/20260725t231031150626z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`
+with file
+`sha256:d77cfb5a1a9838c83b8ac5addb184aa87989b53530e4a88c4a95bcf417caabfd`.
+The 714.265-second initial fingerprint scope advanced to a
+4,264,914,944-byte/four-PID peak and used 4,184,272 of 357,132,684 allowed CPU
+microseconds. It completed three thermal pauses; four pauses totaled 709.341
+seconds, and the fourth failed at 300.648 seconds under the unchanged
+per-pause bound. Host/GPU peaks were 94.05/66 C, below the independent 95/85 C
+hard limits. Memory-limit, OOM, OOM-kill, and swap-limit events stayed zero.
+The scope was removed and outer supervision completed its three-sample stable
+handoff at 78.05/64 C after 534 samples.
+
+The receipt and all five local artifacts pass strict known-commit and
+local-artifact validation. The fingerprint output is empty, `model` remains
+null, environment collection did not start, effective config is empty, and
+the required c1 result failed without execution. No final fingerprint,
+campaign root, process, or scope survived. This is deeper pre-model thermal
+counterevidence, not a model, device, request, or c1 performance result. The
+host approached its hard limit and then could not reach the unchanged resume
+boundary within 300 seconds; do not immediately retry the same laptop path or
+weaken the policy to force progress.
+
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
 `sha256:2f34ab2dc62641d247306c9ce29d62c68e5c12b16cd326e2860ce00061a345ac`).

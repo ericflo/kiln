@@ -1,0 +1,120 @@
+{
+  "artifacts": [
+    {
+      "bytes": 982,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260725t231031150626z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1/environment.json",
+      "sha256": "sha256:4c10a34853f7d7f77d5e5efb08e2dcb51bb1fc5b97491a1d15392172e3383dec"
+    },
+    {
+      "bytes": 0,
+      "kind": "model_fingerprint_initial",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260725t231031150626z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1/model-fingerprint-initial.json",
+      "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 2860,
+      "kind": "model_fingerprint_initial_wsl2_supervision",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260725t231031150626z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1/model-fingerprint-initial.stderr",
+      "sha256": "sha256:24c47a29cc0ad4bc1492ecc67eabe85000dff37b0671f1ccc65689f5cf75d3f9"
+    },
+    {
+      "bytes": 967,
+      "kind": "wsl2_thermal_policy",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260725t231031150626z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1/wsl2-thermal-policy.json",
+      "sha256": "sha256:d12ce02b498d31b0859b8072d331bd8d506f74668dd09c700f86e593339bce77"
+    },
+    {
+      "bytes": 5718,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260725t231031150626z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1/run-config.json",
+      "sha256": "sha256:be427784b9a0e22db896b467145bd39d4739f1e83dc6c95bed20f5616dafbda0"
+    }
+  ],
+  "created_at_utc": "2026-07-25T23:22:32.227Z",
+  "effective_config": {},
+  "environment": {
+    "compiler": {
+      "python": "3.10.12"
+    },
+    "device": {
+      "architecture": "unavailable",
+      "driver": "unavailable",
+      "memory_bytes": null,
+      "name": "unavailable",
+      "unified_memory": false
+    },
+    "host_id": "rtx4090-laptop",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "6.6.87.2-microsoft-standard-WSL2",
+      "name": "Ubuntu",
+      "version": "22.04"
+    },
+    "runtime": {
+      "cuda": "unavailable",
+      "execution_environment_sha256": "sha256:fe7e6ff8e8ce179fbc2e5e863a147822255f4cabde7f71ba470dc813b252552b"
+    }
+  },
+  "metrics": [],
+  "model": null,
+  "notes": [
+    "Model identity is absent because the initial model fingerprint failed."
+  ],
+  "qualification": {
+    "backend": "cuda",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "--variant",
+      "cuda-rtx4090-laptop-c1",
+      "--host-id",
+      "rtx4090-laptop",
+      "--model",
+      ".qualification/cuda-rtx4090-laptop/performance-model-v1",
+      "--model-id",
+      "Qwen/Qwen3.5-4B",
+      "--wsl2-thermal-policy",
+      "qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json",
+      "qualification/workloads/serving-cuda-performance-c1-v1.json"
+    ],
+    "duration_seconds": 721.0772159750013,
+    "finished_at_utc": "2026-07-25T23:22:32.227Z",
+    "kind": "performance",
+    "profile": "serving-cuda-performance-c1-v1",
+    "started_at_utc": "2026-07-25T23:10:31.150Z",
+    "verdict": "failed"
+  },
+  "receipt_id": "20260725t231031150626z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1",
+  "results": [
+    {
+      "details": "initial model fingerprint failed: WSL2 model fingerprint failed under thermal/scope supervision: us\":64000,\"ending_host_millicelsius\":78050,\"longest_pause_seconds\":300.64812892400005,\"mode\":\"cgroup_freeze\",\"pause_count\":4,\"peak_gpu_millicelsius\":66000,\"peak_host_millicelsius\":94050,\"policy_sha256\":\"sha256:998e65f84651ce28d36acfcadb3f1216a589883054a9f27853fe755f373e3745\",\"sample_count\":530,\"total_pause_seconds\":709.341186206002},\"unit\":\"kiln-wsl-scope-3f48bc7267c441e18ffd34a2ca824c3f\"}\nerror: WSL2 scope boundary: thermal pacing pause exceeded 300 seconds\nwsl2-thermal: {\"child_returncode\":2,\"ending_gpu_millicelsius\":64000,\"ending_host_millicelsius\":78050,\"event\":\"complete\",\"failure_reason\":null,\"peak_gpu_millicelsius\":66000,\"peak_host_millicelsius\":94050,\"policy_id\":\"rtx4090-laptop-wsl2-cgroup-pacing-v2\",\"policy_sha256\":\"sha256:998e65f84651ce28d36acfcadb3f1216a589883054a9f27853fe755f373e3745\",\"safe_handoff_stable_samples\":3,\"sample_count\":534,\"schema\":\"kiln.wsl2-thermal-event.v1\",\"starting_gpu_millicelsius\":63000,\"starting_host_millicelsius\":78050,\"supervision_outcome\":\"child_exit\"}",
+      "duration_seconds": 0.0,
+      "id": "cuda-serving-performance-c1",
+      "metrics": [],
+      "required": true,
+      "status": "failed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "04d2c229bab5c5d668b77166b7900fbac5717342",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:a00e6f5a84becfd0ddf184f1cf439255a08035ad58511f126a51674799df7d13",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "serving-cuda-performance-c1-v1",
+    "parameters": {
+      "variant_id": "cuda-rtx4090-laptop-c1"
+    },
+    "seed": 20260725,
+    "sha256": "sha256:224637dad515385f8e99404da73fa187179c067061ebd94568133d8abc61054d"
+  }
+}
