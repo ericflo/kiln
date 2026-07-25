@@ -1080,7 +1080,7 @@ before the next starts. The command reports both strict-valid thermal records;
 a trip, omitted policy, uncommitted policy or supervisor bytes, missing event,
 timeout, or incomplete cooldown prevents publication.
 The laptop performance launch pins
-`--max-provenance-read-mib-per-second=64`, cumulatively pacing all
+`--max-provenance-read-mib-per-second=32`, cumulatively pacing all
 launcher-owned model/snapshot/adapter/runtime hashing and applying the same
 ceiling to the fresh child runtime recheck. This is startup-only policy and
 does not enter timed request throughput.

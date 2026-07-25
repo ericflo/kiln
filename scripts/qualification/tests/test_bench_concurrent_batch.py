@@ -1052,14 +1052,14 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertIn("--max-num-seqs=64", command)
         self.assertIn("--max-num-batched-tokens=32768", command)
         self.assertIn("--language-model-only", command)
-        self.assertIn("--max-provenance-read-mib-per-second=64", command)
+        self.assertIn("--max-provenance-read-mib-per-second=32", command)
         args = bench.validate_vllm_owned_launch(
             vllm_launch,
             valid_vllm_manifest("Qwen3.5-4B"),
         )
         self.assertEqual(args.model_path, Path(serving_model))
         self.assertEqual(args.process_group_mode, "inherited")
-        self.assertEqual(args.max_provenance_read_mib_per_second, 64)
+        self.assertEqual(args.max_provenance_read_mib_per_second, 32)
         self.assertEqual(vllm_launch.startup_timeout_seconds, 3600.0)
 
     def test_vllm_owned_launch_rejects_provenance_and_argument_drift(self) -> None:
