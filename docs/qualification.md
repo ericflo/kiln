@@ -667,6 +667,34 @@ public model, drive serving near the 16 GB limit, or prove recovery under
 model-resident pressure. Keep that later hardware run bounded by a declared
 free-memory floor; do not fill the card merely to manufacture an OOM.
 
+#### Current WSL2 RTX 4090 Laptop memory-lifecycle result
+
+The four-case lifecycle workload passed from exact clean pushed source
+`9fadc2592f1814d7dd68b3c96ab008e8b886d665` and source tree
+`sha256:d44de18f440643c2ffd7b1620f9203f67c6fd1458fa49aa63f01381cc2fb4c20`.
+The retained receipt is
+`qualification/receipts/cuda/rtx4090-laptop/20260725t065312369587z-cuda-rtx4090-laptop-cuda-memory-lifecycle-v1-61a2e68c95-v1.json`
+with receipt hash
+`sha256:377583f15bc6365c4baf8a12f02c8f38e4f7b6a863ebd5958bdb321204956aeb`.
+Strict current-source, local-artifact, and known-commit validation passed. All
+four required cases passed in 495.495 seconds with no unsupported item.
+
+The allocator began with 15,044 MiB free, showed a freed 2 GiB allocation
+remained held by the stream-ordered pool, and required explicit trim to return
+all 2,048 MiB. The production server gate retained its 1,024 MiB floor and
+rejected block 14,021 above the live 14,020-block ceiling before allocation.
+The four-layer BF16 paged-KV cache preserved its marker through physical
+`4,000 -> 500 -> 4,000` replacement. Every named zero-swap scope was removed,
+peak scoped memory was 5,336,924,160 bytes during the server test build, peak
+PIDs were 28, and every memory-limit and OOM counter remained zero. Stable
+thermal handoff completed for each case after worst host/GPU peaks of
+92.05/66 C below the 95/85 C hard limits.
+
+This is allocator, admission, and replacement substrate evidence under healthy
+headroom. It does not close the laptop low-memory item and does not claim
+public-model residency, model-resident pressure, request recovery, serving
+performance, soak completion, native Linux, or a desktop RTX 4090.
+
 ### CUDA Serving Bootstrap Handoff
 
 After the environment, core-correctness, and memory-lifecycle receipts pass and
