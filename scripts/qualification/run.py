@@ -48,6 +48,7 @@ from workload import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
+LINUX_NAMESPACE_EXEC = ROOT / "scripts" / "qualification" / "linux_namespace_exec.py"
 WORKLOAD_DIRECTORY = Path("qualification/workloads")
 RESULT_PATH_ENVIRONMENT_VARIABLE = "KILN_QUALIFICATION_CASE_RESULT"
 VARIANT_ID_ENVIRONMENT_VARIABLE = "KILN_QUALIFICATION_VARIANT_ID"
@@ -642,30 +643,69 @@ def establish_network_isolation(root: Path) -> NetworkIsolation:
             f"network isolation is not implemented on {sys.platform}"
         )
     bubblewrap = shutil.which("bwrap")
-    if bubblewrap is None:
-        raise QualificationRunError(
-            "bubblewrap is required to enforce workload network_access='forbidden'"
+    if bubblewrap is not None:
+        prefix = (
+            bubblewrap,
+            "--unshare-net",
+            "--unshare-pid",
+            "--die-with-parent",
+            "--bind",
+            "/",
+            "/",
+            "--dev-bind",
+            "/dev",
+            "/dev",
+            "--proc",
+            "/proc",
+            "--",
         )
-    prefix = (
-        bubblewrap,
-        "--unshare-net",
-        "--unshare-pid",
-        "--die-with-parent",
-        "--bind",
-        "/",
-        "/",
-        "--dev-bind",
-        "/dev",
-        "/dev",
-        "--proc",
-        "/proc",
-        "--",
-    )
+        mechanism = "bubblewrap-unshare-net-pid-v1"
+        failure_label = "bubblewrap"
+    else:
+        unshare = shutil.which("unshare")
+        ip = shutil.which("ip")
+        if unshare is None or ip is None:
+            missing = [
+                name
+                for name, value in (("unshare", unshare), ("ip", ip))
+                if value is None
+            ]
+            raise QualificationRunError(
+                "Linux qualification network isolation requires bubblewrap or "
+                f"util-linux unshare plus ip; missing: {', '.join(missing)}"
+            )
+        if LINUX_NAMESPACE_EXEC.is_symlink() or not LINUX_NAMESPACE_EXEC.is_file():
+            raise QualificationRunError(
+                "Linux namespace helper is not a regular tracked file: "
+                f"{LINUX_NAMESPACE_EXEC}"
+            )
+        prefix = (
+            unshare,
+            "--user",
+            "--map-root-user",
+            "--net",
+            "--pid",
+            "--fork",
+            "--kill-child=SIGKILL",
+            "--mount",
+            "--mount-proc=/proc",
+            sys.executable,
+            str(LINUX_NAMESPACE_EXEC),
+            "--",
+        )
+        mechanism = "util-linux-unshare-user-net-pid-v1"
+        failure_label = "util-linux unshare"
     probe = (
-        "import socket; "
+        "import errno,socket,threading; "
         "names={name for _,name in socket.if_nameindex()}; "
         "assert names <= {'lo'} and 'lo' in names; "
-        "s=socket.socket(); s.bind(('127.0.0.1',0)); s.listen()"
+        "listener=socket.socket(); listener.bind(('127.0.0.1',0)); listener.listen(); "
+        "sender=threading.Thread(target=lambda: listener.accept()[0].send(b'x')); "
+        "sender.start(); client=socket.create_connection(listener.getsockname(),1); "
+        "assert client.recv(1) == b'x'; sender.join(); "
+        "external=socket.socket(); external.settimeout(.5); "
+        "result=external.connect_ex(('192.0.2.1',9)); "
+        "assert result in {errno.ENETUNREACH,errno.EHOSTUNREACH}, result"
     )
     try:
         completed = subprocess.run(
@@ -678,14 +718,16 @@ def establish_network_isolation(root: Path) -> NetworkIsolation:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise QualificationRunError(f"bubblewrap network-isolation probe failed: {exc}") from exc
+        raise QualificationRunError(
+            f"{failure_label} network-isolation probe failed: {exc}"
+        ) from exc
     if completed.returncode != 0:
         detail = completed.stderr.decode(errors="replace").strip()
         raise QualificationRunError(
-            "bubblewrap could not establish isolated loopback-only networking"
+            f"{failure_label} could not establish isolated loopback-only networking"
             + (f": {detail}" if detail else "")
         )
-    return NetworkIsolation("bubblewrap-unshare-net-pid-v1", prefix)
+    return NetworkIsolation(mechanism, prefix)
 
 
 DEFAULT_HOOKS = RunnerHooks(

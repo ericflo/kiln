@@ -145,10 +145,19 @@ arguments and output hash, selected class constraints, and redacted relevant
 backend environment. Sensitive variable names are hashed; ambient controls do
 not enter the closed case.
 
-Linux cases run inside bubblewrap network and PID namespaces. On macOS the
-runner first proves that its `sandbox-exec` profile preserves loopback while an
-external test-net connection is denied, then applies that profile to the case.
-A missing mechanism or failed probe stops before a run directory or receipt is
+Linux cases prefer bubblewrap network and PID namespaces. When bubblewrap is
+not installed, including the current WSL2 laptop, the runner uses util-linux
+`unshare` with a mapped private user namespace, a private mount/proc view, a
+private network namespace, and a private PID namespace whose supervisor uses
+`--kill-child=SIGKILL`. A tracked helper enables `lo` before executing the case.
+Both routes first prove that loopback can carry traffic, that the namespace has
+no interface other than `lo`, and that an external test-net address is
+unreachable. The live containment regression also launches a signal-ignoring
+`setsid` child and proves it cannot survive either normal parent exit or a
+runner timeout. On macOS the runner first proves that its `sandbox-exec`
+profile preserves loopback while an external test-net connection is denied,
+then applies that profile to the case. A missing executable, denied namespace,
+failed probe, or cleanup escape stops before a run directory or receipt is
 created. The environment receipt proves machine identity, runtime/toolchain
 presence, and capture-time memory capability only. It does not prove Kiln
 compiles, executes correctly, survives pressure, or meets a throughput target;

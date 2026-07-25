@@ -881,6 +881,8 @@ const generatedDocsPages = [
     canonical: 'https://ericflo.github.io/kiln/docs/hardware-qualification/',
     h1: 'Local Hardware Qualification',
     terms: [
+      'util-linux',
+      '--kill-child=SIGKILL',
       'private TOML file',
       'server.debug_model_state',
       'memory.kv_autoscale',

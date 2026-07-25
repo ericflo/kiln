@@ -315,6 +315,51 @@ class RunnerTests(unittest.TestCase):
             ):
                 run_module.establish_network_isolation(Path("/tmp"))
 
+    def test_linux_network_isolation_uses_pid_containing_unshare_fallback(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, b"", b"")
+
+        def which(name: str) -> str | None:
+            return {
+                "bwrap": None,
+                "unshare": "/usr/bin/unshare",
+                "ip": "/usr/sbin/ip",
+            }.get(name)
+
+        with mock.patch.object(
+            run_module.sys, "platform", "linux"
+        ), mock.patch.object(
+            run_module.shutil, "which", side_effect=which
+        ), mock.patch.object(
+            run_module.subprocess, "run", return_value=completed
+        ) as invoked:
+            isolation = run_module.establish_network_isolation(Path("/tmp"))
+
+        self.assertEqual(
+            isolation.mechanism, "util-linux-unshare-user-net-pid-v1"
+        )
+        self.assertIn("--map-root-user", isolation.argv_prefix)
+        self.assertIn("--kill-child=SIGKILL", isolation.argv_prefix)
+        self.assertIn("--mount-proc=/proc", isolation.argv_prefix)
+        self.assertIn(str(run_module.LINUX_NAMESPACE_EXEC), isolation.argv_prefix)
+        probe = invoked.call_args.args[0]
+        self.assertIn("127.0.0.1", probe[-1])
+        self.assertIn("192.0.2.1", probe[-1])
+
+    def test_linux_network_isolation_fails_closed_without_complete_mechanism(
+        self,
+    ) -> None:
+        with mock.patch.object(
+            run_module.sys, "platform", "linux"
+        ), mock.patch.object(
+            run_module.shutil,
+            "which",
+            side_effect=lambda name: "/usr/bin/unshare" if name == "unshare" else None,
+        ):
+            with self.assertRaisesRegex(
+                run_module.QualificationRunError, "missing: ip"
+            ):
+                run_module.establish_network_isolation(Path("/tmp"))
+
     def test_inherited_auth_payloads_are_hashed_before_local_capture(self) -> None:
         captured = run_module._redacted_environment(
             {
@@ -1867,8 +1912,7 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn("array", json.dumps(config))
 
     @unittest.skipUnless(
-        sys.platform == "linux" and shutil.which("bwrap") is not None,
-        "bubblewrap network namespaces are Linux-specific",
+        sys.platform == "linux", "network namespaces are Linux-specific"
     )
     def test_production_network_wrapper_has_only_loopback(self) -> None:
         repository = Repository(
@@ -1878,7 +1922,7 @@ class RunnerTests(unittest.TestCase):
         try:
             isolation = run_module.establish_network_isolation(repository.root)
         except run_module.QualificationRunError as exc:
-            self.skipTest(f"bubblewrap namespaces unavailable on this host: {exc}")
+            self.skipTest(f"Linux network namespaces unavailable on this host: {exc}")
         probe = (
             "import json,socket; "
             "print(json.dumps([name for _,name in socket.if_nameindex()]))"
@@ -1893,8 +1937,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(json.loads(completed.stdout), ["lo"])
 
     @unittest.skipUnless(
-        sys.platform == "linux" and shutil.which("bwrap") is not None,
-        "bubblewrap PID namespaces are Linux-specific",
+        sys.platform == "linux", "PID namespaces are Linux-specific"
     )
     def test_pid_namespace_kills_setsid_escape_on_exit_and_timeout(self) -> None:
         repository = Repository(
@@ -1904,7 +1947,7 @@ class RunnerTests(unittest.TestCase):
         try:
             isolation = run_module.establish_network_isolation(repository.root)
         except run_module.QualificationRunError as exc:
-            self.skipTest(f"bubblewrap namespaces unavailable on this host: {exc}")
+            self.skipTest(f"Linux PID namespaces unavailable on this host: {exc}")
         output_root = repository.root / ".qualification/containment"
         output_root.mkdir(parents=True)
 
