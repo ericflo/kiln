@@ -822,6 +822,23 @@ The revised workload is `sha256:f42fad082d86aa82480acb3a2a7e0f8d5f5f9ce189c97295
 it still requires a real allocation, a complete request under pressure,
 deterministic recovery, clean shutdown, and zero fault or residue evidence.
 
+The first clean pushed-source attempt at that contract, receipt
+`20260725t143235401396z-cuda-rtx4090-laptop-serving-cuda-low-memory--647fb2a614-v1`,
+failed in preflight before Cargo. The exact TOML, hashed manifest, and driver
+effective configuration all declared inference fraction 0.1, but a duplicated
+validation table still demanded the historical 0.7 value. The strict current
+source/local-artifact/known-commit receipt has file
+`sha256:a474bd87130e92631b08c3227cd937e7098a67078ef8522e66d29b394efddcca`.
+Its 0.319-second scope peaked at 24,743,936 bytes and four PIDs with zero
+limit/OOM events, removed cleanly, and completed thermal handoff after
+77.05/62 C host/GPU peaks.
+
+The validator now reads the floor and inference fraction from the same
+committed effective contract that must exactly equal the workload manifest.
+A direct executable regression passes the checked-in TOML through that
+validation function and proves that restoring 0.7 is rejected. This preflight
+failure contains no build, model, KV, peer, request, or recovery evidence.
+
 ### CUDA Serving Bootstrap Handoff
 
 After the environment, core-correctness, and memory-lifecycle receipts pass and

@@ -116,6 +116,19 @@ class ServeCudaLowMemoryTests(unittest.TestCase):
         ):
             low_memory.parse_closed_toml("[server]\nport = 1\nport = 2\n")
 
+    def test_checked_in_server_config_passes_driver_contract(self) -> None:
+        parsed = low_memory.parse_closed_toml(
+            low_memory.SERVER_CONFIG.read_text()
+        )
+        low_memory.validate_server_config_contract(parsed)
+
+        parsed["memory"]["inference_memory_fraction"] = 0.7
+        with self.assertRaisesRegex(
+            low_memory.mixed.QualificationError,
+            "inference_memory_fraction",
+        ):
+            low_memory.validate_server_config_contract(parsed)
+
     def test_prerequisite_receipt_is_exact_and_passed(self) -> None:
         low_memory.validate_admission_prerequisite()
         with mock.patch.object(

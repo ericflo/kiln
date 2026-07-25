@@ -357,6 +357,34 @@ def validate_admission_prerequisite() -> None:
         )
 
 
+def validate_server_config_contract(config: dict[str, dict[str, Any]]) -> None:
+    expected = {
+        ("server", "serving_profile"): "stable",
+        ("server", "host"): "127.0.0.1",
+        ("server", "port"): 8420,
+        ("model", "model_id"): MODEL_SOURCE_ID,
+        ("model", "served_model_id"): MODEL_ID,
+        ("model", "checkpoint_read_mib_per_second"): 256,
+        ("model", "accelerator_weight_upload_mib_per_second"): 256,
+        ("memory", "gpu_memory_gb"): 15.0,
+        ("memory", "inference_memory_fraction"): EFFECTIVE_CONFIG["server"][
+            "inference_memory_fraction"
+        ],
+        ("memory", "floor_gb"): EFFECTIVE_CONFIG["server"]["floor_gib"],
+        ("memory", "reclaim_mode"): "off",
+        ("memory", "kv_autoscale"): False,
+        ("memory", "kv_cache_fp8"): False,
+        ("memory", "cuda_graphs"): False,
+    }
+    for (section, field), expected_value in expected.items():
+        observed = (config.get(section) or {}).get(field)
+        if observed != expected_value:
+            raise mixed.QualificationError(
+                f"server config {section}.{field}={observed!r}, "
+                f"expected {expected_value!r}"
+            )
+
+
 def validate_server_inputs(model_path: Path) -> None:
     require_artifact_hash(
         SERVER_CONFIG, SERVER_CONFIG_SHA256, "CUDA server configuration"
@@ -372,29 +400,7 @@ def validate_server_inputs(model_path: Path) -> None:
         raise mixed.QualificationError(
             f"cannot parse CUDA server configuration: {exc}"
         ) from exc
-    expected = {
-        ("server", "serving_profile"): "stable",
-        ("server", "host"): "127.0.0.1",
-        ("server", "port"): 8420,
-        ("model", "model_id"): MODEL_SOURCE_ID,
-        ("model", "served_model_id"): MODEL_ID,
-        ("model", "checkpoint_read_mib_per_second"): 256,
-        ("model", "accelerator_weight_upload_mib_per_second"): 256,
-        ("memory", "gpu_memory_gb"): 15.0,
-        ("memory", "inference_memory_fraction"): 0.7,
-        ("memory", "floor_gb"): 1.5,
-        ("memory", "reclaim_mode"): "off",
-        ("memory", "kv_autoscale"): False,
-        ("memory", "kv_cache_fp8"): False,
-        ("memory", "cuda_graphs"): False,
-    }
-    for (section, field), expected_value in expected.items():
-        observed = (config.get(section) or {}).get(field)
-        if observed != expected_value:
-            raise mixed.QualificationError(
-                f"server config {section}.{field}={observed!r}, "
-                f"expected {expected_value!r}"
-            )
+    validate_server_config_contract(config)
     configured_model = Path(config["model"]["path"])
     if not configured_model.is_absolute():
         configured_model = ROOT / configured_model
