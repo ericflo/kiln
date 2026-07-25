@@ -865,6 +865,28 @@ revised low-memory workload is
 `sha256:a0cec58ef62ac01a7210cc2001e9302581fbb4ada0bff7e91f8e2e8b4be057ac`.
 Only a clean pushed-source rerun may close the low-memory gate.
 
+That exact-source rerun, receipt
+`20260725t150047861492z-cuda-rtx4090-laptop-serving-cuda-low-memory--647fb2a614-v1`,
+passed listener preflight, readiness, model identity, warmup, and the 32-token
+deterministic baseline, then failed before any allocation because the dedicated
+peer still required `--minimum-free-mib` to be at least 1,024. The driver and
+manifest passed 768, matching the reviewed hard floor. The strict
+current-source/local-artifact/known-commit receipt has file
+`sha256:63cab4eccfcc71be75284bad8a0c5c67627271e69596614197728546deafcf45`.
+The listener returned exactly 212,992 effective bytes, both source-cache shards
+released, and 58 BF16 KV blocks allocated. Both pre-pressure requests returned
+HTTP 200 with 32 tokens and `finish_reason=length`; no pressure peer allocation
+or pressure/recovery request ran. The scope peaked at 10,737,418,240 bytes and
+66 PIDs, recorded 1,974 limit events and zero OOM events, removed cleanly, and
+completed thermal handoff after 93.05/67 C host/GPU peaks.
+
+The peer's fail-closed minimum is now the same reviewed 768 MiB floor, while its
+target-minus-floor margin remains at least 256 MiB. Its standalone defaults are
+also the declared 1,024 MiB target, 768 MiB floor, 256 MiB chunk, and 1,024 MiB
+allocation cap. A direct argument regression accepts that exact envelope and
+rejects 767 MiB. No allocation, polling, release, or cleanup check was removed.
+A new clean pushed-source run is still required.
+
 ### CUDA Serving Bootstrap Handoff
 
 After the environment, core-correctness, and memory-lifecycle receipts pass and

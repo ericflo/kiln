@@ -18,6 +18,7 @@ from typing import Any
 CUDA_LIBRARY = Path("/usr/lib/wsl/lib/libcuda.so.1")
 MIB = 1024 * 1024
 GIB = 1024 * MIB
+MINIMUM_ALLOWED_FREE_MIB = 768
 MIN_ALLOCATION_BYTES = 64 * MIB
 ALLOCATION_ALIGNMENT_BYTES = 2 * MIB
 
@@ -222,8 +223,11 @@ def validate_args(args: argparse.Namespace) -> None:
         value = getattr(args, name)
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise PressurePeerError(f"--{name.replace('_', '-')} must be positive")
-    if args.minimum_free_mib < 1024:
-        raise PressurePeerError("--minimum-free-mib must be at least 1024")
+    if args.minimum_free_mib < MINIMUM_ALLOWED_FREE_MIB:
+        raise PressurePeerError(
+            "--minimum-free-mib must be at least "
+            f"{MINIMUM_ALLOWED_FREE_MIB}"
+        )
     if args.target_free_mib < args.minimum_free_mib + 256:
         raise PressurePeerError(
             "--target-free-mib must leave at least 256 MiB above the floor"
@@ -417,10 +421,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ready-file", required=True, type=Path)
     parser.add_argument("--release-file", required=True, type=Path)
     parser.add_argument("--device", type=int, default=0)
-    parser.add_argument("--target-free-mib", type=int, default=2048)
-    parser.add_argument("--minimum-free-mib", type=int, default=1536)
+    parser.add_argument("--target-free-mib", type=int, default=1024)
+    parser.add_argument("--minimum-free-mib", type=int, default=768)
     parser.add_argument("--chunk-mib", type=int, default=256)
-    parser.add_argument("--max-allocation-mib", type=int, default=8192)
+    parser.add_argument("--max-allocation-mib", type=int, default=1024)
     parser.add_argument("--hold-seconds", type=float, default=300.0)
     parser.add_argument("--poll-milliseconds", type=int, default=100)
     parser.add_argument("--cuda-library", type=Path, default=CUDA_LIBRARY)

@@ -25,10 +25,10 @@ def valid_args() -> argparse.Namespace:
         ready_file=Path("ready.json"),
         release_file=Path("release.json"),
         device=0,
-        target_free_mib=2048,
-        minimum_free_mib=1536,
+        target_free_mib=1024,
+        minimum_free_mib=768,
         chunk_mib=256,
-        max_allocation_mib=8192,
+        max_allocation_mib=1024,
         hold_seconds=300.0,
         poll_milliseconds=100,
         cuda_library=peer.CUDA_LIBRARY,
@@ -93,6 +93,10 @@ class CudaPressurePeerTests(unittest.TestCase):
 
     def test_argument_contract_retains_target_floor_margin(self) -> None:
         peer.validate_args(valid_args())
+        args = valid_args()
+        args.minimum_free_mib = peer.MINIMUM_ALLOWED_FREE_MIB - 1
+        with self.assertRaisesRegex(peer.PressurePeerError, "at least 768"):
+            peer.validate_args(args)
         args = valid_args()
         args.target_free_mib = args.minimum_free_mib + 255
         with self.assertRaisesRegex(peer.PressurePeerError, "256 MiB"):
