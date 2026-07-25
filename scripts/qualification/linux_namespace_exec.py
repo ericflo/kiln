@@ -15,6 +15,8 @@ IP_CANDIDATES = (Path("/usr/sbin/ip"), Path("/sbin/ip"), Path("/bin/ip"))
 LANDLOCK_CREATE_RULESET_VERSION = 1
 LANDLOCK_RULE_PATH_BENEATH = 1
 LANDLOCK_ACCESS_FS_EXECUTE = 1 << 0
+LANDLOCK_ACCESS_FS_REFER = 1 << 13
+LANDLOCK_MINIMUM_ABI = 2
 PR_SET_NO_NEW_PRIVS = 38
 SYS_LANDLOCK_CREATE_RULESET = 444
 SYS_LANDLOCK_ADD_RULE = 445
@@ -59,9 +61,14 @@ def restrict_execution_to_native_roots() -> str | None:
         0,
         LANDLOCK_CREATE_RULESET_VERSION,
     )
-    if abi < 1:
-        return f"Landlock ABI is unavailable (errno {ctypes.get_errno()})"
-    ruleset_attr = LandlockRulesetAttr(LANDLOCK_ACCESS_FS_EXECUTE)
+    if abi < LANDLOCK_MINIMUM_ABI:
+        return (
+            f"Landlock ABI {LANDLOCK_MINIMUM_ABI}+ with REFER is unavailable "
+            f"(reported {abi}, errno {ctypes.get_errno()})"
+        )
+    ruleset_attr = LandlockRulesetAttr(
+        LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_REFER
+    )
     ruleset_fd = libc.syscall(
         SYS_LANDLOCK_CREATE_RULESET,
         ctypes.byref(ruleset_attr),
@@ -71,6 +78,32 @@ def restrict_execution_to_native_roots() -> str | None:
     if ruleset_fd < 0:
         return f"cannot create Landlock ruleset (errno {ctypes.get_errno()})"
     try:
+        try:
+            root_fd = os.open("/", os.O_PATH | os.O_CLOEXEC)
+        except OSError as exc:
+            return f"cannot open filesystem root for Landlock REFER: {exc}"
+        try:
+            root_rule = LandlockPathBeneathAttr(
+                LANDLOCK_ACCESS_FS_REFER,
+                root_fd,
+            )
+            if (
+                libc.syscall(
+                    SYS_LANDLOCK_ADD_RULE,
+                    ruleset_fd,
+                    LANDLOCK_RULE_PATH_BENEATH,
+                    ctypes.byref(root_rule),
+                    0,
+                )
+                != 0
+            ):
+                return (
+                    "cannot allow filesystem-wide Landlock REFER "
+                    f"(errno {ctypes.get_errno()})"
+                )
+        finally:
+            os.close(root_fd)
+
         allowed = 0
         for path in EXECUTABLE_ROOT_CANDIDATES:
             try:

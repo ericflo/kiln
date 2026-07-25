@@ -345,6 +345,7 @@ class RunnerTests(unittest.TestCase):
         probe = invoked.call_args.args[0]
         self.assertIn("127.0.0.1", probe[-1])
         self.assertIn("192.0.2.1", probe[-1])
+        self.assertIn("os.replace(rename_source,rename_destination)", probe[-1])
         if "microsoft-standard-wsl2" in run_module.platform.release().lower():
             self.assertIn("/mnt/c/Windows/System32/cmd.exe", probe[-1])
 

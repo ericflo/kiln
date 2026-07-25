@@ -148,9 +148,15 @@ The WSL2 runner always uses the util-linux namespace path even if bubblewrap is
 installed. Its tracked launcher requires Landlock, permits native toolchain
 execution, and denies WSL's root-level `/init` interpreter. Preflight must
 prove private loopback, an unreachable external route, and a real permission
-denial for `cmd.exe`; otherwise no run artifacts are created. The contained
-environment case repeats the interface, route, user-map, and Windows-interop
-checks. A caller-provided environment variable alone cannot attest containment.
+denial for `cmd.exe`; otherwise no run artifacts are created. Landlock ABI 2 or
+newer is required so the launcher can allow the `REFER` right from `/` while
+granting `EXECUTE` only below native executable roots. The same preflight moves
+a file across two directories on the native workspace filesystem. This keeps
+Rust's temporary-archive rename usable without allowing `/init` execution and
+fails before evidence if the namespace would instead return `EXDEV`. The
+contained environment case repeats the interface, route, user-map, and
+Windows-interop checks. A caller-provided environment variable alone cannot
+attest containment.
 
 Capability values are exactly `available` or `unavailable`; an unavailable
 safeguard is also named in `unsupported` and is never converted into a passing

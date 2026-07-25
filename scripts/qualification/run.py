@@ -765,7 +765,7 @@ def establish_network_isolation(root: Path) -> NetworkIsolation:
         mechanism = "util-linux-unshare-user-net-pid-landlock-v1"
         failure_label = "util-linux unshare"
     probe_parts = [
-        "import errno,socket,threading; "
+        "import errno,os,socket,tempfile,threading; "
         "names={name for _,name in socket.if_nameindex()}; "
         "assert names <= {'lo'} and 'lo' in names; "
         "listener=socket.socket(); listener.bind(('127.0.0.1',0)); listener.listen(); "
@@ -774,7 +774,16 @@ def establish_network_isolation(root: Path) -> NetworkIsolation:
         "assert client.recv(1) == b'x'; sender.join(); "
         "external=socket.socket(); external.settimeout(.5); "
         "result=external.connect_ex(('192.0.2.1',9)); "
-        "assert result in {errno.ENETUNREACH,errno.EHOSTUNREACH}, result"
+        "assert result in {errno.ENETUNREACH,errno.EHOSTUNREACH}, result; "
+        "rename_probe=tempfile.TemporaryDirectory(dir='.'); "
+        "rename_root=rename_probe.name; "
+        "rename_nested=os.path.join(rename_root,'nested'); os.mkdir(rename_nested); "
+        "rename_source=os.path.join(rename_nested,'source'); "
+        "open(rename_source,'wb').write(b'x'); "
+        "rename_destination=os.path.join(rename_root,'destination'); "
+        "os.replace(rename_source,rename_destination); "
+        "assert open(rename_destination,'rb').read() == b'x'; "
+        "rename_probe.cleanup()"
     ]
     if wsl2:
         probe_parts.append(
@@ -804,7 +813,8 @@ def establish_network_isolation(root: Path) -> NetworkIsolation:
     if completed.returncode != 0:
         detail = completed.stderr.decode(errors="replace").strip()
         raise QualificationRunError(
-            f"{failure_label} could not establish isolated loopback-only networking"
+            f"{failure_label} could not establish isolated loopback-only networking "
+            "and cross-directory rename semantics"
             + (f": {detail}" if detail else "")
         )
     return NetworkIsolation(mechanism, prefix)
