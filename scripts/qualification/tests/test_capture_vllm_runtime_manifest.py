@@ -120,6 +120,58 @@ def thermal_stderr(supervision: object) -> bytes:
     ).encode()
 
 
+def scope_stderr(supervision: object) -> bytes:
+    unit = "kiln-wsl-scope-" + "a" * 32
+    duration_seconds = 10.0
+    cpu_allowed_usec = 5_000_000
+    start = {
+        "schema": capture.WSL_SCOPE_EVENT_SCHEMA,
+        "event": "start",
+        "unit": unit,
+        "cgroup": (
+            f"/sys/fs/cgroup/user.slice/user-{capture.os.getuid()}.slice/"
+            f"user@{capture.os.getuid()}.service/app.slice/{unit}.scope"
+        ),
+        "containment": capture.benchmark.WSL2_NETWORK_BOUNDARY,
+        "memory_max_bytes": capture.benchmark.WSL2_SCOPE_MEMORY_MAX_BYTES,
+        "memory_swap_max_bytes": 0,
+        "pids_max": capture.benchmark.WSL2_SCOPE_PIDS_MAX,
+        "cpu_quota_percent": capture.benchmark.WSL2_SCOPE_CPU_QUOTA_PERCENT,
+        "cpu_controller": "usage-feedback-cgroup-freeze-v1",
+        "cpu_poll_interval_ms": capture.WSL_SCOPE_CPU_POLL_INTERVAL_MS,
+        "runtime_max_seconds": 1470.0,
+        "thermal_policy_sha256": supervision.policy.content_sha256,
+    }
+    complete = {
+        "schema": capture.WSL_SCOPE_EVENT_SCHEMA,
+        "event": "complete",
+        "unit": unit,
+        "duration_seconds": duration_seconds,
+        "cpu_usage_usec": cpu_allowed_usec - 1,
+        "cpu_allowed_usec": cpu_allowed_usec,
+        "cpu_quota_percent": capture.benchmark.WSL2_SCOPE_CPU_QUOTA_PERCENT,
+        "memory_peak_bytes": 1024 * 1024,
+        "memory_events": {
+            "low": 0,
+            "high": 0,
+            "max": 0,
+            "oom": 0,
+            "oom_kill": 0,
+            "oom_group_kill": 0,
+        },
+        "pids_peak": 2,
+        "scope_removed": True,
+        "child_returncode": 0,
+        "reason": None,
+    }
+    return (
+        f"{capture.WSL_SCOPE_EVENT_PREFIX}"
+        f"{json.dumps(start, separators=(',', ':'))}\n"
+        f"{capture.WSL_SCOPE_EVENT_PREFIX}"
+        f"{json.dumps(complete, separators=(',', ':'))}\n"
+    ).encode()
+
+
 class VllmRuntimeManifestCaptureTests(unittest.TestCase):
     def test_manifest_command_inserts_only_manifest_mode(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -143,18 +195,23 @@ class VllmRuntimeManifestCaptureTests(unittest.TestCase):
             )
         )
         config = launch_config(Path("/tmp/fixture-python"))
-        command = capture.supervised_manifest_command(config, supervision)
+        command = capture.supervised_manifest_command(config, supervision, 1800.0)
         self.assertEqual(
-            command[:6],
+            command[:5],
             [
                 sys.executable,
                 str(capture.WSL_THERMAL_EXEC),
                 "--policy",
                 str(supervision.path),
                 "--",
-                "/tmp/fixture-python",
             ],
         )
+        self.assertEqual(command[5:7], [sys.executable, str(capture.WSL_SCOPE_EXEC)])
+        self.assertIn(str(capture.benchmark.WSL2_SCOPE_MEMORY_MAX_BYTES), command)
+        self.assertIn(str(capture.benchmark.WSL2_SCOPE_CPU_QUOTA_PERCENT), command)
+        self.assertIn(str(supervision.unshare_path), command)
+        self.assertIn(str(capture.LINUX_NAMESPACE_EXEC), command)
+        self.assertIn("/tmp/fixture-python", command)
         self.assertIn("--manifest-only", command)
 
         evidence = capture.validate_wsl2_thermal_stderr(
@@ -163,6 +220,17 @@ class VllmRuntimeManifestCaptureTests(unittest.TestCase):
         )
         self.assertEqual(evidence["policy_sha256"], supervision.policy.content_sha256)
         self.assertEqual(evidence["ending_host_millicelsius"], 80_000)
+        scope_evidence = capture.validate_wsl2_scope_stderr(
+            scope_stderr(supervision),
+            supervision,
+            1470.0,
+        )
+        self.assertEqual(
+            scope_evidence["memory_max_bytes"],
+            capture.benchmark.WSL2_SCOPE_MEMORY_MAX_BYTES,
+        )
+        self.assertEqual(scope_evidence["cpu_usage_usec"], 4_999_999)
+        self.assertTrue(scope_evidence["scope_removed"])
 
         mutated = thermal_stderr(supervision).replace(
             b'"supervision_outcome":"child_exit"',
@@ -170,6 +238,28 @@ class VllmRuntimeManifestCaptureTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(capture.CaptureError, "child_exit"):
             capture.validate_wsl2_thermal_stderr(mutated, supervision)
+        scope_mutated = scope_stderr(supervision).replace(
+            b'"scope_removed":true',
+            b'"scope_removed":false',
+        )
+        with self.assertRaisesRegex(capture.CaptureError, "required lifecycle"):
+            capture.validate_wsl2_scope_stderr(
+                scope_mutated,
+                supervision,
+                1470.0,
+            )
+        ordered = (
+            thermal_stderr(supervision).splitlines()[1]
+            + b"\n"
+            + scope_stderr(supervision)
+            + thermal_stderr(supervision).splitlines()[2]
+            + b"\n"
+        )
+        capture.validate_wsl2_event_order(ordered)
+        with self.assertRaisesRegex(capture.CaptureError, "event order"):
+            capture.validate_wsl2_event_order(
+                scope_stderr(supervision) + thermal_stderr(supervision)
+            )
 
     def test_wsl2_policy_must_be_a_repository_regular_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

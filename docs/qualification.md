@@ -1079,6 +1079,12 @@ Windows-thermal-zone/NVML wrapper lifecycle and must complete stable handoff
 before the next starts. The command reports both strict-valid thermal records;
 a trip, omitted policy, uncommitted policy or supervisor bytes, missing event,
 timeout, or incomplete cooldown prevents publication.
+Each pass also uses the same reviewed WSL2 private network/PID/mount namespace,
+Landlock interop denial, 10 GiB memory/zero-swap/512-PID user scope, group OOM
+handling, and 50-percent usage-feedback CPU controller as the qualification
+runner. The capture result retains both scope records. Missing or reordered
+scope events, a control mismatch, excess CPU accounting, any memory-limit/OOM
+event, nonzero child, or scope residue prevents publication.
 The laptop performance launch pins
 `--max-provenance-read-mib-per-second=32`, cumulatively pacing all
 launcher-owned model/snapshot/adapter/runtime hashing and applying the same

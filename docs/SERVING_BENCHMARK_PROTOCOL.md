@@ -377,18 +377,26 @@ twice with bounded output and a per-capture deadline. It requires two
 byte-identical strict-valid results under the benchmark driver's manifest plus
 launch-binding validators. It publishes the exact repeated bytes
 with fsync and no overwrite, and reports the source commit, manifest hash,
-runtime-content hash, system fingerprint, both stderr hashes, and both thermal
-lifecycles. The launch JSON must be a tracked regular file whose bytes match
-`HEAD`. On WSL2, omitting the policy is rejected automatically. The explicit
+runtime-content hash, system fingerprint, both stderr hashes, both thermal
+lifecycles, and both scope lifecycles. The launch JSON must be a tracked regular
+file whose bytes match `HEAD`. On WSL2, omitting the policy is rejected
+automatically. The explicit
 content-hashed repository policy and supervisor have the same file and commit
-binding, and the policy wraps each capture independently. The tool requires
-exactly one successful
+binding. Each pass is nested inside the existing root-owned util-linux private
+network/PID/mount/Landlock boundary and a distinct verified systemd user scope
+with a 10 GiB memory maximum, zero swap, 512-PID maximum, group OOM handling,
+and the 50-percent usage-feedback CPU controller. The policy wraps that complete
+scope independently. The tool requires exactly one successful
 `preflight`/`complete` pair per pass, peaks below both hard limits, and the
-configured stable handoff before starting the next pass. A dirty tree, existing
-output, source or commit change during capture, nonzero/timeout child, missing
-or malformed thermal evidence, oversized output, invalid manifest, or repeat
-mismatch fails without publication. A timeout or interruption terminates the
-complete capture session and waits for the wrapper's handoff before escalation.
+configured stable handoff before starting the next pass. It also requires
+ordered scope start/completion evidence, the exact policy and cgroup controls,
+CPU usage within allowance, no memory-limit/OOM events, successful child exit,
+and scope removal. A dirty tree, existing output, source or commit change during
+capture, nonzero/timeout child, missing or malformed thermal/scope evidence,
+scope residue, oversized output, invalid manifest, or repeat mismatch fails
+without publication. A timeout or interruption terminates the complete capture
+session, kills the cgroup through its controller, and waits for the wrapper's
+handoff before escalation.
 Commit the manifest before startup.
 The tracked laptop launch makes both captures use the explicit 32 MiB/s
 cumulative provenance-read ceiling; do not remove or override it to accelerate

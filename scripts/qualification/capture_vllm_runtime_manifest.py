@@ -8,8 +8,10 @@ import dataclasses
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import platform
+import re
 import resource
 import signal
 import stat
@@ -37,8 +39,16 @@ MAX_STDERR_BYTES = 8 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 1800.0
 CAPTURE_TERMINATION_GRACE_SECONDS = 30.0
 WSL_THERMAL_EXEC = ROOT / "scripts" / "qualification" / "wsl_thermal_exec.py"
+WSL_SCOPE_EXEC = ROOT / "scripts" / "qualification" / "wsl_scope_exec.py"
+WSL_SCOPE_PAYLOAD = ROOT / "scripts" / "qualification" / "wsl_scope_payload.py"
+LINUX_NAMESPACE_EXEC = ROOT / "scripts" / "qualification" / "linux_namespace_exec.py"
+WSL_PLATFORM = ROOT / "scripts" / "qualification" / "wsl_platform.py"
+UNSHARE_EXECUTABLE = Path("/usr/bin/unshare")
+WSL_SCOPE_CPU_POLL_INTERVAL_MS = 5
 WSL_THERMAL_EVENT_PREFIX = "wsl2-thermal: "
 WSL_THERMAL_EVENT_SCHEMA = "kiln.wsl2-thermal-event.v1"
+WSL_SCOPE_EVENT_PREFIX = "wsl2-scope: "
+WSL_SCOPE_EVENT_SCHEMA = "kiln.wsl2-scope-event.v1"
 WSL_THERMAL_PREFLIGHT_KEYS = {
     "schema",
     "event",
@@ -66,6 +76,36 @@ WSL_THERMAL_COMPLETE_KEYS = {
     "ending_gpu_millicelsius",
     "safe_handoff_stable_samples",
 }
+WSL_SCOPE_START_KEYS = {
+    "schema",
+    "event",
+    "unit",
+    "cgroup",
+    "containment",
+    "memory_max_bytes",
+    "memory_swap_max_bytes",
+    "pids_max",
+    "cpu_quota_percent",
+    "cpu_controller",
+    "cpu_poll_interval_ms",
+    "runtime_max_seconds",
+    "thermal_policy_sha256",
+}
+WSL_SCOPE_COMPLETE_KEYS = {
+    "schema",
+    "event",
+    "unit",
+    "duration_seconds",
+    "cpu_usage_usec",
+    "cpu_allowed_usec",
+    "cpu_quota_percent",
+    "memory_peak_bytes",
+    "memory_events",
+    "pids_peak",
+    "scope_removed",
+    "child_returncode",
+    "reason",
+}
 
 
 class CaptureError(RuntimeError):
@@ -79,6 +119,7 @@ class Capture:
     stderr_bytes: int
     stderr_sha256: str
     wsl2_thermal: dict[str, Any] | None
+    wsl2_scope: dict[str, Any] | None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -86,6 +127,7 @@ class Wsl2ThermalSupervision:
     path: Path
     repository_path: str
     policy: Any
+    unshare_path: Path
 
 
 def require_clean_repository(root: Path = ROOT) -> str:
@@ -188,6 +230,25 @@ def load_wsl2_thermal_supervision(path: Path) -> Wsl2ThermalSupervision:
         "WSL2 thermal policy",
     )
     _repository_regular_file(WSL_THERMAL_EXEC, "WSL2 thermal supervisor")
+    _repository_regular_file(WSL_SCOPE_EXEC, "WSL2 scope supervisor")
+    _repository_regular_file(WSL_SCOPE_PAYLOAD, "WSL2 scope payload")
+    _repository_regular_file(LINUX_NAMESPACE_EXEC, "Linux namespace helper")
+    _repository_regular_file(WSL_PLATFORM, "WSL2 platform helper")
+    unshare_path = UNSHARE_EXECUTABLE
+    try:
+        unshare_info = unshare_path.lstat()
+    except OSError as exc:
+        raise CaptureError(f"cannot inspect util-linux unshare: {exc}") from exc
+    if (
+        not stat.S_ISREG(unshare_info.st_mode)
+        or not os.access(unshare_path, os.X_OK)
+        or unshare_info.st_uid != 0
+        or unshare_info.st_mode & 0o022
+        or unshare_path.name != "unshare"
+    ):
+        raise CaptureError(
+            "WSL2 manifest capture requires root-owned non-writable /usr/bin/unshare"
+        )
     try:
         policy = benchmark.wsl_thermal_exec.load_policy(absolute)
     except benchmark.wsl_thermal_exec.ThermalGuardError as exc:
@@ -196,6 +257,7 @@ def load_wsl2_thermal_supervision(path: Path) -> Wsl2ThermalSupervision:
         path=absolute,
         repository_path=repository_path,
         policy=policy,
+        unshare_path=unshare_path,
     )
 
 
@@ -213,17 +275,58 @@ def load_platform_thermal_supervision(
 def supervised_manifest_command(
     config: Any,
     supervision: Wsl2ThermalSupervision | None,
+    timeout_seconds: float,
 ) -> list[str]:
     command = manifest_command(config)
     if supervision is None:
         return command
+    scope_runtime_seconds = (
+        timeout_seconds
+        - supervision.policy.handoff_timeout_seconds
+        - CAPTURE_TERMINATION_GRACE_SECONDS
+    )
+    if scope_runtime_seconds < 1.0:
+        raise CaptureError(
+            "capture timeout cannot contain the WSL2 scope plus thermal handoff"
+        )
+    namespaced_command = [
+        os.fspath(supervision.unshare_path),
+        "--user",
+        "--map-root-user",
+        "--net",
+        "--pid",
+        "--fork",
+        "--kill-child=SIGKILL",
+        "--mount",
+        "--mount-proc=/proc",
+        sys.executable,
+        os.fspath(LINUX_NAMESPACE_EXEC),
+        "--",
+        *command,
+    ]
+    scoped_command = [
+        sys.executable,
+        os.fspath(WSL_SCOPE_EXEC),
+        "--memory-max-bytes",
+        str(benchmark.WSL2_SCOPE_MEMORY_MAX_BYTES),
+        "--pids-max",
+        str(benchmark.WSL2_SCOPE_PIDS_MAX),
+        "--cpu-quota-percent",
+        str(benchmark.WSL2_SCOPE_CPU_QUOTA_PERCENT),
+        "--cpu-poll-interval-ms",
+        str(WSL_SCOPE_CPU_POLL_INTERVAL_MS),
+        "--runtime-max-seconds",
+        f"{scope_runtime_seconds:g}",
+        "--",
+        *namespaced_command,
+    ]
     return [
         sys.executable,
         os.fspath(WSL_THERMAL_EXEC),
         "--policy",
         os.fspath(supervision.path),
         "--",
-        *command,
+        *scoped_command,
     ]
 
 
@@ -262,10 +365,12 @@ def _run_capture_child(
     stderr: Any,
     timeout_seconds: float,
     termination_grace_seconds: float,
+    environment: dict[str, str] | None = None,
 ) -> int:
     process = subprocess.Popen(
         list(command),
         cwd=working_directory,
+        env=environment,
         stdin=subprocess.DEVNULL,
         stdout=stdout,
         stderr=stderr,
@@ -395,6 +500,192 @@ def validate_wsl2_thermal_stderr(
     }
 
 
+def _scope_number(value: Any, label: str, *, minimum: float = 0) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < minimum
+    ):
+        raise CaptureError(f"{label} must be finite and at or above {minimum}")
+    return float(value)
+
+
+def validate_wsl2_scope_stderr(
+    stderr_payload: bytes,
+    supervision: Wsl2ThermalSupervision,
+    expected_runtime_max_seconds: float,
+) -> dict[str, Any]:
+    events: list[dict[str, Any]] = []
+    for raw_line in stderr_payload.decode("utf-8", errors="replace").splitlines():
+        if not raw_line.startswith(WSL_SCOPE_EVENT_PREFIX):
+            continue
+        payload = raw_line.removeprefix(WSL_SCOPE_EVENT_PREFIX).encode("utf-8")
+        try:
+            event = benchmark.strict_json_loads(payload)
+        except Exception as exc:
+            raise CaptureError(f"WSL2 scope event is not strict JSON: {exc}") from exc
+        if not isinstance(event, dict):
+            raise CaptureError("WSL2 scope event must be an object")
+        events.append(event)
+    if [event.get("event") for event in events] != ["start", "complete"]:
+        raise CaptureError("WSL2 scope must emit exactly start then complete")
+    start, complete = events
+    if set(start) != WSL_SCOPE_START_KEYS:
+        raise CaptureError("WSL2 scope start event fields are invalid")
+    if set(complete) != WSL_SCOPE_COMPLETE_KEYS:
+        raise CaptureError("WSL2 scope complete event fields are invalid")
+    for label, event in (("start", start), ("complete", complete)):
+        if event.get("schema") != WSL_SCOPE_EVENT_SCHEMA:
+            raise CaptureError(f"WSL2 scope {label} event schema is invalid")
+
+    unit = start.get("unit")
+    if (
+        not isinstance(unit, str)
+        or not re.fullmatch(r"kiln-wsl-scope-[0-9a-f]{32}", unit)
+        or complete.get("unit") != unit
+    ):
+        raise CaptureError("WSL2 scope unit identity is invalid")
+    expected_cgroup = (
+        f"/sys/fs/cgroup/user.slice/user-{os.getuid()}.slice/"
+        f"user@{os.getuid()}.service/app.slice/{unit}.scope"
+    )
+    if start.get("cgroup") != expected_cgroup:
+        raise CaptureError("WSL2 scope cgroup path is invalid")
+    expected_start = {
+        "containment": benchmark.WSL2_NETWORK_BOUNDARY,
+        "memory_max_bytes": benchmark.WSL2_SCOPE_MEMORY_MAX_BYTES,
+        "memory_swap_max_bytes": 0,
+        "pids_max": benchmark.WSL2_SCOPE_PIDS_MAX,
+        "cpu_quota_percent": benchmark.WSL2_SCOPE_CPU_QUOTA_PERCENT,
+        "cpu_controller": "usage-feedback-cgroup-freeze-v1",
+        "cpu_poll_interval_ms": WSL_SCOPE_CPU_POLL_INTERVAL_MS,
+        "thermal_policy_sha256": supervision.policy.content_sha256,
+    }
+    for field, expected in expected_start.items():
+        if start.get(field) != expected:
+            raise CaptureError(f"WSL2 scope start {field} is invalid")
+    runtime_max_seconds = _scope_number(
+        start.get("runtime_max_seconds"),
+        "WSL2 scope runtime maximum",
+        minimum=1,
+    )
+    if runtime_max_seconds != expected_runtime_max_seconds:
+        raise CaptureError("WSL2 scope runtime maximum is invalid")
+    duration_seconds = _scope_number(
+        complete.get("duration_seconds"),
+        "WSL2 scope duration",
+        minimum=0,
+    )
+    if duration_seconds > runtime_max_seconds + 1.0:
+        raise CaptureError("WSL2 scope duration exceeded its bounded allowance")
+    if (
+        complete.get("cpu_quota_percent")
+        != benchmark.WSL2_SCOPE_CPU_QUOTA_PERCENT
+        or complete.get("scope_removed") is not True
+        or complete.get("child_returncode") != 0
+        or complete.get("reason") is not None
+    ):
+        raise CaptureError("WSL2 scope did not complete its required lifecycle")
+    cpu_usage = _thermal_integer(
+        complete.get("cpu_usage_usec"),
+        "WSL2 scope CPU usage",
+    )
+    cpu_allowed = _thermal_integer(
+        complete.get("cpu_allowed_usec"),
+        "WSL2 scope CPU allowance",
+    )
+    expected_allowed = int(
+        duration_seconds
+        * 1_000_000
+        * benchmark.WSL2_SCOPE_CPU_QUOTA_PERCENT
+        / 100
+    )
+    if cpu_allowed != expected_allowed or cpu_usage > cpu_allowed:
+        raise CaptureError("WSL2 scope CPU accounting is invalid")
+    memory_peak = _thermal_integer(
+        complete.get("memory_peak_bytes"),
+        "WSL2 scope memory peak",
+        minimum=1,
+    )
+    pids_peak = _thermal_integer(
+        complete.get("pids_peak"),
+        "WSL2 scope PID peak",
+        minimum=1,
+    )
+    if memory_peak > benchmark.WSL2_SCOPE_MEMORY_MAX_BYTES:
+        raise CaptureError("WSL2 scope memory peak exceeded its maximum")
+    if pids_peak > benchmark.WSL2_SCOPE_PIDS_MAX:
+        raise CaptureError("WSL2 scope PID peak exceeded its maximum")
+    if Path(expected_cgroup).exists():
+        raise CaptureError("WSL2 scope cgroup still exists after completion")
+    memory_events = complete.get("memory_events")
+    if not isinstance(memory_events, dict) or not memory_events:
+        raise CaptureError("WSL2 scope memory events are invalid")
+    if any(
+        not isinstance(name, str)
+        or not name
+        or isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        for name, value in memory_events.items()
+    ):
+        raise CaptureError("WSL2 scope memory event counters are invalid")
+    for field in ("max", "oom", "oom_kill", "oom_group_kill"):
+        if memory_events.get(field) != 0:
+            raise CaptureError(f"WSL2 scope memory event {field} was not zero")
+    return {
+        "mechanism": "systemd-user-scope-feedback-v1",
+        "unit": unit,
+        "cgroup": expected_cgroup,
+        "network_containment": benchmark.WSL2_NETWORK_BOUNDARY,
+        "memory_max_bytes": benchmark.WSL2_SCOPE_MEMORY_MAX_BYTES,
+        "memory_swap_max_bytes": 0,
+        "memory_peak_bytes": memory_peak,
+        "memory_events": memory_events,
+        "pids_max": benchmark.WSL2_SCOPE_PIDS_MAX,
+        "pids_peak": pids_peak,
+        "cpu_quota_percent": benchmark.WSL2_SCOPE_CPU_QUOTA_PERCENT,
+        "cpu_poll_interval_ms": WSL_SCOPE_CPU_POLL_INTERVAL_MS,
+        "cpu_usage_usec": cpu_usage,
+        "cpu_allowed_usec": cpu_allowed,
+        "duration_seconds": duration_seconds,
+        "scope_removed": True,
+    }
+
+
+def validate_wsl2_event_order(stderr_payload: bytes) -> None:
+    observed: list[tuple[str, Any]] = []
+    for raw_line in stderr_payload.decode("utf-8", errors="replace").splitlines():
+        for source, prefix in (
+            ("thermal", WSL_THERMAL_EVENT_PREFIX),
+            ("scope", WSL_SCOPE_EVENT_PREFIX),
+        ):
+            if not raw_line.startswith(prefix):
+                continue
+            payload = raw_line.removeprefix(prefix).encode("utf-8")
+            try:
+                event = benchmark.strict_json_loads(payload)
+            except Exception as exc:
+                raise CaptureError(
+                    f"WSL2 {source} event order payload is invalid: {exc}"
+                ) from exc
+            observed.append(
+                (
+                    source,
+                    event.get("event") if isinstance(event, dict) else None,
+                )
+            )
+            break
+    if observed != [
+        ("thermal", "preflight"),
+        ("scope", "start"),
+        ("scope", "complete"),
+        ("thermal", "complete"),
+    ]:
+        raise CaptureError("WSL2 thermal/scope event order is invalid")
+
+
 def capture_once(
     config: Any,
     *,
@@ -403,10 +694,21 @@ def capture_once(
 ) -> Capture:
     """Execute one bounded manifest-only child and validate its exact output."""
 
-    command = supervised_manifest_command(config, wsl2_thermal)
+    command = supervised_manifest_command(config, wsl2_thermal, timeout_seconds)
     termination_grace_seconds = CAPTURE_TERMINATION_GRACE_SECONDS
+    environment: dict[str, str] | None = None
+    scope_runtime_seconds: float | None = None
     if wsl2_thermal is not None:
         termination_grace_seconds += wsl2_thermal.policy.handoff_timeout_seconds
+        scope_runtime_seconds = (
+            timeout_seconds
+            - wsl2_thermal.policy.handoff_timeout_seconds
+            - CAPTURE_TERMINATION_GRACE_SECONDS
+        )
+        environment = dict(os.environ)
+        environment[benchmark.wsl_platform.NETWORK_ISOLATION_ENV] = (
+            benchmark.WSL2_NETWORK_BOUNDARY
+        )
     with tempfile.TemporaryDirectory(prefix="kiln-vllm-manifest-") as directory:
         capture_root = Path(directory)
         stdout_path = capture_root / "stdout"
@@ -419,6 +721,7 @@ def capture_once(
                 stderr=stderr,
                 timeout_seconds=timeout_seconds,
                 termination_grace_seconds=termination_grace_seconds,
+                environment=environment,
             )
         stderr_bytes = stderr_path.stat().st_size
         stderr_payload = stderr_path.read_bytes()
@@ -446,12 +749,26 @@ def capture_once(
         if wsl2_thermal is None
         else validate_wsl2_thermal_stderr(stderr_payload, wsl2_thermal)
     )
+    if wsl2_thermal is not None and scope_runtime_seconds is None:
+        raise CaptureError("WSL2 scope runtime bound was not derived")
+    scope_evidence = (
+        None
+        if wsl2_thermal is None
+        else validate_wsl2_scope_stderr(
+            stderr_payload,
+            wsl2_thermal,
+            scope_runtime_seconds,
+        )
+    )
+    if wsl2_thermal is not None:
+        validate_wsl2_event_order(stderr_payload)
     return Capture(
         payload=payload,
         manifest=manifest,
         stderr_bytes=stderr_bytes,
         stderr_sha256="sha256:" + hashlib.sha256(stderr_payload).hexdigest(),
         wsl2_thermal=thermal_evidence,
+        wsl2_scope=scope_evidence,
     )
 
 
@@ -593,6 +910,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 None
                 if wsl2_thermal is None
                 else [first.wsl2_thermal, second.wsl2_thermal]
+            ),
+            "wsl2_scope_supervision": (
+                None
+                if wsl2_thermal is None
+                else [first.wsl2_scope, second.wsl2_scope]
             ),
         }
         print(
