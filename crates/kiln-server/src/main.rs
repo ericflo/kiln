@@ -987,21 +987,23 @@ async fn main() -> Result<()> {
             gpu_weights.base_weight_shard_manifest.as_ref() == Some(&base_weight_shard_manifest),
             "GPU weights did not retain the verified base-weight shard manifest"
         );
-        match model_weights.verify_source_content_unchanged() {
-            Ok(()) => {}
-            Err(error)
-                if error
-                    .downcast_ref::<kiln_model::CheckpointReadCancelled>()
-                    .is_some() =>
-            {
-                process_shutdown.requested_during_startup("checkpoint_read_cancelled");
-                return Ok(());
-            }
-            Err(error) => {
-                return Err(error)
-                    .context("model source changed between load and completed GPU upload");
-            }
-        }
+        let released_source_cache_shards =
+            match model_weights.verify_source_content_unchanged_and_release_cache() {
+                Ok(released) => released,
+                Err(error)
+                    if error
+                        .downcast_ref::<kiln_model::CheckpointReadCancelled>()
+                        .is_some() =>
+                {
+                    process_shutdown.requested_during_startup("checkpoint_read_cancelled");
+                    return Ok(());
+                }
+                Err(error) => {
+                    return Err(error).context(
+                    "model source verification or cache release failed after completed GPU upload",
+                );
+                }
+            };
         let completed_checkpoint_reads = checkpoint_read_policy.report();
         anyhow::ensure!(
             completed_checkpoint_reads.complete,
@@ -1013,7 +1015,8 @@ async fn main() -> Result<()> {
             base_model_source_sha256,
             base_weight_shard_count = base_weight_shard_manifest.shards.len(),
             base_weight_total_size_bytes = base_weight_shard_manifest.total_size_bytes,
-            "CPU model weights dropped after verified GPU upload"
+            released_source_cache_shards,
+            "CPU model weights and verified source cache dropped after GPU upload"
         );
 
         if let Some(pb) = load_spinner.as_ref() {

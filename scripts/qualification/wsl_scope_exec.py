@@ -131,6 +131,37 @@ def _atomic_runtime_unit(path: Path, content: str) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def _owned_runtime_directory(path: Path, label: str) -> os.stat_result:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ScopeExecError(f"{label} is unavailable: {exc}") from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or metadata.st_mode & 0o022
+    ):
+        raise ScopeExecError(f"{label} has unsafe type, ownership, or permissions")
+    return metadata
+
+
+def _ensure_runtime_unit_directory(runtime: Path) -> Path:
+    _owned_runtime_directory(runtime, "WSL2 user runtime directory")
+    systemd_directory = runtime / "systemd"
+    _owned_runtime_directory(systemd_directory, "WSL2 user systemd runtime directory")
+    unit_directory = systemd_directory / "user"
+    try:
+        unit_directory.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise ScopeExecError(
+            f"cannot create WSL2 user runtime unit directory: {exc}"
+        ) from exc
+    _owned_runtime_directory(unit_directory, "WSL2 user runtime unit directory")
+    return unit_directory
+
+
 def ensure_user_bus() -> dict[str, str]:
     if "microsoft-standard-wsl2" not in platform.release().lower():
         raise ScopeExecError("user-scope execution requires a WSL2 kernel")
@@ -145,19 +176,7 @@ def ensure_user_bus() -> dict[str, str]:
             raise ScopeExecError(f"required executable is unavailable: {executable}")
 
     runtime = Path(f"/run/user/{os.getuid()}")
-    unit_directory = runtime / "systemd" / "user"
-    try:
-        runtime_metadata = runtime.stat()
-        unit_metadata = unit_directory.stat()
-    except OSError as exc:
-        raise ScopeExecError(f"WSL2 user runtime directory is unavailable: {exc}") from exc
-    if (
-        not stat.S_ISDIR(runtime_metadata.st_mode)
-        or not stat.S_ISDIR(unit_metadata.st_mode)
-        or runtime_metadata.st_uid != os.getuid()
-        or unit_metadata.st_uid != os.getuid()
-    ):
-        raise ScopeExecError("WSL2 user runtime directories have unsafe ownership")
+    unit_directory = _ensure_runtime_unit_directory(runtime)
 
     _atomic_runtime_unit(unit_directory / SOCKET_UNIT, SOCKET_TEXT)
     _atomic_runtime_unit(unit_directory / SERVICE_UNIT, SERVICE_TEXT)

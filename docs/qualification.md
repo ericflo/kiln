@@ -162,7 +162,12 @@ Capability values are exactly `available` or `unavailable`; an unavailable
 safeguard is also named in `unsupported` and is never converted into a passing
 probe. The current WSL2 boundary creates exact runtime `dbus.socket` and
 `dbus.service` units when the distribution omitted the user bus, then proves an
-owned user transient unit. It reads the Windows
+owned user transient unit. A fresh WSL user manager can also omit
+`/run/user/<uid>/systemd/user`; the launcher creates that directory with mode
+0700 only after the runtime and `systemd` parents prove they are real
+directories owned by the current user and not group/world-writable. A symlink,
+wrong owner, writable parent, publication conflict, missing bus socket, or
+failed transient-unit proof aborts the case. It reads the Windows
 `Win32_PerfFormattedData_Counters_ThermalZoneInformation` zone
 `\_TZ.THRM`, cross-checks whole- and tenth-Kelvin fields, and converts the
 high-precision field to millicelsius. The checked
@@ -723,10 +728,10 @@ clean-source execution provenance, and the exact source-built executable hash.
 
 After warmup, the driver records a deterministic 32-token baseline. A separate
 CUDA-driver process allocates in at most 256 MiB chunks until free memory is at
-or below 2,048 MiB. It refuses to start when the resident server is already at
-that target, allocates at most 8,192 MiB, requires at least 64 MiB of real
+or below 1,024 MiB. It refuses to start when the resident server is already at
+that target, allocates at most 1,024 MiB, requires at least 64 MiB of real
 external allocation, samples every 100 ms, and immediately fails and releases
-if free memory crosses the 1,536 MiB floor. While the peer remains alive, the
+if free memory crosses the 768 MiB floor. While the peer remains alive, the
 server must complete another 32-token request and its independent live sampler
 must corroborate bounded pressure.
 
@@ -783,6 +788,39 @@ The scope peaked at 7,146,455,040 bytes and 30 PIDs, reported zero
 memory-limit or OOM events, removed cleanly, and completed thermal handoff
 after 90.05 C host and 66 C GPU peaks. This timeout is retained separately;
 it still contains no model or pressure evidence.
+
+The next exact pushed-source restart, receipt
+`20260725t085019331711z-cuda-rtx4090-laptop-serving-cuda-low-memory--647fb2a614-v1`,
+completed the CUDA release build and the full two-shard model upload. All 32
+layers and 8,411,510,272 source bytes uploaded, and the post-upload pass
+verified all 9,319,828,096 snapshot bytes before the CPU weights dropped.
+Startup then rejected KV allocation without attempting one. NVIDIA reported
+14,675,869,696 of 16,106,127,360 bytes used, leaving 1,430,257,664 bytes free
+below the configured 1.5 GiB floor. Independently, the verification pass had
+repopulated the clean snapshot page cache inside the 10 GiB host scope, so the
+host governor reported no available budget.
+
+The retained failed receipt has file
+`sha256:66cc0097820efe4819f2d23f00b9e639c21ddd20c9fb35267baf03baeee0b159`.
+The scope peaked at its exact 10,737,418,240-byte limit and recorded 5,737
+limit events, but all OOM counters remained zero, the 66-PID peak drained, and
+the scope and private snapshot were removed. Thermal supervision completed its
+stable handoff after 93.05 C host and 68 C GPU peaks below the 95/85 C limits.
+No KV cache, pressure peer, baseline request, pressure request, or recovery
+request ran, so the low-memory gate remains open.
+
+The next source contract closes both observed startup constraints without
+raising the host cap. After the exact post-upload content check, Linux startup
+must release every retained read-only mapping with `MADV_DONTNEED`, require a
+successful `POSIX_FADV_DONTNEED` for every verified shard file, log the exact
+released-shard count, and only then drop CPU weights. A cache-release failure
+aborts startup. The laptop server floor is now 1.0 GiB, below the observed
+1.430 GiB post-load free memory, and its inference-memory fraction is 0.1 so
+auto-KV leaves bounded external-pressure room. The peer target, safety floor,
+and maximum allocation are 1,024 MiB, 768 MiB, and 1,024 MiB respectively.
+The revised workload is `sha256:f42fad082d86aa82480acb3a2a7e0f8d5f5f9ce189c972952015a944c31f9b2b`;
+it still requires a real allocation, a complete request under pressure,
+deterministic recovery, clean shutdown, and zero fault or residue evidence.
 
 ### CUDA Serving Bootstrap Handoff
 

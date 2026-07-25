@@ -2264,6 +2264,20 @@ mod tests {
     }
 
     #[test]
+    fn post_upload_verification_releases_all_loaded_shard_caches() {
+        let (_dir, _source, weights) = load_tiny_source_guard_fixture();
+
+        let released = weights
+            .verify_source_content_unchanged_and_release_cache()
+            .unwrap();
+
+        #[cfg(target_os = "linux")]
+        assert_eq!(released, 1);
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(released, 0);
+    }
+
+    #[test]
     fn checkpoint_read_policy_accounts_all_loader_owned_phases() {
         let tensors = tiny_model_tensors("model.language_model.");
         let tensor_refs = tensors

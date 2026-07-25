@@ -2,6 +2,8 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io;
 use std::ops::Deref;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -672,6 +674,38 @@ impl SourceContentGuard {
         pacer.complete(bytes_completed, bytes_completed)?;
         Ok(())
     }
+
+    #[cfg(target_os = "linux")]
+    fn release_clean_cache(&self) -> Result<usize> {
+        for shard in &self.shards {
+            let filename = &shard.identity.filename;
+            // SAFETY: this read-only mapping has just been verified, its
+            // immutable backing file remains open, and the caller performs no
+            // further CPU-weight access before dropping the mappings.
+            unsafe {
+                shard
+                    ._mmap
+                    .unchecked_advise(memmap2::UncheckedAdvice::DontNeed)
+            }
+            .with_context(|| {
+                format!("failed to release mapped model source shard {filename} from memory")
+            })?;
+            let result = unsafe {
+                libc::posix_fadvise(shard.file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED)
+            };
+            if result != 0 {
+                return Err(io::Error::from_raw_os_error(result)).with_context(|| {
+                    format!("failed to release model source shard {filename} from page cache")
+                });
+            }
+        }
+        Ok(self.shards.len())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn release_clean_cache(&self) -> Result<usize> {
+        Ok(0)
+    }
 }
 
 const SOURCE_VERIFY_BUFFER_BYTES: usize = 256 * 1024;
@@ -802,6 +836,20 @@ impl ModelWeights {
             .validate()
             .context("invalid loader-owned base-weight shard manifest")?;
         guard.verify_unchanged()
+    }
+
+    /// Verify the exact post-upload source bytes and release their clean host
+    /// cache before the loader-owned CPU mappings are dropped.
+    ///
+    /// Linux callers receive an error if either the mapping or file-cache
+    /// release fails. This keeps a bounded serving cgroup from retaining a
+    /// checkpoint-sized cache after accelerator upload.
+    pub fn verify_source_content_unchanged_and_release_cache(&self) -> Result<usize> {
+        self.verify_source_content_unchanged()?;
+        self.source_content_guard
+            .as_ref()
+            .context("model weights have no loader-owned source content guard")?
+            .release_clean_cache()
     }
 
     /// Total size of all loaded weights in bytes.

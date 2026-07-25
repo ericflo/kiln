@@ -4,6 +4,7 @@ import importlib.util
 import contextlib
 import io
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -24,6 +25,41 @@ SPEC.loader.exec_module(scope)
 
 
 class WslScopeExecTests(unittest.TestCase):
+    def test_missing_runtime_unit_directory_is_created_with_private_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            systemd_directory = runtime / "systemd"
+            systemd_directory.mkdir(mode=0o700)
+
+            unit_directory = scope._ensure_runtime_unit_directory(runtime)
+
+            self.assertEqual(unit_directory, systemd_directory / "user")
+            self.assertTrue(stat.S_ISDIR(unit_directory.lstat().st_mode))
+            self.assertEqual(stat.S_IMODE(unit_directory.lstat().st_mode), 0o700)
+            self.assertEqual(
+                scope._ensure_runtime_unit_directory(runtime),
+                unit_directory,
+            )
+
+    def test_runtime_unit_directory_rejects_symlink_and_writable_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            systemd_directory = runtime / "systemd"
+            systemd_directory.mkdir(mode=0o700)
+            target = runtime / "target"
+            target.mkdir(mode=0o700)
+            (systemd_directory / "user").symlink_to(target, target_is_directory=True)
+            with self.assertRaisesRegex(scope.ScopeExecError, "unsafe"):
+                scope._ensure_runtime_unit_directory(runtime)
+
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            systemd_directory = runtime / "systemd"
+            systemd_directory.mkdir(mode=0o777)
+            systemd_directory.chmod(0o777)
+            with self.assertRaisesRegex(scope.ScopeExecError, "unsafe"):
+                scope._ensure_runtime_unit_directory(runtime)
+
     def test_runtime_bus_units_are_no_clobber_and_exact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "bus.socket"

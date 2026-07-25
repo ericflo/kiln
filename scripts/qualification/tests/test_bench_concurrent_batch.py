@@ -832,10 +832,17 @@ class ServingBenchmarkTests(unittest.TestCase):
         desktop = self._parse_server_config(config_root / f"{desktop_name}.toml")
 
         for name, config, expected in (
-            (laptop_name, laptop, (15.0, 1.5, 4_096, 512, 16)),
-            (desktop_name, desktop, (23.0, 2.0, 8_192, 1_024, 32)),
+            (laptop_name, laptop, (15.0, 1.0, 0.1, 4_096, 512, 16)),
+            (desktop_name, desktop, (23.0, 2.0, 0.7, 8_192, 1_024, 32)),
         ):
-            gpu_gib, floor_gib, batch_tokens, prefill_tokens, decode_batch = expected
+            (
+                gpu_gib,
+                floor_gib,
+                inference_fraction,
+                batch_tokens,
+                prefill_tokens,
+                decode_batch,
+            ) = expected
             self.assertEqual(config["server"]["serving_profile"], "stable")
             self.assertEqual(config["server"]["max_batch_tokens"], batch_tokens)
             self.assertEqual(
@@ -847,6 +854,10 @@ class ServingBenchmarkTests(unittest.TestCase):
             self.assertEqual(config["accelerator"]["rocm_graph_mode"], "disabled")
             self.assertEqual(config["memory"]["gpu_memory_gb"], gpu_gib)
             self.assertEqual(config["memory"]["floor_gb"], floor_gib)
+            self.assertEqual(
+                config["memory"]["inference_memory_fraction"],
+                inference_fraction,
+            )
             self.assertEqual(config["memory"]["reclaim_mode"], "off")
             self.assertFalse(config["memory"]["kv_autoscale"])
             self.assertFalse(config["memory"]["cuda_graphs"])
@@ -881,6 +892,7 @@ class ServingBenchmarkTests(unittest.TestCase):
         laptop["model"]["snapshot_dir"] = desktop["model"]["snapshot_dir"]
         laptop["memory"]["gpu_memory_gb"] = 23.0
         laptop["memory"]["floor_gb"] = 2.0
+        laptop["memory"]["inference_memory_fraction"] = 0.7
         self.assertEqual(laptop, desktop)
 
     def test_cuda_vllm_bootstrap_launch_uses_reviewed_immutable_options(self) -> None:

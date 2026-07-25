@@ -55,10 +55,10 @@
         "pressure": {
           "chunk_mib": 256,
           "hold_seconds": 300,
-          "maximum_allocation_mib": 8192,
-          "minimum_free_mib": 1536,
+          "maximum_allocation_mib": 1024,
+          "minimum_free_mib": 768,
           "poll_milliseconds": 100,
-          "target_free_mib": 2048
+          "target_free_mib": 1024
         },
         "recovery": {
           "health_tolerance_mib": 768,
@@ -71,7 +71,9 @@
           "timeout_seconds": 300
         },
         "server": {
-          "config_sha256": "sha256:ba4bd93f6d4778ce6007eeaea0dcdc21940f5251ddba149ddd3d922cff5f40d0",
+          "config_sha256": "sha256:15b23cf0edf997bb24c0ab1ba7ec3cb82a36bf0a1be91cdc9cdc786c84961f9f",
+          "floor_gib": 1.0,
+          "inference_memory_fraction": 0.1,
           "launch_sha256": "sha256:62c237b2cc5209ff834d2aac655d196af128aa7990556cb45cbf287ad4f60889",
           "serving_profile": "stable"
         }
@@ -79,7 +81,7 @@
       "cases": [
         {
           "id": "cuda-model-resident-low-memory",
-          "description": "Build the release server, attest the public model and clean CUDA execution identity, hold a separate CUDA allocation at 2 GiB free without crossing 1.5 GiB, complete a request under pressure, release, exactly replay the baseline request, and remove every owned process and snapshot.",
+          "description": "Build the release server, attest the public model and clean CUDA execution identity, hold a separate CUDA allocation at 1 GiB free without crossing 768 MiB, complete a request under pressure, release, exactly replay the baseline request, and remove every owned process and snapshot.",
           "required": true,
           "command": [
             "python3",

@@ -34,11 +34,11 @@ def ready_payload() -> dict:
         "minimum_free_bytes": low_memory.MINIMUM_FREE_MIB * low_memory.MIB,
         "baseline": {
             "total_bytes": 16 * low_memory.GIB,
-            "free_bytes": 3 * low_memory.GIB,
+            "free_bytes": 2 * low_memory.GIB,
         },
         "ready": {
             "total_bytes": 16 * low_memory.GIB,
-            "free_bytes": 2 * low_memory.GIB,
+            "free_bytes": low_memory.TARGET_FREE_MIB * low_memory.MIB,
         },
     }
 
@@ -105,7 +105,8 @@ class ServeCudaLowMemoryTests(unittest.TestCase):
             low_memory.SERVER_CONFIG.read_text()
         )
         self.assertEqual(parsed["server"]["port"], 8420)
-        self.assertEqual(parsed["memory"]["floor_gb"], 1.5)
+        self.assertEqual(parsed["memory"]["floor_gb"], 1.0)
+        self.assertEqual(parsed["memory"]["inference_memory_fraction"], 0.1)
         with self.assertRaisesRegex(
             low_memory.mixed.QualificationError, "non-scalar"
         ):
@@ -213,7 +214,8 @@ class ServeCudaLowMemoryTests(unittest.TestCase):
             path.write_text(json.dumps(ready_payload()))
             loaded = low_memory.load_peer_ready(path, 123)
             self.assertEqual(
-                loaded["ready"]["free_bytes"], 2 * low_memory.GIB
+                loaded["ready"]["free_bytes"],
+                low_memory.TARGET_FREE_MIB * low_memory.MIB,
             )
 
             malformed = ready_payload()
@@ -244,7 +246,7 @@ class ServeCudaLowMemoryTests(unittest.TestCase):
                 low_memory.load_peer_release(path, 123, ready_payload())
 
             malformed = release_payload()
-            malformed["final"]["free_bytes"] = 2 * low_memory.GIB
+            malformed["final"]["free_bytes"] = low_memory.TARGET_FREE_MIB * low_memory.MIB
             path.write_text(json.dumps(malformed))
             with self.assertRaisesRegex(
                 low_memory.mixed.QualificationError, "did not recover"
