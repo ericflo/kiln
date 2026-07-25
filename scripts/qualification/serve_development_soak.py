@@ -6,11 +6,13 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import dataclasses
+import json
 import math
 import os
 import re
 import signal
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -18,6 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Literal
 
+import device_memory_sampler as device_memory
 import host_thermal_guard as thermal
 import serve_mixed_load as mixed
 
@@ -30,6 +33,23 @@ RUNTIME_VARIANT = "autoscale-off"
 ROCM_ENDURANCE_VARIANT = "rocm-endurance"
 VULKAN_RUNTIME_VARIANT = "vulkan-development-soak"
 VULKAN_ENDURANCE_VARIANT = "vulkan-endurance"
+CUDA_ENDURANCE_VARIANT = "cuda-rtx4090-laptop-endurance"
+CUDA_GPU_UUID = "GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd"
+CUDA_GPU_NAME = "NVIDIA GeForce RTX 4090 Laptop GPU"
+CUDA_GPU_TOTAL_BYTES = 17_171_480_576
+CUDA_WSL2_THERMAL_POLICY_SHA256 = (
+    "sha256:998e65f84651ce28d36acfcadb3f1216a589883054a9f27853fe755f373e3745"
+)
+CUDA_WSL2_PACING_EVENTS_PATH_ENV = "KILN_WSL2_THERMAL_PACING_EVENTS_PATH"
+CUDA_WSL2_PACING_EVENT_SCHEMA = "kiln.wsl2-thermal-pacing-event.v1"
+CUDA_WSL2_MEMORY_MAX_BYTES = 10 * 1024 * 1024 * 1024
+CUDA_WSL2_PIDS_MAX = 512
+CUDA_WSL2_CPU_QUOTA_PERCENT = 50
+CUDA_KV_BLOCKS = 62
+CUDA_INFERENCE_MEMORY_FRACTION = 0.1
+CUDA_MEMORY_FLOOR_GB = 1.0
+CUDA_QUALIFIED_WAVE_CONCURRENCY = (1,)
+CUDA_QUALIFIED_PROMPT_WORDS = (16, 64, 256, 1024)
 VULKAN_MAX_PREFILL_TOKENS_PER_CYCLE = 128
 VULKAN_QUALIFIED_ACTIVE_REQUESTS = 4
 VULKAN_QUALIFIED_DECODE_BATCH = 2
@@ -52,6 +72,8 @@ ROCM_REQUEST_TIMEOUT_SECONDS = 120.0
 QUALIFICATION_DURATION_SECONDS = 1800.0
 ROCM_ENDURANCE_DURATION_SECONDS = 24 * 60 * 60.0
 VULKAN_ENDURANCE_DURATION_SECONDS = 8 * 60 * 60.0
+CUDA_ENDURANCE_DURATION_SECONDS = 8 * 60 * 60.0
+CUDA_EXTERNAL_PACING_ALLOWANCE_SECONDS = 4 * 60 * 60.0
 CASE_TEARDOWN_GRACE_SECONDS = 180.0
 REQUEST_WORKER_CLEANUP_TIMEOUT_SECONDS = 10.0
 MAX_STEADY_STATE_WARMUP_WAVES = 16
@@ -107,6 +129,67 @@ SMAPS_HEADER = re.compile(
     r"[r-][w-][x-][ps]\s+[0-9A-Fa-f]+\s+"
     r"[0-9A-Fa-f]+:[0-9A-Fa-f]+\s+\d+(?:\s+(?P<pathname>.*))?$"
 )
+
+CUDA_BUILD_SPEC = mixed.SourceBuildSpec(
+    backend="CUDA",
+    features="cuda",
+    cargo_cpu_quota_percent=CUDA_WSL2_CPU_QUOTA_PERCENT,
+    cargo_min_available_gib=13,
+    cargo_memory_scope="outer-wsl2-qualification-scope",
+    cargo_execution_mode="delegated-cgroup",
+    cargo_private_network=True,
+    cargo_environment_policy="closed-qualification-test-v1",
+    cargo_service_runtime_max_seconds=1740,
+    cargo_host_reserve_gib=3,
+    cargo_max_memory_gib=10,
+    timeout_seconds=1800.0,
+    cudarc_cuda_version="12080",
+    cuda_archs="89",
+    qualification_device_required=True,
+)
+
+
+def _cuda_variant_config() -> dict[str, Any]:
+    config = mixed._variant_config(
+        serving_profile="stable",
+        kv_autoscale_requested=False,
+        kv_autoscale_enabled=False,
+        memory_reclaim_requested_mode="off",
+        memory_reclaim_mode="off",
+        rocm_graphs_requested=False,
+        rocm_graphs_enabled=False,
+        request_timeout_seconds=900,
+        max_decode_batch=1,
+        max_prefill_layers_per_cycle=8,
+    )
+    config["build"] = CUDA_BUILD_SPEC.effective_config()
+    config["server"].update(
+        {
+            "http_send_buffer_bytes": 212_992,
+            "max_batch_tokens": 4096,
+            "max_prefill_tokens_per_cycle": 512,
+            "max_prefill_layers_per_cycle": 8,
+            "max_decode_batch": 1,
+            "max_prefill_staging_slots": 0,
+            "max_active_requests": 1,
+            "max_prefill_staging_priority_burst": 0,
+        }
+    )
+    config["runtime"].update(
+        {
+            "prefix_cache_requested_enabled": True,
+            "prefix_cache_effective_enabled": True,
+            "prefix_cache_effective_reason": "active",
+            "vulkan_buffer_pool_gb": 0.0,
+        }
+    )
+    config["model"] = {
+        "checkpoint_read_mib_per_second": 256,
+        "accelerator_weight_upload_mib_per_second": 256,
+        "vulkan_decode_weight_prewarm": False,
+        "vulkan_decode_weight_prewarm_mib_per_second": 512,
+    }
+    return config
 
 
 def _vulkan_variant_config() -> dict[str, Any]:
@@ -164,6 +247,7 @@ def _vulkan_variant_config() -> dict[str, Any]:
 mixed.VARIANT_CONFIGS[ROCM_ENDURANCE_VARIANT] = mixed.VARIANT_CONFIGS[RUNTIME_VARIANT]
 mixed.VARIANT_CONFIGS[VULKAN_RUNTIME_VARIANT] = _vulkan_variant_config()
 mixed.VARIANT_CONFIGS[VULKAN_ENDURANCE_VARIANT] = _vulkan_variant_config()
+mixed.VARIANT_CONFIGS[CUDA_ENDURANCE_VARIANT] = _cuda_variant_config()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -197,6 +281,14 @@ class SoakRuntime:
     host_swap_growth_limit_bytes: int | None = None
     host_thermal_policy: thermal.HostThermalPolicy | None = None
     accelerator_telemetry_required: bool = False
+    gpu_memory_device_uuid: str | None = None
+    gpu_memory_device_name: str | None = None
+    gpu_memory_total_bytes: int | None = None
+    external_wsl2_thermal_policy_sha256: str | None = None
+    external_wsl2_pause_allowance_seconds: float = 0.0
+    kv_num_blocks: int | None = None
+    inference_memory_fraction: float | None = None
+    memory_floor_gb: float | None = None
 
 
 ROCM_RUNTIME = SoakRuntime(
@@ -268,6 +360,43 @@ VULKAN_ENDURANCE_RUNTIME = dataclasses.replace(
     VULKAN_RUNTIME,
     variant_id=VULKAN_ENDURANCE_VARIANT,
 )
+CUDA_ENDURANCE_RUNTIME = SoakRuntime(
+    variant_id=CUDA_ENDURANCE_VARIANT,
+    backend="cuda",
+    build_spec=CUDA_BUILD_SPEC,
+    gpu_memory_scope="device_global",
+    gpu_memory_source="nvml_used",
+    graph_execution_required=False,
+    wave_concurrency=CUDA_QUALIFIED_WAVE_CONCURRENCY,
+    prompt_words=CUDA_QUALIFIED_PROMPT_WORDS,
+    prompt_assignment=COHORT_BY_CYCLE,
+    max_tokens=32,
+    cancel_every_waves=4,
+    cancellation_max_tokens=256,
+    cancellation_prompt_words=48,
+    request_timeout_seconds=900.0,
+    max_steady_state_warmup_waves=16,
+    graph_cache_max=8,
+    min_stabilization_cycles=4,
+    max_stabilization_cycles=8,
+    required_stable_cycles=2,
+    stabilization_gpu_delta_limit_bytes=64 * 1024 * 1024,
+    stabilization_rss_delta_limit_bytes=16 * 1024 * 1024,
+    active_gpu_peak_growth_limit_bytes=512 * 1024 * 1024,
+    vulkan_allocation_growth_limit_count=None,
+    vulkan_buffer_pool_gb=0.0,
+    setup_deadline_seconds=1800.0,
+    gpu_memory_device_uuid=CUDA_GPU_UUID,
+    gpu_memory_device_name=CUDA_GPU_NAME,
+    gpu_memory_total_bytes=CUDA_GPU_TOTAL_BYTES,
+    external_wsl2_thermal_policy_sha256=CUDA_WSL2_THERMAL_POLICY_SHA256,
+    external_wsl2_pause_allowance_seconds=(
+        CUDA_EXTERNAL_PACING_ALLOWANCE_SECONDS
+    ),
+    kv_num_blocks=CUDA_KV_BLOCKS,
+    inference_memory_fraction=CUDA_INFERENCE_MEMORY_FRACTION,
+    memory_floor_gb=CUDA_MEMORY_FLOOR_GB,
+)
 RUNTIMES = {
     runtime.variant_id: runtime
     for runtime in (
@@ -275,6 +404,7 @@ RUNTIMES = {
         ROCM_ENDURANCE_RUNTIME,
         VULKAN_RUNTIME,
         VULKAN_ENDURANCE_RUNTIME,
+        CUDA_ENDURANCE_RUNTIME,
     )
 }
 
@@ -286,6 +416,59 @@ def runtime_for_variant(variant: str) -> SoakRuntime:
         raise SoakError(
             f"{VARIANT_ENV} must name one of {sorted(RUNTIMES)}, got {variant!r}"
         ) from exc
+
+
+def validate_cuda_wsl2_runner_environment(source: dict[str, str]) -> None:
+    allowed = (
+        mixed.RUNNER_OWNED_KILN_ENVIRONMENT
+        | mixed.WSL2_RUNNER_OWNED_KILN_ENVIRONMENT
+    )
+    unexpected = sorted(
+        key for key in source if key.startswith("KILN_") and key not in allowed
+    )
+    if unexpected:
+        raise SoakError(
+            "CUDA endurance rejects ambient Kiln controls: "
+            + ", ".join(unexpected)
+        )
+    expected = {
+        mixed.VARIANT_ENV: CUDA_ENDURANCE_VARIANT,
+        "KILN_QUALIFICATION_NETWORK_ISOLATION": (
+            "util-linux-unshare-user-net-pid-landlock-v1"
+        ),
+        "KILN_WSL2_SCOPE_BOUNDARY": "systemd-user-scope-feedback-v1",
+        "KILN_WSL2_SCOPE_CPU_QUOTA_PERCENT": str(
+            CUDA_WSL2_CPU_QUOTA_PERCENT
+        ),
+        "KILN_WSL2_SCOPE_MEMORY_MAX_BYTES": str(
+            CUDA_WSL2_MEMORY_MAX_BYTES
+        ),
+        "KILN_WSL2_SCOPE_PIDS_MAX": str(CUDA_WSL2_PIDS_MAX),
+        "KILN_WSL2_THERMAL_POLICY_SHA256": (
+            CUDA_WSL2_THERMAL_POLICY_SHA256
+        ),
+    }
+    for name, expected_value in expected.items():
+        if source.get(name) != expected_value:
+            raise SoakError(
+                f"CUDA endurance requires {name}={expected_value!r}, "
+                f"got {source.get(name)!r}"
+            )
+    if not source.get(mixed.RESULT_ENV):
+        raise SoakError(f"CUDA endurance requires {mixed.RESULT_ENV}")
+    if re.fullmatch(
+        r"kiln-wsl-scope-[0-9a-f]{32}",
+        source.get("KILN_WSL2_SCOPE_UNIT", ""),
+    ) is None:
+        raise SoakError("CUDA endurance scope unit is invalid")
+    if re.fullmatch(
+        r"[1-9][0-9]*",
+        source.get("KILN_WSL2_SCOPE_HOST_UID", ""),
+    ) is None:
+        raise SoakError("CUDA endurance scope host UID is invalid")
+    pacing_path = Path(source.get(CUDA_WSL2_PACING_EVENTS_PATH_ENV, ""))
+    if not pacing_path.is_absolute():
+        raise SoakError("CUDA endurance pacing event path must be absolute")
 
 
 def build_phase_deadline(started: float, runtime: SoakRuntime) -> float:
@@ -318,7 +501,12 @@ def measurement_phase_deadline(
     minimum_duration_seconds: float,
     runtime: SoakRuntime,
 ) -> float:
-    return started + minimum_duration_seconds + runtime.request_timeout_seconds
+    return (
+        started
+        + minimum_duration_seconds
+        + runtime.external_wsl2_pause_allowance_seconds
+        + runtime.request_timeout_seconds
+    )
 
 
 def qualification_case_timeout_seconds(
@@ -329,6 +517,7 @@ def qualification_case_timeout_seconds(
         runtime.build_spec.timeout_seconds
         + runtime.setup_deadline_seconds
         + minimum_duration_seconds
+        + runtime.external_wsl2_pause_allowance_seconds
         + runtime.request_timeout_seconds
         + CASE_TEARDOWN_GRACE_SECONDS
     )
@@ -500,6 +689,13 @@ ROCM_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     **HOST_SAFETY_METRIC_DEFINITIONS,
     **ACCELERATOR_TELEMETRY_METRIC_DEFINITIONS,
 }
+CUDA_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
+    **METRIC_DEFINITIONS,
+    "external_wsl2_active_measurement_seconds": ("s", "sum", False),
+    "external_wsl2_thermal_pause_count": ("count", "sum", False),
+    "external_wsl2_thermal_pause_max_seconds": ("s", "max", True),
+    "external_wsl2_thermal_pause_seconds": ("s", "sum", True),
+}
 VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     **METRIC_DEFINITIONS,
     **HOST_SAFETY_METRIC_DEFINITIONS,
@@ -638,6 +834,210 @@ class RequestWorkerEvidence:
         self.peak_residue_count = max(self.peak_residue_count, residue_count)
 
 
+@dataclasses.dataclass(frozen=True)
+class ExternalWsl2PacingEvidence:
+    events: tuple[mixed.ObservedEvent, ...]
+    completed_pause_count: int
+    total_pause_seconds: float
+    longest_pause_seconds: float
+
+    def metric_values(self) -> dict[str, float | int]:
+        return {
+            "external_wsl2_thermal_pause_count": self.completed_pause_count,
+            "external_wsl2_thermal_pause_max_seconds": self.longest_pause_seconds,
+            "external_wsl2_thermal_pause_seconds": self.total_pause_seconds,
+        }
+
+
+def _strict_json_object(payload: str) -> dict[str, Any]:
+    def object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for name, item in pairs:
+            if name in value:
+                raise SoakError(
+                    f"WSL2 pacing event repeats field {name!r}"
+                )
+            value[name] = item
+        return value
+
+    try:
+        value = json.loads(payload, object_pairs_hook=object_pairs)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise SoakError(f"WSL2 pacing event is malformed JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise SoakError("WSL2 pacing event must be an object")
+    return value
+
+
+def external_wsl2_pacing_evidence(
+    measurement_started: float,
+    source: dict[str, str] | None = None,
+) -> ExternalWsl2PacingEvidence:
+    environment = dict(os.environ) if source is None else source
+    raw_path = environment.get(CUDA_WSL2_PACING_EVENTS_PATH_ENV)
+    if not raw_path:
+        raise SoakError("CUDA endurance lacks the trusted WSL2 pacing event path")
+    path = Path(raw_path)
+    if not path.is_absolute():
+        raise SoakError("WSL2 pacing event path must be absolute and non-symlink")
+    descriptor: int | None = None
+    try:
+        parent = path.parent.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+        metadata = os.fstat(descriptor)
+    except OSError as exc:
+        raise SoakError(f"cannot inspect WSL2 pacing event stream: {exc}") from exc
+    try:
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o400
+            or not stat.S_ISDIR(parent.st_mode)
+            or parent.st_uid != os.getuid()
+            or stat.S_IMODE(parent.st_mode) & 0o077
+        ):
+            raise SoakError(
+                "WSL2 pacing event stream has unsafe type, ownership, or mode"
+            )
+        if metadata.st_size > 8 * 1024 * 1024:
+            raise SoakError("WSL2 pacing event stream exceeds 8 MiB")
+        payload_bytes = b""
+        while chunk := os.read(descriptor, 65_536):
+            payload_bytes += chunk
+            if len(payload_bytes) > 8 * 1024 * 1024:
+                raise SoakError("WSL2 pacing event stream exceeds 8 MiB")
+        payload = payload_bytes.decode("ascii")
+    except (OSError, UnicodeError) as exc:
+        raise SoakError(f"cannot read WSL2 pacing event stream: {exc}") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if payload and not payload.endswith("\n"):
+        raise SoakError("WSL2 pacing event stream ends with a partial record")
+
+    expected_keys = {
+        "active",
+        "duration_seconds",
+        "gpu_millicelsius",
+        "host_millicelsius",
+        "observed_monotonic_seconds",
+        "pause_index",
+        "policy_sha256",
+        "schema",
+        "sequence",
+        "started_monotonic_seconds",
+        "transition",
+    }
+    active: tuple[int, float] | None = None
+    observed_events: list[mixed.ObservedEvent] = []
+    completed_durations: list[float] = []
+    next_pause_index = 1
+    last_observed = -math.inf
+    for sequence, line in enumerate(payload.splitlines()):
+        value = _strict_json_object(line)
+        if set(value) != expected_keys:
+            raise SoakError("WSL2 pacing event violates its exact schema")
+        if (
+            value["schema"] != CUDA_WSL2_PACING_EVENT_SCHEMA
+            or value["policy_sha256"] != CUDA_WSL2_THERMAL_POLICY_SHA256
+            or isinstance(value["sequence"], bool)
+            or not isinstance(value["sequence"], int)
+            or value["sequence"] != sequence
+        ):
+            raise SoakError(
+                "WSL2 pacing event schema, policy, or sequence drifted"
+            )
+        pause_index = value["pause_index"]
+        started = value["started_monotonic_seconds"]
+        observed = value["observed_monotonic_seconds"]
+        duration = value["duration_seconds"]
+        host = value["host_millicelsius"]
+        gpu = value["gpu_millicelsius"]
+        if (
+            isinstance(pause_index, bool)
+            or not isinstance(pause_index, int)
+            or pause_index < 1
+            or isinstance(started, bool)
+            or not isinstance(started, (int, float))
+            or not math.isfinite(started)
+            or started < 0
+            or isinstance(observed, bool)
+            or not isinstance(observed, (int, float))
+            or not math.isfinite(observed)
+            or observed < started
+            or observed < last_observed
+            or isinstance(duration, bool)
+            or not isinstance(duration, (int, float))
+            or not math.isfinite(duration)
+            or duration < 0
+            or isinstance(host, bool)
+            or not isinstance(host, int)
+            or not -50_000 <= host <= 200_000
+            or isinstance(gpu, bool)
+            or not isinstance(gpu, int)
+            or not 0 < gpu <= 200_000
+        ):
+            raise SoakError("WSL2 pacing event values are invalid")
+        transition = value["transition"]
+        event_active = value["active"]
+        if transition == "started":
+            if (
+                event_active is not True
+                or duration != 0
+                or active is not None
+                or pause_index != next_pause_index
+            ):
+                raise SoakError("WSL2 pacing start transition is inconsistent")
+            if observed != started:
+                raise SoakError("WSL2 pacing start time does not match observation")
+            active = (pause_index, float(started))
+        elif transition == "completed":
+            if event_active is not False or active != (
+                pause_index,
+                float(started),
+            ):
+                raise SoakError("WSL2 pacing completion has no matching start")
+            expected_duration = float(observed) - float(started)
+            if not math.isclose(
+                float(duration),
+                expected_duration,
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            ):
+                raise SoakError("WSL2 pacing duration does not match its interval")
+            active = None
+            next_pause_index += 1
+            measured_overlap = max(
+                0.0,
+                float(observed) - max(float(started), measurement_started),
+            )
+            if measured_overlap > 0:
+                completed_durations.append(measured_overlap)
+        else:
+            raise SoakError(f"unknown WSL2 pacing transition {transition!r}")
+        if observed >= measurement_started:
+            observed_events.append(
+                mixed.ObservedEvent(
+                    observed=float(observed),
+                    category="host_thermal_pacing",
+                    message=f"external WSL2 thermal pacing {transition}",
+                    fields=value,
+                )
+            )
+        last_observed = float(observed)
+    if active is not None:
+        raise SoakError("WSL2 pacing event stream ends during an active pause")
+    return ExternalWsl2PacingEvidence(
+        events=tuple(observed_events),
+        completed_pause_count=len(completed_durations),
+        total_pause_seconds=sum(completed_durations),
+        longest_pause_seconds=max(completed_durations, default=0.0),
+    )
+
+
 def effective_config(
     minimum_duration_seconds: float,
     memory_growth_limit_bytes: int,
@@ -667,28 +1067,6 @@ def effective_config(
             "cancel_every_waves": runtime.cancel_every_waves,
             "gpu_memory_scope": runtime.gpu_memory_scope,
             "gpu_memory_source": runtime.gpu_memory_source,
-            "accelerator_telemetry": {
-                "active_busy_floor_percent": (
-                    ACCELERATOR_TELEMETRY_ACTIVE_BUSY_FLOOR_PERCENT
-                ),
-                "amd_gpu_vendor_id": AMD_GPU_VENDOR_ID,
-                "device_selector": "exactly_one_amd_drm_device",
-                "mode": (
-                    "required"
-                    if runtime.accelerator_telemetry_required
-                    else "if_available"
-                ),
-                "poll_interval_ms": int(
-                    HOST_GUARD_POLL_INTERVAL_SECONDS * 1000
-                ),
-                "sources": {
-                    "busy": "drm_device/gpu_busy_percent",
-                    "edge_temperature": "amdgpu_hwmon/temp_edge_input",
-                    "power": "amdgpu_hwmon/power_PPT_average",
-                    "sclk": "amdgpu_hwmon/freq_sclk_input",
-                    "sclk_advertised_max": "drm_device/pp_dpm_sclk",
-                },
-            },
             "active_gpu_peak_growth_limit_bytes": (
                 runtime.active_gpu_peak_growth_limit_bytes
                 if runtime.active_gpu_peak_growth_limit_bytes is not None
@@ -719,7 +1097,9 @@ def effective_config(
             ),
             "deadline_policy": "independent_build_setup_and_measurement",
             "measurement_deadline_seconds": int(
-                minimum_duration_seconds + runtime.request_timeout_seconds
+                minimum_duration_seconds
+                + runtime.external_wsl2_pause_allowance_seconds
+                + runtime.request_timeout_seconds
             ),
             "qualification_case_timeout_seconds": qualification_case_timeout_seconds(
                 minimum_duration_seconds, runtime
@@ -732,7 +1112,11 @@ def effective_config(
             "stabilization_memory_boundary": (
                 "process_drm_and_owned_buffers"
                 if runtime.backend == "vulkan"
-                else "gpu_and_rss"
+                else (
+                    "nvml_device_and_rss"
+                    if runtime.backend == "cuda"
+                    else "gpu_and_rss"
+                )
             ),
             "stabilization_max_cycles": runtime.max_stabilization_cycles,
             "stabilization_min_cycles": runtime.min_stabilization_cycles,
@@ -757,6 +1141,62 @@ def effective_config(
         effective["batching"] = base["batching"]
     if "model" in base:
         effective["model"] = base["model"]
+    if runtime.backend in {"rocm", "vulkan"}:
+        effective["soak"]["accelerator_telemetry"] = {
+            "active_busy_floor_percent": (
+                ACCELERATOR_TELEMETRY_ACTIVE_BUSY_FLOOR_PERCENT
+            ),
+            "amd_gpu_vendor_id": AMD_GPU_VENDOR_ID,
+            "device_selector": "exactly_one_amd_drm_device",
+            "mode": (
+                "required"
+                if runtime.accelerator_telemetry_required
+                else "if_available"
+            ),
+            "poll_interval_ms": int(HOST_GUARD_POLL_INTERVAL_SECONDS * 1000),
+            "sources": {
+                "busy": "drm_device/gpu_busy_percent",
+                "edge_temperature": "amdgpu_hwmon/temp_edge_input",
+                "power": "amdgpu_hwmon/power_PPT_average",
+                "sclk": "amdgpu_hwmon/freq_sclk_input",
+                "sclk_advertised_max": "drm_device/pp_dpm_sclk",
+            },
+        }
+    if runtime.backend == "cuda":
+        effective["soak"]["gpu_memory_device"] = {
+            "name": runtime.gpu_memory_device_name,
+            "total_bytes": runtime.gpu_memory_total_bytes,
+            "uuid": runtime.gpu_memory_device_uuid,
+        }
+        effective["soak"]["external_wsl2_boundary"] = {
+            "containment": "util-linux-unshare-user-net-pid-landlock-v1",
+            "cpu_quota_percent": CUDA_WSL2_CPU_QUOTA_PERCENT,
+            "memory_max_bytes": CUDA_WSL2_MEMORY_MAX_BYTES,
+            "memory_swap_max_bytes": 0,
+            "active_measurement_seconds_required": minimum_duration_seconds,
+            "cumulative_pacing_allowance_seconds": (
+                runtime.external_wsl2_pause_allowance_seconds
+            ),
+            "duration_accounting": (
+                "measurement_wall_seconds_minus_verified_pacing_overlap"
+            ),
+            "pacing_event_stream": {
+                "controller": "scripts/qualification/wsl_scope_exec.py",
+                "environment_variable": CUDA_WSL2_PACING_EVENTS_PATH_ENV,
+                "mode": "outer_controller_append_contained_driver_read_only",
+                "schema": CUDA_WSL2_PACING_EVENT_SCHEMA,
+            },
+            "pids_max": CUDA_WSL2_PIDS_MAX,
+            "scope": "systemd-user-scope-feedback-v1",
+            "thermal_policy_sha256": (
+                runtime.external_wsl2_thermal_policy_sha256
+            ),
+        }
+        effective["soak"]["server_memory"] = {
+            "inference_memory_fraction": runtime.inference_memory_fraction,
+            "kv_num_blocks": runtime.kv_num_blocks,
+            "memory_floor_gb": runtime.memory_floor_gb,
+        }
     if runtime.backend == "rocm":
         effective["soak"]["rocm_graph_admission_policy"] = (
             ROCM_GRAPH_ADMISSION_POLICY
@@ -1595,6 +2035,8 @@ def process_drm_memory_bytes(pid: int, proc_root: Path = Path("/proc")) -> int:
 
 
 def gpu_memory_bytes(port: int, pid: int, runtime: SoakRuntime) -> int:
+    if runtime.gpu_memory_source == "nvml_used":
+        raise SoakError("NVML device memory requires the persistent sampler")
     if runtime.gpu_memory_scope == "server_process":
         return process_drm_memory_bytes(pid)
     if runtime.gpu_memory_scope != "device_global":
@@ -1613,6 +2055,46 @@ class GpuMemorySampler:
         self.stop = threading.Event()
         self.samples: list[int] = []
         self.errors: list[str] = []
+        self._read_lock = threading.Lock()
+        self._nvml_counter: device_memory.NvmlMemoryCounter | None = None
+        self._counter_closed = False
+        if runtime.gpu_memory_source == "nvml_used":
+            if runtime.gpu_memory_device_uuid is None:
+                raise SoakError("NVML memory sampling requires an exact GPU UUID")
+            self._nvml_counter = device_memory.NvmlMemoryCounter(
+                None,
+                device_uuid=runtime.gpu_memory_device_uuid,
+            )
+            try:
+                identity = self._nvml_counter.receipt_identity().get("device")
+            except Exception as exc:
+                try:
+                    self._nvml_counter.close()
+                except Exception as close_exc:
+                    raise SoakError(
+                        "cannot bind NVML device identity and cannot close its "
+                        f"counter: {exc}; {close_exc}"
+                    ) from exc
+                finally:
+                    self._counter_closed = True
+                raise SoakError(
+                    f"cannot bind NVML device identity: {exc}"
+                ) from exc
+            expected_identity = {
+                "uuid": runtime.gpu_memory_device_uuid,
+                "name": runtime.gpu_memory_device_name,
+                "total_bytes": runtime.gpu_memory_total_bytes,
+            }
+            if not isinstance(identity, dict) or any(
+                identity.get(name) != value
+                for name, value in expected_identity.items()
+            ):
+                self._nvml_counter.close()
+                self._counter_closed = True
+                raise SoakError(
+                    f"NVML device identity {identity!r} does not match "
+                    f"{expected_identity!r}"
+                )
         self.thread = threading.Thread(
             target=self._run, name="qualification-gpu-memory-sampler"
         )
@@ -1623,20 +2105,49 @@ class GpuMemorySampler:
         self.thread.start()
         self._started = True
 
-    def close(self) -> None:
+    def stop_sampling(self) -> None:
         self.stop.set()
-        if not self._started:
-            return
-        self.thread.join(timeout=10.0)
-        if self.thread.is_alive() and len(self.errors) < 8:
-            self.errors.append("GPU memory sampler thread did not stop within 10 seconds")
+        if self._started:
+            self.thread.join(timeout=10.0)
+            if self.thread.is_alive() and len(self.errors) < 8:
+                self.errors.append(
+                    "GPU memory sampler thread did not stop within 10 seconds"
+                )
+
+    def close(self) -> None:
+        self.stop_sampling()
+        if self._nvml_counter is not None and not self._counter_closed:
+            try:
+                with self._read_lock:
+                    self._nvml_counter.close()
+            except Exception as exc:
+                if len(self.errors) < 8:
+                    self.errors.append(f"{type(exc).__name__}: {exc}")
+            finally:
+                self._counter_closed = True
+
+    def read_bytes(self) -> int:
+        with self._read_lock:
+            if self.errors:
+                raise SoakError(
+                    "GPU memory sampler previously failed: " + ", ".join(self.errors)
+                )
+            if self._nvml_counter is not None:
+                if self._counter_closed:
+                    raise SoakError("NVML memory counter is already closed")
+                try:
+                    return self._nvml_counter.read_bytes()
+                except Exception as exc:
+                    raise SoakError(f"NVML memory sampling failed: {exc}") from exc
+            return gpu_memory_bytes(self.port, self.pid, self.runtime)
 
     def _sample(self) -> None:
         try:
-            self.samples.append(gpu_memory_bytes(self.port, self.pid, self.runtime))
+            self.samples.append(self.read_bytes())
         except Exception as exc:
             if len(self.errors) < 8:
                 self.errors.append(f"{type(exc).__name__}: {exc}")
+            self.stop.set()
 
     def _run(self) -> None:
         while not self.stop.wait(mixed.MEMORY_POLL_INTERVAL_SECONDS):
@@ -2577,6 +3088,8 @@ def metric_definitions(
         return ROCM_METRIC_DEFINITIONS
     if runtime.backend == "vulkan":
         return VULKAN_METRIC_DEFINITIONS
+    if runtime.backend == "cuda":
+        return CUDA_METRIC_DEFINITIONS
     raise SoakError(f"unsupported soak metric backend {runtime.backend!r}")
 
 
@@ -2732,6 +3245,8 @@ def execute(
     memory_growth_limit_bytes: int,
     runtime: SoakRuntime = ROCM_RUNTIME,
 ) -> tuple[list[dict[str, Any]], str | None]:
+    if runtime.backend == "cuda":
+        validate_cuda_wsl2_runner_environment(dict(os.environ))
     binary, binary_hash, build_seconds, runtime_started, setup_deadline = (
         build_binary_for_soak(runtime)
     )
@@ -2755,11 +3270,23 @@ def execute(
         adapter_dir,
         snapshot_dir,
         rocm_graph_cache_entries=runtime.graph_cache_max,
+        cuda_graphs=False,
+        kv_num_blocks=runtime.kv_num_blocks,
+        inference_memory_fraction=runtime.inference_memory_fraction,
+        memory_floor_gb=runtime.memory_floor_gb,
     )
     process, server_log = mixed.start_server(
         binary, config_path, runtime.variant_id, runtime.build_spec
     )
-    sampler = GpuMemorySampler(port, process.pid, runtime)
+    try:
+        sampler = GpuMemorySampler(port, process.pid, runtime)
+    except Exception:
+        try:
+            mixed.terminate_process(process)
+        finally:
+            server_log.join()
+            shutil.rmtree(run_dir, ignore_errors=True)
+        raise
     accelerator_sampler = AcceleratorTelemetrySampler(
         required=runtime.accelerator_telemetry_required
     )
@@ -2780,7 +3307,8 @@ def execute(
         thermal_guard.start()
     if host_guard is not None:
         host_guard.start()
-    accelerator_sampler.start()
+    if runtime.backend in {"rocm", "vulkan"}:
+        accelerator_sampler.start()
     shutdown: mixed.ShutdownOutcome | None = None
     snapshot_residue: list[str] = []
     values: dict[str, float | int] | None = None
@@ -2807,6 +3335,7 @@ def execute(
     observed_batched_state_end: dict[str, int | bool] | None = None
     observed_process_mappings_start: ProcessMemoryMappingSnapshot | None = None
     observed_process_mappings_end: ProcessMemoryMappingSnapshot | None = None
+    external_pacing: ExternalWsl2PacingEvidence | None = None
     warmup: mixed.StreamResult | None = None
     health_start: dict[str, Any] | None = None
     health_end: dict[str, Any] | None = None
@@ -2989,7 +3518,7 @@ def execute(
                 waves=steady_state_warmup_waves,
             )
 
-        previous_gpu = gpu_memory_bytes(port, process.pid, runtime)
+        previous_gpu = sampler.read_bytes()
         previous_memory = process_memory_snapshot(process.pid)
         stabilization_memory_baseline = previous_memory
         previous_process_mappings = (
@@ -3179,7 +3708,7 @@ def execute(
 
             if cycle_failures:
                 raise SoakError("; ".join(dict.fromkeys(cycle_failures)))
-            current_gpu = gpu_memory_bytes(port, process.pid, runtime)
+            current_gpu = sampler.read_bytes()
             current_memory = process_memory_snapshot(process.pid)
             current_process_mappings = (
                 process_memory_mapping_snapshot(process.pid)
@@ -3419,7 +3948,7 @@ def execute(
         )
         if baseline_resident_failures:
             raise SoakError("; ".join(baseline_resident_failures))
-        gpu_start = gpu_memory_bytes(port, process.pid, runtime)
+        gpu_start = sampler.read_bytes()
         gpu_end = gpu_start
         rss_start = process_memory_snapshot(process.pid).rss_bytes
         rss_end = rss_start
@@ -3431,13 +3960,39 @@ def execute(
         mixed.trace(
             "soak_measurement_started",
             deadline_seconds=minimum_duration_seconds
+            + runtime.external_wsl2_pause_allowance_seconds
             + runtime.request_timeout_seconds,
+            external_wsl2_pause_allowance_seconds=(
+                runtime.external_wsl2_pause_allowance_seconds
+            ),
             minimum_duration_seconds=minimum_duration_seconds,
             setup_elapsed_seconds=measurement_started - runtime_started,
         )
         rss_samples = [rss_start]
 
-        while wave == 0 or time.monotonic() - measurement_started < minimum_duration_seconds:
+        while True:
+            elapsed_before_wave = phase_elapsed_seconds(measurement_started)
+            paused_before_wave = 0.0
+            if runtime.backend == "cuda":
+                current_pacing = external_wsl2_pacing_evidence(
+                    measurement_started
+                )
+                paused_before_wave = current_pacing.total_pause_seconds
+                if (
+                    paused_before_wave
+                    > runtime.external_wsl2_pause_allowance_seconds
+                ):
+                    raise SoakError(
+                        "external WSL2 thermal pacing exceeded the cumulative "
+                        "measurement allowance: "
+                        f"{paused_before_wave:.3f} > "
+                        f"{runtime.external_wsl2_pause_allowance_seconds:.3f} seconds"
+                    )
+            active_before_wave = max(
+                0.0, elapsed_before_wave - paused_before_wave
+            )
+            if wave > 0 and active_before_wave >= minimum_duration_seconds:
+                break
             wave_failures: list[str] = []
             if thermal_guard is not None:
                 thermal_guard.set_phase(f"measurement-wave-{wave}")
@@ -3577,7 +4132,7 @@ def execute(
                     f"{device_faults[-1].message}"
                 )
 
-            current_gpu = gpu_memory_bytes(port, process.pid, runtime)
+            current_gpu = sampler.read_bytes()
             current_memory = process_memory_snapshot(process.pid)
             current_vulkan_buffers = vulkan_buffer_snapshot(health, runtime)
             current_vulkan_pool = vulkan_buffer_pool_snapshot(health, runtime)
@@ -3667,7 +4222,7 @@ def execute(
                 failures.extend(wave_failures)
                 break
 
-        sampler.close()
+        sampler.stop_sampling()
         accelerator_sampler.close()
         health_end = wait_drained(
             port, measurement_deadline, "soak final health"
@@ -3697,8 +4252,11 @@ def execute(
         events = server_log.events_since(measurement_started)
         if thermal_guard is not None:
             events.extend(thermal_guard.pacing_events_since(measurement_started))
+        if runtime.backend == "cuda":
+            external_pacing = external_wsl2_pacing_evidence(measurement_started)
+            events.extend(external_pacing.events)
         all_server_events = server_log.events_since(runtime_started)
-        gpu_end = gpu_memory_bytes(port, process.pid, runtime)
+        gpu_end = sampler.read_bytes()
         rss_end = process_memory_snapshot(process.pid).rss_bytes
         if host_guard is not None:
             host_guard.close()
@@ -3708,6 +4266,15 @@ def execute(
         # Fallback stats are flattened by graph_snapshot with a `fallback_` prefix.
         fallback_delta = mixed.counter_delta(graph_start, graph_end, "fallback_total")
         duration = phase_elapsed_seconds(measurement_started)
+        active_measurement_seconds = max(
+            0.0,
+            duration
+            - (
+                external_pacing.total_pause_seconds
+                if external_pacing is not None
+                else 0.0
+            ),
+        )
         result_evidence = measurement_result_evidence(
             warmup_itl_ms=warmup.itl_ms,
             results=all_results,
@@ -3727,7 +4294,25 @@ def execute(
         zero_tokens = int(result_evidence.values["zero_token_response_count"])
         values = {
             **result_evidence.values,
-            **accelerator_sampler.metric_values_since(measurement_started),
+            **(
+                accelerator_sampler.metric_values_since(measurement_started)
+                if runtime.backend in {"rocm", "vulkan"}
+                else {}
+            ),
+            **(
+                external_pacing.metric_values()
+                if external_pacing is not None
+                else {}
+            ),
+            **(
+                {
+                    "external_wsl2_active_measurement_seconds": (
+                        active_measurement_seconds
+                    )
+                }
+                if runtime.backend == "cuda"
+                else {}
+            ),
             "batching_error_count": mixed.counter_delta(
                 batching_start, batching_end, "total_errors"
             ),
@@ -3929,9 +4514,22 @@ def execute(
         if thermal_guard is not None:
             values.update(thermal_guard.metric_values())
             values.update(thermal_guard.pacing_metric_values())
-        if duration < minimum_duration_seconds:
+        if active_measurement_seconds < minimum_duration_seconds:
             failures.append(
-                f"soak duration {duration:.3f}s was below {minimum_duration_seconds:.3f}s"
+                "active soak duration "
+                f"{active_measurement_seconds:.3f}s was below "
+                f"{minimum_duration_seconds:.3f}s"
+            )
+        if (
+            external_pacing is not None
+            and external_pacing.total_pause_seconds
+            > runtime.external_wsl2_pause_allowance_seconds
+        ):
+            failures.append(
+                "external WSL2 thermal pacing exceeded the cumulative "
+                "measurement allowance: "
+                f"{external_pacing.total_pause_seconds:.3f} > "
+                f"{runtime.external_wsl2_pause_allowance_seconds:.3f} seconds"
             )
         if request_failures != 0 or zero_tokens != 0:
             failures.append(
@@ -4079,6 +4677,9 @@ def execute(
         snapshot_residue = mixed.snapshot_payload_residue(snapshot_dir)
         shutil.rmtree(run_dir, ignore_errors=True)
 
+    if sampler.errors:
+        failures.append("GPU memory sampler errors: " + ", ".join(sampler.errors))
+
     if host_guard is not None:
         if host_guard.trip_reason is not None:
             failures.append(host_guard.trip_reason)
@@ -4198,6 +4799,21 @@ def execute(
                 measurement_events.extend(
                     thermal_guard.pacing_events_since(measurement_started)
                 )
+            if runtime.backend == "cuda":
+                try:
+                    external_pacing = external_wsl2_pacing_evidence(
+                        measurement_started
+                    )
+                except SoakError as exc:
+                    failures.append(f"SoakError: {exc}")
+                else:
+                    measurement_events.extend(external_pacing.events)
+                    values.update(external_pacing.metric_values())
+                    values["external_wsl2_active_measurement_seconds"] = max(
+                        0.0,
+                        phase_elapsed_seconds(measurement_started)
+                        - external_pacing.total_pause_seconds,
+                    )
             result_evidence = measurement_result_evidence(
                 warmup_itl_ms=warmup.itl_ms,
                 results=all_results,
@@ -4369,26 +4985,27 @@ def execute(
     if thermal_guard is not None:
         values.update(thermal_guard.metric_values())
         values.update(thermal_guard.pacing_metric_values())
-    accelerator_values = accelerator_sampler.metric_values_since(
-        measurement_started if measurement_started is not None else math.inf
-    )
-    values.update(accelerator_values)
-    if accelerator_sampler.errors:
-        failures.append(
-            "accelerator telemetry errors: "
-            + ", ".join(accelerator_sampler.errors)
+    if runtime.backend in {"rocm", "vulkan"}:
+        accelerator_values = accelerator_sampler.metric_values_since(
+            measurement_started if measurement_started is not None else math.inf
         )
-    if runtime.accelerator_telemetry_required:
-        if accelerator_values["accelerator_telemetry_available"] != 1:
-            failures.append("required accelerator telemetry was unavailable")
-        if accelerator_values["accelerator_telemetry_sample_count"] < 1:
+        values.update(accelerator_values)
+        if accelerator_sampler.errors:
             failures.append(
-                "required accelerator telemetry recorded no measurement samples"
+                "accelerator telemetry errors: "
+                + ", ".join(accelerator_sampler.errors)
             )
-        if accelerator_values["accelerator_telemetry_active_sample_count"] < 1:
-            failures.append(
-                "required accelerator telemetry recorded no active GPU samples"
-            )
+        if runtime.accelerator_telemetry_required:
+            if accelerator_values["accelerator_telemetry_available"] != 1:
+                failures.append("required accelerator telemetry was unavailable")
+            if accelerator_values["accelerator_telemetry_sample_count"] < 1:
+                failures.append(
+                    "required accelerator telemetry recorded no measurement samples"
+                )
+            if accelerator_values["accelerator_telemetry_active_sample_count"] < 1:
+                failures.append(
+                    "required accelerator telemetry recorded no active GPU samples"
+                )
     assert shutdown is not None
     values["shutdown_forced_count"] = int(shutdown.forced)
     values["shutdown_nonzero_count"] = int(shutdown.returncode != 0)

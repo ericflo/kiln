@@ -107,6 +107,48 @@ def write_amd_telemetry_fixture(root: Path) -> dict[str, Path]:
     return paths
 
 
+def write_wsl2_pacing_fixture(
+    root: Path,
+    records: list[dict[str, object]],
+) -> Path:
+    path = root / "thermal-pacing-events.jsonl"
+    if path.exists():
+        path.chmod(0o600)
+    path.write_text(
+        "".join(
+            json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n"
+            for record in records
+        ),
+        encoding="ascii",
+    )
+    path.chmod(0o400)
+    return path
+
+
+def wsl2_pacing_record(
+    *,
+    sequence: int,
+    transition: str,
+    active: bool,
+    started: float,
+    observed: float,
+    pause_index: int = 1,
+) -> dict[str, object]:
+    return {
+        "active": active,
+        "duration_seconds": 0.0 if active else observed - started,
+        "gpu_millicelsius": 74_000 if active else 69_000,
+        "host_millicelsius": 80_000 if active else 74_000,
+        "observed_monotonic_seconds": observed,
+        "pause_index": pause_index,
+        "policy_sha256": soak.CUDA_WSL2_THERMAL_POLICY_SHA256,
+        "schema": soak.CUDA_WSL2_PACING_EVENT_SCHEMA,
+        "sequence": sequence,
+        "started_monotonic_seconds": started,
+        "transition": transition,
+    }
+
+
 class ServeRocmSoakTests(unittest.TestCase):
     def test_drained_warmup_evidence_survives_later_policy_failure(self) -> None:
         requests, waves = soak.record_drained_warmup_wave(
@@ -448,6 +490,263 @@ class ServeRocmSoakTests(unittest.TestCase):
             123,
         )
 
+        cuda = soak.effective_config(
+            soak.CUDA_ENDURANCE_DURATION_SECONDS,
+            soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
+            soak.CUDA_ENDURANCE_RUNTIME,
+        )
+        self.assertIs(
+            soak.runtime_for_variant(soak.CUDA_ENDURANCE_VARIANT),
+            soak.CUDA_ENDURANCE_RUNTIME,
+        )
+        self.assertEqual(cuda["build"], soak.CUDA_BUILD_SPEC.effective_config())
+        self.assertEqual(cuda["runtime"]["serving_profile"], "stable")
+        self.assertFalse(cuda["runtime"]["kv_autoscale_enabled"])
+        self.assertEqual(cuda["runtime"]["memory_reclaim_mode"], "off")
+        self.assertEqual(cuda["server"]["max_active_requests"], 1)
+        self.assertEqual(cuda["server"]["max_prefill_staging_slots"], 0)
+        self.assertEqual(cuda["server"]["request_timeout_seconds"], 900)
+        self.assertEqual(
+            cuda["soak"]["wave_concurrency"],
+            {"wave_0": 1},
+        )
+        self.assertEqual(
+            cuda["soak"]["prompt_words"],
+            {"slot_0": 16, "slot_1": 64, "slot_2": 256, "slot_3": 1024},
+        )
+        self.assertEqual(
+            cuda["soak"]["gpu_memory_device"],
+            {
+                "name": soak.CUDA_GPU_NAME,
+                "total_bytes": soak.CUDA_GPU_TOTAL_BYTES,
+                "uuid": soak.CUDA_GPU_UUID,
+            },
+        )
+        self.assertEqual(
+            cuda["soak"]["server_memory"],
+            {
+                "inference_memory_fraction": 0.1,
+                "kv_num_blocks": 62,
+                "memory_floor_gb": 1.0,
+            },
+        )
+        self.assertEqual(
+            cuda["soak"]["external_wsl2_boundary"]["pacing_event_stream"],
+            {
+                "controller": "scripts/qualification/wsl_scope_exec.py",
+                "environment_variable": soak.CUDA_WSL2_PACING_EVENTS_PATH_ENV,
+                "mode": "outer_controller_append_contained_driver_read_only",
+                "schema": soak.CUDA_WSL2_PACING_EVENT_SCHEMA,
+            },
+        )
+        self.assertEqual(
+            cuda["soak"]["external_wsl2_boundary"][
+                "active_measurement_seconds_required"
+            ],
+            28_800,
+        )
+        self.assertEqual(
+            cuda["soak"]["external_wsl2_boundary"][
+                "cumulative_pacing_allowance_seconds"
+            ],
+            14_400,
+        )
+        self.assertEqual(cuda["soak"]["measurement_deadline_seconds"], 44_100)
+        self.assertEqual(
+            cuda["soak"]["qualification_case_timeout_seconds"],
+            47_880,
+        )
+        self.assertNotIn("accelerator_telemetry", cuda["soak"])
+        self.assertNotIn("host_thermal_guard", cuda["soak"])
+
+    def test_cuda_runner_environment_is_exact_and_requires_pacing_stream(
+        self,
+    ) -> None:
+        source = {
+            soak.mixed.RESULT_ENV: "/tmp/result.json",
+            soak.mixed.VARIANT_ENV: soak.CUDA_ENDURANCE_VARIANT,
+            "KILN_QUALIFICATION_NETWORK_ISOLATION": (
+                "util-linux-unshare-user-net-pid-landlock-v1"
+            ),
+            "KILN_WSL2_SCOPE_BOUNDARY": "systemd-user-scope-feedback-v1",
+            "KILN_WSL2_SCOPE_CPU_QUOTA_PERCENT": "50",
+            "KILN_WSL2_SCOPE_HOST_UID": "1000",
+            "KILN_WSL2_SCOPE_MEMORY_MAX_BYTES": str(10 * 1024**3),
+            "KILN_WSL2_SCOPE_PIDS_MAX": "512",
+            "KILN_WSL2_SCOPE_UNIT": "kiln-wsl-scope-" + "a" * 32,
+            soak.CUDA_WSL2_PACING_EVENTS_PATH_ENV: "/tmp/events.jsonl",
+            "KILN_WSL2_THERMAL_POLICY_SHA256": (
+                soak.CUDA_WSL2_THERMAL_POLICY_SHA256
+            ),
+        }
+        soak.validate_cuda_wsl2_runner_environment(source)
+
+        missing = dict(source)
+        del missing[soak.CUDA_WSL2_PACING_EVENTS_PATH_ENV]
+        with self.assertRaisesRegex(soak.SoakError, "path must be absolute"):
+            soak.validate_cuda_wsl2_runner_environment(missing)
+
+        ambient = dict(source, KILN_SERVER_PORT="9999")
+        with self.assertRaisesRegex(soak.SoakError, "ambient Kiln controls"):
+            soak.validate_cuda_wsl2_runner_environment(ambient)
+
+    def test_cuda_source_build_environment_preserves_only_delegated_controls(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cargo = Path(directory) / "cargo"
+            cargo.write_text("#!/bin/sh\n", encoding="ascii")
+            cargo.chmod(0o755)
+            source = {
+                "CARGO": str(cargo),
+                "HOME": directory,
+                "PATH": "/usr/bin",
+                "OPENAI_API_KEY": "must-not-enter-build",
+                soak.mixed.RESULT_ENV: "/tmp/result.json",
+                soak.mixed.VARIANT_ENV: soak.CUDA_ENDURANCE_VARIANT,
+                "KILN_QUALIFICATION_NETWORK_ISOLATION": (
+                    "util-linux-unshare-user-net-pid-landlock-v1"
+                ),
+                "KILN_WSL2_SCOPE_BOUNDARY": "systemd-user-scope-feedback-v1",
+                "KILN_WSL2_SCOPE_CPU_QUOTA_PERCENT": "50",
+                "KILN_WSL2_SCOPE_HOST_UID": "1000",
+                "KILN_WSL2_SCOPE_MEMORY_MAX_BYTES": str(10 * 1024**3),
+                "KILN_WSL2_SCOPE_PIDS_MAX": "512",
+                "KILN_WSL2_SCOPE_UNIT": "kiln-wsl-scope-" + "a" * 32,
+                soak.CUDA_WSL2_PACING_EVENTS_PATH_ENV: "/tmp/events.jsonl",
+                "KILN_WSL2_THERMAL_POLICY_SHA256": (
+                    soak.CUDA_WSL2_THERMAL_POLICY_SHA256
+                ),
+            }
+            environment = soak.mixed.source_bound_build_environment(
+                source,
+                soak.CUDA_BUILD_SPEC,
+            )
+        self.assertNotIn("OPENAI_API_KEY", environment)
+        self.assertEqual(environment["CUDARC_CUDA_VERSION"], "12080")
+        self.assertEqual(environment["KILN_CUDA_ARCHS"], "89")
+        self.assertEqual(environment["KILN_QUALIFICATION"], "1")
+        self.assertEqual(environment["KILN_CARGO_HOST_RESERVE_GIB"], "3")
+        self.assertEqual(environment["KILN_CARGO_MAX_MEMORY_GIB"], "10")
+        self.assertEqual(
+            environment["KILN_WSL2_THERMAL_POLICY_SHA256"],
+            soak.CUDA_WSL2_THERMAL_POLICY_SHA256,
+        )
+        self.assertEqual(
+            environment[soak.CUDA_WSL2_PACING_EVENTS_PATH_ENV],
+            "/tmp/events.jsonl",
+        )
+
+    def test_external_wsl2_pacing_evidence_is_strict_and_measurement_scoped(
+        self,
+    ) -> None:
+        records = [
+            wsl2_pacing_record(
+                sequence=0,
+                transition="started",
+                active=True,
+                started=90.0,
+                observed=90.0,
+            ),
+            wsl2_pacing_record(
+                sequence=1,
+                transition="completed",
+                active=False,
+                started=90.0,
+                observed=105.0,
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = write_wsl2_pacing_fixture(root, records)
+            evidence = soak.external_wsl2_pacing_evidence(
+                95.0,
+                {soak.CUDA_WSL2_PACING_EVENTS_PATH_ENV: str(path)},
+            )
+            self.assertEqual(len(evidence.events), 1)
+            self.assertEqual(evidence.events[0].observed, 105.0)
+            self.assertEqual(
+                evidence.events[0].category,
+                "host_thermal_pacing",
+            )
+            self.assertEqual(
+                evidence.metric_values(),
+                {
+                    "external_wsl2_thermal_pause_count": 1,
+                    "external_wsl2_thermal_pause_max_seconds": 10.0,
+                    "external_wsl2_thermal_pause_seconds": 10.0,
+                },
+            )
+
+            path.chmod(0o600)
+            with self.assertRaisesRegex(soak.SoakError, "unsafe"):
+                soak.external_wsl2_pacing_evidence(
+                    95.0,
+                    {soak.CUDA_WSL2_PACING_EVENTS_PATH_ENV: str(path)},
+                )
+
+    def test_external_wsl2_pacing_evidence_rejects_schema_and_state_drift(
+        self,
+    ) -> None:
+        base = [
+            wsl2_pacing_record(
+                sequence=0,
+                transition="started",
+                active=True,
+                started=90.0,
+                observed=90.0,
+            ),
+            wsl2_pacing_record(
+                sequence=1,
+                transition="completed",
+                active=False,
+                started=90.0,
+                observed=105.0,
+            ),
+        ]
+        mutations = (
+            ("sequence", 1, "schema, policy, or sequence"),
+            ("pause_index", 2, "start transition"),
+            ("policy_sha256", "sha256:" + "0" * 64, "schema, policy, or sequence"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for field, value, message in mutations:
+                with self.subTest(field=field):
+                    records = [dict(record) for record in base]
+                    records[0][field] = value
+                    path = write_wsl2_pacing_fixture(root, records)
+                    with self.assertRaisesRegex(soak.SoakError, message):
+                        soak.external_wsl2_pacing_evidence(
+                            95.0,
+                            {
+                                soak.CUDA_WSL2_PACING_EVENTS_PATH_ENV: str(path)
+                            },
+                        )
+
+            path = write_wsl2_pacing_fixture(root, base[:1])
+            with self.assertRaisesRegex(soak.SoakError, "active pause"):
+                soak.external_wsl2_pacing_evidence(
+                    95.0,
+                    {soak.CUDA_WSL2_PACING_EVENTS_PATH_ENV: str(path)},
+                )
+
+    def test_external_wsl2_pacing_evidence_rejects_duplicate_and_partial_json(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(soak.SoakError, "repeats field"):
+            soak._strict_json_object('{"schema":"first","schema":"second"}')
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "thermal-pacing-events.jsonl"
+            path.write_text('{"partial":true}', encoding="ascii")
+            path.chmod(0o400)
+            with self.assertRaisesRegex(soak.SoakError, "partial record"):
+                soak.external_wsl2_pacing_evidence(
+                    95.0,
+                    {soak.CUDA_WSL2_PACING_EVENTS_PATH_ENV: str(path)},
+                )
+
     def test_vulkan_launch_file_enforces_the_qualified_active_ceiling(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -464,6 +763,28 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(parsed["server"]["max_decode_batch"], 2)
         self.assertEqual(parsed["batching"]["prefill_admission_quantum"], 2)
         self.assertEqual(parsed["memory"]["vulkan_buffer_pool_gb"], 3.5)
+
+    def test_cuda_launch_file_emits_the_source_bound_memory_ceiling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "kiln.toml"
+            soak.mixed.write_server_config(
+                path,
+                soak.CUDA_ENDURANCE_VARIANT,
+                root / "model",
+                8420,
+                root / "adapters",
+                root / "snapshots",
+                kv_num_blocks=soak.CUDA_KV_BLOCKS,
+                inference_memory_fraction=soak.CUDA_INFERENCE_MEMORY_FRACTION,
+                memory_floor_gb=soak.CUDA_MEMORY_FLOOR_GB,
+            )
+            parsed = parse_generated_toml(path.read_text(encoding="utf-8"))
+        self.assertEqual(parsed["memory"]["num_blocks"], 62)
+        self.assertEqual(parsed["memory"]["inference_memory_fraction"], 0.1)
+        self.assertEqual(parsed["memory"]["floor_gb"], 1.0)
+        self.assertFalse(parsed["memory"]["kv_autoscale"])
+        self.assertFalse(parsed["memory"]["cuda_graphs"])
 
     def test_process_memory_snapshot_requires_and_converts_linux_fields(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -845,6 +1166,82 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(sampler.samples, [789])
         self.assertEqual(sampler.errors, [])
         sample.assert_called_once_with(8420, 42, soak.VULKAN_RUNTIME)
+
+    def test_cuda_gpu_memory_sampler_is_persistent_and_identity_bound(self) -> None:
+        counter = mock.Mock()
+        counter.receipt_identity.return_value = {
+            "source": "nvml_used",
+            "path": None,
+            "device": {
+                "uuid": soak.CUDA_GPU_UUID,
+                "name": soak.CUDA_GPU_NAME,
+                "total_bytes": soak.CUDA_GPU_TOTAL_BYTES,
+                "index": 0,
+            },
+        }
+        counter.read_bytes.return_value = 456
+        with mock.patch.object(
+            soak.device_memory,
+            "NvmlMemoryCounter",
+            return_value=counter,
+        ) as constructor:
+            sampler = soak.GpuMemorySampler(
+                8420,
+                42,
+                soak.CUDA_ENDURANCE_RUNTIME,
+            )
+            self.assertEqual(sampler.read_bytes(), 456)
+            sampler.stop_sampling()
+            self.assertEqual(sampler.read_bytes(), 456)
+            counter.close.assert_not_called()
+            sampler.close()
+            with self.assertRaisesRegex(soak.SoakError, "already closed"):
+                sampler.read_bytes()
+        constructor.assert_called_once_with(None, device_uuid=soak.CUDA_GPU_UUID)
+        counter.close.assert_called_once_with()
+
+    def test_cuda_gpu_memory_sampler_rejects_device_identity_drift(self) -> None:
+        counter = mock.Mock()
+        counter.receipt_identity.return_value = {
+            "source": "nvml_used",
+            "path": None,
+            "device": {
+                "uuid": soak.CUDA_GPU_UUID,
+                "name": "wrong GPU",
+                "total_bytes": soak.CUDA_GPU_TOTAL_BYTES,
+            },
+        }
+        with mock.patch.object(
+            soak.device_memory,
+            "NvmlMemoryCounter",
+            return_value=counter,
+        ):
+            with self.assertRaisesRegex(soak.SoakError, "does not match"):
+                soak.GpuMemorySampler(
+                    8420,
+                    42,
+                    soak.CUDA_ENDURANCE_RUNTIME,
+                )
+        counter.close.assert_called_once_with()
+
+    def test_cuda_gpu_memory_sampler_closes_after_identity_read_failure(self) -> None:
+        counter = mock.Mock()
+        counter.receipt_identity.side_effect = RuntimeError("identity failed")
+        with mock.patch.object(
+            soak.device_memory,
+            "NvmlMemoryCounter",
+            return_value=counter,
+        ):
+            with self.assertRaisesRegex(
+                soak.SoakError,
+                "cannot bind NVML device identity",
+            ):
+                soak.GpuMemorySampler(
+                    8420,
+                    42,
+                    soak.CUDA_ENDURANCE_RUNTIME,
+                )
+        counter.close.assert_called_once_with()
 
     def test_vulkan_buffer_snapshot_is_closed_typed_and_monotonic(self) -> None:
         before = {
@@ -1723,6 +2120,56 @@ class ServeRocmSoakTests(unittest.TestCase):
             ),
         )
 
+    def test_checked_in_cuda_endurance_workload_matches_driver_contract(self) -> None:
+        path = ROOT / "qualification/workloads/serving-cuda-endurance-v1.json"
+        workload = json.loads(path.read_text())
+        self.assertEqual(workload["workload_id"], "serving-cuda-endurance-v1")
+        self.assertEqual(workload["kind"], "soak")
+        self.assertIsNone(workload["comparison_policy"])
+        self.assertEqual(len(workload["variants"]), 1)
+        variant = workload["variants"][0]
+        self.assertEqual(variant["id"], soak.CUDA_ENDURANCE_RUNTIME.variant_id)
+        self.assertEqual(variant["backend"], "cuda")
+        self.assertEqual(variant["device_requirement"], "required")
+        self.assertEqual(variant["skip_policy"], "fail")
+        self.assertEqual(
+            variant["effective_config"],
+            soak.effective_config(
+                soak.CUDA_ENDURANCE_DURATION_SECONDS,
+                soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
+                soak.CUDA_ENDURANCE_RUNTIME,
+            ),
+        )
+        self.assertEqual(len(variant["cases"]), 1)
+        case = variant["cases"][0]
+        self.assertEqual(case["id"], soak.CASE_ID)
+        self.assertEqual(
+            case["result_protocol"]["declared_metrics"],
+            sorted(soak.metric_definitions(soak.CUDA_ENDURANCE_RUNTIME)),
+        )
+        self.assertEqual(
+            case["command"],
+            [
+                "python3",
+                "scripts/qualification/serve_development_soak.py",
+                "--model-path",
+                "${model_path}",
+                "--seed",
+                "${seed}",
+                "--minimum-duration-seconds",
+                "28800",
+                "--memory-growth-limit-bytes",
+                str(soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES),
+            ],
+        )
+        self.assertEqual(
+            case["timeout_seconds"],
+            soak.qualification_case_timeout_seconds(
+                soak.CUDA_ENDURANCE_DURATION_SECONDS,
+                soak.CUDA_ENDURANCE_RUNTIME,
+            ),
+        )
+
     def test_phase_deadlines_and_case_timeout_are_independent(self) -> None:
         started = 100.0
         self.assertEqual(
@@ -1748,6 +2195,21 @@ class ServeRocmSoakTests(unittest.TestCase):
                 soak.QUALIFICATION_DURATION_SECONDS, soak.ROCM_RUNTIME
             ),
             4200,
+        )
+        self.assertEqual(
+            soak.measurement_phase_deadline(
+                started,
+                soak.CUDA_ENDURANCE_DURATION_SECONDS,
+                soak.CUDA_ENDURANCE_RUNTIME,
+            ),
+            44_200.0,
+        )
+        self.assertEqual(
+            soak.qualification_case_timeout_seconds(
+                soak.CUDA_ENDURANCE_DURATION_SECONDS,
+                soak.CUDA_ENDURANCE_RUNTIME,
+            ),
+            47_880,
         )
         self.assertEqual(soak.phase_elapsed_seconds(None, 500.0), 0.0)
         self.assertEqual(soak.phase_elapsed_seconds(475.0, 500.0), 25.0)
@@ -2744,6 +3206,26 @@ class ServeRocmSoakTests(unittest.TestCase):
         )
         self.assertEqual(
             [metric["name"] for metric in vulkan_metrics], sorted(vulkan_values)
+        )
+        cuda_values = {
+            name: 0 for name in soak.metric_definitions(soak.CUDA_ENDURANCE_RUNTIME)
+        }
+        cuda_metrics = soak.metrics_from_values(
+            cuda_values,
+            soak.CUDA_ENDURANCE_RUNTIME,
+        )
+        self.assertEqual(
+            [metric["name"] for metric in cuda_metrics],
+            sorted(cuda_values),
+        )
+        self.assertEqual(
+            set(soak.CUDA_METRIC_DEFINITIONS) - set(soak.METRIC_DEFINITIONS),
+            {
+                "external_wsl2_active_measurement_seconds",
+                "external_wsl2_thermal_pause_count",
+                "external_wsl2_thermal_pause_max_seconds",
+                "external_wsl2_thermal_pause_seconds",
+            },
         )
 
     def test_arguments_enforce_bounded_duration_and_growth(self) -> None:

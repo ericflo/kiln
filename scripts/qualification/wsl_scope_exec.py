@@ -17,7 +17,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import wsl_platform
 import wsl_thermal_exec
@@ -36,10 +36,12 @@ PIDS_MAX_ENV = "KILN_WSL2_SCOPE_PIDS_MAX"
 CPU_QUOTA_ENV = "KILN_WSL2_SCOPE_CPU_QUOTA_PERCENT"
 UNIT_ENV = "KILN_WSL2_SCOPE_UNIT"
 HOST_UID_ENV = "KILN_WSL2_SCOPE_HOST_UID"
+PACING_EVENTS_PATH_ENV = "KILN_WSL2_THERMAL_PACING_EVENTS_PATH"
 BOUNDARY_VALUE = "systemd-user-scope-feedback-v1"
 SCOPE_EVENT_SCHEMA_V1 = "kiln.wsl2-scope-event.v1"
 SCOPE_EVENT_SCHEMA_V2 = "kiln.wsl2-scope-event.v2"
 THERMAL_TELEMETRY_SOURCE = "outer-supervisor-inherited-pipe-v1"
+THERMAL_PACING_EVENT_SCHEMA = "kiln.wsl2-thermal-pacing-event.v1"
 SCOPE_PAYLOAD = Path(__file__).with_name("wsl_scope_payload.py")
 SOCKET_UNIT = "dbus.socket"
 SERVICE_UNIT = "dbus.service"
@@ -299,6 +301,123 @@ class ThermalTelemetryReader:
             os.close(self.descriptor)
         except OSError as exc:
             raise ScopeExecError(f"cannot close thermal telemetry pipe: {exc}") from exc
+
+
+class ThermalPacingEventWriter:
+    def __init__(
+        self,
+        path: Path,
+        policy: wsl_thermal_exec.ThermalPolicy,
+    ) -> None:
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                0o600,
+            )
+            os.fchmod(descriptor, 0o400)
+        except OSError as exc:
+            if descriptor is not None:
+                os.close(descriptor)
+            raise ScopeExecError(
+                f"cannot create thermal pacing event stream: {exc}"
+            ) from exc
+        self.descriptor = descriptor
+        self.path = path
+        self.policy = policy
+        self.sequence = 0
+
+    def transition(
+        self,
+        *,
+        active: bool,
+        pause_index: int,
+        started_monotonic_seconds: float,
+        sample: wsl_thermal_exec.ThermalSample,
+    ) -> None:
+        duration_seconds = (
+            0.0
+            if active
+            else sample.monotonic_seconds - started_monotonic_seconds
+        )
+        if (
+            pause_index < 1
+            or not math.isfinite(started_monotonic_seconds)
+            or started_monotonic_seconds < 0
+            or not math.isfinite(duration_seconds)
+            or duration_seconds < 0
+        ):
+            raise ScopeExecError("thermal pacing transition values are invalid")
+        value = {
+            "active": active,
+            "duration_seconds": duration_seconds,
+            "gpu_millicelsius": sample.gpu_millicelsius,
+            "host_millicelsius": sample.host_millicelsius,
+            "observed_monotonic_seconds": sample.monotonic_seconds,
+            "pause_index": pause_index,
+            "policy_sha256": self.policy.content_sha256,
+            "schema": THERMAL_PACING_EVENT_SCHEMA,
+            "sequence": self.sequence,
+            "started_monotonic_seconds": started_monotonic_seconds,
+            "transition": "started" if active else "completed",
+        }
+        payload = (
+            json.dumps(
+                value,
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("ascii")
+        offset = 0
+        try:
+            while offset < len(payload):
+                written = os.write(self.descriptor, payload[offset:])
+                if written <= 0:
+                    raise OSError("zero-byte pacing event write")
+                offset += written
+            os.fsync(self.descriptor)
+        except OSError as exc:
+            raise ScopeExecError(
+                f"cannot append thermal pacing event: {exc}"
+            ) from exc
+        self.sequence += 1
+
+    def close(self) -> None:
+        try:
+            os.close(self.descriptor)
+        except OSError as exc:
+            raise ScopeExecError(
+                f"cannot close thermal pacing event stream: {exc}"
+            ) from exc
+
+
+def _observe_thermal_pacing(
+    state: ThermalPacingState,
+    writer: ThermalPacingEventWriter,
+    sample: wsl_thermal_exec.ThermalSample,
+    *,
+    before_start: Callable[[], None] | None = None,
+) -> None:
+    was_active = state.active
+    previous_started = state.pause_started_seconds
+    state.observe(sample, sample.monotonic_seconds)
+    if state.active == was_active:
+        return
+    started = state.pause_started_seconds if state.active else previous_started
+    if started is None:
+        raise ScopeExecError("thermal pacing transition lacks its start time")
+    if state.active and before_start is not None:
+        before_start()
+    writer.transition(
+        active=state.active,
+        pause_index=state.pause_count,
+        started_monotonic_seconds=started,
+        sample=sample,
+    )
 
 
 def _close_thermal_telemetry(
@@ -722,6 +841,7 @@ def execute(args: argparse.Namespace) -> int:
     )
     environment = ensure_user_bus()
     environment.pop(TELEMETRY_FD_ENV, None)
+    environment.pop(PACING_EVENTS_PATH_ENV, None)
     if SCOPE_PAYLOAD.is_symlink() or not SCOPE_PAYLOAD.is_file():
         raise ScopeExecError(f"trusted scope payload is unavailable: {SCOPE_PAYLOAD}")
     unit = f"kiln-wsl-scope-{uuid.uuid4().hex}"
@@ -730,6 +850,12 @@ def execute(args: argparse.Namespace) -> int:
     handoff_root = Path(handoff.name)
     status_path = handoff_root / "status.json"
     release_path = handoff_root / "release"
+    pacing_events_path = handoff_root / "thermal-pacing-events.jsonl"
+    pacing_event_writer = (
+        None
+        if thermal_policy is None
+        else ThermalPacingEventWriter(pacing_events_path, thermal_policy)
+    )
     environment.update(
         {
             BOUNDARY_ENV: BOUNDARY_VALUE,
@@ -738,6 +864,11 @@ def execute(args: argparse.Namespace) -> int:
             CPU_QUOTA_ENV: str(args.cpu_quota_percent),
             UNIT_ENV: unit,
             HOST_UID_ENV: str(os.getuid()),
+            **(
+                {}
+                if pacing_event_writer is None
+                else {PACING_EVENTS_PATH_ENV: str(pacing_events_path)}
+            ),
         }
     )
     command = [
@@ -765,6 +896,8 @@ def execute(args: argparse.Namespace) -> int:
     try:
         process = subprocess.Popen(command, env=environment)
     except OSError as exc:
+        if pacing_event_writer is not None:
+            pacing_event_writer.close()
         raise ScopeExecError(f"cannot launch systemd user scope: {exc}") from exc
 
     interrupted: int | None = None
@@ -782,6 +915,12 @@ def execute(args: argparse.Namespace) -> int:
     def handle_signal(signum: int, _frame: Any) -> None:
         nonlocal interrupted
         interrupted = signum
+
+    def freeze_before_thermal_start() -> None:
+        nonlocal frozen
+        if not frozen:
+            _set_frozen(cgroup, True)
+            frozen = True
 
     old_handlers = {
         signum: signal.signal(signum, handle_signal)
@@ -823,14 +962,15 @@ def execute(args: argparse.Namespace) -> int:
                 if not initial_samples:
                     time.sleep(0.005)
             for current_thermal in initial_samples:
-                thermal_pacing.observe(
+                if pacing_event_writer is None:
+                    raise ScopeExecError("thermal pacing event stream is unavailable")
+                _observe_thermal_pacing(
+                    thermal_pacing,
+                    pacing_event_writer,
                     current_thermal,
-                    current_thermal.monotonic_seconds,
+                    before_start=freeze_before_thermal_start,
                 )
             thermal_telemetry.require_fresh(time.monotonic())
-            if thermal_pacing.active:
-                _set_frozen(cgroup, True)
-                frozen = True
         _emit(
             "start",
             schema=event_schema,
@@ -881,9 +1021,15 @@ def execute(args: argparse.Namespace) -> int:
                 if thermal_telemetry is None:
                     raise ScopeExecError("thermal pacing lost outer telemetry")
                 for current_thermal in thermal_telemetry.read_available():
-                    thermal_pacing.observe(
+                    if pacing_event_writer is None:
+                        raise ScopeExecError(
+                            "thermal pacing event stream is unavailable"
+                        )
+                    _observe_thermal_pacing(
+                        thermal_pacing,
+                        pacing_event_writer,
                         current_thermal,
-                        current_thermal.monotonic_seconds,
+                        before_start=freeze_before_thermal_start,
                     )
                 thermal_telemetry.require_fresh(time.monotonic())
             usage = _cpu_usage(cgroup) - baseline_cpu
@@ -967,6 +1113,15 @@ def execute(args: argparse.Namespace) -> int:
         for signum, handler in old_handlers.items():
             signal.signal(signum, handler)
         failure = _close_thermal_telemetry(thermal_telemetry, failure)
+        if pacing_event_writer is not None:
+            try:
+                pacing_event_writer.close()
+            except ScopeExecError as close_error:
+                failure = (
+                    close_error
+                    if failure is None
+                    else ScopeExecError(f"{failure}; {close_error}")
+                )
         try:
             _run(
                 ["/usr/bin/systemctl", "--user", "stop", f"{unit}.scope"],

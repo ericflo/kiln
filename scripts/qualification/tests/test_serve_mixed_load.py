@@ -4,6 +4,7 @@ import concurrent.futures
 import dataclasses
 import importlib.util
 import json
+import math
 import subprocess
 import sys
 import tempfile
@@ -1624,6 +1625,48 @@ class ServeMixedLoadTests(unittest.TestCase):
                     cargo_cpu_quota_percent=invalid,
                 )
 
+    def test_source_build_cuda_fields_are_typed_and_memory_consistent(self) -> None:
+        spec = serve.SourceBuildSpec(
+            backend="CUDA",
+            features="cuda",
+            cargo_min_available_gib=13,
+            cargo_host_reserve_gib=3,
+            cargo_max_memory_gib=10,
+            cudarc_cuda_version="12080",
+            cuda_archs="89",
+            qualification_device_required=True,
+        )
+        effective = spec.effective_config()
+        self.assertEqual(effective["cargo_host_reserve_gib"], 3)
+        self.assertEqual(effective["cargo_max_memory_gib"], 10)
+        self.assertEqual(effective["cudarc_cuda_version"], "12080")
+        self.assertEqual(effective["cuda_archs"], "89")
+        self.assertTrue(effective["qualification_device_required"])
+
+        for kwargs, message in (
+            ({"cargo_host_reserve_gib": 0}, "positive integer"),
+            (
+                {
+                    "cargo_min_available_gib": 12,
+                    "cargo_host_reserve_gib": 3,
+                    "cargo_max_memory_gib": 10,
+                },
+                "must not exceed",
+            ),
+            ({"cudarc_cuda_version": "12.8"}, "positive decimal"),
+            ({"cuda_archs": "sm_89"}, "comma-separated decimals"),
+            ({"qualification_device_required": 1}, "must be boolean"),
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(
+                ValueError,
+                message,
+            ):
+                serve.SourceBuildSpec(
+                    backend="CUDA",
+                    features="cuda",
+                    **kwargs,
+                )
+
     def test_vulkan_server_environment_cannot_inherit_rocm_toolchain(self) -> None:
         with mock.patch.dict(
             serve.os.environ,
@@ -2561,6 +2604,32 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(parsed["memory"]["cuda_graph_cache_entries"], 16)
         self.assertEqual(parsed["memory"]["kv_force_blocks"], 7)
         self.assertEqual(parsed["model"]["path"], str(root / 'model "quoted"'))
+
+    def test_server_config_rejects_invalid_explicit_memory_bounds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            arguments = (
+                root / "kiln.toml",
+                "default",
+                root / "model",
+                4321,
+                root / "adapters",
+                root / "snapshots",
+            )
+            for keyword, value, message in (
+                ("kv_num_blocks", 0, "positive integer"),
+                ("inference_memory_fraction", math.nan, "finite"),
+                ("inference_memory_fraction", 1.1, "finite"),
+                ("memory_floor_gb", -1.0, "nonnegative"),
+            ):
+                with self.subTest(keyword=keyword), self.assertRaisesRegex(
+                    serve.QualificationError,
+                    message,
+                ):
+                    serve.write_server_config(
+                        *arguments,
+                        **{keyword: value},
+                    )
 
     def test_server_launcher_requires_and_consumes_one_typed_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

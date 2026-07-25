@@ -1235,6 +1235,55 @@ artifacts. Its `model: null`, unavailable environment, empty effective config,
 and failed unexecuted c1 result make it retained thermal-boundary
 counterevidence only, not a model or performance result.
 
+The source-bound laptop endurance gate is now declared separately as
+`qualification/workloads/serving-cuda-endurance-v1.json` (file
+`sha256:2f34ab2dc62641d247306c9ce29d62c68e5c12b16cd326e2860ce00061a345ac`).
+Run it only from clean pushed source after the final accepted performance
+checkpoint:
+
+```bash
+python3 scripts/qualification/run.py \
+  --variant cuda-rtx4090-laptop-endurance \
+  --host-id rtx4090-laptop \
+  --model .qualification/cuda-rtx4090-laptop/performance-model-v1 \
+  --model-id Qwen/Qwen3.5-4B \
+  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json \
+  qualification/workloads/serving-cuda-endurance-v1.json
+```
+
+The case builds current CUDA source inside the delegated scope, selects the
+exact retained Laptop GPU UUID/name/17,171,480,576-byte capacity through one
+persistent NVML counter, and starts one stable eager server with 62 fixed KV
+blocks, reclaim and graphs disabled, and a one-request active ceiling. It runs
+16/64/256/1,024-word prompt cohorts for at least 28,800 active seconds,
+excluding verified thermal-pacing overlap, completes 32-token deterministic
+responses, and exercises cancellation every four waves. Cumulative pacing is
+limited to 14,400 seconds, so the 44,100-second measurement deadline and
+47,880-second case bound cannot silently turn a mostly frozen process into an
+eight-hour result. Post-stabilization device-memory and RSS growth are each
+bounded at 512 MiB; unexplained ITL gaps, faults, graph activity, invalid
+responses, worker/snapshot/process residue, forced shutdown, or capacity drift
+fail the case.
+
+WSL2 thermal freezes occur outside the contained driver, so the scope
+controller now creates a private mode-0400 transition stream while retaining
+the sole append descriptor. It freezes the scope before publishing a start
+record and publishes the complete matching record before resuming, preventing
+the reader from racing a partial append. Every transition binds the exact v2
+policy hash, monotonic sequence, contiguous pause identity, interval, and
+host/GPU sample. The contained driver reads it with `O_NOFOLLOW`, exact
+owner/type/mode/schema checks and an 8 MiB bound, uses completed transitions to
+attribute otherwise unexplained ITL gaps, and reports pause count, total
+measurement-overlap seconds, longest interval, and derived active duration. A
+missing, writable, partial, reordered,
+policy-drifted, unpaired, or still-active stream fails closed. The stream does
+not replace the parent receipt's authoritative outer hard-limit, final scope
+accounting/removal, cleanup, and safe-handoff evidence.
+
+This is a checked-in portable gate, not an endurance result. No eight-hour
+laptop run has been performed for this workload, and it does not close the
+performance, endurance, native-Linux, or desktop-4090 requirements.
+
 The initial Kiln inputs are stable-profile, eager-only baselines. They are not
 an optimality claim and must not be edited in place after a receipt binds them.
 Land a new source-bound candidate for graph capture, scheduler widening,

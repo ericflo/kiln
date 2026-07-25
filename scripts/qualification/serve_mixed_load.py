@@ -40,6 +40,19 @@ CASE_ID = "mixed-load"
 RESULT_ENV = "KILN_QUALIFICATION_CASE_RESULT"
 VARIANT_ENV = "KILN_QUALIFICATION_VARIANT_ID"
 RUNNER_OWNED_KILN_ENVIRONMENT = frozenset({RESULT_ENV, VARIANT_ENV})
+WSL2_RUNNER_OWNED_KILN_ENVIRONMENT = frozenset(
+    {
+        "KILN_QUALIFICATION_NETWORK_ISOLATION",
+        "KILN_WSL2_SCOPE_BOUNDARY",
+        "KILN_WSL2_SCOPE_CPU_QUOTA_PERCENT",
+        "KILN_WSL2_SCOPE_HOST_UID",
+        "KILN_WSL2_SCOPE_MEMORY_MAX_BYTES",
+        "KILN_WSL2_SCOPE_PIDS_MAX",
+        "KILN_WSL2_SCOPE_UNIT",
+        "KILN_WSL2_THERMAL_PACING_EVENTS_PATH",
+        "KILN_WSL2_THERMAL_POLICY_SHA256",
+    }
+)
 MODEL_ID = "Qwen3.5-4B"
 MODEL_SOURCE_ID = "Qwen/Qwen3.5-4B"
 BUILD_PACKAGE = "kiln-server"
@@ -160,11 +173,16 @@ class SourceBuildSpec:
     cargo_private_network: bool = BUILD_CARGO_PRIVATE_NETWORK
     cargo_environment_policy: str = BUILD_CARGO_ENVIRONMENT_POLICY
     cargo_service_runtime_max_seconds: int = BUILD_CARGO_SERVICE_RUNTIME_MAX_SECONDS
+    cargo_host_reserve_gib: int | None = None
+    cargo_max_memory_gib: int | None = None
     cargo_host_thermal_sensor_name: str | None = None
     cargo_host_thermal_sensor_label: str | None = None
     cargo_host_thermal_limit_millicelsius: int | None = None
     cargo_host_thermal_poll_milliseconds: int | None = None
     timeout_seconds: float = BUILD_TIMEOUT_SECONDS
+    cudarc_cuda_version: str | None = None
+    cuda_archs: str | None = None
+    qualification_device_required: bool = False
     environment: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
@@ -175,6 +193,44 @@ class SourceBuildSpec:
             or not 1 <= quota <= 10_000
         ):
             raise ValueError("source-build Cargo CPU quota must be in 1..=10000")
+        for label, value in (
+            ("host reserve", self.cargo_host_reserve_gib),
+            ("memory maximum", self.cargo_max_memory_gib),
+        ):
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 1
+            ):
+                raise ValueError(
+                    f"source-build Cargo {label} must be a positive integer"
+                )
+        if (
+            self.cargo_host_reserve_gib is not None
+            and self.cargo_max_memory_gib is not None
+            and self.cargo_host_reserve_gib + self.cargo_max_memory_gib
+            > self.cargo_min_available_gib
+        ):
+            raise ValueError(
+                "source-build Cargo memory maximum plus host reserve must not "
+                "exceed the preflight available-memory floor"
+            )
+        if self.cudarc_cuda_version is not None and re.fullmatch(
+            r"[1-9][0-9]*", self.cudarc_cuda_version
+        ) is None:
+            raise ValueError(
+                "source-build CUDARC CUDA version must be a positive decimal"
+            )
+        if self.cuda_archs is not None and re.fullmatch(
+            r"[1-9][0-9]*(?:,[1-9][0-9]*)*", self.cuda_archs
+        ) is None:
+            raise ValueError(
+                "source-build CUDA architectures must be comma-separated decimals"
+            )
+        if not isinstance(self.qualification_device_required, bool):
+            raise ValueError(
+                "source-build qualification-device requirement must be boolean"
+            )
         thermal = (
             self.cargo_host_thermal_sensor_name,
             self.cargo_host_thermal_sensor_label,
@@ -223,6 +279,16 @@ class SourceBuildSpec:
             "cargo_execution_mode": self.cargo_execution_mode,
             "cargo_environment_policy": self.cargo_environment_policy,
             **(
+                {"cargo_host_reserve_gib": self.cargo_host_reserve_gib}
+                if self.cargo_host_reserve_gib is not None
+                else {}
+            ),
+            **(
+                {"cargo_max_memory_gib": self.cargo_max_memory_gib}
+                if self.cargo_max_memory_gib is not None
+                else {}
+            ),
+            **(
                 {
                     "cargo_host_thermal_limit_millicelsius": (
                         self.cargo_host_thermal_limit_millicelsius
@@ -247,6 +313,21 @@ class SourceBuildSpec:
             "offline": True,
             "package": self.package,
             "profile": self.profile,
+            **(
+                {"cudarc_cuda_version": self.cudarc_cuda_version}
+                if self.cudarc_cuda_version is not None
+                else {}
+            ),
+            **(
+                {"cuda_archs": self.cuda_archs}
+                if self.cuda_archs is not None
+                else {}
+            ),
+            **(
+                {"qualification_device_required": True}
+                if self.qualification_device_required
+                else {}
+            ),
             "timeout_seconds": int(self.timeout_seconds),
         }
         config.update(dict(self.environment))
@@ -2605,11 +2686,19 @@ def sha256_file(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def sanitized_environment(source: dict[str, str]) -> dict[str, str]:
+def sanitized_environment(
+    source: dict[str, str],
+    *,
+    additional_runner_owned_kiln_environment: frozenset[str] = frozenset(),
+) -> dict[str, str]:
+    allowed = (
+        RUNNER_OWNED_KILN_ENVIRONMENT
+        | additional_runner_owned_kiln_environment
+    )
     unexpected = sorted(
         key
         for key in source
-        if key.startswith("KILN_") and key not in RUNNER_OWNED_KILN_ENVIRONMENT
+        if key.startswith("KILN_") and key not in allowed
     )
     if unexpected:
         raise QualificationError(
@@ -2680,7 +2769,16 @@ def source_bound_build_command(spec: SourceBuildSpec = ROCM_BUILD_SPEC) -> list[
 def source_bound_build_environment(
     source: dict[str, str], spec: SourceBuildSpec = ROCM_BUILD_SPEC
 ) -> dict[str, str]:
-    sanitized = sanitized_environment(source)
+    delegated_wsl2 = spec.cargo_execution_mode == "delegated-cgroup"
+    additional_runner_environment = (
+        WSL2_RUNNER_OWNED_KILN_ENVIRONMENT
+        if delegated_wsl2
+        else frozenset()
+    )
+    sanitized = sanitized_environment(
+        source,
+        additional_runner_owned_kiln_environment=additional_runner_environment,
+    )
     closed_source_build_environment = {
         "CARGO",
         "CARGO_HOME",
@@ -2719,10 +2817,32 @@ def source_bound_build_environment(
             ),
         }
     )
+    if spec.cargo_host_reserve_gib is not None:
+        environment["KILN_CARGO_HOST_RESERVE_GIB"] = str(
+            spec.cargo_host_reserve_gib
+        )
+    if spec.cargo_max_memory_gib is not None:
+        environment["KILN_CARGO_MAX_MEMORY_GIB"] = str(
+            spec.cargo_max_memory_gib
+        )
     if spec.cargo_cpu_quota_percent is not None:
         environment["KILN_CARGO_CPU_QUOTA_PERCENT"] = str(
             spec.cargo_cpu_quota_percent
         )
+    if delegated_wsl2:
+        environment.update(
+            {
+                key: source[key]
+                for key in WSL2_RUNNER_OWNED_KILN_ENVIRONMENT
+                if key in source
+            }
+        )
+    if spec.cudarc_cuda_version is not None:
+        environment["CUDARC_CUDA_VERSION"] = spec.cudarc_cuda_version
+    if spec.cuda_archs is not None:
+        environment["KILN_CUDA_ARCHS"] = spec.cuda_archs
+    if spec.qualification_device_required:
+        environment["KILN_QUALIFICATION"] = "1"
     if spec.cargo_host_thermal_sensor_name is not None:
         environment.update(
             {
@@ -2803,7 +2923,14 @@ def server_environment(
     spec: SourceBuildSpec = ROCM_BUILD_SPEC,
 ) -> dict[str, str]:
     config = VARIANT_CONFIGS[variant]
-    environment = sanitized_environment(dict(os.environ))
+    environment = sanitized_environment(
+        dict(os.environ),
+        additional_runner_owned_kiln_environment=(
+            WSL2_RUNNER_OWNED_KILN_ENVIRONMENT
+            if spec.cargo_execution_mode == "delegated-cgroup"
+            else frozenset()
+        ),
+    )
     for key in ("ROCM_PATH", "HIP_PATH"):
         environment.pop(key, None)
     build_environment = dict(spec.environment)
@@ -2842,6 +2969,9 @@ def write_server_config(
     rocm_graph_cache_max_bytes: int = 1 << 30,
     cuda_graphs: bool = False,
     cuda_graph_cache_entries: int = CUDA_GRAPH_CACHE_ENTRIES,
+    kv_num_blocks: int | None = None,
+    inference_memory_fraction: float | None = None,
+    memory_floor_gb: float | None = None,
     kv_force_blocks: int = 0,
 ) -> None:
     """Write the complete public qualification launch policy as typed TOML."""
@@ -2861,6 +2991,28 @@ def write_server_config(
             "rocm_graph_mode",
             "profile" if runtime["rocm_graphs_requested"] else "disabled",
         )
+    if kv_num_blocks is not None and (
+        isinstance(kv_num_blocks, bool)
+        or not isinstance(kv_num_blocks, int)
+        or kv_num_blocks < 1
+    ):
+        raise QualificationError("KV block count must be a positive integer")
+    if inference_memory_fraction is not None and (
+        isinstance(inference_memory_fraction, bool)
+        or not isinstance(inference_memory_fraction, (int, float))
+        or not math.isfinite(inference_memory_fraction)
+        or not 0.0 <= inference_memory_fraction <= 1.0
+    ):
+        raise QualificationError(
+            "inference memory fraction must be finite and in 0.0..=1.0"
+        )
+    if memory_floor_gb is not None and (
+        isinstance(memory_floor_gb, bool)
+        or not isinstance(memory_floor_gb, (int, float))
+        or not math.isfinite(memory_floor_gb)
+        or memory_floor_gb < 0.0
+    ):
+        raise QualificationError("memory floor must be finite and nonnegative")
 
     lines = [
         "[server]",
@@ -2933,6 +3085,21 @@ def write_server_config(
         f"served_model_id = {_toml_string(MODEL_ID)}",
         "",
         "[memory]",
+        *(
+            [f"num_blocks = {kv_num_blocks}"]
+            if kv_num_blocks is not None
+            else []
+        ),
+        *(
+            [f"inference_memory_fraction = {inference_memory_fraction}"]
+            if inference_memory_fraction is not None
+            else []
+        ),
+        *(
+            [f"floor_gb = {memory_floor_gb}"]
+            if memory_floor_gb is not None
+            else []
+        ),
         f"reclaim_mode = {_toml_string(runtime['memory_reclaim_requested_mode'])}",
         f"kv_autoscale = {'true' if runtime['kv_autoscale_requested'] else 'false'}",
         f"kv_force_blocks = {kv_force_blocks}",

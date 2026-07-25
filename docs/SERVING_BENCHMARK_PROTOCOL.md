@@ -474,6 +474,51 @@ result. Widening concurrency is a later committed workload and must preserve
 the same model, prompts, sampling, fixed output length, memory ceiling, launch
 inputs, and reference role.
 
+After the accepted performance matrix is retained, run the independent laptop
+endurance workload:
+
+```bash
+python3 scripts/qualification/run.py \
+  --variant cuda-rtx4090-laptop-endurance \
+  --host-id rtx4090-laptop \
+  --model .qualification/cuda-rtx4090-laptop/performance-model-v1 \
+  --model-id Qwen/Qwen3.5-4B \
+  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json \
+  qualification/workloads/serving-cuda-endurance-v1.json
+```
+
+`serving-cuda-endurance-v1` is source-bound and has file
+`sha256:2f34ab2dc62641d247306c9ce29d62c68e5c12b16cd326e2860ce00061a345ac`.
+It keeps one stable eager CUDA server alive for at least eight active measured
+hours, subtracting only verified thermal-pacing overlap, with fixed 62-block KV
+capacity, graphs/reclaim/autoscaling disabled, one active request, varied
+16/64/256/1,024-word cohorts, 32 completion tokens, and periodic cancellation.
+Cumulative pacing is limited to four hours inside a 44,100-second measurement
+deadline and 47,880-second case bound. A persistent NVML counter must
+continuously resolve the exact Laptop GPU UUID, product name, and
+17,171,480,576-byte capacity.
+Stabilization requires two consecutive bounded device-memory/RSS cycles;
+post-stabilization end and active-peak growth, request/oracle integrity,
+latency attribution, KV/prefix ownership, graph inactivity, shutdown, worker,
+snapshot, and process cleanup remain closed receipt gates.
+
+The outer WSL2 controller writes thermal-pacing transitions to a private
+mode-0400 JSONL stream. It freezes the complete scope before publishing each
+start and publishes each complete matching transition before resuming. The
+contained driver opens that stream without following symlinks and requires its
+exact owner, type, mode, size, v1 event schema, v2 policy hash, monotonic
+sequence, contiguous pause identity, paired state, and interval arithmetic.
+Completed events may attribute an ITL gap that spans a verified external
+freeze; all other unexplained gaps still fail. The result reports external
+pause count, measurement-overlap seconds, longest interval, and active measured
+duration. Stream failure or excess cumulative pacing is case failure, and the
+enclosing qualification receipt remains authoritative for outer 95/85 C hard
+limits, cgroup accounting/removal, process cleanup, and stable thermal handoff.
+
+The workload is a portable handoff only until an exact clean pushed-source run
+publishes a retained passing receipt. Do not cite the declaration or its unit
+tests as eight-hour laptop evidence.
+
 The first corrected exact invocation from clean pushed source
 `c903f7dd97c7250c862db7a393a774e7ca48261e` retained failed parent receipt
 `qualification/receipts/cuda/rtx4090-laptop/20260725t203426391915z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`

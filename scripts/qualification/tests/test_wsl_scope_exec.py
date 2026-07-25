@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import contextlib
 import io
+import json
 import os
 import stat
 import sys
@@ -206,6 +207,102 @@ class WslScopeExecTests(unittest.TestCase):
         state = scope.ThermalPacingState(policy)
         with self.assertRaisesRegex(scope.ScopeExecError, "hard limit"):
             state.observe(sample(0.0, 95_000, 60_000), 1.0)
+
+    def test_thermal_pacing_writer_records_exact_read_only_transitions(self) -> None:
+        policy = self.pacing_policy()
+        sample = scope.wsl_thermal_exec.ThermalSample
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "events.jsonl"
+            writer = scope.ThermalPacingEventWriter(path, policy)
+            state = scope.ThermalPacingState(policy)
+            scope._observe_thermal_pacing(
+                state,
+                writer,
+                sample(10.0, 80_000, 74_000),
+            )
+            scope._observe_thermal_pacing(
+                state,
+                writer,
+                sample(11.0, 74_000, 69_000),
+            )
+            scope._observe_thermal_pacing(
+                state,
+                writer,
+                sample(12.0, 74_000, 69_000),
+            )
+            scope._observe_thermal_pacing(
+                state,
+                writer,
+                sample(13.0, 74_000, 69_000),
+            )
+            writer.close()
+
+            records = [
+                json.loads(line)
+                for line in path.read_text(encoding="ascii").splitlines()
+            ]
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o400)
+            self.assertEqual(
+                [(record["sequence"], record["transition"]) for record in records],
+                [(0, "started"), (1, "completed")],
+            )
+            self.assertEqual(
+                {record["schema"] for record in records},
+                {scope.THERMAL_PACING_EVENT_SCHEMA},
+            )
+            self.assertEqual(
+                {record["policy_sha256"] for record in records},
+                {policy.content_sha256},
+            )
+            self.assertEqual(
+                {record["pause_index"] for record in records},
+                {1},
+            )
+            self.assertEqual(records[0]["duration_seconds"], 0.0)
+            self.assertEqual(records[1]["duration_seconds"], 3.0)
+            self.assertFalse(records[1]["active"])
+
+    def test_thermal_pacing_writer_rejects_invalid_transition_values(self) -> None:
+        policy = self.pacing_policy()
+        with tempfile.TemporaryDirectory() as directory:
+            writer = scope.ThermalPacingEventWriter(
+                Path(directory) / "events.jsonl",
+                policy,
+            )
+            try:
+                with self.assertRaisesRegex(scope.ScopeExecError, "invalid"):
+                    writer.transition(
+                        active=True,
+                        pause_index=0,
+                        started_monotonic_seconds=1.0,
+                        sample=scope.wsl_thermal_exec.ThermalSample(
+                            1.0,
+                            80_000,
+                            74_000,
+                        ),
+                    )
+            finally:
+                writer.close()
+
+    def test_thermal_pacing_freezes_before_publishing_start(self) -> None:
+        policy = self.pacing_policy()
+        state = scope.ThermalPacingState(policy)
+        order: list[str] = []
+        writer = mock.Mock()
+        writer.transition.side_effect = lambda **_kwargs: order.append("write")
+
+        scope._observe_thermal_pacing(
+            state,
+            writer,
+            scope.wsl_thermal_exec.ThermalSample(
+                10.0,
+                80_000,
+                74_000,
+            ),
+            before_start=lambda: order.append("freeze"),
+        )
+
+        self.assertEqual(order, ["freeze", "write"])
 
     def test_thermal_pacing_policy_requires_both_outer_hash_bindings(self) -> None:
         policy_path = (
