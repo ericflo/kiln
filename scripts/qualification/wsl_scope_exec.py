@@ -301,6 +301,21 @@ class ThermalTelemetryReader:
             raise ScopeExecError(f"cannot close thermal telemetry pipe: {exc}") from exc
 
 
+def _close_thermal_telemetry(
+    telemetry: ThermalTelemetryReader | None,
+    failure: ScopeExecError | None,
+) -> ScopeExecError | None:
+    if telemetry is None:
+        return failure
+    try:
+        telemetry.close()
+    except ScopeExecError as close_error:
+        if failure is None:
+            return close_error
+        return ScopeExecError(f"{failure}; {close_error}")
+    return failure
+
+
 def _run(
     command: list[str],
     label: str,
@@ -951,16 +966,7 @@ def execute(args: argparse.Namespace) -> int:
     finally:
         for signum, handler in old_handlers.items():
             signal.signal(signum, handler)
-        if thermal_telemetry is not None and failure is not None:
-            try:
-                thermal_telemetry.close()
-            except ScopeExecError as telemetry_close_error:
-                if failure is None:
-                    failure = telemetry_close_error
-                else:
-                    failure = ScopeExecError(
-                        f"{failure}; {telemetry_close_error}"
-                    )
+        failure = _close_thermal_telemetry(thermal_telemetry, failure)
         try:
             _run(
                 ["/usr/bin/systemctl", "--user", "stop", f"{unit}.scope"],
@@ -995,8 +1001,6 @@ def execute(args: argparse.Namespace) -> int:
             else {"thermal_pacing": thermal_pacing.record(time.monotonic())}
         ),
     )
-    if thermal_telemetry is not None:
-        thermal_telemetry.close()
     if interrupted is not None:
         return 128 + interrupted
     if failure is not None:

@@ -1162,6 +1162,26 @@ never reused. Retain the parent qualification receipt and all ten validated
 nested receipts before making a c1 request or performance claim. This
 preparatory workload does not itself close the open matrix or soak gates.
 
+The first corrected exact invocation from clean pushed source
+`c903f7dd97c7250c862db7a393a774e7ca48261e` is retained as failed receipt
+`qualification/receipts/cuda/rtx4090-laptop/20260725t203426391915z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`
+with file
+`sha256:06618553060c9405de939d7f518b1810b3067a282e27cd698148d224f17894ad`.
+The initial fingerprint passed, but the current-source CUDA build accumulated
+1,551.390 thermally paused seconds inside its 1,616.727-second scope. Its
+fifty-first pause reached 301.470 seconds, exceeding the unchanged 300-second
+policy limit and failing closed before server startup or campaign output. The
+case stayed below the independent hard limits at 93.05/66 C host/GPU, peaked
+at 1,011,679,232 scoped bytes and 14 PIDs, and recorded zero memory-limit/OOM
+events. The independently supervised final fingerprint completed and was byte
+identical to the initial fingerprint. All three scopes were removed, all outer
+stable handoffs completed, and no process or campaign artifact remained. This
+valid receipt is thermal-boundary counterevidence, not performance evidence.
+The failure path also revealed a diagnostic-only second close of the thermal
+telemetry descriptor after the causal failed event. The controller now closes
+that descriptor exactly once and preserves the primary failure. Commit and
+push this checkpoint before an unchanged exact c1 retry.
+
 The initial Kiln inputs are stable-profile, eager-only baselines. They are not
 an optimality claim and must not be edited in place after a receipt binds them.
 Land a new source-bound candidate for graph capture, scheduler widening,

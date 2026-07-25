@@ -286,6 +286,25 @@ class WslScopeExecTests(unittest.TestCase):
             reader.close()
             os.close(write_descriptor)
 
+    def test_thermal_telemetry_close_preserves_primary_failure(self) -> None:
+        reader = mock.Mock()
+        primary = scope.ScopeExecError("thermal pacing pause exceeded")
+
+        self.assertIs(
+            scope._close_thermal_telemetry(reader, primary),
+            primary,
+        )
+        reader.close.assert_called_once_with()
+
+        reader = mock.Mock()
+        reader.close.side_effect = scope.ScopeExecError("cannot close telemetry")
+        combined = scope._close_thermal_telemetry(reader, primary)
+        self.assertEqual(
+            str(combined),
+            "thermal pacing pause exceeded; cannot close telemetry",
+        )
+        reader.close.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -474,6 +474,25 @@ result. Widening concurrency is a later committed workload and must preserve
 the same model, prompts, sampling, fixed output length, memory ceiling, launch
 inputs, and reference role.
 
+The first corrected exact invocation from clean pushed source
+`c903f7dd97c7250c862db7a393a774e7ca48261e` retained failed parent receipt
+`qualification/receipts/cuda/rtx4090-laptop/20260725t203426391915z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`
+with file
+`sha256:06618553060c9405de939d7f518b1810b3067a282e27cd698148d224f17894ad`.
+The initial fingerprint completed, then the current-source CUDA build spent
+1,551.390 of 1,616.727 scope seconds thermally paused. Pause 51 crossed the
+unchanged 300-second bound at 301.470 seconds, so the controller removed the
+scope before server launch or campaign output. Case host/GPU peaks were
+93.05/66 C, scoped memory/PID peaks were 1,011,679,232 bytes/14, and all
+memory-limit/OOM counters were zero. The independent final fingerprint
+completed and matched the initial fingerprint byte for byte. All three scopes
+were removed and every outer supervisor completed stable handoff. The receipt
+is valid failure evidence only; it provides no request or performance row.
+That path also exposed a post-event double close of the controller's telemetry
+descriptor. The controller now closes it exactly once and preserves the causal
+pacing error. Commit and push the receipt and repair before retrying the
+unchanged c1 workload.
+
 For the first Kiln campaign, use the exact UUID from
 `.environment.device.device_uuid` in the environment receipt, the matching
 bootstrap launch JSON, and `target/release/kiln` as `--runtime-artifact`. Use a
