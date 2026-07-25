@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "workload_id": "serving-cuda-low-memory-v1",
+  "kind": "correctness",
+  "description": "Build current CUDA source, load the public Qwen3.5-4B model on the 16 GiB RTX 4090 Laptop GPU, preserve a hard free-memory floor under bounded external CUDA pressure, and prove deterministic request recovery plus clean teardown.",
+  "determinism": {
+    "seed": 20260725,
+    "seed_delivery": "argv",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [],
+  "variants": [
+    {
+      "id": "cuda-rtx4090-laptop-16gb",
+      "description": "Require logical device zero to be the 16 GiB Laptop GPU and combine the retained non-allocating admission proof with public-model pressure and recovery.",
+      "backend": "cuda",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {
+        "admission_prerequisite": {
+          "receipt_sha256": "sha256:377583f15bc6365c4baf8a12f02c8f38e4f7b6a863ebd5958bdb321204956aeb",
+          "source_commit": "9fadc2592f1814d7dd68b3c96ab008e8b886d665",
+          "workload_sha256": "sha256:ae9fc43d6284f1d5dd1f9cee2cde188883560536c67d10735fe504624bfdf95a"
+        },
+        "build": {
+          "binary": "kiln",
+          "cargo_environment_policy": "closed-qualification-test-v1",
+          "cargo_cpu_quota_percent": 50,
+          "cargo_execution_mode": "delegated-cgroup",
+          "cargo_jobs": 1,
+          "cargo_memory_scope": "outer-wsl2-qualification-scope",
+          "cargo_min_available_gib": 14,
+          "cargo_private_network": true,
+          "cargo_service_runtime_max_seconds": 1740,
+          "cargo_wrapper": "scripts/qualification/cargo-test-bounded.sh",
+          "features": "cuda",
+          "locked": true,
+          "no_default_features": true,
+          "offline": true,
+          "package": "kiln-server",
+          "profile": "release",
+          "timeout_seconds": 1800
+        },
+        "model": {
+          "accelerator_weight_upload_mib_per_second": 256,
+          "checkpoint_read_mib_per_second": 256,
+          "model_id": "Qwen/Qwen3.5-4B",
+          "served_model_id": "Qwen3.5-4B"
+        },
+        "pressure": {
+          "chunk_mib": 256,
+          "hold_seconds": 300,
+          "maximum_allocation_mib": 8192,
+          "minimum_free_mib": 1536,
+          "poll_milliseconds": 100,
+          "target_free_mib": 2048
+        },
+        "recovery": {
+          "health_tolerance_mib": 768,
+          "peer_tolerance_mib": 512,
+          "timeout_seconds": 60
+        },
+        "request": {
+          "max_tokens": 32,
+          "prompt_words": 16,
+          "timeout_seconds": 300
+        },
+        "server": {
+          "config_sha256": "sha256:ba4bd93f6d4778ce6007eeaea0dcdc21940f5251ddba149ddd3d922cff5f40d0",
+          "launch_sha256": "sha256:62c237b2cc5209ff834d2aac655d196af128aa7990556cb45cbf287ad4f60889",
+          "serving_profile": "stable"
+        }
+      },
+      "cases": [
+        {
+          "id": "cuda-model-resident-low-memory",
+          "description": "Build the release server, attest the public model and clean CUDA execution identity, hold a separate CUDA allocation at 2 GiB free without crossing 1.5 GiB, complete a request under pressure, release, exactly replay the baseline request, and remove every owned process and snapshot.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/serve_cuda_low_memory.py",
+            "--model-path",
+            "${model_path}",
+            "--seed",
+            "${seed}"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "PYTHONUNBUFFERED": "1"
+          },
+          "timeout_seconds": 3600,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\"event\":\"cuda_pressure_ready\""
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\"event\":\"cuda_pressure_released\""
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\"event\":\"cuda_server_log_artifact\""
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(CUDA_ERROR_OUT_OF_MEMORY|out of memory|device-side assert|illegal memory access|generation_error|skipp(?:ed|ing)|no CUDA device|CUDA unavailable)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "command",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "admission_prerequisite_pass_count",
+              "backend_quarantine_count",
+              "baseline_free_bytes",
+              "baseline_request_completion_tokens",
+              "build_duration_ms",
+              "deterministic_recovery_match_count",
+              "device_identity_pass_count",
+              "model_identity_pass_count",
+              "model_resident_bytes",
+              "peer_allocated_bytes",
+              "peer_allocation_count",
+              "peer_exit_code",
+              "peer_forced_shutdown_count",
+              "peer_process_group_residue_count",
+              "pressure_minimum_observed_free_bytes",
+              "pressure_ready_free_bytes",
+              "pressure_request_completion_tokens",
+              "pressure_request_success_count",
+              "pressure_sample_count",
+              "recovery_duration_ms",
+              "recovery_free_bytes",
+              "recovery_request_completion_tokens",
+              "request_failure_count",
+              "server_exit_code",
+              "server_fault_log_count",
+              "server_forced_shutdown_count",
+              "server_log_bytes",
+              "server_process_group_residue_count",
+              "snapshot_residue_count"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "comparison_policy": {
+    "mode": "self_contained_correctness",
+    "variant_pairs": [],
+    "backend_pairs": [],
+    "metric_rules": []
+  }
+}

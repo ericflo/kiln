@@ -695,6 +695,55 @@ headroom. It does not close the laptop low-memory item and does not claim
 public-model residency, model-resident pressure, request recovery, serving
 performance, soak completion, native Linux, or a desktop RTX 4090.
 
+#### Declared WSL2 RTX 4090 Laptop low-memory gate
+
+`serving-cuda-low-memory-v1.json` is the bounded public-model continuation of
+the retained lifecycle receipt. Run it only from a clean pushed source tree
+with the local two-shard Qwen3.5-4B directory:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" \
+python3 scripts/qualification/run.py \
+  --variant cuda-rtx4090-laptop-16gb \
+  --host-id rtx4090-laptop \
+  --model "$(pwd)/Qwen3.5-4B" \
+  --model-id Qwen/Qwen3.5-4B \
+  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-boundary-v1.json \
+  qualification/workloads/serving-cuda-low-memory-v1.json
+```
+
+The single case first verifies by hash that the earlier lifecycle receipt
+passed the production non-allocating admission rejection. It then builds the
+current CUDA release server through the delegated 10 GiB, zero-swap, 50-percent
+CPU WSL scope and starts the immutable stable-profile laptop launch. Readiness
+must expose the exact public model, two weight shards, positive post-load CUDA
+residency, healthy `nvidia-smi` sampling, clean-source execution provenance,
+and the exact source-built executable hash.
+
+After warmup, the driver records a deterministic 32-token baseline. A separate
+CUDA-driver process allocates in at most 256 MiB chunks until free memory is at
+or below 2,048 MiB. It refuses to start when the resident server is already at
+that target, allocates at most 8,192 MiB, requires at least 64 MiB of real
+external allocation, samples every 100 ms, and immediately fails and releases
+if free memory crosses the 1,536 MiB floor. While the peer remains alive, the
+server must complete another 32-token request and its independent live sampler
+must corroborate bounded pressure.
+
+The peer must then exit on `SIGTERM` without a forced kill, free every
+allocation, report no release error, and recover within 512 MiB of its
+pre-pressure CUDA-driver reading. The server sampler must recover within 768
+MiB of baseline in 60 seconds. A final request with the exact baseline prompt
+and seed must reproduce all 32 token IDs and the finish reason. Any request
+error, OOM/device-fault/quarantine log, stale memory sampler, backend
+quarantine, nonzero or forced exit, process-group residue, or model-snapshot
+payload fails the case.
+
+This is a committed source contract only until its exact clean pushed-source
+receipt passes. It deliberately combines safe bounded pressure with the
+already retained pre-allocation rejection instead of manufacturing an OOM. It
+does not qualify serving throughput, concurrency expansion, an eight-hour
+soak, native Linux, or the desktop RTX 4090.
+
 ### CUDA Serving Bootstrap Handoff
 
 After the environment, core-correctness, and memory-lifecycle receipts pass and
