@@ -73,10 +73,14 @@
           "timeout_seconds": 300
         },
         "server": {
-          "config_sha256": "sha256:a55467d566cde26021b9fcd49ba960f522dad1d01c26f53c9e8d2e342fa3e915",
+          "config_sha256": "sha256:455dee1f50c87e7d7eb2674fcf30823073500141e1f05a311b068633deb6f494",
           "floor_gib": 1.0,
+          "gpu_capacity_source": "nvidia-smi",
+          "gpu_memory_gib": null,
           "http_send_buffer_bytes": 212992,
           "inference_memory_fraction": 0.1,
+          "kv_blocks": 62,
+          "kv_cache_bytes": 130023424,
           "launch_sha256": "sha256:62c237b2cc5209ff834d2aac655d196af128aa7990556cb45cbf287ad4f60889",
           "serving_profile": "stable"
         }

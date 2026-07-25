@@ -70,6 +70,8 @@ BUILD_HOST_RESERVE_GIB = 3
 BUILD_MAX_MEMORY_GIB = 10
 REQUEST_PROMPT_WORDS = 16
 REQUEST_MAX_TOKENS = 32
+KV_BLOCKS = 62
+KV_CACHE_BYTES = 130_023_424
 MODEL_ID = "Qwen3.5-4B"
 MODEL_SOURCE_ID = "Qwen/Qwen3.5-4B"
 CUDA_LIBRARY = Path("/usr/lib/wsl/lib/libcuda.so.1")
@@ -92,7 +94,7 @@ ADMISSION_RECEIPT = (
     "cuda-memory-lifecycle-v1-61a2e68c95-v1.json"
 )
 SERVER_CONFIG_SHA256 = (
-    "sha256:a55467d566cde26021b9fcd49ba960f522dad1d01c26f53c9e8d2e342fa3e915"
+    "sha256:455dee1f50c87e7d7eb2674fcf30823073500141e1f05a311b068633deb6f494"
 )
 SERVER_LAUNCH_SHA256 = (
     "sha256:62c237b2cc5209ff834d2aac655d196af128aa7990556cb45cbf287ad4f60889"
@@ -183,8 +185,12 @@ EFFECTIVE_CONFIG: dict[str, Any] = {
     "server": {
         "config_sha256": SERVER_CONFIG_SHA256,
         "floor_gib": 1.0,
+        "gpu_capacity_source": "nvidia-smi",
+        "gpu_memory_gib": None,
         "http_send_buffer_bytes": 212992,
         "inference_memory_fraction": 0.1,
+        "kv_blocks": KV_BLOCKS,
+        "kv_cache_bytes": KV_CACHE_BYTES,
         "launch_sha256": SERVER_LAUNCH_SHA256,
         "serving_profile": "stable",
     },
@@ -373,7 +379,8 @@ def validate_server_config_contract(config: dict[str, dict[str, Any]]) -> None:
         ("model", "served_model_id"): MODEL_ID,
         ("model", "checkpoint_read_mib_per_second"): 256,
         ("model", "accelerator_weight_upload_mib_per_second"): 256,
-        ("memory", "gpu_memory_gb"): 15.0,
+        ("memory", "gpu_memory_gb"): None,
+        ("memory", "num_blocks"): EFFECTIVE_CONFIG["server"]["kv_blocks"],
         ("memory", "inference_memory_fraction"): EFFECTIVE_CONFIG["server"][
             "inference_memory_fraction"
         ],
@@ -417,7 +424,7 @@ def validate_server_inputs(model_path: Path) -> None:
         )
 
 
-def validate_device_identity() -> None:
+def validate_device_identity() -> int:
     command = [
         "/usr/lib/wsl/lib/nvidia-smi",
         "-i",
@@ -464,6 +471,7 @@ def validate_device_identity() -> None:
         raise mixed.QualificationError(
             f"CUDA device memory {total_mib} MiB is outside the laptop envelope"
         )
+    return total_mib * MIB
 
 
 def validate_runner_environment(source: dict[str, str]) -> None:
@@ -714,6 +722,7 @@ def attest_model(
     models: dict[str, Any],
     debug: dict[str, Any],
     binary_sha256: str,
+    expected_total_vram_bytes: int,
 ) -> int:
     failures: list[str] = []
     if health.get("status") != "ok":
@@ -763,6 +772,22 @@ def attest_model(
     ):
         failures.append("health base-weight identity is not the two-shard public model")
     gpu = health.get("gpu_memory")
+    total_vram_bytes = (
+        gpu.get("total_vram_bytes") if isinstance(gpu, dict) else None
+    )
+    if total_vram_bytes != expected_total_vram_bytes:
+        failures.append(
+            f"health total_vram_bytes={total_vram_bytes!r}, "
+            f"expected physical device total {expected_total_vram_bytes}"
+        )
+    kv_cache_bytes = (
+        gpu.get("kv_cache_bytes") if isinstance(gpu, dict) else None
+    )
+    if kv_cache_bytes != KV_CACHE_BYTES:
+        failures.append(
+            f"health kv_cache_bytes={kv_cache_bytes!r}, "
+            f"expected {KV_CACHE_BYTES}"
+        )
     model_resident_bytes = (
         gpu.get("post_load_used_bytes") if isinstance(gpu, dict) else None
     )
@@ -1259,7 +1284,7 @@ def execute(
     absolute_deadline = time.monotonic() + OVERALL_TIMEOUT_SECONDS
     validate_admission_prerequisite()
     validate_server_inputs(model_path)
-    validate_device_identity()
+    device_total_bytes = validate_device_identity()
     original_environment = dict(os.environ)
     server_environment = child_environment(original_environment)
     peer_environment = child_environment(original_environment)
@@ -1305,7 +1330,11 @@ def execute(
         bench.verify_owned_listener(server, "http://127.0.0.1:8420")
         debug_start = mixed.json_request(port, "GET", "/v1/debug/model-state")
         model_resident_bytes = attest_model(
-            health_start, models, debug_start, binary_sha256
+            health_start,
+            models,
+            debug_start,
+            binary_sha256,
+            device_total_bytes,
         )
         warmup = run_request(
             port,
@@ -1350,6 +1379,7 @@ def execute(
             mixed.json_request(port, "GET", "/v1/models"),
             mixed.json_request(port, "GET", "/v1/debug/model-state"),
             binary_sha256,
+            device_total_bytes,
         )
         peer_shutdown = terminate_peer(peer)
         peer = None
@@ -1393,6 +1423,7 @@ def execute(
             mixed.json_request(port, "GET", "/v1/models"),
             mixed.json_request(port, "GET", "/v1/debug/model-state"),
             binary_sha256,
+            device_total_bytes,
         )
         requests = final_health.get("requests")
         request_errors = (

@@ -171,7 +171,7 @@ each NVIDIA host:
 
 | Machine/runtime | Tracked input | Initial contract |
 |---|---|---|
-| 16 GiB RTX 4090 Laptop GPU, Kiln | `qualification/server-config/kiln-cuda-rtx4090-laptop-serving-bootstrap-v1.toml` plus its same-name launch JSON | Stable eager profile, 15 GiB capacity cap, 1.5 GiB live floor, decode width 16, no reclaim, physical KV resize, FP8 KV, Marlin, or CUDA graph capture. |
+| 16 GiB RTX 4090 Laptop GPU, Kiln | `qualification/server-config/kiln-cuda-rtx4090-laptop-serving-bootstrap-v1.toml` plus its same-name launch JSON | Stable eager profile, selected-device capacity, 1 GiB live floor, fixed 62-block BF16 KV pool, decode width 16, no reclaim, physical KV resize, FP8 KV, Marlin, or CUDA graph capture. |
 | 24 GiB desktop RTX 4090, Kiln | `qualification/server-config/kiln-cuda-rtx4090-desktop-serving-bootstrap-v1.toml` plus its same-name launch JSON | Stable eager profile, 23 GiB capacity cap, 2 GiB live floor, decode width 32, and the same disabled mutation/experimental routes. |
 | Either RTX 4090, vLLM | `qualification/server-launch/vllm-cuda-rtx4090-serving-bootstrap-v1.json` | BF16, 32K context/batch-token bound, 64 sequence slots, 75 percent device-memory utilization, isolated per-launch caches, prefix caching, FCFS, seed zero, and text-only serving. |
 

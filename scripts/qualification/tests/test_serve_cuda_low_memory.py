@@ -128,6 +128,8 @@ class ServeCudaLowMemoryTests(unittest.TestCase):
         self.assertEqual(parsed["server"]["port"], 8420)
         self.assertEqual(parsed["server"]["http_send_buffer_bytes"], 212992)
         self.assertEqual(parsed["memory"]["floor_gb"], 1.0)
+        self.assertNotIn("gpu_memory_gb", parsed["memory"])
+        self.assertEqual(parsed["memory"]["num_blocks"], 62)
         self.assertEqual(parsed["memory"]["inference_memory_fraction"], 0.1)
         with self.assertRaisesRegex(
             low_memory.mixed.QualificationError, "non-scalar"
@@ -148,6 +150,26 @@ class ServeCudaLowMemoryTests(unittest.TestCase):
         with self.assertRaisesRegex(
             low_memory.mixed.QualificationError,
             "inference_memory_fraction",
+        ):
+            low_memory.validate_server_config_contract(parsed)
+
+        parsed = low_memory.parse_closed_toml(
+            low_memory.SERVER_CONFIG.read_text()
+        )
+        parsed["memory"]["gpu_memory_gb"] = 15.0
+        with self.assertRaisesRegex(
+            low_memory.mixed.QualificationError,
+            "gpu_memory_gb",
+        ):
+            low_memory.validate_server_config_contract(parsed)
+
+        parsed = low_memory.parse_closed_toml(
+            low_memory.SERVER_CONFIG.read_text()
+        )
+        parsed["memory"]["num_blocks"] = 63
+        with self.assertRaisesRegex(
+            low_memory.mixed.QualificationError,
+            "num_blocks",
         ):
             low_memory.validate_server_config_contract(parsed)
 
@@ -349,6 +371,8 @@ class ServeCudaLowMemoryTests(unittest.TestCase):
                 "total_size_bytes": 9 * low_memory.GIB,
             },
             "gpu_memory": {
+                "total_vram_bytes": 16 * low_memory.GIB,
+                "kv_cache_bytes": low_memory.KV_CACHE_BYTES,
                 "post_load_used_bytes": 8 * low_memory.GIB,
                 "live": {
                     "probe_failed": False,
@@ -376,14 +400,50 @@ class ServeCudaLowMemoryTests(unittest.TestCase):
             }
         }
         self.assertEqual(
-            low_memory.attest_model(health, models, debug, binary_hash),
+            low_memory.attest_model(
+                health,
+                models,
+                debug,
+                binary_hash,
+                16 * low_memory.GIB,
+            ),
             8 * low_memory.GIB,
         )
+        health["gpu_memory"]["total_vram_bytes"] = 15 * low_memory.GIB
+        with self.assertRaisesRegex(
+            low_memory.mixed.QualificationError, "physical device total"
+        ):
+            low_memory.attest_model(
+                health,
+                models,
+                debug,
+                binary_hash,
+                16 * low_memory.GIB,
+            )
+        health["gpu_memory"]["total_vram_bytes"] = 16 * low_memory.GIB
+        health["gpu_memory"]["kv_cache_bytes"] += 1
+        with self.assertRaisesRegex(
+            low_memory.mixed.QualificationError, "kv_cache_bytes"
+        ):
+            low_memory.attest_model(
+                health,
+                models,
+                debug,
+                binary_hash,
+                16 * low_memory.GIB,
+            )
+        health["gpu_memory"]["kv_cache_bytes"] = low_memory.KV_CACHE_BYTES
         health["base_weight_identity"]["aggregate_sha256"] = "a" * 64
         with self.assertRaisesRegex(
             low_memory.mixed.QualificationError, "base-weight identity"
         ):
-            low_memory.attest_model(health, models, debug, binary_hash)
+            low_memory.attest_model(
+                health,
+                models,
+                debug,
+                binary_hash,
+                16 * low_memory.GIB,
+            )
 
     def test_device_identity_is_exact(self) -> None:
         completed = mock.Mock(
@@ -394,7 +454,8 @@ class ServeCudaLowMemoryTests(unittest.TestCase):
         with mock.patch.object(
             low_memory.subprocess, "run", return_value=completed
         ) as run:
-            low_memory.validate_device_identity()
+            total_bytes = low_memory.validate_device_identity()
+        self.assertEqual(total_bytes, 16376 * low_memory.MIB)
         self.assertEqual(run.call_args.args[0][0], "/usr/lib/wsl/lib/nvidia-smi")
 
         completed.stdout = "NVIDIA GeForce RTX 4090, 24564\n"

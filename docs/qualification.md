@@ -725,6 +725,10 @@ requires 13 GiB live host availability and preserves 3 GiB outside its 10 GiB
 aggregate ceiling. Readiness must expose the exact public model, two weight
 shards, positive post-load CUDA residency, healthy `nvidia-smi` sampling,
 clean-source execution provenance, and the exact source-built executable hash.
+The laptop input leaves `memory.gpu_memory_gb` unset so the selected
+`nvidia-smi` device is the single capacity authority, and pins the previously
+observed 62-block/130,023,424-byte BF16 KV pool so removing the stale capacity
+cap cannot enlarge that physical allocation.
 
 After warmup, the driver records a deterministic 32-token baseline. A separate
 CUDA-driver process allocates in at most 256 MiB chunks until free memory is at
@@ -945,6 +949,22 @@ raw 1,024/768 MiB pressure envelope and cap-adjusted health sampler therefore
 cannot represent the same contract. The low-memory gate remains open until a
 source repair removes that contradiction and an exact clean pushed-source run
 completes sampler corroboration and deterministic recovery.
+
+The repaired source contract removes the laptop-only 15 GiB
+`memory.gpu_memory_gb` override while retaining the exact device-name,
+architecture, and 15,000-17,000 MiB hardware checks. The configured 1 GiB
+server floor, 768 MiB peer floor, pressure target, allocation cap, and sampler
+tolerances do not change. Rather than letting the additional detected capacity
+increase auto-sized KV, the config fixes the pool at the last run's measured 62
+BF16 blocks and 130,023,424 bytes. The driver rejects any reintroduced capacity
+override or block-count drift. Config hash
+`sha256:455dee1f50c87e7d7eb2674fcf30823073500141e1f05a311b068633deb6f494`
+and workload
+`sha256:2c741a773ccc4f02e714b78fcb30c32c578cb83c6019e56432706f69191f2d45`
+bind the correction. Runtime model attestation also requires the server's
+`total_vram_bytes` to exactly equal the preflight physical-device total and
+requires `kv_cache_bytes=130023424`. This is still a source contract until a
+clean pushed run passes the complete gate.
 
 ### CUDA Serving Bootstrap Handoff
 
