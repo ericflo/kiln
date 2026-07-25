@@ -416,6 +416,23 @@ The tracked laptop launch makes both captures use the explicit 32 MiB/s
 cumulative provenance-read ceiling; do not remove or override it to accelerate
 capture.
 
+The retained Laptop GPU manifest at
+`qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json` was
+captured twice from exact clean pushed source
+`2eb37adb9cd7279cc1472f5763ed939fbbe55add`. Both captures produced the same
+2,608-byte file with
+`sha256:50d46bd54df16f1ea9095dace7656708b7347db3591ad8ebc74d1238d284d125`;
+the bound installed-runtime content hash is
+`8b3b7273f3e031c427591a4c4447e7541e85023edb92bdf5da51a1882e5e5abb`.
+The separate scopes completed in 1,279.766 and 1,075.023 seconds with
+10,106,621,952- and 10,551,422,976-byte memory peaks, 27-PID peaks, zero
+memory-limit/OOM events, and clean removal. They completed 39 and 41 thermal
+pauses totaling 958.839 and 466.370 seconds. Outer host/GPU peaks were
+94.05/66 C and 93.05/64 C, both below the unchanged hard limits, and both
+lifecycles completed stable handoff. This artifact is the immutable vLLM input
+for the next exact-source performance run; it does not itself establish server
+startup, request correctness, throughput, or endurance.
+
 The manifest must identify the expected RTX 4090 class, `sm_89`, model and
 tokenizer content, interpreter, Python/native packages, CUDA runtime, and every
 inference option. Any package, driver, accelerator, model, environment, or

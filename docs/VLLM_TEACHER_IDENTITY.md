@@ -583,6 +583,18 @@ payload starts. Publication requires strict ordered scope events, a matching
 inactive pacing lifecycle with sub-limit peaks, zero memory-limit/OOM events,
 bounded CPU accounting, and scope removal. The outer 95/85 C trip guard remains
 independently active.
+The first retained Laptop GPU performance identity is
+`qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json`, with file
+`sha256:50d46bd54df16f1ea9095dace7656708b7347db3591ad8ebc74d1238d284d125`
+and runtime-content
+`8b3b7273f3e031c427591a4c4447e7541e85023edb92bdf5da51a1882e5e5abb`.
+Two exact clean-source captures produced the same 2,608 bytes. Their distinct
+scopes completed all 39 and 41 thermal pauses, stayed below the 95/85 C hard
+limits at 94.05/66 C and 93.05/64 C peaks, recorded zero memory-limit/OOM
+events, and were removed before stable outer handoff. This establishes the
+immutable runtime identity used by later serving evidence, not serving
+correctness or performance by itself.
+
 The accelerator identity must match the environment receipt's 4090 class,
 `sm_89`, capacity, and selected logical device. The benchmark then binds the
 manifest as `--runtime-artifact`, the environment receipt's stable GPU UUID as
