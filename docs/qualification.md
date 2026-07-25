@@ -1135,6 +1135,9 @@ with the parent receipt. The case starts only after the initial scope is
 removed, and final source/commit validation occurs only after the final scope
 is removed. The case itself remains a separate lifecycle, so neither long
 preflight nor post-run hashing can execute outside the WSL2 safety boundary.
+Both fingerprint launches receive the same closed runner base environment plus
+the exact private-containment mechanism binding required by the scope
+controller; an omitted or different binding fails before model I/O.
 
 The first source-bound performance checkpoint is the complete five-profile c1
 pair:

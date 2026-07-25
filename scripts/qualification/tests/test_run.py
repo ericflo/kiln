@@ -428,6 +428,12 @@ class RunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             stdout_path = Path(temporary) / "fingerprint.json"
             stderr_path = Path(temporary) / "fingerprint.stderr"
+            environment = {
+                "PATH": "/usr/bin",
+                run_module.NETWORK_ISOLATION_ENVIRONMENT_VARIABLE: (
+                    isolation.mechanism
+                ),
+            }
             with mock.patch.object(
                 run_module,
                 "_wsl_supervised_argv",
@@ -436,7 +442,7 @@ class RunnerTests(unittest.TestCase):
                 run_module.subprocess,
                 "run",
                 return_value=completed,
-            ):
+            ) as invoked:
                 observed = run_module._supervised_wsl_model_fingerprint(
                     Path("/tmp/model"),
                     "fixture",
@@ -445,6 +451,7 @@ class RunnerTests(unittest.TestCase):
                     policy=policy,
                     stdout_path=stdout_path,
                     stderr_path=stderr_path,
+                    environment=environment,
                 )
             self.assertEqual(observed, payload)
             contained = wrapped.call_args.args[0]
@@ -457,6 +464,10 @@ class RunnerTests(unittest.TestCase):
             )
             self.assertEqual(stdout_path.read_bytes(), completed.stdout)
             self.assertEqual(stderr_path.read_bytes(), completed.stderr)
+            self.assertEqual(
+                invoked.call_args.kwargs["env"],
+                environment,
+            )
 
     def test_wsl_model_fingerprint_nonzero_exit_fails_after_capture(self) -> None:
         policy_path = (
@@ -475,6 +486,11 @@ class RunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             stdout_path = Path(temporary) / "fingerprint.json"
             stderr_path = Path(temporary) / "fingerprint.stderr"
+            environment = {
+                run_module.NETWORK_ISOLATION_ENVIRONMENT_VARIABLE: (
+                    isolation.mechanism
+                )
+            }
             with mock.patch.object(
                 run_module,
                 "_wsl_supervised_argv",
@@ -496,6 +512,7 @@ class RunnerTests(unittest.TestCase):
                         policy=policy,
                         stdout_path=stdout_path,
                         stderr_path=stderr_path,
+                        environment=environment,
                     )
             self.assertEqual(stdout_path.read_bytes(), b"")
             self.assertEqual(stderr_path.read_bytes(), completed.stderr)

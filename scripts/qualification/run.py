@@ -442,6 +442,7 @@ def _supervised_wsl_model_fingerprint(
     policy: wsl_thermal_exec.ThermalPolicy,
     stdout_path: Path,
     stderr_path: Path,
+    environment: dict[str, str],
 ) -> dict[str, Any]:
     command = [
         sys.executable,
@@ -464,6 +465,7 @@ def _supervised_wsl_model_fingerprint(
         completed = subprocess.run(
             executed,
             cwd=ROOT,
+            env=environment,
             check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -1893,6 +1895,10 @@ def _run_qualification_impl(
         and wsl_thermal_policy_value is not None
         and hooks == DEFAULT_HOOKS
     )
+    model_fingerprint_environment = dict(case_base_environment)
+    model_fingerprint_environment[NETWORK_ISOLATION_ENVIRONMENT_VARIABLE] = (
+        network_isolation.mechanism
+    )
     model: dict[str, Any] | None = None
     model_fingerprint_artifacts: list[tuple[Path, str]] = []
     if model_path is not None:
@@ -1910,6 +1916,7 @@ def _run_qualification_impl(
                     policy=wsl_thermal_policy_value,
                     stdout_path=initial_stdout,
                     stderr_path=initial_stderr,
+                    environment=model_fingerprint_environment,
                 )
                 model_fingerprint_artifacts.extend(
                     (
@@ -2317,6 +2324,7 @@ def _run_qualification_impl(
                     policy=wsl_thermal_policy_value,
                     stdout_path=final_stdout,
                     stderr_path=final_stderr,
+                    environment=model_fingerprint_environment,
                 )
             else:
                 final_model = hooks.fingerprint_model(model_path, model_id)

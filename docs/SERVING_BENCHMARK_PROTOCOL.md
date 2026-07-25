@@ -441,6 +441,9 @@ the case. Each scope must be removed and complete stable handoff; the parent
 receipt retains both bounded JSON and supervision streams. The campaign case is
 a third lifecycle. This prevents the long before/after provenance reads from
 escaping the boundary that protects server work.
+The runner passes the same closed base environment and exact private-network
+containment marker to these scopes as it passes to ordinary cases. The scope
+controller revalidates that marker before any fingerprint read.
 
 The manifest must identify the expected RTX 4090 class, `sm_89`, model and
 tokenizer content, interpreter, Python/native packages, CUDA runtime, and every
