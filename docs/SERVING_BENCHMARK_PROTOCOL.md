@@ -196,6 +196,35 @@ the exact recorded runtime. It launches through a regular copied interpreter at
 `.qualification/vllm-cuda-venv/bin/python-kiln`, not a venv symlink which would
 canonicalize to the base interpreter and break runtime identity.
 
+The laptop performance campaign does not edit either receipt-bound bootstrap
+input. It uses
+`kiln-cuda-rtx4090-laptop-serving-performance-v1.toml` and its matching launch
+JSON, plus `vllm-cuda-rtx4090-laptop-serving-performance-v1.json`. The Kiln
+runtime fields are byte-for-byte equivalent to the laptop bootstrap after
+normalizing only `model.path`, `model.adapter_dir`, and `model.snapshot_dir`.
+Both performance arms use
+`.qualification/cuda-rtx4090-laptop/performance-model-v1`.
+
+That closed model view is necessary because a development model directory may
+also contain operational `.cache` and `adapters` trees, including adapter
+symlinks that are not model inputs. Prepare it with:
+
+```bash
+mkdir -p .qualification/cuda-rtx4090-laptop
+python3 scripts/qualification/prepare_cuda_serving_model.py \
+  --source Qwen3.5-4B \
+  --target .qualification/cuda-rtx4090-laptop/performance-model-v1 \
+  --model-id Qwen/Qwen3.5-4B
+```
+
+The materializer accepts exactly root regular files plus the two named excluded
+directories. It rejects a root symlink, special file, or any other directory.
+The target is a read-only directory of same-filesystem hardlinks; reuse
+requires every entry to remain the exact source inode and all source/target
+bytes and strict model fingerprints to agree. This avoids a persistent 9.3 GB
+duplicate on the laptop while preserving per-launch immutable snapshot copies,
+initial/final benchmark fingerprints, and source-change detection.
+
 These are bootstrap baselines, not performance recommendations. First retain a
 passing environment receipt, core-correctness receipt, memory-lifecycle receipt,
 and eager serving receipt. A tuned scheduler, graph-enabled Kiln input, Marlin
@@ -289,16 +318,36 @@ target/release/kiln config \
   --backend cuda --json
 ```
 
-For vLLM, create `.qualification/vllm-cuda-venv`, install one explicit reviewed
-CUDA-compatible vLLM version rather than a floating package, and copy the
-resolved venv interpreter to `bin/python-kiln`. From the resulting clean source
-tree, create the empty machine directory and capture through the launch JSON:
+For vLLM, create `.qualification/vllm-cuda-venv` and install the reviewed
+`vllm==0.23.0` CUDA 12.9 runtime rather than a floating package. The current
+managed Python is dynamically linked, so copy both the resolved interpreter
+and its matching `libpython3.12.so.1.0`; the launch executable must be a regular
+file:
+
+```bash
+uv venv --python 3.12 --seed --managed-python \
+  .qualification/vllm-cuda-venv
+uv pip install \
+  --python .qualification/vllm-cuda-venv/bin/python \
+  'vllm==0.23.0' --torch-backend=cu129
+resolved="$(readlink -f .qualification/vllm-cuda-venv/bin/python)"
+base="$(dirname "$(dirname "$resolved")")"
+cp --reflink=auto "$resolved" \
+  .qualification/vllm-cuda-venv/bin/python-kiln
+cp --reflink=auto "$base/lib/libpython3.12.so.1.0" \
+  .qualification/vllm-cuda-venv/lib/libpython3.12.so.1.0
+chmod 0755 .qualification/vllm-cuda-venv/bin/python-kiln
+```
+
+From the resulting clean source tree, prepare the closed model view above,
+create the empty machine directory, and capture through the performance launch
+JSON:
 
 ```bash
 mkdir -p qualification/runtime/vllm/cuda/rtx4090-laptop
 python3 scripts/qualification/capture_vllm_runtime_manifest.py \
-  --server-launch-config qualification/server-launch/vllm-cuda-rtx4090-serving-bootstrap-v1.json \
-  --output qualification/runtime/vllm/cuda/rtx4090-laptop/bootstrap-v1.json
+  --server-launch-config qualification/server-launch/vllm-cuda-rtx4090-laptop-serving-performance-v1.json \
+  --output qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json
 ```
 
 The capture tool validates the owned-launch contract, inserts only
@@ -326,7 +375,7 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --engine kiln \
   --base-url http://127.0.0.1:8420 \
   --model Qwen3.5-4B \
-  --model-path Qwen3.5-4B \
+  --model-path .qualification/cuda-rtx4090-laptop/performance-model-v1 \
   --runtime-identity "kiln-git:$(git rev-parse HEAD)" \
   --runtime-artifact target/release/kiln \
   --campaign-id cuda-rtx4090-laptop-bootstrap-attempt-001 \
@@ -338,7 +387,7 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --memory-limit-bytes '<reviewed whole-device ceiling>' \
   --model-fingerprint-read-mib-per-second 256 \
   --external-wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-boundary-v1.json \
-  --server-launch-config qualification/server-launch/kiln-cuda-rtx4090-laptop-serving-bootstrap-v1.json \
+  --server-launch-config qualification/server-launch/kiln-cuda-rtx4090-laptop-serving-performance-v1.json \
   --output-evidence hashes
 ```
 

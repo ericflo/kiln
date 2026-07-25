@@ -1081,6 +1081,19 @@ a time. Commit and push the environment receipt, thermal policy, guarded build
 and config checkpoint, first c1 receipt, each defect/fix, each wider accepted
 matrix, and final soak separately.
 
+The laptop performance handoff follows that rule with separate
+`kiln-cuda-rtx4090-laptop-serving-performance-v1` and
+`vllm-cuda-rtx4090-laptop-serving-performance-v1` launch inputs. They share the
+closed `.qualification/cuda-rtx4090-laptop/performance-model-v1` base-model
+view produced by `scripts/qualification/prepare_cuda_serving_model.py`. The
+tool excludes exactly the operational `.cache` and `adapters` directories,
+rejects every other non-regular root entry, publishes no duplicate weight
+bytes, and requires exact source hardlinks plus complete content and strict
+model-fingerprint agreement on every reuse. Each server still owns a separate
+immutable runtime snapshot. The complete materialization, pinned vLLM 0.23.0
+CUDA 12.9 environment, copied-interpreter runtime library, and manifest-capture
+commands are in the serving benchmark protocol.
+
 ROCm core correctness:
 
 ```bash

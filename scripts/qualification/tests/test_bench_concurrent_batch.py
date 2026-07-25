@@ -1006,6 +1006,59 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertEqual(args.served_model_id, "Qwen3.5-4B")
         self.assertEqual(args.process_group_mode, "inherited")
 
+    def test_cuda_laptop_performance_inputs_change_only_storage_paths(self) -> None:
+        config_root = ROOT / "qualification" / "server-config"
+        launch_root = ROOT / "qualification" / "server-launch"
+        bootstrap_name = "kiln-cuda-rtx4090-laptop-serving-bootstrap-v1"
+        performance_name = "kiln-cuda-rtx4090-laptop-serving-performance-v1"
+        bootstrap = self._parse_server_config(
+            config_root / f"{bootstrap_name}.toml"
+        )
+        performance = self._parse_server_config(
+            config_root / f"{performance_name}.toml"
+        )
+        serving_model = (
+            ".qualification/cuda-rtx4090-laptop/performance-model-v1"
+        )
+        self.assertEqual(performance["model"]["path"], serving_model)
+        for field in ("path", "adapter_dir", "snapshot_dir"):
+            performance["model"][field] = bootstrap["model"][field]
+        self.assertEqual(performance, bootstrap)
+
+        kiln_launch_path = launch_root / f"{performance_name}.json"
+        kiln_launch = bench.validate_server_launch_config_value(
+            bench.strict_json_loads(kiln_launch_path.read_bytes()),
+            config_directory=kiln_launch_path.parent,
+            label=performance_name,
+            require_local_paths=False,
+        )
+        self.assertEqual(
+            kiln_launch.record["command"][-1],
+            f"qualification/server-config/{performance_name}.toml",
+        )
+
+        vllm_launch_path = (
+            launch_root / "vllm-cuda-rtx4090-laptop-serving-performance-v1.json"
+        )
+        vllm_launch = bench.validate_server_launch_config_value(
+            bench.strict_json_loads(vllm_launch_path.read_bytes()),
+            config_directory=vllm_launch_path.parent,
+            label=vllm_launch_path.stem,
+            require_local_paths=False,
+        )
+        command = vllm_launch.record["command"]
+        self.assertIn(f"--model-path={serving_model}", command)
+        self.assertIn("--gpu-memory-utilization=0.75", command)
+        self.assertIn("--max-num-seqs=64", command)
+        self.assertIn("--max-num-batched-tokens=32768", command)
+        self.assertIn("--language-model-only", command)
+        args = bench.validate_vllm_owned_launch(
+            vllm_launch,
+            valid_vllm_manifest("Qwen3.5-4B"),
+        )
+        self.assertEqual(args.model_path, Path(serving_model))
+        self.assertEqual(args.process_group_mode, "inherited")
+
     def test_vllm_owned_launch_rejects_provenance_and_argument_drift(self) -> None:
         launch_path = (
             ROOT

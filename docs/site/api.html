@@ -1182,6 +1182,17 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 samples, scope accounting and removal, process cleanup, and stable handoff; the
                 nested record is not standalone performance evidence.
               </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Both laptop performance arms use a separate closed base-model view at
+                <code>.qualification/cuda-rtx4090-laptop/performance-model-v1</code>;
+                the accepted low-memory bootstrap input is unchanged. Preparation excludes exactly
+                the operational <code>.cache</code> and <code>adapters</code> directories and rejects
+                every other root directory, symlink, or special file. The read-only directory must
+                contain the exact source hardlink inodes, and complete source/target hashes plus the
+                strict model fingerprints must agree. Each launch still creates and removes its own
+                immutable private snapshot, and benchmark fingerprints bracket every request
+                campaign.
+              </p>
             </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">
               <h4 class="font-semibold mb-2">Memory alerting contract</h4>
