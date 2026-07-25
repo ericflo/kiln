@@ -162,6 +162,51 @@ class ServeCudaLowMemoryTests(unittest.TestCase):
         ):
             low_memory.child_environment(source)
 
+    def test_build_environment_preserves_scope_and_sets_exact_bounds(self) -> None:
+        source = {
+            "PATH": os.environ["PATH"],
+            low_memory.RESULT_ENV: "/tmp/result.json",
+            low_memory.VARIANT_ENV: low_memory.VARIANT_ID,
+            low_memory.NETWORK_ENV: "util-linux-unshare-user-net-pid-landlock-v1",
+            low_memory.THERMAL_POLICY_ENV: "sha256:" + "a" * 64,
+            low_memory.SCOPE_BOUNDARY_ENV: "systemd-user-scope-feedback-v1",
+            low_memory.SCOPE_MEMORY_MAX_ENV: str(10 * low_memory.GIB),
+            low_memory.SCOPE_PIDS_MAX_ENV: "512",
+            low_memory.SCOPE_CPU_QUOTA_ENV: "50",
+            low_memory.SCOPE_UNIT_ENV: "kiln-wsl-scope-" + "a" * 32,
+            low_memory.SCOPE_HOST_UID_ENV: "1000",
+        }
+        environment = low_memory.build_environment(source)
+        self.assertEqual(
+            {
+                key: environment[key]
+                for key in (
+                    "KILN_CARGO_ENVIRONMENT_POLICY",
+                    "KILN_CARGO_EXECUTION_MODE",
+                    "KILN_CARGO_HOST_RESERVE_GIB",
+                    "KILN_CARGO_JOBS",
+                    "KILN_CARGO_MAX_MEMORY_GIB",
+                    "KILN_CARGO_MIN_AVAILABLE_GIB",
+                    "KILN_CARGO_PRIVATE_NETWORK",
+                    "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS",
+                )
+            },
+            {
+                "KILN_CARGO_ENVIRONMENT_POLICY": "closed-qualification-test-v1",
+                "KILN_CARGO_EXECUTION_MODE": "delegated-cgroup",
+                "KILN_CARGO_HOST_RESERVE_GIB": "3",
+                "KILN_CARGO_JOBS": "1",
+                "KILN_CARGO_MAX_MEMORY_GIB": "10",
+                "KILN_CARGO_MIN_AVAILABLE_GIB": "13",
+                "KILN_CARGO_PRIVATE_NETWORK": "1",
+                "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS": "1740",
+            },
+        )
+        self.assertEqual(
+            environment[low_memory.SCOPE_MEMORY_MAX_ENV],
+            str(10 * low_memory.GIB),
+        )
+
     def test_ready_payload_is_closed_and_enforces_floor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ready.json"

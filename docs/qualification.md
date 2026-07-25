@@ -715,10 +715,11 @@ python3 scripts/qualification/run.py \
 The single case first verifies by hash that the earlier lifecycle receipt
 passed the production non-allocating admission rejection. It then builds the
 current CUDA release server through the delegated 10 GiB, zero-swap, 50-percent
-CPU WSL scope and starts the immutable stable-profile laptop launch. Readiness
-must expose the exact public model, two weight shards, positive post-load CUDA
-residency, healthy `nvidia-smi` sampling, clean-source execution provenance,
-and the exact source-built executable hash.
+CPU WSL scope and starts the immutable stable-profile laptop launch. The build
+requires 13 GiB live host availability and preserves 3 GiB outside its 10 GiB
+aggregate ceiling. Readiness must expose the exact public model, two weight
+shards, positive post-load CUDA residency, healthy `nvidia-smi` sampling,
+clean-source execution provenance, and the exact source-built executable hash.
 
 After warmup, the driver records a deterministic 32-token baseline. A separate
 CUDA-driver process allocates in at most 256 MiB chunks until free memory is at
@@ -760,8 +761,18 @@ then failed before compilation because the nested Cargo preflight observed 13
 whole GiB available against the unchanged 14 GiB admission floor. Its scope
 ran for 0.356 seconds, peaked at 42,921,984 bytes and seven PIDs, reported zero
 memory-limit or OOM events, and was removed cleanly. This second receipt also
-contains no model or pressure evidence; wait for the declared host-memory
-floor rather than weakening it.
+contains no model or pressure evidence.
+
+A second clean pushed-source retry, receipt
+`20260725t081310957001z-cuda-rtx4090-laptop-serving-cuda-low-memory--647fb2a614-v1`,
+reproduced that 13-versus-14 GiB refusal after environment capture saw
+15,046,885,376 bytes available. The WSL VM exposes only 15.33 GiB total, and
+the runner plus its scope cross the old whole-GiB threshold. The revised typed
+build boundary therefore requires 13 GiB available, reserves 3 GiB for the
+host, and retains the same 10 GiB aggregate compiler scope with swap disabled.
+It does not raise compiler capacity or change any GPU pressure, thermal,
+network, process, filesystem, or cleanup limit. A new clean pushed-source
+receipt must still pass before this gate closes.
 
 ### CUDA Serving Bootstrap Handoff
 

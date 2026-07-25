@@ -65,6 +65,9 @@ PEER_HOLD_SECONDS = 300
 PEER_POLL_MILLISECONDS = 100
 RECOVERY_TOLERANCE_MIB = 512
 HEALTH_RECOVERY_TOLERANCE_MIB = 768
+BUILD_MIN_AVAILABLE_GIB = 13
+BUILD_HOST_RESERVE_GIB = 3
+BUILD_MAX_MEMORY_GIB = 10
 REQUEST_PROMPT_WORDS = 16
 REQUEST_MAX_TOKENS = 32
 MODEL_ID = "Qwen3.5-4B"
@@ -134,12 +137,14 @@ EFFECTIVE_CONFIG: dict[str, Any] = {
         "cargo_environment_policy": "closed-qualification-test-v1",
         "cargo_cpu_quota_percent": 50,
         "cargo_execution_mode": "delegated-cgroup",
+        "cargo_host_reserve_gib": BUILD_HOST_RESERVE_GIB,
         "cargo_jobs": 1,
+        "cargo_max_memory_gib": BUILD_MAX_MEMORY_GIB,
         "cargo_memory_scope": "outer-wsl2-qualification-scope",
-        "cargo_min_available_gib": 14,
+        "cargo_min_available_gib": BUILD_MIN_AVAILABLE_GIB,
         "cargo_private_network": True,
         "cargo_service_runtime_max_seconds": 1740,
-        "cargo_wrapper": "scripts/qualification/cargo-test-bounded.sh",
+        "cargo_wrapper": "scripts/cargo-bounded.sh",
         "features": "cuda",
         "locked": True,
         "no_default_features": True,
@@ -502,25 +507,38 @@ def child_environment(source: dict[str, str]) -> dict[str, str]:
     }
 
 
+def build_environment(source: dict[str, str]) -> dict[str, str]:
+    validate_runner_environment(source)
+    environment = dict(source)
+    environment.update(
+        {
+            "CARGO_NET_OFFLINE": "true",
+            "CUDARC_CUDA_VERSION": "12080",
+            "KILN_CARGO_CPU_QUOTA_PERCENT": "50",
+            "KILN_CARGO_ENVIRONMENT_POLICY": "closed-qualification-test-v1",
+            "KILN_CARGO_EXECUTION_MODE": "delegated-cgroup",
+            "KILN_CARGO_HOST_RESERVE_GIB": str(BUILD_HOST_RESERVE_GIB),
+            "KILN_CARGO_JOBS": "1",
+            "KILN_CARGO_MAX_MEMORY_GIB": str(BUILD_MAX_MEMORY_GIB),
+            "KILN_CARGO_MIN_AVAILABLE_GIB": str(BUILD_MIN_AVAILABLE_GIB),
+            "KILN_CARGO_PRIVATE_NETWORK": "1",
+            "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS": "1740",
+            "KILN_CUDA_ARCHS": "89",
+            "KILN_QUALIFICATION": "1",
+        }
+    )
+    return environment
+
+
 def build_binary(absolute_deadline: float) -> tuple[Path, str, float]:
     started = time.monotonic()
     remaining = min(
         BUILD_TIMEOUT_SECONDS,
         max(0.001, absolute_deadline - time.monotonic()),
     )
-    environment = dict(os.environ)
-    validate_runner_environment(environment)
-    environment.update(
-        {
-            "CARGO_NET_OFFLINE": "true",
-            "CUDARC_CUDA_VERSION": "12080",
-            "KILN_CARGO_CPU_QUOTA_PERCENT": "50",
-            "KILN_CUDA_ARCHS": "89",
-            "KILN_QUALIFICATION": "1",
-        }
-    )
+    environment = build_environment(dict(os.environ))
     command = [
-        str(ROOT / "scripts/qualification/cargo-test-bounded.sh"),
+        str(ROOT / "scripts/cargo-bounded.sh"),
         "build",
         "--locked",
         "--offline",
