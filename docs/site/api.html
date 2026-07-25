@@ -1150,6 +1150,10 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 accelerator budget. An unavailable observation is <code>null</code>;
                 <code>probe_failed=true</code> means the latest sample failed, in which case effective
                 free memory is forced to zero while the last known capacity and provenance remain visible.
+                NVIDIA&rsquo;s reported used and free counters can leave a reserved gap, including on
+                WSL2. The safe NVIDIA snapshot therefore uses the lower of
+                <code>driver_free_bytes</code> and total minus
+                <code>driver_used_bytes</code>, while preserving both raw counters here.
                 The safe bounded values derived from the observations remain in the surrounding
                 <code>live</code> fields.
               </p>

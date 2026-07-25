@@ -993,6 +993,16 @@ tolerance: server sampling must query all three counters, retain their raw
 diagnostics, and use the conservative minimum of reported free and
 `total - used` as effective free. The low-memory gate remains open.
 
+The repaired NVIDIA probe now requests total, used, and free in one bounded
+`nvidia-smi` process. It rejects missing, extra, multi-row, zero-capacity,
+non-integer, and out-of-range results. Effective free is the lower of reported
+free and `total - reported_used`; effective used is recomputed from that value
+so the safe snapshot remains internally consistent. Raw reported used and free
+remain separately exposed in memory observations, including the WSL2 reserved
+gap. Focused tests cover both directions of disagreement. No pressure target,
+floor, tolerance, or lifecycle bound changed, and a clean pushed-source
+hardware rerun is still required.
+
 ### CUDA Serving Bootstrap Handoff
 
 After the environment, core-correctness, and memory-lifecycle receipts pass and

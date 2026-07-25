@@ -1024,10 +1024,11 @@ pub struct MemorySnapshotObservations {
 
 /// A point-in-time safe memory snapshot for one selected accelerator.
 ///
-/// On discrete devices the effective figures are the driver's all-process
-/// counters. On a unified Linux device, DRM VRAM+GTT is only an address-space
-/// observation: effective total/free are additionally bounded by host RAM,
-/// `MemAvailable`, and any finite cgroup v1/v2 limit.
+/// On discrete devices the effective figures conservatively reconcile the
+/// driver's all-process used and free counters. On a unified Linux device, DRM
+/// VRAM+GTT is only an address-space observation: effective total/free are
+/// additionally bounded by host RAM, `MemAvailable`, and any finite cgroup
+/// v1/v2 limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemorySnapshot {
     /// Safe effective capacity after shared-memory headroom.
@@ -1106,10 +1107,25 @@ fn empty_memory_snapshot() -> MemorySnapshot {
 }
 
 fn nvidia_memory_snapshot(index: usize) -> Option<MemorySnapshot> {
-    let (total, used) = query_nvidia_smi_memory_for(index)?;
-    let used = used.min(total);
-    let free = total.saturating_sub(used);
-    Some(MemorySnapshot {
+    let (total, reported_used, reported_free) = query_nvidia_smi_memory_for(index)?;
+    Some(nvidia_memory_snapshot_from_counters(
+        total,
+        reported_used,
+        reported_free,
+    ))
+}
+
+fn nvidia_memory_snapshot_from_counters(
+    total: u64,
+    reported_used: u64,
+    reported_free: u64,
+) -> MemorySnapshot {
+    // WSL2 can report a reserved gap where used + free < total. Treat both
+    // counters as independent ceilings and publish the more conservative
+    // allocation budget while retaining their raw values for diagnostics.
+    let free = reported_free.min(total.saturating_sub(reported_used));
+    let used = total.saturating_sub(free);
+    MemorySnapshot {
         total_bytes: total,
         used_bytes: used,
         free_bytes: free,
@@ -1117,11 +1133,11 @@ fn nvidia_memory_snapshot(index: usize) -> Option<MemorySnapshot> {
         unified: false,
         observations: MemorySnapshotObservations {
             driver_total_bytes: Some(total),
-            driver_used_bytes: Some(used),
-            driver_free_bytes: Some(free),
+            driver_used_bytes: Some(reported_used),
+            driver_free_bytes: Some(reported_free),
             ..MemorySnapshotObservations::default()
         },
-    })
+    }
 }
 
 fn apple_memory_snapshot() -> Option<MemorySnapshot> {
@@ -1372,7 +1388,7 @@ fn query_meminfo_available_bytes_at(path: &std::path::Path) -> Option<u64> {
 /// which returns total memory in MiB. Returns None if nvidia-smi is not available
 /// or fails.
 fn query_nvidia_smi_for(index: usize) -> Option<u64> {
-    query_nvidia_smi_memory_for(index).map(|(total, _used)| total)
+    query_nvidia_smi_memory_for(index).map(|(total, _used, _free)| total)
 }
 
 /// Enumerate physical NVIDIA indices and stable UUIDs in one bounded process.
@@ -1411,14 +1427,14 @@ fn parse_nvidia_physical_indices(stdout: &[u8]) -> Option<Vec<usize>> {
     (!indices.is_empty()).then_some(indices)
 }
 
-/// Query total and used memory in one bounded `nvidia-smi` process.
-fn query_nvidia_smi_memory_for(index: usize) -> Option<(u64, u64)> {
+/// Query total, used, and free memory in one bounded `nvidia-smi` process.
+fn query_nvidia_smi_memory_for(index: usize) -> Option<(u64, u64, u64)> {
     let id = format!("--id={index}");
     let stdout = bounded_command_stdout(
         "nvidia-smi",
         &[
             id.as_str(),
-            "--query-gpu=memory.total,memory.used",
+            "--query-gpu=memory.total,memory.used,memory.free",
             "--format=csv,noheader,nounits",
         ],
         std::time::Duration::from_secs(2),
@@ -1426,17 +1442,23 @@ fn query_nvidia_smi_memory_for(index: usize) -> Option<(u64, u64)> {
     parse_nvidia_smi_memory(&stdout)
 }
 
-fn parse_nvidia_smi_memory(stdout: &[u8]) -> Option<(u64, u64)> {
+fn parse_nvidia_smi_memory(stdout: &[u8]) -> Option<(u64, u64, u64)> {
     let stdout = std::str::from_utf8(stdout).ok()?;
-    let mut fields = stdout.trim().lines().next()?.split(',');
+    let mut lines = stdout.lines().filter(|line| !line.trim().is_empty());
+    let mut fields = lines.next()?.split(',');
+    if lines.next().is_some() {
+        return None;
+    }
     let total_mib: u64 = fields.next()?.trim().parse().ok()?;
     let used_mib: u64 = fields.next()?.trim().parse().ok()?;
-    if fields.next().is_some() {
+    let free_mib: u64 = fields.next()?.trim().parse().ok()?;
+    if fields.next().is_some() || total_mib == 0 || used_mib > total_mib || free_mib > total_mib {
         return None;
     }
     Some((
         total_mib.checked_mul(1024 * 1024)?,
         used_mib.checked_mul(1024 * 1024)?,
+        free_mib.checked_mul(1024 * 1024)?,
     ))
 }
 
@@ -1831,11 +1853,38 @@ mod tests {
     fn parses_single_nvidia_memory_query() {
         let mib = 1024 * 1024;
         assert_eq!(
-            parse_nvidia_smi_memory(b"24564, 1024\n"),
-            Some((24_564 * mib, 1_024 * mib))
+            parse_nvidia_smi_memory(b"24564, 1024, 23200\n"),
+            Some((24_564 * mib, 1_024 * mib, 23_200 * mib))
         );
-        assert_eq!(parse_nvidia_smi_memory(b"24564\n"), None);
-        assert_eq!(parse_nvidia_smi_memory(b"24564, nope\n"), None);
+        assert_eq!(parse_nvidia_smi_memory(b"24564, 1024\n"), None);
+        assert_eq!(parse_nvidia_smi_memory(b"24564, nope, 23200\n"), None);
+        assert_eq!(
+            parse_nvidia_smi_memory(b"24564, 1024, 23200\n24564, 0, 0\n"),
+            None
+        );
+        assert_eq!(parse_nvidia_smi_memory(b"0, 0, 0\n"), None);
+        assert_eq!(parse_nvidia_smi_memory(b"24564, 24565, 0\n"), None);
+        assert_eq!(parse_nvidia_smi_memory(b"24564, 0, 24565\n"), None);
+    }
+
+    #[test]
+    fn nvidia_snapshot_uses_conservative_free_counter() {
+        let mib = 1024 * 1024;
+        let snapshot =
+            nvidia_memory_snapshot_from_counters(16_376 * mib, 15_089 * mib, 1_024 * mib);
+        assert_eq!(snapshot.total_bytes, 16_376 * mib);
+        assert_eq!(snapshot.free_bytes, 1_024 * mib);
+        assert_eq!(snapshot.used_bytes, 15_352 * mib);
+        assert_eq!(
+            snapshot.used_bytes.saturating_add(snapshot.free_bytes),
+            snapshot.total_bytes
+        );
+        assert_eq!(snapshot.observations.driver_used_bytes, Some(15_089 * mib));
+        assert_eq!(snapshot.observations.driver_free_bytes, Some(1_024 * mib));
+
+        let subtraction_is_lower =
+            nvidia_memory_snapshot_from_counters(16_376 * mib, 15_089 * mib, 1_500 * mib);
+        assert_eq!(subtraction_is_lower.free_bytes, 1_287 * mib);
     }
 
     #[test]
@@ -2830,6 +2879,25 @@ mod tests {
         let s = current_memory_snapshot();
         assert_eq!(s.used_bytes.saturating_add(s.free_bytes), s.total_bytes);
         assert!(s.free_bytes <= s.total_bytes);
+        if s.source == VramSource::NvidiaSmi {
+            let reported_total = s
+                .observations
+                .driver_total_bytes
+                .expect("NVIDIA snapshot must retain reported total");
+            let reported_used = s
+                .observations
+                .driver_used_bytes
+                .expect("NVIDIA snapshot must retain reported used");
+            let reported_free = s
+                .observations
+                .driver_free_bytes
+                .expect("NVIDIA snapshot must retain reported free");
+            assert_eq!(reported_total, s.total_bytes);
+            assert_eq!(
+                s.free_bytes,
+                reported_free.min(reported_total.saturating_sub(reported_used))
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]
