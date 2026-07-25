@@ -568,6 +568,10 @@ version in the ignored venv, then run
 JSON. The tool inserts only `--manifest-only`, requires two byte-identical
 strict-valid results, and publishes without overwrite. Commit that machine's
 manifest under `qualification/runtime/vllm/cuda/<machine>/` before startup.
+WSL2 capture must also pass the committed policy through
+`--wsl2-thermal-policy`; the tool supervises and cools each identity pass
+independently and rejects an omitted policy automatically, uncommitted policy
+or supervisor bytes, and missing, tripped, or incomplete thermal evidence.
 The accelerator identity must match the environment receipt's 4090 class,
 `sm_89`, capacity, and selected logical device. The benchmark then binds the
 manifest as `--runtime-artifact`, the environment receipt's stable GPU UUID as

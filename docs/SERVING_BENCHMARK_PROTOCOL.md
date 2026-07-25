@@ -365,6 +365,7 @@ JSON:
 mkdir -p qualification/runtime/vllm/cuda/rtx4090-laptop
 python3 scripts/qualification/capture_vllm_runtime_manifest.py \
   --server-launch-config qualification/server-launch/vllm-cuda-rtx4090-laptop-serving-performance-v1.json \
+  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-boundary-v1.json \
   --output qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json
 ```
 
@@ -374,9 +375,19 @@ twice with bounded output and a per-capture deadline. It requires two
 byte-identical strict-valid results under the benchmark driver's manifest plus
 launch-binding validators. It publishes the exact repeated bytes
 with fsync and no overwrite, and reports the source commit, manifest hash,
-runtime-content hash, system fingerprint, and both stderr hashes. A dirty tree,
-existing output, nonzero/timeout child, oversized output, invalid manifest, or
-repeat mismatch fails without publication. Commit the manifest before startup.
+runtime-content hash, system fingerprint, both stderr hashes, and both thermal
+lifecycles. The launch JSON must be a tracked regular file whose bytes match
+`HEAD`. On WSL2, omitting the policy is rejected automatically. The explicit
+content-hashed repository policy and supervisor have the same file and commit
+binding, and the policy wraps each capture independently. The tool requires
+exactly one successful
+`preflight`/`complete` pair per pass, peaks below both hard limits, and the
+configured stable handoff before starting the next pass. A dirty tree, existing
+output, source or commit change during capture, nonzero/timeout child, missing
+or malformed thermal evidence, oversized output, invalid manifest, or repeat
+mismatch fails without publication. A timeout or interruption terminates the
+complete capture session and waits for the wrapper's handoff before escalation.
+Commit the manifest before startup.
 The tracked laptop launch makes both captures use the explicit 64 MiB/s
 cumulative provenance-read ceiling; do not remove or override it to accelerate
 capture.

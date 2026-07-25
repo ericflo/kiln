@@ -1071,7 +1071,14 @@ pre-existing server is rejected.
 Use `scripts/qualification/capture_vllm_runtime_manifest.py` with the tracked
 vLLM launch JSON; do not retype its inference arguments. The tool requires a
 clean commit, two byte-identical strict-valid captures, bounded child output,
-and a new destination before it publishes the exact runtime manifest.
+and a new destination before it publishes the exact runtime manifest. The
+launch JSON must be a tracked regular file with bytes identical to `HEAD`.
+On this WSL2 laptop, pass the committed boundary as
+`--wsl2-thermal-policy`. Each capture then runs in a separate
+Windows-thermal-zone/NVML wrapper lifecycle and must complete stable handoff
+before the next starts. The command reports both strict-valid thermal records;
+a trip, omitted policy, uncommitted policy or supervisor bytes, missing event,
+timeout, or incomplete cooldown prevents publication.
 The laptop performance launch pins
 `--max-provenance-read-mib-per-second=64`, cumulatively pacing all
 launcher-owned model/snapshot/adapter/runtime hashing and applying the same
