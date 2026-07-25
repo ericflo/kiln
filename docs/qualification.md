@@ -744,6 +744,16 @@ already retained pre-allocation rejection instead of manufacturing an OOM. It
 does not qualify serving throughput, concurrency expansion, an eight-hour
 soak, native Linux, or the desktop RTX 4090.
 
+The first exact pushed-source attempt, receipt
+`20260725t073758504795z-cuda-rtx4090-laptop-serving-cuda-low-memory--647fb2a614-v1`,
+failed closed at the declared 1,800-second build limit while compiling the
+BF16 FlashAttention CUDA objects from a cold cache. It never launched the
+server, loaded the model, or started the pressure peer. The bounded scope
+reported zero memory-limit or OOM events, peaked at 7,255,072,768 bytes and 29
+PIDs, was removed cleanly, and completed thermal handoff after 92.05 C host
+and 66 C GPU peaks. This is retained counterevidence for cold-cache build
+completion within the current limit; the low-memory gate remains open.
+
 ### CUDA Serving Bootstrap Handoff
 
 After the environment, core-correctness, and memory-lifecycle receipts pass and
