@@ -162,6 +162,32 @@ capability is installed and recaptured. Toolkit provenance is descriptive:
 recording CUDA 12.4 does not by itself establish the workload manifests'
 cudarc CUDA 12.8 API contract or any accelerator correctness.
 
+#### Current WSL2 RTX 4090 Laptop environment result
+
+The first source-bound laptop environment run passed from clean pushed commit
+`c55bff4a76ced998bd51ebc3098822383d5f28d1` and tree hash
+`sha256:74fcaa95635e7a003a2c91c9b8308fa7a58d1778620761b81f7831e48e1905a2`.
+Its retained outer receipt is
+`qualification/receipts/cuda/rtx4090-laptop/20260725t042515089130z-cuda-rtx4090-laptop-local-environment-v1-df3e8fee15-v1.json`.
+The outer receipt and ignored inner collector receipt both pass current-source,
+local-artifact, and known-commit validation. The case exited zero with empty
+stderr, no output-assertion or infrastructure failure, the accepted
+`util-linux-unshare-user-net-pid-landlock-v1` mechanism, and no process residue.
+
+The selected device is logical index zero, NVIDIA GeForce RTX 4090 Laptop GPU,
+UUID `GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd`, PCI
+`00000000:01:00.0`, SM 8.9, with 17,171,480,576 total bytes and
+15,680,405,504 free bytes at capture. Windows driver 32.0.15.9636 maps to
+NVIDIA 596.36 and agrees with both `nvidia-smi` and NVML. The receipt records
+NVML 13.595.71.01, libcuda driver API 13.2, CUDA SDK/runtime 12.4, nvcc
+12.4.99, rustc/Cargo 1.96.1, 16,459,141,120 WSL VM bytes, and 4 GiB swap.
+
+This closes the laptop environment and capture-time memory-capability gate
+only. The receipt explicitly leaves `systemd_user_transient` and
+`host_thermal_guard` unavailable. It does not establish CUDA kernel
+correctness, the cudarc 12.8 workload contract, model loading, low-memory
+recovery, serving performance, or endurance.
+
 New environment receipts retain the common device fields and may additionally
 carry these closed optional fields:
 

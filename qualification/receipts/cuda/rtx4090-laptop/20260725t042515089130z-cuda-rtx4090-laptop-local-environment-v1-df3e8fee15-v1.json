@@ -1,0 +1,188 @@
+{
+  "artifacts": [
+    {
+      "bytes": 20771,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260725t042515089130z-cuda-rtx4090-laptop-local-environment-v1-df3e8fee15-v1/environment.json",
+      "sha256": "sha256:6e5c9965e3a05434ab29d3a36cb31bfedd1689dd87d558529e599b73d9f3d43f"
+    },
+    {
+      "bytes": 67,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260725t042515089130z-cuda-rtx4090-laptop-local-environment-v1-df3e8fee15-v1/cases/001-environment-capture-r001/stdout.log",
+      "sha256": "sha256:8345826ba31dbbf725ff4f8ef12516ff40bd23a1817a141b178dab1b274ca5d2"
+    },
+    {
+      "bytes": 0,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260725t042515089130z-cuda-rtx4090-laptop-local-environment-v1-df3e8fee15-v1/cases/001-environment-capture-r001/stderr.log",
+      "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 645,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260725t042515089130z-cuda-rtx4090-laptop-local-environment-v1-df3e8fee15-v1/cases/001-environment-capture-r001/case-result.json",
+      "sha256": "sha256:cfde8ae224caa4d8f67b7d9ece9b654ee41306d2200d3faaa8f34ab31e0a813c"
+    },
+    {
+      "bytes": 6073,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260725t042515089130z-cuda-rtx4090-laptop-local-environment-v1-df3e8fee15-v1/run-config.json",
+      "sha256": "sha256:8232d1fe6c6a2173fabf89a94f3297754482bdf3e78fb0d4c3192eea624ab2a1"
+    }
+  ],
+  "created_at_utc": "2026-07-25T04:25:17.405Z",
+  "effective_config": {},
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+      "nvcc": "release 12.4, V12.4.99",
+      "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)"
+    },
+    "device": {
+      "architecture": "sm_89",
+      "compute_capability": "8.9",
+      "compute_units": null,
+      "device_uuid": "GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd",
+      "driver": "NVIDIA 596.36",
+      "logical_index": 0,
+      "memory_available_bytes": 15680405504,
+      "memory_bytes": 17171480576,
+      "name": "NVIDIA GeForce RTX 4090 Laptop GPU",
+      "pci_bus_id": "00000000:01:00.0",
+      "unified_memory": false
+    },
+    "host_id": "rtx4090-laptop",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "6.6.87.2-microsoft-standard-WSL2",
+      "name": "Ubuntu",
+      "version": "22.04"
+    },
+    "platform": {
+      "capabilities": {
+        "cgroup_memory_delegation": "available",
+        "cuda_driver_bridge": "available",
+        "cuda_runtime": "available",
+        "cuda_toolkit": "available",
+        "driver_identity": "available",
+        "filesystem_semantics": "available",
+        "gpu_temperature": "available",
+        "host_thermal_guard": "unavailable",
+        "memory_accounting": "available",
+        "network_containment": "available",
+        "nvml": "available",
+        "process_containment": "available",
+        "systemd_system": "available",
+        "systemd_user_transient": "unavailable",
+        "windows_identity": "available",
+        "wsl_identity": "available"
+      },
+      "details": {
+        "cgroup_memory_delegation": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice; controllers=memory,pids; memory.max and swap.max round-trip",
+        "cuda_driver_bridge": "libcuda API 13020; bridge_root=/usr/lib/wsl/lib",
+        "cuda_runtime": "runtime API 12.4; driver API 13.2",
+        "cuda_toolkit": "SDK 12.4.0; nvcc 12.4.99; root=/usr/local/cuda-12.4",
+        "driver_identity": "Windows 32.0.15.9636; NVIDIA 596.36; PNP PCI\\VEN_10DE&DEV_2757&SUBSYS_36081043&REV_A1\\4&6AD973D&0&0008",
+        "filesystem_semantics": "/dev/sdd ext4 at /; atomic+durable+link+case probes passed",
+        "gpu_temperature": "temperature_c=62; hardware_shutdown_threshold=unavailable_under_wsl2",
+        "host_thermal_guard": "no readable Linux hwmon temperature inputs; Windows ACPI probe unavailable: wsl2-windows-acpi-temperature exited 1: Get-CimInstance : Access denied \r\nAt line:1 char:33\r\n+ ... ce='Stop';@(Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_The ...\r\n+                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : PermissionDenied: (root/wmi:MSAcpi_ThermalZoneTemperature:String) [Get-CimInstance], Cim \r\n   Exception\r\n    + FullyQualifiedErrorId : HRESULT 0x80041003,Microsoft.Management.Infrastructure.CimCmdlets.GetCimInstanceCommand",
+        "memory_accounting": "MemAvailable=15404408832; MemTotal=16459141120; SwapFree=4294967296; SwapTotal=4294967296",
+        "nvml": "NVML 13.595.71.01; driver 596.36; UUID GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd",
+        "systemd_system": "PID 1 systemd; system state running",
+        "systemd_user_transient": "wsl2-systemd-user-transient exited 1: Failed to connect to bus: No such file or directory",
+        "windows_identity": "Microsoft Windows 11 Home 10.0.26200 build 26200; WSL 2.5.9.0",
+        "workload_containment": "util-linux-unshare-user-net-pid-landlock-v1; loopback-only network, private PID namespace, kill-child lifetime, and Landlock-denied WSL interop",
+        "wsl_identity": "kernel=6.6.87.2-microsoft-standard-WSL2; interop=enabled\ninterpreter /init\nflags: PF\noffset 0\nmagic 4d5a"
+      },
+      "kind": "wsl2"
+    },
+    "runtime": {
+      "cuda_driver": "596.36",
+      "cuda_toolkit": "release 12.4, V12.4.99",
+      "execution_environment_sha256": "sha256:40c4c6a9e04e82075ef88c94a1c722ca7acc4ef88971bbf1651bba62ad72197c",
+      "nvidia_smi_query": "index,name,uuid,pci.bus_id,compute_cap,memory.total,memory.free,driver_version"
+    }
+  },
+  "metrics": [],
+  "model": null,
+  "notes": [],
+  "qualification": {
+    "backend": "cuda",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "--variant",
+      "cuda-rtx4090-laptop-16gb",
+      "--host-id",
+      "rtx4090-laptop",
+      "--var",
+      "output_path=.qualification/environment/rtx4090-laptop-cuda-wsl2-c55bff4a7.json",
+      "qualification/workloads/environment-v1.json"
+    ],
+    "duration_seconds": 2.316212233999977,
+    "finished_at_utc": "2026-07-25T04:25:17.405Z",
+    "kind": "environment",
+    "profile": "local-environment-v1",
+    "started_at_utc": "2026-07-25T04:25:15.089Z",
+    "verdict": "passed"
+  },
+  "receipt_id": "20260725t042515089130z-cuda-rtx4090-laptop-local-environment-v1-df3e8fee15-v1",
+  "results": [
+    {
+      "details": null,
+      "duration_seconds": 0.82796996199977,
+      "id": "environment-capture",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "c55bff4a76ced998bd51ebc3098822383d5f28d1",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:74fcaa95635e7a003a2c91c9b8308fa7a58d1778620761b81f7831e48e1905a2",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [
+    "wsl2_systemd_user_transient: wsl2-systemd-user-transient exited 1: Failed to connect to bus: No such file or directory",
+    "wsl2_host_temperature_guard: no readable Linux hwmon temperature inputs; Windows ACPI probe unavailable: wsl2-windows-acpi-temperature exited 1: Get-CimInstance : Access denied \r\nAt line:1 char:33\r\n+ ... ce='Stop';@(Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_The ...\r\n+                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : PermissionDenied: (root/wmi:MSAcpi_ThermalZoneTemperature:String) [Get-CimInstance], Cim \r\n   Exception\r\n    + FullyQualifiedErrorId : HRESULT 0x80041003,Microsoft.Management.Infrastructure.CimCmdlets.GetCimInstanceCommand"
+  ],
+  "workload": {
+    "id": "local-environment-v1",
+    "parameters": {
+      "output_path": ".qualification/environment/rtx4090-laptop-cuda-wsl2-c55bff4a7.json",
+      "variant_id": "cuda-rtx4090-laptop-16gb"
+    },
+    "seed": null,
+    "sha256": "sha256:33bab5720a03cd5c6af7f626b132408eb479f1689a536a2465f274d951981c9a"
+  }
+}
