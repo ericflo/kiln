@@ -1000,8 +1000,34 @@ free and `total - reported_used`; effective used is recomputed from that value
 so the safe snapshot remains internally consistent. Raw reported used and free
 remain separately exposed in memory observations, including the WSL2 reserved
 gap. Focused tests cover both directions of disagreement. No pressure target,
-floor, tolerance, or lifecycle bound changed, and a clean pushed-source
-hardware rerun is still required.
+floor, tolerance, or lifecycle bound changed.
+
+The unchanged workload passed from exact clean pushed source
+`385bcf20874ff93ebbd91b4099935c554d03ad15`. Receipt
+`20260725t155941791666z-cuda-rtx4090-laptop-serving-cuda-low-memory--647fb2a614-v1`
+is strict current-source, local-artifact, and known-commit valid; its file hash
+is
+`sha256:c6fb85c2ffa0d437e7b0bbacdb2e8811b5c7ceb8e8a42a5d895e71924dccb4b2`.
+The server attested the 17,171,480,576-byte physical capacity,
+14,975,762,432-byte resident model state, and exact
+62-block/130,023,424-byte BF16 KV pool. The peer allocated 260,046,848 bytes
+in two bounded allocations, reached 1,007,681,536 bytes free, observed
+940,572,672 bytes at its minimum across 17 held-pressure samples, and released
+cleanly to 1,449,132,032 bytes. The unchanged server sampler corroborated the
+pressure envelope and recovered in 1.445 ms. Baseline, pressure, and recovery
+requests each returned HTTP 200 with 32 completion tokens, and the recovery
+token IDs plus finish reason exactly matched the deterministic baseline.
+
+The 10 GiB zero-swap scope reached its exact 10,737,418,240-byte bound and a
+66-PID peak. Its 5,994 `memory.max` events did not produce an OOM, OOM kill, or
+group kill. Server and peer exits were graceful; process-group, snapshot, and
+scope cleanup completed without residue. Continuous supervision completed its
+safe handoff after 92.05 C host and 69 C GPU peaks, below the 95/85 C hard
+limits. This accepted receipt and the retained lifecycle receipt close the
+bounded WSL2 Laptop GPU low-memory admission, explicit rejection, held-pressure
+request, release recovery, deterministic replay, and cleanup gate. They do not
+qualify the performance matrix, eight-hour soak, native Linux, or desktop RTX
+4090.
 
 ### CUDA Serving Bootstrap Handoff
 

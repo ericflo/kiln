@@ -1157,6 +1157,20 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 The safe bounded values derived from the observations remain in the surrounding
                 <code>live</code> fields.
               </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                This reconciliation has passed the bounded WSL2 RTX 4090 Laptop low-memory gate on
+                exact clean source <code>385bcf20874ff93ebbd91b4099935c554d03ad15</code>. With a
+                17,171,480,576-byte physical device and 14,975,762,432 bytes resident after model
+                load, an independent peer allocated 260,046,848 bytes, reached 1,007,681,536 bytes
+                reported free, and observed a 940,572,672-byte minimum while a 32-token request
+                completed. Server sampling corroborated the unchanged 1,024/768 MiB target/floor
+                envelope; after clean peer release it recovered within the declared bound and an
+                exact deterministic 32-token replay passed. The 10 GiB zero-swap scope recorded no
+                OOM or residue and thermal handoff passed. Receipt
+                <code>20260725t155941791666z-cuda-rtx4090-laptop-serving-cuda-low-memory--647fb2a614-v1</code>
+                closes only that bounded admission and recovery gate. It is not performance, soak,
+                native-Linux, or desktop-4090 evidence.
+              </p>
             </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">
               <h4 class="font-semibold mb-2">Memory alerting contract</h4>

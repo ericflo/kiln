@@ -1668,7 +1668,7 @@ without waiting for the remaining repository-wide cleanup phases.
   87.05/67 C below the 95/85 C hard limits. This closes the bounded laptop core
   subset only, not full-model, multi-row graph, memory-pressure, serving,
   performance, or endurance qualification.
-- [ ] Exercise low-memory admission and explicit failure behavior.
+- [x] Exercise low-memory admission and explicit failure behavior.
   The four-case lifecycle substrate passed from exact clean pushed source
   `9fadc2592f1814d7dd68b3c96ab008e8b886d665`. The retained receipt proves
   real pool retention and explicit 2,048 MiB trim recovery, non-allocating
@@ -1862,8 +1862,36 @@ without waiting for the remaining repository-wide cleanup phases.
   conservative free value while preserving both raw counters in diagnostic
   observations. Focused parser and reconciliation tests cover the WSL2
   reserved-gap direction and the inverse disagreement. No pressure tolerance
-  or floor changed. This remains a source repair until a clean pushed-source
-  run completes corroboration and recovery.
+  or floor changed.
+  The unchanged workload then passed from exact clean pushed source
+  `385bcf20874ff93ebbd91b4099935c554d03ad15`. The strict current-source,
+  local-artifact, and known-commit valid receipt is
+  `qualification/receipts/cuda/rtx4090-laptop/20260725t155941791666z-cuda-rtx4090-laptop-serving-cuda-low-memory--647fb2a614-v1.json`
+  with file
+  `sha256:c6fb85c2ffa0d437e7b0bbacdb2e8811b5c7ceb8e8a42a5d895e71924dccb4b2`.
+  It binds source tree
+  `sha256:7b351dc2a5064fd0fc02f4644e8ae3db5d28f73c23cf66929278f5cba767ee5a`,
+  config
+  `sha256:455dee1f50c87e7d7eb2674fcf30823073500141e1f05a311b068633deb6f494`,
+  and workload
+  `sha256:2c741a773ccc4f02e714b78fcb30c32c578cb83c6019e56432706f69191f2d45`.
+  The source-built server attested the 17,171,480,576-byte physical capacity,
+  14,975,762,432-byte resident model state, and exact
+  62-block/130,023,424-byte KV pool. The peer allocated 260,046,848 bytes in
+  two bounded allocations, reached 1,007,681,536 bytes free, observed a
+  940,572,672-byte minimum across 17 held-pressure samples, and released
+  cleanly to 1,449,132,032 bytes. The unchanged server sampler corroborated
+  pressure and recovered within its envelope in 1.445 ms. Baseline, pressure,
+  and recovery each completed 32 tokens; the recovery token IDs and finish
+  reason exactly matched baseline. All request, fault, quarantine, forced
+  shutdown, peer/server process-group residue, and snapshot-residue counts
+  were zero. The exact 10,737,418,240-byte scope peak and 66-PID peak produced
+  5,994 `memory.max` events but zero OOM, OOM-kill, or group-kill events; the
+  scope was removed, and thermal handoff passed after 92.05/69 C host/GPU
+  peaks below the 95/85 C limits. Together with the retained non-allocating
+  over-budget rejection, this closes only the Phase 7.1 low-memory admission,
+  explicit-failure, pressure, recovery, and cleanup item. Performance,
+  eight-hour soak, native Linux, and desktop RTX 4090 evidence remain open.
 - [ ] Run serving performance at every concurrency that fits without changing
   the workload semantics.
 - [ ] Run an 8-hour mixed-load soak.
@@ -4201,6 +4229,7 @@ or focused documents. Never paste raw logs here.
 | 2026-07-25 | WSL2 CUDA single-capacity-authority repair | this source | this corrective source checkpoint | laptop bootstrap, low-memory driver, workload, focused regression, and permanent documentation contract only; no post-repair CUDA model load, pressure request, recovery, low-memory pass, performance, soak, native-Linux, or desktop-4090 claim | config `sha256:455dee1f50c87e7d7eb2674fcf30823073500141e1f05a311b068633deb6f494`; workload `sha256:2c741a773ccc4f02e714b78fcb30c32c578cb83c6019e56432706f69191f2d45`; real `kiln config --backend cuda --json` parse with default-null `memory.gpu_memory_gb`, file-owned `memory.num_blocks=62`, and file-owned 0.1 fraction; 23/23 focused config/peer/bootstrap tests; 756/756 complete qualification-tooling tests; all 25 workloads valid; 9/10 documentation-builder tests with only Chromium unavailable; 55-document/5-asset generated site and static smoke; Python/JSON/Rust formatting and diff hygiene; retained counterevidence remains local-artifact/known-commit valid | portable correction passed; clean pushed-source hardware rerun required | The laptop config now has no configured capacity override, so the selected device's `nvidia-smi` total is the only server and peer capacity authority. The 1 GiB server floor, 1,024/768 MiB peer target/floor, pressure cap, and every lifecycle bound remain unchanged. An explicit 62-block BF16 KV pool retains the previous run's exact 130,023,424-byte allocation instead of spending newly visible capacity. Driver preflight rejects a restored override or changed block count; runtime attestation requires health `total_vram_bytes` to exactly equal the independently queried physical total and `kv_cache_bytes` to exactly equal 130,023,424. No tolerance was widened. |
 | 2026-07-25 | WSL2 CUDA used/free-counter counterevidence | exact clean pushed source `6725896cf3147cec121e825b9e2a93cec8bd1498`; source tree `sha256:e2e2ef212dfc35d915a3f3f5316993a95047adfd8e3750c712b75dd626aa97f5` | retained failed-receipt checkpoint only | exact WSL2 RTX 4090 Laptop physical-capacity attestation, fixed KV allocation, model residency, baseline, bounded global peer pressure, successful pressure request, clean release, and teardown through sampler corroboration; no sampler acceptance, deterministic recovery, low-memory pass, performance, soak, native-Linux, or desktop-4090 claim | strict current-source/local-artifact/known-commit validation for failed receipt `qualification/receipts/cuda/rtx4090-laptop/20260725t154633387643z-cuda-rtx4090-laptop-serving-cuda-low-memory--647fb2a614-v1.json` (`sha256:d7a65609398c748c72bf0b1edc15751b9402e94dd02a54e1af0549f8bd2f826c`); config `sha256:455dee1f50c87e7d7eb2674fcf30823073500141e1f05a311b068633deb6f494`; workload `sha256:2c741a773ccc4f02e714b78fcb30c32c578cb83c6019e56432706f69191f2d45`; 17,171,480,576-byte physical capacity and 130,023,424-byte KV runtime attestation passed; peer baseline/ready/minimum/final reported free 1,268,776,960/1,073,741,824/1,006,632,960/1,451,229,184 bytes; one 195,035,136-byte allocation; successful HTTP-200 32-token pressure request; server sampler last free 1,349,517,312 bytes; clean peer release; exact 10,737,418,240-byte scope peak, 64-PID peak, 2,857 limit events, zero OOM events, clean server/scope/snapshot removal, and stable thermal handoff after 93.05/68 C host/GPU peaks | single capacity authority and fixed allocation passed hardware attestation; server used/free synthesis remained incompatible with direct free accounting; low-memory gate remains open | The server probe queries only `memory.total,memory.used` and derives free by subtraction; the peer queries `memory.total,memory.free`. WSL2's reserved-memory gap makes those views non-additive. The server value exceeded the unchanged target-plus-256 MiB allowance by exactly 7 MiB, and the driver correctly withheld acceptance rather than widening it. The next repair must query total, used, and free together, preserve raw used/free observations, and use the lower of reported free and `total - used` as the effective allocation budget. Recovery never ran. |
 | 2026-07-25 | Conservative NVIDIA free-counter reconciliation | this source | this corrective source checkpoint | shared NVIDIA memory probe, exact raw diagnostics, regression tests, qualification contract, and permanent API documentation only; no post-repair CUDA model load, pressure request, recovery, low-memory pass, performance, soak, native-Linux, or desktop-4090 claim | 3/3 focused NVIDIA parser/reconciliation tests; 67/67 executed `kiln-memory` tests passed with only the pre-existing explicitly ignored live-governor smoke; the existing host-sensitive snapshot test exercised the real WSL2 `nvidia-smi` source and verified the conservative raw-counter equation; 756/756 qualification-tooling tests; all 25 workloads valid; 9/10 documentation-builder tests with only Chromium unavailable; 55-document/5-asset generated site and static smoke; Rust formatting and diff hygiene | portable and live-probe correction passed; clean pushed-source hardware rerun required | One bounded `nvidia-smi` call now requests total, used, and free. Closed parsing rejects missing, extra, multi-row, non-integer, zero-capacity, and out-of-range output. Effective free is `min(reported_free, total - reported_used)` and effective used is recomputed as `total - effective_free`, so reserved gaps and inverse disagreement both fail toward less admission. Raw reported used/free remain in `MemorySnapshotObservations`. No floor, target, tolerance, cap, timeout, cleanup, or containment policy changed. |
+| 2026-07-25 | Accepted WSL2 RTX 4090 Laptop low-memory admission and recovery | exact clean pushed source `385bcf20874ff93ebbd91b4099935c554d03ad15`; source tree `sha256:7b351dc2a5064fd0fc02f4644e8ae3db5d28f73c23cf66929278f5cba767ee5a` | retained passed-receipt checkpoint | exact 16 GB Laptop GPU WSL2 public-model residency, fixed KV allocation, deterministic baseline, bounded external CUDA pressure, live server corroboration, held-pressure request, clean release, sampler recovery, exact deterministic replay, and teardown; no performance-matrix, eight-hour-soak, native-Linux, or desktop-4090 claim | strict current-source/local-artifact/known-commit validation of passed receipt `qualification/receipts/cuda/rtx4090-laptop/20260725t155941791666z-cuda-rtx4090-laptop-serving-cuda-low-memory--647fb2a614-v1.json` (`sha256:c6fb85c2ffa0d437e7b0bbacdb2e8811b5c7ceb8e8a42a5d895e71924dccb4b2`); config `sha256:455dee1f50c87e7d7eb2674fcf30823073500141e1f05a311b068633deb6f494`; workload `sha256:2c741a773ccc4f02e714b78fcb30c32c578cb83c6019e56432706f69191f2d45`; 17,171,480,576-byte capacity, 14,975,762,432-byte model residency, exact 62-block/130,023,424-byte KV pool; two allocations totaling 260,046,848 bytes; peer ready/minimum/final free 1,007,681,536/940,572,672/1,449,132,032 bytes across 17 samples; successful 32-token pressure request; 1.445 ms health recovery; exact baseline/recovery token and finish-reason match; zero request, quarantine, fault, forced-shutdown, process-group-residue, or snapshot-residue counts; exact 10,737,418,240-byte scope and 66-PID peaks, 5,994 limit events, zero OOM events, clean scope removal, and stable thermal handoff after 92.05/69 C host/GPU peaks | Phase 7.1 low-memory admission and explicit-failure item passed | The retained earlier lifecycle receipt supplies the non-allocating over-budget rejection; this receipt supplies the missing public-model held-pressure and recovery path. The pressure target, floor, cap, tolerances, and lifecycle bounds are unchanged from the failed counterevidence. Conservative three-counter sampling made the server and peer views compatible without admitting more memory. Performance and eight-hour soak remain separate open machine gates. |
 
 ## Known Starting Defects
 
