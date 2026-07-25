@@ -53,9 +53,11 @@
           "served_model_id": "Qwen3.5-4B"
         },
         "pressure": {
+          "allocator_memory_source": "cuMemGetInfo_v2",
           "chunk_mib": 256,
           "hold_seconds": 300,
-          "maximum_allocation_mib": 1024,
+          "maximum_allocation_mib": 1280,
+          "memory_source": "nvidia-smi",
           "minimum_free_mib": 768,
           "poll_milliseconds": 100,
           "target_free_mib": 1024

@@ -8,6 +8,7 @@ import ctypes
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -16,6 +17,7 @@ from typing import Any
 
 
 CUDA_LIBRARY = Path("/usr/lib/wsl/lib/libcuda.so.1")
+NVIDIA_SMI = Path("/usr/lib/wsl/lib/nvidia-smi")
 MIB = 1024 * 1024
 GIB = 1024 * MIB
 MINIMUM_ALLOWED_FREE_MIB = 768
@@ -33,6 +35,59 @@ class CudaMemorySnapshot:
     free_bytes: int
 
 
+def parse_nvidia_memory_snapshot(output: str) -> CudaMemorySnapshot:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(lines) != 1:
+        raise PressurePeerError(
+            "nvidia-smi memory query returned an unexpected number of rows"
+        )
+    fields = [field.strip() for field in lines[0].split(",")]
+    if len(fields) != 2:
+        raise PressurePeerError(
+            "nvidia-smi memory query returned an unexpected shape"
+        )
+    try:
+        total_mib, free_mib = (int(field) for field in fields)
+    except ValueError as exc:
+        raise PressurePeerError(
+            "nvidia-smi memory query returned a non-integer value"
+        ) from exc
+    if total_mib <= 0 or free_mib < 0 or free_mib > total_mib:
+        raise PressurePeerError(
+            "nvidia-smi memory query returned invalid totals"
+        )
+    return CudaMemorySnapshot(total_mib * MIB, free_mib * MIB)
+
+
+def nvidia_memory_snapshot(
+    nvidia_smi: Path, device_ordinal: int
+) -> CudaMemorySnapshot:
+    try:
+        completed = subprocess.run(
+            [
+                str(nvidia_smi),
+                "-i",
+                str(device_ordinal),
+                "--query-gpu=memory.total,memory.free",
+                "--format=csv,noheader,nounits",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise PressurePeerError(f"nvidia-smi memory query failed: {exc}") from exc
+    if completed.returncode != 0:
+        raise PressurePeerError(
+            "nvidia-smi memory query exited "
+            f"{completed.returncode}: {completed.stderr[-1000:]}"
+        )
+    return parse_nvidia_memory_snapshot(completed.stdout)
+
+
 def next_allocation_bytes(
     snapshot: CudaMemorySnapshot,
     *,
@@ -46,6 +101,10 @@ def next_allocation_bytes(
     size = min(needed, safe, chunk_bytes, remaining_budget_bytes)
     if size <= 0:
         return 0
+    if size < MIN_ALLOCATION_BYTES:
+        if min(safe, chunk_bytes, remaining_budget_bytes) < MIN_ALLOCATION_BYTES:
+            return 0
+        size = MIN_ALLOCATION_BYTES
     return (size // ALLOCATION_ALIGNMENT_BYTES) * ALLOCATION_ALIGNMENT_BYTES
 
 
@@ -236,6 +295,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise PressurePeerError("--chunk-mib must be in 64..=1024")
     if args.max_allocation_mib > 8192:
         raise PressurePeerError("--max-allocation-mib must not exceed 8192")
+    if args.nvidia_smi != NVIDIA_SMI:
+        raise PressurePeerError(
+            f"--nvidia-smi must be the reviewed WSL2 binary {NVIDIA_SMI}"
+        )
     if (
         not isinstance(args.hold_seconds, float)
         or not 1.0 <= args.hold_seconds <= 900.0
@@ -275,22 +338,30 @@ def run(args: argparse.Namespace) -> None:
     allocated_bytes = 0
     ready_written = False
     baseline: CudaMemorySnapshot | None = None
+    allocator_baseline: CudaMemorySnapshot | None = None
+    allocator_ready: CudaMemorySnapshot | None = None
     minimum_observed_free_bytes: int | None = None
     sample_count = 0
     started = time.monotonic()
     failure: BaseException | None = None
     release_failures: list[str] = []
     final_snapshot: CudaMemorySnapshot | None = None
+    allocator_final_snapshot: CudaMemorySnapshot | None = None
     try:
-        baseline = driver.snapshot()
+        baseline = nvidia_memory_snapshot(args.nvidia_smi, args.device)
+        allocator_baseline = driver.snapshot()
         require_minimum_free(baseline, minimum_free_bytes)
-        if baseline.free_bytes <= target_free_bytes:
+        effective_target_free_bytes = min(
+            target_free_bytes,
+            baseline.free_bytes - MIN_ALLOCATION_BYTES,
+        )
+        if effective_target_free_bytes < minimum_free_bytes:
             raise PressurePeerError(
-                "baseline CUDA free memory is already at or below the pressure "
-                f"target: {baseline.free_bytes} <= {target_free_bytes} bytes"
+                "global CUDA free memory cannot retain both the qualifying "
+                "allocation and safety floor"
             )
         while not stop:
-            snapshot = driver.snapshot()
+            snapshot = nvidia_memory_snapshot(args.nvidia_smi, args.device)
             sample_count += 1
             minimum_observed_free_bytes = min(
                 snapshot.free_bytes,
@@ -301,22 +372,27 @@ def run(args: argparse.Namespace) -> None:
                 ),
             )
             require_minimum_free(snapshot, minimum_free_bytes)
-            if snapshot.free_bytes <= target_free_bytes:
+            if snapshot.free_bytes <= effective_target_free_bytes:
                 if allocated_bytes < MIN_ALLOCATION_BYTES:
                     raise PressurePeerError(
                         "pressure target was reached without a qualifying external "
                         f"allocation of at least {MIN_ALLOCATION_BYTES} bytes"
                     )
                 payload = {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "pid": os.getpid(),
                     "device_ordinal": args.device,
+                    "memory_source": "nvidia-smi",
+                    "allocator_memory_source": "cuMemGetInfo_v2",
                     "allocated_bytes": allocated_bytes,
                     "allocation_count": len(pointers),
-                    "target_free_bytes": target_free_bytes,
+                    "configured_target_free_bytes": target_free_bytes,
+                    "effective_target_free_bytes": effective_target_free_bytes,
                     "minimum_free_bytes": minimum_free_bytes,
                     "baseline": asdict(baseline),
                     "ready": asdict(snapshot),
+                    "allocator_baseline": asdict(allocator_baseline),
+                    "allocator_ready": asdict(allocator_ready),
                 }
                 write_json_no_clobber(ready_path, payload)
                 ready_written = True
@@ -324,7 +400,9 @@ def run(args: argparse.Namespace) -> None:
                 deadline = time.monotonic() + args.hold_seconds
                 while not stop and time.monotonic() < deadline:
                     time.sleep(args.poll_milliseconds / 1000.0)
-                    held = driver.snapshot()
+                    held = nvidia_memory_snapshot(
+                        args.nvidia_smi, args.device
+                    )
                     sample_count += 1
                     minimum_observed_free_bytes = min(
                         held.free_bytes,
@@ -339,7 +417,7 @@ def run(args: argparse.Namespace) -> None:
 
             size = next_allocation_bytes(
                 snapshot,
-                target_free_bytes=target_free_bytes,
+                target_free_bytes=effective_target_free_bytes,
                 minimum_free_bytes=minimum_free_bytes,
                 chunk_bytes=chunk_bytes,
                 remaining_budget_bytes=max_allocation_bytes - allocated_bytes,
@@ -352,7 +430,8 @@ def run(args: argparse.Namespace) -> None:
             pointer = driver.allocate(size)
             pointers.append(pointer)
             allocated_bytes += size
-            after = driver.snapshot()
+            allocator_ready = driver.snapshot()
+            after = nvidia_memory_snapshot(args.nvidia_smi, args.device)
             sample_count += 1
             minimum_observed_free_bytes = min(
                 after.free_bytes,
@@ -382,17 +461,25 @@ def run(args: argparse.Namespace) -> None:
             except PressurePeerError as exc:
                 release_failures.append(str(exc))
         try:
-            final_snapshot = driver.snapshot()
+            allocator_final_snapshot = driver.snapshot()
         except PressurePeerError as exc:
             release_failures.append(str(exc))
         try:
             driver.release()
         except PressurePeerError as exc:
             release_failures.append(str(exc))
+        try:
+            final_snapshot = nvidia_memory_snapshot(
+                args.nvidia_smi, args.device
+            )
+        except PressurePeerError as exc:
+            release_failures.append(str(exc))
         release_payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "pid": os.getpid(),
             "device_ordinal": args.device,
+            "memory_source": "nvidia-smi",
+            "allocator_memory_source": "cuMemGetInfo_v2",
             "ready_written": ready_written,
             "completed": failure is None and not release_failures,
             "allocated_bytes": allocated_bytes,
@@ -402,6 +489,11 @@ def run(args: argparse.Namespace) -> None:
             "elapsed_seconds": time.monotonic() - started,
             "release_failures": release_failures[:8],
             "final": None if final_snapshot is None else asdict(final_snapshot),
+            "allocator_final": (
+                None
+                if allocator_final_snapshot is None
+                else asdict(allocator_final_snapshot)
+            ),
         }
         try:
             write_json_no_clobber(release_path, release_payload)
@@ -424,10 +516,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--target-free-mib", type=int, default=1024)
     parser.add_argument("--minimum-free-mib", type=int, default=768)
     parser.add_argument("--chunk-mib", type=int, default=256)
-    parser.add_argument("--max-allocation-mib", type=int, default=1024)
+    parser.add_argument("--max-allocation-mib", type=int, default=1280)
     parser.add_argument("--hold-seconds", type=float, default=300.0)
     parser.add_argument("--poll-milliseconds", type=int, default=100)
     parser.add_argument("--cuda-library", type=Path, default=CUDA_LIBRARY)
+    parser.add_argument("--nvidia-smi", type=Path, default=NVIDIA_SMI)
     return parser.parse_args(argv)
 
 

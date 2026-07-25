@@ -28,14 +28,28 @@ def valid_args() -> argparse.Namespace:
         target_free_mib=1024,
         minimum_free_mib=768,
         chunk_mib=256,
-        max_allocation_mib=1024,
+        max_allocation_mib=1280,
         hold_seconds=300.0,
         poll_milliseconds=100,
         cuda_library=peer.CUDA_LIBRARY,
+        nvidia_smi=peer.NVIDIA_SMI,
     )
 
 
 class CudaPressurePeerTests(unittest.TestCase):
+    def test_nvidia_memory_snapshot_parser_is_closed(self) -> None:
+        self.assertEqual(
+            peer.parse_nvidia_memory_snapshot("16376, 2075\n"),
+            peer.CudaMemorySnapshot(
+                total_bytes=16376 * peer.MIB,
+                free_bytes=2075 * peer.MIB,
+            ),
+        )
+        for output in ("", "16376\n", "16376,free\n", "1,2\n3,4\n"):
+            with self.subTest(output=output):
+                with self.assertRaises(peer.PressurePeerError):
+                    peer.parse_nvidia_memory_snapshot(output)
+
     def test_next_allocation_reaches_target_without_overshoot(self) -> None:
         snapshot = peer.CudaMemorySnapshot(
             total_bytes=16 * peer.GIB,
@@ -80,6 +94,19 @@ class CudaPressurePeerTests(unittest.TestCase):
             0,
         )
 
+    def test_next_allocation_uses_minimum_chunk_near_target(self) -> None:
+        size = peer.next_allocation_bytes(
+            peer.CudaMemorySnapshot(
+                total_bytes=16 * peer.GIB,
+                free_bytes=1052 * peer.MIB,
+            ),
+            target_free_bytes=1024 * peer.MIB,
+            minimum_free_bytes=768 * peer.MIB,
+            chunk_bytes=256 * peer.MIB,
+            remaining_budget_bytes=256 * peer.MIB,
+        )
+        self.assertEqual(size, peer.MIN_ALLOCATION_BYTES)
+
     def test_minimum_free_floor_fails_closed(self) -> None:
         peer.require_minimum_free(
             peer.CudaMemorySnapshot(16 * peer.GIB, 1536 * peer.MIB),
@@ -104,6 +131,10 @@ class CudaPressurePeerTests(unittest.TestCase):
         args = valid_args()
         args.max_allocation_mib = 8193
         with self.assertRaisesRegex(peer.PressurePeerError, "8192"):
+            peer.validate_args(args)
+        args = valid_args()
+        args.nvidia_smi = Path("/tmp/nvidia-smi")
+        with self.assertRaisesRegex(peer.PressurePeerError, "reviewed WSL2"):
             peer.validate_args(args)
 
     def test_evidence_file_is_atomic_and_cannot_be_replaced(self) -> None:

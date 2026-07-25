@@ -25,12 +25,19 @@ SPEC.loader.exec_module(low_memory)
 
 def ready_payload() -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "pid": 123,
         "device_ordinal": 0,
-        "allocated_bytes": 1024 * low_memory.MIB,
-        "allocation_count": 4,
-        "target_free_bytes": low_memory.TARGET_FREE_MIB * low_memory.MIB,
+        "memory_source": "nvidia-smi",
+        "allocator_memory_source": "cuMemGetInfo_v2",
+        "allocated_bytes": 1280 * low_memory.MIB,
+        "allocation_count": 5,
+        "configured_target_free_bytes": (
+            low_memory.TARGET_FREE_MIB * low_memory.MIB
+        ),
+        "effective_target_free_bytes": (
+            low_memory.TARGET_FREE_MIB * low_memory.MIB
+        ),
         "minimum_free_bytes": low_memory.MINIMUM_FREE_MIB * low_memory.MIB,
         "baseline": {
             "total_bytes": 16 * low_memory.GIB,
@@ -40,15 +47,25 @@ def ready_payload() -> dict:
             "total_bytes": 16 * low_memory.GIB,
             "free_bytes": low_memory.TARGET_FREE_MIB * low_memory.MIB,
         },
+        "allocator_baseline": {
+            "total_bytes": 16 * low_memory.GIB,
+            "free_bytes": 15 * low_memory.GIB,
+        },
+        "allocator_ready": {
+            "total_bytes": 16 * low_memory.GIB,
+            "free_bytes": 14 * low_memory.GIB,
+        },
     }
 
 
 def release_payload() -> dict:
     ready = ready_payload()
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "pid": 123,
         "device_ordinal": 0,
+        "memory_source": "nvidia-smi",
+        "allocator_memory_source": "cuMemGetInfo_v2",
         "ready_written": True,
         "completed": True,
         "allocated_bytes": ready["allocated_bytes"],
@@ -61,6 +78,10 @@ def release_payload() -> dict:
         "final": {
             "total_bytes": 16 * low_memory.GIB,
             "free_bytes": 3 * low_memory.GIB,
+        },
+        "allocator_final": {
+            "total_bytes": 16 * low_memory.GIB,
+            "free_bytes": 15 * low_memory.GIB,
         },
     }
 
@@ -252,6 +273,16 @@ class ServeCudaLowMemoryTests(unittest.TestCase):
             ):
                 low_memory.load_peer_ready(path, 123)
 
+            malformed = ready_payload()
+            malformed["baseline"]["free_bytes"] = (
+                malformed["ready"]["free_bytes"] + 63 * low_memory.MIB
+            )
+            path.write_text(json.dumps(malformed))
+            with self.assertRaisesRegex(
+                low_memory.mixed.QualificationError, "below 64 MiB"
+            ):
+                low_memory.load_peer_ready(path, 123)
+
     def test_release_payload_requires_recovery_and_complete_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "release.json"
@@ -374,6 +405,29 @@ class ServeCudaLowMemoryTests(unittest.TestCase):
                 low_memory.mixed.QualificationError, "identity drifted"
             ):
                 low_memory.validate_device_identity()
+
+    def test_pressure_peer_command_binds_global_and_allocator_sources(self) -> None:
+        with mock.patch.object(
+            low_memory.subprocess, "Popen", return_value=mock.sentinel.process
+        ) as popen:
+            process = low_memory.start_pressure_peer(
+                Path("/tmp/ready.json"),
+                Path("/tmp/release.json"),
+                {"PATH": os.environ["PATH"]},
+            )
+        self.assertIs(process, mock.sentinel.process)
+        command = popen.call_args.args[0]
+        self.assertEqual(
+            command[command.index("--max-allocation-mib") + 1], "1280"
+        )
+        self.assertEqual(
+            command[command.index("--nvidia-smi") + 1],
+            str(low_memory.NVIDIA_SMI),
+        )
+        self.assertEqual(
+            command[command.index("--cuda-library") + 1],
+            str(low_memory.CUDA_LIBRARY),
+        )
 
     def test_metric_contract_is_closed_sorted_and_finite(self) -> None:
         metrics = low_memory.zero_metrics()

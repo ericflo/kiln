@@ -60,7 +60,7 @@ PEER_SHUTDOWN_SECONDS = 30.0
 TARGET_FREE_MIB = 1024
 MINIMUM_FREE_MIB = 768
 PEER_CHUNK_MIB = 256
-PEER_MAX_ALLOCATION_MIB = 1024
+PEER_MAX_ALLOCATION_MIB = 1280
 PEER_HOLD_SECONDS = 300
 PEER_POLL_MILLISECONDS = 100
 RECOVERY_TOLERANCE_MIB = 512
@@ -73,6 +73,7 @@ REQUEST_MAX_TOKENS = 32
 MODEL_ID = "Qwen3.5-4B"
 MODEL_SOURCE_ID = "Qwen/Qwen3.5-4B"
 CUDA_LIBRARY = Path("/usr/lib/wsl/lib/libcuda.so.1")
+NVIDIA_SMI = Path("/usr/lib/wsl/lib/nvidia-smi")
 PEER_SCRIPT = ROOT / "scripts/qualification/cuda_pressure_peer.py"
 SERVER_CONFIG = (
     ROOT
@@ -160,9 +161,11 @@ EFFECTIVE_CONFIG: dict[str, Any] = {
         "served_model_id": MODEL_ID,
     },
     "pressure": {
+        "allocator_memory_source": "cuMemGetInfo_v2",
         "chunk_mib": PEER_CHUNK_MIB,
         "hold_seconds": PEER_HOLD_SECONDS,
         "maximum_allocation_mib": PEER_MAX_ALLOCATION_MIB,
+        "memory_source": "nvidia-smi",
         "minimum_free_mib": MINIMUM_FREE_MIB,
         "poll_milliseconds": PEER_POLL_MILLISECONDS,
         "target_free_mib": TARGET_FREE_MIB,
@@ -850,20 +853,27 @@ def load_peer_ready(path: Path, pid: int) -> dict[str, Any]:
             "schema_version",
             "pid",
             "device_ordinal",
+            "memory_source",
+            "allocator_memory_source",
             "allocated_bytes",
             "allocation_count",
-            "target_free_bytes",
+            "configured_target_free_bytes",
+            "effective_target_free_bytes",
             "minimum_free_bytes",
             "baseline",
             "ready",
+            "allocator_baseline",
+            "allocator_ready",
         },
         "CUDA pressure readiness",
     )
     expected = {
-        "schema_version": 1,
+        "schema_version": 2,
         "pid": pid,
         "device_ordinal": 0,
-        "target_free_bytes": TARGET_FREE_MIB * MIB,
+        "memory_source": "nvidia-smi",
+        "allocator_memory_source": "cuMemGetInfo_v2",
+        "configured_target_free_bytes": TARGET_FREE_MIB * MIB,
         "minimum_free_bytes": MINIMUM_FREE_MIB * MIB,
     }
     for field, expected_value in expected.items():
@@ -878,11 +888,33 @@ def load_peer_ready(path: Path, pid: int) -> dict[str, Any]:
     ready = validate_memory_snapshot(
         value["ready"], "CUDA pressure ready", MINIMUM_FREE_MIB * MIB
     )
+    allocator_baseline = validate_memory_snapshot(
+        value["allocator_baseline"], "CUDA allocator baseline"
+    )
+    allocator_ready = validate_memory_snapshot(
+        value["allocator_ready"], "CUDA allocator ready"
+    )
     if baseline["total_bytes"] != ready["total_bytes"]:
         raise mixed.QualificationError("CUDA pressure total memory changed")
-    if ready["free_bytes"] > TARGET_FREE_MIB * MIB:
+    if allocator_baseline["total_bytes"] != allocator_ready["total_bytes"]:
+        raise mixed.QualificationError("CUDA allocator total memory changed")
+    effective_target = value.get("effective_target_free_bytes")
+    if (
+        isinstance(effective_target, bool)
+        or not isinstance(effective_target, int)
+        or effective_target < MINIMUM_FREE_MIB * MIB
+        or effective_target > TARGET_FREE_MIB * MIB
+    ):
+        raise mixed.QualificationError(
+            "CUDA pressure effective target is invalid"
+        )
+    if ready["free_bytes"] > effective_target:
         raise mixed.QualificationError(
             "CUDA pressure peer declared readiness above its target"
+        )
+    if baseline["free_bytes"] - ready["free_bytes"] < 64 * MIB:
+        raise mixed.QualificationError(
+            "CUDA pressure global free-memory drop is below 64 MiB"
         )
     for field in ("allocated_bytes", "allocation_count"):
         observed = value.get(field)
@@ -908,6 +940,8 @@ def load_peer_release(path: Path, pid: int, ready: dict[str, Any]) -> dict[str, 
             "schema_version",
             "pid",
             "device_ordinal",
+            "memory_source",
+            "allocator_memory_source",
             "ready_written",
             "completed",
             "allocated_bytes",
@@ -917,13 +951,16 @@ def load_peer_release(path: Path, pid: int, ready: dict[str, Any]) -> dict[str, 
             "elapsed_seconds",
             "release_failures",
             "final",
+            "allocator_final",
         },
         "CUDA pressure release",
     )
     expected = {
-        "schema_version": 1,
+        "schema_version": 2,
         "pid": pid,
         "device_ordinal": 0,
+        "memory_source": "nvidia-smi",
+        "allocator_memory_source": "cuMemGetInfo_v2",
         "ready_written": True,
         "completed": True,
         "allocated_bytes": ready["allocated_bytes"],
@@ -963,6 +1000,9 @@ def load_peer_release(path: Path, pid: int, ready: dict[str, Any]) -> dict[str, 
     final = validate_memory_snapshot(
         value["final"], "CUDA pressure final", MINIMUM_FREE_MIB * MIB
     )
+    validate_memory_snapshot(
+        value["allocator_final"], "CUDA allocator final"
+    )
     recovery_floor = max(
         MINIMUM_FREE_MIB * MIB,
         ready["baseline"]["free_bytes"] - RECOVERY_TOLERANCE_MIB * MIB,
@@ -1001,6 +1041,8 @@ def start_pressure_peer(
         str(PEER_POLL_MILLISECONDS),
         "--cuda-library",
         str(CUDA_LIBRARY),
+        "--nvidia-smi",
+        str(NVIDIA_SMI),
     ]
     return subprocess.Popen(
         command,

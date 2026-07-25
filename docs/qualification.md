@@ -729,11 +729,14 @@ clean-source execution provenance, and the exact source-built executable hash.
 After warmup, the driver records a deterministic 32-token baseline. A separate
 CUDA-driver process allocates in at most 256 MiB chunks until free memory is at
 or below 1,024 MiB. It refuses to start when the resident server is already at
-that target, allocates at most 1,024 MiB, requires at least 64 MiB of real
-external allocation, samples every 100 ms, and immediately fails and releases
-if free memory crosses the 768 MiB floor. While the peer remains alive, the
-server must complete another 32-token request and its independent live sampler
-must corroborate bounded pressure.
+that target unless it can still create a qualifying 64 MiB global drop,
+allocates at most 1,280 MiB, requires at least 64 MiB of real external
+allocation, samples global free memory through the reviewed WSL2 `nvidia-smi`
+binary every 100 ms, and immediately fails and releases if free memory crosses
+the 768 MiB floor. Peer-local `cuMemGetInfo` remains separate allocator
+evidence. While the peer remains alive, the server must complete another
+32-token request and its independent `nvidia-smi` sampler must corroborate
+bounded pressure.
 
 The peer must then exit on `SIGTERM` without a forced kill, free every
 allocation, report no release error, and recover within 512 MiB of its
@@ -886,6 +889,34 @@ also the declared 1,024 MiB target, 768 MiB floor, 256 MiB chunk, and 1,024 MiB
 allocation cap. A direct argument regression accepts that exact envelope and
 rejects 767 MiB. No allocation, polling, release, or cleanup check was removed.
 A new clean pushed-source run is still required.
+
+That rerun, receipt
+`20260725t150911705759z-cuda-rtx4090-laptop-serving-cuda-low-memory--647fb2a614-v1`,
+proved the peer can allocate and release, but exposed a WSL2 accounting
+boundary. It allocated four 256 MiB chunks and released the complete 1 GiB
+without error. Its process-local `cuMemGetInfo` still reported 13,005,041,664
+bytes free at the low point even though the resident server's OS-level
+`nvidia-smi` accounting reported 14,873,001,984 bytes used before KV
+allocation. The peer therefore exhausted its bounded cap without reaching a
+1 GiB process-local free target and failed before publishing readiness. The
+strict current-source/local-artifact/known-commit receipt has file
+`sha256:dc07aa26895c4eb65718a0a570c5d6d317863f926a06799448d0e055f64e38b0`.
+The scope peaked at 10,737,418,240 bytes and 66 PIDs, recorded 2,130 limit
+events and zero OOM events, removed cleanly, and completed thermal handoff
+after 91.05/68 C host/GPU peaks. No pressure request or recovery request ran.
+
+The peer now uses the same global `nvidia-smi` source required by server health
+for its target, floor, hold samples, and release snapshot. It retains
+`cuMemGetInfo` as explicitly labeled allocator-local evidence instead of
+treating it as global residency. Readiness schema v2 requires both source
+labels, a measured global free-memory drop of at least 64 MiB, a global value at
+or below the effective 1,024 MiB target, and a value at or above the 768 MiB
+floor. The bounded cap is 1,280 MiB, sufficient for the measured physical
+capacity while leaving the independent 256 MiB target-to-floor margin. The
+revised workload is
+`sha256:419d37b415f4dae158f259e90c91bb12c697f80605abbd86aff14c1931526cba`.
+If WSL2 does not expose the peer allocation through global accounting, the run
+still fails without pressure acceptance.
 
 ### CUDA Serving Bootstrap Handoff
 
