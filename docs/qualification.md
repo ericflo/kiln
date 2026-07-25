@@ -1126,6 +1126,39 @@ stable handoff. This closes the runtime-manifest prerequisite only. It is not a
 server startup, request, performance-matrix, soak, native-Linux, or desktop-4090
 claim.
 
+Every model-bearing WSL2 CUDA run now brackets its case with two additional
+model-fingerprint lifecycles. The runner reads at a fixed 32 MiB/s and places
+each initial and final fingerprint inside its own private namespace, 10 GiB
+scope, v2 cgroup-pacing controller, outer Windows/NVML hard-limit supervisor,
+and stable handoff. Their bounded JSON and supervision streams are retained
+with the parent receipt. The case starts only after the initial scope is
+removed, and final source/commit validation occurs only after the final scope
+is removed. The case itself remains a separate lifecycle, so neither long
+preflight nor post-run hashing can execute outside the WSL2 safety boundary.
+
+The first source-bound performance checkpoint is the complete five-profile c1
+pair:
+
+```bash
+python3 scripts/qualification/run.py \
+  --variant cuda-rtx4090-laptop-c1 \
+  --host-id rtx4090-laptop \
+  --model .qualification/cuda-rtx4090-laptop/performance-model-v1 \
+  --model-id Qwen/Qwen3.5-4B \
+  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json \
+  qualification/workloads/serving-cuda-performance-c1-v1.json
+```
+
+It builds the exact committed CUDA server once, then runs `greedy-short`,
+`api-default-sampled`, `long-prefill`, `prefix-hit`, and `mixed` through five
+owned Kiln lifecycles. Only after all five strict receipts pass does it run the
+matching five owned vLLM lifecycles against those exact references. Generated
+campaign artifacts live under the commit-qualified ignored
+`.qualification/serving/cuda-rtx4090-laptop-performance-c1-v1/` root and are
+never reused. Retain the parent qualification receipt and all ten validated
+nested receipts before making a c1 request or performance claim. This
+preparatory workload does not itself close the open matrix or soak gates.
+
 The initial Kiln inputs are stable-profile, eager-only baselines. They are not
 an optimality claim and must not be edited in place after a receipt binds them.
 Land a new source-bound candidate for graph capture, scheduler widening,

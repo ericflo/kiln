@@ -433,10 +433,43 @@ lifecycles completed stable handoff. This artifact is the immutable vLLM input
 for the next exact-source performance run; it does not itself establish server
 startup, request correctness, throughput, or endurance.
 
+Before a model-bearing WSL2 case starts, the qualification runner now performs
+the initial model fingerprint in an independent private namespace, 10 GiB
+scope, v2 thermal-pacing controller, and outer Windows/NVML lifecycle at a
+fixed 32 MiB/s. It repeats the same independently supervised fingerprint after
+the case. Each scope must be removed and complete stable handoff; the parent
+receipt retains both bounded JSON and supervision streams. The campaign case is
+a third lifecycle. This prevents the long before/after provenance reads from
+escaping the boundary that protects server work.
+
 The manifest must identify the expected RTX 4090 class, `sm_89`, model and
 tokenizer content, interpreter, Python/native packages, CUDA runtime, and every
 inference option. Any package, driver, accelerator, model, environment, or
 option change invalidates it and requires a new source-bound capture.
+
+Run the first Laptop GPU performance checkpoint through its committed c1
+workload, not by transcribing the lower-level campaign command:
+
+```bash
+python3 scripts/qualification/run.py \
+  --variant cuda-rtx4090-laptop-c1 \
+  --host-id rtx4090-laptop \
+  --model .qualification/cuda-rtx4090-laptop/performance-model-v1 \
+  --model-id Qwen/Qwen3.5-4B \
+  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json \
+  qualification/workloads/serving-cuda-performance-c1-v1.json
+```
+
+The workload builds current source once, fixes concurrency at one, and runs
+all five campaign profiles in order for Kiln and then vLLM. It validates all
+five Kiln receipts before starting vLLM, passes that exact directory as the
+reference, and requires all ten nested receipts plus zero exact-output
+mismatches. Its deterministic ignored artifact root includes the full source
+commit and refuses reuse. Retain the enclosing qualification receipt, both
+campaign summaries, and all ten strict-valid nested receipts before citing the
+result. Widening concurrency is a later committed workload and must preserve
+the same model, prompts, sampling, fixed output length, memory ceiling, launch
+inputs, and reference role.
 
 For the first Kiln campaign, use the exact UUID from
 `.environment.device.device_uuid` in the environment receipt, the matching

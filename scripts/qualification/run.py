@@ -51,6 +51,7 @@ from workload import (
 
 ROOT = Path(__file__).resolve().parents[2]
 LINUX_NAMESPACE_EXEC = ROOT / "scripts" / "qualification" / "linux_namespace_exec.py"
+MODEL_FINGERPRINT_EXEC = ROOT / "scripts" / "qualification" / "model_fingerprint.py"
 WSL_THERMAL_EXEC = ROOT / "scripts" / "qualification" / "wsl_thermal_exec.py"
 WSL_SCOPE_EXEC = ROOT / "scripts" / "qualification" / "wsl_scope_exec.py"
 WORKLOAD_DIRECTORY = Path("qualification/workloads")
@@ -111,6 +112,11 @@ WSL_SCOPE_MEMORY_MAX_BYTES = 10 * 1024 * 1024 * 1024
 WSL_SCOPE_PIDS_MAX = 512
 WSL_SCOPE_CPU_QUOTA_PERCENT = 50
 WSL_SCOPE_CPU_POLL_INTERVAL_MS = 5
+WSL_MODEL_FINGERPRINT_READ_MIB_PER_SECOND = 32
+WSL_MODEL_FINGERPRINT_RUNTIME_MAX_SECONDS = 1_800.0
+WSL_MODEL_FINGERPRINT_TIMEOUT_SECONDS = 2_130.0
+WSL_MODEL_FINGERPRINT_STDOUT_MAX_BYTES = 1024 * 1024
+WSL_MODEL_FINGERPRINT_STDERR_MAX_BYTES = 4 * 1024 * 1024
 
 
 class QualificationRunError(RuntimeError):
@@ -415,6 +421,83 @@ def _wsl_supervised_argv(
         "--",
         *scoped_argv,
     ]
+
+
+def _write_bytes_new(path: Path, payload: bytes) -> None:
+    try:
+        with path.open("xb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as exc:
+        raise QualificationRunError(f"cannot write bounded evidence {path}: {exc}") from exc
+
+
+def _supervised_wsl_model_fingerprint(
+    model_path: Path,
+    model_id: str | None,
+    *,
+    network_isolation: NetworkIsolation,
+    policy_path: Path,
+    policy: wsl_thermal_exec.ThermalPolicy,
+    stdout_path: Path,
+    stderr_path: Path,
+) -> dict[str, Any]:
+    command = [
+        sys.executable,
+        str(MODEL_FINGERPRINT_EXEC),
+        "--model-path",
+        str(model_path),
+        "--json",
+        "--max-read-mib-per-second",
+        str(WSL_MODEL_FINGERPRINT_READ_MIB_PER_SECOND),
+    ]
+    if model_id is not None:
+        command.extend(("--model-id", model_id))
+    executed = _wsl_supervised_argv(
+        [*network_isolation.argv_prefix, *command],
+        policy_path,
+        policy,
+        WSL_MODEL_FINGERPRINT_RUNTIME_MAX_SECONDS,
+    )
+    try:
+        completed = subprocess.run(
+            executed,
+            cwd=ROOT,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=WSL_MODEL_FINGERPRINT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise QualificationRunError(
+            "WSL2 model fingerprint exceeded its supervision deadline"
+        ) from exc
+    if (
+        len(completed.stdout) > WSL_MODEL_FINGERPRINT_STDOUT_MAX_BYTES
+        or len(completed.stderr) > WSL_MODEL_FINGERPRINT_STDERR_MAX_BYTES
+    ):
+        raise QualificationRunError(
+            "WSL2 model fingerprint exceeded its bounded evidence limits"
+        )
+    _write_bytes_new(stdout_path, completed.stdout)
+    _write_bytes_new(stderr_path, completed.stderr)
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise QualificationRunError(
+            "WSL2 model fingerprint failed under thermal/scope supervision"
+            + (f": {detail[-1000:]}" if detail else "")
+        )
+    try:
+        value = strict_json_loads(completed.stdout)
+    except Exception as exc:
+        raise QualificationRunError(
+            f"WSL2 model fingerprint returned invalid JSON: {exc}"
+        ) from exc
+    if not isinstance(value, dict):
+        raise QualificationRunError("WSL2 model fingerprint did not return an object")
+    return value
 
 
 def _parse_variable_value(raw: str, definition: dict[str, Any]) -> Any:
@@ -1726,13 +1809,6 @@ def _run_qualification_impl(
         raise QualificationRunError(f"--model is required for {kind!r} workloads")
     if kind == "environment" and model_path is not None:
         raise QualificationRunError("environment workloads do not accept --model")
-    model: dict[str, Any] | None = None
-    if model_path is not None:
-        try:
-            model = hooks.fingerprint_model(model_path, model_id)
-        except (ModelFingerprintError, OSError) as exc:
-            raise QualificationRunError(f"model fingerprint failed: {exc}") from exc
-    resolved_model_path = model["path"] if model is not None else None
     network_isolation = hooks.network_isolation(root)
     wsl_thermal_policy_path: Path | None = None
     wsl_thermal_policy_value: wsl_thermal_exec.ThermalPolicy | None = None
@@ -1812,6 +1888,44 @@ def _run_qualification_impl(
         ) from exc
     active_run_directories.append(run_directory)
 
+    supervised_wsl_model_fingerprint = (
+        wsl_thermal_policy_path is not None
+        and wsl_thermal_policy_value is not None
+        and hooks == DEFAULT_HOOKS
+    )
+    model: dict[str, Any] | None = None
+    model_fingerprint_artifacts: list[tuple[Path, str]] = []
+    if model_path is not None:
+        try:
+            if supervised_wsl_model_fingerprint:
+                assert wsl_thermal_policy_path is not None
+                assert wsl_thermal_policy_value is not None
+                initial_stdout = run_directory / "model-fingerprint-initial.json"
+                initial_stderr = run_directory / "model-fingerprint-initial.stderr"
+                model = _supervised_wsl_model_fingerprint(
+                    model_path,
+                    model_id,
+                    network_isolation=network_isolation,
+                    policy_path=wsl_thermal_policy_path,
+                    policy=wsl_thermal_policy_value,
+                    stdout_path=initial_stdout,
+                    stderr_path=initial_stderr,
+                )
+                model_fingerprint_artifacts.extend(
+                    (
+                        (initial_stdout, "model_fingerprint_initial"),
+                        (
+                            initial_stderr,
+                            "model_fingerprint_initial_wsl2_supervision",
+                        ),
+                    )
+                )
+            else:
+                model = hooks.fingerprint_model(model_path, model_id)
+        except (ModelFingerprintError, OSError, QualificationRunError) as exc:
+            raise QualificationRunError(f"model fingerprint failed: {exc}") from exc
+    resolved_model_path = model["path"] if model is not None else None
+
     infrastructure_failures: list[str] = []
     try:
         capture = hooks.capture_environment(variant["backend"], host_id, root)
@@ -1849,6 +1963,10 @@ def _run_qualification_impl(
         },
     )
     artifacts = [_artifact(root, environment_raw_path, "environment_probes")]
+    artifacts.extend(
+        _artifact(root, artifact_path, artifact_kind)
+        for artifact_path, artifact_kind in model_fingerprint_artifacts
+    )
     if wsl_thermal_policy_path is not None:
         thermal_policy_snapshot = run_directory / "wsl2-thermal-policy.json"
         _atomic_write_json_new(
@@ -2175,8 +2293,33 @@ def _run_qualification_impl(
     infrastructure_failures.extend(_metric_policy_failures(workload, results))
 
     if model_path is not None:
+        final_fingerprint_artifacts: list[tuple[Path, str]] = []
         try:
-            final_model = hooks.fingerprint_model(model_path, model_id)
+            if supervised_wsl_model_fingerprint:
+                assert wsl_thermal_policy_path is not None
+                assert wsl_thermal_policy_value is not None
+                final_stdout = run_directory / "model-fingerprint-final.json"
+                final_stderr = run_directory / "model-fingerprint-final.stderr"
+                final_fingerprint_artifacts.extend(
+                    (
+                        (final_stdout, "model_fingerprint_final"),
+                        (
+                            final_stderr,
+                            "model_fingerprint_final_wsl2_supervision",
+                        ),
+                    )
+                )
+                final_model = _supervised_wsl_model_fingerprint(
+                    model_path,
+                    model_id,
+                    network_isolation=network_isolation,
+                    policy_path=wsl_thermal_policy_path,
+                    policy=wsl_thermal_policy_value,
+                    stdout_path=final_stdout,
+                    stderr_path=final_stderr,
+                )
+            else:
+                final_model = hooks.fingerprint_model(model_path, model_id)
         except Exception as exc:
             infrastructure_failures.append(f"final model fingerprint failed: {exc}")
         else:
@@ -2184,6 +2327,12 @@ def _run_qualification_impl(
                 infrastructure_failures.append(
                     "model fingerprint changed during qualification"
                 )
+        finally:
+            for artifact_path, artifact_kind in final_fingerprint_artifacts:
+                if artifact_path.is_file() and not artifact_path.is_symlink():
+                    artifacts.append(
+                        _artifact(root, artifact_path, artifact_kind)
+                    )
 
     try:
         final_commit = _git_commit(root)
@@ -2244,6 +2393,27 @@ def _run_qualification_impl(
                     "policy_sha256": wsl_thermal_policy_value.content_sha256,
                     "scope": {
                         "mechanism": "systemd-user-scope-feedback-v1",
+                        "memory_max_bytes": WSL_SCOPE_MEMORY_MAX_BYTES,
+                        "memory_swap_max_bytes": 0,
+                        "pids_max": WSL_SCOPE_PIDS_MAX,
+                        "cpu_quota_percent": WSL_SCOPE_CPU_QUOTA_PERCENT,
+                        "cpu_poll_interval_ms": WSL_SCOPE_CPU_POLL_INTERVAL_MS,
+                    },
+                }
+            ),
+            "model_fingerprint_supervision": (
+                None
+                if not supervised_wsl_model_fingerprint or model_path is None
+                else {
+                    "mode": "independent-initial-and-final-wsl2-lifecycles-v1",
+                    "network_containment": network_isolation.mechanism,
+                    "read_mib_per_second": (
+                        WSL_MODEL_FINGERPRINT_READ_MIB_PER_SECOND
+                    ),
+                    "runtime_max_seconds": (
+                        WSL_MODEL_FINGERPRINT_RUNTIME_MAX_SECONDS
+                    ),
+                    "scope": {
                         "memory_max_bytes": WSL_SCOPE_MEMORY_MAX_BYTES,
                         "memory_swap_max_bytes": 0,
                         "pids_max": WSL_SCOPE_PIDS_MAX,

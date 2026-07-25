@@ -1,0 +1,163 @@
+{
+  "schema_version": 1,
+  "workload_id": "serving-cuda-performance-c1-v1",
+  "kind": "performance",
+  "description": "Build current CUDA source and run the complete five-profile Kiln/vLLM serving campaign at concurrency one on the 16 GiB RTX 4090 Laptop GPU under the parent WSL2 boundary.",
+  "determinism": {
+    "seed": 20260725,
+    "seed_delivery": "argv",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [],
+  "variants": [
+    {
+      "id": "cuda-rtx4090-laptop-c1",
+      "description": "Require the exact Laptop GPU, build once, and run all fixed profiles through owned Kiln then vLLM lifecycles with exact reference comparison.",
+      "backend": "cuda",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {
+        "build": {
+          "binary": "kiln",
+          "cargo_cpu_quota_percent": 50,
+          "cargo_environment_policy": "closed-qualification-test-v1",
+          "cargo_execution_mode": "delegated-cgroup",
+          "cargo_host_reserve_gib": 3,
+          "cargo_jobs": 1,
+          "cargo_max_memory_gib": 10,
+          "cargo_memory_scope": "outer-wsl2-qualification-scope",
+          "cargo_min_available_gib": 13,
+          "cargo_private_network": true,
+          "cargo_service_runtime_max_seconds": 1740,
+          "cargo_wrapper": "scripts/cargo-bounded.sh",
+          "features": "cuda",
+          "locked": true,
+          "no_default_features": true,
+          "offline": true,
+          "package": "kiln-server",
+          "profile": "release",
+          "timeout_seconds": 1800
+        },
+        "campaign": {
+          "continue_after_failure": true,
+          "max_tokens": 64,
+          "memory_device_uuid": "GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd",
+          "memory_limit_bytes": 16500000000,
+          "memory_sample_ms": 100,
+          "model_fingerprint_read_mib_per_second": 64,
+          "output_evidence": "hashes",
+          "profiles": {
+            "profile_0": "greedy-short",
+            "profile_1": "api-default-sampled",
+            "profile_2": "long-prefill",
+            "profile_3": "prefix-hit",
+            "profile_4": "mixed"
+          },
+          "prompt_set_id": "cuda-rtx4090-laptop-performance-v1",
+          "repeats": 1,
+          "request_timeout_seconds": 900,
+          "sizes": {
+            "concurrency_0": 1
+          },
+          "warmup_requests": 1
+        },
+        "kiln": {
+          "base_url": "http://127.0.0.1:8420",
+          "config_sha256": "sha256:21c068c0ec39b532c364e6bf9495d235ed5006e78140bb47f8548ca3269c8943",
+          "launch_sha256": "sha256:2d351c605bb0da71dde85521b6a0a4546fb9990a7f0c45f84f926dcb157f344d"
+        },
+        "model": {
+          "model_id": "Qwen/Qwen3.5-4B",
+          "served_model_id": "Qwen3.5-4B",
+          "shared_closed_model_view": ".qualification/cuda-rtx4090-laptop/performance-model-v1"
+        },
+        "thermal": {
+          "outer_hard_limit_gpu_millicelsius": 85000,
+          "outer_hard_limit_host_millicelsius": 95000,
+          "pacing_start_gpu_millicelsius": 75000,
+          "pacing_start_host_millicelsius": 80000,
+          "policy_content_sha256": "sha256:998e65f84651ce28d36acfcadb3f1216a589883054a9f27853fe755f373e3745"
+        },
+        "vllm": {
+          "base_url": "http://127.0.0.1:8421",
+          "launch_sha256": "sha256:37b3ce1244241eb7e3cb5c8b30cbb853636a73bc16f270662dc947d32676a35e",
+          "runtime_manifest_sha256": "sha256:50d46bd54df16f1ea9095dace7656708b7347db3591ad8ebc74d1238d284d125"
+        }
+      },
+      "cases": [
+        {
+          "id": "cuda-serving-performance-c1",
+          "description": "Build current source once, run five owned concurrency-one Kiln profiles, validate them, run the matching five vLLM profiles against those exact references, and retain compact paired metrics.",
+          "required": true,
+          "command": [
+            "python3",
+            "scripts/qualification/serve_cuda_performance.py",
+            "--model-path",
+            "${model_path}",
+            "--seed",
+            "${seed}"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "PYTHONUNBUFFERED": "1"
+          },
+          "timeout_seconds": 43200,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(CUDA_ERROR_OUT_OF_MEMORY|out of memory|device-side assert|illegal memory access|generation_error|skipp(?:ed|ing)|no CUDA device|CUDA unavailable)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "command",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": [
+              "build_duration_ms",
+              "exact_output_mismatch_count",
+              "kiln_completion_token_count",
+              "kiln_output_token_throughput_per_second",
+              "kiln_peak_device_memory_bytes",
+              "kiln_profile_pass_count",
+              "kiln_request_failure_count",
+              "kiln_request_success_count",
+              "paired_profile_pass_count",
+              "vllm_completion_token_count",
+              "vllm_output_token_throughput_per_second",
+              "vllm_peak_device_memory_bytes",
+              "vllm_profile_pass_count",
+              "vllm_request_failure_count",
+              "vllm_request_success_count"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "comparison_policy": {
+    "mode": "same_environment_performance",
+    "variant_pairs": [],
+    "backend_pairs": [],
+    "metric_rules": [
+      {
+        "scope": "result",
+        "result_id": "cuda-serving-performance-c1",
+        "metric": "paired_profile_pass_count",
+        "metric_class": "performance",
+        "unit": "count",
+        "aggregation": "sum",
+        "lower_is_better": false,
+        "operator": "not_less",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
+        "required": true
+      }
+    ]
+  }
+}

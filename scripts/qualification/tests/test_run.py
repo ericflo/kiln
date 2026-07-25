@@ -400,6 +400,106 @@ class RunnerTests(unittest.TestCase):
                 30.0,
             )
 
+    def test_wsl_model_fingerprint_is_paced_scoped_and_bounded(self) -> None:
+        policy_path = (
+            QUALIFICATION_DIR.parents[1]
+            / "qualification/host-policies/"
+            "rtx4090-laptop-wsl2-cgroup-pacing-v2.json"
+        )
+        policy = run_module.wsl_thermal_exec.load_policy(policy_path)
+        isolation = run_module.NetworkIsolation(
+            mechanism="util-linux-unshare-user-net-pid-landlock-v1",
+            argv_prefix=("/usr/bin/unshare", "--"),
+        )
+        payload = {
+            "id": "fixture",
+            "path": "/tmp/model",
+            "weight_files": [],
+            "config_hash": "sha256:" + "a" * 64,
+            "tokenizer_hash": "sha256:" + "b" * 64,
+            "chat_template_hash": None,
+        }
+        completed = subprocess.CompletedProcess(
+            args=["wrapped"],
+            returncode=0,
+            stdout=json.dumps(payload).encode(),
+            stderr=b'{"event":"wsl_scope_complete"}\n',
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            stdout_path = Path(temporary) / "fingerprint.json"
+            stderr_path = Path(temporary) / "fingerprint.stderr"
+            with mock.patch.object(
+                run_module,
+                "_wsl_supervised_argv",
+                return_value=["wrapped"],
+            ) as wrapped, mock.patch.object(
+                run_module.subprocess,
+                "run",
+                return_value=completed,
+            ):
+                observed = run_module._supervised_wsl_model_fingerprint(
+                    Path("/tmp/model"),
+                    "fixture",
+                    network_isolation=isolation,
+                    policy_path=policy_path,
+                    policy=policy,
+                    stdout_path=stdout_path,
+                    stderr_path=stderr_path,
+                )
+            self.assertEqual(observed, payload)
+            contained = wrapped.call_args.args[0]
+            self.assertEqual(contained[:2], list(isolation.argv_prefix))
+            self.assertIn("--max-read-mib-per-second", contained)
+            rate_index = contained.index("--max-read-mib-per-second")
+            self.assertEqual(
+                contained[rate_index + 1],
+                str(run_module.WSL_MODEL_FINGERPRINT_READ_MIB_PER_SECOND),
+            )
+            self.assertEqual(stdout_path.read_bytes(), completed.stdout)
+            self.assertEqual(stderr_path.read_bytes(), completed.stderr)
+
+    def test_wsl_model_fingerprint_nonzero_exit_fails_after_capture(self) -> None:
+        policy_path = (
+            QUALIFICATION_DIR.parents[1]
+            / "qualification/host-policies/"
+            "rtx4090-laptop-wsl2-cgroup-pacing-v2.json"
+        )
+        policy = run_module.wsl_thermal_exec.load_policy(policy_path)
+        isolation = run_module.NetworkIsolation("test", ("/bin/true", "--"))
+        completed = subprocess.CompletedProcess(
+            args=["wrapped"],
+            returncode=3,
+            stdout=b"",
+            stderr=b"thermal trip with stable handoff\n",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            stdout_path = Path(temporary) / "fingerprint.json"
+            stderr_path = Path(temporary) / "fingerprint.stderr"
+            with mock.patch.object(
+                run_module,
+                "_wsl_supervised_argv",
+                return_value=["wrapped"],
+            ), mock.patch.object(
+                run_module.subprocess,
+                "run",
+                return_value=completed,
+            ):
+                with self.assertRaisesRegex(
+                    run_module.QualificationRunError,
+                    "failed under thermal/scope supervision",
+                ):
+                    run_module._supervised_wsl_model_fingerprint(
+                        Path("/tmp/model"),
+                        "fixture",
+                        network_isolation=isolation,
+                        policy_path=policy_path,
+                        policy=policy,
+                        stdout_path=stdout_path,
+                        stderr_path=stderr_path,
+                    )
+            self.assertEqual(stdout_path.read_bytes(), b"")
+            self.assertEqual(stderr_path.read_bytes(), completed.stderr)
+
     def test_inherited_auth_payloads_are_hashed_before_local_capture(self) -> None:
         captured = run_module._redacted_environment(
             {

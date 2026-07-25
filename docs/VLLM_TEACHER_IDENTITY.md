@@ -595,6 +595,14 @@ events, and were removed before stable outer handoff. This establishes the
 immutable runtime identity used by later serving evidence, not serving
 correctness or performance by itself.
 
+Model-bearing WSL2 qualification also brackets the serving case itself. The
+parent runner performs both its initial and final model fingerprints at a fixed
+32 MiB/s in independent private-namespace, systemd-scope, cgroup-pacing, and
+outer Windows/NVML lifecycles. Each must complete stable handoff and scope
+removal, and both bounded JSON/supervision streams are retained in the parent
+receipt. The owned benchmark lifecycles remain nested evidence and explicitly
+depend on that parent for complete thermal, resource, and cleanup provenance.
+
 The accelerator identity must match the environment receipt's 4090 class,
 `sm_89`, capacity, and selected logical device. The benchmark then binds the
 manifest as `--runtime-artifact`, the environment receipt's stable GPU UUID as
