@@ -227,11 +227,15 @@ duplicate on the laptop while preserving per-launch immutable snapshot copies,
 initial/final benchmark fingerprints, and source-change detection.
 
 The vLLM performance launch also pins
-`--max-provenance-read-mib-per-second=256`. One cumulative launcher schedule
+`--max-provenance-read-mib-per-second=64`. One cumulative launcher schedule
 covers model/snapshot/adapter/runtime hashing, and the fresh child runtime
 recheck receives the same ceiling. This pacing is outside request timing. It
 does not rate-limit vLLM's later accelerator upload, which remains under the
 outer WSL2 thermal supervisor and must fail closed if unsafe.
+The readiness deadline is 3,600 seconds because a copy-fallback real launch
+performs nine complete model reads across staging, verification, identity, and
+pre-spawn revalidation before vLLM loads weights. The deadline is containment,
+not evidence that startup completed or was thermally safe.
 
 These are bootstrap baselines, not performance recommendations. First retain a
 passing environment receipt, core-correctness receipt, memory-lifecycle receipt,
@@ -373,7 +377,7 @@ with fsync and no overwrite, and reports the source commit, manifest hash,
 runtime-content hash, system fingerprint, and both stderr hashes. A dirty tree,
 existing output, nonzero/timeout child, oversized output, invalid manifest, or
 repeat mismatch fails without publication. Commit the manifest before startup.
-The tracked laptop launch makes both captures use the explicit 256 MiB/s
+The tracked laptop launch makes both captures use the explicit 64 MiB/s
 cumulative provenance-read ceiling; do not remove or override it to accelerate
 capture.
 

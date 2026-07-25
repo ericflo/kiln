@@ -555,7 +555,7 @@ text-only model surface. It deliberately omits the ROCm-only `TRITON_ATTN`
 choice; the captured CUDA runtime must report its actual supported attention
 route.
 
-The separate laptop performance launch selects a cumulative 256 MiB/s
+The separate laptop performance launch selects a cumulative 64 MiB/s
 provenance-read ceiling. Its manifest-only captures and real launches therefore
 pace model/snapshot/runtime hashing under the same reviewed limit. Historical
 bootstrap and ROCm launch documents remain unchanged evidence inputs; they do

@@ -1073,7 +1073,7 @@ vLLM launch JSON; do not retype its inference arguments. The tool requires a
 clean commit, two byte-identical strict-valid captures, bounded child output,
 and a new destination before it publishes the exact runtime manifest.
 The laptop performance launch pins
-`--max-provenance-read-mib-per-second=256`, cumulatively pacing all
+`--max-provenance-read-mib-per-second=64`, cumulatively pacing all
 launcher-owned model/snapshot/adapter/runtime hashing and applying the same
 ceiling to the fresh child runtime recheck. This is startup-only policy and
 does not enter timed request throughput.
