@@ -570,6 +570,34 @@ left no process or scope residue. The graph defect must be fixed and the full
 five-case workload rerun from a new clean pushed source before CUDA core
 correctness passes.
 
+The source repair that follows this receipt closes two independent defects
+before a clean rerun. First, `Tensor::from_vec_on` inside the forward path used
+`host_to_cuda_copy`, which bypassed the capture arena. CUDA captured device
+allocation, pageable host-to-device copy, and free operations whose source
+addresses belonged to temporary CPU tensors. Those host allocations were gone
+before graph launch, so the current WSL2 driver read invalid source storage and
+the valid warm-pass hidden state became all zero. The arena now uploads
+host-initialized tensors once before capture, retains their device allocations,
+requires byte-identical initialization during capture, and emits no captured
+pageable-host copy for them. It also distinguishes zero, uninitialized, and
+host-initialized allocation sequences and rejects underruns after the capture
+forward.
+
+Second, the old graph test repeated one sequence position three times. The
+runner's owner-timeline guard deliberately evicts a graph unless the next
+position advances by one, so the supposed third-call replay was actually a
+second capture. The permanent test now uses three monotonically advancing
+positions, computes independent eager references for all three, requires a
+captured graph before the third call, and checks warmup, first-launch, and real
+replay token parity. Under the full WSL2 boundary it returned eager and graph
+tokens `7/7/7`, with zero replay logit difference. The new arena invariant test
+proved stable pointer reuse and fail-closed host-byte, initialization-kind, and
+sequence checks. Complete guarded CUDA library runs passed `1,027/1,027`
+`kiln-tensor` tests and `412/412` `kiln-model` tests. These are source-repair
+checks, not a replacement for the five-case clean-source receipt; the laptop
+correctness item remains open until that unchanged workload passes and its new
+receipt is committed.
+
 ### CUDA Memory Lifecycle Handoff
 
 After the environment and core-correctness receipts pass, run the memory

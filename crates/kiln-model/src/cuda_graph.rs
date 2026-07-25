@@ -1891,6 +1891,10 @@ impl CudaGraphRunner {
                 Ok::<(), anyhow::Error>(())
             })
         });
+        let capture_arena_result = arena
+            .borrow()
+            .ensure_replay_complete()
+            .context("CUDA graph capture arena allocation sequence mismatch");
 
         // End capture — instantiates the graph with AUTO_FREE_ON_LAUNCH.
         //
@@ -1910,6 +1914,7 @@ impl CudaGraphRunner {
 
         // Check forward pass success first
         capture_result.context("forward pass failed during graph capture")?;
+        capture_arena_result?;
 
         // #1082: `graph_inputs` borrows the owned kt buffers
         // (`block_table_buffer`, `rotary_*`, `paged_decode_*`, …); drop it
@@ -2324,6 +2329,10 @@ impl CudaGraphRunner {
                     )
                 })
             });
+            let capture_arena_result = arena
+                .borrow()
+                .ensure_replay_complete()
+                .context("batched CUDA graph capture arena allocation sequence mismatch");
 
             // Instantiate the bs>1 graph with AUTO_FREE_ON_LAUNCH (restored).
             // An earlier change flipped this to flags=0 as a purported BUG2 fix;
@@ -2336,6 +2345,7 @@ impl CudaGraphRunner {
             );
 
             forward_result.context("batched forward failed during graph capture")?;
+            capture_arena_result?;
             let graph = match graph_result {
                 Ok(Some(g)) => g,
                 Ok(None) => anyhow::bail!("batched graph capture produced no operations"),

@@ -122,7 +122,8 @@ pub use active_rocm_stream::{active_rocm_stream, with_rocm_graph_capture_stream}
 pub use active_stream::{active_cuda_stream, with_active_cuda_stream};
 #[cfg(feature = "cuda")]
 pub use capture_alloc::{
-    CaptureArena, capture_arena_active, capture_arena_alloc, with_capture_arena,
+    CaptureArena, capture_arena_active, capture_arena_alloc, capture_arena_from_host,
+    with_capture_arena,
 };
 #[cfg(feature = "cuda")]
 pub use cuda_allocator::CudaAllocator;

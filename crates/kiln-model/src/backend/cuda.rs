@@ -2374,7 +2374,7 @@ mod tests {
     #[test]
     fn cuda_sgd_step_resident_round_trip_f32() -> Result<()> {
         use kiln_tensor::Device as KtDevice;
-        let backend = CudaBackend::new(kiln_tensor::Device::Cpu);
+        let backend = CudaBackend::new(kiln_tensor::Device::Cuda(0));
         let Some(param) = kt_cuda_f32(&[1.0f32, -2.0, 0.5, 3.0])? else {
             eprintln!("CUDA unavailable, skipping cuda_sgd_step_resident_round_trip_f32");
             return Ok(());
@@ -2400,7 +2400,7 @@ mod tests {
     #[test]
     fn cuda_adamw_step_resident_round_trip_f32() -> Result<()> {
         use kiln_tensor::Device as KtDevice;
-        let backend = CudaBackend::new(kiln_tensor::Device::Cpu);
+        let backend = CudaBackend::new(kiln_tensor::Device::Cuda(0));
         let Some(param) = kt_cuda_f32(&[1.0f32, -2.0, 0.5, 3.0])? else {
             eprintln!("CUDA unavailable, skipping cuda_adamw_step_resident_round_trip_f32");
             return Ok(());
@@ -2452,7 +2452,7 @@ mod tests {
     #[test]
     fn cuda_sgd_and_adamw_resident_round_trip_bf16() -> Result<()> {
         use kiln_tensor::{DType as KtDType, Device as KtDevice};
-        let backend = CudaBackend::new(kiln_tensor::Device::Cpu);
+        let backend = CudaBackend::new(kiln_tensor::Device::Cuda(0));
 
         // Build host BF16 then move to CUDA; skip when no device.
         let mk_bf16 = |vals: &[f32]| -> Result<Option<kiln_tensor::Tensor>> {
@@ -2597,7 +2597,7 @@ mod tests {
 
     #[test]
     fn cuda_linear_prefill_apply_matches_reference_matmul() -> Result<()> {
-        let backend = CudaBackend::new(kiln_tensor::Device::Cpu);
+        let backend = CudaBackend::new(kiln_tensor::Device::Cuda(0));
 
         let Some(x) = kt_cuda_2d(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], [2, 3])? else {
             eprintln!(
@@ -2629,7 +2629,7 @@ mod tests {
 
     #[test]
     fn cuda_linear_prefill_apply_offset_matches_reference_chunk() -> Result<()> {
-        let backend = CudaBackend::new(kiln_tensor::Device::Cpu);
+        let backend = CudaBackend::new(kiln_tensor::Device::Cuda(0));
 
         let Some(x) = kt_cuda_2d(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], [2, 3])? else {
             eprintln!(
@@ -2663,7 +2663,7 @@ mod tests {
 
     #[test]
     fn cuda_registered_lora_delta_matches_reference() -> Result<()> {
-        let backend = CudaBackend::new(kiln_tensor::Device::Cpu);
+        let backend = CudaBackend::new(kiln_tensor::Device::Cuda(0));
 
         let Some(x) = kt_cuda_2d(&[0.5f32, -1.0, 2.0, 1.5, 0.25, -0.75], [2, 3])? else {
             eprintln!("CUDA unavailable, skipping cuda_registered_lora_delta_matches_reference");

@@ -3023,6 +3023,20 @@ pub fn host_to_cuda_copy(src: &crate::Tensor, device_index: usize) -> Result<cra
         )));
     }
 
+    // CUDA graph freeze-pointers: host-created tensors inside the captured
+    // forward must not record `cudaMallocAsync` plus a pageable H2D copy whose
+    // source is this short-lived CPU tensor. Record mode uploads and retains a
+    // stable device buffer; replay/capture mode validates identical host bytes
+    // and reuses it without emitting allocation, memcpy, or free graph nodes.
+    if let Some(storage) = crate::capture_arena_from_host(dtype, n_elements, bytes) {
+        let storage_arc: crate::Storage = Arc::new(storage?);
+        return crate::Tensor::from_parts(
+            storage_arc,
+            crate::Layout::contiguous(src.shape().to_vec()),
+            crate::TensorId::next(),
+        );
+    }
+
     // Allocate the device buffer + issue H2D memcpy via the primary
     // cudarc context's default stream. No candle device is involved
     // anywhere along this path: `primary_cuda_context(device_index)`

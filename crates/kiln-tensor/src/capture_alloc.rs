@@ -19,22 +19,27 @@
 //! # The fix (mirrors [`crate::active_stream`])
 //!
 //! A thread-local capture arena installed for the duration of the captured
-//! forward. While active, `zeros_ctx` / `alloc_uninit_ctx` route through
-//! [`capture_arena_alloc`] instead of allocating fresh. The arena runs in two
-//! passes:
+//! forward. While active, `zeros_ctx` / `alloc_uninit_ctx` and host-to-device
+//! tensor construction route through [`capture_arena_alloc`] /
+//! [`capture_arena_from_host`] instead of allocating fresh. The arena runs in
+//! two passes:
 //!
 //! 1. **Record** (before `begin_capture`): each alloc makes a *real owned*
 //!    buffer (`cudaMallocAsync` is legal here — outside capture), retains it in
 //!    the arena, and hands the forward a [`SliceOwner::Borrowed`] *view* into it
 //!    (keep-alive = the arena's `Arc`). The forward drops its view normally; the
-//!    owned buffer persists in the arena.
+//!    owned buffer persists in the arena. Host-initialized tensors are uploaded
+//!    and synchronized in this pass, while their source bytes are still alive.
 //! 2. **Replay** (inside `begin_capture`): each alloc hands out a Borrowed view
 //!    of the *same* pre-allocated buffer, in the identical order (decode is
 //!    deterministic, so the alloc sequence matches pass 1). **No `cudaMalloc`
-//!    happens during capture** → the captured graph has no alloc/free nodes and
-//!    every recorded device pointer is stable. `zeros_ctx` buffers get a
+//!    or pageable-host memcpy happens in the arena path during capture** → the
+//!    arena contributes no alloc/free nodes or dangling temporary host pointer,
+//!    and every recorded device pointer is stable. `zeros_ctx` buffers get a
 //!    *captured* `cuMemsetD8Async(0)` on the capture stream so each replay
-//!    re-zeros them (read-before-write correctness).
+//!    re-zeros them (read-before-write correctness). Host-initialized tensors
+//!    must reproduce byte-for-byte identical contents in both passes or capture
+//!    fails closed.
 //!
 //! After capture, [`CaptureArena::into_retained`] hands the owned buffers to the
 //! `CapturedDecodeGraph` so they outlive every replay.
@@ -63,7 +68,25 @@ use crate::{CudaStorage, DType, Error, Result};
 struct ArenaBuf {
     dtype: DType,
     n_elements: usize,
+    init: ArenaInit,
     storage: Arc<CudaStorage>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum ArenaInit {
+    Zero,
+    Uninit,
+    Host(Vec<u8>),
+}
+
+impl ArenaInit {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Zero => "zero",
+            Self::Uninit => "uninit",
+            Self::Host(_) => "host",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -109,21 +132,78 @@ impl CaptureArena {
         self.bufs.len()
     }
 
+    /// Verify that the replay/capture pass consumed the complete allocation
+    /// sequence recorded by the warm pass.
+    ///
+    /// An underrun is as unsafe as an overrun: it means some data-dependent or
+    /// lazily initialized path changed the allocation sequence between passes,
+    /// so later same-shaped allocations may have been bound to the wrong stable
+    /// device pointers without tripping the per-allocation shape check.
+    pub fn ensure_replay_complete(&self) -> Result<()> {
+        if self.mode != ArenaMode::Replay {
+            return Err(Error::Msg(
+                "CaptureArena completion check requires Replay mode".to_string(),
+            ));
+        }
+        if self.cursor != self.bufs.len() {
+            return Err(Error::Msg(format!(
+                "CaptureArena replay underrun: consumed {} of {} recorded buffers \
+                 (forward allocation sequence changed between warm and capture passes)",
+                self.cursor,
+                self.bufs.len()
+            )));
+        }
+        Ok(())
+    }
+
     /// Allocate (`Record`) or hand out (`Replay`) a buffer, returning a
     /// Borrowed [`CudaStorage`] view into an arena-owned allocation.
-    fn alloc(&mut self, dtype: DType, n_elements: usize, zero: bool) -> Result<CudaStorage> {
+    fn alloc(&mut self, dtype: DType, n_elements: usize, init: ArenaInit) -> Result<CudaStorage> {
         match self.mode {
             ArenaMode::Record => {
-                let owned = if zero {
-                    CudaStorage::zeros_ctx(&self.ctx, self.device_index, dtype, n_elements)?
-                } else {
-                    CudaStorage::alloc_uninit_ctx(&self.ctx, self.device_index, dtype, n_elements)?
+                let owned = match &init {
+                    ArenaInit::Zero => {
+                        CudaStorage::zeros_ctx(&self.ctx, self.device_index, dtype, n_elements)?
+                    }
+                    ArenaInit::Uninit => CudaStorage::alloc_uninit_ctx(
+                        &self.ctx,
+                        self.device_index,
+                        dtype,
+                        n_elements,
+                    )?,
+                    ArenaInit::Host(bytes) => {
+                        let expected = dtype.packed_buffer_bytes(n_elements);
+                        if bytes.len() != expected {
+                            return Err(Error::Msg(format!(
+                                "CaptureArena host allocation byte length mismatch: \
+                                 got {}, expected {expected} for ({dtype:?}, {n_elements})",
+                                bytes.len()
+                            )));
+                        }
+                        let stream = crate::active_cuda_stream(&self.ctx);
+                        let slice = stream.clone_htod(bytes).map_err(|e| {
+                            Error::Msg(format!(
+                                "CaptureArena host allocation clone_htod({expected}) failed: {e:?}"
+                            ))
+                        })?;
+                        // `clone_htod` is asynchronous for pageable host memory.
+                        // The retained `ArenaInit::Host` bytes are moved below,
+                        // but synchronizing here also makes the one-time warm
+                        // upload complete before any capture can begin.
+                        stream.synchronize().map_err(|e| {
+                            Error::Msg(format!(
+                                "CaptureArena host allocation stream synchronize failed: {e:?}"
+                            ))
+                        })?;
+                        CudaStorage::from_slice_ctx(&self.ctx, self.device_index, dtype, slice)?
+                    }
                 };
                 let storage = Arc::new(owned);
                 let view = self.borrow_view(dtype, &storage)?;
                 self.bufs.push(ArenaBuf {
                     dtype,
                     n_elements,
+                    init,
                     storage,
                 });
                 Ok(view)
@@ -144,9 +224,36 @@ impl CaptureArena {
                         self.cursor, buf.dtype, buf.n_elements, dtype, n_elements
                     )));
                 }
+                if buf.init.name() != init.name() {
+                    return Err(Error::Msg(format!(
+                        "CaptureArena replay initialization mismatch at alloc #{}: \
+                         recorded {} vs requested {}",
+                        self.cursor,
+                        buf.init.name(),
+                        init.name()
+                    )));
+                }
+                if let (ArenaInit::Host(recorded), ArenaInit::Host(requested)) = (&buf.init, &init)
+                {
+                    if recorded != requested {
+                        let first_diff = recorded
+                            .iter()
+                            .zip(requested)
+                            .position(|(left, right)| left != right)
+                            .map_or(recorded.len().min(requested.len()), |offset| offset);
+                        return Err(Error::Msg(format!(
+                            "CaptureArena replay host data mismatch at alloc #{}: \
+                             recorded {} bytes vs requested {} bytes; first difference \
+                             at byte {first_diff}",
+                            self.cursor,
+                            recorded.len(),
+                            requested.len()
+                        )));
+                    }
+                }
                 let storage = buf.storage.clone();
                 let view = self.borrow_view(dtype, &storage)?;
-                if zero {
+                if init == ArenaInit::Zero {
                     // Captured memset on the active (capture) stream — recorded
                     // into the graph so every replay re-zeros the buffer.
                     self.memset_zero(&storage)?;
@@ -215,8 +322,9 @@ impl CaptureArena {
 thread_local! {
     /// The capture arena active on this thread, or `None` outside a
     /// [`with_capture_arena`] scope (in which case `zeros_ctx` /
-    /// `alloc_uninit_ctx` take their normal direct-allocation path — ZERO
-    /// behavior change for every non-capture caller).
+    /// `alloc_uninit_ctx` / host-to-device construction take their normal
+    /// direct-allocation path — ZERO behavior change for every non-capture
+    /// caller).
     static CAPTURE_ARENA: RefCell<Option<Rc<RefCell<CaptureArena>>>> =
         const { RefCell::new(None) };
 }
@@ -236,7 +344,8 @@ impl Drop for ArenaGuard {
 
 /// Run `f` with `arena` installed as the active capture arena on this thread,
 /// restoring the previous value afterward (even on panic). Inside `f`, every
-/// `zeros_ctx` / `alloc_uninit_ctx` routes through the arena.
+/// `zeros_ctx` / `alloc_uninit_ctx` / host-to-device tensor construction routes
+/// through the arena.
 pub fn with_capture_arena<R>(arena: Rc<RefCell<CaptureArena>>, f: impl FnOnce() -> R) -> R {
     let prev = CAPTURE_ARENA.with(|cell| cell.borrow_mut().replace(arena));
     let _guard = ArenaGuard { prev };
@@ -262,7 +371,34 @@ pub fn capture_arena_alloc(
     // immediately after.
     let arena = CAPTURE_ARENA.with(|cell| cell.borrow_mut().take());
     let arena = arena?;
-    let result = arena.borrow_mut().alloc(dtype, n_elements, zero);
+    let init = if zero {
+        ArenaInit::Zero
+    } else {
+        ArenaInit::Uninit
+    };
+    let result = arena.borrow_mut().alloc(dtype, n_elements, init);
+    CAPTURE_ARENA.with(|cell| {
+        *cell.borrow_mut() = Some(arena);
+    });
+    Some(result)
+}
+
+/// Host-initialized allocation hook called by
+/// [`crate::host_to_cuda_copy`].
+///
+/// Record mode uploads `bytes` once into an arena-owned device allocation.
+/// Replay mode requires identical bytes and returns the same stable device
+/// pointer without recording a pageable-host memcpy in the CUDA graph.
+pub fn capture_arena_from_host(
+    dtype: DType,
+    n_elements: usize,
+    bytes: &[u8],
+) -> Option<Result<CudaStorage>> {
+    let arena = CAPTURE_ARENA.with(|cell| cell.borrow_mut().take());
+    let arena = arena?;
+    let result = arena
+        .borrow_mut()
+        .alloc(dtype, n_elements, ArenaInit::Host(bytes.to_vec()));
     CAPTURE_ARENA.with(|cell| {
         *cell.borrow_mut() = Some(arena);
     });
@@ -272,4 +408,60 @@ pub fn capture_arena_alloc(
 /// Whether a capture arena is active on this thread.
 pub fn capture_arena_active() -> bool {
     CAPTURE_ARENA.with(|cell| cell.borrow().is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn host_alloc(arena: Rc<RefCell<CaptureArena>>, bytes: &[u8]) -> Result<CudaStorage> {
+        with_capture_arena(arena, || {
+            capture_arena_from_host(DType::U8, bytes.len(), bytes)
+                .expect("capture arena must be active")
+        })
+    }
+
+    fn zero_alloc(arena: Rc<RefCell<CaptureArena>>, n_elements: usize) -> Result<CudaStorage> {
+        with_capture_arena(arena, || {
+            capture_arena_alloc(DType::U8, n_elements, true).expect("capture arena must be active")
+        })
+    }
+
+    #[test]
+    fn host_initialized_replay_reuses_pointer_and_rejects_drift() -> Result<()> {
+        let ctx = crate::primary_cuda_context(0)?;
+        let arena = Rc::new(RefCell::new(CaptureArena::new_record(ctx, 0)));
+        let host_bytes = [3u8, 1, 4, 1, 5, 9];
+
+        let recorded_host = host_alloc(arena.clone(), &host_bytes)?;
+        let recorded_zero = zero_alloc(arena.clone(), 8)?;
+        assert_eq!(arena.borrow().buffer_count(), 2);
+
+        arena.borrow_mut().begin_replay();
+        let replayed_host = host_alloc(arena.clone(), &host_bytes)?;
+        assert_eq!(
+            recorded_host.device_ptr_raw(),
+            replayed_host.device_ptr_raw(),
+            "host-initialized replay must return the retained device allocation"
+        );
+        let underrun = arena.borrow().ensure_replay_complete().unwrap_err();
+        assert!(underrun.to_string().contains("replay underrun"));
+        let replayed_zero = zero_alloc(arena.clone(), 8)?;
+        assert_eq!(
+            recorded_zero.device_ptr_raw(),
+            replayed_zero.device_ptr_raw(),
+            "zero-initialized replay must return the retained device allocation"
+        );
+        arena.borrow().ensure_replay_complete()?;
+
+        arena.borrow_mut().begin_replay();
+        let drift = host_alloc(arena.clone(), &[3u8, 1, 4, 2, 5, 9]).unwrap_err();
+        assert!(drift.to_string().contains("host data mismatch"));
+        assert!(drift.to_string().contains("byte 3"));
+
+        arena.borrow_mut().begin_replay();
+        let kind_drift = zero_alloc(arena.clone(), host_bytes.len()).unwrap_err();
+        assert!(kind_drift.to_string().contains("initialization mismatch"));
+        Ok(())
+    }
 }

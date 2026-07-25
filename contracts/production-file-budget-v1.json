@@ -59,8 +59,8 @@
     },
     {
       "path": "crates/kiln-tensor/src/cuda_storage.rs",
-      "max_lines": 6721,
-      "rationale": "CUDA storage and operation dispatch remain coupled to backend resource ownership; this reviewed ceiling prevents further unrelated backend behavior here."
+      "max_lines": 6735,
+      "rationale": "CUDA storage now includes the reviewed host-upload capture-arena interception required to keep CUDA graph inputs device-resident; this exact ceiling prevents unrelated backend growth."
     },
     {
       "path": "crates/kiln-train/src/opd.rs",

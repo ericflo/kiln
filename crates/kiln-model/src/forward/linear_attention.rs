@@ -791,7 +791,12 @@ pub(super) fn strict_lower_tri_bool(n: usize, device: &Device) -> Result<Tensor>
 #[cfg(test)]
 #[allow(dead_code)]
 pub(super) fn strict_lower_tri_mask(n: usize, dtype: DType, device: &Device) -> Result<Tensor> {
-    Ok(strict_lower_tri_bool(n, device)?.to_dtype(dtype)?)
+    let values: Vec<f32> = (0..n)
+        .flat_map(|row| (0..n).map(move |col| f32::from(row > col)))
+        .collect();
+    Ok(Tensor::from_vec(values, (n, n))?
+        .to_dtype(dtype)?
+        .to_device(*device)?)
 }
 
 /// Build a [n, n] mask on `device` with `dtype`, 1.0 where row >= col else 0.0.

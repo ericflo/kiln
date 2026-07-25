@@ -3146,18 +3146,30 @@ fn test_model_forward_paged_decode_contiguous_batch_dyn_seqlen_cuda() -> Result<
         let mean_abs_diff =
             br.iter().zip(&rw).map(|(a, b)| (a - b).abs()).sum::<f32>() / br.len() as f32;
         let max_abs_logit = rw.iter().map(|x| x.abs()).fold(0.0f32, f32::max).max(1e-6);
+        let max_relative_diff = max_abs_diff / max_abs_logit;
+        let mean_relative_diff = mean_abs_diff / max_abs_logit;
         eprintln!(
             "dyn_seqlen batched decode row {row} (start_pos={row_start_pos}): token={ba} \
                  max_abs_diff={max_abs_diff:e} ({:.3}% of max|logit|={max_abs_logit:e}) \
-                 mean_abs_diff={mean_abs_diff:e}",
-            100.0 * max_abs_diff / max_abs_logit
+                 mean_abs_diff={mean_abs_diff:e} ({:.3}% of max|logit|)",
+            100.0 * max_relative_diff,
+            100.0 * mean_relative_diff,
         );
-        // bf16-realistic RELATIVE sanity bound. bf16 GEMM-shape noise is well under
-        // 0.5% of the logit magnitude; a logic bug would be >>1% relative.
+        // BF16 has 0.78125% spacing within a binade. Different M=1 and M=2
+        // accumulation paths can therefore differ by one adjacent BF16 value
+        // even when both are correctly rounded. Bound the worst element at
+        // 0.8%, and separately require the mean drift to remain below 0.1% so
+        // a broad low-amplitude corruption cannot hide behind the max bound.
         assert!(
-            max_abs_diff <= 5e-3 * max_abs_logit,
+            max_relative_diff <= 8e-3,
             "row {row} dyn_seqlen batched decode max_abs_diff={max_abs_diff:e} exceeds \
-                 0.5% of max|logit|={max_abs_logit:e} — larger than bf16 GEMM-shape noise"
+                 0.8% of max|logit|={max_abs_logit:e} — larger than one BF16 spacing"
+        );
+        assert!(
+            mean_relative_diff <= 1e-3,
+            "row {row} dyn_seqlen batched decode mean_abs_diff={mean_abs_diff:e} exceeds \
+                 0.1% of max|logit|={max_abs_logit:e} — drift is too broad for BF16 \
+                 GEMM-shape noise"
         );
     }
 
@@ -3663,22 +3675,20 @@ fn test_metal_graph_batched_decode_matches_eager_and_replays_bucket() -> Result<
 ///
 /// Strategy: build the same synthetic 1-layer full-attention model the
 /// C3 dyn-seqlen test uses, then
-///   1. compute reference logits with a plain eager `model_forward_paged`
-///      on a fresh prefix-only cache, and
-///   2. drive `CudaGraphRunner::decode_step_paged` THREE times against a
-///      second fresh prefix-only cache at the SAME (token, position,
-///      block-table) shape: call 1 = eager warmup, call 2 = stream
-///      capture, call 3 = graph replay.
+///   1. compute three sequential reference logits with plain eager
+///      `model_forward_paged` on a fresh prefix-only cache, and
+///   2. drive `CudaGraphRunner::decode_step_paged` through the same three
+///      positions against a second fresh prefix-only cache: call 1 = eager
+///      warmup, call 2 = stream capture, call 3 = graph replay.
 /// We assert (a) a graph was actually captured (guards against a silent
 /// eager fallback making the comparison vacuous), and (b) the replay
 /// logits match the eager reference with token/argmax parity + a
 /// bf16-realistic relative bound — mirroring the C3 assertion exactly.
 ///
-/// Each `decode_step_paged` call writes the decode token's K/V to the
-/// same KV slot (`start_pos`, fixed across all three calls) with the
-/// same value, so the writes are idempotent and the three calls are
-/// shape- and value-identical — the only thing that changes between
-/// them is eager vs. captured vs. replayed execution.
+/// Positions advance monotonically because the runner deliberately invalidates
+/// an owner's graphs when its decode timeline does not advance by one. All
+/// three positions remain in the same graph geometry bucket, so call 3 must hit
+/// and replay call 2's graph instead of capturing again.
 ///
 /// bs=1 ONLY: the unqualified bs>1 graph path is unavailable; this test
 /// deliberately does not exercise it.
@@ -3749,7 +3759,6 @@ fn test_cuda_graph_bs1_decode_matches_eager() -> Result<()> {
     let prefix_k = patterned_bf16(&[1, start_pos, num_kv_heads, head_dim], 0.002, &device)?;
     let prefix_v = patterned_bf16(&[1, start_pos, num_kv_heads, head_dim], 0.003, &device)?;
     let block_table = BlockTable { blocks: vec![0] };
-    let positions = Tensor::from_slice(&[start_pos as f32], 1usize)?.to_device(device)?;
 
     // --- (1) Eager reference: fresh cache + fresh linear state. ---
     let mut ref_cache = crate::PagedKvCacheKt::new(
@@ -3762,26 +3771,30 @@ fn test_cuda_graph_bs1_decode_matches_eager() -> Result<()> {
         device_kt,
     )?;
     assert!(ref_cache.write_token_major_native(0, &block_table, 0, &prefix_k, &prefix_v)?);
-    let eager_logits = model_forward_paged(
-        &*backend,
-        &[token_id],
-        &weights,
-        &config,
-        &mut ref_cache,
-        &block_table,
-        start_pos,
-        None,
-        None,
-        Some(&positions),
-    )?;
-    synchronize_for_profile(&device)?;
-    // #1082: both the eager reference and the graph path now return a kt
-    // `Tensor`; read host f32 through the identical kt API on both sides.
-    assert_eq!(eager_logits.dims(), &[1usize, 1usize, vocab]);
-    let eager: Vec<f32> = eager_logits
-        .to_dtype(kiln_tensor::DType::F32)?
-        .flatten_all()?
-        .to_vec1::<f32>()?;
+    let mut eager_step = |position: usize| -> Result<Vec<f32>> {
+        let positions = Tensor::from_slice(&[position as f32], 1usize)?.to_device(device)?;
+        let logits = model_forward_paged(
+            &*backend,
+            &[token_id],
+            &weights,
+            &config,
+            &mut ref_cache,
+            &block_table,
+            position,
+            None,
+            None,
+            Some(&positions),
+        )?;
+        synchronize_for_profile(&device)?;
+        assert_eq!(logits.dims(), &[1usize, 1usize, vocab]);
+        Ok(logits
+            .to_dtype(kiln_tensor::DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?)
+    };
+    let eager_warmup = eager_step(start_pos)?;
+    let eager_capture = eager_step(start_pos + 1)?;
+    let eager_replay = eager_step(start_pos + 2)?;
 
     // --- (2) Graph path: warmup -> capture -> replay. ---
     let result = (|| -> Result<()> {
@@ -3792,7 +3805,7 @@ fn test_cuda_graph_bs1_decode_matches_eager() -> Result<()> {
             "CUDA graph runner must be enabled on a CUDA device"
         );
 
-        let mut graph_cache = crate::PagedKvCacheKt::new(
+        let graph_cache = crate::PagedKvCacheKt::new(
             1,
             1,
             block_size,
@@ -3804,12 +3817,9 @@ fn test_cuda_graph_bs1_decode_matches_eager() -> Result<()> {
         assert!(graph_cache.write_token_major_native(0, &block_table, 0, &prefix_k, &prefix_v)?);
         let mut linear_state = LinearAttentionState::new(&config, &device)?;
 
-        // Three steps at the identical (token, position, block-table)
-        // shape. Each writes the same decode K/V to slot=start_pos
-        // (idempotent value), so the only difference between the calls
-        // is eager-warmup vs. capture vs. replay. A plain local fn
-        // (not a closure) so the `&mut runner` borrow ends after each
-        // call — letting us inspect `runner` state between steps.
+        // Three monotonically advancing positions in one graph geometry bucket.
+        // A plain local fn (not a closure) makes the `&mut runner` borrow end
+        // after each call so the test can inspect runner state between steps.
         #[allow(clippy::too_many_arguments)]
         fn run_decode_step(
             runner: &mut crate::cuda_graph::CudaGraphRunner,
@@ -3846,7 +3856,8 @@ fn test_cuda_graph_bs1_decode_matches_eager() -> Result<()> {
                 .to_vec1::<f32>()?)
         }
         let step = |runner: &mut crate::cuda_graph::CudaGraphRunner,
-                    linear_state: &mut LinearAttentionState|
+                    linear_state: &mut LinearAttentionState,
+                    position: usize|
          -> Result<Vec<f32>> {
             run_decode_step(
                 runner,
@@ -3856,15 +3867,15 @@ fn test_cuda_graph_bs1_decode_matches_eager() -> Result<()> {
                 &config,
                 &graph_cache,
                 &block_table,
-                start_pos,
+                position,
                 linear_state,
                 &device,
                 vocab,
             )
         };
 
-        let _warmup = step(&mut runner, &mut linear_state)?; // call 1: eager warmup
-        let _captured = step(&mut runner, &mut linear_state)?; // call 2: stream capture
+        let warmup = step(&mut runner, &mut linear_state, start_pos)?;
+        let captured = step(&mut runner, &mut linear_state, start_pos + 1)?;
         // Guard against silent eager fallback: a graph MUST have been
         // captured by now, otherwise this "parity" test is comparing
         // eager-against-eager and proves nothing about capture/replay.
@@ -3876,7 +3887,7 @@ fn test_cuda_graph_bs1_decode_matches_eager() -> Result<()> {
             runner.captured_graph_count() > 0,
             "CUDA graph replay parity requires a captured graph, not eager fallback"
         );
-        let replay = step(&mut runner, &mut linear_state)?; // call 3: graph REPLAY
+        let replay = step(&mut runner, &mut linear_state, start_pos + 2)?;
 
         // --- Assertions: mirror the C3 token-parity + relative bound. ---
         let argmax = |v: &[f32]| {
@@ -3887,35 +3898,62 @@ fn test_cuda_graph_bs1_decode_matches_eager() -> Result<()> {
                 })
                 .0
         };
-        let (ea, ra) = (argmax(&eager), argmax(&replay));
+        let (ewa, eca, era, wa, ca, ra) = (
+            argmax(&eager_warmup),
+            argmax(&eager_capture),
+            argmax(&eager_replay),
+            argmax(&warmup),
+            argmax(&captured),
+            argmax(&replay),
+        );
+        let max_abs = |v: &[f32]| v.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+        eprintln!(
+            "cuda graph bs=1 decode stages: eager_tokens={ewa}/{eca}/{era} \
+             graph_tokens={wa}/{ca}/{ra} eager_replay_max_abs={:e} \
+             warmup_max_abs={:e} capture_max_abs={:e} replay_max_abs={:e}",
+            max_abs(&eager_replay),
+            max_abs(&warmup),
+            max_abs(&captured),
+            max_abs(&replay),
+        );
+        assert_eq!(
+            ewa, wa,
+            "CUDA graph-shaped eager warmup picked a different token \
+             (warmup={wa} eager={ewa})"
+        );
+        assert_eq!(
+            eca, ca,
+            "CUDA graph first captured launch picked a different token \
+             (capture={ca} eager={eca})"
+        );
         // DECODE-CORRECTNESS gate: the graph-replayed decode MUST pick the
         // same token as eager. A stale/dangling-pointer or wrong-buffer
         // capture bug flips this; bf16 rounding noise does not (top-2 gap
         // dwarfs it).
         assert_eq!(
-            ea, ra,
+            era, ra,
             "CUDA-graph replay and eager decode picked DIFFERENT tokens \
-                 (graph={ra} eager={ea}) — a real graph-replay corruption, not bf16 noise"
+                 (graph={ra} eager={era}) — a real graph-replay corruption, not bf16 noise"
         );
-        let max_abs_diff = eager
+        let max_abs_diff = eager_replay
             .iter()
             .zip(&replay)
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
-        let mean_abs_diff = eager
+        let mean_abs_diff = eager_replay
             .iter()
             .zip(&replay)
             .map(|(a, b)| (a - b).abs())
             .sum::<f32>()
-            / eager.len() as f32;
-        let max_abs_logit = eager
+            / eager_replay.len() as f32;
+        let max_abs_logit = eager_replay
             .iter()
             .map(|x| x.abs())
             .fold(0.0f32, f32::max)
             .max(1e-6);
         eprintln!(
             "cuda graph bs=1 decode parity (start_pos={start_pos}, token={token_id}): \
-                 graph_token={ra} eager_token={ea} \
+                 graph_token={ra} eager_token={era} \
                  max_abs_diff={max_abs_diff:e} ({:.3}% of max|logit|={max_abs_logit:e}) \
                  mean_abs_diff={mean_abs_diff:e}",
             100.0 * max_abs_diff / max_abs_logit
