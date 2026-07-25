@@ -528,6 +528,23 @@ performance, training, eval, or soak receipt still requires the complete
 fingerprint. This closes evidence retention, not host thermal availability or
 performance acceptance.
 
+After a ten-minute independent cooldown, the unchanged invocation from exact
+clean pushed source `98f7c2db72523b35c042818a457ea4fdfa637a11`
+published the first such retained failure:
+`qualification/receipts/cuda/rtx4090-laptop/20260725t221058934964z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`,
+file
+`sha256:c8d8e3364d46e84f7b89eac810dc1ccbd036280bce49261c4f69017128802bee`.
+The incomplete initial fingerprint scope ran for 336.353 seconds, peaked at
+1,253,879,808 bytes and four PIDs, used 1,314,771 of 168,176,288 allowed CPU
+microseconds, and recorded zero memory-limit or OOM events. Two verified
+freezes totaled 334.129 seconds; the second reached 300.510 seconds and failed
+at the unchanged per-pause bound after an 86.05/64 C host/GPU peak. The scope
+was removed and the outer supervisor completed stable handoff at 76.05/63 C.
+No environment collection, case, final fingerprint, campaign output, or
+process survived. The receipt and all five local artifacts pass strict
+known-commit/local-artifact validation, but `model: null` and the failed
+unexecuted c1 result make it boundary counterevidence only.
+
 For the first Kiln campaign, use the exact UUID from
 `.environment.device.device_uuid` in the environment receipt, the matching
 bootstrap launch JSON, and `target/release/kiln` as `--runtime-artifact`. Use a

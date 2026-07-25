@@ -1217,6 +1217,24 @@ still require the full weight/config/tokenizer/template identity. A failed
 receipt with no model is pre-model boundary evidence only; it cannot be cited
 for model integrity, device identity, case execution, or performance.
 
+After a ten-minute independent cooldown, the unchanged invocation from exact
+clean pushed source `98f7c2db72523b35c042818a457ea4fdfa637a11`
+exercised that retention path. It published failed parent receipt
+`qualification/receipts/cuda/rtx4090-laptop/20260725t221058934964z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`
+with file
+`sha256:c8d8e3364d46e84f7b89eac810dc1ccbd036280bce49261c4f69017128802bee`.
+The incomplete initial fingerprint scope ran for 336.353 seconds, peaked at
+1,253,879,808 bytes and four PIDs, used 1,314,771 of 168,176,288 allowed CPU
+microseconds, and recorded zero memory-limit or OOM events. Two verified
+freezes totaled 334.129 seconds; the second reached 300.510 seconds and failed
+at the unchanged per-pause bound after an 86.05/64 C host/GPU peak. The scope
+was removed, the outer supervisor completed stable handoff at 76.05/63 C, and
+no case, final fingerprint, campaign root, or process remained. The strict
+known-commit/local-artifact validator accepts the receipt and all five hashed
+artifacts. Its `model: null`, unavailable environment, empty effective config,
+and failed unexecuted c1 result make it retained thermal-boundary
+counterevidence only, not a model or performance result.
+
 The initial Kiln inputs are stable-profile, eager-only baselines. They are not
 an optimality claim and must not be edited in place after a receipt binds them.
 Land a new source-bound candidate for graph capture, scheduler widening,
