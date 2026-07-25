@@ -1059,6 +1059,15 @@ qualification runner. Its outer Windows/NVML supervisor also contains the
 source build. Do not pass this WSL policy to
 `cargo-bounded.sh --host-thermal-policy`, whose schema intentionally accepts
 only a Linux hwmon selector.
+Serving benchmark driver v20 and campaign schema v9 extend that same rule to
+owned benchmark launches. A committed WSL2 workload passes the policy as
+`--external-wsl2-thermal-policy`; the child driver revalidates the live private
+network, Landlock, exact UID-qualified systemd scope, memory/swap/PID/OOM
+controls, and usage-feedback CPU controller. The nested benchmark receipt
+requires its enclosing qualification receipt, which remains the sole authority
+for final Windows/NVML thermal evidence, cgroup accounting and removal, process
+cleanup, and safe handoff. Running the external mode directly or attaching to a
+pre-existing server is rejected.
 Use `scripts/qualification/capture_vllm_runtime_manifest.py` with the tracked
 vLLM launch JSON; do not retype its inference arguments. The tool requires a
 clean commit, two byte-identical strict-valid captures, bounded child output,

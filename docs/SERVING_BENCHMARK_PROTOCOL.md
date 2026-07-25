@@ -9,8 +9,11 @@ complete lifecycle.
 
 ## Server Ownership
 
-Every measured run requires `--host-thermal-policy` and exactly one server
-ownership mode:
+Every potentially passing measured run requires one thermal boundary and
+exactly one server ownership mode. Native Linux uses `--host-thermal-policy`.
+WSL2 may instead use `--external-wsl2-thermal-policy` only from inside the
+qualification runner's already active Windows/NVML supervisor, private
+namespace, and exact user scope:
 
 - `--server-launch-config PATH` is the default for local qualification. The
   driver fingerprints the model in its own guarded child lifecycle, fingerprints
@@ -27,6 +30,16 @@ ownership mode:
   alive only after the configured safe-handoff temperature is stable.
 - `--unsafe-no-host-thermal-guard` exists only to retain diagnostic
   counterevidence. It can never produce a passing receipt.
+
+Driver v20 requires an owned `--server-launch-config` with the external WSL2
+mode. It revalidates the WSL2 kernel, policy hash, network/Landlock boundary,
+host UID, exact `.scope` cgroup path, 10 GiB memory maximum, zero swap, 512 PID
+maximum, group OOM handling, absence of delegated `cpu.max`, and the outer
+50-percent usage-feedback controller before model hashing or launch. Each
+measured row records wall time and sustainable throughput under that boundary.
+The child receipt deliberately marks the enclosing qualification receipt as
+required: only the parent owns final thermal samples, scope accounting, cleanup,
+and stable handoff, so a child v20 WSL2 receipt is never sufficient by itself.
 
 Owned launch eliminates the manual gap in which model loading or inference
 prewarm could run before the guard attached. Driver v8 also removes the
@@ -324,10 +337,15 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --memory-device-uuid '<environment receipt GPU UUID>' \
   --memory-limit-bytes '<reviewed whole-device ceiling>' \
   --model-fingerprint-read-mib-per-second 256 \
-  --host-thermal-policy qualification/host-policies/rtx4090-laptop-serving-hard-limit-v1.json \
+  --external-wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-boundary-v1.json \
   --server-launch-config qualification/server-launch/kiln-cuda-rtx4090-laptop-serving-bootstrap-v1.json \
   --output-evidence hashes
 ```
+
+Run that WSL2 command only through a committed qualification workload. Direct
+shell execution has no parent receipt and fails the external-boundary
+revalidation. On native Linux, use the machine-specific
+`--host-thermal-policy` from the preparation procedure instead.
 
 Run vLLM only after its manifest is committed. Change `--engine`, loopback port,
 runtime artifact, campaign/output IDs, and launch JSON; point `--reference-dir`
@@ -432,7 +450,7 @@ diagnostics.
 
 ## Device-Memory Telemetry
 
-Driver v19 samples whole-device used memory through one typed source. This is
+Drivers v19 and v20 sample whole-device used memory through one typed source. This is
 the same scope for both supported mechanisms: it is not per-process memory and
 therefore includes other users of the selected accelerator. Qualification
 machines must be quiescent enough that the recorded baseline and peak delta are
@@ -461,7 +479,7 @@ boundary lock, so an in-flight sample from the prior row cannot be committed
 after the next row resets its baseline. A negative or inconsistent value, any
 background read failure, a sampler thread that does not stop, or failed NVML
 shutdown makes the receipt fail. A memory limit larger than the selected NVML
-device's recorded capacity is rejected before measurement. Passed v19
+device's recorded capacity is rejected before measurement. Passed v19/v20
 Kiln/vLLM comparisons must
 use the same cadence and source and must bind the same DRM path or NVML
 UUID/capacity. Thus peak-memory comparisons cannot silently come from different
@@ -516,7 +534,7 @@ accepts unique lifecycle identities while rejecting any prompt, sampling,
 shape, seed, model alias, SLO, or memory-limit drift. V2-v15 validators retain
 their original exact-workload fingerprint semantics.
 
-Driver v7 through v19 retain one ordered `output_evidence` row for every successful
+Driver v7 through v20 retain one ordered `output_evidence` row for every successful
 request. Hash-only evidence is the default and includes the combined semantic
 output hash, separate reasoning/content hashes, UTF-8 byte counts, completion
 tokens, and finish reason. The validator requires these rows to cover exactly
@@ -579,7 +597,7 @@ does not re-authorize active-work suspension there.
 
 ### Server route diagnostics
 
-Drivers v18 and v19 use `kiln.serving-benchmark-server-diagnostics.v7`. Its
+Drivers v18 through v20 use `kiln.serving-benchmark-server-diagnostics.v7`. Its
 `request_route` is exactly `batching_engine`; the batching-engine record is
 mandatory; and the record contains no direct-worker, rendezvous, or alternate
 route object. The before/after actor ownership must be stable, all cumulative
@@ -1290,7 +1308,7 @@ environment receipt:
 ```
 
 Use the same UUID, sample cadence, and memory limit for the Kiln and vLLM
-campaign. The child v19 receipts bind the resolved index and UUID; the campaign
+campaign. The child v19/v20 receipts bind the resolved index and UUID; the campaign
 records the requested selector. An explicit physical index remains available
 for a stable, non-remapped single-tenant host.
 
@@ -1322,9 +1340,11 @@ mapfile -d '' receipts < <(
 python3 scripts/bench-concurrent-batch.py --validate-receipt "${receipts[@]}"
 ```
 
-Driver v19 is the current contract. It retains v18's actor-only diagnostics and
-adds typed DRM/NVML whole-device memory telemetry, stable NVML identity,
-fail-closed sampling, and same-device comparison. Driver v18 retained v17's
+Driver v20 is the current contract. It retains v19's typed DRM/NVML
+whole-device memory contract and adds the parent-bound external WSL2
+thermal/scope mode described above. Driver v19 retained v18's actor-only
+diagnostics and added typed memory telemetry, stable NVML identity, fail-closed
+sampling, and same-device comparison. Driver v18 retained v17's
 closed ROCm batch-capture parity evidence and fail-closed reference roles, then
 replaced route-aware diagnostics with the actor-only v7 schema described above.
 Driver v17 retained
@@ -1341,9 +1361,9 @@ integrity contract. Driver v11 added typed idle-boundary
 cooldown evidence to v10. Driver v10 added closed ROCm graph execution evidence;
 v9 added historical route-aware batching-actor and direct-rendezvous
 diagnostics; and v8 added mandatory initial and final guarded model-fingerprint
-lifecycles. A v17, v18, or v19 graph/eager discriminator requires a compatible
+lifecycles. A v17 through v20 graph/eager discriminator requires a compatible
 eager reference with the same prompt-set ID, model-visible
-workload, runtime identity, and exact binary hash. Ordinary v7-v19 references
+workload, runtime identity, and exact binary hash. Ordinary v7-v20 references
 remain comparison-compatible when their version-appropriate workload
 fingerprints match. The current arm must still satisfy v16 prompt identity, v15
 request-performance accounting, v14 multi-row
@@ -1360,6 +1380,6 @@ identity semantics. Owned evidence contains the content-hashed launch document,
 absolute server-log fingerprint, shutdown signal/status/timing,
 forced-shutdown flag, and process-group liveness. Attached and explicitly
 unsafe runs serialize null lifecycle artifacts so ownership cannot be inferred
-from missing fields. Historical driver v2 through v18 receipts remain valid
-under their original contracts, but do not satisfy current v19 performance
+from missing fields. Historical driver v2 through v19 receipts remain valid
+under their original contracts, but do not satisfy current v20 performance
 acceptance.

@@ -76,6 +76,67 @@ def valid_host_thermal_policy() -> dict:
     }
 
 
+def valid_wsl2_thermal_policy() -> dict:
+    policy = {
+        "schema": bench.WSL2_THERMAL_POLICY_SCHEMA,
+        "id": "test-wsl2-policy-v1",
+        "content_sha256": "",
+        "host": {
+            "cpu_name": "Test CPU",
+            "thermal_zone_name": "\\_TZ.THRM",
+            "limit_millicelsius": 95_000,
+            "vendor_tjunction_millicelsius": 110_000,
+        },
+        "gpu": {
+            "name": "Test GPU",
+            "uuid": "GPU-test",
+            "limit_millicelsius": 85_000,
+        },
+        "poll_interval_ms": 100,
+        "safe_handoff": {
+            "host_target_millicelsius": 85_000,
+            "gpu_target_millicelsius": 75_000,
+            "stable_samples": 2,
+            "timeout_seconds": 5,
+        },
+    }
+    hashed = dict(policy)
+    hashed.pop("content_sha256")
+    payload = json.dumps(
+        hashed,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    policy["content_sha256"] = f"sha256:{hashlib.sha256(payload).hexdigest()}"
+    return policy
+
+
+def valid_external_wsl2_boundary_evidence(policy: dict) -> dict:
+    unit = "kiln-wsl-scope-" + "a" * 32
+    host_uid = 1000
+    return {
+        "mechanism": "qualification-runner-windows-nvml-outer-supervisor-v1",
+        "policy_sha256": policy["content_sha256"],
+        "network_containment": bench.WSL2_NETWORK_BOUNDARY,
+        "scope_boundary": bench.WSL2_SCOPE_BOUNDARY,
+        "scope_unit": unit,
+        "scope_host_uid": host_uid,
+        "cgroup_path": (
+            f"/sys/fs/cgroup/user.slice/user-{host_uid}.slice/"
+            f"user@{host_uid}.service/app.slice/{unit}.scope"
+        ),
+        "memory_max_bytes": bench.WSL2_SCOPE_MEMORY_MAX_BYTES,
+        "memory_swap_max_bytes": 0,
+        "pids_max": bench.WSL2_SCOPE_PIDS_MAX,
+        "memory_oom_group": 1,
+        "cpu_quota_percent": bench.WSL2_SCOPE_CPU_QUOTA_PERCENT,
+        "cpu_controller": "usage-feedback-cgroup-freeze-v1",
+        "parent_qualification_receipt_required": True,
+    }
+
+
 def valid_prelaunch_cooldown() -> dict:
     return {
         "scope": "host_package_before_process_creation",
@@ -2333,6 +2394,158 @@ class ServingBenchmarkTests(unittest.TestCase):
             with self.assertRaisesRegex(bench.BenchmarkError, "resume < start"):
                 bench.load_host_thermal_policy(path)
 
+    def test_external_wsl2_boundary_receipt_is_closed_and_parent_bound(self) -> None:
+        policy = valid_wsl2_thermal_policy()
+        evidence = valid_external_wsl2_boundary_evidence(policy)
+        receipt = {
+            "mode": "external_wsl2_boundary",
+            "unsafe_no_guard_acknowledged": False,
+            "policy": policy,
+            "process_group": None,
+            "model_fingerprint": None,
+            "evidence": evidence,
+        }
+        self.assertEqual(
+            bench.validate_host_thermal_receipt(
+                receipt, driver_version=bench.DRIVER_VERSION
+            ),
+            ("external_wsl2_boundary", True, None),
+        )
+
+        mutations = (
+            ("policy_sha256", "sha256:" + "0" * 64, "policy_sha256"),
+            (
+                "cgroup_path",
+                evidence["cgroup_path"].removesuffix(".scope"),
+                "bound scope",
+            ),
+            (
+                "parent_qualification_receipt_required",
+                False,
+                "parent_qualification_receipt_required",
+            ),
+        )
+        for field, value, message in mutations:
+            with self.subTest(field=field):
+                mutated = json.loads(json.dumps(receipt))
+                mutated["evidence"][field] = value
+                with self.assertRaisesRegex(bench.BenchmarkError, message):
+                    bench.validate_host_thermal_receipt(
+                        mutated, driver_version=bench.DRIVER_VERSION
+                    )
+
+    def test_external_wsl2_scope_requires_exact_cgroup_controls(self) -> None:
+        unit = "kiln-wsl-scope-" + "b" * 32
+        host_uid = 1000
+        relative = (
+            f"user.slice/user-{host_uid}.slice/user@{host_uid}.service/"
+            f"app.slice/{unit}.scope"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            proc_cgroup = root / "self.cgroup"
+            cgroup_root = root / "cgroup"
+            cgroup = cgroup_root / relative
+            cgroup.mkdir(parents=True)
+            proc_cgroup.write_text(f"0::/{relative}\n", encoding="ascii")
+            controls = {
+                "memory.max": bench.WSL2_SCOPE_MEMORY_MAX_BYTES,
+                "memory.swap.max": 0,
+                "pids.max": bench.WSL2_SCOPE_PIDS_MAX,
+                "memory.oom.group": 1,
+            }
+            for name, value in controls.items():
+                (cgroup / name).write_text(str(value), encoding="ascii")
+
+            observed_path, observed = bench.verify_external_wsl2_scope(
+                unit,
+                host_uid,
+                proc_cgroup_path=proc_cgroup,
+                cgroup_root=cgroup_root,
+            )
+            self.assertEqual(observed_path, cgroup)
+            self.assertEqual(
+                observed["memory_max_bytes"],
+                bench.WSL2_SCOPE_MEMORY_MAX_BYTES,
+            )
+
+            (cgroup / "memory.max").write_text("max", encoding="ascii")
+            with self.assertRaisesRegex(
+                bench.BenchmarkError, "scope controls"
+            ):
+                bench.verify_external_wsl2_scope(
+                    unit,
+                    host_uid,
+                    proc_cgroup_path=proc_cgroup,
+                    cgroup_root=cgroup_root,
+                )
+            (cgroup / "memory.max").write_text(
+                str(bench.WSL2_SCOPE_MEMORY_MAX_BYTES), encoding="ascii"
+            )
+            (cgroup / "cpu.max").write_text("50000 100000", encoding="ascii")
+            with self.assertRaisesRegex(bench.BenchmarkError, "delegates cpu.max"):
+                bench.verify_external_wsl2_scope(
+                    unit,
+                    host_uid,
+                    proc_cgroup_path=proc_cgroup,
+                    cgroup_root=cgroup_root,
+                )
+
+    def test_external_wsl2_boundary_revalidates_the_live_runner(self) -> None:
+        policy = valid_wsl2_thermal_policy()
+        unit = "kiln-wsl-scope-" + "c" * 32
+        host_uid = 1000
+        cgroup = Path(
+            f"/sys/fs/cgroup/user.slice/user-{host_uid}.slice/"
+            f"user@{host_uid}.service/app.slice/{unit}.scope"
+        )
+        controls = {
+            "memory_max_bytes": bench.WSL2_SCOPE_MEMORY_MAX_BYTES,
+            "memory_swap_max_bytes": 0,
+            "pids_max": bench.WSL2_SCOPE_PIDS_MAX,
+            "memory_oom_group": 1,
+        }
+        environment = {
+            bench.WSL2_THERMAL_POLICY_ENV: policy["content_sha256"],
+            bench.WSL2_SCOPE_BOUNDARY_ENV: bench.WSL2_SCOPE_BOUNDARY,
+            bench.WSL2_SCOPE_MEMORY_MAX_ENV: str(
+                bench.WSL2_SCOPE_MEMORY_MAX_BYTES
+            ),
+            bench.WSL2_SCOPE_PIDS_MAX_ENV: str(bench.WSL2_SCOPE_PIDS_MAX),
+            bench.WSL2_SCOPE_CPU_QUOTA_ENV: str(
+                bench.WSL2_SCOPE_CPU_QUOTA_PERCENT
+            ),
+            bench.WSL2_SCOPE_UNIT_ENV: unit,
+            bench.WSL2_SCOPE_HOST_UID_ENV: str(host_uid),
+            bench.wsl_platform.NETWORK_ISOLATION_ENV: bench.WSL2_NETWORK_BOUNDARY,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "policy.json"
+            path.write_text(json.dumps(policy), encoding="ascii")
+            with (
+                mock.patch.object(
+                    bench.platform,
+                    "release",
+                    return_value="6.6.87.2-microsoft-standard-WSL2",
+                ),
+                mock.patch.dict(bench.os.environ, environment, clear=False),
+                mock.patch.object(
+                    bench,
+                    "verify_external_wsl2_scope",
+                    return_value=(cgroup, controls),
+                ) as verify_scope,
+                mock.patch.object(
+                    bench.wsl_platform, "verify_contained_case"
+                ) as verify_containment,
+            ):
+                record, evidence = bench.load_external_wsl2_boundary(path)
+
+        self.assertEqual(record, policy)
+        self.assertEqual(evidence["cgroup_path"], str(cgroup))
+        self.assertTrue(evidence["parent_qualification_receipt_required"])
+        verify_scope.assert_called_once_with(unit, host_uid)
+        verify_containment.assert_called_once_with(bench.WSL2_NETWORK_BOUNDARY)
+
     def test_host_thermal_hard_limit_only_policy_never_arms_process_stop(self) -> None:
         value = valid_host_thermal_policy()
         value["id"] = "test-hard-limit-only-v1"
@@ -2758,7 +2971,7 @@ class ServingBenchmarkTests(unittest.TestCase):
             return_code, output = self._run_cli_fixture(fake, directory)
             receipt = bench.strict_json_loads(output.read_bytes())
             self.assertEqual(bench.main(["--validate-receipt", str(output)]), 0)
-            self.assertEqual(receipt["driver_version"], "19")
+            self.assertEqual(receipt["driver_version"], bench.DRIVER_VERSION)
             self.assertEqual(
                 receipt["memory_sampler"],
                 {

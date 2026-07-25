@@ -1171,6 +1171,17 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 closes only that bounded admission and recovery gate. It is not performance, soak,
                 native-Linux, or desktop-4090 evidence.
               </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                WSL2 serving performance uses benchmark driver v20 under the same outer boundary.
+                Its <code>external_wsl2_boundary</code> record is accepted only for an owned launch
+                after live revalidation of the policy hash, private network and Landlock mechanism,
+                exact host-UID systemd <code>.scope</code>, 10 GiB memory maximum, zero swap,
+                512-PID maximum, group OOM handling, and the 50-percent usage-feedback CPU
+                controller. The nested benchmark record explicitly requires the enclosing
+                qualification receipt. Only that parent can prove final Windows/NVML thermal
+                samples, scope accounting and removal, process cleanup, and stable handoff; the
+                nested record is not standalone performance evidence.
+              </p>
             </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">
               <h4 class="font-semibold mb-2">Memory alerting contract</h4>

@@ -19,7 +19,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DRIVER = ROOT / "scripts" / "bench-concurrent-batch.py"
-SCHEMA = "kiln.serving-benchmark-campaign.v8"
+SCHEMA = "kiln.serving-benchmark-campaign.v9"
 DEFAULT_MODEL_FINGERPRINT_READ_MIB_PER_SECOND = 256
 REFERENCE_ROLES = (
     "qualification_gate",
@@ -134,7 +134,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_MODEL_FINGERPRINT_READ_MIB_PER_SECOND,
         help="cumulative read-rate limit across both model-integrity passes",
     )
-    parser.add_argument("--host-thermal-policy", type=Path, required=True)
+    thermal = parser.add_mutually_exclusive_group(required=True)
+    thermal.add_argument("--host-thermal-policy", type=Path)
+    thermal.add_argument("--external-wsl2-thermal-policy", type=Path)
     server_owner = parser.add_mutually_exclusive_group(required=True)
     server_owner.add_argument("--server-pid", type=int)
     server_owner.add_argument("--server-launch-config", type=Path)
@@ -210,8 +212,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--memory-path cannot be combined with --memory-source nvml")
     if not 64 <= args.model_fingerprint_read_mib_per_second <= 16_384:
         parser.error("--model-fingerprint-read-mib-per-second must be in 64..=16384")
-    if args.host_thermal_policy.is_symlink() or not args.host_thermal_policy.is_file():
-        parser.error("--host-thermal-policy must name a regular file")
+    thermal_path = (
+        args.host_thermal_policy
+        if args.host_thermal_policy is not None
+        else args.external_wsl2_thermal_policy
+    )
+    assert thermal_path is not None
+    if thermal_path.is_symlink() or not thermal_path.is_file():
+        parser.error("the selected thermal policy must name a regular file")
+    if (
+        args.external_wsl2_thermal_policy is not None
+        and args.server_launch_config is None
+    ):
+        parser.error(
+            "--external-wsl2-thermal-policy requires --server-launch-config"
+        )
     if args.server_launch_config is not None and (
         args.server_launch_config.is_symlink()
         or not args.server_launch_config.is_file()
@@ -266,8 +281,6 @@ def benchmark_command(
         str(args.memory_sample_ms),
         "--model-fingerprint-read-mib-per-second",
         str(args.model_fingerprint_read_mib_per_second),
-        "--host-thermal-policy",
-        str(args.host_thermal_policy),
         "--slo-ttft-ms",
         str(args.slo_ttft_ms),
         "--slo-itl-ms",
@@ -283,6 +296,15 @@ def benchmark_command(
         "--out",
         str(output),
     ]
+    if args.host_thermal_policy is not None:
+        command.extend(("--host-thermal-policy", str(args.host_thermal_policy)))
+    else:
+        command.extend(
+            (
+                "--external-wsl2-thermal-policy",
+                str(args.external_wsl2_thermal_policy),
+            )
+        )
     if args.server_launch_config is not None:
         command.extend(("--server-launch-config", str(args.server_launch_config)))
     else:
@@ -344,9 +366,24 @@ def build_summary(
             "interval_ms": args.memory_sample_ms,
             "limit_bytes": args.memory_limit_bytes,
         },
-        "host_thermal_policy": {
-            "path": str(args.host_thermal_policy.resolve()),
-            "sha256": file_sha256(args.host_thermal_policy),
+        "thermal_policy": {
+            "mode": (
+                "native_hwmon"
+                if args.host_thermal_policy is not None
+                else "external_wsl2_boundary"
+            ),
+            "path": str(
+                (
+                    args.host_thermal_policy
+                    if args.host_thermal_policy is not None
+                    else args.external_wsl2_thermal_policy
+                ).resolve()
+            ),
+            "sha256": file_sha256(
+                args.host_thermal_policy
+                if args.host_thermal_policy is not None
+                else args.external_wsl2_thermal_policy
+            ),
         },
         "server_owner": (
             {

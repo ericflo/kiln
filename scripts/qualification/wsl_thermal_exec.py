@@ -136,11 +136,7 @@ def _canonical_policy_hash(raw: dict[str, Any]) -> str:
     return f"sha256:{hashlib.sha256(payload).hexdigest()}"
 
 
-def load_policy(path: Path) -> ThermalPolicy:
-    try:
-        raw = json.loads(path.read_bytes())
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ThermalGuardError(f"cannot read WSL2 thermal policy {path}: {exc}") from exc
+def validate_policy(raw: Any) -> ThermalPolicy:
     root = _exact_object(raw, POLICY_KEYS, "WSL2 thermal policy")
     if root["schema"] != SCHEMA:
         raise ThermalGuardError(f"WSL2 thermal policy schema must be {SCHEMA!r}")
@@ -222,6 +218,14 @@ def load_policy(path: Path) -> ThermalPolicy:
             3600.0,
         ),
     )
+
+
+def load_policy(path: Path) -> ThermalPolicy:
+    try:
+        raw = json.loads(path.read_bytes())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ThermalGuardError(f"cannot read WSL2 thermal policy {path}: {exc}") from exc
+    return validate_policy(raw)
 
 
 def _run(command: list[str], label: str, timeout: float = 10.0) -> str:

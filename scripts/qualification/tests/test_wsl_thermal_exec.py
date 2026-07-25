@@ -83,6 +83,15 @@ class WslThermalExecTests(unittest.TestCase):
             with self.assertRaisesRegex(thermal.ThermalGuardError, "unknown disabled"):
                 thermal.load_policy(path)
 
+    def test_in_memory_policy_validation_uses_the_same_closed_contract(self) -> None:
+        parsed = thermal.validate_policy(policy_document())
+        self.assertEqual(parsed.gpu_uuid, "GPU-test")
+
+        unknown = policy_document()
+        unknown["disabled"] = True
+        with self.assertRaisesRegex(thermal.ThermalGuardError, "unknown disabled"):
+            thermal.validate_policy(unknown)
+
     def test_windows_high_precision_temperature_is_tenths_kelvin(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             policy = thermal.load_policy(self.write_policy(Path(directory)))

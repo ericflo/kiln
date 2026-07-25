@@ -40,7 +40,7 @@ from typing import Any, Callable, Iterable
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "19"
+DRIVER_VERSION = "20"
 SUPPORTED_DRIVER_VERSIONS = {
     "2",
     "3",
@@ -59,49 +59,51 @@ SUPPORTED_DRIVER_VERSIONS = {
     "16",
     "17",
     "18",
+    "19",
     DRIVER_VERSION,
 }
 THERMAL_DRIVER_VERSIONS = {
     "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", DRIVER_VERSION,
+    "16", "17", "18", "19", DRIVER_VERSION,
 }
 LIFECYCLE_DRIVER_VERSIONS = {
     "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", DRIVER_VERSION,
+    "16", "17", "18", "19", DRIVER_VERSION,
 }
 PRELAUNCH_DRIVER_VERSIONS = {
     "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", DRIVER_VERSION,
+    "16", "17", "18", "19", DRIVER_VERSION,
 }
 OUTPUT_EVIDENCE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", DRIVER_VERSION,
+    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", DRIVER_VERSION,
 }
 MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {
-    "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", DRIVER_VERSION,
+    "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", DRIVER_VERSION,
 }
 RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS = {
-    "12", "13", "14", "15", "16", "17", "18", DRIVER_VERSION,
+    "12", "13", "14", "15", "16", "17", "18", "19", DRIVER_VERSION,
 }
 ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", DRIVER_VERSION,
+    "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", DRIVER_VERSION,
 }
 ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "10", "11", "12", "13", "14", "15", "16", "17", "18", DRIVER_VERSION,
+    "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", DRIVER_VERSION,
 }
 REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", DRIVER_VERSION,
+    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", DRIVER_VERSION,
 }
 IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS = {
-    "11", "12", "13", "14", "15", "16", "17", "18", DRIVER_VERSION,
+    "11", "12", "13", "14", "15", "16", "17", "18", "19", DRIVER_VERSION,
 }
-COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", "15", "16", "17", "18", DRIVER_VERSION}
-MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", "15", "16", "17", "18", DRIVER_VERSION}
-REQUEST_PERFORMANCE_DRIVER_VERSIONS = {"15", "16", "17", "18", DRIVER_VERSION}
-PROMPT_SET_IDENTITY_DRIVER_VERSIONS = {"16", "17", "18", DRIVER_VERSION}
-GRAPH_PARITY_DRIVER_VERSIONS = {"17", "18", DRIVER_VERSION}
-REFERENCE_ROLE_DRIVER_VERSIONS = {"17", "18", DRIVER_VERSION}
-ACTOR_ONLY_DIAGNOSTICS_DRIVER_VERSIONS = {"18", DRIVER_VERSION}
-TYPED_MEMORY_SOURCE_DRIVER_VERSIONS = {DRIVER_VERSION}
+COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", "15", "16", "17", "18", "19", DRIVER_VERSION}
+MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", "15", "16", "17", "18", "19", DRIVER_VERSION}
+REQUEST_PERFORMANCE_DRIVER_VERSIONS = {"15", "16", "17", "18", "19", DRIVER_VERSION}
+PROMPT_SET_IDENTITY_DRIVER_VERSIONS = {"16", "17", "18", "19", DRIVER_VERSION}
+GRAPH_PARITY_DRIVER_VERSIONS = {"17", "18", "19", DRIVER_VERSION}
+REFERENCE_ROLE_DRIVER_VERSIONS = {"17", "18", "19", DRIVER_VERSION}
+ACTOR_ONLY_DIAGNOSTICS_DRIVER_VERSIONS = {"18", "19", DRIVER_VERSION}
+TYPED_MEMORY_SOURCE_DRIVER_VERSIONS = {"19", DRIVER_VERSION}
+EXTERNAL_WSL2_THERMAL_DRIVER_VERSIONS = {DRIVER_VERSION}
 REFERENCE_ROLES = {
     "qualification_gate",
     "same_artifact_graph_eager_discriminator",
@@ -119,6 +121,8 @@ if str(QUALIFICATION_DIR) not in sys.path:
 import hf_thermal_supervisor as fingerprint_supervisor  # noqa: E402
 import host_thermal_guard as thermal  # noqa: E402
 import host_thermal_policy as thermal_policy_file  # noqa: E402
+import wsl_platform  # noqa: E402
+import wsl_thermal_exec  # noqa: E402
 from scripts import vllm_teacher as teacher  # noqa: E402
 from device_memory_sampler import (  # noqa: E402
     DeviceMemoryError,
@@ -136,6 +140,19 @@ from request_latency_contract import (  # noqa: E402
 from strict_json import loads as strict_json_loads  # noqa: E402
 
 HOST_THERMAL_POLICY_SCHEMA = thermal_policy_file.SCHEMA
+WSL2_THERMAL_POLICY_SCHEMA = wsl_thermal_exec.SCHEMA
+WSL2_THERMAL_POLICY_ENV = wsl_thermal_exec.POLICY_ENV
+WSL2_SCOPE_BOUNDARY_ENV = "KILN_WSL2_SCOPE_BOUNDARY"
+WSL2_SCOPE_MEMORY_MAX_ENV = "KILN_WSL2_SCOPE_MEMORY_MAX_BYTES"
+WSL2_SCOPE_PIDS_MAX_ENV = "KILN_WSL2_SCOPE_PIDS_MAX"
+WSL2_SCOPE_CPU_QUOTA_ENV = "KILN_WSL2_SCOPE_CPU_QUOTA_PERCENT"
+WSL2_SCOPE_UNIT_ENV = "KILN_WSL2_SCOPE_UNIT"
+WSL2_SCOPE_HOST_UID_ENV = "KILN_WSL2_SCOPE_HOST_UID"
+WSL2_SCOPE_BOUNDARY = "systemd-user-scope-feedback-v1"
+WSL2_NETWORK_BOUNDARY = "util-linux-unshare-user-net-pid-landlock-v1"
+WSL2_SCOPE_MEMORY_MAX_BYTES = 10 * 1024**3
+WSL2_SCOPE_PIDS_MAX = 512
+WSL2_SCOPE_CPU_QUOTA_PERCENT = 50
 MODEL_FINGERPRINT_SCRIPT = QUALIFICATION_DIR / "model_fingerprint.py"
 MODEL_FINGERPRINT_THERMAL_SCHEMA_V1 = "kiln.serving-model-fingerprint-thermal.v1"
 MODEL_FINGERPRINT_THERMAL_SCHEMA = "kiln.serving-model-fingerprint-thermal.v2"
@@ -710,6 +727,195 @@ def load_host_thermal_policy(
         error_type=BenchmarkError,
         cooldown_mode="live_process_safe_handoff",
     )
+
+
+EXTERNAL_WSL2_BOUNDARY_EVIDENCE_KEYS = {
+    "mechanism",
+    "policy_sha256",
+    "network_containment",
+    "scope_boundary",
+    "scope_unit",
+    "scope_host_uid",
+    "cgroup_path",
+    "memory_max_bytes",
+    "memory_swap_max_bytes",
+    "pids_max",
+    "memory_oom_group",
+    "cpu_quota_percent",
+    "cpu_controller",
+    "parent_qualification_receipt_required",
+}
+
+
+def validate_wsl2_thermal_policy_value(
+    value: Any,
+    label: str,
+) -> tuple[dict[str, Any], wsl_thermal_exec.ThermalPolicy]:
+    policy_record = _object(value, label)
+    try:
+        policy = wsl_thermal_exec.validate_policy(policy_record)
+    except wsl_thermal_exec.ThermalGuardError as exc:
+        raise BenchmarkError(f"{label} is invalid: {exc}") from exc
+    return policy_record, policy
+
+
+def validate_external_wsl2_boundary_evidence(
+    value: Any,
+    *,
+    policy_sha256: str,
+    label: str,
+) -> dict[str, Any]:
+    evidence = _object(value, label)
+    _exact_keys(evidence, EXTERNAL_WSL2_BOUNDARY_EVIDENCE_KEYS, label)
+    expected = {
+        "mechanism": "qualification-runner-windows-nvml-outer-supervisor-v1",
+        "policy_sha256": policy_sha256,
+        "network_containment": WSL2_NETWORK_BOUNDARY,
+        "scope_boundary": WSL2_SCOPE_BOUNDARY,
+        "memory_max_bytes": WSL2_SCOPE_MEMORY_MAX_BYTES,
+        "memory_swap_max_bytes": 0,
+        "pids_max": WSL2_SCOPE_PIDS_MAX,
+        "memory_oom_group": 1,
+        "cpu_quota_percent": WSL2_SCOPE_CPU_QUOTA_PERCENT,
+        "cpu_controller": "usage-feedback-cgroup-freeze-v1",
+        "parent_qualification_receipt_required": True,
+    }
+    for name, expected_value in expected.items():
+        if evidence[name] != expected_value:
+            raise BenchmarkError(
+                f"{label}.{name} must be {expected_value!r}, got {evidence[name]!r}"
+            )
+    if re.fullmatch(r"kiln-wsl-scope-[0-9a-f]{32}", evidence["scope_unit"]) is None:
+        raise BenchmarkError(f"{label}.scope_unit is invalid")
+    host_uid = evidence["scope_host_uid"]
+    if (
+        not isinstance(host_uid, int)
+        or isinstance(host_uid, bool)
+        or host_uid <= 0
+    ):
+        raise BenchmarkError(f"{label}.scope_host_uid is invalid")
+    expected_cgroup_path = (
+        f"/sys/fs/cgroup/user.slice/user-{host_uid}.slice/"
+        f"user@{host_uid}.service/app.slice/{evidence['scope_unit']}.scope"
+    )
+    if evidence["cgroup_path"] != expected_cgroup_path:
+        raise BenchmarkError(f"{label}.cgroup_path is not the bound scope")
+    return evidence
+
+
+def verify_external_wsl2_scope(
+    unit: str,
+    host_uid: int,
+    *,
+    proc_cgroup_path: Path = Path("/proc/self/cgroup"),
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> tuple[Path, dict[str, int]]:
+    try:
+        cgroup_rows = proc_cgroup_path.read_text(encoding="ascii").splitlines()
+        unified = [row.split("::", 1)[1] for row in cgroup_rows if row.startswith("0::")]
+        expected_relative = (
+            f"/user.slice/user-{host_uid}.slice/user@{host_uid}.service/"
+            f"app.slice/{unit}.scope"
+        )
+        if unified != [expected_relative]:
+            raise BenchmarkError("process is not executing inside the bound WSL2 scope")
+        cgroup = cgroup_root / expected_relative.lstrip("/")
+        observed = {
+            "memory_max_bytes": int((cgroup / "memory.max").read_text().strip()),
+            "memory_swap_max_bytes": int(
+                (cgroup / "memory.swap.max").read_text().strip()
+            ),
+            "pids_max": int((cgroup / "pids.max").read_text().strip()),
+            "memory_oom_group": int(
+                (cgroup / "memory.oom.group").read_text().strip()
+            ),
+        }
+        if (cgroup / "cpu.max").exists():
+            raise BenchmarkError(
+                "external WSL2 scope unexpectedly delegates cpu.max"
+            )
+    except (OSError, ValueError, IndexError) as exc:
+        raise BenchmarkError(f"cannot verify external WSL2 scope controls: {exc}") from exc
+    expected_controls = {
+        "memory_max_bytes": WSL2_SCOPE_MEMORY_MAX_BYTES,
+        "memory_swap_max_bytes": 0,
+        "pids_max": WSL2_SCOPE_PIDS_MAX,
+        "memory_oom_group": 1,
+    }
+    if observed != expected_controls:
+        raise BenchmarkError(f"external WSL2 scope controls disagree: {observed!r}")
+    return cgroup, observed
+
+
+def load_external_wsl2_boundary(
+    policy_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        if policy_path.is_symlink() or not policy_path.is_file():
+            raise BenchmarkError(
+                "external WSL2 thermal policy must name a regular file"
+            )
+        resolved = policy_path.expanduser().resolve(strict=True)
+        policy_record = strict_json_loads(resolved.read_bytes())
+    except Exception as exc:
+        raise BenchmarkError(f"cannot read external WSL2 thermal policy: {exc}") from exc
+    policy_record, policy = validate_wsl2_thermal_policy_value(
+        policy_record, "external WSL2 thermal policy"
+    )
+    if "microsoft-standard-wsl2" not in platform.release().lower():
+        raise BenchmarkError("external WSL2 thermal supervision requires a WSL2 kernel")
+    if os.environ.get(WSL2_THERMAL_POLICY_ENV) != policy.content_sha256:
+        raise BenchmarkError(
+            "external WSL2 thermal policy does not match the outer supervisor binding"
+        )
+    expected_environment = {
+        WSL2_SCOPE_BOUNDARY_ENV: WSL2_SCOPE_BOUNDARY,
+        WSL2_SCOPE_MEMORY_MAX_ENV: str(WSL2_SCOPE_MEMORY_MAX_BYTES),
+        WSL2_SCOPE_PIDS_MAX_ENV: str(WSL2_SCOPE_PIDS_MAX),
+        WSL2_SCOPE_CPU_QUOTA_ENV: str(WSL2_SCOPE_CPU_QUOTA_PERCENT),
+        wsl_platform.NETWORK_ISOLATION_ENV: WSL2_NETWORK_BOUNDARY,
+    }
+    for name, expected in expected_environment.items():
+        if os.environ.get(name) != expected:
+            raise BenchmarkError(
+                f"external WSL2 boundary requires {name}={expected!r}, "
+                f"got {os.environ.get(name)!r}"
+            )
+    unit = os.environ.get(WSL2_SCOPE_UNIT_ENV, "")
+    if re.fullmatch(r"kiln-wsl-scope-[0-9a-f]{32}", unit) is None:
+        raise BenchmarkError("external WSL2 scope unit binding is invalid")
+    raw_host_uid = os.environ.get(WSL2_SCOPE_HOST_UID_ENV, "")
+    if re.fullmatch(r"[1-9][0-9]*", raw_host_uid) is None:
+        raise BenchmarkError("external WSL2 scope host UID binding is invalid")
+    host_uid = int(raw_host_uid)
+    cgroup, observed = verify_external_wsl2_scope(unit, host_uid)
+    try:
+        wsl_platform.verify_contained_case(
+            os.environ.get(wsl_platform.NETWORK_ISOLATION_ENV)
+        )
+    except wsl_platform.PlatformProbeError as exc:
+        raise BenchmarkError(
+            f"external WSL2 containment revalidation failed: {exc}"
+        ) from exc
+    evidence = {
+        "mechanism": "qualification-runner-windows-nvml-outer-supervisor-v1",
+        "policy_sha256": policy.content_sha256,
+        "network_containment": WSL2_NETWORK_BOUNDARY,
+        "scope_boundary": WSL2_SCOPE_BOUNDARY,
+        "scope_unit": unit,
+        "scope_host_uid": host_uid,
+        "cgroup_path": str(cgroup),
+        **observed,
+        "cpu_quota_percent": WSL2_SCOPE_CPU_QUOTA_PERCENT,
+        "cpu_controller": "usage-feedback-cgroup-freeze-v1",
+        "parent_qualification_receipt_required": True,
+    }
+    validate_external_wsl2_boundary_evidence(
+        evidence,
+        policy_sha256=policy.content_sha256,
+        label="external WSL2 boundary evidence",
+    )
+    return policy_record, evidence
 
 
 def wait_for_prelaunch_cooldown(
@@ -1423,6 +1629,12 @@ RUN_HOST_THERMAL_KEYS = {
     "host_thermal_pacing_seconds",
 }
 RUN_HOST_THERMAL_KEYS_V11 = RUN_HOST_THERMAL_KEYS | {"idle_boundary_cooldowns"}
+RUN_EXTERNAL_WSL2_THERMAL_KEYS = {
+    "phase",
+    "phase_wall_seconds",
+    "thermally_sustainable_output_token_throughput_per_s",
+    "supervision",
+}
 IDLE_BOUNDARY_COOLDOWN_KEYS = {
     "completed",
     "elapsed_seconds",
@@ -1453,6 +1665,33 @@ def validate_run_host_thermal(
     if value is None:
         return
     evidence = _object(value, label)
+    if (
+        driver_version in EXTERNAL_WSL2_THERMAL_DRIVER_VERSIONS
+        and policy_record is not None
+        and policy_record.get("schema") == WSL2_THERMAL_POLICY_SCHEMA
+    ):
+        _exact_keys(evidence, RUN_EXTERNAL_WSL2_THERMAL_KEYS, label)
+        if evidence["phase"] != phase:
+            raise BenchmarkError(f"{label}.phase disagrees with its run")
+        wall_seconds = _nonnegative_number(
+            evidence["phase_wall_seconds"], f"{label}.phase_wall_seconds"
+        )
+        if wall_seconds <= 0:
+            raise BenchmarkError(f"{label}.phase_wall_seconds must be positive")
+        throughput = _nonnegative_number(
+            evidence["thermally_sustainable_output_token_throughput_per_s"],
+            f"{label}.thermally_sustainable_output_token_throughput_per_s",
+        )
+        if not math.isclose(
+            throughput,
+            completion_tokens / wall_seconds,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise BenchmarkError(f"{label} has inconsistent sustainable throughput")
+        if evidence["supervision"] != "external_wsl2_boundary":
+            raise BenchmarkError(f"{label}.supervision is unsupported")
+        return
     expected_keys = (
         RUN_HOST_THERMAL_KEYS_V11
         if driver_version in IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS
@@ -3171,6 +3410,31 @@ def validate_host_thermal_receipt(
                 "unconfigured host thermal evidence requires an explicit unsafe acknowledgment"
             )
         return mode, False, None
+    if (
+        driver_version in EXTERNAL_WSL2_THERMAL_DRIVER_VERSIONS
+        and mode == "external_wsl2_boundary"
+    ):
+        if host_thermal["unsafe_no_guard_acknowledged"] is not False:
+            raise BenchmarkError(
+                "external WSL2 thermal evidence cannot be marked unsafe"
+            )
+        policy_record, policy = validate_wsl2_thermal_policy_value(
+            host_thermal["policy"], "receipt.host_thermal.policy"
+        )
+        if host_thermal["process_group"] is not None:
+            raise BenchmarkError(
+                "external WSL2 supervision owns the enclosing scope, not a server process group"
+            )
+        if host_thermal.get("model_fingerprint") is not None:
+            raise BenchmarkError(
+                "external WSL2 model fingerprint supervision belongs to the parent receipt"
+            )
+        validate_external_wsl2_boundary_evidence(
+            host_thermal["evidence"],
+            policy_sha256=policy.content_sha256,
+            label="receipt.host_thermal.evidence",
+        )
+        return mode, True, None
     if mode not in {"attached_process_group", "owned_process_group"}:
         raise BenchmarkError("receipt.host_thermal.mode is unsupported")
     if host_thermal["unsafe_no_guard_acknowledged"] is not False:
@@ -3428,9 +3692,18 @@ def validate_server_lifecycle(
             raise BenchmarkError(
                 "owned server pre-launch cooldown requires a host thermal policy"
             )
-        prelaunch_passed = validate_prelaunch_cooldown(
-            lifecycle["prelaunch_cooldown"], host_thermal_policy
-        )
+        if (
+            driver_version in EXTERNAL_WSL2_THERMAL_DRIVER_VERSIONS
+            and host_thermal_policy.get("schema") == WSL2_THERMAL_POLICY_SCHEMA
+        ):
+            if lifecycle["prelaunch_cooldown"] is not None:
+                raise BenchmarkError(
+                    "external WSL2 pre-launch evidence belongs to the parent qualification receipt"
+                )
+        else:
+            prelaunch_passed = validate_prelaunch_cooldown(
+                lifecycle["prelaunch_cooldown"], host_thermal_policy
+            )
     launch = validate_server_launch_config_value(
         lifecycle["launch_config"],
         config_directory=Path("/"),
@@ -4061,13 +4334,19 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
             driver_version=driver_version,
             host_thermal_policy=receipt["host_thermal"]["policy"],
         )
-        if server_lifecycle_mode != host_thermal_mode:
+        external_wsl2_owned = (
+            driver_version in EXTERNAL_WSL2_THERMAL_DRIVER_VERSIONS
+            and host_thermal_mode == "external_wsl2_boundary"
+            and server_lifecycle_mode == "owned_process_group"
+        )
+        if server_lifecycle_mode != host_thermal_mode and not external_wsl2_owned:
             raise BenchmarkError(
                 "receipt server lifecycle and host thermal ownership modes disagree"
             )
         if (
             driver_version in PRELAUNCH_DRIVER_VERSIONS
             and server_lifecycle_mode == "owned_process_group"
+            and not external_wsl2_owned
             and receipt["server_lifecycle"]["prelaunch_cooldown"]["sensor_path"]
             != receipt["host_thermal"]["evidence"]["sensor_path"]
         ):
@@ -4156,6 +4435,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
         expect_thermal_rows = host_thermal_mode in {
             "attached_process_group",
             "owned_process_group",
+            "external_wsl2_boundary",
         }
         if any(
             (row["host_thermal"] is not None) != expect_thermal_rows
@@ -4467,7 +4747,12 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
         not repository["dirty"]
         and not completion_failures
         and host_thermal_mode
-        in {"legacy", "attached_process_group", "owned_process_group"}
+        in {
+            "legacy",
+            "attached_process_group",
+            "owned_process_group",
+            "external_wsl2_boundary",
+        }
         and host_thermal_passed
         and server_lifecycle_passed
         and (
@@ -5817,7 +6102,7 @@ def compare_reference(receipt: dict[str, Any], reference_path: Path) -> dict[str
                 not in TYPED_MEMORY_SOURCE_DRIVER_VERSIONS
             ):
                 raise BenchmarkError(
-                    "NVML comparison requires a driver v19 reference receipt"
+                    "NVML comparison requires a typed-memory driver reference receipt"
                 )
             same_device = (
                 current_memory["device"]["uuid"]
@@ -6294,6 +6579,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="typed host thermal policy for the attached local server process group",
     )
     host_safety.add_argument(
+        "--external-wsl2-thermal-policy",
+        type=Path,
+        help=(
+            "WSL2 Windows/NVML policy already enforced by the enclosing "
+            "qualification runner and systemd scope"
+        ),
+    )
+    host_safety.add_argument(
         "--unsafe-no-host-thermal-guard",
         action="store_true",
         help="run without host thermal containment and force a diagnostic-only verdict",
@@ -6473,6 +6766,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.out is not None
                 or args.reference_receipt is not None
                 or args.host_thermal_policy is not None
+                or args.external_wsl2_thermal_policy is not None
                 or args.server_pid is not None
                 or args.server_launch_config is not None
                 or args.unsafe_no_host_thermal_guard
@@ -6485,10 +6779,14 @@ def main(argv: list[str] | None = None) -> int:
                 validate_benchmark_receipt_path(path)
                 print(f"OK {path}")
             return 0
-        if args.host_thermal_policy is None and not args.unsafe_no_host_thermal_guard:
+        if (
+            args.host_thermal_policy is None
+            and args.external_wsl2_thermal_policy is None
+            and not args.unsafe_no_host_thermal_guard
+        ):
             raise BenchmarkError(
-                "measured runs require --host-thermal-policy plus --server-pid or "
-                "--server-launch-config; "
+                "measured runs require --host-thermal-policy or "
+                "--external-wsl2-thermal-policy plus server ownership; "
                 "use --unsafe-no-host-thermal-guard only for diagnostic counterevidence"
             )
         if args.run_id is None or args.prompt_set_id is None:
@@ -6500,9 +6798,20 @@ def main(argv: list[str] | None = None) -> int:
         has_server_owner = (
             args.server_pid is not None or args.server_launch_config is not None
         )
-        if (args.host_thermal_policy is None) != (not has_server_owner):
+        has_thermal_boundary = (
+            args.host_thermal_policy is not None
+            or args.external_wsl2_thermal_policy is not None
+        )
+        if has_thermal_boundary != has_server_owner:
             raise BenchmarkError(
-                "--host-thermal-policy and exactly one server owner must be provided together"
+                "a thermal boundary and exactly one server owner must be provided together"
+            )
+        if (
+            args.external_wsl2_thermal_policy is not None
+            and args.server_launch_config is None
+        ):
+            raise BenchmarkError(
+                "external WSL2 supervision requires an owned --server-launch-config"
             )
         if args.model_path is None:
             raise BenchmarkError("--model-path is required for a measured run")
@@ -6553,6 +6862,13 @@ def main(argv: list[str] | None = None) -> int:
                     )
             else:
                 validate_vllm_owned_launch(launch_config, runtime_manifest)
+        external_wsl2_policy_record: dict[str, Any] | None = None
+        external_wsl2_boundary_evidence: dict[str, Any] | None = None
+        if args.external_wsl2_thermal_policy is not None:
+            (
+                external_wsl2_policy_record,
+                external_wsl2_boundary_evidence,
+            ) = load_external_wsl2_boundary(args.external_wsl2_thermal_policy)
         try:
             initial_model_identity, initial_fingerprint_thermal = (
                 fingerprint_model_with_thermal_containment(
@@ -6583,7 +6899,7 @@ def main(argv: list[str] | None = None) -> int:
             else None
         )
         thermal_startup_error: BenchmarkError | None = None
-        thermal_policy_record: dict[str, Any] | None = None
+        thermal_policy_record: dict[str, Any] | None = external_wsl2_policy_record
         thermal_policy: thermal.HostThermalPolicy | None = None
         thermal_settlement_timeout = 0.0
         attached_process: AttachedProcessGroup | None = None
@@ -6639,6 +6955,9 @@ def main(argv: list[str] | None = None) -> int:
                     thermal_guard.trip_reason
                     or "host thermal pacing failed to settle before server probes"
                 )
+        elif args.external_wsl2_thermal_policy is not None:
+            assert launch_config is not None
+            owned_server = launch_owned_server(launch_config, args.run_id)
 
         headers = {
             "Accept": "text/event-stream",
@@ -6742,8 +7061,20 @@ def main(argv: list[str] | None = None) -> int:
             **run_kwargs: Any,
         ) -> tuple[dict[str, Any], BenchmarkError | None]:
             if thermal_guard is None:
+                phase_started = time.perf_counter()
                 row = run_once(phase=phase, **run_kwargs)
-                row["host_thermal"] = None
+                if external_wsl2_policy_record is None:
+                    row["host_thermal"] = None
+                else:
+                    phase_wall_seconds = time.perf_counter() - phase_started
+                    row["host_thermal"] = {
+                        "phase": phase,
+                        "phase_wall_seconds": phase_wall_seconds,
+                        "thermally_sustainable_output_token_throughput_per_s": (
+                            row["completion_tokens"] / phase_wall_seconds
+                        ),
+                        "supervision": "external_wsl2_boundary",
+                    }
                 return row, None
 
             thermal_guard.set_phase(phase)
@@ -6980,6 +7311,17 @@ def main(argv: list[str] | None = None) -> int:
                     "process_alive_at_handoff": attached_process.poll() is None,
                 },
             }
+        elif external_wsl2_policy_record is not None:
+            assert external_wsl2_boundary_evidence is not None
+            finalization_checks["host_thermal_handoff"] = "not_applicable"
+            host_thermal_record = {
+                "mode": "external_wsl2_boundary",
+                "unsafe_no_guard_acknowledged": False,
+                "policy": external_wsl2_policy_record,
+                "process_group": None,
+                "model_fingerprint": None,
+                "evidence": external_wsl2_boundary_evidence,
+            }
         else:
             finalization_checks["host_thermal_handoff"] = "not_applicable"
             host_thermal_record = {
@@ -7107,7 +7449,11 @@ def main(argv: list[str] | None = None) -> int:
         if (
             args.reference_receipt is not None
             and host_thermal_record["mode"]
-            in {"attached_process_group", "owned_process_group"}
+            in {
+                "attached_process_group",
+                "owned_process_group",
+                "external_wsl2_boundary",
+            }
             and len(runs) == len(sizes) * args.repeats
         ):
             try:
@@ -7120,7 +7466,11 @@ def main(argv: list[str] | None = None) -> int:
             not repo["dirty"]
             and not completion_failures
             and host_thermal_record["mode"]
-            in {"attached_process_group", "owned_process_group"}
+            in {
+                "attached_process_group",
+                "owned_process_group",
+                "external_wsl2_boundary",
+            }
             and all(
                 status in {"passed", "not_applicable"}
                 for status in finalization_checks.values()
