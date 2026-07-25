@@ -546,6 +546,30 @@ bounded tests do not claim full-model correctness, multi-row CUDA graph safety,
 resize behavior, memory-pressure safety, serving performance, or soak
 completion.
 
+#### Current WSL2 RTX 4090 Laptop correctness counterevidence
+
+The first post-boundary core run from clean pushed source
+`547d15754e5491abf135ddca1b172821ef604b0e` and source tree
+`sha256:1979c8f4b40358e529c97221af5ee44cfa714f4c60d05e81fe08e1316ab2a8d7`
+is retained at
+`qualification/receipts/cuda/rtx4090-laptop/20260725t052543938882z-cuda-rtx4090-laptop-cuda-metal-core-correctn-9f21d75c94-v1.json`
+with receipt hash
+`sha256:16deee09107bf4a577270bb04404cff1ffa90ff9d201ebded3a03148798e0303`.
+It is a strict-valid failed receipt, not partial acceptance.
+
+Device selection, CUDA tensor resize/copy parity, all four F32 and three BF16
+matmul shapes, both 20-step native BF16 AdamW trajectories, and the complete
+tiny LoRA SFT step passed. The required graph case performed a real capture and
+replay but selected token zero while the independent eager path selected token
+seven. The test failed explicitly as graph-replay corruption. Its scope reached
+7,978,455,040 bytes and 28 PIDs without a cgroup limit, swap, or OOM event;
+settled 851,538,135 CPU microseconds inside an 851,549,685-microsecond
+allowance; and removed itself. Continuous supervision peaked at 94.05 C host
+and 66 C GPU below the 95/85 C hard limits, completed the safe handoff, and
+left no process or scope residue. The graph defect must be fixed and the full
+five-case workload rerun from a new clean pushed source before CUDA core
+correctness passes.
+
 ### CUDA Memory Lifecycle Handoff
 
 After the environment and core-correctness receipts pass, run the memory
