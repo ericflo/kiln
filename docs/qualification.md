@@ -546,7 +546,7 @@ bounded tests do not claim full-model correctness, multi-row CUDA graph safety,
 resize behavior, memory-pressure safety, serving performance, or soak
 completion.
 
-#### Current WSL2 RTX 4090 Laptop correctness counterevidence
+#### Current WSL2 RTX 4090 Laptop correctness evidence
 
 The first post-boundary core run from clean pushed source
 `547d15754e5491abf135ddca1b172821ef604b0e` and source tree
@@ -593,10 +593,34 @@ replay token parity. Under the full WSL2 boundary it returned eager and graph
 tokens `7/7/7`, with zero replay logit difference. The new arena invariant test
 proved stable pointer reuse and fail-closed host-byte, initialization-kind, and
 sequence checks. Complete guarded CUDA library runs passed `1,027/1,027`
-`kiln-tensor` tests and `412/412` `kiln-model` tests. These are source-repair
-checks, not a replacement for the five-case clean-source receipt; the laptop
-correctness item remains open until that unchanged workload passes and its new
-receipt is committed.
+`kiln-tensor` tests and `412/412` `kiln-model` tests. These source-repair checks
+do not replace the five-case clean-source receipt.
+
+The unchanged workload subsequently passed all five required cases from exact
+clean pushed source `1a6941330dee21b814caaa2f40d9652daffc0ef3` and source tree
+`sha256:d44de18f440643c2ffd7b1620f9203f67c6fd1458fa49aa63f01381cc2fb4c20`.
+The retained receipt is
+`qualification/receipts/cuda/rtx4090-laptop/20260725t064445179639z-cuda-rtx4090-laptop-cuda-metal-core-correctn-9f21d75c94-v1.json`
+with receipt hash
+`sha256:500a0cf760cac67995a8452c266896790445f638026f1ca42317ed2c0dbafad3`.
+Strict current-source, local-artifact, and known-commit validation passed.
+Device probe, tensor parity, F32/BF16 matmul parity, real single-row graph
+capture/replay parity, and the native BF16 AdamW plus tiny LoRA SFT training
+oracles all passed in 148.181 seconds with no unsupported item.
+
+The graph case returned eager and graph tokens `7/7/7` for warmup, first
+captured launch, and actual replay, with zero maximum and mean replay-logit
+difference. All five cases ran through the Windows/NVML thermal supervisor,
+named user scope, 10 GiB memory and zero-swap bounds, 512-PID limit, 50-percent
+feedback CPU controller, user/network/PID/mount namespaces, and Landlock.
+Every scope was removed; peak scoped memory was 1,681,219,584 bytes, peak PIDs
+were 29, and every memory-limit and OOM counter stayed zero. Each thermal
+supervisor completed its stable handoff; the worst host/GPU peaks were
+87.05/67 C below the 95/85 C hard limits. No matching process or scope residue
+remained. This receipt closes only the bounded CUDA core-correctness subset on
+the named 16 GB Laptop GPU under WSL2. It does not claim public-model loading,
+multi-row CUDA graph safety, low-memory pressure and recovery, serving
+performance, soak completion, native Linux, or a desktop RTX 4090.
 
 ### CUDA Memory Lifecycle Handoff
 
