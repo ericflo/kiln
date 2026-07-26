@@ -164,9 +164,18 @@ class WslThermalExecTests(unittest.TestCase):
             self.assertEqual(thermal._parse_host_temperature(policy, row), 72_050)
             row["HighPrecisionTemperature"] = 3600
             with self.assertRaisesRegex(
-                thermal.ThermalGuardError, "disagree"
+                thermal.ThermalGuardError,
+                "Temperature=345 K, HighPrecisionTemperature=3600 tenths K",
             ):
                 thermal._parse_host_temperature(policy, row)
+
+    def test_persistent_counter_uses_one_timestamped_category_snapshot(self) -> None:
+        self.assertIn("$snapshot = $category.ReadCategory()", thermal.HOST_COUNTER_SCRIPT)
+        self.assertIn(
+            "thermal snapshot counter timestamps disagree",
+            thermal.HOST_COUNTER_SCRIPT,
+        )
+        self.assertNotIn(".NextValue()", thermal.HOST_COUNTER_SCRIPT)
 
     def test_persistent_counter_json_rejects_duplicate_keys(self) -> None:
         with self.assertRaisesRegex(
@@ -226,7 +235,7 @@ import json
 import sys
 
 print(json.dumps({
-    "Schema": "kiln.wsl2-host-thermal-counter.v1",
+    "Schema": "kiln.wsl2-host-thermal-counter.v2",
     "CpuName": "Test CPU",
     "Name": "\\_TZ.THRM",
     "CounterNames": [
@@ -239,9 +248,10 @@ print(json.dumps({
 for line in sys.stdin:
     sequence = int(line)
     print(json.dumps({
-        "Schema": "kiln.wsl2-host-thermal-counter.v1",
+        "Schema": "kiln.wsl2-host-thermal-counter.v2",
         "Sequence": sequence,
         "Name": "\\_TZ.THRM",
+        "Timestamp100nSec": 1000 + sequence,
         "Temperature": 345,
         "HighPrecisionTemperature": 3452,
         "PercentPassiveLimit": 100,
@@ -265,13 +275,64 @@ for line in sys.stdin:
             self.assertEqual(counter.read_millicelsius(), 72_050)
             self.assertEqual(counter.read_millicelsius(), 72_050)
 
+    def test_persistent_host_counter_rejects_stale_snapshot_timestamp(self) -> None:
+        policy = thermal.validate_policy(policy_document())
+        fixture = r"""
+import json
+import sys
+
+print(json.dumps({
+    "Schema": "kiln.wsl2-host-thermal-counter.v2",
+    "CpuName": "Test CPU",
+    "Name": "\\_TZ.THRM",
+    "CounterNames": [
+        "Temperature",
+        "High Precision Temperature",
+        "% Passive Limit",
+        "Throttle Reasons",
+    ],
+}), flush=True)
+for line in sys.stdin:
+    sequence = int(line)
+    print(json.dumps({
+        "Schema": "kiln.wsl2-host-thermal-counter.v2",
+        "Sequence": sequence,
+        "Name": "\\_TZ.THRM",
+        "Timestamp100nSec": 1000,
+        "Temperature": 345,
+        "HighPrecisionTemperature": 3452,
+        "PercentPassiveLimit": 100,
+        "ThrottleReasons": 0,
+    }), flush=True)
+"""
+
+        def process_factory(*_args, **kwargs):
+            return thermal.subprocess.Popen(
+                [sys.executable, "-c", fixture],
+                stdin=kwargs["stdin"],
+                stdout=kwargs["stdout"],
+                stderr=kwargs["stderr"],
+                bufsize=kwargs["bufsize"],
+            )
+
+        with thermal.WindowsThermalCounter(
+            policy,
+            process_factory=process_factory,
+        ) as counter:
+            self.assertEqual(counter.read_millicelsius(), 72_050)
+            with self.assertRaisesRegex(
+                thermal.ThermalGuardError,
+                "timestamp did not advance",
+            ):
+                counter.read_millicelsius()
+
     def test_persistent_host_counter_binds_registry_cpu_identity(self) -> None:
         policy = thermal.validate_policy(policy_document())
         fixture = r"""
 import json
 
 print(json.dumps({
-    "Schema": "kiln.wsl2-host-thermal-counter.v1",
+    "Schema": "kiln.wsl2-host-thermal-counter.v2",
     "CpuName": "Different CPU",
     "Name": "\\_TZ.THRM",
     "CounterNames": [
@@ -307,7 +368,7 @@ import json
 import sys
 
 print(json.dumps({
-    "Schema": "kiln.wsl2-host-thermal-counter.v1",
+    "Schema": "kiln.wsl2-host-thermal-counter.v2",
     "CpuName": "Test CPU",
     "Name": "\\_TZ.THRM",
     "CounterNames": [
@@ -319,9 +380,10 @@ print(json.dumps({
 }), flush=True)
 for _line in sys.stdin:
     print(json.dumps({
-        "Schema": "kiln.wsl2-host-thermal-counter.v1",
+        "Schema": "kiln.wsl2-host-thermal-counter.v2",
         "Sequence": 99,
         "Name": "\\_TZ.THRM",
+        "Timestamp100nSec": 1000,
         "Temperature": 345,
         "HighPrecisionTemperature": 3452,
         "PercentPassiveLimit": 100,
@@ -354,7 +416,7 @@ import json
 import sys
 
 print(json.dumps({
-    "Schema": "kiln.wsl2-host-thermal-counter.v1",
+    "Schema": "kiln.wsl2-host-thermal-counter.v2",
     "CpuName": "Test CPU",
     "Name": "\\_TZ.THRM",
     "CounterNames": [

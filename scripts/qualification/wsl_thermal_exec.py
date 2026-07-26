@@ -35,7 +35,7 @@ POWERSHELL = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
 NVIDIA_SMI = Path("/usr/lib/wsl/lib/nvidia-smi")
 NVIDIA_NVML = Path("/usr/lib/wsl/lib/libnvidia-ml.so.1")
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-HOST_COUNTER_SCHEMA = "kiln.wsl2-host-thermal-counter.v1"
+HOST_COUNTER_SCHEMA = "kiln.wsl2-host-thermal-counter.v2"
 HOST_COUNTER_NAMES = (
     "Temperature",
     "High Precision Temperature",
@@ -47,6 +47,7 @@ HOST_COUNTER_SAMPLE_KEYS = {
     "Schema",
     "Sequence",
     "Name",
+    "Timestamp100nSec",
     "Temperature",
     "HighPrecisionTemperature",
     "PercentPassiveLimit",
@@ -91,25 +92,39 @@ function Resolve-Counter([string]$name) {
     }
     return $matches[0]
 }
-$temperature = Resolve-Counter 'Temperature'
-$highPrecisionTemperature = Resolve-Counter 'High Precision Temperature'
-$percentPassiveLimit = Resolve-Counter '% Passive Limit'
-$throttleReasons = Resolve-Counter 'Throttle Reasons'
-function Read-IntegerCounter($counter, [string]$name) {
-    $value = [double]$counter.NextValue()
-    if ([double]::IsNaN($value) -or [double]::IsInfinity($value)) {
-        throw "thermal counter '$name' returned a non-finite value"
+foreach ($name in @(
+    'Temperature',
+    'High Precision Temperature',
+    '% Passive Limit',
+    'Throttle Reasons'
+)) {
+    Resolve-Counter $name | Out-Null
+}
+foreach ($counter in $allCounters) {
+    $counter.Dispose()
+}
+function Read-SnapshotCounter($snapshot, [string]$name) {
+    $counter = $snapshot[$name]
+    if ($null -eq $counter) {
+        throw "thermal snapshot omitted counter '$name'"
     }
-    $rounded = [math]::Round($value)
-    if ([math]::Abs($value - $rounded) -gt 0.001) {
-        throw "thermal counter '$name' returned a non-integer value"
+    $instance = $counter[$zone]
+    if ($null -eq $instance) {
+        throw "thermal snapshot counter '$name' omitted exact instance '$zone'"
     }
-    return [long]$rounded
+    $sample = $instance.Sample
+    if ([string]$sample.CounterType -cne 'NumberOfItems32') {
+        throw "thermal snapshot counter '$name' has unexpected type '$($sample.CounterType)'"
+    }
+    return [ordered]@{
+        Value = [long]$sample.RawValue
+        Timestamp100nSec = [long]$sample.TimeStamp100nSec
+    }
 }
 $writer = [Console]::Out
 $reader = [Console]::In
 $ready = [ordered]@{
-    Schema = 'kiln.wsl2-host-thermal-counter.v1'
+    Schema = 'kiln.wsl2-host-thermal-counter.v2'
     CpuName = $cpuName
     Name = $zone
     CounterNames = @(
@@ -129,16 +144,30 @@ while ($null -ne ($line = $reader.ReadLine())) {
         $line,
         [System.Globalization.CultureInfo]::InvariantCulture
     )
+    $snapshot = $category.ReadCategory()
+    $temperature = Read-SnapshotCounter $snapshot 'Temperature'
+    $highPrecisionTemperature = Read-SnapshotCounter `
+        $snapshot 'High Precision Temperature'
+    $percentPassiveLimit = Read-SnapshotCounter $snapshot '% Passive Limit'
+    $throttleReasons = Read-SnapshotCounter $snapshot 'Throttle Reasons'
+    $timestamps = @(
+        $temperature.Timestamp100nSec,
+        $highPrecisionTemperature.Timestamp100nSec,
+        $percentPassiveLimit.Timestamp100nSec,
+        $throttleReasons.Timestamp100nSec
+    ) | Select-Object -Unique
+    if ($timestamps.Count -ne 1 -or $timestamps[0] -le 0) {
+        throw 'thermal snapshot counter timestamps disagree or are invalid'
+    }
     $sample = [ordered]@{
-        Schema = 'kiln.wsl2-host-thermal-counter.v1'
+        Schema = 'kiln.wsl2-host-thermal-counter.v2'
         Sequence = $sequence
         Name = $zone
-        Temperature = Read-IntegerCounter $temperature 'Temperature'
-        HighPrecisionTemperature = Read-IntegerCounter `
-            $highPrecisionTemperature 'High Precision Temperature'
-        PercentPassiveLimit = Read-IntegerCounter `
-            $percentPassiveLimit '% Passive Limit'
-        ThrottleReasons = Read-IntegerCounter $throttleReasons 'Throttle Reasons'
+        Timestamp100nSec = [long]$timestamps[0]
+        Temperature = $temperature.Value
+        HighPrecisionTemperature = $highPrecisionTemperature.Value
+        PercentPassiveLimit = $percentPassiveLimit.Value
+        ThrottleReasons = $throttleReasons.Value
     }
     $writer.WriteLine(($sample | ConvertTo-Json -Compress))
     $writer.Flush()
@@ -512,7 +541,9 @@ def _parse_host_temperature(
     )
     if abs(kelvin * 10 - tenths_kelvin) > 10:
         raise ThermalGuardError(
-            "Windows thermal Temperature and HighPrecisionTemperature disagree"
+            "Windows thermal Temperature and HighPrecisionTemperature disagree: "
+            f"Temperature={kelvin} K, "
+            f"HighPrecisionTemperature={tenths_kelvin} tenths K"
         )
     temperature = tenths_kelvin * 100 - 273_150
     if temperature < -50_000 or temperature > 200_000:
@@ -572,6 +603,7 @@ class WindowsThermalCounter:
         self._policy = policy
         self._stdout_buffer = b""
         self._next_sequence = 0
+        self._last_timestamp_100ns: int | None = None
         self._closed = False
         try:
             ready = self._read_json_line("Windows thermal-counter initialization")
@@ -678,6 +710,12 @@ class WindowsThermalCounter:
             0,
             2**63 - 1,
         )
+        timestamp_100ns = _integer(
+            row["Timestamp100nSec"],
+            "Windows thermal-counter sample Timestamp100nSec",
+            1,
+            2**63 - 1,
+        )
         if (
             row["Schema"] != HOST_COUNTER_SCHEMA
             or observed_sequence != sequence
@@ -685,6 +723,14 @@ class WindowsThermalCounter:
             raise ThermalGuardError(
                 "Windows thermal-counter sample violates its schema or sequence"
             )
+        if (
+            self._last_timestamp_100ns is not None
+            and timestamp_100ns <= self._last_timestamp_100ns
+        ):
+            raise ThermalGuardError(
+                "Windows thermal-counter sample timestamp did not advance"
+            )
+        self._last_timestamp_100ns = timestamp_100ns
         self._next_sequence += 1
         return _parse_host_temperature(
             self._policy,

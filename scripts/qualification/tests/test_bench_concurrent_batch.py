@@ -2617,6 +2617,142 @@ class ServingBenchmarkTests(unittest.TestCase):
         verify_scope.assert_called_once_with(unit, host_uid)
         verify_containment.assert_called_once_with(bench.WSL2_NETWORK_BOUNDARY)
 
+    def test_external_wsl2_active_deadline_credits_only_verified_pauses(self) -> None:
+        class Snapshot:
+            @staticmethod
+            def overlap_seconds(started: float, finished: float) -> float:
+                self.assertEqual(started, 100.0)
+                self.assertIn(finished, {110.0, 117.0})
+                return 7.0
+
+        deadline = bench.WslActiveDeadline(
+            started_monotonic_seconds=100.0,
+            timeout_seconds=10.0,
+            policy_sha256="sha256:" + "a" * 64,
+            source={"fixture": "value"},
+            next_evidence_check_monotonic_seconds=110.0,
+        )
+        with mock.patch.object(
+            bench.pacing,
+            "read_pacing_snapshot",
+            return_value=Snapshot(),
+        ) as read_snapshot:
+            self.assertFalse(deadline.expired(109.0))
+            read_snapshot.assert_not_called()
+            self.assertFalse(deadline.expired(110.0))
+            self.assertEqual(deadline.active_seconds, 3.0)
+            self.assertEqual(deadline.pause_seconds, 7.0)
+            self.assertEqual(deadline.next_evidence_check_monotonic_seconds, 117.0)
+            self.assertFalse(deadline.expired(116.0))
+            self.assertTrue(deadline.expired(117.0))
+
+        self.assertEqual(read_snapshot.call_count, 2)
+        self.assertEqual(
+            deadline.detail(),
+            "10.000 active seconds, 7.000 verified pause seconds, "
+            "17.000 wall seconds",
+        )
+
+    def test_external_wsl2_active_deadline_rejects_invalid_evidence(self) -> None:
+        deadline = bench.WslActiveDeadline(
+            started_monotonic_seconds=100.0,
+            timeout_seconds=10.0,
+            policy_sha256="sha256:" + "a" * 64,
+            source={},
+            next_evidence_check_monotonic_seconds=110.0,
+        )
+        with (
+            mock.patch.object(
+                bench.pacing,
+                "read_pacing_snapshot",
+                side_effect=bench.pacing.WslPacingEvidenceError("injected"),
+            ),
+            self.assertRaisesRegex(
+                bench.BenchmarkError,
+                "cannot account external WSL2 active time",
+            ),
+        ):
+            deadline.expired(110.0)
+
+    def test_owned_server_readiness_retries_without_an_inner_guard(self) -> None:
+        class Process:
+            @staticmethod
+            def poll() -> None:
+                return None
+
+        class Config:
+            startup_timeout_seconds = 1.0
+            readiness_poll_interval_seconds = 0.001
+
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "server.log"
+            log.write_text("", encoding="ascii")
+            server = bench.OwnedServer(
+                process=Process(),
+                identity=None,
+                config=Config(),
+                log_path=log,
+                log_handle=None,
+            )
+            with mock.patch.object(
+                bench,
+                "probe_models",
+                side_effect=[
+                    bench.BenchmarkError("connection refused"),
+                    ["test-model"],
+                ],
+            ) as probe:
+                models = bench.wait_for_owned_server_models(
+                    server,
+                    None,
+                    "http://127.0.0.1:8420",
+                    {},
+                )
+
+        self.assertEqual(models, ["test-model"])
+        self.assertEqual(probe.call_count, 2)
+
+    def test_shutdown_accounting_failure_still_drains_owned_group(self) -> None:
+        process = bench.subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import time; time.sleep(60)",
+            ],
+            stdin=bench.subprocess.DEVNULL,
+            stdout=bench.subprocess.DEVNULL,
+            stderr=bench.subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        identity = bench.AttachedProcessGroup.attach(process.pid)
+
+        class Config:
+            shutdown_timeout_seconds = 1.0
+            acceptable_exit_codes = (0,)
+
+        server = bench.OwnedServer(
+            process=process,
+            identity=identity,
+            config=Config(),
+            log_path=Path("/unused"),
+            log_handle=None,
+        )
+        with (
+            mock.patch.object(
+                bench,
+                "_wait_for_owned_process",
+                side_effect=bench.BenchmarkError("invalid pacing stream"),
+            ),
+            self.assertRaisesRegex(bench.BenchmarkError, "invalid pacing stream"),
+        ):
+            bench.shutdown_owned_server(
+                server,
+                external_wsl2_policy_sha256="sha256:" + "a" * 64,
+            )
+
+        self.assertIsNotNone(process.poll())
+        self.assertFalse(bench.process_group_alive(process.pid))
+
     def test_host_thermal_hard_limit_only_policy_never_arms_process_stop(self) -> None:
         value = valid_host_thermal_policy()
         value["id"] = "test-hard-limit-only-v1"

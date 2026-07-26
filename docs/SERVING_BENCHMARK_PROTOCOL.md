@@ -31,7 +31,7 @@ namespace, and exact user scope:
 - `--unsafe-no-host-thermal-guard` exists only to retain diagnostic
   counterevidence. It can never produce a passing receipt.
 
-Driver v20 requires an owned `--server-launch-config` with the external WSL2
+Driver v21 requires an owned `--server-launch-config` with the external WSL2
 mode. It revalidates the WSL2 kernel, policy hash, network/Landlock boundary,
 host UID, exact `.scope` cgroup path, 10 GiB memory maximum, zero swap, 512 PID
 maximum, group OOM handling, absence of delegated `cpu.max`, and the outer
@@ -39,7 +39,19 @@ maximum, group OOM handling, absence of delegated `cpu.max`, and the outer
 measured row records wall time and sustainable throughput under that boundary.
 The child receipt deliberately marks the enclosing qualification receipt as
 required: only the parent owns final thermal samples, scope accounting, cleanup,
-and stable handoff, so a child v20 WSL2 receipt is never sufficient by itself.
+and stable handoff, so a child v20 or v21 WSL2 receipt is never sufficient by
+itself.
+
+External WSL2 owned launch uses the same retrying `/v1/models` readiness loop
+as native owned launch. Its startup and shutdown grace periods count wall time
+minus only complete, exact-policy intervals from the controller-authenticated
+thermal-pacing stream. The driver rereads that stream only when the projected
+active deadline is reached. Missing, unsafe, partial, unpaired, policy-drifted,
+or arithmetically invalid evidence rejects the run. A pacing-accounting failure
+during shutdown still sends `SIGKILL` and drains the process group under an
+independent emergency wall bound before surfacing the failure. No controller
+freeze can by itself force shutdown escalation or consume the readiness
+allowance; ordinary delay and CPU-feedback freezes still consume it.
 
 Owned launch eliminates the manual gap in which model loading or inference
 prewarm could run before the guard attached. Driver v8 also removes the
@@ -113,8 +125,8 @@ The closed `kiln.serving-benchmark-server-launch.v1` document has these fields:
 | `working_directory` | Child working directory. Relative paths resolve from the launch document's directory. |
 | `log_directory` | Directory for exclusive `<run-id>.server.log` files. Relative paths resolve from the launch document's directory. |
 | `readiness_poll_interval_ms` | Delay between failed `/v1/models` attempts, from 1 through 60,000 ms. |
-| `startup_timeout_seconds` | Positive total readiness deadline. Individual probes are bounded to two seconds. |
-| `shutdown_timeout_seconds` | Positive grace period after process-group `SIGTERM` before containment uses `SIGKILL` and fails the run. |
+| `startup_timeout_seconds` | Positive readiness deadline. Native execution counts wall time; external WSL2 execution subtracts only authenticated thermal-pacing overlap. Individual probes are bounded to two seconds and failed probes are retried. |
+| `shutdown_timeout_seconds` | Positive grace period after process-group `SIGTERM` before containment uses `SIGKILL` and fails the run. Native execution counts wall time; external WSL2 execution subtracts only authenticated thermal-pacing overlap. |
 | `acceptable_exit_codes` | Sorted, unique, non-empty accepted status list. A forced shutdown fails regardless of status. |
 
 The launch contract intentionally has no environment map and accepts no shell
@@ -873,7 +885,7 @@ boundary lock, so an in-flight sample from the prior row cannot be committed
 after the next row resets its baseline. A negative or inconsistent value, any
 background read failure, a sampler thread that does not stop, or failed NVML
 shutdown makes the receipt fail. A memory limit larger than the selected NVML
-device's recorded capacity is rejected before measurement. Passed v19/v20
+device's recorded capacity is rejected before measurement. Passed v19-v21
 Kiln/vLLM comparisons must
 use the same cadence and source and must bind the same DRM path or NVML
 UUID/capacity. Thus peak-memory comparisons cannot silently come from different
@@ -1702,7 +1714,7 @@ environment receipt:
 ```
 
 Use the same UUID, sample cadence, and memory limit for the Kiln and vLLM
-campaign. The child v19/v20 receipts bind the resolved index and UUID; the campaign
+campaign. The child v19-v21 receipts bind the resolved index and UUID; the campaign
 records the requested selector. An explicit physical index remains available
 for a stable, non-remapped single-tenant host.
 
@@ -1734,8 +1746,10 @@ mapfile -d '' receipts < <(
 python3 scripts/bench-concurrent-batch.py --validate-receipt "${receipts[@]}"
 ```
 
-Driver v20 is the current contract. It retains v19's typed DRM/NVML
-whole-device memory contract and adds the parent-bound external WSL2
+Driver v21 is the current contract. It retains v20's parent-bound external
+WSL2 thermal/scope mode and adds retrying owned readiness plus authenticated
+active-time startup and shutdown bounds. Driver v20 retained v19's typed DRM/NVML
+whole-device memory contract and added the parent-bound external WSL2
 thermal/scope mode described above. Driver v19 retained v18's actor-only
 diagnostics and added typed memory telemetry, stable NVML identity, fail-closed
 sampling, and same-device comparison. Driver v18 retained v17's
@@ -1755,9 +1769,9 @@ integrity contract. Driver v11 added typed idle-boundary
 cooldown evidence to v10. Driver v10 added closed ROCm graph execution evidence;
 v9 added historical route-aware batching-actor and direct-rendezvous
 diagnostics; and v8 added mandatory initial and final guarded model-fingerprint
-lifecycles. A v17 through v20 graph/eager discriminator requires a compatible
+lifecycles. A v17 through v21 graph/eager discriminator requires a compatible
 eager reference with the same prompt-set ID, model-visible
-workload, runtime identity, and exact binary hash. Ordinary v7-v20 references
+workload, runtime identity, and exact binary hash. Ordinary v7-v21 references
 remain comparison-compatible when their version-appropriate workload
 fingerprints match. The current arm must still satisfy v16 prompt identity, v15
 request-performance accounting, v14 multi-row

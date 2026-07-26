@@ -40,7 +40,7 @@ from typing import Any, Callable, Iterable
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "20"
+DRIVER_VERSION = "21"
 SUPPORTED_DRIVER_VERSIONS = {
     "2",
     "3",
@@ -60,50 +60,51 @@ SUPPORTED_DRIVER_VERSIONS = {
     "17",
     "18",
     "19",
+    "20",
     DRIVER_VERSION,
 }
 THERMAL_DRIVER_VERSIONS = {
     "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", "19", DRIVER_VERSION,
+    "16", "17", "18", "19", "20", DRIVER_VERSION,
 }
 LIFECYCLE_DRIVER_VERSIONS = {
     "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", "19", DRIVER_VERSION,
+    "16", "17", "18", "19", "20", DRIVER_VERSION,
 }
 PRELAUNCH_DRIVER_VERSIONS = {
     "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", "19", DRIVER_VERSION,
+    "16", "17", "18", "19", "20", DRIVER_VERSION,
 }
 OUTPUT_EVIDENCE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", DRIVER_VERSION,
+    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", DRIVER_VERSION,
 }
 MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {
-    "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", DRIVER_VERSION,
+    "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", DRIVER_VERSION,
 }
 RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS = {
-    "12", "13", "14", "15", "16", "17", "18", "19", DRIVER_VERSION,
+    "12", "13", "14", "15", "16", "17", "18", "19", "20", DRIVER_VERSION,
 }
 ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", DRIVER_VERSION,
+    "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", DRIVER_VERSION,
 }
 ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", DRIVER_VERSION,
+    "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", DRIVER_VERSION,
 }
 REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", DRIVER_VERSION,
+    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", DRIVER_VERSION,
 }
 IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS = {
-    "11", "12", "13", "14", "15", "16", "17", "18", "19", DRIVER_VERSION,
+    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", DRIVER_VERSION,
 }
-COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", "15", "16", "17", "18", "19", DRIVER_VERSION}
-MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", "15", "16", "17", "18", "19", DRIVER_VERSION}
-REQUEST_PERFORMANCE_DRIVER_VERSIONS = {"15", "16", "17", "18", "19", DRIVER_VERSION}
-PROMPT_SET_IDENTITY_DRIVER_VERSIONS = {"16", "17", "18", "19", DRIVER_VERSION}
-GRAPH_PARITY_DRIVER_VERSIONS = {"17", "18", "19", DRIVER_VERSION}
-REFERENCE_ROLE_DRIVER_VERSIONS = {"17", "18", "19", DRIVER_VERSION}
-ACTOR_ONLY_DIAGNOSTICS_DRIVER_VERSIONS = {"18", "19", DRIVER_VERSION}
-TYPED_MEMORY_SOURCE_DRIVER_VERSIONS = {"19", DRIVER_VERSION}
-EXTERNAL_WSL2_THERMAL_DRIVER_VERSIONS = {DRIVER_VERSION}
+COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", "15", "16", "17", "18", "19", "20", DRIVER_VERSION}
+MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", "15", "16", "17", "18", "19", "20", DRIVER_VERSION}
+REQUEST_PERFORMANCE_DRIVER_VERSIONS = {"15", "16", "17", "18", "19", "20", DRIVER_VERSION}
+PROMPT_SET_IDENTITY_DRIVER_VERSIONS = {"16", "17", "18", "19", "20", DRIVER_VERSION}
+GRAPH_PARITY_DRIVER_VERSIONS = {"17", "18", "19", "20", DRIVER_VERSION}
+REFERENCE_ROLE_DRIVER_VERSIONS = {"17", "18", "19", "20", DRIVER_VERSION}
+ACTOR_ONLY_DIAGNOSTICS_DRIVER_VERSIONS = {"18", "19", "20", DRIVER_VERSION}
+TYPED_MEMORY_SOURCE_DRIVER_VERSIONS = {"19", "20", DRIVER_VERSION}
+EXTERNAL_WSL2_THERMAL_DRIVER_VERSIONS = {"20", DRIVER_VERSION}
 REFERENCE_ROLES = {
     "qualification_gate",
     "same_artifact_graph_eager_discriminator",
@@ -121,6 +122,7 @@ if str(QUALIFICATION_DIR) not in sys.path:
 import hf_thermal_supervisor as fingerprint_supervisor  # noqa: E402
 import host_thermal_guard as thermal  # noqa: E402
 import host_thermal_policy as thermal_policy_file  # noqa: E402
+import wsl_pacing_evidence as pacing  # noqa: E402
 import wsl_platform  # noqa: E402
 import wsl_thermal_exec  # noqa: E402
 from scripts import vllm_teacher as teacher  # noqa: E402
@@ -1139,6 +1141,78 @@ class OwnedServer:
     log_handle: Any
 
 
+@dataclasses.dataclass
+class WslActiveDeadline:
+    """Count only controller-authenticated runnable time at an outer deadline."""
+
+    started_monotonic_seconds: float
+    timeout_seconds: float
+    policy_sha256: str
+    source: dict[str, str]
+    next_evidence_check_monotonic_seconds: float
+    wall_seconds: float = 0.0
+    pause_seconds: float = 0.0
+    active_seconds: float = 0.0
+
+    @classmethod
+    def start(
+        cls,
+        timeout_seconds: float,
+        policy_sha256: str,
+        *,
+        source: dict[str, str] | None = None,
+    ) -> "WslActiveDeadline":
+        started = time.monotonic()
+        return cls(
+            started_monotonic_seconds=started,
+            timeout_seconds=timeout_seconds,
+            policy_sha256=policy_sha256,
+            source=dict(os.environ) if source is None else dict(source),
+            next_evidence_check_monotonic_seconds=started + timeout_seconds,
+        )
+
+    def expired(self, now: float | None = None) -> bool:
+        observed = time.monotonic() if now is None else now
+        if observed < self.next_evidence_check_monotonic_seconds:
+            return False
+        try:
+            snapshot = pacing.read_pacing_snapshot(
+                self.source,
+                expected_policy_sha256=self.policy_sha256,
+            )
+            pause_seconds = snapshot.overlap_seconds(
+                self.started_monotonic_seconds,
+                observed,
+            )
+        except pacing.WslPacingEvidenceError as exc:
+            raise BenchmarkError(
+                f"cannot account external WSL2 active time: {exc}"
+            ) from exc
+        wall_seconds = observed - self.started_monotonic_seconds
+        active_seconds = wall_seconds - pause_seconds
+        if (
+            not math.isfinite(wall_seconds)
+            or wall_seconds < 0
+            or pause_seconds < 0
+            or pause_seconds > wall_seconds
+            or active_seconds < -1e-6
+        ):
+            raise BenchmarkError("external WSL2 active-time accounting is invalid")
+        self.wall_seconds = wall_seconds
+        self.pause_seconds = pause_seconds
+        self.active_seconds = max(0.0, active_seconds)
+        remaining = self.timeout_seconds - self.active_seconds
+        self.next_evidence_check_monotonic_seconds = observed + max(0.0, remaining)
+        return remaining <= 0
+
+    def detail(self) -> str:
+        return (
+            f"{self.active_seconds:.3f} active seconds, "
+            f"{self.pause_seconds:.3f} verified pause seconds, "
+            f"{self.wall_seconds:.3f} wall seconds"
+        )
+
+
 def owned_server_log_path(log_directory: Path, run_id: str) -> Path:
     return log_directory / f"{run_id}.server.log"
 
@@ -1310,7 +1384,100 @@ def verify_owned_listener(server: OwnedServer, base_url: str) -> None:
         )
 
 
-def shutdown_owned_server(server: OwnedServer) -> dict[str, Any]:
+def _wait_for_owned_process(
+    process: subprocess.Popen[bytes],
+    timeout_seconds: float,
+    *,
+    external_wsl2_policy_sha256: str | None,
+) -> tuple[int | None, WslActiveDeadline | None]:
+    deadline = (
+        WslActiveDeadline.start(timeout_seconds, external_wsl2_policy_sha256)
+        if external_wsl2_policy_sha256 is not None
+        else None
+    )
+    wall_deadline = time.monotonic() + timeout_seconds
+    while True:
+        returncode = process.poll()
+        if returncode is not None:
+            return process.wait(), deadline
+        now = time.monotonic()
+        if deadline is not None:
+            if deadline.expired(now):
+                return None, deadline
+        elif now >= wall_deadline:
+            return None, None
+        time.sleep(0.05)
+
+
+def _wait_for_process_group_exit(
+    process_group_id: int,
+    timeout_seconds: float,
+    *,
+    external_wsl2_policy_sha256: str | None,
+) -> tuple[bool, WslActiveDeadline | None]:
+    deadline = (
+        WslActiveDeadline.start(timeout_seconds, external_wsl2_policy_sha256)
+        if external_wsl2_policy_sha256 is not None
+        else None
+    )
+    wall_deadline = time.monotonic() + timeout_seconds
+    while process_group_alive(process_group_id):
+        now = time.monotonic()
+        if deadline is not None:
+            if deadline.expired(now):
+                return False, deadline
+        elif now >= wall_deadline:
+            return False, None
+        time.sleep(0.05)
+    return True, deadline
+
+
+def _emergency_force_drain_owned_server(
+    server: OwnedServer,
+) -> tuple[int | None, bool]:
+    """Best-effort wall-bounded cleanup after trusted timing becomes unavailable."""
+
+    try:
+        os.killpg(server.identity.process_group_id, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        returncode = server.process.wait(timeout=10.0)
+    except subprocess.TimeoutExpired:
+        returncode = server.process.poll()
+    group_exited, _deadline = _wait_for_process_group_exit(
+        server.identity.process_group_id,
+        10.0,
+        external_wsl2_policy_sha256=None,
+    )
+    return returncode, group_exited
+
+
+def shutdown_owned_server(
+    server: OwnedServer,
+    *,
+    external_wsl2_policy_sha256: str | None = None,
+) -> dict[str, Any]:
+    try:
+        return _shutdown_owned_server(
+            server,
+            external_wsl2_policy_sha256=external_wsl2_policy_sha256,
+        )
+    except BaseException as exc:
+        returncode, group_exited = _emergency_force_drain_owned_server(server)
+        if returncode is None or not group_exited:
+            raise BenchmarkError(
+                "owned server cleanup failed after shutdown accounting error: "
+                f"{exc}"
+            ) from exc
+        raise
+
+
+def _shutdown_owned_server(
+    server: OwnedServer,
+    *,
+    external_wsl2_policy_sha256: str | None,
+) -> dict[str, Any]:
     started = time.monotonic()
     signal_sent = server.process.poll() is None
     forced = False
@@ -1319,20 +1486,58 @@ def shutdown_owned_server(server: OwnedServer) -> dict[str, Any]:
             os.killpg(server.process.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
-    try:
-        returncode = server.process.wait(timeout=server.config.shutdown_timeout_seconds)
-    except subprocess.TimeoutExpired:
+    returncode, _term_deadline = _wait_for_owned_process(
+        server.process,
+        server.config.shutdown_timeout_seconds,
+        external_wsl2_policy_sha256=external_wsl2_policy_sha256,
+    )
+    if returncode is None:
         forced = True
         try:
             os.killpg(server.process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        try:
-            returncode = server.process.wait(timeout=10.0)
-        except subprocess.TimeoutExpired as exc:
+        returncode, kill_deadline = _wait_for_owned_process(
+            server.process,
+            10.0,
+            external_wsl2_policy_sha256=external_wsl2_policy_sha256,
+        )
+        if returncode is None:
+            detail = (
+                kill_deadline.detail()
+                if kill_deadline is not None
+                else "10.000 wall seconds"
+            )
             raise BenchmarkError(
-                "owned server process did not exit after SIGTERM and SIGKILL"
-            ) from exc
+                "owned server process did not exit after SIGTERM and SIGKILL "
+                f"within {detail}"
+            )
+    group_exited, _group_deadline = _wait_for_process_group_exit(
+        server.identity.process_group_id,
+        10.0,
+        external_wsl2_policy_sha256=external_wsl2_policy_sha256,
+    )
+    if not group_exited:
+        forced = True
+        try:
+            os.killpg(server.identity.process_group_id, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        group_exited, kill_group_deadline = _wait_for_process_group_exit(
+            server.identity.process_group_id,
+            10.0,
+            external_wsl2_policy_sha256=external_wsl2_policy_sha256,
+        )
+        if not group_exited:
+            detail = (
+                kill_group_deadline.detail()
+                if kill_group_deadline is not None
+                else "bounded wall time"
+            )
+            raise BenchmarkError(
+                "owned server process group survived SIGTERM and SIGKILL after "
+                f"{detail}"
+            )
     return {
         "signal": "SIGTERM",
         "signal_sent": signal_sent,
@@ -1340,7 +1545,7 @@ def shutdown_owned_server(server: OwnedServer) -> dict[str, Any]:
         "returncode": returncode,
         "acceptable_exit_codes": list(server.config.acceptable_exit_codes),
         "elapsed_seconds": time.monotonic() - started,
-        "process_group_alive_end": process_group_alive(server.identity.process_group_id),
+        "process_group_alive_end": not group_exited,
     }
 
 
@@ -6359,14 +6564,24 @@ def probe_models(
 
 def wait_for_owned_server_models(
     server: OwnedServer,
-    guard: thermal.HostThermalGuard,
+    guard: thermal.HostThermalGuard | None,
     base_url: str,
     headers: dict[str, str],
+    *,
+    external_wsl2_policy_sha256: str | None = None,
 ) -> list[str]:
-    deadline = time.monotonic() + server.config.startup_timeout_seconds
+    active_deadline = (
+        WslActiveDeadline.start(
+            server.config.startup_timeout_seconds,
+            external_wsl2_policy_sha256,
+        )
+        if external_wsl2_policy_sha256 is not None
+        else None
+    )
+    wall_deadline = time.monotonic() + server.config.startup_timeout_seconds
     last_error = "server has not accepted a readiness probe"
     while True:
-        if guard.trip_reason is not None:
+        if guard is not None and guard.trip_reason is not None:
             raise BenchmarkError(
                 f"owned server thermal containment tripped during startup: "
                 f"{guard.trip_reason}\n{server_log_tail(server.log_path)}"
@@ -6377,13 +6592,30 @@ def wait_for_owned_server_models(
                 f"owned server exited during startup with status {returncode}:\n"
                 f"{server_log_tail(server.log_path)}"
             )
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        now = time.monotonic()
+        expired = (
+            active_deadline.expired(now)
+            if active_deadline is not None
+            else now >= wall_deadline
+        )
+        if expired:
+            elapsed = (
+                active_deadline.detail()
+                if active_deadline is not None
+                else (
+                    f"{server.config.startup_timeout_seconds:.3f} wall seconds"
+                )
+            )
             raise BenchmarkError(
                 f"owned server did not become ready within "
-                f"{server.config.startup_timeout_seconds:.3f} seconds; last probe: "
+                f"{elapsed}; last probe: "
                 f"{last_error}\n{server_log_tail(server.log_path)}"
             )
+        remaining = (
+            active_deadline.next_evidence_check_monotonic_seconds - now
+            if active_deadline is not None
+            else wall_deadline - now
+        )
         try:
             return probe_models(base_url, headers, min(2.0, remaining))
         except BenchmarkError as exc:
@@ -6875,11 +7107,15 @@ def main(argv: list[str] | None = None) -> int:
                 validate_vllm_owned_launch(launch_config, runtime_manifest)
         external_wsl2_policy_record: dict[str, Any] | None = None
         external_wsl2_boundary_evidence: dict[str, Any] | None = None
+        external_wsl2_policy_sha256: str | None = None
         if args.external_wsl2_thermal_policy is not None:
             (
                 external_wsl2_policy_record,
                 external_wsl2_boundary_evidence,
             ) = load_external_wsl2_boundary(args.external_wsl2_thermal_policy)
+            external_wsl2_policy_sha256 = external_wsl2_policy_record[
+                "content_sha256"
+            ]
         try:
             initial_model_identity, initial_fingerprint_thermal = (
                 fingerprint_model_with_thermal_containment(
@@ -6985,9 +7221,13 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 models = (
                     wait_for_owned_server_models(
-                        owned_server, thermal_guard, args.base_url, headers
+                        owned_server,
+                        thermal_guard,
+                        args.base_url,
+                        headers,
+                        external_wsl2_policy_sha256=external_wsl2_policy_sha256,
                     )
-                    if owned_server is not None and thermal_guard is not None
+                    if owned_server is not None
                     else probe_models(args.base_url, headers, args.timeout_secs)
                 )
                 if owned_server is not None:
@@ -7234,7 +7474,10 @@ def main(argv: list[str] | None = None) -> int:
                 nonlocal owned_shutdown, owned_log
                 if thermal_guard is not None:
                     thermal_guard.prepare_for_process_exit()
-                owned_shutdown = shutdown_owned_server(owned_server)
+                owned_shutdown = shutdown_owned_server(
+                    owned_server,
+                    external_wsl2_policy_sha256=external_wsl2_policy_sha256,
+                )
                 owned_log = close_owned_server_log(owned_server)
                 if owned_shutdown["forced"]:
                     raise BenchmarkError("owned server required SIGKILL during shutdown")
@@ -7512,7 +7755,10 @@ def main(argv: list[str] | None = None) -> int:
             if thermal_guard is not None:
                 thermal_guard.prepare_for_process_exit()
             try:
-                owned_shutdown = shutdown_owned_server(owned_server)
+                owned_shutdown = shutdown_owned_server(
+                    owned_server,
+                    external_wsl2_policy_sha256=external_wsl2_policy_sha256,
+                )
             except Exception as exc:
                 print(f"owned server cleanup error: {exc}", file=sys.stderr)
         if thermal_guard is not None:

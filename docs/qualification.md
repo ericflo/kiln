@@ -1075,7 +1075,7 @@ qualification runner. Its outer Windows/NVML supervisor also contains the
 source build. Do not pass this WSL policy to
 `cargo-bounded.sh --host-thermal-policy`, whose schema intentionally accepts
 only a Linux hwmon selector.
-Serving benchmark driver v20 and campaign schema v9 extend that same rule to
+Serving benchmark driver v21 and campaign schema v9 extend that same rule to
 owned benchmark launches. A committed WSL2 workload passes the policy as
 `--external-wsl2-thermal-policy`; the child driver revalidates the live private
 network, Landlock, exact UID-qualified systemd scope, memory/swap/PID/OOM
@@ -1518,6 +1518,55 @@ and shutdown accounting against the same authenticated pacing stream. Diagnose
 the Windows field mismatch as malformed input, provider drift, or a true
 invalid boundary before changing its interpretation; do not bypass the
 independent hard-limit authority.
+
+Driver v21 closes the owned-lifecycle defect without changing the launch
+documents, workload, thermal policy, or resource limits. Every owned launch now
+uses the retrying readiness loop even when the thermal guard is external.
+External-WSL startup, TERM grace, post-leader process-group drain, and KILL
+grace count wall time minus only exact completed intervals from the existing
+controller-authenticated pacing stream. Evidence is reread at projected active
+deadlines rather than on every poll. Invalid evidence rejects the run, and a
+shutdown-accounting error still performs an independent wall-bounded SIGKILL
+and process-group drain before it is reported. This prevents a legitimate
+controller freeze from causing an immediate readiness failure or forced
+shutdown while preserving bounded cleanup.
+
+The Windows mismatch was an observation-tearing defect in the persistent
+sensor process, not grounds to relax the cross-field check. Four independent
+`PerformanceCounter.NextValue()` calls could sample different provider updates
+and combine them as one row. The v2 host-counter protocol now performs one
+`PerformanceCounterCategory.ReadCategory()` per requested sequence and indexes
+the exact `\_TZ.THRM` instance for all four required counters from that single
+category snapshot. It requires `NumberOfItems32` raw counters, one identical
+positive `TimeStamp100nSec` across all four values, and a strictly advancing
+timestamp between rows. The existing whole-Kelvin versus tenths-Kelvin
+agreement tolerance, exact CPU/zone identity, hard limits, pacing thresholds,
+sample cadence, and fail-closed behavior are unchanged.
+
+Live dirty-source diagnostics support that normalization. A direct atomic
+snapshot returned raw `Temperature=354` and
+`HighPrecisionTemperature=3542` with the same timestamp and counter type.
+Ten 50 ms diagnostic reads advanced coherently. The production persistent
+reader then completed 60 samples in 59.034 seconds, from 78.05 C to 72.05 C
+with a 71.05-78.05 C range and no PowerShell residue. A subsequent exact
+guarded no-op, after supplying the runner-owned network binding, admitted at
+71.05/62 C and completed a 0.159-second scope using 71,685 of 79,612 allowed
+CPU microseconds, with a 15,298,560-byte/four-PID peak, zero memory/OOM events,
+scope removal, 72.05/62 C handoff, and an 80.05/62 C outer peak across nine
+samples. These are observer, containment, and cleanup probes only; they do not
+establish server readiness, a request, c1 performance, or endurance.
+
+The repaired benchmark driver is
+`sha256:c02748e6e5134f17f186c9599251d6243be14f9b3673f0361fa33b9d06a286b3`;
+the atomic WSL2 supervisor is
+`sha256:32995b7d53b3cad5c2b1ba432db9f369557ceab14f21c2ff355f02720f45a03d`.
+All 94 focused lifecycle/pacing/sensor tests and all 836 qualification-tooling
+tests pass. All 173 compact qualification receipts, 53 detailed serving
+receipts, and 17 specialized oracle results remain strict-valid, including the
+two retained v20 startup failures. Nine documentation-builder tests pass with
+only the Chromium-dependent case unavailable; the 55-document/five-asset build
+and assembled static smoke pass. Commit and push this repair before the next
+exact c1 invocation; the performance and endurance gates remain open.
 
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
