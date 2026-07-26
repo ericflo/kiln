@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import serve_mixed_load as mixed
+import wsl_pacing_evidence as pacing
 from strict_json import loads as strict_json_loads
 
 
@@ -43,6 +45,11 @@ MEMORY_SAMPLE_MS = 100
 REQUEST_TIMEOUT_SECONDS = 900
 CASE_TIMEOUT_SECONDS = 43_200.0
 BUILD_TIMEOUT_SECONDS = 1_800.0
+BUILD_THERMAL_PAUSE_ALLOWANCE_SECONDS = 14_400.0
+BUILD_WALL_TIMEOUT_SECONDS = (
+    BUILD_TIMEOUT_SECONDS + BUILD_THERMAL_PAUSE_ALLOWANCE_SECONDS
+)
+BUILD_POLL_SECONDS = 1.0
 GPU_UUID = "GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd"
 MODEL_ID = "Qwen3.5-4B"
 PROMPT_SET_ID = "cuda-rtx4090-laptop-performance-v1"
@@ -114,15 +121,26 @@ EFFECTIVE_CONFIG: dict[str, Any] = {
         "cargo_memory_scope": "outer-wsl2-qualification-scope",
         "cargo_min_available_gib": 13,
         "cargo_private_network": True,
-        "cargo_service_runtime_max_seconds": 1740,
+        "cargo_runtime_authority": (
+            "contained-parent-pause-aware-process-group-v1"
+        ),
+        "cargo_termination": "new-session-term-then-kill-process-group-v1",
         "cargo_wrapper": "scripts/cargo-bounded.sh",
+        "duration_metric_accounting": (
+            "wall_seconds_minus_verified_wsl2_thermal_pause_overlap"
+        ),
         "features": "cuda",
         "locked": True,
         "no_default_features": True,
         "offline": True,
         "package": "kiln-server",
         "profile": "release",
+        "thermal_pause_allowance_seconds": 14400,
+        "timeout_accounting": (
+            "wall_seconds_minus_verified_wsl2_thermal_pause_overlap"
+        ),
         "timeout_seconds": 1800,
+        "wall_timeout_seconds": 16200,
     },
     "campaign": {
         "continue_after_failure": True,
@@ -248,6 +266,7 @@ def git_commit() -> str:
 
 def build_environment(source: dict[str, str]) -> dict[str, str]:
     environment = dict(source)
+    environment.pop("KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS", None)
     environment.update(
         {
             "CARGO_NET_OFFLINE": "true",
@@ -260,7 +279,6 @@ def build_environment(source: dict[str, str]) -> dict[str, str]:
             "KILN_CARGO_MAX_MEMORY_GIB": "10",
             "KILN_CARGO_MIN_AVAILABLE_GIB": "13",
             "KILN_CARGO_PRIVATE_NETWORK": "1",
-            "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS": "1740",
             "KILN_CUDA_ARCHS": "89",
             "KILN_QUALIFICATION": "1",
         }
@@ -268,9 +286,67 @@ def build_environment(source: dict[str, str]) -> dict[str, str]:
     return environment
 
 
-def build_binary(deadline: float) -> tuple[Path, str, float]:
+def _terminate_build_process(process: subprocess.Popen[Any]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=15.0)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=15.0)
+    except subprocess.TimeoutExpired as exc:
+        raise mixed.QualificationError(
+            "CUDA performance build process group did not terminate"
+        ) from exc
+
+
+def _build_elapsed_seconds(
+    started: float,
+    finished: float,
+    source: dict[str, str],
+) -> tuple[float, float, float]:
+    snapshot = pacing.read_pacing_snapshot(
+        source,
+        expected_policy_sha256=THERMAL_POLICY_CONTENT_SHA256,
+    )
+    wall_seconds = finished - started
+    if (
+        not math.isfinite(wall_seconds)
+        or wall_seconds < 0
+        or wall_seconds > BUILD_WALL_TIMEOUT_SECONDS + BUILD_POLL_SECONDS
+    ):
+        raise mixed.QualificationError(
+            "CUDA performance build wall-time accounting is invalid"
+        )
+    pause_seconds = snapshot.overlap_seconds(started, finished)
+    active_seconds = wall_seconds - pause_seconds
+    if (
+        pause_seconds < 0
+        or pause_seconds > wall_seconds
+        or active_seconds < -1e-6
+    ):
+        raise mixed.QualificationError(
+            "CUDA performance build thermal-pause accounting is invalid"
+        )
+    return wall_seconds, pause_seconds, max(0.0, active_seconds)
+
+
+def build_binary(deadline: float) -> tuple[Path, str, float, float, float]:
     started = time.monotonic()
-    remaining = min(BUILD_TIMEOUT_SECONDS, max(0.001, deadline - started))
+    wall_deadline = min(
+        deadline,
+        started + BUILD_WALL_TIMEOUT_SECONDS,
+    )
     command = [
         str(ROOT / "scripts/cargo-bounded.sh"),
         "build",
@@ -286,28 +362,84 @@ def build_binary(deadline: float) -> tuple[Path, str, float]:
         "cuda",
     ]
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command,
             cwd=ROOT,
             env=build_environment(dict(os.environ)),
             stdin=subprocess.DEVNULL,
-            timeout=remaining,
-            check=False,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired as exc:
+    except OSError as exc:
         raise mixed.QualificationError(
-            f"CUDA performance build exceeded {remaining:.3f} seconds"
+            f"cannot start CUDA performance build: {exc}"
         ) from exc
-    if completed.returncode != 0:
+    try:
+        while process.poll() is None:
+            now = time.monotonic()
+            wall_seconds, pause_seconds, active_seconds = (
+                _build_elapsed_seconds(started, now, dict(os.environ))
+            )
+            if pause_seconds > BUILD_THERMAL_PAUSE_ALLOWANCE_SECONDS:
+                raise mixed.QualificationError(
+                    "CUDA performance build exceeded "
+                    f"{BUILD_THERMAL_PAUSE_ALLOWANCE_SECONDS:.3f} seconds "
+                    "of verified thermal pacing"
+                )
+            if active_seconds > BUILD_TIMEOUT_SECONDS:
+                raise mixed.QualificationError(
+                    "CUDA performance build exceeded "
+                    f"{BUILD_TIMEOUT_SECONDS:.3f} active seconds"
+                )
+            if now >= wall_deadline:
+                raise mixed.QualificationError(
+                    "CUDA performance build exceeded its "
+                    f"{wall_deadline - started:.3f}-second hard wall deadline"
+                )
+            try:
+                process.wait(
+                    timeout=min(
+                        BUILD_POLL_SECONDS,
+                        max(0.001, wall_deadline - now),
+                    )
+                )
+            except subprocess.TimeoutExpired:
+                pass
+        finished = time.monotonic()
+        wall_seconds, pause_seconds, active_seconds = _build_elapsed_seconds(
+            started,
+            finished,
+            dict(os.environ),
+        )
+    except BaseException:
+        _terminate_build_process(process)
+        raise
+    if process.returncode != 0:
         raise mixed.QualificationError(
-            f"CUDA performance build returned {completed.returncode}"
+            f"CUDA performance build returned {process.returncode}"
+        )
+    if pause_seconds > BUILD_THERMAL_PAUSE_ALLOWANCE_SECONDS:
+        raise mixed.QualificationError(
+            "CUDA performance build completed after exceeding "
+            f"{BUILD_THERMAL_PAUSE_ALLOWANCE_SECONDS:.3f} seconds "
+            "of verified thermal pacing"
+        )
+    if active_seconds > BUILD_TIMEOUT_SECONDS:
+        raise mixed.QualificationError(
+            "CUDA performance build completed after exceeding "
+            f"{BUILD_TIMEOUT_SECONDS:.3f} active seconds"
         )
     binary = ROOT / "target/release/kiln"
     if binary.is_symlink() or not binary.is_file() or not os.access(binary, os.X_OK):
         raise mixed.QualificationError(
             "CUDA performance build did not produce target/release/kiln"
         )
-    return binary, sha256_file(binary), time.monotonic() - started
+    return (
+        binary,
+        sha256_file(binary),
+        active_seconds,
+        wall_seconds,
+        pause_seconds,
+    )
 
 
 def campaign_command(
@@ -599,11 +731,19 @@ def execute(
     kiln_directory = output_root / "kiln"
     vllm_directory = output_root / "vllm"
     deadline = time.monotonic() + CASE_TIMEOUT_SECONDS
-    binary, binary_sha256, build_seconds = build_binary(deadline)
+    (
+        binary,
+        binary_sha256,
+        build_seconds,
+        build_wall_seconds,
+        build_thermal_pause_seconds,
+    ) = build_binary(deadline)
     mixed.trace(
         "cuda_performance_binary_built",
         binary_sha256=binary_sha256,
         build_seconds=build_seconds,
+        build_thermal_pause_seconds=build_thermal_pause_seconds,
+        build_wall_seconds=build_wall_seconds,
     )
     run_campaign(
         campaign_command(

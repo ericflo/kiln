@@ -31,15 +31,20 @@
           "cargo_memory_scope": "outer-wsl2-qualification-scope",
           "cargo_min_available_gib": 13,
           "cargo_private_network": true,
-          "cargo_service_runtime_max_seconds": 1740,
+          "cargo_runtime_authority": "contained-parent-pause-aware-process-group-v1",
+          "cargo_termination": "new-session-term-then-kill-process-group-v1",
           "cargo_wrapper": "scripts/cargo-bounded.sh",
+          "duration_metric_accounting": "wall_seconds_minus_verified_wsl2_thermal_pause_overlap",
           "features": "cuda",
           "locked": true,
           "no_default_features": true,
           "offline": true,
           "package": "kiln-server",
           "profile": "release",
-          "timeout_seconds": 1800
+          "thermal_pause_allowance_seconds": 14400,
+          "timeout_accounting": "wall_seconds_minus_verified_wsl2_thermal_pause_overlap",
+          "timeout_seconds": 1800,
+          "wall_timeout_seconds": 16200
         },
         "campaign": {
           "continue_after_failure": true,

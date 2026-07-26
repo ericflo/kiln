@@ -1436,6 +1436,38 @@ accounting defect: verified cgroup-freeze intervals consumed the inner
 the compile. Retain and push this evidence before making the build bound
 pause-aware; do not weaken the thermal policy or resource boundary.
 
+The corrected c1 workload has file
+`sha256:d54e339986d6962d55eea7a893b1d9e9bb5038535129fd4d6d0715950d45fb53`.
+The source-build active allowance remains 1,800 seconds. A separate 14,400
+seconds of verified WSL2 thermal-pacing overlap may extend it, while an
+independent 16,200-second wall deadline remains absolute and inside the
+unchanged 43,200-second case scope. `build_duration_ms` now reports wall time
+minus only verified thermal overlap. CPU-feedback freezes, scheduler delay,
+and ordinary idle time continue to count against that active duration.
+
+The contained parent owns the runtime deadline and launches
+`cargo-bounded.sh` in a new process session. Every poll opens the private
+mode-0400 transition stream without following the final path, checks its
+normalized absolute path, owner, parent permissions, regular-file type, 8 MiB
+bound, ASCII/strict-JSON encoding, exact field set, policy hash, sequence,
+pause identity, monotonic interval, temperatures, duration, and complete
+start/completion pairing. Only completed interval overlap after build start is
+credited. Missing, unsafe, partial, unpaired, reordered, duplicate-field,
+non-finite, or drifted evidence fails closed and sends TERM then KILL to the
+complete Cargo/rustc process group if necessary. The former transient-service
+runtime setting is no longer presented as an authority in delegated mode.
+
+A live dirty-source guarded probe exercised the exact persistent Windows/NVML
+outer supervisor, private network/PID/mount namespace, Landlock boundary,
+10 GiB/zero-swap/512-PID/50-percent-CPU scope, inherited event path, strict
+reader, status handoff, scope removal, and final thermal handoff. The reader
+accepted a valid empty stream while no pause occurred. The 0.170-second scope
+used 74,448 of 85,028 allowed CPU microseconds, peaked at 15,302,656 bytes and
+four PIDs, and recorded zero memory/OOM events. Outer supervision started and
+ended at 73.05/63 C, retained a 78.05/63 C peak across nine samples, and left
+no process, sensor, or unit residue. This proves the dirty-source reader
+composition only; commit and push before another exact c1 attempt.
+
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
 `sha256:2f34ab2dc62641d247306c9ce29d62c68e5c12b16cd326e2860ce00061a345ac`).

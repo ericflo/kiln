@@ -484,6 +484,18 @@ result. Widening concurrency is a later committed workload and must preserve
 the same model, prompts, sampling, fixed output length, memory ceiling, launch
 inputs, and reference role.
 
+Under WSL2, the c1 source build has three independent bounds. It may use at
+most 1,800 active seconds after subtracting only controller-authenticated
+thermal-pause overlap, at most 14,400 seconds of that verified overlap, and at
+most 16,200 wall seconds. The contained parent reads the outer controller's
+private mode-0400 transition stream and validates its exact policy hash,
+schema, sequence, pause pairing, monotonic interval, ownership, and size before
+crediting any pause. CPU-quota freezes, scheduling, and ordinary idle time are
+not thermal credit. Missing, unsafe, partial, active-ended, reordered, or
+policy-drifted evidence fails the build and terminates its new-session Cargo
+process group. `build_duration_ms` records wall time minus verified thermal
+overlap; the trace also retains wall and pause seconds.
+
 After the accepted performance matrix is retained, run the independent laptop
 endurance workload:
 
