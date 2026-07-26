@@ -179,7 +179,9 @@ field to millicelsius. The GPU side holds one initialized NVML handle selected
 by exact UUID and reads temperature in process. It does not launch PowerShell,
 WMI, or `nvidia-smi` for every sample. Before launching a v2-policy child, the
 outer supervisor requires the configured three consecutive readings at or
-below the existing 75/70 C host/GPU pacing-resume thresholds. Pre-admission
+below the current 75.05/70 C host/GPU pacing-resume thresholds. The host value
+is the exact nearest reading in the Windows counter's tenth-Kelvin
+representation. Pre-admission
 samples remain included in the outer sample count and peaks but are not sent
 to a scope that does not yet exist. Timeout or a hard-limit reading fails
 without launching the child. The checked
@@ -1100,7 +1102,7 @@ Landlock interop denial, 10 GiB memory/zero-swap/512-PID user scope, group OOM
 handling, and 50-percent usage-feedback CPU controller as the qualification
 runner. The v2 policy makes that controller freeze the complete scope at
 80 C host or 75 C GPU and resume only after three consecutive samples at or
-below 75/70 C. Each pause has a 300-second deadline. The independent outer
+below 75.05/70 C. Each pause has a 300-second deadline. The independent outer
 supervisor retains the unchanged 95/85 C hard limits and post-exit handoff,
 and streams its accepted samples over a one-way inherited pipe. The scope
 controller does not duplicate the expensive Windows/NVML probes, and the
@@ -1612,9 +1614,37 @@ After retention, all 174 compact receipts, 54 detailed serving receipts, and
 only local Chromium unavailable; the 55-document/five-asset build and
 assembled static smoke pass.
 
+The follow-on policy revision preserves the 80/75 C pacing starts, 300-second
+pause deadline, three-sample hysteresis, 85/75 C safe handoff, and independent
+95/85 C hard limits. It changes only the host resume value from 75.00 to
+75.05 C, the exact nearest value representable after converting the Windows
+tenth-Kelvin counter to Celsius. The content hash is now
+`sha256:d389a7f632baab0448bd41efc205349dee4ff3944152b48cf17e52866322e3e9`.
+All current performance and endurance bindings use that exact hash.
+
+A pacing timeout now unfreezes the scope and interrupts only current leaf
+processes through membership-rechecked pidfds. As each leaf exits, the next
+supervisor layer is interrupted, giving Python `finally` blocks and owned
+server signal handlers a bounded opportunity to delete snapshots and drain
+their process groups. The cleanup is capped at 75 wall seconds; any survivor
+still reaches unconditional `cgroup.kill`, and the original pacing timeout
+remains the reported failure. Other hard-limit, telemetry, runtime, and
+accounting failures retain their immediate kill behavior.
+
+The repaired scope controller is
+`sha256:df75f1ae712f289491d744ca9da5a22b89b4b43b28ce384583067676b740524c`.
+All 841 qualification-tooling tests and all 27 workload manifests pass. A live
+two-process scope probe restored normal Python interrupt handling, then proved
+leaf cleanup before parent cleanup, successful scope removal during the final
+cgroup-read race, and no process, scope, or marker residue. A separate guarded
+no-op exercised the revised policy with a 0.124-second scope, 13,643,776-byte
+and four-PID peaks, zero memory-limit/OOM events, 73.05/63 C start,
+82.05/63 C outer peak, 74.05/63 C handoff, and clean removal. These are
+dirty-source boundary checks, not c1 or endurance evidence.
+
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
-`sha256:2f34ab2dc62641d247306c9ce29d62c68e5c12b16cd326e2860ce00061a345ac`).
+`sha256:2e81344e95637821046fd0dee2ff61495af6b91a5e728214975eeb7785507d63`).
 Run it only from clean pushed source after the final accepted performance
 checkpoint:
 

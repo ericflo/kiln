@@ -42,6 +42,7 @@ SCOPE_EVENT_SCHEMA_V1 = "kiln.wsl2-scope-event.v1"
 SCOPE_EVENT_SCHEMA_V2 = "kiln.wsl2-scope-event.v2"
 THERMAL_TELEMETRY_SOURCE = "outer-supervisor-inherited-pipe-v1"
 THERMAL_PACING_EVENT_SCHEMA = "kiln.wsl2-thermal-pacing-event.v1"
+THERMAL_TIMEOUT_CLEANUP_GRACE_SECONDS = 75.0
 SCOPE_PAYLOAD = Path(__file__).with_name("wsl_scope_payload.py")
 SOCKET_UNIT = "dbus.socket"
 SERVICE_UNIT = "dbus.service"
@@ -67,6 +68,10 @@ ExecReload=/usr/bin/dbus-send --print-reply --session --type=method_call --dest=
 
 class ScopeExecError(RuntimeError):
     """The WSL2 user-scope boundary could not be established or verified."""
+
+
+class ThermalPacingTimeoutError(ScopeExecError):
+    """One controller-owned thermal pause exceeded its policy deadline."""
 
 
 @dataclass
@@ -123,7 +128,7 @@ class ThermalPacingState:
             raise ScopeExecError("active thermal pacing has no pause start")
         pause_seconds = now_seconds - self.pause_started_seconds
         if pause_seconds >= pacing.timeout_seconds:
-            raise ScopeExecError(
+            raise ThermalPacingTimeoutError(
                 f"thermal pacing pause exceeded {pacing.timeout_seconds:g} seconds"
             )
         below_resume = (
@@ -768,6 +773,103 @@ def _kill_scope(cgroup: Path) -> None:
         _write(cgroup / "cgroup.kill", "1")
 
 
+def _cgroup_process_members(cgroup: Path) -> tuple[tuple[int, str, int], ...]:
+    raw_pids = _read(cgroup / "cgroup.procs")
+    if not raw_pids:
+        return ()
+    members: list[tuple[int, str, int]] = []
+    for raw_pid in raw_pids.splitlines():
+        if not raw_pid.isdecimal() or int(raw_pid) <= 0:
+            raise ScopeExecError("cgroup.procs contains an invalid process ID")
+        pid = int(raw_pid)
+        try:
+            stat_line = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+            fields = stat_line[stat_line.rfind(")") + 2 :].split()
+            state = fields[0]
+            parent_pid = int(fields[1])
+        except FileNotFoundError:
+            continue
+        except (IndexError, OSError, UnicodeError, ValueError) as exc:
+            raise ScopeExecError(
+                f"cannot inspect cgroup process {pid}: {exc}"
+            ) from exc
+        members.append((pid, state, parent_pid))
+    return tuple(members)
+
+
+def _signal_cgroup_member(
+    cgroup: Path,
+    pid: int,
+    signal_number: int,
+) -> bool:
+    descriptor: int | None = None
+    try:
+        descriptor = os.pidfd_open(pid)
+        members = {
+            member_pid: state
+            for member_pid, state, _parent_pid in _cgroup_process_members(cgroup)
+        }
+        if pid not in members or members[pid] == "Z":
+            return False
+        signal.pidfd_send_signal(descriptor, signal_number)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError as exc:
+        raise ScopeExecError(
+            f"cannot signal cgroup process {pid}: {exc}"
+        ) from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _terminate_scope_leaf_first(
+    cgroup: Path,
+    grace_seconds: float = THERMAL_TIMEOUT_CLEANUP_GRACE_SECONDS,
+) -> bool:
+    if not cgroup.is_dir():
+        return True
+    try:
+        _set_frozen(cgroup, False)
+    except ScopeExecError:
+        if not cgroup.is_dir():
+            return True
+        raise
+    deadline = time.monotonic() + max(0.0, grace_seconds)
+    signaled: set[int] = set()
+    while True:
+        try:
+            members = tuple(
+                member
+                for member in _cgroup_process_members(cgroup)
+                if member[1] != "Z"
+            )
+        except ScopeExecError:
+            if not cgroup.is_dir():
+                return True
+            raise
+        if not members:
+            return True
+        parent_pids = {parent_pid for _pid, _state, parent_pid in members}
+        leaves = [
+            pid
+            for pid, _state, _parent_pid in members
+            if pid not in parent_pids and pid not in signaled
+        ]
+        for pid in leaves:
+            try:
+                if _signal_cgroup_member(cgroup, pid, signal.SIGINT):
+                    signaled.add(pid)
+            except ScopeExecError:
+                if not cgroup.is_dir():
+                    return True
+                raise
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+
 def _verify_network_command(command: list[str]) -> None:
     mechanism = os.environ.get(wsl_platform.NETWORK_ISOLATION_ENV)
     if mechanism not in wsl_platform.WSL_CONTAINMENT_MECHANISMS:
@@ -1101,7 +1203,13 @@ def execute(args: argparse.Namespace) -> int:
     except (OSError, subprocess.TimeoutExpired, ScopeExecError) as exc:
         failure = exc if isinstance(exc, ScopeExecError) else ScopeExecError(str(exc))
         try:
-            _kill_scope(cgroup)
+            settled = (
+                _terminate_scope_leaf_first(cgroup)
+                if isinstance(failure, ThermalPacingTimeoutError)
+                else False
+            )
+            if not settled:
+                _kill_scope(cgroup)
         except ScopeExecError as cleanup_exc:
             failure = ScopeExecError(f"{failure}; scope kill failed: {cleanup_exc}")
         try:

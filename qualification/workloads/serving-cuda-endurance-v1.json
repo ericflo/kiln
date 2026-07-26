@@ -138,7 +138,7 @@
             },
             "pids_max": 512,
             "scope": "systemd-user-scope-feedback-v1",
-            "thermal_policy_sha256": "sha256:998e65f84651ce28d36acfcadb3f1216a589883054a9f27853fe755f373e3745"
+            "thermal_policy_sha256": "sha256:d389a7f632baab0448bd41efc205349dee4ff3944152b48cf17e52866322e3e9"
           },
           "server_memory": {
             "inference_memory_fraction": 0.1,

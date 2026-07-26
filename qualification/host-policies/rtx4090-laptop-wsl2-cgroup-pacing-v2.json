@@ -1,7 +1,7 @@
 {
   "schema": "kiln.wsl2-thermal-policy.v2",
   "id": "rtx4090-laptop-wsl2-cgroup-pacing-v2",
-  "content_sha256": "sha256:998e65f84651ce28d36acfcadb3f1216a589883054a9f27853fe755f373e3745",
+  "content_sha256": "sha256:d389a7f632baab0448bd41efc205349dee4ff3944152b48cf17e52866322e3e9",
   "host": {
     "cpu_name": "Intel(R) Core(TM) Ultra 9 185H",
     "thermal_zone_name": "\\_TZ.THRM",
@@ -23,7 +23,7 @@
   "pacing": {
     "mode": "cgroup_freeze",
     "host_start_millicelsius": 80000,
-    "host_resume_millicelsius": 75000,
+    "host_resume_millicelsius": 75050,
     "gpu_start_millicelsius": 75000,
     "gpu_resume_millicelsius": 70000,
     "resume_stable_samples": 3,

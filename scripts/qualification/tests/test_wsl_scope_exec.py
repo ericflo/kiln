@@ -183,6 +183,7 @@ class WslScopeExecTests(unittest.TestCase):
         self,
     ) -> None:
         policy = self.pacing_policy()
+        self.assertEqual(policy.pacing.host_resume_millicelsius, 75_050)
         state = scope.ThermalPacingState(policy)
         sample = scope.wsl_thermal_exec.ThermalSample
         self.assertFalse(state.observe(sample(0.0, 79_000, 74_000), 1.0))
@@ -201,12 +202,139 @@ class WslScopeExecTests(unittest.TestCase):
         sample = scope.wsl_thermal_exec.ThermalSample
         state = scope.ThermalPacingState(policy)
         self.assertTrue(state.observe(sample(0.0, 80_000, 60_000), 10.0))
-        with self.assertRaisesRegex(scope.ScopeExecError, "exceeded 300 seconds"):
+        with self.assertRaisesRegex(
+            scope.ThermalPacingTimeoutError,
+            "exceeded 300 seconds",
+        ):
             state.observe(sample(0.0, 73_000, 60_000), 310.0)
 
         state = scope.ThermalPacingState(policy)
         with self.assertRaisesRegex(scope.ScopeExecError, "hard limit"):
             state.observe(sample(0.0, 95_000, 60_000), 1.0)
+
+    def test_thermal_timeout_cleanup_interrupts_leaves_before_parents(
+        self,
+    ) -> None:
+        cgroup = Path("/fixture/cgroup")
+        process_layers = [
+            ((10, "S", 1), (20, "S", 10), (30, "S", 20)),
+            ((10, "S", 1), (20, "S", 10)),
+            ((10, "S", 1),),
+            (),
+        ]
+        with mock.patch.object(Path, "is_dir", return_value=True), mock.patch.object(
+            scope,
+            "_set_frozen",
+        ) as set_frozen, mock.patch.object(
+            scope,
+            "_cgroup_process_members",
+            side_effect=process_layers,
+        ), mock.patch.object(
+            scope,
+            "_signal_cgroup_member",
+            return_value=True,
+        ) as signal_member, mock.patch.object(
+            scope.time,
+            "sleep",
+        ):
+            self.assertTrue(
+                scope._terminate_scope_leaf_first(cgroup, grace_seconds=1.0)
+            )
+
+        set_frozen.assert_called_once_with(cgroup, False)
+        self.assertEqual(
+            signal_member.call_args_list,
+            [
+                mock.call(cgroup, 30, scope.signal.SIGINT),
+                mock.call(cgroup, 20, scope.signal.SIGINT),
+                mock.call(cgroup, 10, scope.signal.SIGINT),
+            ],
+        )
+
+    def test_thermal_timeout_cleanup_rechecks_pidfd_membership(self) -> None:
+        cgroup = Path("/fixture/cgroup")
+        with mock.patch.object(
+            scope.os,
+            "pidfd_open",
+            return_value=91,
+        ) as pidfd_open, mock.patch.object(
+            scope,
+            "_cgroup_process_members",
+            return_value=((30, "S", 20),),
+        ), mock.patch.object(
+            scope.signal,
+            "pidfd_send_signal",
+        ) as pidfd_signal, mock.patch.object(
+            scope.os,
+            "close",
+        ) as close:
+            self.assertTrue(
+                scope._signal_cgroup_member(cgroup, 30, scope.signal.SIGINT)
+            )
+
+        pidfd_open.assert_called_once_with(30)
+        pidfd_signal.assert_called_once_with(91, scope.signal.SIGINT)
+        close.assert_called_once_with(91)
+
+    def test_thermal_timeout_cleanup_accepts_scope_removal_race(self) -> None:
+        cgroup = Path("/fixture/cgroup")
+        with mock.patch.object(
+            Path,
+            "is_dir",
+            side_effect=[True, False],
+        ), mock.patch.object(
+            scope,
+            "_set_frozen",
+        ), mock.patch.object(
+            scope,
+            "_cgroup_process_members",
+            side_effect=scope.ScopeExecError("scope disappeared"),
+        ):
+            self.assertTrue(
+                scope._terminate_scope_leaf_first(cgroup, grace_seconds=1.0)
+            )
+
+    def test_thermal_timeout_cleanup_accepts_unfreeze_removal_race(self) -> None:
+        cgroup = Path("/fixture/cgroup")
+        with mock.patch.object(
+            Path,
+            "is_dir",
+            side_effect=[True, False],
+        ), mock.patch.object(
+            scope,
+            "_set_frozen",
+            side_effect=scope.ScopeExecError("scope disappeared"),
+        ):
+            self.assertTrue(
+                scope._terminate_scope_leaf_first(cgroup, grace_seconds=1.0)
+            )
+
+    def test_thermal_timeout_cleanup_remains_force_bounded(self) -> None:
+        cgroup = Path("/fixture/cgroup")
+        with mock.patch.object(Path, "is_dir", return_value=True), mock.patch.object(
+            scope,
+            "_set_frozen",
+        ), mock.patch.object(
+            scope,
+            "_cgroup_process_members",
+            return_value=((10, "S", 1),),
+        ), mock.patch.object(
+            scope,
+            "_signal_cgroup_member",
+            return_value=True,
+        ) as signal_member, mock.patch.object(
+            scope.time,
+            "monotonic",
+            side_effect=[0.0, 0.0, 0.0, 2.0],
+        ), mock.patch.object(
+            scope.time,
+            "sleep",
+        ):
+            self.assertFalse(
+                scope._terminate_scope_leaf_first(cgroup, grace_seconds=1.0)
+            )
+
+        signal_member.assert_called_once_with(cgroup, 10, scope.signal.SIGINT)
 
     def test_thermal_pacing_writer_records_exact_read_only_transitions(self) -> None:
         policy = self.pacing_policy()
