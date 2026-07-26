@@ -135,7 +135,7 @@ pub(crate) fn allocator_safe_available_bytes(
 pub(crate) fn refresh_governor_for_kv_admission(
     governor: &kiln_memory::MemoryGovernor,
 ) -> anyhow::Result<kiln_memory::MemoryGovernorObservation> {
-    governor.refresh();
+    governor.refresh_startup_capacity();
     let observation = governor.cached_observation();
     anyhow::ensure!(
         observation.sample_status.healthy,

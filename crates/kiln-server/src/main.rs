@@ -822,7 +822,7 @@ async fn main() -> Result<()> {
         .context("failed to configure the process-wide memory governor")?;
         let memory_governor = kiln_memory::MemoryGovernor::global();
         if vram_probe_selector != kiln_memory::vram::VramProbeSelector::None {
-            let startup_memory = memory_governor.refresh();
+            let startup_memory = memory_governor.refresh_startup_capacity();
             anyhow::ensure!(
                 startup_memory.total_bytes > 0 && !startup_memory.observations.probe_failed,
                 "selected-device memory probe failed before model loading"

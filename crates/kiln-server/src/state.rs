@@ -3696,7 +3696,7 @@ impl AppState {
             // or mutates accelerator state; reclaim hooks remain wired only
             // after actor/GPU coordination exists below.
             let governor = kiln_memory::MemoryGovernor::global();
-            let published = governor.refresh();
+            let published = governor.refresh_startup_capacity();
             anyhow::ensure!(
                 published.total_bytes > 0 && !published.observations.probe_failed,
                 "selected-device memory probe lost its safe capacity before KV allocation; refusing to allocate"
@@ -4292,7 +4292,7 @@ impl AppState {
             )
         };
         if vram_probe_selector != kiln_memory::vram::VramProbeSelector::None {
-            let published = kiln_memory::MemoryGovernor::global().refresh();
+            let published = kiln_memory::MemoryGovernor::global().refresh_startup_capacity();
             anyhow::ensure!(
                 published.total_bytes > 0 && !published.observations.probe_failed,
                 "selected-device memory probe lost its safe capacity after startup allocations; refusing to become ready"

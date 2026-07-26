@@ -3116,8 +3116,8 @@ fn main() -> Result<()> {
 
     let gpu_weights = GpuWeights::from_model_weights_kt(&model_weights, &model_config, &device_kt)
         .context("failed to transfer weights to GPU")?;
-    let post_load_memory = kiln_memory::MemoryGovernor::global().refresh();
-    if post_load_memory.total_bytes == 0 {
+    let post_load_memory = kiln_memory::MemoryGovernor::global().refresh_startup_capacity();
+    if post_load_memory.total_bytes == 0 || post_load_memory.observations.probe_failed {
         anyhow::bail!("selected-device memory probe failed after benchmark model load");
     }
     drop(model_weights); // Free CPU memory

@@ -690,7 +690,7 @@ pub fn ensure_memory_governor_for_runtime(
     }
 
     let governor = kiln_memory::MemoryGovernor::global();
-    let published = governor.refresh();
+    let published = governor.refresh_startup_capacity();
     if published.total_bytes != runtime_capacity || published.observations.probe_failed {
         anyhow::bail!(
             "training memory probe for {} did not publish the runtime-bound {}-byte capacity (published {} bytes, probe_failed={})",

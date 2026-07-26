@@ -144,9 +144,15 @@ Kiln's selected NVIDIA startup identity and capacity probes use strict
 `nvidia-smi` output parsing and a two-second child lifetime. Startup now allows
 at most three attempts separated by 100 ms. A failed or malformed third sample
 still establishes zero capacity and rejects accelerator startup; a configured
-capacity remains a cap and cannot replace hardware evidence. The persistent
-live memory governor keeps its single-sample fail-closed behavior, preserving
-the distinction between bounded startup recovery and runtime counter loss.
+capacity remains a cap and cannot replace hardware evidence. The process-wide
+memory governor independently applies the same fixed three-attempt, 100 ms
+startup budget only at allocation-transition boundaries: pre-model startup,
+post-upload/pre-KV sizing, initial KV admission, and the final pre-ready check.
+The probe lock serializes those attempts, and a failed third sample publishes
+zero free memory and an unhealthy cache. Ordinary governor refreshes, the
+persistent sampler, and live runtime admission remain single-sample and
+fail-closed, preserving the distinction between bounded startup recovery and
+runtime counter loss.
 
 The launch contract intentionally has no environment map and accepts no shell
 command string. Runtime behavior belongs in the server's typed configuration;

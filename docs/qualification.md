@@ -1995,6 +1995,72 @@ the hard limit, retain and commit the receipt, allow another authenticated full
 cooldown, and make one exact link-only retry. c1 and every later laptop
 performance/endurance requirement remain open.
 
+The cooled link-only retry then ran from exact clean pushed source
+`ed61ef57cb28501f79b24d95f4b349cb0e50c0e1` and the unchanged source tree
+`sha256:98d6a83346233e5bb373387379529d27c632ac6836d573a3aab1cdebee108946`.
+It retained failed parent
+`qualification/receipts/cuda/rtx4090-laptop/20260726t183949196702z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`
+at file
+`sha256:108f2e2074f1b78e2d4c477479708a86e3109862c28872e7d3826c0a9770dcb9`.
+Before corrective edits, strict current-source, local-artifact, and known-commit
+validation passed. The parent binds all 16 available WSL2 capabilities,
+identical initial/final model fingerprints at
+`sha256:31b656e8b4992a7dd56d31f0c4cf18fcb360601e69af4f538b780c40de585612`,
+and the exact ten-profile prompt preflight. Incremental reuse published the
+source-built binary after 30.012 active seconds, 135.459 wall seconds, and
+105.447 authenticated pause seconds.
+
+The five-profile Kiln campaign atomically published all detailed receipts.
+Greedy-short, API-default-sampled, long-prefill, and mixed are strict-valid
+passes:
+
+- `20260726t191322-cuda-rtx4090-laptop-c1-greedy-short-ed61ef57-v1.kiln.json`,
+  file `sha256:185b2843ee5642190b34ca55eaabc8989d90e10accd33ac39e603e6caae0dbba`;
+- `20260726t194153-cuda-rtx4090-laptop-c1-api-default-sampled-ed61ef57-v1.kiln.json`,
+  file `sha256:e1ca3900a0ac80aa78133a1855c21488fcdf62c71d682c35ebc0bc36b7973623`;
+- `20260726t201333-cuda-rtx4090-laptop-c1-long-prefill-ed61ef57-v1.kiln.json`,
+  file `sha256:327d7d2956e95afe3f8af33a793c5ed946bf44444e4c93e9e6c66184b5a77f5a`;
+  and
+- `20260726t210018-cuda-rtx4090-laptop-c1-mixed-ed61ef57-v1.kiln.json`,
+  file `sha256:2fcdb092846b32ae039a1a47951b97ce075b53137b82b6ccbee13c13ba12aa3c`.
+
+Each pass completed warmup, one measured 64-token request, every identity and
+repository finalization check, unforced return-code-zero shutdown, and
+process-group drain. This confirms the zombie-only teardown repair on the exact
+hardware path. It does not make the aggregate campaign pass.
+
+Prefix-hit is retained as strict-valid failed receipt
+`20260726t203243-cuda-rtx4090-laptop-c1-prefix-hit-startup-probe-ed61ef57-v1.kiln.json`
+at file
+`sha256:f98d44f8b572a914bd0975513cf91c6df991469d87e3da957bcceb947b9d8b72`.
+Its server completed the private 9,319,828,096-byte snapshot copy, initial
+content verification, all 8,411,510,272 bytes and 32 layers of CUDA upload, and
+post-upload content verification. After CPU/source-cache release and execution
+provenance initialization, the synchronous pre-KV governor refresh received no
+valid selected-device sample and rejected startup with
+`selected-device memory probe lost its safe capacity before KV allocation`.
+The following mixed launch passed the same boundary, so this is another
+transient startup observation, not evidence that the selected device or safe
+capacity permanently disappeared.
+
+The 7,813.194-second case scope used
+889,224,571/3,906,597,186 CPU microseconds, peaked at 10,737,676,288 bytes and
+68 PIDs, recorded 248,573 `memory.max` events with zero OOM, OOM-kill, or
+group-kill events, and removed cleanly. All 261 pauses completed, totaling
+4,538.889 seconds with a 118.413-second longest pause. Host/GPU peaks were
+93.05/68 C below the unchanged 95/85 C hard limits, and stable handoff completed
+at 75.05/65 C. Both independent model-fingerprint scopes returned zero and
+removed cleanly. vLLM correctly did not start after the failed Kiln campaign.
+
+The corrective governor now gives only startup allocation transitions three
+serialized source probes separated by 100 ms. A successful second or third
+sample replaces the cache; three failures still publish zero free memory,
+unhealthy status, and fail startup. Ordinary `refresh()`, the persistent
+sampler, and live runtime admission remain single-sample fail-closed.
+Focused governor and initial-KV tests pass. This is a portable repair pending a
+clean pushed-source exact rerun; it does not accept c1, wider concurrency,
+endurance, native Linux, or desktop RTX 4090.
+
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
 `sha256:2e81344e95637821046fd0dee2ff61495af6b91a5e728214975eeb7785507d63`).

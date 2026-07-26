@@ -247,6 +247,8 @@ const AUTOMATIC_RECLAIM_MAX_BACKOFF: Duration = Duration::from_secs(128);
 /// for faster sysfs-backed configurations.
 const MIN_CACHED_SAMPLE_MAX_AGE: Duration = Duration::from_secs(5);
 const CACHED_SAMPLE_TTL_MULTIPLIER: u32 = 4;
+const STARTUP_CAPACITY_PROBE_ATTEMPTS: usize = 3;
+const STARTUP_CAPACITY_PROBE_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AutomaticReclaimScheduleUpdate {
@@ -759,6 +761,51 @@ impl MemoryGovernor {
             .unwrap_or_else(|error| error.into_inner());
         let snapshot = self.source.try_probe();
         self.publish_probe_result(snapshot)
+    }
+
+    /// Refresh a selected accelerator's capacity at a startup allocation
+    /// boundary, tolerating only a short burst of transient probe failures.
+    ///
+    /// This fixed retry budget is deliberately separate from [`Self::refresh`]:
+    /// the background sampler and live admission paths remain single-sample and
+    /// fail closed immediately. Startup may spend at most three bounded source
+    /// probes plus two 100 ms delays before publishing a failed observation.
+    pub fn refresh_startup_capacity(&self) -> MemorySnapshot {
+        self.refresh_startup_capacity_with_retry(
+            STARTUP_CAPACITY_PROBE_ATTEMPTS,
+            STARTUP_CAPACITY_PROBE_RETRY_DELAY,
+        )
+    }
+
+    fn refresh_startup_capacity_with_retry(
+        &self,
+        attempts: usize,
+        retry_delay: Duration,
+    ) -> MemorySnapshot {
+        let attempts = attempts.max(1);
+        let _probe_guard = self
+            .probe_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for attempt in 0..attempts {
+            if let Some(snapshot) = self
+                .source
+                .try_probe()
+                .filter(|snapshot| snapshot.total_bytes > 0 && !snapshot.observations.probe_failed)
+            {
+                return self.publish_probe_result(Some(snapshot));
+            }
+            if attempt + 1 < attempts {
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    attempts,
+                    retry_delay_ms = retry_delay.as_millis(),
+                    "startup accelerator memory probe failed; retrying within the bounded startup budget"
+                );
+                std::thread::sleep(retry_delay);
+            }
+        }
+        self.publish_probe_result(None)
     }
 
     fn publish_probe_result(&self, snapshot: Option<MemorySnapshot>) -> MemorySnapshot {
@@ -1906,6 +1953,76 @@ mod tests {
         let recovered = governor.refresh();
         assert_eq!(recovered.free_bytes, 8 * GB);
         assert!(!recovered.observations.probe_failed);
+    }
+
+    #[test]
+    fn startup_capacity_refresh_recovers_within_its_bounded_retry_budget() {
+        struct StartupTransientFailure {
+            calls: std::sync::Arc<AtomicU64>,
+        }
+
+        impl MemorySource for StartupTransientFailure {
+            fn probe(&self) -> MemorySnapshot {
+                snap(24 * GB, 16 * GB)
+            }
+
+            fn try_probe(&self) -> Option<MemorySnapshot> {
+                match self.calls.fetch_add(1, Ordering::SeqCst) {
+                    0 => Some(snap(24 * GB, 16 * GB)),
+                    1 | 2 => None,
+                    _ => Some(snap(24 * GB, 8 * GB)),
+                }
+            }
+        }
+
+        let calls = std::sync::Arc::new(AtomicU64::new(0));
+        let governor = MemoryGovernor::with_source(
+            Box::new(StartupTransientFailure {
+                calls: calls.clone(),
+            }),
+            GovernorConfig::default(),
+        );
+
+        let recovered = governor.refresh_startup_capacity_with_retry(3, Duration::from_millis(0));
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(recovered.total_bytes, 24 * GB);
+        assert_eq!(recovered.free_bytes, 8 * GB);
+        assert!(!recovered.observations.probe_failed);
+        assert!(governor.cached_sample_status().healthy);
+    }
+
+    #[test]
+    fn startup_capacity_refresh_fails_closed_after_its_bounded_retry_budget() {
+        struct StartupPersistentFailure {
+            calls: std::sync::Arc<AtomicU64>,
+        }
+
+        impl MemorySource for StartupPersistentFailure {
+            fn probe(&self) -> MemorySnapshot {
+                snap(24 * GB, 16 * GB)
+            }
+
+            fn try_probe(&self) -> Option<MemorySnapshot> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                (call == 0).then(|| snap(24 * GB, 16 * GB))
+            }
+        }
+
+        let calls = std::sync::Arc::new(AtomicU64::new(0));
+        let governor = MemoryGovernor::with_source(
+            Box::new(StartupPersistentFailure {
+                calls: calls.clone(),
+            }),
+            GovernorConfig::default(),
+        );
+
+        let failed = governor.refresh_startup_capacity_with_retry(3, Duration::from_millis(0));
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(failed.total_bytes, 24 * GB);
+        assert_eq!(failed.used_bytes, 24 * GB);
+        assert_eq!(failed.free_bytes, 0);
+        assert!(failed.observations.probe_failed);
+        assert!(!governor.cached_sample_status().healthy);
     }
 
     #[test]
