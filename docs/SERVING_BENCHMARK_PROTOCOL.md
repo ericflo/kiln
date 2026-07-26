@@ -629,6 +629,25 @@ namespace, accounting, cleanup, and stable-handoff lifecycle with a
 serving receipt. Push the repair before rerunning fixed c1; every thermal
 threshold and workload semantic remains unchanged.
 
+The clean pushed-source retry at
+`1e22141cfd2a60efe4e00d674dcd0190ec95a348` retained strict-valid failed
+receipt
+`qualification/receipts/cuda/rtx4090-laptop/20260725t235849138625z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`,
+file
+`sha256:bad5e9d085176e035617f27ad687b60bb40cdf29485dd4a95eb886b45f3b10bd`.
+The external admission probe read 74.05/64 C, but formal preflight after the
+separate CPU-identity WMI query read 86.05/64 C. The initial fingerprint scope
+ran 751.564 seconds, peaked at 9,387,716,608 bytes/four PIDs, used 13,122,123
+of 375,782,151 allowed CPU microseconds, and recorded zero memory-limit or OOM
+events. Two of three pauses completed; all pauses totaled 459.892 seconds, and
+the active third pause reached 300.867 seconds at a 90.05/64 C peak. Scope
+removal and 74.05/64 C outer handoff completed after 752 samples with no
+process or campaign residue. Model identity, environment collection, build,
+server, and request work did not complete. This is pre-model counterevidence,
+not c1. Replace the remaining WMI identity read with an exact non-WMI source
+and admit a child only after the pacing-resume boundary is stable; do not
+change the thermal limits.
+
 For the first Kiln campaign, use the exact UUID from
 `.environment.device.device_uuid` in the environment receipt, the matching
 bootstrap launch JSON, and `target/release/kiln` as `--runtime-artifact`. Use a

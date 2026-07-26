@@ -1295,6 +1295,34 @@ five samples, and left no process, PowerShell, or user-unit residue. These are
 live dirty-source boundary probes, not qualification receipts or c1 evidence.
 Commit and push the repair before another exact c1 attempt.
 
+The exact retry from clean pushed observer-repair source
+`1e22141cfd2a60efe4e00d674dcd0190ec95a348` retained failed receipt
+`qualification/receipts/cuda/rtx4090-laptop/20260725t235849138625z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`,
+file
+`sha256:bad5e9d085176e035617f27ad687b60bb40cdf29485dd4a95eb886b45f3b10bd`.
+The admission probe immediately before launch read 74.05/64 C, but formal
+preflight after the independent CPU-identity query read 86.05/64 C. The
+751.564-second fingerprint scope reached 9,387,716,608 bytes and four PIDs and
+used 13,122,123 of 375,782,151 allowed CPU microseconds. Three pacing pauses
+totaled 459.892 seconds; two completed, while the third remained active and
+reached 300.867 seconds. Scope and outer peaks were 90.05/64 C. All
+memory-limit, OOM, OOM-kill, and swap-limit events remained zero. The scope was
+removed and the outer supervisor completed stable handoff at 74.05/64 C after
+752 total samples.
+
+The strict known-commit/local-artifact validator accepts the receipt and all
+five bounded files. The fingerprint output remains empty, `model` is null,
+environment collection and the case did not start, effective config is empty,
+and the required c1 result failed without execution. No final fingerprint,
+campaign root, server, Cargo/rustc process, PowerShell process, or scope
+survived. Persistent sampling removed most of the former outer observer work
+and allowed the bounded reader to reach a 9.388 GB scoped peak, but the child
+still started above the pacing threshold and could not hold three samples at
+or below 75 C within the unchanged pause limit. This is pre-model
+counterevidence only. The next repair must remove the pre-sampler WMI
+CPU-identity query and require a stable pacing-resume boundary before child
+launch; do not weaken the policy.
+
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
 `sha256:2f34ab2dc62641d247306c9ce29d62c68e5c12b16cd326e2860ce00061a345ac`).
