@@ -1468,6 +1468,57 @@ ended at 73.05/63 C, retained a 78.05/63 C peak across nine samples, and left
 no process, sensor, or unit residue. This proves the dirty-source reader
 composition only; commit and push before another exact c1 attempt.
 
+The exact clean pushed retry from
+`57d297e0f7835d98ba12f3b4b728603a0f344caa` retained failed parent receipt
+`qualification/receipts/cuda/rtx4090-laptop/20260726t015018730815z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`,
+file
+`sha256:2cce798022fce948a78e855ff35a175f667b0427119fab1cf24fe8527104f2cd`.
+The pause-aware source build completed successfully. It consumed 2,161.060
+wall seconds, including 1,987.708 seconds of exact completed pacing overlap
+and 173.352 active seconds, and produced `target/release/kiln` at
+`sha256:38da3668a40b3df1b92c89c66cefbe7063665ab08357c1222445ba3fad36ac3e`.
+This establishes that the revised build authority clears the former timeout
+without crediting ordinary delay or weakening any resource or thermal limit.
+It is not c1 acceptance.
+
+The first two Kiln profiles each wrote a strict-valid failed benchmark receipt,
+now retained as
+`benchmarks/receipts/cuda/rtx4090-laptop/20260726t030335-cuda-rtx4090-laptop-c1-greedy-short-startup-race-57d297e0-v1.kiln.json`
+and
+`benchmarks/receipts/cuda/rtx4090-laptop/20260726t032626-cuda-rtx4090-laptop-c1-api-default-startup-race-57d297e0-v1.kiln.json`.
+Their file hashes are
+`sha256:4e4fc71f882aba58edb75c88ca0cc02bf6d881bcae1936a56f9b53d0ab5c3eda`
+and
+`sha256:e7fe629fb50d1e3094c98114b12af73b12105a415e08015f8dcdbbfbfc507640`.
+Both passed final model, repository, and runtime-artifact checks, but completed
+zero requests. External-WSL owned-server mode launches the server and then
+uses a one-shot `/v1/models` probe rather than the existing owned readiness
+loop; both probes raced startup and recorded connection refusal. Their
+shutdown waits also used undifferentiated wall time, crossed authenticated
+cgroup freezes, and escalated to SIGKILL. These are benchmark lifecycle
+defects, not server output or OOM evidence.
+
+Before the third profile completed, the outer hard authority rejected its
+persistent Windows input because `Temperature` and
+`HighPrecisionTemperature` disagreed. It sent SIGTERM to the complete case
+boundary. The 5,023.139-second scope used 250,572,502 of 2,511,569,367 allowed
+CPU microseconds, peaked at 10,737,639,424 bytes and 33 PIDs, and recorded
+137,891 `memory.max` reclaim events with zero OOM, OOM-kill, or group-kill
+events. All 155 pacing episodes completed, totaling 3,613.488 seconds; the
+outer peak was 94.05/66 C and stable handoff completed at 74.05/64 C after
+5,009 samples. Initial and final model fingerprints remained byte-identical,
+all 16 environment capabilities passed, every scope was removed, and no
+Cargo, rustc, Kiln, benchmark, runner, sensor, or unit process remained.
+
+The parent and nested receipts are retained counterevidence only. They prove
+build completion, strict containment, fail-closed sensor handling, integrity,
+and cleanup. They do not prove server readiness, a request, a profile pass,
+vLLM comparison, c1 performance, or endurance. Repair external-WSL readiness
+and shutdown accounting against the same authenticated pacing stream. Diagnose
+the Windows field mismatch as malformed input, provider drift, or a true
+invalid boundary before changing its interpretation; do not bypass the
+independent hard-limit authority.
+
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
 `sha256:2f34ab2dc62641d247306c9ce29d62c68e5c12b16cd326e2860ce00061a345ac`).

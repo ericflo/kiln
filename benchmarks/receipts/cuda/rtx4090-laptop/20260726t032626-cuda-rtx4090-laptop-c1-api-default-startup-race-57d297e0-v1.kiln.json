@@ -1,0 +1,237 @@
+{
+  "completion": {
+    "completed_run_count": 0,
+    "expected_run_count": 1,
+    "failures": [
+      {
+        "detail": "BenchmarkError: GET http://127.0.0.1:8420/v1/models failed: URLError: <urlopen error [Errno 111] Connection refused>",
+        "phase": "server_startup"
+      },
+      {
+        "detail": "BenchmarkError: Kiln execution identity is unavailable because startup did not complete",
+        "phase": "execution_identity_unchanged"
+      },
+      {
+        "detail": "BenchmarkError: owned server required SIGKILL during shutdown",
+        "phase": "server_shutdown"
+      }
+    ],
+    "finalization_checks": {
+      "execution_identity_unchanged": "failed",
+      "host_thermal_handoff": "not_applicable",
+      "model_identity_unchanged": "passed",
+      "repository_unchanged": "passed",
+      "runtime_artifact_unchanged": "passed",
+      "runtime_manifest_unchanged": "not_applicable",
+      "server_shutdown": "failed"
+    }
+  },
+  "created_at": "2026-07-26T03:26:26.516820+00:00",
+  "diagnostics": {
+    "timed_request_path_affected": false,
+    "url": "http://127.0.0.1:8420/health"
+  },
+  "driver_environment": {
+    "hostname": "ERICLAPTOPG16",
+    "machine": "x86_64",
+    "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+    "python": "3.10.12",
+    "repository": {
+      "commit": "57d297e0f7835d98ba12f3b4b728603a0f344caa",
+      "dirty": false,
+      "source_tree_sha256": "sha256:6fa2e7b37375b74f65902f18c974e2548337e4fb75813e1310f27bdb78f0ad7d"
+    }
+  },
+  "driver_version": "20",
+  "engine": {
+    "authentication_configured": false,
+    "authentication_source": "none",
+    "available_models": [],
+    "base_url": "http://127.0.0.1:8420",
+    "model": "Qwen3.5-4B",
+    "model_identity": {
+      "chat_template_hash": "sha256:a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+      "config_hash": "sha256:ddc63e1c717afa86c865bb5e01313d89d72bb53b97ad4a8a03ba8510c0621670",
+      "content_sha256": "sha256:b1f2cce5baf9e662fc4c2c421b79fccc8787521e6e85810eebffbb4aa43b309f",
+      "id": "Qwen3.5-4B",
+      "path": "/home/ericflo/Development/kiln/.qualification/cuda-rtx4090-laptop/performance-model-v1",
+      "tokenizer_hash": "sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+      "weight_files": [
+        {
+          "bytes": 5329398688,
+          "path": "model.safetensors-00001-of-00002.safetensors",
+          "sha256": "sha256:26a93f066e1916adb13453dae5a0c707c0fbc71299ed98779571a907b8e74c61"
+        },
+        {
+          "bytes": 3990429408,
+          "path": "model.safetensors-00002-of-00002.safetensors",
+          "sha256": "sha256:cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188"
+        }
+      ]
+    },
+    "name": "kiln",
+    "reported_version": null,
+    "runtime_artifact": {
+      "bytes": 62404952,
+      "path": "/home/ericflo/Development/kiln/target/release/kiln",
+      "sha256": "sha256:38da3668a40b3df1b92c89c66cefbe7063665ab08357c1222445ba3fad36ac3e"
+    },
+    "runtime_execution_identity": null,
+    "runtime_identity": "kiln-git:57d297e0f7835d98ba12f3b4b728603a0f344caa",
+    "runtime_manifest": null
+  },
+  "host_thermal": {
+    "evidence": {
+      "cgroup_path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/kiln-wsl-scope-ac9a2e63ea52492ba04996469e60ecaf.scope",
+      "cpu_controller": "usage-feedback-cgroup-freeze-v1",
+      "cpu_quota_percent": 50,
+      "mechanism": "qualification-runner-windows-nvml-outer-supervisor-v1",
+      "memory_max_bytes": 10737418240,
+      "memory_oom_group": 1,
+      "memory_swap_max_bytes": 0,
+      "network_containment": "util-linux-unshare-user-net-pid-landlock-v1",
+      "parent_qualification_receipt_required": true,
+      "pids_max": 512,
+      "policy_sha256": "sha256:998e65f84651ce28d36acfcadb3f1216a589883054a9f27853fe755f373e3745",
+      "scope_boundary": "systemd-user-scope-feedback-v1",
+      "scope_host_uid": 1000,
+      "scope_unit": "kiln-wsl-scope-ac9a2e63ea52492ba04996469e60ecaf"
+    },
+    "mode": "external_wsl2_boundary",
+    "model_fingerprint": null,
+    "policy": {
+      "content_sha256": "sha256:998e65f84651ce28d36acfcadb3f1216a589883054a9f27853fe755f373e3745",
+      "gpu": {
+        "limit_millicelsius": 85000,
+        "name": "NVIDIA GeForce RTX 4090 Laptop GPU",
+        "uuid": "GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd"
+      },
+      "host": {
+        "cpu_name": "Intel(R) Core(TM) Ultra 9 185H",
+        "limit_millicelsius": 95000,
+        "thermal_zone_name": "\\_TZ.THRM",
+        "vendor_tjunction_millicelsius": 110000
+      },
+      "id": "rtx4090-laptop-wsl2-cgroup-pacing-v2",
+      "pacing": {
+        "gpu_resume_millicelsius": 70000,
+        "gpu_start_millicelsius": 75000,
+        "host_resume_millicelsius": 75000,
+        "host_start_millicelsius": 80000,
+        "mode": "cgroup_freeze",
+        "resume_stable_samples": 3,
+        "timeout_seconds": 300
+      },
+      "poll_interval_ms": 1000,
+      "safe_handoff": {
+        "gpu_target_millicelsius": 75000,
+        "host_target_millicelsius": 85000,
+        "stable_samples": 3,
+        "timeout_seconds": 300
+      },
+      "schema": "kiln.wsl2-thermal-policy.v2"
+    },
+    "process_group": null,
+    "unsafe_no_guard_acknowledged": false
+  },
+  "memory_sampler": {
+    "device": {
+      "enumerated_device_count": 1,
+      "index": 0,
+      "library": "libnvidia-ml.so.1",
+      "name": "NVIDIA GeForce RTX 4090 Laptop GPU",
+      "nvml_version": "13.595.71.01",
+      "selector": "explicit_uuid",
+      "total_bytes": 17171480576,
+      "uuid": "GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd"
+    },
+    "interval_ms": 100,
+    "path": null,
+    "source": "nvml_used"
+  },
+  "receipt_sha256": "sha256:3e0aaab990d25418b7833f77729b87cced2c94450c3a8b6eb65fc979ebf5073f",
+  "reference_role": "qualification_gate",
+  "runs": [],
+  "schema": "kiln.serving-benchmark.v1",
+  "server_lifecycle": {
+    "launch_config": {
+      "acceptable_exit_codes": [
+        0
+      ],
+      "command": [
+        "./target/release/kiln",
+        "serve",
+        "--config",
+        "qualification/server-config/kiln-cuda-rtx4090-laptop-serving-performance-v1.toml"
+      ],
+      "content_sha256": "sha256:76ae6f25e8fa2d62a165e9660b7b1f4e34c08e7788c624f6a71430726f82a2e3",
+      "id": "kiln-cuda-rtx4090-laptop-serving-performance-v1",
+      "log_directory": "../../.qualification/kiln-serving/cuda-rtx4090-laptop-performance-v1/logs",
+      "readiness_poll_interval_ms": 250,
+      "schema": "kiln.serving-benchmark-server-launch.v1",
+      "shutdown_timeout_seconds": 180.0,
+      "startup_timeout_seconds": 1200.0,
+      "working_directory": "../.."
+    },
+    "log": {
+      "bytes": 5274,
+      "path": "/home/ericflo/Development/kiln/.qualification/kiln-serving/cuda-rtx4090-laptop-performance-v1/logs/cuda4090l-c1-57d297e0f783-kiln-api-default-sampled.server.log",
+      "sha256": "sha256:5d7923c036dc5b43a4e059274549cafd73afcc111dda6c543f393d2758631883"
+    },
+    "mode": "owned_process_group",
+    "prelaunch_cooldown": null,
+    "shutdown": {
+      "acceptable_exit_codes": [
+        0
+      ],
+      "elapsed_seconds": 180.98729349600035,
+      "forced": true,
+      "process_group_alive_end": true,
+      "returncode": -9,
+      "signal": "SIGTERM",
+      "signal_sent": true
+    }
+  },
+  "verdict": "failed",
+  "warmup": null,
+  "workload": {
+    "arrival_pattern": "thread_barrier_all_at_once",
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    },
+    "comparison_mode": "inputs_only",
+    "concurrency": [
+      1
+    ],
+    "endpoint": "/v1/chat/completions",
+    "max_dispatch_spread_ms": 250.0,
+    "max_tokens": 64,
+    "memory_limit_bytes": 16500000000,
+    "model": "Qwen3.5-4B",
+    "profile": "api-default-sampled",
+    "prompt_set_id": "cuda-rtx4090-laptop-performance-v1-api-default-sampled",
+    "prompt_template_version": "fixed-serving-profiles-v1",
+    "repeats": 1,
+    "require_max_tokens": true,
+    "require_uniform_prompt_tokens": true,
+    "run_id": "cuda4090l-c1-57d297e0f783-kiln-api-default-sampled",
+    "sampling": {
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "repetition_penalty": 1.0,
+      "seed": 20260725,
+      "temperature": 1.0,
+      "top_p": 1.0
+    },
+    "schema": "kiln.serving-benchmark-workload.v1",
+    "slo": {
+      "client_visible_itl_ms": 250.0,
+      "e2e_ms": 60000.0,
+      "ttft_ms": 5000.0
+    },
+    "stream": true,
+    "stream_include_usage": true,
+    "warmup_requests": 1
+  },
+  "workload_fingerprint": "sha256:f6655662bda4e18b907bb3798c4afe055879b351d0d94720fbc7111f762171d0"
+}
