@@ -1391,6 +1391,51 @@ pause, then requires the next half-MiB to consume the full interval through
 establish laptop model identity or c1. Commit and push the repair before the
 exact retry.
 
+The exact retry from clean pushed limiter-repair source
+`dba9b9062b9cc7f53e29bbc65f444f33c98fae12` retained failed receipt
+`qualification/receipts/cuda/rtx4090-laptop/20260726t003539048501z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`,
+file
+`sha256:fff67591c5fce479fbda102b104b02e1d9c6164e62d0a8ca551af0cc1c08ff0f`.
+For the first time on this c1 path, the initial model fingerprint, all 16
+required environment capabilities, the case boundary, and the final model
+fingerprint completed. The two 824-byte fingerprint artifacts are byte- and
+hash-identical at
+`sha256:31b656e8b4992a7dd56d31f0c4cf18fcb360601e69af4f538b780c40de585612`.
+They bind both exact weight shards totaling 9,319,828,096 bytes plus the
+configuration, tokenizer, and chat-template digests for
+`Qwen/Qwen3.5-4B`.
+
+The 632.493-second initial fingerprint scope used 17,454,711 of 316,246,590
+allowed CPU microseconds, peaked at 9,388,126,208 bytes/four PIDs, and
+completed two pauses totaling 57.216 seconds. The 929.768-second final scope
+used 19,342,218 of 464,884,048 allowed CPU microseconds, peaked at
+9,387,827,200 bytes/four PIDs, and completed three pauses totaling 351.605
+seconds. Both recorded zero memory-limit, OOM, OOM-kill, or swap-limit events
+and removed their scopes. The retained environment fixes the exact Laptop GPU
+UUID/name/17,171,480,576-byte capacity, NVIDIA 596.36 driver, CUDA 12.4
+toolkit, ext4 filesystem probes, WSL2 identity, system and user systemd, memory
+accounting, private network/process containment, and thermal authorities.
+
+The required c1 case still failed before service startup. Its source build
+reached `kiln-server` compilation, then the driver rejected
+`CUDA performance build exceeded 1800.000 seconds`. The enclosing
+1,802.090-second scope used 185,237,153 of 901,045,144 allowed CPU
+microseconds, peaked at 2,123,210,752 bytes/14 PIDs, recorded zero memory/OOM
+events, and completed all 140 pauses totaling 1,615.144 seconds. Host/GPU
+peaks were 94.05/66 C, below the unchanged hard limits. Scope and outer
+supervision both removed cleanly and completed a stable handoff.
+
+This is model-integrity, environment, containment, thermal-pacing, cleanup,
+and source-build counterevidence only. No build completion, server startup,
+request, nested campaign receipt, throughput, c1 acceptance, or endurance
+claim follows. The strict known-commit/local-artifact validator accepts the
+receipt and all 11 hashed files, and no Cargo/rustc, Kiln, driver, PowerShell,
+sensor, campaign, or scope residue remained. The failure isolates a timeout
+accounting defect: verified cgroup-freeze intervals consumed the inner
+1,800-second source-build wall deadline, leaving only about 185 CPU-seconds for
+the compile. Retain and push this evidence before making the build bound
+pause-aware; do not weaken the thermal policy or resource boundary.
+
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
 `sha256:2f34ab2dc62641d247306c9ce29d62c68e5c12b16cd326e2860ce00061a345ac`).
