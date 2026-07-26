@@ -1374,6 +1374,23 @@ unthrottled catch-up burst. The next repair must rebase a stale deadline on
 resume so idle or frozen time never creates credit, while retaining the exact
 32 MiB/s maximum, two integrity passes, thermal limits, and workload semantics.
 
+The limiter now keeps an explicit next deadline rather than deriving every
+deadline from process start and total bytes. It still counts every byte through
+one limiter across discovery, all files, and both integrity passes. Before
+charging each chunk, however, it rebases a deadline that is older than the
+current monotonic time. The current chunk must then wait its complete
+`bytes / configured_rate` interval. Cgroup freezes, scheduler delay, parsing,
+and other idle work can make the effective rate lower but can never grant
+catch-up credit or make it exceed the configured maximum. The read chunk
+remains 8 MiB and the laptop cap remains 32 MiB/s.
+
+The deterministic limiter regression paces two consecutive half-MiB chunks at
+one MiB/s from time 10 to 11, jumps the clock to 100 as a synthetic external
+pause, then requires the next half-MiB to consume the full interval through
+100.5 while retaining 1.5 MiB total accounting. This portable test does not
+establish laptop model identity or c1. Commit and push the repair before the
+exact retry.
+
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
 `sha256:2f34ab2dc62641d247306c9ce29d62c68e5c12b16cd326e2860ce00061a345ac`).

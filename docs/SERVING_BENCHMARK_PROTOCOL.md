@@ -688,6 +688,16 @@ post-pause chunk so frozen/idle time grants no credit. Keep the same 32 MiB/s
 maximum, shared limiter across both integrity passes, and unchanged thermal
 policy before retrying fixed c1.
 
+`_ReadRateLimiter` now retains one next deadline. Each charged chunk advances
+that deadline by `bytes / configured_rate`; if external stop or ordinary idle
+time has moved the clock past it, the limiter first rebases to current time.
+The next 8 MiB read therefore pays its complete 250 ms interval at the
+unchanged laptop 32 MiB/s cap instead of spending pause credit. All bytes from
+all files and both integrity passes remain in one total. A synthetic
+one-MiB/s regression paces two half-MiB chunks from time 10 to 11, jumps to
+time 100, and proves the next half-MiB still paces through 100.5. This closes
+the portable catch-up-burst defect only; push the source before fixed c1.
+
 For the first Kiln campaign, use the exact UUID from
 `.environment.device.device_uuid` in the environment receipt, the matching
 bootstrap launch JSON, and `target/release/kiln` as `--runtime-artifact`. Use a

@@ -60,7 +60,7 @@ class _ReadRateLimiter:
         )
         self._clock = clock or time.monotonic
         self._sleeper = sleeper or time.sleep
-        self._started: float | None = None
+        self._deadline: float | None = None
 
     def account(self, byte_count: int) -> None:
         if byte_count < 0:
@@ -68,11 +68,12 @@ class _ReadRateLimiter:
         self.total_bytes += byte_count
         if self._bytes_per_second is None:
             return
-        if self._started is None:
-            self._started = self._clock()
-        deadline = self._started + self.total_bytes / self._bytes_per_second
+        now = self._clock()
+        if self._deadline is None or self._deadline < now:
+            self._deadline = now
+        self._deadline += byte_count / self._bytes_per_second
         while True:
-            remaining = deadline - self._clock()
+            remaining = self._deadline - self._clock()
             if remaining <= 0:
                 return
             self._sleeper(min(remaining, MAX_RATE_LIMIT_SLEEP_SECONDS))

@@ -49,7 +49,7 @@ class ModelFingerprintTests(unittest.TestCase):
             (json.dumps({"weight_map": weight_map}) + "\n").encode(),
         )
 
-    def test_read_rate_limiter_uses_one_cumulative_bounded_schedule(self) -> None:
+    def test_read_rate_limiter_never_accrues_idle_catch_up_credit(self) -> None:
         now = [10.0]
         sleeps: list[float] = []
 
@@ -72,6 +72,16 @@ class ModelFingerprintTests(unittest.TestCase):
         self.assertAlmostEqual(now[0], 11.0)
         self.assertEqual(limiter.total_bytes, model_fingerprint.MIB)
         self.assertGreater(len(sleeps), 2)
+
+        sleeps_before_idle = len(sleeps)
+        now[0] = 100.0
+        limiter.account(model_fingerprint.MIB // 2)
+        self.assertAlmostEqual(now[0], 100.5)
+        self.assertGreater(len(sleeps), sleeps_before_idle)
+        self.assertEqual(
+            limiter.total_bytes,
+            model_fingerprint.MIB + model_fingerprint.MIB // 2,
+        )
 
         unlimited_sleeps: list[float] = []
         unlimited = model_fingerprint._ReadRateLimiter(
