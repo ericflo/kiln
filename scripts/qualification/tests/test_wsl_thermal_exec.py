@@ -227,6 +227,7 @@ import sys
 
 print(json.dumps({
     "Schema": "kiln.wsl2-host-thermal-counter.v1",
+    "CpuName": "Test CPU",
     "Name": "\\_TZ.THRM",
     "CounterNames": [
         "Temperature",
@@ -264,6 +265,41 @@ for line in sys.stdin:
             self.assertEqual(counter.read_millicelsius(), 72_050)
             self.assertEqual(counter.read_millicelsius(), 72_050)
 
+    def test_persistent_host_counter_binds_registry_cpu_identity(self) -> None:
+        policy = thermal.validate_policy(policy_document())
+        fixture = r"""
+import json
+
+print(json.dumps({
+    "Schema": "kiln.wsl2-host-thermal-counter.v1",
+    "CpuName": "Different CPU",
+    "Name": "\\_TZ.THRM",
+    "CounterNames": [
+        "Temperature",
+        "High Precision Temperature",
+        "% Passive Limit",
+        "Throttle Reasons",
+    ],
+}), flush=True)
+"""
+
+        def process_factory(*_args, **kwargs):
+            return thermal.subprocess.Popen(
+                [sys.executable, "-c", fixture],
+                stdin=kwargs["stdin"],
+                stdout=kwargs["stdout"],
+                stderr=kwargs["stderr"],
+                bufsize=kwargs["bufsize"],
+            )
+
+        with self.assertRaisesRegex(
+            thermal.ThermalGuardError, "exact identity"
+        ):
+            thermal.WindowsThermalCounter(
+                policy,
+                process_factory=process_factory,
+            )
+
     def test_persistent_host_counter_rejects_wrong_sequence(self) -> None:
         policy = thermal.validate_policy(policy_document())
         fixture = r"""
@@ -272,6 +308,7 @@ import sys
 
 print(json.dumps({
     "Schema": "kiln.wsl2-host-thermal-counter.v1",
+    "CpuName": "Test CPU",
     "Name": "\\_TZ.THRM",
     "CounterNames": [
         "Temperature",
@@ -318,6 +355,7 @@ import sys
 
 print(json.dumps({
     "Schema": "kiln.wsl2-host-thermal-counter.v1",
+    "CpuName": "Test CPU",
     "Name": "\\_TZ.THRM",
     "CounterNames": [
         "Temperature",
@@ -405,6 +443,40 @@ for _line in sys.stdin:
             at_gpu_limit = thermal.ThermalSample(0.0, 80_000, 85_000)
             with self.assertRaisesRegex(thermal.ThermalGuardError, "GPU temperature"):
                 thermal._check_limits(at_gpu_limit, policy)
+
+    def test_pacing_preflight_requires_the_stable_resume_boundary(self) -> None:
+        document = policy_document(pacing=True)
+        assert isinstance(document["pacing"], dict)
+        document["pacing"]["resume_stable_samples"] = 3
+        document["content_sha256"] = thermal._canonical_policy_hash(document)
+        policy = thermal.validate_policy(document)
+        observed = iter(
+            [
+                thermal.ThermalSample(0.0, 80_000, 60_000),
+                thermal.ThermalSample(1.0, 71_000, 69_000),
+                thermal.ThermalSample(2.0, 71_000, 69_000),
+                thermal.ThermalSample(3.0, 71_000, 69_000),
+            ]
+        )
+        with mock.patch.object(thermal.time, "sleep"):
+            result = thermal._stable_preflight(policy, lambda: next(observed))
+        self.assertEqual(result.sample_count, 4)
+        self.assertEqual(result.ending.host_millicelsius, 71_000)
+        self.assertEqual(result.peak_host_millicelsius, 80_000)
+        self.assertEqual(result.peak_gpu_millicelsius, 69_000)
+
+    def test_pacing_preflight_timeout_does_not_launch_a_child(self) -> None:
+        policy = thermal.validate_policy(policy_document(pacing=True))
+        current = thermal.ThermalSample(0.0, 80_000, 60_000)
+        with mock.patch.object(
+            thermal.time,
+            "monotonic",
+            side_effect=[0.0, 6.0],
+        ), self.assertRaisesRegex(
+            thermal.ThermalGuardError,
+            "stable preflight thermal boundary timed out",
+        ):
+            thermal._stable_preflight(policy, lambda: current)
 
     def test_trip_terminates_child_and_completes_safe_handoff(self) -> None:
         policy = thermal.validate_policy(policy_document())

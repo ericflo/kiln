@@ -42,7 +42,7 @@ HOST_COUNTER_NAMES = (
     "% Passive Limit",
     "Throttle Reasons",
 )
-HOST_COUNTER_READY_KEYS = {"Schema", "Name", "CounterNames"}
+HOST_COUNTER_READY_KEYS = {"Schema", "CpuName", "Name", "CounterNames"}
 HOST_COUNTER_SAMPLE_KEYS = {
     "Schema",
     "Sequence",
@@ -61,6 +61,21 @@ $ErrorActionPreference = 'Stop'
 $zone = [System.Text.Encoding]::UTF8.GetString(
     [System.Convert]::FromBase64String($zoneBase64)
 )
+$cpuKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+    'HARDWARE\DESCRIPTION\System\CentralProcessor\0'
+)
+if ($null -eq $cpuKey) {
+    throw 'Windows CPU identity registry key is unavailable'
+}
+try {
+    $cpuName = [string]$cpuKey.GetValue('ProcessorNameString')
+} finally {
+    $cpuKey.Dispose()
+}
+if ([string]::IsNullOrWhiteSpace($cpuName) -or $cpuName.Contains("`n") -or
+    $cpuName.Contains("`r")) {
+    throw 'Windows CPU identity registry value is invalid'
+}
 $category = [System.Diagnostics.PerformanceCounterCategory]::new(
     'Thermal Zone Information'
 )
@@ -95,6 +110,7 @@ $writer = [Console]::Out
 $reader = [Console]::In
 $ready = [ordered]@{
     Schema = 'kiln.wsl2-host-thermal-counter.v1'
+    CpuName = $cpuName
     Name = $zone
     CounterNames = @(
         'Temperature',
@@ -211,6 +227,14 @@ class HandoffResult:
     peak_host_millicelsius: int
     peak_gpu_millicelsius: int
     limit_failure: ThermalGuardError | None
+
+
+@dataclass(frozen=True)
+class PreflightResult:
+    ending: ThermalSample
+    sample_count: int
+    peak_host_millicelsius: int
+    peak_gpu_millicelsius: int
 
 
 def _exact_object(value: Any, keys: set[str], context: str) -> dict[str, Any]:
@@ -436,49 +460,7 @@ def load_policy(path: Path) -> ThermalPolicy:
     return validate_policy(raw)
 
 
-def _run(command: list[str], label: str, timeout: float = 10.0) -> str:
-    try:
-        completed = subprocess.run(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-            timeout=timeout,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ThermalGuardError(f"{label} failed: {exc}") from exc
-    stdout = completed.stdout.decode("utf-8-sig", errors="strict").strip()
-    stderr = completed.stderr.decode("utf-8-sig", errors="replace").strip()
-    if completed.returncode != 0:
-        raise ThermalGuardError(
-            f"{label} exited {completed.returncode}"
-            + (f": {stderr}" if stderr else "")
-        )
-    if not stdout:
-        raise ThermalGuardError(f"{label} returned empty output")
-    return stdout
-
-
-def _powershell_json(script: str, label: str) -> Any:
-    text = _run(
-        [
-            str(POWERSHELL),
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "$ErrorActionPreference='Stop'; " + script,
-        ],
-        label,
-    )
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ThermalGuardError(f"{label} returned malformed JSON: {exc}") from exc
-
-
-def verify_host_identity(policy: ThermalPolicy) -> None:
+def verify_host_identity(_policy: ThermalPolicy) -> None:
     if "microsoft-standard-wsl2" not in platform.release().lower():
         raise ThermalGuardError("WSL2 thermal supervision requires a WSL2 kernel")
     if not POWERSHELL.is_file():
@@ -487,15 +469,6 @@ def verify_host_identity(policy: ThermalPolicy) -> None:
         raise ThermalGuardError(f"WSL NVIDIA SMI is unavailable: {NVIDIA_SMI}")
     if not NVIDIA_NVML.is_file():
         raise ThermalGuardError(f"WSL NVML is unavailable: {NVIDIA_NVML}")
-    value = _powershell_json(
-        "(Get-CimInstance -ClassName Win32_Processor | "
-        "Select-Object -ExpandProperty Name) | ConvertTo-Json -Compress",
-        "Windows CPU identity probe",
-    )
-    if value != policy.cpu_name:
-        raise ThermalGuardError(
-            f"CPU identity mismatch: observed {value!r}, expected {policy.cpu_name!r}"
-        )
 
 
 def _parse_host_temperature(
@@ -609,6 +582,7 @@ class WindowsThermalCounter:
             )
             if (
                 ready["Schema"] != HOST_COUNTER_SCHEMA
+                or ready["CpuName"] != policy.cpu_name
                 or ready["Name"] != policy.thermal_zone_name
                 or ready["CounterNames"] != list(HOST_COUNTER_NAMES)
             ):
@@ -1008,6 +982,53 @@ def _terminate(process: subprocess.Popen[Any], grace_seconds: float = 15.0) -> N
     process.wait()
 
 
+def _stable_preflight(
+    policy: ThermalPolicy,
+    sample_reader: Callable[[], ThermalSample],
+) -> PreflightResult:
+    pacing = policy.pacing
+    if pacing is None:
+        current = sample_reader()
+        _check_limits(current, policy)
+        return PreflightResult(
+            ending=current,
+            sample_count=1,
+            peak_host_millicelsius=current.host_millicelsius,
+            peak_gpu_millicelsius=current.gpu_millicelsius,
+        )
+
+    deadline = time.monotonic() + pacing.timeout_seconds
+    stable = 0
+    sample_count = 0
+    peak_host = 0
+    peak_gpu = 0
+    while True:
+        current = sample_reader()
+        sample_count += 1
+        peak_host = max(peak_host, current.host_millicelsius)
+        peak_gpu = max(peak_gpu, current.gpu_millicelsius)
+        _check_limits(current, policy)
+        below = (
+            current.host_millicelsius <= pacing.host_resume_millicelsius
+            and current.gpu_millicelsius <= pacing.gpu_resume_millicelsius
+        )
+        stable = stable + 1 if below else 0
+        if stable >= pacing.resume_stable_samples:
+            return PreflightResult(
+                ending=current,
+                sample_count=sample_count,
+                peak_host_millicelsius=peak_host,
+                peak_gpu_millicelsius=peak_gpu,
+            )
+        if time.monotonic() >= deadline:
+            raise ThermalGuardError(
+                "stable preflight thermal boundary timed out: "
+                f"host={current.host_millicelsius}, "
+                f"gpu={current.gpu_millicelsius}"
+            )
+        time.sleep(policy.poll_interval_ms / 1000.0)
+
+
 def _safe_handoff(
     policy: ThermalPolicy,
     *,
@@ -1115,16 +1136,17 @@ def supervise(policy: ThermalPolicy, command: Sequence[str]) -> int:
     _validate_pacing_scope_command(policy, command)
     verify_host_identity(policy)
     with PersistentThermalSampler(policy) as sampler:
-        return _supervise_with_sampler(policy, command, sampler)
+        preflight = _stable_preflight(policy, sampler.sample)
+        return _supervise_with_sampler(policy, command, sampler, preflight)
 
 
 def _supervise_with_sampler(
     policy: ThermalPolicy,
     command: Sequence[str],
     sampler: PersistentThermalSampler,
+    preflight: PreflightResult,
 ) -> int:
-    starting = sampler.sample()
-    _check_limits(starting, policy)
+    starting = preflight.ending
     _emit(
         "preflight",
         policy,
@@ -1184,9 +1206,9 @@ def _supervise_with_sampler(
         signum: signal.signal(signum, interrupt)
         for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
     }
-    peak_host = starting.host_millicelsius
-    peak_gpu = starting.gpu_millicelsius
-    samples = 1
+    peak_host = preflight.peak_host_millicelsius
+    peak_gpu = preflight.peak_gpu_millicelsius
+    samples = preflight.sample_count
     failure: ThermalGuardError | None = None
     handoff: HandoffResult
     try:

@@ -397,8 +397,11 @@ sole Windows/NVML probe owner and sends strict sequenced samples over an
 inherited pipe that the scope controller consumes and does not pass to the
 contained payload. The supervisor holds one exact-instance Windows
 `Thermal Zone Information` performance-counter process and one exact-UUID NVML
-handle for the complete lifecycle. It does not launch a new PowerShell/WMI
-query or `nvidia-smi` process at the one-second cadence. The Windows
+handle for the complete lifecycle. The Windows startup handshake reads the
+exact CPU name from the local-machine processor registry key; no CIM/WMI query
+is required. It does not launch a new PowerShell or `nvidia-smi` process at the
+one-second cadence. Before a child exists, a v2 policy requires three
+consecutive readings at or below its 75/70 C resume boundary. The Windows
 request/response channel binds a monotonically increasing sequence and exact
 four-counter schema; missing identity, malformed or reordered data, timeout,
 unexpected output, nonzero exit, or cleanup failure is fatal. Freeze and
@@ -647,6 +650,21 @@ server, and request work did not complete. This is pre-model counterevidence,
 not c1. Replace the remaining WMI identity read with an exact non-WMI source
 and admit a child only after the pacing-resume boundary is stable; do not
 change the thermal limits.
+
+The next source repair removes the fresh CPU-identity WMI query. The persistent
+Windows process reads the exact `ProcessorNameString` from
+`HKEY_LOCAL_MACHINE\HARDWARE\DESCRIPTION\System\CentralProcessor\0` and binds
+it into the same ready handshake as the exact thermal-zone/counter identity.
+Before any v2-policy child exists, the outer supervisor now requires the
+policy's three consecutive readings at or below the unchanged 75/70 C
+pacing-resume boundary. Pre-admission samples remain in outer count/peak
+evidence. Timeout, sensor failure, or a hard-limit sample rejects the launch.
+A dirty-source five-read probe observed host
+75.05/77.05/74.05/74.05/74.05 C and fixed 64 C GPU with clean sensor exit. An
+exact guarded no-op then admitted at 74.05/64 C, ran with zero scope pauses,
+removed the scope, and handed off at 74.05/64 C; its nine-sample outer peak
+retained the earlier 77.05 C reading. This is a boundary probe, not serving
+evidence. Push the repair before fixed c1.
 
 For the first Kiln campaign, use the exact UUID from
 `.environment.device.device_uuid` in the environment receipt, the matching

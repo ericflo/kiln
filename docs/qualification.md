@@ -167,16 +167,22 @@ owned user transient unit. A fresh WSL user manager can also omit
 0700 only after the runtime and `systemd` parents prove they are real
 directories owned by the current user and not group/world-writable. A symlink,
 wrong owner, writable parent, publication conflict, missing bus socket, or
-failed transient-unit proof aborts the case. Capability discovery reads the
-Windows `Win32_PerfFormattedData_Counters_ThermalZoneInformation` class once.
-Continuous supervision then opens one persistent Windows
-`Thermal Zone Information` performance-counter process, resolves exactly one
-`\_TZ.THRM` instance and all four expected counters, and exchanges bounded,
-strictly sequenced request/response records over pipes. Each sample
+failed transient-unit proof aborts the case. Continuous supervision opens one
+persistent Windows process. Its startup handshake reads the exact CPU name from
+`HKEY_LOCAL_MACHINE\HARDWARE\DESCRIPTION\System\CentralProcessor\0`,
+resolves exactly one `\_TZ.THRM` instance and all four expected
+`Thermal Zone Information` performance counters, and exchanges bounded,
+strictly sequenced request/response records over pipes. No CIM/WMI query is
+used during admission or continuous sampling. Each sample
 cross-checks whole- and tenth-Kelvin fields and converts the high-precision
 field to millicelsius. The GPU side holds one initialized NVML handle selected
 by exact UUID and reads temperature in process. It does not launch PowerShell,
-WMI, or `nvidia-smi` for every sample. The checked
+WMI, or `nvidia-smi` for every sample. Before launching a v2-policy child, the
+outer supervisor requires the configured three consecutive readings at or
+below the existing 75/70 C host/GPU pacing-resume thresholds. Pre-admission
+samples remain included in the outer sample count and peaks but are not sent
+to a scope that does not yet exist. Timeout or a hard-limit reading fails
+without launching the child. The checked
 `rtx4090-laptop-wsl2-boundary-v1` policy binds that source to the exact
 `Intel(R) Core(TM) Ultra 9 185H`, uses a 95 C hard limit below Intel's 110 C
 Tjunction, and independently binds the exact GPU UUID/name to an 85 C limit.
@@ -1322,6 +1328,26 @@ or below 75 C within the unchanged pause limit. This is pre-model
 counterevidence only. The next repair must remove the pre-sampler WMI
 CPU-identity query and require a stable pacing-resume boundary before child
 launch; do not weaken the policy.
+
+The follow-on source repair removes `_powershell_json` and its fresh
+`Get-CimInstance Win32_Processor` process entirely. The already-persistent
+Windows sensor process reads `ProcessorNameString` directly from the local
+machine registry, binds it in the exact ready record, and still resolves the
+same thermal instance/counters. With a v2 policy, outer supervision now waits
+for `pacing.resume_stable_samples` consecutive host/GPU readings at or below
+the existing resume thresholds before emitting `preflight`, creating the
+scope, or launching any child. Those wait samples contribute to the outer
+sample count and peak. Sensor failure, a hard-limit sample, or the unchanged
+300-second pacing timeout rejects admission without child work.
+
+A live dirty-source handshake read 75.05, 77.05, 74.05, 74.05, and 74.05 C
+host with a fixed 64 C GPU and exited without sensor residue. The exact guarded
+no-op then admitted at 74.05/64 C only after the stable boundary, completed
+with zero scope pauses, 51,108 of 59,376 allowed CPU microseconds, a
+13,934,592-byte/four-PID peak, zero memory/OOM events, scope removal, and a
+74.05/64 C handoff. Its outer record included all nine samples and the earlier
+77.05 C pre-admission peak. This proves only the repaired dirty-source
+admission and lifecycle. Commit and push before another exact c1 attempt.
 
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
