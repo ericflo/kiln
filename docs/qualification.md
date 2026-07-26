@@ -1568,6 +1568,50 @@ only the Chromium-dependent case unavailable; the 55-document/five-asset build
 and assembled static smoke pass. Commit and push this repair before the next
 exact c1 invocation; the performance and endurance gates remain open.
 
+The exact retry from clean pushed source
+`853374d4b65734612461164e47bebe90ce742c47` retained failed parent receipt
+`qualification/receipts/cuda/rtx4090-laptop/20260726t041101771428z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`
+with file
+`sha256:0fac3dbbe3d582373d6374cf3175569cbe70c9c26389b96bffccb52f969c3b66`.
+It passes structural, current-source, and local-artifact validation. Initial
+and final model fingerprints are identical, all 16 environment capabilities
+are available, and the cached CUDA build reproduced binary
+`sha256:38da3668a40b3df1b92c89c66cefbe7063665ab08357c1222445ba3fad36ac3e`.
+
+Driver v21 then proved the repaired owned lifecycle with a real request. The
+strict-valid passed nested receipt is
+`benchmarks/receipts/cuda/rtx4090-laptop/20260726t045839-cuda-rtx4090-laptop-c1-greedy-short-853374d4-v1.kiln.json`
+with file
+`sha256:af34bfb0490d548415aabbdb23e6cca5eb8e2a9e567a5bdb19b6bb716b082bdf`.
+The owned server waited through the bounded load, completed one warmup and one
+64-token measured request, peaked at 15,577,939,968 device-memory bytes below
+the 16.5 GB limit, accepted SIGTERM, exited zero without force in 0.354
+seconds, removed its private snapshot, drained its process group, and passed
+all final identity checks. Thermal freezes remain deliberately visible in
+client latency: measured TTFT was 526.8 ms, but p99 ITL and E2E were
+88,268.2 and 195,313.1 ms, leaving raw SLO goodput at zero. This profile-level
+receipt is retained evidence, not an accepted paired c1 result.
+
+The second Kiln profile reached full snapshot, 32-layer upload, and
+post-upload verification before outer scope authority rejected its 79th
+pacing interval. The scope completed 78 pauses totaling 2,474.186 seconds,
+but the final pause lasted 300.239 seconds and ended at 75.05 C, above the
+exact 75.00 C host-resume target. The scope used 302,311,575 of
+1,724,275,706 allowed CPU microseconds, reached the exact 10 GiB memory cap
+with 43,807 reclaim events, peaked at 68 PIDs, and recorded zero OOM,
+OOM-kill, or group-kill events. Host/GPU peaks were 92.05/67 C below the
+95/85 C hard limits; outer supervision handed off at 74.05/64 C and removed
+the scope. The timeout correctly prevented the campaign from producing its
+required case result or starting vLLM. It also interrupted the second owned
+server before graceful snapshot cleanup, so the temporary private snapshot
+required explicit post-run removal. Do not rerun this unchanged gate. Preserve
+the exact hard limits and first determine a fail-closed response to the
+host-counter's 0.05 C representable boundary and abrupt timeout cleanup.
+After retention, all 174 compact receipts, 54 detailed serving receipts, and
+17 oracle results validate. Nine of ten documentation-builder tests pass with
+only local Chromium unavailable; the 55-document/five-asset build and
+assembled static smoke pass.
+
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
 `sha256:2f34ab2dc62641d247306c9ce29d62c68e5c12b16cd326e2860ce00061a345ac`).
