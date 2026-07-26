@@ -1930,6 +1930,43 @@ oracle results validate. vLLM correctly did not start after the failed Kiln
 campaign. This counterevidence and repair do not accept c1, wider concurrency,
 endurance, native Linux, or desktop RTX 4090.
 
+The next exact retry ran from clean pushed repair source
+`55cbd5030115a6a87f72eb3c1afef6fa94f0f311`, source tree
+`sha256:98d6a83346233e5bb373387379529d27c632ac6836d573a3aab1cdebee108946`.
+It retained failed parent
+`qualification/receipts/cuda/rtx4090-laptop/20260726t173036289662z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`
+at
+`sha256:67767d6ddaa48073451455beb4da9554d60d8aab361b0b63593710d4f4e08503`.
+The receipt passes strict current-source, local-artifact, and known-commit
+validation, binds all 16 available WSL2 capabilities, and records identical
+initial/final model fingerprints at
+`sha256:31b656e8b4992a7dd56d31f0c4cf18fcb360601e69af4f538b780c40de585612`.
+The pinned Transformers 5.14.1 prompt preflight also passed all ten exact
+profiles with a 3,883-token maximum input, 3,947-token maximum total, and
+21-token minimum context headroom.
+
+The source build started with one job under the declared 10 GiB, zero-swap,
+50%-CPU scope. It rebuilt the changed `kiln-memory` owner and progressed through
+`kiln-tensor`, accelerator kernels, `kiln-model`, and `kiln-train`, but the
+outer guard then observed host temperature 95.05 C against the unchanged
+95.00 C hard limit. It terminated the build before publication or campaign
+launch. The 391.471-second case scope used
+89,890,721/195,735,360 CPU microseconds, peaked at 2,292,531,200 bytes and 47
+PIDs, recorded zero memory, OOM, OOM-kill, or group-kill events, and removed
+cleanly. All 57 authenticated pauses completed, totaling 298.102 seconds with
+a 12.052-second longest pause; the scope sampler peaked at 94.05/65 C before
+the next outer sample tripped at 95.05/65 C. Safe handoff completed at
+74.05/64 C with `supervision_outcome=thermal_trip`.
+
+No serving campaign, Kiln server, vLLM teacher, measured request, or detailed
+receipt started. Both independent fingerprint scopes returned zero, removed
+cleanly, and completed stable handoff. This is valid thermal counterevidence,
+not a software or performance failure and not permission to relax the hard
+limit. Retain and commit it, allow the host to cool, and retry the exact
+unchanged command from clean pushed source so Cargo can reuse the completed
+incremental objects. c1, wider concurrency, endurance, native Linux, and
+desktop RTX 4090 remain open.
+
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
 `sha256:2e81344e95637821046fd0dee2ff61495af6b91a5e728214975eeb7785507d63`).
