@@ -540,6 +540,114 @@ for _line in sys.stdin:
         ):
             thermal._stable_preflight(policy, lambda: current)
 
+    def test_closed_telemetry_reader_preserves_settled_child_exit(self) -> None:
+        policy = thermal.validate_policy(policy_document(pacing=True))
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.wait.return_value = 7
+        sampler = mock.Mock()
+        sampler.sample.side_effect = [
+            thermal.ThermalSample(0.1, 71_000, 60_000),
+            thermal.ThermalSample(0.2, 71_000, 60_000),
+            thermal.ThermalSample(0.3, 71_000, 60_000),
+        ]
+        preflight = thermal.PreflightResult(
+            ending=thermal.ThermalSample(0.0, 71_000, 60_000),
+            sample_count=1,
+            peak_host_millicelsius=71_000,
+            peak_gpu_millicelsius=60_000,
+        )
+        stderr = io.StringIO()
+        with mock.patch.object(
+            thermal.subprocess,
+            "Popen",
+            return_value=process,
+        ), mock.patch.object(
+            thermal,
+            "_send_telemetry_sample",
+            side_effect=[
+                None,
+                thermal.ThermalTelemetryClosed("fixture reader closed"),
+            ],
+        ), mock.patch.object(
+            thermal.time,
+            "sleep",
+        ), mock.patch.object(
+            thermal.signal,
+            "signal",
+            return_value=thermal.signal.SIG_DFL,
+        ), mock.patch(
+            "sys.stderr",
+            stderr,
+        ):
+            self.assertEqual(
+                thermal._supervise_with_sampler(
+                    policy,
+                    ["fixture"],
+                    sampler,
+                    preflight,
+                ),
+                7,
+            )
+        process.wait.assert_any_call(timeout=0.1)
+        events = [
+            json.loads(line.removeprefix("wsl2-thermal: "))
+            for line in stderr.getvalue().splitlines()
+        ]
+        self.assertEqual([item["event"] for item in events], ["preflight", "complete"])
+        self.assertEqual(events[-1]["supervision_outcome"], "child_exit")
+        self.assertEqual(events[-1]["child_returncode"], 7)
+
+    def test_closed_telemetry_reader_while_scope_is_live_fails_closed(self) -> None:
+        policy = thermal.validate_policy(policy_document(pacing=True))
+        process = mock.Mock()
+        process.poll.return_value = None
+
+        def wait(*, timeout: float | None = None) -> int:
+            if timeout is not None:
+                raise thermal.subprocess.TimeoutExpired("fixture", timeout)
+            return 3
+
+        process.wait.side_effect = wait
+        with mock.patch.object(
+            thermal,
+            "_send_telemetry_sample",
+            side_effect=thermal.ThermalTelemetryClosed("fixture reader closed"),
+        ):
+            with self.assertRaisesRegex(
+                thermal.ThermalTelemetryClosed,
+                "fixture reader closed",
+            ):
+                thermal._deliver_telemetry_or_settle_child_exit(
+                    process,
+                    1,
+                    policy,
+                    0,
+                    thermal.ThermalSample(0.0, 71_000, 60_000),
+                )
+        process.wait.assert_called_once_with(timeout=0.1)
+
+    def test_nonclosure_telemetry_failure_never_uses_exit_settlement(self) -> None:
+        policy = thermal.validate_policy(policy_document(pacing=True))
+        process = mock.Mock()
+        with mock.patch.object(
+            thermal,
+            "_send_telemetry_sample",
+            side_effect=thermal.ThermalGuardError("fixture partial write"),
+        ):
+            with self.assertRaisesRegex(
+                thermal.ThermalGuardError,
+                "fixture partial write",
+            ):
+                thermal._deliver_telemetry_or_settle_child_exit(
+                    process,
+                    1,
+                    policy,
+                    0,
+                    thermal.ThermalSample(0.0, 71_000, 60_000),
+                )
+        process.wait.assert_not_called()
+
     def test_trip_terminates_child_and_completes_safe_handoff(self) -> None:
         policy = thermal.validate_policy(policy_document())
         process = mock.Mock()

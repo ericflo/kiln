@@ -91,6 +91,8 @@ MAX_RUNTIME_CONTENT_PATH_METADATA_BYTES = 64 * 1024**2
 RUNTIME_CONTENT_PROBE_TIMEOUT_SECONDS = 600
 MIN_PROVENANCE_READ_MIB_PER_SECOND = _model_fingerprint.MIN_READ_MIB_PER_SECOND
 MAX_PROVENANCE_READ_MIB_PER_SECOND = _model_fingerprint.MAX_READ_MIB_PER_SECOND
+MAX_PROC_IDENTITY_BYTES = 4096
+MAX_LINUX_UID = 2**32 - 2
 
 IDENTITY_FIELDS = (
     "schema",
@@ -740,14 +742,81 @@ def _assert_no_symlink_components(path: Path, label: str) -> None:
             raise TeacherLaunchError(f"{label} must not traverse a symlink: {current}")
 
 
-def _trusted_snapshot_directory_owner(info: os.stat_result) -> bool:
-    return not hasattr(os, "getuid") or info.st_uid in {0, os.getuid()}
+def _bounded_ascii_file(path: Path) -> str | None:
+    try:
+        with path.open("rb") as handle:
+            payload = handle.read(MAX_PROC_IDENTITY_BYTES + 1)
+    except OSError:
+        return None
+    if len(payload) > MAX_PROC_IDENTITY_BYTES:
+        return None
+    try:
+        return payload.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+
+
+def _verified_remapped_namespace_overflow_uid(
+    *,
+    uid_map_path: Path = Path("/proc/self/uid_map"),
+    overflow_uid_path: Path = Path("/proc/sys/kernel/overflowuid"),
+) -> int | None:
+    if (
+        not hasattr(os, "getuid")
+        or os.getuid() != 0
+        or (hasattr(os, "geteuid") and os.geteuid() != 0)
+    ):
+        return None
+    uid_map = _bounded_ascii_file(uid_map_path)
+    overflow_text = _bounded_ascii_file(overflow_uid_path)
+    if uid_map is None or overflow_text is None:
+        return None
+    uid_map_lines = uid_map.splitlines()
+    overflow_lines = overflow_text.splitlines()
+    if len(uid_map_lines) != 1 or len(overflow_lines) != 1:
+        return None
+    fields = uid_map_lines[0].split()
+    overflow_field = overflow_lines[0].strip()
+    if (
+        len(fields) != 3
+        or any(re.fullmatch(r"[0-9]+", field) is None for field in fields)
+        or re.fullmatch(r"[0-9]+", overflow_field) is None
+    ):
+        return None
+    namespace_start, parent_start, length = (int(field) for field in fields)
+    overflow_uid = int(overflow_field)
+    if (
+        namespace_start != 0
+        or parent_start <= 0
+        or parent_start > MAX_LINUX_UID
+        or length != 1
+        or overflow_uid <= 0
+        or overflow_uid > MAX_LINUX_UID
+    ):
+        return None
+    return overflow_uid
+
+
+def _trusted_snapshot_directory_owner(
+    info: os.stat_result,
+    remapped_namespace_overflow_uid: int | None = None,
+) -> bool:
+    if not hasattr(os, "getuid"):
+        return True
+    trusted = {0, os.getuid()}
+    if (
+        remapped_namespace_overflow_uid is not None
+        and remapped_namespace_overflow_uid not in trusted
+    ):
+        trusted.add(remapped_namespace_overflow_uid)
+    return info.st_uid in trusted
 
 
 def _secure_private_root(path: Path, label: str) -> Path:
     absolute = Path(os.path.abspath(os.fspath(path.expanduser())))
     if absolute == Path(absolute.anchor):
         raise TeacherLaunchError(f"{label} must be a dedicated directory, not a filesystem root")
+    remapped_namespace_overflow_uid = _verified_remapped_namespace_overflow_uid()
     current = Path(absolute.anchor)
     final_created = False
     for part in absolute.parts[1:]:
@@ -772,7 +841,10 @@ def _secure_private_root(path: Path, label: str) -> Path:
             raise TeacherLaunchError(f"{label} must not traverse a symlink: {current}")
         if not stat.S_ISDIR(info.st_mode):
             raise TeacherLaunchError(f"{label} component is not a directory: {current}")
-        if not _trusted_snapshot_directory_owner(info):
+        if not _trusted_snapshot_directory_owner(
+            info,
+            remapped_namespace_overflow_uid,
+        ):
             raise TeacherLaunchError(
                 f"{label} ancestry has an untrusted owner: {current}"
             )

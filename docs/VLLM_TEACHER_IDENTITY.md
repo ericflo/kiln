@@ -34,7 +34,14 @@ remote teachers.
   validated and never changed by the launcher. Its ancestry must not be
   group/world writable unless the writable ancestor has sticky-directory
   rename protection, as `/tmp` normally does, and every component must be owned
-  by the launcher UID or root.
+  by the launcher UID or root. In a Linux user namespace whose exact UID map is
+  one non-identity `0 -> parent UID` entry of length one, the kernel reports
+  every unmapped ancestor owner as `/proc/sys/kernel/overflowuid`. The launcher
+  admits that exact overflow UID for ancestry only after bounded ASCII parsing
+  of both kernel files confirms this map. Identity maps, broader or multi-line
+  maps, malformed input, non-root real/effective UIDs, and invalid overflow
+  values retain the ordinary launcher-UID/root rule. The dedicated snapshot
+  root itself must still be owned by the launcher UID with mode `0700`.
 - Enough free bytes and inodes for a full copy plus bounded metadata headroom,
   even when the filesystem supports reflinks.
 
@@ -87,9 +94,12 @@ Every real launch also gets a fresh, empty vLLM runtime cache. The typed
 `~/.cache/kiln/vllm-runtime-caches`. The launcher creates a unique mode-0700
 `cache-<pid>-<nonce>` child, verifies the parent and child through open
 directory descriptors, and derives `VLLM_CACHE_ROOT` for the supervised vLLM
-process. An ambient `VLLM_CACHE_ROOT` is rejected with a pointer to the typed
-option. Model, adapter, snapshot, and cache roots must be separate and
-non-nested.
+process. The cache parent uses the same user-namespace ancestry rule as the
+snapshot parent, but both final parents and every generated child remain
+launcher-owned and private. Symlink, directory-type, writable-rename, anchor,
+and replacement checks are unchanged. An ambient `VLLM_CACHE_ROOT` is rejected
+with a pointer to the typed option. Model, adapter, snapshot, and cache roots
+must be separate and non-nested.
 
 The generated cache path is a nonce and is excluded from the inference digest.
 That is valid because the child is empty at spawn, is used only as output, is

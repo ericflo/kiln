@@ -1790,6 +1790,72 @@ receipts remain validation-compatible. Commit and push v23 before the next
 exact c1 retry; none of the evidence above is paired c1, wider-concurrency, or
 endurance acceptance.
 
+The exact retry from clean pushed source
+`909797a3029ca1ca57e5264ec099c80fc7e77c72` retained failed parent receipt
+`qualification/receipts/cuda/rtx4090-laptop/20260726t114347782372z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`
+with file
+`sha256:5b9fcd5c62cad7f26cfee319828bca07909de1993412a40e303878bfd473a983`.
+It passes structural, current-source, local-artifact, and known-commit
+validation. All 16 WSL2 capabilities were available, and the initial and final
+model fingerprints are identical at
+`sha256:31b656e8b4992a7dd56d31f0c4cf18fcb360601e69af4f538b780c40de585612`.
+
+Driver v23 closed its original blocker on hardware. All five Kiln profiles
+produced strict-valid passed receipts, including API-default with a readable
+log and clean unforced return-code-zero shutdown. Greedy, API-default,
+long-prefill, prefix-hit, and mixed completed their exact warmup and measured
+requests; mixed again allocated the fixed 130,023,424-byte KV pool on attempt
+one. The retained files use creation timestamps `20260726t121418`,
+`20260726t123418`, `20260726t130021`, `20260726t132537`, and
+`20260726t134327` with suffix
+`cuda-rtx4090-laptop-c1-<profile>-909797a3-v1.kiln.json`.
+
+The paired vLLM campaign then failed before cache creation, snapshot creation,
+model load, GPU allocation, readiness, or any request. Inside the runner's
+exact root-mapped namespace, `/proc/self/uid_map` is `0 1000 1`, while `/` and
+`/home` are reported as overflow UID 65534 rather than host root. The launcher
+therefore rejected `/home` as an untrusted runtime-cache ancestor. All five
+profile receipts are strict-valid failed counterevidence with the same
+86-byte log hash
+`sha256:4cd822431c1be93afa3afa446bdd9419e884c4fe0e3edfae97d72f83f8ecc158`,
+return code 2, zero completed runs, and passed repository, runtime-artifact,
+and model-identity finalization checks. Their retained creation timestamps are
+`20260726t135529`, `20260726t140626`, `20260726t141644`,
+`20260726t142649`, and `20260726t143742`, with suffix
+`cuda-rtx4090-laptop-c1-<profile>-909797a3-v1.vllm.json`.
+
+The 9,822.104-second case scope reached 10,737,639,424 bytes and 70 PIDs,
+recorded 197,765 `memory.max` events but zero OOM, OOM-kill, or group-kill
+events, completed 297 authenticated pauses totaling 3,626.796 seconds, and
+removed its cgroup. Host/GPU peaks were 94.05/68 C below the unchanged 95/85 C
+hard limits. A second teardown race then mislabeled ordinary controller
+closure: after the scope had emitted its complete record and closed the
+telemetry reader, the outer writer observed `EPIPE` while the scope process
+had not yet become waitable, recorded a false thermal trip, and replaced the
+contained status with exit 3. The independent final fingerprint scope still
+removed cleanly and completed stable handoff at 74.05/63 C.
+
+The corrective launcher admits the kernel overflow UID for ancestry only when
+bounded kernel-file reads prove real/effective namespace UID zero and one exact
+non-identity root mapping of length one. The final cache/snapshot parents still
+require current-UID ownership and exact mode `0700`; symlink, writable-rename,
+anchor, and replacement checks remain unchanged. A real
+`unshare --user --map-root-user` regression creates, verifies, and removes a
+private cache, and an exact-path probe created both laptop cache and snapshot
+parents as host UID 1000 at mode `0700`. The repaired launcher is
+`sha256:7ccafe17cde3f3db6cbf7d0abaccd6b07d3bd1a85a5d54fae72c409867a4540b`.
+
+The outer thermal repair recognizes only `EPIPE`, waits at most one poll
+interval capped at one second for the owned scope to exit, and then preserves
+that exact status. A live scope after the bound, every other write error, and a
+partial write still fail closed. A real pipe-close race retained child status
+7 with a normal `child_exit` handoff; focused tests separately prove the live
+scope and non-closure failure paths. The repaired outer supervisor is
+`sha256:de81cd6be93caaad846f51c9de3f67249dd140b1f3bc81c4fd0d5c58e8e28040`.
+These are source repairs and retained counterevidence, not c1 acceptance.
+Commit and push them before the next exact retry; paired c1, wider concurrency,
+endurance, native Linux, and desktop RTX 4090 remain open.
+
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
 `sha256:2e81344e95637821046fd0dee2ff61495af6b91a5e728214975eeb7785507d63`).

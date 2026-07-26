@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import signal
 import subprocess
 import struct
@@ -636,7 +637,9 @@ class ImmutableSnapshotTests(unittest.TestCase):
         finally:
             unsafe_parent.chmod(0o700)
 
-    def test_snapshot_ancestry_owner_must_be_current_user_or_root(self) -> None:
+    def test_snapshot_ancestry_owner_must_be_current_user_root_or_verified_overflow(
+        self,
+    ) -> None:
         if not hasattr(os, "getuid"):
             self.skipTest("POSIX ownership is required")
         self.assertTrue(
@@ -654,6 +657,97 @@ class ImmutableSnapshotTests(unittest.TestCase):
                 types.SimpleNamespace(st_uid=max(os.getuid(), 0) + 1000)
             )
         )
+        overflow_uid = 65_534
+        self.assertTrue(
+            vllm_teacher._trusted_snapshot_directory_owner(
+                types.SimpleNamespace(st_uid=overflow_uid),
+                overflow_uid,
+            )
+        )
+        self.assertFalse(
+            vllm_teacher._trusted_snapshot_directory_owner(
+                types.SimpleNamespace(st_uid=overflow_uid)
+            )
+        )
+
+    def test_overflow_owner_requires_exact_single_id_root_remap(self) -> None:
+        uid_map = self.base / "uid_map"
+        overflow_uid = self.base / "overflowuid"
+        cases = (
+            ("         0       1000          1\n", "65534\n", 65_534),
+            ("0 0 1\n", "65534\n", None),
+            ("0 1000 2\n", "65534\n", None),
+            ("0 1000 1\n1 1001 1\n", "65534\n", None),
+            ("not a map\n", "65534\n", None),
+            ("0 1000 1\n", "0\n", None),
+            ("0 1000 1\n", "65534 extra\n", None),
+            ("0" * (vllm_teacher.MAX_PROC_IDENTITY_BYTES + 1), "65534\n", None),
+        )
+        with mock.patch.object(vllm_teacher.os, "getuid", return_value=0), mock.patch.object(
+            vllm_teacher.os,
+            "geteuid",
+            return_value=0,
+        ):
+            for uid_map_text, overflow_text, expected in cases:
+                with self.subTest(uid_map=uid_map_text, overflow=overflow_text):
+                    uid_map.write_text(uid_map_text, encoding="ascii")
+                    overflow_uid.write_text(overflow_text, encoding="ascii")
+                    self.assertEqual(
+                        vllm_teacher._verified_remapped_namespace_overflow_uid(
+                            uid_map_path=uid_map,
+                            overflow_uid_path=overflow_uid,
+                        ),
+                        expected,
+                    )
+        with mock.patch.object(vllm_teacher.os, "getuid", return_value=1000):
+            self.assertIsNone(
+                vllm_teacher._verified_remapped_namespace_overflow_uid(
+                    uid_map_path=uid_map,
+                    overflow_uid_path=overflow_uid,
+                )
+            )
+
+    def test_private_cache_accepts_real_root_mapped_namespace_ancestry(self) -> None:
+        unshare = shutil.which("unshare")
+        if sys.platform != "linux" or unshare is None:
+            self.skipTest("Linux util-linux unshare is unavailable")
+        probe = subprocess.run(
+            [unshare, "--user", "--map-root-user", "true"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if probe.returncode != 0:
+            self.skipTest("unprivileged root-mapped user namespaces are unavailable")
+        cache_root = self.base / "mapped-runtime-caches"
+        code = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import vllm_teacher
+root = Path(sys.argv[2])
+cache = vllm_teacher.create_private_runtime_cache(root)
+cache.verify()
+cache.cleanup()
+assert list(root.iterdir()) == []
+"""
+        completed = subprocess.run(
+            [
+                unshare,
+                "--user",
+                "--map-root-user",
+                sys.executable,
+                "-c",
+                code,
+                str(MODULE_PATH.parent),
+                str(cache_root),
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_existing_nonprivate_snapshot_root_is_rejected_without_chmod(self) -> None:
         existing = self.base / "existing-root"

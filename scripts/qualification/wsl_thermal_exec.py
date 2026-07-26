@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import hashlib
 import json
 import math
@@ -31,6 +32,7 @@ POLICY_ENV = "KILN_WSL2_THERMAL_POLICY_SHA256"
 PACING_POLICY_ENV = "KILN_WSL2_CGROUP_THERMAL_PACING_POLICY_SHA256"
 TELEMETRY_FD_ENV = "KILN_WSL2_THERMAL_TELEMETRY_FD"
 TELEMETRY_SCHEMA = "kiln.wsl2-thermal-sample.v1"
+MAX_TELEMETRY_EXIT_SETTLEMENT_SECONDS = 1.0
 POWERSHELL = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
 NVIDIA_SMI = Path("/usr/lib/wsl/lib/nvidia-smi")
 NVIDIA_NVML = Path("/usr/lib/wsl/lib/libnvidia-ml.so.1")
@@ -209,6 +211,10 @@ PACING_KEYS = {
 
 class ThermalGuardError(RuntimeError):
     """The WSL2 thermal policy or live telemetry failed closed."""
+
+
+class ThermalTelemetryClosed(ThermalGuardError):
+    """The owned scope closed its telemetry reader while exiting."""
 
 
 @dataclass(frozen=True)
@@ -993,14 +999,45 @@ def _send_telemetry_sample(
     ).encode("ascii")
     try:
         written = os.write(descriptor, payload)
-    except (BlockingIOError, BrokenPipeError, OSError) as exc:
-        raise ThermalGuardError(
+    except OSError as exc:
+        error = (
+            ThermalTelemetryClosed
+            if exc.errno == errno.EPIPE
+            else ThermalGuardError
+        )
+        raise error(
             f"cannot deliver thermal telemetry to the scope controller: {exc}"
         ) from exc
     if written != len(payload):
         raise ThermalGuardError(
             "thermal telemetry pipe accepted only a partial sample"
         )
+
+
+def _deliver_telemetry_or_settle_child_exit(
+    process: subprocess.Popen[Any],
+    descriptor: int,
+    policy: ThermalPolicy,
+    sequence: int,
+    value: ThermalSample,
+) -> bool:
+    try:
+        _send_telemetry_sample(descriptor, policy, sequence, value)
+    except ThermalTelemetryClosed as exc:
+        settlement_seconds = min(
+            policy.poll_interval_ms / 1000.0,
+            MAX_TELEMETRY_EXIT_SETTLEMENT_SECONDS,
+        )
+        try:
+            process.wait(timeout=settlement_seconds)
+        except subprocess.TimeoutExpired:
+            raise exc
+        except (OSError, subprocess.SubprocessError) as wait_exc:
+            raise ThermalGuardError(
+                f"{exc}; cannot settle the owned scope exit: {wait_exc}"
+            ) from wait_exc
+        return False
+    return True
 
 
 def _check_limits(value: ThermalSample, policy: ThermalPolicy) -> None:
@@ -1231,7 +1268,8 @@ def _supervise_with_sampler(
     telemetry_sequence = 0
     if telemetry_write_fd is not None:
         try:
-            _send_telemetry_sample(
+            _deliver_telemetry_or_settle_child_exit(
+                process,
                 telemetry_write_fd,
                 policy,
                 telemetry_sequence,
@@ -1277,15 +1315,17 @@ def _supervise_with_sampler(
             telemetry_sequence += 1
             if telemetry_write_fd is not None:
                 try:
-                    _send_telemetry_sample(
+                    delivered = _deliver_telemetry_or_settle_child_exit(
+                        process,
                         telemetry_write_fd,
                         policy,
                         telemetry_sequence,
                         current,
                     )
                 except ThermalGuardError as exc:
-                    if process.poll() is None:
-                        failure = exc
+                    failure = exc
+                    break
+                if not delivered:
                     break
         if failure is not None:
             _emit("trip", policy, reason=str(failure))

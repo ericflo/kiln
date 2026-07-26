@@ -2416,6 +2416,56 @@ without waiting for the remaining repository-wide cleanup phases.
   exceptions, retries only bounded transient `fsync` errors, and surfaces the
   original finalization failure before schema validation if complete lifecycle
   evidence is impossible. Historical v22 validation remains unchanged.
+  The exact retry from clean pushed source
+  `909797a3029ca1ca57e5264ec099c80fc7e77c72` retained failed parent receipt
+  `qualification/receipts/cuda/rtx4090-laptop/20260726t114347782372z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`
+  with file
+  `sha256:5b9fcd5c62cad7f26cfee319828bca07909de1993412a40e303878bfd473a983`.
+  It is strict current-source/local-artifact/known-commit valid, binds all 16
+  available WSL2 capabilities, and has identical initial/final model
+  fingerprints at
+  `sha256:31b656e8b4992a7dd56d31f0c4cf18fcb360601e69af4f538b780c40de585612`.
+  Driver v23 closed its original hardware blocker: all five Kiln profiles,
+  including API-default, retained strict-valid passed receipts with readable
+  logs and clean unforced return-code-zero shutdowns. Their timestamps are
+  `20260726t121418`, `20260726t123418`, `20260726t130021`,
+  `20260726t132537`, and `20260726t134327`, followed by the profile,
+  `909797a3`, and `.kiln.json`.
+  Every paired vLLM profile then failed before cache/snapshot creation, model
+  load, GPU allocation, readiness, or a request. The exact runner namespace
+  maps `0 -> 1000` for length one, so host-root `/` and `/home` appear as
+  overflow UID 65534; the launcher rejected `/home` as an untrusted cache-root
+  ancestor. Five strict-valid failed receipts at timestamps
+  `20260726t135529`, `20260726t140626`, `20260726t141644`,
+  `20260726t142649`, and `20260726t143742` retain the identical 86-byte error
+  log hash
+  `sha256:4cd822431c1be93afa3afa446bdd9419e884c4fe0e3edfae97d72f83f8ecc158`,
+  return code two, zero runs, and passed repository/runtime/model finalization.
+  The 9,822.104-second case scope peaked at 10,737,639,424 bytes/70 PIDs,
+  recorded 197,765 memory-limit events but zero OOM events, completed 297
+  authenticated pauses totaling 3,626.796 seconds under 94.05/68 C peaks, and
+  removed cleanly.
+  That completion also exposed an outer teardown race: after the scope emitted
+  its complete record and closed the thermal pipe reader, one final writer
+  sample observed `EPIPE` before the process became waitable, misclassified
+  normal channel closure as a thermal trip, and returned three. The independent
+  final fingerprint and stable handoff still passed.
+  The launcher repair accepts the kernel overflow UID for ancestry only after
+  bounded ASCII reads prove real/effective UID zero, one exact non-identity
+  root mapping of length one, and a valid overflow value. Final cache/snapshot
+  parents remain current-UID mode `0700`; symlink, writable-rename, anchor, and
+  replacement checks are unchanged. A real root-mapped namespace regression
+  and exact laptop-path probe pass. The repaired launcher is
+  `sha256:7ccafe17cde3f3db6cbf7d0abaccd6b07d3bd1a85a5d54fae72c409867a4540b`.
+  The thermal repair recognizes only `EPIPE`, waits no more than the poll
+  cadence capped at one second for the owned scope to exit, and preserves its
+  status. A live scope after that bound, any other write error, partial writes,
+  and thermal limits remain fatal. The repaired outer supervisor is
+  `sha256:de81cd6be93caaad846f51c9de3f67249dd140b1f3bc81c4fd0d5c58e8e28040`.
+  Focused unit tests and a real pipe-close race returning child status seven
+  pass. Commit and push these two source repairs before another exact c1
+  attempt; the current evidence does not accept c1, wider concurrency,
+  endurance, native Linux, or desktop RTX 4090.
 - [ ] Run serving performance at every concurrency that fits without changing
   the workload semantics.
 - [ ] Run an 8-hour mixed-load soak. The source-bound
@@ -4813,6 +4863,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-26 | Closed prompt-context and fresh initial KV admission | this source | this corrective source checkpoint | driver-v22 prompt-template versioning, exact pinned-tokenizer c1 preflight, version-aware historical receipt validation, synchronous selected-device governor refresh at initial KV admission, exact workload/docs/site bindings; no accepted c1, paired vLLM comparison, wider concurrency, endurance, native-Linux, or desktop-4090 claim | driver `sha256:413ef7cee0ab8bc8b97975603418cf63953b1ae1370995f51c05196f3edb3d4e`; prompt checker `sha256:2b17c4a3f77ed026fa999935dc2de89f0b99a2f86155ecb8d4ff4130050d3c85`; c1 runner `sha256:22dd57aa782926a2e99623fcf293d434e9800db507ee8e59afd00e0a70334eb9`; device-memory owner `sha256:ac32234c7ef135112552c4a60d95114d6aa592c25ba71ab1c0849f60fdc9f91b`; unchanged-size state owner `sha256:65a910f9b6de289176d3342a56af35ee0f7924cdacbea3b15503b3c4a4077437`; c1 workload `sha256:0ed551b72953d4889665918c07347ec0c05959026357f58ee5de82bdb6e14cba`; pinned Transformers 5.14.1 live check of 10 exact prompts with 3,883-token input maximum, 3,947-token total maximum, and 21-token minimum headroom; focused Python and Rust regressions; 844/844 qualification tests; all 27 workloads, 175 compact receipts, 59 detailed receipts, and 17 oracle results valid; retained parent local artifacts valid; production file-budget cap preserved; 9/10 documentation-builder tests with only Chromium unavailable; 55-document/five-asset validation, build, and assembled static smoke; Rust/Python/JSON/diff hygiene | portable and local-tokenizer corrective gates passed; clean commit/push and exact c1 retry required | Template v2 reduces the shared long block from 64 to 61 repetitions and fails before build unless the exact tokenizer/template identities and every c1 prompt remain within the unchanged 3,968-token context including output reserve. Historical v1 hashes remain computed with 64 repetitions. The retained mixed-profile failure came from a cached governor observation aging past five seconds during model upload plus the blocking all-process residency probe while outer pacing could freeze the sampler; it was not allocator exhaustion. Initial KV admission now synchronously refreshes the selected-device governor before combining it with fresh allocator and host-backed budgets, while failed or unhealthy probes remain fail-closed. The 62 KV blocks, one-GiB floor, memory fraction, output length, thermal policy, resource limits, and acceptance thresholds are unchanged. This checkpoint repairs the known blockers but is not hardware acceptance. |
 
 | 2026-07-26 | Driver-v22 RTX 4090 Laptop prompt/KV proof and lifecycle-receipt rejection | exact clean pushed source `bf1b385fd1c6da1df266e296014b73660ffa7c1f`; source tree `sha256:895d56b578b36dcf63b122141f49a755b3ea4d37713315f5dff5076e58e6ce78` | this retained counterevidence plus driver-v23 finalizer checkpoint | one exact c1 attempt through initial/final fingerprints, all environment probes, cached current-source CUDA artifact, five terminal Kiln profiles, four complete passed receipts, exact context-ceiling and fresh-governor hardware proof, failed lifecycle serialization, final cleanup, and portable finalizer correction; no paired c1, vLLM comparison, wider concurrency, endurance, native-Linux, or desktop-4090 claim | known-commit/local-artifact valid failed parent `20260726t085636979438z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json` (file `sha256:576c984840992e67279c215f69cf84200cbfae1a227826b31721d1434f52ad8d`); strict-valid passed detailed greedy/long/prefix/mixed files at `sha256:d918a7d3c0e3889a7bf6649b790726959c02a5f99cadeb076e6392fd93f9ceb3`, `sha256:61488ee16725e443de5a85b9f303446177230f41a48ab4919176324e39418b6e`, `sha256:41d512d3a69728756ca707aba9398b3813f3251cd9668a57edec627cfa67f5dc`, and `sha256:20519abd5f4aeecc7f242b01920317f208d221372147a0b23cb6262beeafbdea`; identical initial/final model fingerprint; all 16 capabilities; zero OOM events; exact 10 GiB/69-PID case peaks; 371/371 pauses; clean scope removal and handoff; driver-v23 shutdown/log failure-evidence regressions; 72/72 benchmark tests and 847/847 qualification tests; all 63 detailed receipts valid | prompt-context and live initial-KV blockers passed on hardware; aggregate c1 rejected because API-default lifecycle evidence was not serialized, so vLLM correctly did not start | Long-prefill completed 3,876+64 tokens and prefix-hit completed 3,883+64 under the unchanged 3,968-token KV context. Mixed refreshed the selected governor to 2.2607 GB free/1.1870 GB available and allocated 130,023,424 bytes on attempt one. Greedy, long, prefix, and mixed stayed below 16.5 GB and shut down unforced with return code zero. API-default likewise completed 64 tokens and its log proves a clean drain, but the swallowed finalizer exception left no log object and the schema error masked the cause. Driver v23 independently finalizes shutdown/log evidence, carries conservative failure artifacts, retries only explicitly transient log-sync errors, and reports the original cause when serialization is impossible. Exact clean-source c1 must be rerun from the pushed v23 checkpoint. |
+
+| 2026-07-26 | Driver-v23 five-profile proof and remapped-namespace teardown repair | exact clean pushed source `909797a3029ca1ca57e5264ec099c80fc7e77c72` plus this corrective source | this retained counterevidence and WSL2/vLLM boundary checkpoint | one exact c1 attempt through both model fingerprints, all environment probes, cached current-source CUDA artifact, five passed Kiln profiles, five fail-closed vLLM launch attempts, complete resource/thermal cleanup, root-mapped ancestry correction, and outer telemetry-exit settlement; no paired c1, wider concurrency, endurance, native-Linux, or desktop-4090 claim | strict current-source/local-artifact/known-commit valid failed parent `20260726t114347782372z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json` (file `sha256:5b9fcd5c62cad7f26cfee319828bca07909de1993412a40e303878bfd473a983`); five strict-valid passed driver-v23 Kiln receipts including API-default and five strict-valid failed vLLM receipts; identical initial/final model fingerprint; all 16 capabilities; 9,822.104-second case scope at 10,737,639,424-byte/70-PID peaks, 197,765 memory-limit events, zero OOM events, 297/297 pauses totaling 3,626.796 seconds, 94.05/68 C peaks, and scope removal; repaired teacher `sha256:7ccafe17cde3f3db6cbf7d0abaccd6b07d3bd1a85a5d54fae72c409867a4540b`; repaired outer supervisor `sha256:de81cd6be93caaad846f51c9de3f67249dd140b1f3bc81c4fd0d5c58e8e28040`; 93/93 focused and 852/852 complete qualification tests; all 27 workloads, 177 compact receipts, 73 detailed receipts, and 17 oracle results valid; real root-mapped exact-path cache/snapshot probe; real telemetry pipe-close race preserving child status seven; 9/10 docs-builder tests with only Chromium unavailable; 55-document/five-asset build and assembled static smoke; Python compilation and diff hygiene | driver-v23 lifecycle proof passed on hardware; paired c1 rejected before vLLM load on overflow-owner ancestry, with a second false outer `EPIPE` trip after scope completion; both portable/live repairs pass and require clean commit/push before exact retry | All Kiln profiles completed warmup and measurement below the device-memory ceiling, emitted readable lifecycle logs, shut down unforced with return code zero, and removed their private snapshots. Inside the exact `0 -> 1000, length 1` user namespace, host-root `/` and `/home` appear as overflow UID 65534, so all vLLM attempts stopped before cache/snapshot creation or GPU work. The launcher now accepts that UID for ancestry only after strict bounded kernel-map verification while keeping final roots current-UID mode `0700` and every symlink/rename/anchor check. The outer supervisor recognizes only `EPIPE` and only when the owned scope exits within one poll interval capped at one second; live or differently failed channels remain fatal. This checkpoint clears neither c1 nor any later performance/endurance item. |
 
 ## Known Starting Defects
 

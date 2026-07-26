@@ -859,6 +859,17 @@ evidence cannot be serialized after catastrophic cleanup, the driver surfaces
 the original finalization detail before schema validation. Historical v22
 receipts keep their original lifecycle contract.
 
+The WSL2 outer supervisor owns a nonblocking thermal-sample pipe into the
+resource-scope controller. Closing that pipe before the scope exits is still a
+hard loss of pacing authority. One narrower teardown case is not a thermal
+trip: if a sample write fails specifically with `EPIPE`, the outer supervisor
+waits no longer than the configured poll cadence and never more than one second
+for the owned scope process to exit, then preserves its exact status. A live
+scope after that interval fails closed. `EAGAIN`, other write errors, partial
+writes, hard-limit samples, and invalid telemetry never enter this settlement
+path. This keeps thermal protection continuous through work while avoiding a
+false trip after the scope has already completed and closed its reader.
+
 ## Workload Matrix
 
 The fixed profiles are:
