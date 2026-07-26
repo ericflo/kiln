@@ -91,6 +91,56 @@ class CudaPerformanceTests(unittest.TestCase):
         self.assertIn(str(performance.VLLM_LAUNCH), vllm)
         self.assertEqual(vllm[-2:], ["--reference-dir", str(output)])
 
+    def test_prompt_context_check_uses_the_closed_c1_contract(self) -> None:
+        model = ROOT / ".qualification/model"
+        command = performance.prompt_context_check_command(model)
+        self.assertEqual(command[0], str(performance.VLLM_PYTHON))
+        self.assertEqual(command[1], str(performance.PROMPT_CONTEXT_CHECKER))
+        self.assertIn(",".join(performance.PROFILES), command)
+        self.assertIn(str(performance.KILN_CONTEXT_CEILING_TOKENS), command)
+        self.assertIn(str(performance.PROMPT_CONTEXT_MAX_PROMPT_TOKENS), command)
+
+        record = {
+            "schema": "kiln.serving-prompt-context-check.v1",
+            "verdict": "passed",
+            "driver_version": performance.bench.DRIVER_VERSION,
+            "prompt_template_version": performance.bench.PROMPT_TEMPLATE_VERSION,
+            "context_ceiling_tokens": performance.KILN_CONTEXT_CEILING_TOKENS,
+            "max_tokens": performance.MAX_TOKENS,
+            "max_prompt_tokens": performance.PROMPT_CONTEXT_MAX_PROMPT_TOKENS,
+            "max_total_tokens": (
+                performance.KILN_CONTEXT_CEILING_TOKENS
+                - performance.PROMPT_CONTEXT_MIN_HEADROOM_TOKENS
+            ),
+            "minimum_headroom_tokens": (
+                performance.PROMPT_CONTEXT_MIN_HEADROOM_TOKENS
+            ),
+            "profiles": list(performance.PROFILES),
+            "sizes": list(performance.SIZE_VALUES),
+            "tokenizer_sha256": performance.TOKENIZER_SHA256,
+            "chat_template_sha256": performance.CHAT_TEMPLATE_SHA256,
+            "checked_prompt_count": 10,
+            "transformers_version": "fixture",
+        }
+        completed = mock.Mock(
+            returncode=0,
+            stdout=json.dumps(record).encode("utf-8"),
+            stderr=b"",
+        )
+        with mock.patch.object(
+            performance.Path, "is_symlink", return_value=False
+        ), mock.patch.object(
+            performance.Path, "is_file", return_value=True
+        ), mock.patch.object(
+            performance.os, "access", return_value=True
+        ), mock.patch.object(
+            performance.subprocess, "run", return_value=completed
+        ):
+            observed = performance.run_prompt_context_check(
+                model, performance.time.monotonic() + 30.0
+            )
+        self.assertEqual(observed, record)
+
     def test_build_uses_the_closed_delegated_cuda_command(self) -> None:
         binary = performance.ROOT / "target/release/kiln"
         process = mock.Mock()

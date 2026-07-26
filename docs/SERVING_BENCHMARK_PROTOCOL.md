@@ -866,9 +866,19 @@ latency, request throughput, output-token throughput, SLO goodput, dispatch
 spread, prompt/output hashes, whole-device memory, failures, and Kiln server-route
 diagnostics.
 
+Prompt template `fixed-serving-profiles-v2` uses 61 copies of the shared
+long-prompt block. The source-bound RTX 4090 Laptop c1 handoff renders every
+warmup and measured prompt through the exact pinned tokenizer and chat template
+before build or server startup. It requires a maximum of 3,883 input tokens and
+3,947 total tokens after the 64-token output reserve, leaving 21 tokens below
+the declared 3,968-token KV context. Tokenizer, template, driver, and prompt
+template identities are part of the effective workload. Historical
+`fixed-serving-profiles-v1` receipts retain their original 64-block prompt
+identity and validation.
+
 ## Device-Memory Telemetry
 
-Drivers v19 and v20 sample whole-device used memory through one typed source. This is
+Drivers v19 and later sample whole-device used memory through one typed source. This is
 the same scope for both supported mechanisms: it is not per-process memory and
 therefore includes other users of the selected accelerator. Qualification
 machines must be quiescent enough that the recorded baseline and peak delta are

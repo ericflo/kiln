@@ -77,6 +77,19 @@ VLLM_RUNTIME_MANIFEST = (
     ROOT / "qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json"
 )
 CAMPAIGN_RUNNER = ROOT / "scripts/run-serving-benchmark-campaign.py"
+PROMPT_CONTEXT_CHECKER = (
+    ROOT / "scripts/qualification/check_serving_prompt_context.py"
+)
+VLLM_PYTHON = ROOT / ".qualification/vllm-cuda-venv/bin/python-kiln"
+KILN_CONTEXT_CEILING_TOKENS = 62 * 64
+PROMPT_CONTEXT_MAX_PROMPT_TOKENS = 3_883
+PROMPT_CONTEXT_MIN_HEADROOM_TOKENS = 21
+TOKENIZER_SHA256 = (
+    "sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
+)
+CHAT_TEMPLATE_SHA256 = (
+    "sha256:a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+)
 KILN_LAUNCH_SHA256 = (
     "sha256:2d351c605bb0da71dde85521b6a0a4546fb9990a7f0c45f84f926dcb157f344d"
 )
@@ -152,6 +165,11 @@ EFFECTIVE_CONFIG: dict[str, Any] = {
             MODEL_FINGERPRINT_READ_MIB_PER_SECOND
         ),
         "output_evidence": "hashes",
+        "prompt_context_ceiling_tokens": KILN_CONTEXT_CEILING_TOKENS,
+        "prompt_context_max_prompt_tokens": PROMPT_CONTEXT_MAX_PROMPT_TOKENS,
+        "prompt_context_min_headroom_tokens": PROMPT_CONTEXT_MIN_HEADROOM_TOKENS,
+        "prompt_template_version": bench.PROMPT_TEMPLATE_VERSION,
+        "prompt_tokenizer_sha256": TOKENIZER_SHA256,
         "profiles": {
             f"profile_{index}": profile
             for index, profile in enumerate(PROFILES)
@@ -262,6 +280,120 @@ def git_commit() -> str:
     if completed.returncode != 0 or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         raise mixed.QualificationError("cannot bind the performance run to HEAD")
     return commit
+
+
+def prompt_context_check_command(model_path: Path) -> list[str]:
+    return [
+        str(VLLM_PYTHON),
+        str(PROMPT_CONTEXT_CHECKER),
+        "--model-path",
+        str(model_path),
+        "--prompt-set-id",
+        PROMPT_SET_ID,
+        "--profiles",
+        ",".join(PROFILES),
+        "--sizes",
+        SIZES,
+        "--repeats",
+        str(REPEATS),
+        "--warmup-requests",
+        str(WARMUP_REQUESTS),
+        "--max-tokens",
+        str(MAX_TOKENS),
+        "--context-ceiling",
+        str(KILN_CONTEXT_CEILING_TOKENS),
+        "--expected-max-prompt-tokens",
+        str(PROMPT_CONTEXT_MAX_PROMPT_TOKENS),
+    ]
+
+
+def run_prompt_context_check(model_path: Path, deadline: float) -> dict[str, Any]:
+    if (
+        VLLM_PYTHON.is_symlink()
+        or not VLLM_PYTHON.is_file()
+        or not os.access(VLLM_PYTHON, os.X_OK)
+    ):
+        raise mixed.QualificationError(
+            f"prompt context checker interpreter is unavailable: {VLLM_PYTHON}"
+        )
+    remaining = max(0.001, deadline - time.monotonic())
+    try:
+        completed = subprocess.run(
+            prompt_context_check_command(model_path),
+            cwd=ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=min(120.0, remaining),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise mixed.QualificationError(
+            "serving prompt context check exceeded its bounded startup deadline"
+        ) from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise mixed.QualificationError(
+            f"serving prompt context check returned {completed.returncode}: {detail}"
+        )
+    try:
+        record = strict_json_loads(completed.stdout)
+    except Exception as exc:
+        raise mixed.QualificationError(
+            f"serving prompt context check emitted invalid JSON: {exc}"
+        ) from exc
+    expected_keys = {
+        "chat_template_sha256",
+        "checked_prompt_count",
+        "context_ceiling_tokens",
+        "driver_version",
+        "max_prompt_tokens",
+        "max_tokens",
+        "max_total_tokens",
+        "minimum_headroom_tokens",
+        "profiles",
+        "prompt_template_version",
+        "schema",
+        "sizes",
+        "tokenizer_sha256",
+        "transformers_version",
+        "verdict",
+    }
+    if not isinstance(record, dict) or set(record) != expected_keys:
+        raise mixed.QualificationError("serving prompt context check schema drifted")
+    expected = {
+        "schema": "kiln.serving-prompt-context-check.v1",
+        "verdict": "passed",
+        "driver_version": bench.DRIVER_VERSION,
+        "prompt_template_version": bench.PROMPT_TEMPLATE_VERSION,
+        "context_ceiling_tokens": KILN_CONTEXT_CEILING_TOKENS,
+        "max_tokens": MAX_TOKENS,
+        "max_prompt_tokens": PROMPT_CONTEXT_MAX_PROMPT_TOKENS,
+        "max_total_tokens": KILN_CONTEXT_CEILING_TOKENS
+        - PROMPT_CONTEXT_MIN_HEADROOM_TOKENS,
+        "minimum_headroom_tokens": PROMPT_CONTEXT_MIN_HEADROOM_TOKENS,
+        "profiles": list(PROFILES),
+        "sizes": list(SIZE_VALUES),
+        "tokenizer_sha256": TOKENIZER_SHA256,
+        "chat_template_sha256": CHAT_TEMPLATE_SHA256,
+    }
+    for name, value in expected.items():
+        if record.get(name) != value:
+            raise mixed.QualificationError(
+                f"serving prompt context check {name} drifted: "
+                f"{record.get(name)!r}, expected {value!r}"
+            )
+    if (
+        isinstance(record["checked_prompt_count"], bool)
+        or not isinstance(record["checked_prompt_count"], int)
+        or record["checked_prompt_count"] <= 0
+        or not isinstance(record["transformers_version"], str)
+        or not record["transformers_version"]
+    ):
+        raise mixed.QualificationError(
+            "serving prompt context check returned malformed positive evidence"
+        )
+    return record
 
 
 def build_environment(source: dict[str, str]) -> dict[str, str]:
@@ -728,9 +860,11 @@ def execute(
         raise mixed.QualificationError(
             f"refusing to reuse performance artifact directory {output_root}"
         )
+    deadline = time.monotonic() + CASE_TIMEOUT_SECONDS
+    prompt_context = run_prompt_context_check(model_path, deadline)
+    mixed.trace("cuda_performance_prompt_context_checked", **prompt_context)
     kiln_directory = output_root / "kiln"
     vllm_directory = output_root / "vllm"
-    deadline = time.monotonic() + CASE_TIMEOUT_SECONDS
     (
         binary,
         binary_sha256,

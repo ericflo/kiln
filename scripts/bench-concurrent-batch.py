@@ -40,7 +40,7 @@ from typing import Any, Callable, Iterable
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "21"
+DRIVER_VERSION = "22"
 SUPPORTED_DRIVER_VERSIONS = {
     "2",
     "3",
@@ -61,57 +61,60 @@ SUPPORTED_DRIVER_VERSIONS = {
     "18",
     "19",
     "20",
+    "21",
     DRIVER_VERSION,
 }
 THERMAL_DRIVER_VERSIONS = {
     "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", "19", "20", DRIVER_VERSION,
+    "16", "17", "18", "19", "20", "21", DRIVER_VERSION,
 }
 LIFECYCLE_DRIVER_VERSIONS = {
     "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", "19", "20", DRIVER_VERSION,
+    "16", "17", "18", "19", "20", "21", DRIVER_VERSION,
 }
 PRELAUNCH_DRIVER_VERSIONS = {
     "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", "19", "20", DRIVER_VERSION,
+    "16", "17", "18", "19", "20", "21", DRIVER_VERSION,
 }
 OUTPUT_EVIDENCE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", DRIVER_VERSION,
+    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", DRIVER_VERSION,
 }
 MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {
-    "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", DRIVER_VERSION,
+    "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", DRIVER_VERSION,
 }
 RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS = {
-    "12", "13", "14", "15", "16", "17", "18", "19", "20", DRIVER_VERSION,
+    "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", DRIVER_VERSION,
 }
 ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", DRIVER_VERSION,
+    "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", DRIVER_VERSION,
 }
 ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", DRIVER_VERSION,
+    "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", DRIVER_VERSION,
 }
 REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", DRIVER_VERSION,
+    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", DRIVER_VERSION,
 }
 IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS = {
-    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", DRIVER_VERSION,
+    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", DRIVER_VERSION,
 }
-COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", "15", "16", "17", "18", "19", "20", DRIVER_VERSION}
-MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", "15", "16", "17", "18", "19", "20", DRIVER_VERSION}
-REQUEST_PERFORMANCE_DRIVER_VERSIONS = {"15", "16", "17", "18", "19", "20", DRIVER_VERSION}
-PROMPT_SET_IDENTITY_DRIVER_VERSIONS = {"16", "17", "18", "19", "20", DRIVER_VERSION}
-GRAPH_PARITY_DRIVER_VERSIONS = {"17", "18", "19", "20", DRIVER_VERSION}
-REFERENCE_ROLE_DRIVER_VERSIONS = {"17", "18", "19", "20", DRIVER_VERSION}
-ACTOR_ONLY_DIAGNOSTICS_DRIVER_VERSIONS = {"18", "19", "20", DRIVER_VERSION}
-TYPED_MEMORY_SOURCE_DRIVER_VERSIONS = {"19", "20", DRIVER_VERSION}
-EXTERNAL_WSL2_THERMAL_DRIVER_VERSIONS = {"20", DRIVER_VERSION}
+COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", "15", "16", "17", "18", "19", "20", "21", DRIVER_VERSION}
+MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", "15", "16", "17", "18", "19", "20", "21", DRIVER_VERSION}
+REQUEST_PERFORMANCE_DRIVER_VERSIONS = {"15", "16", "17", "18", "19", "20", "21", DRIVER_VERSION}
+PROMPT_SET_IDENTITY_DRIVER_VERSIONS = {"16", "17", "18", "19", "20", "21", DRIVER_VERSION}
+GRAPH_PARITY_DRIVER_VERSIONS = {"17", "18", "19", "20", "21", DRIVER_VERSION}
+REFERENCE_ROLE_DRIVER_VERSIONS = {"17", "18", "19", "20", "21", DRIVER_VERSION}
+ACTOR_ONLY_DIAGNOSTICS_DRIVER_VERSIONS = {"18", "19", "20", "21", DRIVER_VERSION}
+TYPED_MEMORY_SOURCE_DRIVER_VERSIONS = {"19", "20", "21", DRIVER_VERSION}
+EXTERNAL_WSL2_THERMAL_DRIVER_VERSIONS = {"20", "21", DRIVER_VERSION}
 REFERENCE_ROLES = {
     "qualification_gate",
     "same_artifact_graph_eager_discriminator",
 }
 OUTPUT_EVIDENCE_MAX_UTF8_BYTES_PER_REQUEST = 1024 * 1024
 LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
-PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v1"
+FIXED_PROMPT_TEMPLATE_VERSION_V1 = "fixed-serving-profiles-v1"
+PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v2"
+FIXED_PROMPT_TEMPLATE_V2_DRIVER_VERSIONS = {"22", DRIVER_VERSION}
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -209,7 +212,10 @@ LONG_PROMPT_BLOCK = (
     "and teardown while retaining errors and tail latency. Shared prefixes exercise cache "
     "reuse only when every byte before the unique suffix is identical. "
 )
-LONG_PROMPT_REPETITIONS = 64
+LONG_PROMPT_REPETITIONS_V1 = 64
+# Qwen3.5 tokenizes each block to 61 tokens. Sixty-one repetitions keep the
+# longest fixed c1 prompt plus 64 output tokens inside the 62x64-token KV pool.
+LONG_PROMPT_REPETITIONS = 61
 
 PROMPT_MARKERS = (
     "amber",
@@ -4301,11 +4307,12 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
     if driver_version in PROMPT_SET_IDENTITY_DRIVER_VERSIONS:
         workload_keys.add("prompt_set_id")
     _exact_keys(workload, workload_keys, "receipt.workload")
-    expected_template = (
-        PROMPT_TEMPLATE_VERSION
-        if driver_version in THERMAL_DRIVER_VERSIONS
-        else LEGACY_PROMPT_TEMPLATE_VERSION
-    )
+    if driver_version in FIXED_PROMPT_TEMPLATE_V2_DRIVER_VERSIONS:
+        expected_template = PROMPT_TEMPLATE_VERSION
+    elif driver_version in THERMAL_DRIVER_VERSIONS:
+        expected_template = FIXED_PROMPT_TEMPLATE_VERSION_V1
+    else:
+        expected_template = LEGACY_PROMPT_TEMPLATE_VERSION
     if (
         workload["schema"] != WORKLOAD_SCHEMA
         or workload["prompt_template_version"] != expected_template
@@ -4600,6 +4607,11 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                     f"warmup-c{warmup_requests:03d}",
                     warmup_requests,
                     workload["profile"],
+                    long_prompt_repetitions=(
+                        LONG_PROMPT_REPETITIONS_V1
+                        if expected_template == FIXED_PROMPT_TEMPLATE_VERSION_V1
+                        else LONG_PROMPT_REPETITIONS
+                    ),
                 )
             ):
                 raise BenchmarkError(
@@ -4638,6 +4650,11 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                     f"measure-c{pair[0]:03d}-r{pair[1]:03d}",
                     pair[0],
                     workload["profile"],
+                    long_prompt_repetitions=(
+                        LONG_PROMPT_REPETITIONS_V1
+                        if expected_template == FIXED_PROMPT_TEMPLATE_VERSION_V1
+                        else LONG_PROMPT_REPETITIONS
+                    ),
                 )
             ):
                 raise BenchmarkError(
@@ -5035,6 +5052,8 @@ def deterministic_prompt(
     phase: str,
     request_index: int,
     prompt_profile: str = "short",
+    *,
+    long_prompt_repetitions: int = LONG_PROMPT_REPETITIONS,
 ) -> str:
     def marker_key(marker: str) -> bytes:
         material = f"{prompt_set_id}\0{phase}\0{request_index}\0{marker}".encode("utf-8")
@@ -5053,14 +5072,14 @@ def deterministic_prompt(
     if prompt_profile == "short":
         return short_suffix
     if prompt_profile == "long-prefill":
-        prefix = LONG_PROMPT_BLOCK * LONG_PROMPT_REPETITIONS
+        prefix = LONG_PROMPT_BLOCK * long_prompt_repetitions
     elif prompt_profile == "prefix-hit":
         prefix = (
             "Shared prefix for a cache-reuse workload. "
-            + LONG_PROMPT_BLOCK * LONG_PROMPT_REPETITIONS
+            + LONG_PROMPT_BLOCK * long_prompt_repetitions
         )
     elif prompt_profile == "mixed":
-        repetitions = (0, 4, 16, LONG_PROMPT_REPETITIONS)[request_index % 4]
+        repetitions = (0, 4, 16, long_prompt_repetitions)[request_index % 4]
         prefix = LONG_PROMPT_BLOCK * repetitions
     else:
         raise BenchmarkError(f"unsupported prompt profile: {prompt_profile}")
@@ -5072,6 +5091,8 @@ def deterministic_prompt_set_sha256(
     phase: str,
     concurrency: int,
     workload_profile: str,
+    *,
+    long_prompt_repetitions: int = LONG_PROMPT_REPETITIONS,
 ) -> str:
     prompt_profile = PROFILE_CONTRACTS[workload_profile]["prompt_profile"]
     rows = [
@@ -5083,6 +5104,7 @@ def deterministic_prompt_set_sha256(
                     phase,
                     index,
                     prompt_profile,
+                    long_prompt_repetitions=long_prompt_repetitions,
                 )
             ),
         }

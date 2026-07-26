@@ -129,6 +129,31 @@ pub(crate) fn allocator_safe_available_bytes(
     )
 }
 
+/// Initial loading and the all-process residency probe can outlive the cached
+/// sample deadline, especially while an outer controller freezes the cgroup.
+/// Startup owns synchronous probe I/O, so refresh immediately before admission.
+pub(crate) fn refresh_governor_for_kv_admission(
+    governor: &kiln_memory::MemoryGovernor,
+) -> anyhow::Result<kiln_memory::MemoryGovernorObservation> {
+    governor.refresh();
+    let observation = governor.cached_observation();
+    anyhow::ensure!(
+        observation.sample_status.healthy,
+        "selected-device memory observation is unhealthy after the synchronous initial KV admission refresh (stale={}, sampler_required={}, sampler_running={}); refusing to allocate",
+        observation.sample_status.stale,
+        observation.sample_status.sampler_required,
+        observation.sample_status.sampler_running,
+    );
+    tracing::info!(
+        governor_free_gb = observation.snapshot.free_bytes as f64 / 1e9,
+        governor_available_gb = observation.available_bytes as f64 / 1e9,
+        sample_age_ms = observation.sample_status.age.as_secs_f64() * 1000.0,
+        sample_max_age_ms = observation.sample_status.max_age.as_secs_f64() * 1000.0,
+        "initial KV admission memory observation refreshed"
+    );
+    Ok(observation)
+}
+
 pub(crate) fn allocator_safe_available_bytes_with_soft_reserved(
     policy: GpuAllocatorMemoryProbePolicy,
     device: &Device,
@@ -183,6 +208,7 @@ fn kv_budget_bytes_from_free(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const GB: u64 = 1024 * 1024 * 1024;
 
@@ -200,5 +226,41 @@ mod tests {
         );
         assert_eq!(kv_budget_bytes_from_free(16 * GB, GB, 0, 1.0), 15 * GB);
         assert_eq!(kv_budget_bytes_from_free(16 * GB, GB, 3 * GB, 1.0), 12 * GB);
+    }
+
+    #[test]
+    fn initial_kv_admission_refresh_replaces_the_prior_cached_budget() {
+        struct SequentialSource {
+            calls: AtomicUsize,
+        }
+
+        impl kiln_memory::MemorySource for SequentialSource {
+            fn probe(&self) -> kiln_memory::MemorySnapshot {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                let free_bytes = if call == 0 { GB } else { 3 * GB };
+                kiln_memory::MemorySnapshot {
+                    total_bytes: 4 * GB,
+                    used_bytes: 4 * GB - free_bytes,
+                    free_bytes,
+                    source: kiln_memory::vram::VramSource::None,
+                    unified: false,
+                    observations: Default::default(),
+                }
+            }
+        }
+
+        let governor = kiln_memory::MemoryGovernor::with_source(
+            Box::new(SequentialSource {
+                calls: AtomicUsize::new(0),
+            }),
+            kiln_memory::GovernorConfig::default(),
+        );
+        assert_eq!(governor.cached_available_bytes(), 0);
+
+        let refreshed = refresh_governor_for_kv_admission(&governor).unwrap();
+        assert!(refreshed.sample_status.healthy);
+        assert!(!refreshed.sample_status.stale);
+        assert_eq!(refreshed.snapshot.free_bytes, 3 * GB);
+        assert_eq!(refreshed.available_bytes, 2 * GB);
     }
 }

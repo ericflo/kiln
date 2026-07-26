@@ -4787,7 +4787,7 @@ fn validate_kv_allocation_against_live_allocator(
     if !gpu_memory_budget_policy.cap_kv_blocks_by_live_budget || bytes_per_block == 0 {
         return Ok(());
     }
-    let governor_observation = governor.cached_observation();
+    let governor_observation = crate::device_memory::refresh_governor_for_kv_admission(governor)?;
     let governor_budget = governor_observation.available_bytes;
     let allocator_budget = crate::device_memory::allocator_safe_available_bytes(
         gpu_allocator_memory_probe_policy,

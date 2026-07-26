@@ -54,6 +54,11 @@
           "memory_sample_ms": 100,
           "model_fingerprint_read_mib_per_second": 64,
           "output_evidence": "hashes",
+          "prompt_context_ceiling_tokens": 3968,
+          "prompt_context_max_prompt_tokens": 3883,
+          "prompt_context_min_headroom_tokens": 21,
+          "prompt_template_version": "fixed-serving-profiles-v2",
+          "prompt_tokenizer_sha256": "sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
           "profiles": {
             "profile_0": "greedy-short",
             "profile_1": "api-default-sampled",

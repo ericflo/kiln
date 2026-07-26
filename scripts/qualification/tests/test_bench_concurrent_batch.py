@@ -1499,6 +1499,59 @@ class ServingBenchmarkTests(unittest.TestCase):
         )
         self.assertTrue(all(prompt.startswith(shared_prefix) for prompt in prefix_prompts))
         self.assertEqual(len(mixed_lengths), 4)
+        self.assertEqual(bench.DRIVER_VERSION, "22")
+        self.assertEqual(
+            bench.PROMPT_TEMPLATE_VERSION, "fixed-serving-profiles-v2"
+        )
+        self.assertEqual(bench.FIXED_PROMPT_TEMPLATE_V2_DRIVER_VERSIONS, {"22"})
+        self.assertEqual(bench.LONG_PROMPT_REPETITIONS, 61)
+        self.assertEqual(bench.LONG_PROMPT_REPETITIONS_V1, 64)
+        qualified_prompt_hashes = {
+            profile: bench.text_sha256(
+                bench.deterministic_prompt(
+                    f"cuda-rtx4090-laptop-performance-v1-{profile}",
+                    "measure-c064-r000",
+                    63,
+                    profile,
+                )
+            )
+            for profile in ("long-prefill", "prefix-hit", "mixed")
+        }
+        self.assertEqual(
+            qualified_prompt_hashes,
+            {
+                "long-prefill": (
+                    "sha256:107ee7303c2e3bfc91b7c111bbceb3c9a56db5c4d30682ec94e4e6574d675561"
+                ),
+                "prefix-hit": (
+                    "sha256:b952c83c6c3c66da690781f5644b8d4077c1380742aa66a210449cb46eb3d668"
+                ),
+                "mixed": (
+                    "sha256:982ad94da2170bc57d6f607018b1690b16618e86db2c956b1a278a69722ff576"
+                ),
+            },
+        )
+        historical_prompt_set_hashes = {
+            profile: bench.deterministic_prompt_set_sha256(
+                f"cuda-rtx4090-laptop-performance-v1-{profile}",
+                "measure-c001-r000",
+                1,
+                profile,
+                long_prompt_repetitions=bench.LONG_PROMPT_REPETITIONS_V1,
+            )
+            for profile in ("long-prefill", "prefix-hit")
+        }
+        self.assertEqual(
+            historical_prompt_set_hashes,
+            {
+                "long-prefill": (
+                    "sha256:e8490e64330d2efa4288e173b238ac4df81afa9faebf9f315270c6f98a739fd9"
+                ),
+                "prefix-hit": (
+                    "sha256:5bfd3abdce210aba417f0d7787fc777a5f89765bf4220a7e7bb0f1be2d39a795"
+                ),
+            },
+        )
 
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             bench.parse_args(
@@ -3311,6 +3364,9 @@ class ServingBenchmarkTests(unittest.TestCase):
             driver_v15["driver_version"] = "15"
             driver_v15.pop("reference_role")
             driver_v15["workload"].pop("prompt_set_id")
+            driver_v15["workload"][
+                "prompt_template_version"
+            ] = bench.FIXED_PROMPT_TEMPLATE_VERSION_V1
             driver_v15["memory_sampler"].pop("device")
             for row in [driver_v15["warmup"], *driver_v15["runs"]]:
                 if row is None or row.get("server") is None:

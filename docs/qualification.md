@@ -1721,6 +1721,36 @@ long prompts fit the declared context including output reserve, and explain or
 repair the mixed-profile live KV admission failure without weakening the
 memory floor.
 
+Driver v22 closes both blockers without changing the 62-block KV allocation,
+one-GiB memory floor, allocator fraction, request output length, thermal
+policy, or c1 acceptance gates. Prompt template
+`fixed-serving-profiles-v2` reduces the shared long-prompt block count from 64
+to 61. Before build or server startup, the c1 driver now uses the pinned local
+Transformers runtime and exact model tokenizer/chat template to render every
+warmup and measured prompt with thinking disabled. It fails closed unless all
+five profiles fit the declared 3,968-token server context and the exact
+observed maximum remains 3,883 input tokens. The retained local check covered
+10 prompts; the maximum total was 3,947 tokens including the 64-token output
+reserve, leaving 21 tokens of headroom. It binds tokenizer
+`sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42`
+and chat template
+`sha256:a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715`.
+Historical v1 receipts remain validated against their original 64-block
+prompts rather than being reinterpreted with v2.
+
+The mixed-profile failure was stale fail-closed governor evidence, not
+allocator exhaustion. Model loading and the blocking all-process residency
+probe took longer than the governor's five-second cached-sample limit while
+the outer controller could freeze the complete cgroup, including its
+background sampler. The subsequent admission correctly projected that stale
+cached snapshot to zero even though a fresh CUDA allocator probe reported
+2,257,895,424 free bytes. Initial KV admission now performs one synchronous
+selected-device governor refresh immediately before combining governor,
+allocator, and host-backed budgets. A failed probe or unhealthy refreshed
+sample still refuses allocation. This corrective source checkpoint is not c1
+evidence: commit and push it, then rerun the exact command above and retain all
+parent and nested receipts before making a paired performance claim.
+
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
 `sha256:2e81344e95637821046fd0dee2ff61495af6b91a5e728214975eeb7785507d63`).
