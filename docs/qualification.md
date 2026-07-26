@@ -1642,6 +1642,85 @@ and four-PID peaks, zero memory-limit/OOM events, 73.05/63 C start,
 82.05/63 C outer peak, 74.05/63 C handoff, and clean removal. These are
 dirty-source boundary checks, not c1 or endurance evidence.
 
+The exact clean-source retry at
+`1a5a67cee37fa22736dd38184e6da7e43b0feb3e` retained failed parent receipt
+`qualification/receipts/cuda/rtx4090-laptop/20260726t060631471251z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`
+with file
+`sha256:b9c860152ac91020ce5cf19243fd6b224586c0dd93c7cadde9acc15daed8b31d`.
+It passes structural, current-source, local-artifact, and known-commit
+validation. Initial and final model fingerprints are identical, all 16
+environment capabilities are available, and the cached build reproduced the
+exact CUDA binary at
+`sha256:38da3668a40b3df1b92c89c66cefbe7063665ab08357c1222445ba3fad36ac3e`.
+
+This retry clears the preceding pacing and timeout-cleanup blockers. The case
+completed 207 of 207 pauses totaling 3,350.647 seconds; the longest was
+97.301 seconds, below the unchanged 300-second limit. It used 798,798,821 of
+3,272,703,111 allowed CPU microseconds, peaked at the exact 10 GiB memory cap
+and 68 PIDs, recorded 170,996 memory-limit events but zero OOM, OOM-kill, or
+group-kill events, and stayed below hard thermal limits at 94.05/68 C. The
+scope was removed after 6,545.406 seconds and the outer supervisor handed off
+at 74.05/64 C with no failure reason. Post-run inspection found no campaign
+process, scope, snapshot, or temporary-directory residue.
+
+All five Kiln profiles reached terminal detailed receipts. `greedy-short` and
+`api-default-sampled` passed warmup, one measured 64-token request, all
+request/accounting/identity gates, private-snapshot removal, and unforced
+return-code-zero shutdown:
+
+- `benchmarks/receipts/cuda/rtx4090-laptop/20260726t064133-cuda-rtx4090-laptop-c1-greedy-short-1a5a67ce-v1.kiln.json`,
+  file
+  `sha256:8d309d0540ba6337d46cdf0c5451cc8c7caac39f4501bb3faacd48c9d6ac60d3`,
+  canonical
+  `sha256:ffa5168f4c487d9c6fa874073e58036f43cc74bc83b761ebc6b5bc1c0e2267ae`.
+  It measured 1.517 tokens/second, 499.5 ms TTFT, 18,358.9 ms p99 ITL,
+  42,193.7 ms E2E, and 15,590,719,488 peak device-memory bytes.
+- `benchmarks/receipts/cuda/rtx4090-laptop/20260726t070742-cuda-rtx4090-laptop-c1-api-default-sampled-1a5a67ce-v1.kiln.json`,
+  file
+  `sha256:2bc9f81f5eaa18f90d99e3fb54f10b598c624c04b82d81d096e9559eb99ac2fd`,
+  canonical
+  `sha256:340bcb47d0748a7c7b12b09e0efe0c4851765a3484eb2b8575fdf588c1ba3472`.
+  It measured 0.713 tokens/second, 509.3 ms TTFT, 30,240.2 ms p99 ITL,
+  89,758.2 ms E2E, and 15,590,031,360 peak device-memory bytes. Its
+  graceful-shutdown wall time was 56.628 seconds because authenticated thermal
+  freezes remained visible outside the server's active-time accounting.
+
+The remaining three receipts are strict-valid counterevidence. `long-prefill`
+and `prefix-hit` loaded the model and initialized the 62-block KV cache, but
+their warmups were correctly rejected with HTTP 400 because the fixed prompts
+produced 4,056 and 4,063 message tokens plus 16 requested output tokens against
+the 3,968-token server context. Both servers then removed their snapshots,
+drained their process groups, and exited zero without force. `mixed` completed
+model upload and post-upload verification, then exited one before readiness:
+its live allocator reported 2,257,895,424 free bytes, but the stricter combined
+accelerator/host residency gate admitted zero of the explicitly configured 62
+KV blocks. Its owned process group died naturally and its private snapshot was
+removed. The retained receipts are:
+
+- `benchmarks/receipts/cuda/rtx4090-laptop/20260726t072925-cuda-rtx4090-laptop-c1-long-prefill-1a5a67ce-v1.kiln.json`,
+  file
+  `sha256:d0f46230f6fa569cd978e89ff36653a5f539bc13d16b0898fdccd7efbd92d6c9`,
+  canonical
+  `sha256:5cea593ac5157ec52a256766d8ac7bf5485df31b775c948e7321680e1643199c`.
+- `benchmarks/receipts/cuda/rtx4090-laptop/20260726t074644-cuda-rtx4090-laptop-c1-prefix-hit-1a5a67ce-v1.kiln.json`,
+  file
+  `sha256:a1b59d2a5c318b1c792f680c527a8fce49c4d15d839e84160353b53ed879dfcf`,
+  canonical
+  `sha256:5476c7dbf87ecc894348920e1eb519bdb97b2a0ab8c533276e7c57bf88860852`.
+- `benchmarks/receipts/cuda/rtx4090-laptop/20260726t080744-cuda-rtx4090-laptop-c1-mixed-1a5a67ce-v1.kiln.json`,
+  file
+  `sha256:2edd5ca9130cccc6802ab3a66893ec2037dd8ce1325fa347de944dba53fbe45c`,
+  canonical
+  `sha256:7e69565a624812ad2945e6b4c7a8be5460f2823c10842e99873dc01d40b938ac`.
+
+The Kiln campaign therefore returned 2 and vLLM was correctly not started.
+These receipts establish pacing progress, two real request profiles, terminal
+owned lifecycles, and cleanup only. They do not establish paired c1
+performance. Do not repeat the unchanged run: first make both deterministic
+long prompts fit the declared context including output reserve, and explain or
+repair the mixed-profile live KV admission failure without weakening the
+memory floor.
+
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
 `sha256:2e81344e95637821046fd0dee2ff61495af6b91a5e728214975eeb7785507d63`).
