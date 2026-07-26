@@ -2466,6 +2466,54 @@ without waiting for the remaining repository-wide cleanup phases.
   pass. Commit and push these two source repairs before another exact c1
   attempt; the current evidence does not accept c1, wider concurrency,
   endurance, native Linux, or desktop RTX 4090.
+  The next exact retry from clean pushed source
+  `48b0727667c75668925b8e2863fdaf85ab74afb4` retained failed parent
+  `qualification/receipts/cuda/rtx4090-laptop/20260726t150427314829z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`
+  (file
+  `sha256:292d2c8da00adfcf825aea4532415c30e6556016ada40c8cada36aa104675290`).
+  Before corrective edits it was strict current-source/local-artifact/
+  known-commit valid, bound all 16 capabilities, and repeated the identical
+  initial/final model fingerprint. Greedy-short failed closed after complete
+  CUDA upload when its one-shot two-second selected NVIDIA capacity query
+  returned no valid sample. Its retained strict-valid failed receipt is
+  `20260726t153243-cuda-rtx4090-laptop-c1-greedy-short-48b07276-v1.kiln.json`
+  at file
+  `sha256:d440b19f1366e3d0d10f92aee242210f06311815d8708a4d84ec6710cb83c8a9`.
+  The next four launches passed that boundary.
+  Long-prefill retained strict-valid passed file
+  `20260726t161751-cuda-rtx4090-laptop-c1-long-prefill-48b07276-v1.kiln.json`
+  at
+  `sha256:30e79e072c2b4ff156434e40cf5245ce29c67f8e397d241b550abc5b9853994e`,
+  completed 3,876+64 tokens, peaked at 15,618,965,504 device bytes, and
+  finalized an unforced return-code-zero shutdown. API-default, prefix-hit, and
+  mixed also completed their exact measured 148+64, 3,883+64, and 152+64
+  requests and logged clean shutdowns, but their process groups still answered
+  `killpg(..., 0)` after the leaders were reaped, `SIGKILL`, and 10.023,
+  10.041, and 10.007 active seconds. Driver v23 surfaced those original cleanup
+  failures; no detailed receipts were written.
+  The 6,407.558-second case scope peaked at 10,737,684,480 bytes/70 PIDs,
+  recorded 238,161 memory-limit events and zero OOM events, completed 247/247
+  pauses totaling 3,059.825 seconds under 92.05/68 C peaks, and removed
+  cleanly. Outer supervision preserved child status one with
+  `supervision_outcome=child_exit`, proving the telemetry-settlement repair on
+  the exact path.
+  The lifecycle correction treats a kernel-visible group as quiescent only
+  when a complete `/proc` scan proves every exact-PGID member is a zombie.
+  Live, absent, unreadable, malformed, and permission-uncertain membership
+  remains fatal. A real root-mapped PID/mount namespace blocks a live group and
+  accepts a zombie-only group. The corrected driver is
+  `sha256:fa6a903408855797cc3bfe5a10b4f7def6a78a25669745222dcd7301af468d46`.
+  Selected NVIDIA startup identity/capacity detection now permits three strict
+  two-second attempts separated by 100 ms, still resolves to zero after three
+  failures, and does not change single-attempt live-governor failure semantics.
+  The corrected VRAM owner is
+  `sha256:1cff2a720cb2e6ebfab067f0b347379c6834f7ec644b3e3eb68354fc4f68aa9c`.
+  All 74 focused driver tests, 854 qualification tests, 68 runnable
+  `kiln-memory` tests, and the 1,103-test server library plus every server
+  integration target pass. All retained workload, compact/detailed receipt,
+  and oracle-result validators pass. Commit and push this retained
+  counterevidence and repair before the next exact attempt; c1, paired vLLM,
+  wider concurrency, endurance, native Linux, and desktop RTX 4090 remain open.
 - [ ] Run serving performance at every concurrency that fits without changing
   the workload semantics.
 - [ ] Run an 8-hour mixed-load soak. The source-bound
@@ -4865,6 +4913,8 @@ or focused documents. Never paste raw logs here.
 | 2026-07-26 | Driver-v22 RTX 4090 Laptop prompt/KV proof and lifecycle-receipt rejection | exact clean pushed source `bf1b385fd1c6da1df266e296014b73660ffa7c1f`; source tree `sha256:895d56b578b36dcf63b122141f49a755b3ea4d37713315f5dff5076e58e6ce78` | this retained counterevidence plus driver-v23 finalizer checkpoint | one exact c1 attempt through initial/final fingerprints, all environment probes, cached current-source CUDA artifact, five terminal Kiln profiles, four complete passed receipts, exact context-ceiling and fresh-governor hardware proof, failed lifecycle serialization, final cleanup, and portable finalizer correction; no paired c1, vLLM comparison, wider concurrency, endurance, native-Linux, or desktop-4090 claim | known-commit/local-artifact valid failed parent `20260726t085636979438z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json` (file `sha256:576c984840992e67279c215f69cf84200cbfae1a227826b31721d1434f52ad8d`); strict-valid passed detailed greedy/long/prefix/mixed files at `sha256:d918a7d3c0e3889a7bf6649b790726959c02a5f99cadeb076e6392fd93f9ceb3`, `sha256:61488ee16725e443de5a85b9f303446177230f41a48ab4919176324e39418b6e`, `sha256:41d512d3a69728756ca707aba9398b3813f3251cd9668a57edec627cfa67f5dc`, and `sha256:20519abd5f4aeecc7f242b01920317f208d221372147a0b23cb6262beeafbdea`; identical initial/final model fingerprint; all 16 capabilities; zero OOM events; exact 10 GiB/69-PID case peaks; 371/371 pauses; clean scope removal and handoff; driver-v23 shutdown/log failure-evidence regressions; 72/72 benchmark tests and 847/847 qualification tests; all 63 detailed receipts valid | prompt-context and live initial-KV blockers passed on hardware; aggregate c1 rejected because API-default lifecycle evidence was not serialized, so vLLM correctly did not start | Long-prefill completed 3,876+64 tokens and prefix-hit completed 3,883+64 under the unchanged 3,968-token KV context. Mixed refreshed the selected governor to 2.2607 GB free/1.1870 GB available and allocated 130,023,424 bytes on attempt one. Greedy, long, prefix, and mixed stayed below 16.5 GB and shut down unforced with return code zero. API-default likewise completed 64 tokens and its log proves a clean drain, but the swallowed finalizer exception left no log object and the schema error masked the cause. Driver v23 independently finalizes shutdown/log evidence, carries conservative failure artifacts, retries only explicitly transient log-sync errors, and reports the original cause when serialization is impossible. Exact clean-source c1 must be rerun from the pushed v23 checkpoint. |
 
 | 2026-07-26 | Driver-v23 five-profile proof and remapped-namespace teardown repair | exact clean pushed source `909797a3029ca1ca57e5264ec099c80fc7e77c72` plus this corrective source | this retained counterevidence and WSL2/vLLM boundary checkpoint | one exact c1 attempt through both model fingerprints, all environment probes, cached current-source CUDA artifact, five passed Kiln profiles, five fail-closed vLLM launch attempts, complete resource/thermal cleanup, root-mapped ancestry correction, and outer telemetry-exit settlement; no paired c1, wider concurrency, endurance, native-Linux, or desktop-4090 claim | strict current-source/local-artifact/known-commit valid failed parent `20260726t114347782372z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json` (file `sha256:5b9fcd5c62cad7f26cfee319828bca07909de1993412a40e303878bfd473a983`); five strict-valid passed driver-v23 Kiln receipts including API-default and five strict-valid failed vLLM receipts; identical initial/final model fingerprint; all 16 capabilities; 9,822.104-second case scope at 10,737,639,424-byte/70-PID peaks, 197,765 memory-limit events, zero OOM events, 297/297 pauses totaling 3,626.796 seconds, 94.05/68 C peaks, and scope removal; repaired teacher `sha256:7ccafe17cde3f3db6cbf7d0abaccd6b07d3bd1a85a5d54fae72c409867a4540b`; repaired outer supervisor `sha256:de81cd6be93caaad846f51c9de3f67249dd140b1f3bc81c4fd0d5c58e8e28040`; 93/93 focused and 852/852 complete qualification tests; all 27 workloads, 177 compact receipts, 73 detailed receipts, and 17 oracle results valid; real root-mapped exact-path cache/snapshot probe; real telemetry pipe-close race preserving child status seven; 9/10 docs-builder tests with only Chromium unavailable; 55-document/five-asset build and assembled static smoke; Python compilation and diff hygiene | driver-v23 lifecycle proof passed on hardware; paired c1 rejected before vLLM load on overflow-owner ancestry, with a second false outer `EPIPE` trip after scope completion; both portable/live repairs pass and require clean commit/push before exact retry | All Kiln profiles completed warmup and measurement below the device-memory ceiling, emitted readable lifecycle logs, shut down unforced with return code zero, and removed their private snapshots. Inside the exact `0 -> 1000, length 1` user namespace, host-root `/` and `/home` appear as overflow UID 65534, so all vLLM attempts stopped before cache/snapshot creation or GPU work. The launcher now accepts that UID for ancestry only after strict bounded kernel-map verification while keeping final roots current-UID mode `0700` and every symlink/rename/anchor check. The outer supervisor recognizes only `EPIPE` and only when the owned scope exits within one poll interval capped at one second; live or differently failed channels remain fatal. This checkpoint clears neither c1 nor any later performance/endurance item. |
+
+| 2026-07-26 | RTX 4090 Laptop bounded NVIDIA probe and zombie-only teardown repair | exact clean pushed source `48b0727667c75668925b8e2863fdaf85ab74afb4` plus this corrective source | this retained counterevidence and serving-lifecycle checkpoint | one exact c1 attempt through both model fingerprints, all environment probes, cached current-source CUDA artifact, five terminal Kiln profiles, complete outer scope/thermal cleanup, bounded selected-NVIDIA startup retry, and zombie-aware process-group drain; no accepted c1, paired vLLM, wider concurrency, endurance, native-Linux, or desktop-4090 claim | strict pre-edit current-source/local-artifact/known-commit valid failed parent `20260726t150427314829z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json` (file `sha256:292d2c8da00adfcf825aea4532415c30e6556016ada40c8cada36aa104675290`); strict-valid failed greedy receipt file `sha256:d440b19f1366e3d0d10f92aee242210f06311815d8708a4d84ec6710cb83c8a9`; strict-valid passed long-prefill receipt file `sha256:30e79e072c2b4ff156434e40cf5245ce29c67f8e397d241b550abc5b9853994e`; identical initial/final model fingerprint; all 16 capabilities; 6,407.558-second case scope at 10,737,684,480-byte/70-PID peaks, 238,161 memory-limit events, zero OOM events, 247/247 pauses totaling 3,059.825 seconds, 92.05/68 C peaks, scope removal, preserved child exit one, and stable handoff; repaired driver `sha256:fa6a903408855797cc3bfe5a10b4f7def6a78a25669745222dcd7301af468d46`; repaired VRAM owner `sha256:1cff2a720cb2e6ebfab067f0b347379c6834f7ec644b3e3eb68354fc4f68aa9c`; 74/74 focused, 854/854 qualification, 68 runnable `kiln-memory`, and 1,103 server-library tests plus all server integration targets; every workload, compact/detailed receipt, and oracle result valid; real root-mapped PID/mount-namespace live-versus-zombie probe; 9/10 docs-builder tests with only Chromium unavailable; 55-document/five-asset build and assembled static smoke; schema/API generation plus Rust/Python/diff/format hygiene | aggregate c1 rejected after one transient selected-NVIDIA capacity probe and three zombie-only-shaped process-group teardown failures; vLLM correctly did not start; both fail-closed repairs require clean commit/push before exact retry | Greedy uploaded the full model then rejected zero proven capacity when one two-second NVIDIA query returned no valid sample; the next four launches passed that boundary. Long-prefill completed 3,876+64 tokens, stayed below 16.5 GB, and retained a clean passed receipt. API-default, prefix-hit, and mixed completed measured 148+64, 3,883+64, and 152+64 requests and logged drained shutdowns, but `killpg(..., 0)` remained true for 10 active seconds after their leaders were reaped and no receipts were serialized. The driver now requires complete `/proc` proof that every exact-PGID residue is a zombie before accepting quiescence; uncertainty or any executable member remains fatal. NVIDIA startup identity/capacity probing gets three strict two-second attempts with 100 ms spacing and still resolves to zero after three failures; live governor behavior is unchanged. |
 
 ## Known Starting Defects
 

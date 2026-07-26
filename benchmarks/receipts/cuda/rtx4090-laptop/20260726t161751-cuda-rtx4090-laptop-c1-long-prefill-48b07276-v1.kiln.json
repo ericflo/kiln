@@ -1,0 +1,1272 @@
+{
+  "completion": {
+    "completed_run_count": 1,
+    "expected_run_count": 1,
+    "failures": [],
+    "finalization_checks": {
+      "execution_identity_unchanged": "passed",
+      "host_thermal_handoff": "not_applicable",
+      "model_identity_unchanged": "passed",
+      "repository_unchanged": "passed",
+      "runtime_artifact_unchanged": "passed",
+      "runtime_manifest_unchanged": "not_applicable",
+      "server_shutdown": "passed"
+    }
+  },
+  "created_at": "2026-07-26T16:17:51.623039+00:00",
+  "diagnostics": {
+    "timed_request_path_affected": false,
+    "url": "http://127.0.0.1:8420/health"
+  },
+  "driver_environment": {
+    "hostname": "ERICLAPTOPG16",
+    "machine": "x86_64",
+    "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+    "python": "3.10.12",
+    "repository": {
+      "commit": "48b0727667c75668925b8e2863fdaf85ab74afb4",
+      "dirty": false,
+      "source_tree_sha256": "sha256:6c9c6651f25961f02bf1762c8c13fdaf87f45e5c0c6770112b3928f43be07048"
+    }
+  },
+  "driver_version": "23",
+  "engine": {
+    "authentication_configured": false,
+    "authentication_source": "none",
+    "available_models": [
+      "Qwen3.5-4B"
+    ],
+    "base_url": "http://127.0.0.1:8420",
+    "model": "Qwen3.5-4B",
+    "model_identity": {
+      "chat_template_hash": "sha256:a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+      "config_hash": "sha256:ddc63e1c717afa86c865bb5e01313d89d72bb53b97ad4a8a03ba8510c0621670",
+      "content_sha256": "sha256:b1f2cce5baf9e662fc4c2c421b79fccc8787521e6e85810eebffbb4aa43b309f",
+      "id": "Qwen3.5-4B",
+      "path": "/home/ericflo/Development/kiln/.qualification/cuda-rtx4090-laptop/performance-model-v1",
+      "tokenizer_hash": "sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+      "weight_files": [
+        {
+          "bytes": 5329398688,
+          "path": "model.safetensors-00001-of-00002.safetensors",
+          "sha256": "sha256:26a93f066e1916adb13453dae5a0c707c0fbc71299ed98779571a907b8e74c61"
+        },
+        {
+          "bytes": 3990429408,
+          "path": "model.safetensors-00002-of-00002.safetensors",
+          "sha256": "sha256:cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188"
+        }
+      ]
+    },
+    "name": "kiln",
+    "reported_version": "0.4.1",
+    "runtime_artifact": {
+      "bytes": 62409768,
+      "path": "/home/ericflo/Development/kiln/target/release/kiln",
+      "sha256": "sha256:1c94a21906d5ee48e92dcc4c7fb448692d79d6c9946aa655acef8801d9579901"
+    },
+    "runtime_execution_identity": {
+      "backend": "cuda",
+      "device": "cuda:0",
+      "effective_environment_sha256": "sha256:afe018160d78a3ef301411566c5f8d6cb2c2538a741a56438d62d9ec0a39cbee",
+      "effective_server_config_sha256": "sha256:9a4736b616afcbdddc21a6d42375424b7410e846b4416c2645d82f2f58a19a5c",
+      "executable_sha256": "sha256:1c94a21906d5ee48e92dcc4c7fb448692d79d6c9946aa655acef8801d9579901",
+      "inference_dtype": "bf16",
+      "kernel_contract_sha256": "sha256:f353e4d93d2bf0d6d490921237520cb9e8582e3953584a1834e9ca9a9cec54f8",
+      "numerical_runtime_sha256": "sha256:847c52e726debc67d9d4e433e6325fc6a305b2af4d8608e57d902a1f93888852",
+      "provenance_sha256": "sha256:8cea179f4b86d43437557868d60369b65eea96a6493075cc78d17f8f42eb7c0e",
+      "provenance_type": "kiln.execution-provenance.v1",
+      "training_policy": "cuda_native_float"
+    },
+    "runtime_identity": "kiln-git:48b0727667c75668925b8e2863fdaf85ab74afb4",
+    "runtime_manifest": null
+  },
+  "host_thermal": {
+    "evidence": {
+      "cgroup_path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/kiln-wsl-scope-c6e7e150ae7548f7af1fc927891b4d7e.scope",
+      "cpu_controller": "usage-feedback-cgroup-freeze-v1",
+      "cpu_quota_percent": 50,
+      "mechanism": "qualification-runner-windows-nvml-outer-supervisor-v1",
+      "memory_max_bytes": 10737418240,
+      "memory_oom_group": 1,
+      "memory_swap_max_bytes": 0,
+      "network_containment": "util-linux-unshare-user-net-pid-landlock-v1",
+      "parent_qualification_receipt_required": true,
+      "pids_max": 512,
+      "policy_sha256": "sha256:d389a7f632baab0448bd41efc205349dee4ff3944152b48cf17e52866322e3e9",
+      "scope_boundary": "systemd-user-scope-feedback-v1",
+      "scope_host_uid": 1000,
+      "scope_unit": "kiln-wsl-scope-c6e7e150ae7548f7af1fc927891b4d7e"
+    },
+    "mode": "external_wsl2_boundary",
+    "model_fingerprint": null,
+    "policy": {
+      "content_sha256": "sha256:d389a7f632baab0448bd41efc205349dee4ff3944152b48cf17e52866322e3e9",
+      "gpu": {
+        "limit_millicelsius": 85000,
+        "name": "NVIDIA GeForce RTX 4090 Laptop GPU",
+        "uuid": "GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd"
+      },
+      "host": {
+        "cpu_name": "Intel(R) Core(TM) Ultra 9 185H",
+        "limit_millicelsius": 95000,
+        "thermal_zone_name": "\\_TZ.THRM",
+        "vendor_tjunction_millicelsius": 110000
+      },
+      "id": "rtx4090-laptop-wsl2-cgroup-pacing-v2",
+      "pacing": {
+        "gpu_resume_millicelsius": 70000,
+        "gpu_start_millicelsius": 75000,
+        "host_resume_millicelsius": 75050,
+        "host_start_millicelsius": 80000,
+        "mode": "cgroup_freeze",
+        "resume_stable_samples": 3,
+        "timeout_seconds": 300
+      },
+      "poll_interval_ms": 1000,
+      "safe_handoff": {
+        "gpu_target_millicelsius": 75000,
+        "host_target_millicelsius": 85000,
+        "stable_samples": 3,
+        "timeout_seconds": 300
+      },
+      "schema": "kiln.wsl2-thermal-policy.v2"
+    },
+    "process_group": null,
+    "unsafe_no_guard_acknowledged": false
+  },
+  "memory_sampler": {
+    "device": {
+      "enumerated_device_count": 1,
+      "index": 0,
+      "library": "libnvidia-ml.so.1",
+      "name": "NVIDIA GeForce RTX 4090 Laptop GPU",
+      "nvml_version": "13.595.71.01",
+      "selector": "explicit_uuid",
+      "total_bytes": 17171480576,
+      "uuid": "GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd"
+    },
+    "interval_ms": 100,
+    "path": null,
+    "source": "nvml_used"
+  },
+  "receipt_sha256": "sha256:dd2b7fc62be2bcbcc6e17b7519a45bf82071643c608dcedff02b1eb9fde434fb",
+  "reference_role": "qualification_gate",
+  "runs": [
+    {
+      "client_visible_itl_ms_p50": 36.720187999890186,
+      "client_visible_itl_ms_p99": 25150.622357362303,
+      "client_visible_itl_ms_p999": 26238.672763441984,
+      "client_visible_stream_event_count": 64,
+      "completion_tokens": 64,
+      "concurrency": 1,
+      "dispatch_spread_ms": 0.0,
+      "e2e_ms_p50": 199969.8936640052,
+      "e2e_ms_p99": 199969.8936640052,
+      "e2e_ms_p999": 199969.8936640052,
+      "elapsed_s": 199.9700476069993,
+      "error_count": 0,
+      "errors": [],
+      "gates": [
+        {
+          "detail": "1/1 requests succeeded",
+          "name": "all_requests_succeeded",
+          "passed": true
+        },
+        {
+          "detail": "every measured request must contribute positive completion usage",
+          "name": "positive_completion_usage",
+          "passed": true
+        },
+        {
+          "detail": "0.000 ms <= 250.000 ms",
+          "name": "dispatch_spread",
+          "passed": true
+        },
+        {
+          "detail": "not requested or parsed successfully",
+          "name": "diagnostics_readable",
+          "passed": true
+        },
+        {
+          "detail": "every request must finish by length with exactly 64 tokens",
+          "name": "fixed_output_length",
+          "passed": true
+        },
+        {
+          "detail": "observed prompt-token counts: [3876]",
+          "name": "uniform_prompt_tokens",
+          "passed": true
+        },
+        {
+          "detail": "a local device-memory counter must be sampled during the run",
+          "name": "memory_measured",
+          "passed": true
+        },
+        {
+          "detail": "15618965504 bytes <= 16500000000 bytes",
+          "name": "absolute_memory_limit",
+          "passed": true
+        },
+        {
+          "detail": "route=batching_engine; request={'error': 0, 'timeout': 0, 'rejected': 0}; batching_engine=0; decode_batcher=0; rocm_graph_failures=0",
+          "name": "server_reported_no_errors",
+          "passed": true
+        },
+        {
+          "detail": "total=1, ok=1, active_end=0; expected=1",
+          "name": "server_request_accounting",
+          "passed": true
+        },
+        {
+          "detail": "state=disabled; capture_requested=False; capture_successes=0; replay_successes=0; failures=0; fallbacks=0; multi_row_batch_unsupported=0",
+          "name": "rocm_graph_execution_accounted",
+          "passed": true
+        },
+        {
+          "detail": "batched_successes=0; checks=0; passes=0; failures=0; errors=0; passes_end=0; compared_bytes=0; duration_micros=0",
+          "name": "rocm_graph_capture_parity_accounted",
+          "passed": true
+        },
+        {
+          "detail": "configured_ms=0; source=default; active_end=False; count=0; seconds=0.000000; process_max_ms=0.000",
+          "name": "actor_cycle_idle_accounted",
+          "passed": true
+        },
+        {
+          "detail": "performance=1/1 successful requests; latency=1/1",
+          "name": "request_performance_accounted",
+          "passed": true
+        }
+      ],
+      "host_thermal": {
+        "phase": "measure-c001-r000",
+        "phase_wall_seconds": 199.97409695399983,
+        "supervision": "external_wsl2_boundary",
+        "thermally_sustainable_output_token_throughput_per_s": 0.3200414502420379
+      },
+      "memory": {
+        "baseline_bytes": 15518302208,
+        "peak_bytes": 15618965504,
+        "peak_delta_bytes": 100663296,
+        "samples": 144
+      },
+      "output_evidence": [
+        {
+          "completion_tokens": 64,
+          "content_sha256": "sha256:e28449bb70e4012c7a73455a6f15267530762e86a57e1c4a3d721b4d3b7fe82d",
+          "content_utf8_bytes": 429,
+          "exact_output": null,
+          "finish_reason": "length",
+          "index": 0,
+          "output_sha256": "sha256:1c80f1b681b49e816261f29702abf901d5b0aa6b587c588b567eef7aaab117c2",
+          "reasoning_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "reasoning_utf8_bytes": 0
+        }
+      ],
+      "output_set_sha256": "sha256:3c0452869b2fabb3b707910e375cd0320bb664334e5df621cb0d7e38d2f861ad",
+      "output_token_throughput_per_s": 0.32004793100704293,
+      "prompt_set_sha256": "sha256:2f094cfe127589aab7229fac70de32438f4bd8e55b0492ba4587a42f9db72bfb",
+      "prompt_token_counts": [
+        3876
+      ],
+      "prompt_tokens_max": 3876,
+      "prompt_tokens_min": 3876,
+      "repeat": 0,
+      "request_count": 1,
+      "request_performance": [
+        {
+          "index": 0,
+          "performance": {
+            "actor_admission_ms": 0.662862,
+            "actor_prefill_wall_ms": 131497.267546,
+            "actor_queue_ms": 1.190432,
+            "adapter_used": "base",
+            "completion_tokens": 64,
+            "decode_ms": 68452.042791,
+            "decode_tokens_per_sec": 0.9349611405375714,
+            "finish_reason": "length",
+            "latency": {
+              "emitted_tokens": 64,
+              "gap_samples": 63,
+              "gap_samples_truncated": false,
+              "itl_ms_p50": 36.697004,
+              "itl_ms_p99": 25150.614124080006,
+              "itl_ms_p999": 26238.804082608007,
+              "max_itl_ms": 26359.714078,
+              "phases": {
+                "actor_admission_ms": 0.662862,
+                "actor_cycle_idle_ms": 0.0,
+                "actor_queue_ms": 1.190432,
+                "adapter_ms": null,
+                "client_delivery_ms": 2.331619,
+                "decode_ms": 68455.093858,
+                "gpu_lock_wait_ms": 0.032075,
+                "graph_capture_ms": null,
+                "graph_replay_ms": null,
+                "handler_queue_ms": 5.193489,
+                "prefill_ms": 131495.110115,
+                "readback_ms": 467.86822900000004,
+                "resize_ms": null,
+                "response_delivery_ms": 4.090389,
+                "sampling_ms": null,
+                "synchronization_ms": 60.530121,
+                "tokenization_ms": 4.405335,
+                "training_ms": null,
+                "trim_ms": null,
+                "unexplained_ms": 10.746433999999999
+              },
+              "retained_gap_samples": 63,
+              "stall_count": 3,
+              "stall_reasons": {
+                "actor_admission": 0,
+                "actor_cycle_idle": 0,
+                "actor_decode": 3,
+                "actor_prefill": 0,
+                "actor_queue": 0,
+                "adapter": 0,
+                "client_delivery": 0,
+                "gpu_lock_wait": 0,
+                "graph_capture": 0,
+                "graph_replay": 0,
+                "handler_queue": 0,
+                "readback": 0,
+                "resize": 0,
+                "response_delivery": 0,
+                "sampling": 0,
+                "synchronization": 0,
+                "training": 0,
+                "trim": 0,
+                "unexplained": 0
+              },
+              "stall_threshold_ms": 250.0,
+              "ttft_ms": 131503.92103,
+              "unexplained_stall_count": 0
+            },
+            "prefill_ms": 131429.33306200002,
+            "prompt_tokens": 3876,
+            "resident_prefill_used": false,
+            "thinking_mode": "non_reasoning",
+            "total_latency_ms": 199968.08198299998,
+            "ttft_ms": 131503.92103
+          }
+        }
+      ],
+      "request_phase_summary": {
+        "emitted_tokens": 64,
+        "latency_request_count": 1,
+        "performance_request_count": 1,
+        "phases": {
+          "actor_admission_ms": {
+            "max": 0.662862,
+            "observed_request_count": 1,
+            "p50": 0.662862,
+            "p99": 0.662862
+          },
+          "actor_cycle_idle_ms": {
+            "max": 0.0,
+            "observed_request_count": 1,
+            "p50": 0.0,
+            "p99": 0.0
+          },
+          "actor_queue_ms": {
+            "max": 1.190432,
+            "observed_request_count": 1,
+            "p50": 1.190432,
+            "p99": 1.190432
+          },
+          "adapter_ms": {
+            "max": null,
+            "observed_request_count": 0,
+            "p50": null,
+            "p99": null
+          },
+          "client_delivery_ms": {
+            "max": 2.331619,
+            "observed_request_count": 1,
+            "p50": 2.331619,
+            "p99": 2.331619
+          },
+          "decode_ms": {
+            "max": 68455.093858,
+            "observed_request_count": 1,
+            "p50": 68455.093858,
+            "p99": 68455.093858
+          },
+          "gpu_lock_wait_ms": {
+            "max": 0.032075,
+            "observed_request_count": 1,
+            "p50": 0.032075,
+            "p99": 0.032075
+          },
+          "graph_capture_ms": {
+            "max": null,
+            "observed_request_count": 0,
+            "p50": null,
+            "p99": null
+          },
+          "graph_replay_ms": {
+            "max": null,
+            "observed_request_count": 0,
+            "p50": null,
+            "p99": null
+          },
+          "handler_queue_ms": {
+            "max": 5.193489,
+            "observed_request_count": 1,
+            "p50": 5.193489,
+            "p99": 5.193489
+          },
+          "prefill_ms": {
+            "max": 131495.110115,
+            "observed_request_count": 1,
+            "p50": 131495.110115,
+            "p99": 131495.110115
+          },
+          "readback_ms": {
+            "max": 467.86822900000004,
+            "observed_request_count": 1,
+            "p50": 467.86822900000004,
+            "p99": 467.86822900000004
+          },
+          "resize_ms": {
+            "max": null,
+            "observed_request_count": 0,
+            "p50": null,
+            "p99": null
+          },
+          "response_delivery_ms": {
+            "max": 4.090389,
+            "observed_request_count": 1,
+            "p50": 4.090389,
+            "p99": 4.090389
+          },
+          "sampling_ms": {
+            "max": null,
+            "observed_request_count": 0,
+            "p50": null,
+            "p99": null
+          },
+          "synchronization_ms": {
+            "max": 60.530121,
+            "observed_request_count": 1,
+            "p50": 60.530121,
+            "p99": 60.530121
+          },
+          "tokenization_ms": {
+            "max": 4.405335,
+            "observed_request_count": 1,
+            "p50": 4.405335,
+            "p99": 4.405335
+          },
+          "training_ms": {
+            "max": null,
+            "observed_request_count": 0,
+            "p50": null,
+            "p99": null
+          },
+          "trim_ms": {
+            "max": null,
+            "observed_request_count": 0,
+            "p50": null,
+            "p99": null
+          },
+          "unexplained_ms": {
+            "max": 10.746433999999999,
+            "observed_request_count": 1,
+            "p50": 10.746433999999999,
+            "p99": 10.746433999999999
+          }
+        },
+        "request_metrics": {
+          "actor_admission_ms": {
+            "max": 0.662862,
+            "observed_request_count": 1,
+            "p50": 0.662862,
+            "p99": 0.662862
+          },
+          "actor_prefill_wall_ms": {
+            "max": 131497.267546,
+            "observed_request_count": 1,
+            "p50": 131497.267546,
+            "p99": 131497.267546
+          },
+          "actor_queue_ms": {
+            "max": 1.190432,
+            "observed_request_count": 1,
+            "p50": 1.190432,
+            "p99": 1.190432
+          },
+          "decode_ms": {
+            "max": 68452.042791,
+            "observed_request_count": 1,
+            "p50": 68452.042791,
+            "p99": 68452.042791
+          },
+          "decode_tokens_per_sec": {
+            "max": 0.9349611405375714,
+            "observed_request_count": 1,
+            "p50": 0.9349611405375714,
+            "p99": 0.9349611405375714
+          },
+          "prefill_ms": {
+            "max": 131429.33306200002,
+            "observed_request_count": 1,
+            "p50": 131429.33306200002,
+            "p99": 131429.33306200002
+          },
+          "total_latency_ms": {
+            "max": 199968.08198299998,
+            "observed_request_count": 1,
+            "p50": 199968.08198299998,
+            "p99": 199968.08198299998
+          },
+          "ttft_ms": {
+            "max": 131503.92103,
+            "observed_request_count": 1,
+            "p50": 131503.92103,
+            "p99": 131503.92103
+          }
+        },
+        "schema": "kiln.serving-benchmark-request-phase-summary.v1",
+        "stall_count": 3,
+        "stall_reasons": {
+          "actor_admission": 0,
+          "actor_cycle_idle": 0,
+          "actor_decode": 3,
+          "actor_prefill": 0,
+          "actor_queue": 0,
+          "adapter": 0,
+          "client_delivery": 0,
+          "gpu_lock_wait": 0,
+          "graph_capture": 0,
+          "graph_replay": 0,
+          "handler_queue": 0,
+          "readback": 0,
+          "resize": 0,
+          "response_delivery": 0,
+          "sampling": 0,
+          "synchronization": 0,
+          "training": 0,
+          "trim": 0,
+          "unexplained": 0
+        },
+        "unexplained_stall_count": 0
+      },
+      "request_throughput_per_s": 0.005000748921985046,
+      "server": {
+        "batching_engine": {
+          "actor_cycle_idle_active_end": false,
+          "actor_cycle_idle_count": 0,
+          "actor_cycle_idle_ms": 0,
+          "actor_cycle_idle_seconds": 0.0,
+          "actor_cycle_idle_source": "default",
+          "batched_decode_forward_fraction": 0.0,
+          "effective_max_decode_batch": 16,
+          "mean_decode_rows_per_forward": 1.0,
+          "process_max_actor_cycle_idle_ms": 0.0,
+          "process_max_observed_batch": 1,
+          "total_admission_calls": 1,
+          "total_admission_ms": 0.6628619999999996,
+          "total_batched_decode_forwards": 0,
+          "total_decode_forward_ms": 68455.09385799996,
+          "total_decode_forwards": 63,
+          "total_decode_rows": 63,
+          "total_decode_tokens": 64,
+          "total_errors": 0,
+          "total_prefill_forward_ms": 131495.11011499993,
+          "total_prefill_forwards": 36,
+          "total_prefill_layer_yields": 27,
+          "total_prefill_layers": 288,
+          "total_prefill_tokens": 3876
+        },
+        "request_route": "batching_engine",
+        "requests": {
+          "active_end": 0,
+          "error": 0,
+          "ok": 1,
+          "process_active_peak": 1,
+          "rejected": 0,
+          "timeout": 0,
+          "total": 1
+        },
+        "rocm_graphs": {
+          "active_graph_slot_count_end": 0,
+          "active_graph_slot_count_start": 0,
+          "cache_admission_successes": 0,
+          "capture_attempts": 0,
+          "capture_deferrals": 0,
+          "capture_enabled": false,
+          "capture_failures": 0,
+          "capture_parity": {
+            "batched_capture_attempts": 0,
+            "batched_capture_deferrals": 0,
+            "batched_capture_failures": 0,
+            "batched_capture_successes": 0,
+            "batched_capture_successes_end": 0,
+            "batched_capture_successes_start": 0,
+            "capture_parity_checks": 0,
+            "capture_parity_checks_end": 0,
+            "capture_parity_checks_start": 0,
+            "capture_parity_compared_bytes": 0,
+            "capture_parity_duration_micros": 0,
+            "capture_parity_errors": 0,
+            "capture_parity_errors_end": 0,
+            "capture_parity_errors_start": 0,
+            "capture_parity_failures": 0,
+            "capture_parity_failures_end": 0,
+            "capture_parity_failures_start": 0,
+            "capture_parity_passes": 0,
+            "capture_parity_passes_end": 0,
+            "capture_parity_passes_start": 0
+          },
+          "capture_requested": false,
+          "capture_successes": 0,
+          "captured_graph_count_end": 0,
+          "captured_graph_count_start": 0,
+          "enabled": false,
+          "failures": 0,
+          "fallbacks": {
+            "capture_failure": 0,
+            "cold_cache_host_round_trip": 0,
+            "critical_memory_pressure": 0,
+            "graph_accounting_incomplete": 0,
+            "graph_cache_byte_budget": 0,
+            "graph_cache_capacity": 0,
+            "memory_governor_selector_mismatch": 0,
+            "memory_reservation_denied": 0,
+            "moderate_memory_pressure": 0,
+            "multi_row_batch_unsupported": 0,
+            "persistent_host_round_trip": 0,
+            "process_max_duration_micros": 0,
+            "replay_failure": 0,
+            "shape_dependent_attention": 0,
+            "slow": 0,
+            "tight_memory_pressure": 0,
+            "total": 0,
+            "total_duration_micros": 0
+          },
+          "graph_slot_count_end": 0,
+          "graph_slot_count_start": 0,
+          "graph_slot_create_count": 0,
+          "graph_slot_reuse_count": 0,
+          "idle_graph_slot_count_end": 0,
+          "idle_graph_slot_count_start": 0,
+          "replay_attempts": 0,
+          "replay_failures": 0,
+          "replay_successes": 0,
+          "requested": false,
+          "state": "disabled",
+          "unavailable_reason": null
+        },
+        "schema": "kiln.serving-benchmark-server-diagnostics.v7"
+      },
+      "slo_good_request_count": 0,
+      "slo_goodput_requests_per_s": 0.0,
+      "slo_goodput_tokens_per_s": 0.0,
+      "success_count": 1,
+      "ttft_ms_p50": 131505.15392400848,
+      "ttft_ms_p99": 131505.15392400848,
+      "ttft_ms_p999": 131505.15392400848,
+      "verdict": "passed"
+    }
+  ],
+  "schema": "kiln.serving-benchmark.v1",
+  "server_lifecycle": {
+    "launch_config": {
+      "acceptable_exit_codes": [
+        0
+      ],
+      "command": [
+        "./target/release/kiln",
+        "serve",
+        "--config",
+        "qualification/server-config/kiln-cuda-rtx4090-laptop-serving-performance-v1.toml"
+      ],
+      "content_sha256": "sha256:76ae6f25e8fa2d62a165e9660b7b1f4e34c08e7788c624f6a71430726f82a2e3",
+      "id": "kiln-cuda-rtx4090-laptop-serving-performance-v1",
+      "log_directory": "../../.qualification/kiln-serving/cuda-rtx4090-laptop-performance-v1/logs",
+      "readiness_poll_interval_ms": 250,
+      "schema": "kiln.serving-benchmark-server-launch.v1",
+      "shutdown_timeout_seconds": 180.0,
+      "startup_timeout_seconds": 1200.0,
+      "working_directory": "../.."
+    },
+    "log": {
+      "bytes": 76118,
+      "path": "/home/ericflo/Development/kiln/.qualification/kiln-serving/cuda-rtx4090-laptop-performance-v1/logs/cuda4090l-c1-48b0727667c7-kiln-long-prefill.server.log",
+      "sha256": "sha256:7a93a6cc5fa532d84c1eb26c1172b19de4c62ce8140dc6b900ce2c8cdf3a24fa"
+    },
+    "mode": "owned_process_group",
+    "prelaunch_cooldown": null,
+    "shutdown": {
+      "acceptable_exit_codes": [
+        0
+      ],
+      "elapsed_seconds": 0.3522177830018336,
+      "forced": false,
+      "process_group_alive_end": false,
+      "returncode": 0,
+      "signal": "SIGTERM",
+      "signal_sent": true
+    }
+  },
+  "verdict": "passed",
+  "warmup": {
+    "client_visible_itl_ms_p50": 35.29086499474943,
+    "client_visible_itl_ms_p99": 53.27128981822169,
+    "client_visible_itl_ms_p999": 55.74341447988992,
+    "client_visible_stream_event_count": 16,
+    "completion_tokens": 16,
+    "concurrency": 1,
+    "dispatch_spread_ms": 0.0,
+    "e2e_ms_p50": 140444.43850999232,
+    "e2e_ms_p99": 140444.43850999232,
+    "e2e_ms_p999": 140444.43850999232,
+    "elapsed_s": 140.444618523994,
+    "error_count": 0,
+    "errors": [],
+    "gates": [
+      {
+        "detail": "1/1 requests succeeded",
+        "name": "all_requests_succeeded",
+        "passed": true
+      },
+      {
+        "detail": "every measured request must contribute positive completion usage",
+        "name": "positive_completion_usage",
+        "passed": true
+      },
+      {
+        "detail": "0.000 ms <= 250.000 ms",
+        "name": "dispatch_spread",
+        "passed": true
+      },
+      {
+        "detail": "not requested or parsed successfully",
+        "name": "diagnostics_readable",
+        "passed": true
+      },
+      {
+        "detail": "every request must finish by length with exactly 16 tokens",
+        "name": "fixed_output_length",
+        "passed": true
+      },
+      {
+        "detail": "observed prompt-token counts: [3873]",
+        "name": "uniform_prompt_tokens",
+        "passed": true
+      },
+      {
+        "detail": "a local device-memory counter must be sampled during the run",
+        "name": "memory_measured",
+        "passed": true
+      },
+      {
+        "detail": "15518302208 bytes <= 16500000000 bytes",
+        "name": "absolute_memory_limit",
+        "passed": true
+      },
+      {
+        "detail": "route=batching_engine; request={'error': 0, 'timeout': 0, 'rejected': 0}; batching_engine=0; decode_batcher=0; rocm_graph_failures=0",
+        "name": "server_reported_no_errors",
+        "passed": true
+      },
+      {
+        "detail": "total=1, ok=1, active_end=0; expected=1",
+        "name": "server_request_accounting",
+        "passed": true
+      },
+      {
+        "detail": "state=disabled; capture_requested=False; capture_successes=0; replay_successes=0; failures=0; fallbacks=0; multi_row_batch_unsupported=0",
+        "name": "rocm_graph_execution_accounted",
+        "passed": true
+      },
+      {
+        "detail": "batched_successes=0; checks=0; passes=0; failures=0; errors=0; passes_end=0; compared_bytes=0; duration_micros=0",
+        "name": "rocm_graph_capture_parity_accounted",
+        "passed": true
+      },
+      {
+        "detail": "configured_ms=0; source=default; active_end=False; count=0; seconds=0.000000; process_max_ms=0.000",
+        "name": "actor_cycle_idle_accounted",
+        "passed": true
+      },
+      {
+        "detail": "performance=1/1 successful requests; latency=1/1",
+        "name": "request_performance_accounted",
+        "passed": true
+      }
+    ],
+    "host_thermal": {
+      "phase": "warmup-c001",
+      "phase_wall_seconds": 140.44935251100105,
+      "supervision": "external_wsl2_boundary",
+      "thermally_sustainable_output_token_throughput_per_s": 0.11392006950510333
+    },
+    "memory": {
+      "baseline_bytes": 15040675840,
+      "peak_bytes": 15518302208,
+      "peak_delta_bytes": 477626368,
+      "samples": 120
+    },
+    "output_evidence": [
+      {
+        "completion_tokens": 16,
+        "content_sha256": "sha256:92443f7db91d15813f0c279fbbdc4105fcb614cc73f2ae04fb1fa45cde1dd7f5",
+        "content_utf8_bytes": 123,
+        "exact_output": null,
+        "finish_reason": "length",
+        "index": 0,
+        "output_sha256": "sha256:e52630b850df5416f6728985fbf56d63e4e501475a611e37f46af5ef57938b35",
+        "reasoning_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "reasoning_utf8_bytes": 0
+      }
+    ],
+    "output_set_sha256": "sha256:8c8a9b7daeffdcbc7c23614199c362a712a58e1e6dc87fb1564a273c1b25b6cc",
+    "output_token_throughput_per_s": 0.11392390942531208,
+    "prompt_set_sha256": "sha256:6f42e1cc2d338f242a531c225640aff662e7148123f7c59069c214d166fbbcc1",
+    "prompt_token_counts": [
+      3873
+    ],
+    "prompt_tokens_max": 3873,
+    "prompt_tokens_min": 3873,
+    "repeat": -1,
+    "request_count": 1,
+    "request_performance": [
+      {
+        "index": 0,
+        "performance": {
+          "actor_admission_ms": 5.181666,
+          "actor_prefill_wall_ms": 139892.30619099998,
+          "actor_queue_ms": 1.2182300000000001,
+          "adapter_used": "base",
+          "completion_tokens": 16,
+          "decode_ms": 533.53205,
+          "decode_tokens_per_sec": 29.98882635073188,
+          "finish_reason": "length",
+          "latency": {
+            "emitted_tokens": 16,
+            "gap_samples": 15,
+            "gap_samples_truncated": false,
+            "itl_ms_p50": 35.13065,
+            "itl_ms_p99": 53.24337815999999,
+            "itl_ms_p999": 55.73354211600001,
+            "max_itl_ms": 56.010227,
+            "phases": {
+              "actor_admission_ms": 5.181666,
+              "actor_cycle_idle_ms": 0.0,
+              "actor_queue_ms": 1.2182300000000001,
+              "adapter_ms": null,
+              "client_delivery_ms": 0.604248,
+              "decode_ms": 537.358965,
+              "gpu_lock_wait_ms": 0.01869,
+              "graph_capture_ms": null,
+              "graph_replay_ms": null,
+              "handler_queue_ms": 1.205715,
+              "prefill_ms": 139890.039588,
+              "readback_ms": 49.774004,
+              "resize_ms": null,
+              "response_delivery_ms": 1.122571,
+              "sampling_ms": null,
+              "synchronization_ms": 138.368272,
+              "tokenization_ms": 3.9779259999999996,
+              "training_ms": null,
+              "trim_ms": null,
+              "unexplained_ms": 4.232206
+            },
+            "retained_gap_samples": 15,
+            "stall_count": 0,
+            "stall_reasons": {
+              "actor_admission": 0,
+              "actor_cycle_idle": 0,
+              "actor_decode": 0,
+              "actor_prefill": 0,
+              "actor_queue": 0,
+              "adapter": 0,
+              "client_delivery": 0,
+              "gpu_lock_wait": 0,
+              "graph_capture": 0,
+              "graph_replay": 0,
+              "handler_queue": 0,
+              "readback": 0,
+              "resize": 0,
+              "response_delivery": 0,
+              "sampling": 0,
+              "synchronization": 0,
+              "training": 0,
+              "trim": 0,
+              "unexplained": 0
+            },
+            "stall_threshold_ms": 250.0,
+            "ttft_ms": 139903.115976,
+            "unexplained_stall_count": 0
+          },
+          "prefill_ms": 139752.395427,
+          "prompt_tokens": 3873,
+          "resident_prefill_used": false,
+          "thinking_mode": "non_reasoning",
+          "total_latency_ms": 140442.866732,
+          "ttft_ms": 139903.115976
+        }
+      }
+    ],
+    "request_phase_summary": {
+      "emitted_tokens": 16,
+      "latency_request_count": 1,
+      "performance_request_count": 1,
+      "phases": {
+        "actor_admission_ms": {
+          "max": 5.181666,
+          "observed_request_count": 1,
+          "p50": 5.181666,
+          "p99": 5.181666
+        },
+        "actor_cycle_idle_ms": {
+          "max": 0.0,
+          "observed_request_count": 1,
+          "p50": 0.0,
+          "p99": 0.0
+        },
+        "actor_queue_ms": {
+          "max": 1.2182300000000001,
+          "observed_request_count": 1,
+          "p50": 1.2182300000000001,
+          "p99": 1.2182300000000001
+        },
+        "adapter_ms": {
+          "max": null,
+          "observed_request_count": 0,
+          "p50": null,
+          "p99": null
+        },
+        "client_delivery_ms": {
+          "max": 0.604248,
+          "observed_request_count": 1,
+          "p50": 0.604248,
+          "p99": 0.604248
+        },
+        "decode_ms": {
+          "max": 537.358965,
+          "observed_request_count": 1,
+          "p50": 537.358965,
+          "p99": 537.358965
+        },
+        "gpu_lock_wait_ms": {
+          "max": 0.01869,
+          "observed_request_count": 1,
+          "p50": 0.01869,
+          "p99": 0.01869
+        },
+        "graph_capture_ms": {
+          "max": null,
+          "observed_request_count": 0,
+          "p50": null,
+          "p99": null
+        },
+        "graph_replay_ms": {
+          "max": null,
+          "observed_request_count": 0,
+          "p50": null,
+          "p99": null
+        },
+        "handler_queue_ms": {
+          "max": 1.205715,
+          "observed_request_count": 1,
+          "p50": 1.205715,
+          "p99": 1.205715
+        },
+        "prefill_ms": {
+          "max": 139890.039588,
+          "observed_request_count": 1,
+          "p50": 139890.039588,
+          "p99": 139890.039588
+        },
+        "readback_ms": {
+          "max": 49.774004,
+          "observed_request_count": 1,
+          "p50": 49.774004,
+          "p99": 49.774004
+        },
+        "resize_ms": {
+          "max": null,
+          "observed_request_count": 0,
+          "p50": null,
+          "p99": null
+        },
+        "response_delivery_ms": {
+          "max": 1.122571,
+          "observed_request_count": 1,
+          "p50": 1.122571,
+          "p99": 1.122571
+        },
+        "sampling_ms": {
+          "max": null,
+          "observed_request_count": 0,
+          "p50": null,
+          "p99": null
+        },
+        "synchronization_ms": {
+          "max": 138.368272,
+          "observed_request_count": 1,
+          "p50": 138.368272,
+          "p99": 138.368272
+        },
+        "tokenization_ms": {
+          "max": 3.9779259999999996,
+          "observed_request_count": 1,
+          "p50": 3.9779259999999996,
+          "p99": 3.9779259999999996
+        },
+        "training_ms": {
+          "max": null,
+          "observed_request_count": 0,
+          "p50": null,
+          "p99": null
+        },
+        "trim_ms": {
+          "max": null,
+          "observed_request_count": 0,
+          "p50": null,
+          "p99": null
+        },
+        "unexplained_ms": {
+          "max": 4.232206,
+          "observed_request_count": 1,
+          "p50": 4.232206,
+          "p99": 4.232206
+        }
+      },
+      "request_metrics": {
+        "actor_admission_ms": {
+          "max": 5.181666,
+          "observed_request_count": 1,
+          "p50": 5.181666,
+          "p99": 5.181666
+        },
+        "actor_prefill_wall_ms": {
+          "max": 139892.30619099998,
+          "observed_request_count": 1,
+          "p50": 139892.30619099998,
+          "p99": 139892.30619099998
+        },
+        "actor_queue_ms": {
+          "max": 1.2182300000000001,
+          "observed_request_count": 1,
+          "p50": 1.2182300000000001,
+          "p99": 1.2182300000000001
+        },
+        "decode_ms": {
+          "max": 533.53205,
+          "observed_request_count": 1,
+          "p50": 533.53205,
+          "p99": 533.53205
+        },
+        "decode_tokens_per_sec": {
+          "max": 29.98882635073188,
+          "observed_request_count": 1,
+          "p50": 29.98882635073188,
+          "p99": 29.98882635073188
+        },
+        "prefill_ms": {
+          "max": 139752.395427,
+          "observed_request_count": 1,
+          "p50": 139752.395427,
+          "p99": 139752.395427
+        },
+        "total_latency_ms": {
+          "max": 140442.866732,
+          "observed_request_count": 1,
+          "p50": 140442.866732,
+          "p99": 140442.866732
+        },
+        "ttft_ms": {
+          "max": 139903.115976,
+          "observed_request_count": 1,
+          "p50": 139903.115976,
+          "p99": 139903.115976
+        }
+      },
+      "schema": "kiln.serving-benchmark-request-phase-summary.v1",
+      "stall_count": 0,
+      "stall_reasons": {
+        "actor_admission": 0,
+        "actor_cycle_idle": 0,
+        "actor_decode": 0,
+        "actor_prefill": 0,
+        "actor_queue": 0,
+        "adapter": 0,
+        "client_delivery": 0,
+        "gpu_lock_wait": 0,
+        "graph_capture": 0,
+        "graph_replay": 0,
+        "handler_queue": 0,
+        "readback": 0,
+        "resize": 0,
+        "response_delivery": 0,
+        "sampling": 0,
+        "synchronization": 0,
+        "training": 0,
+        "trim": 0,
+        "unexplained": 0
+      },
+      "unexplained_stall_count": 0
+    },
+    "request_throughput_per_s": 0.007120244339082005,
+    "server": {
+      "batching_engine": {
+        "actor_cycle_idle_active_end": false,
+        "actor_cycle_idle_count": 0,
+        "actor_cycle_idle_ms": 0,
+        "actor_cycle_idle_seconds": 0.0,
+        "actor_cycle_idle_source": "default",
+        "batched_decode_forward_fraction": 0.0,
+        "effective_max_decode_batch": 16,
+        "mean_decode_rows_per_forward": 1.0,
+        "process_max_actor_cycle_idle_ms": 0.0,
+        "process_max_observed_batch": 1,
+        "total_admission_calls": 1,
+        "total_admission_ms": 5.181666,
+        "total_batched_decode_forwards": 0,
+        "total_decode_forward_ms": 537.358965,
+        "total_decode_forwards": 15,
+        "total_decode_rows": 15,
+        "total_decode_tokens": 16,
+        "total_errors": 0,
+        "total_prefill_forward_ms": 139890.03958799999,
+        "total_prefill_forwards": 36,
+        "total_prefill_layer_yields": 27,
+        "total_prefill_layers": 288,
+        "total_prefill_tokens": 3873
+      },
+      "request_route": "batching_engine",
+      "requests": {
+        "active_end": 0,
+        "error": 0,
+        "ok": 1,
+        "process_active_peak": 1,
+        "rejected": 0,
+        "timeout": 0,
+        "total": 1
+      },
+      "rocm_graphs": {
+        "active_graph_slot_count_end": 0,
+        "active_graph_slot_count_start": 0,
+        "cache_admission_successes": 0,
+        "capture_attempts": 0,
+        "capture_deferrals": 0,
+        "capture_enabled": false,
+        "capture_failures": 0,
+        "capture_parity": {
+          "batched_capture_attempts": 0,
+          "batched_capture_deferrals": 0,
+          "batched_capture_failures": 0,
+          "batched_capture_successes": 0,
+          "batched_capture_successes_end": 0,
+          "batched_capture_successes_start": 0,
+          "capture_parity_checks": 0,
+          "capture_parity_checks_end": 0,
+          "capture_parity_checks_start": 0,
+          "capture_parity_compared_bytes": 0,
+          "capture_parity_duration_micros": 0,
+          "capture_parity_errors": 0,
+          "capture_parity_errors_end": 0,
+          "capture_parity_errors_start": 0,
+          "capture_parity_failures": 0,
+          "capture_parity_failures_end": 0,
+          "capture_parity_failures_start": 0,
+          "capture_parity_passes": 0,
+          "capture_parity_passes_end": 0,
+          "capture_parity_passes_start": 0
+        },
+        "capture_requested": false,
+        "capture_successes": 0,
+        "captured_graph_count_end": 0,
+        "captured_graph_count_start": 0,
+        "enabled": false,
+        "failures": 0,
+        "fallbacks": {
+          "capture_failure": 0,
+          "cold_cache_host_round_trip": 0,
+          "critical_memory_pressure": 0,
+          "graph_accounting_incomplete": 0,
+          "graph_cache_byte_budget": 0,
+          "graph_cache_capacity": 0,
+          "memory_governor_selector_mismatch": 0,
+          "memory_reservation_denied": 0,
+          "moderate_memory_pressure": 0,
+          "multi_row_batch_unsupported": 0,
+          "persistent_host_round_trip": 0,
+          "process_max_duration_micros": 0,
+          "replay_failure": 0,
+          "shape_dependent_attention": 0,
+          "slow": 0,
+          "tight_memory_pressure": 0,
+          "total": 0,
+          "total_duration_micros": 0
+        },
+        "graph_slot_count_end": 0,
+        "graph_slot_count_start": 0,
+        "graph_slot_create_count": 0,
+        "graph_slot_reuse_count": 0,
+        "idle_graph_slot_count_end": 0,
+        "idle_graph_slot_count_start": 0,
+        "replay_attempts": 0,
+        "replay_failures": 0,
+        "replay_successes": 0,
+        "requested": false,
+        "state": "disabled",
+        "unavailable_reason": null
+      },
+      "schema": "kiln.serving-benchmark-server-diagnostics.v7"
+    },
+    "slo_good_request_count": 0,
+    "slo_goodput_requests_per_s": 0.0,
+    "slo_goodput_tokens_per_s": 0.0,
+    "success_count": 1,
+    "ttft_ms_p50": 139904.24902099767,
+    "ttft_ms_p99": 139904.24902099767,
+    "ttft_ms_p999": 139904.24902099767,
+    "verdict": "passed"
+  },
+  "workload": {
+    "arrival_pattern": "thread_barrier_all_at_once",
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    },
+    "comparison_mode": "exact_output",
+    "concurrency": [
+      1
+    ],
+    "endpoint": "/v1/chat/completions",
+    "max_dispatch_spread_ms": 250.0,
+    "max_tokens": 64,
+    "memory_limit_bytes": 16500000000,
+    "model": "Qwen3.5-4B",
+    "profile": "long-prefill",
+    "prompt_set_id": "cuda-rtx4090-laptop-performance-v1-long-prefill",
+    "prompt_template_version": "fixed-serving-profiles-v2",
+    "repeats": 1,
+    "require_max_tokens": true,
+    "require_uniform_prompt_tokens": true,
+    "run_id": "cuda4090l-c1-48b0727667c7-kiln-long-prefill",
+    "sampling": {
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "repetition_penalty": 1.0,
+      "seed": 20260725,
+      "temperature": 0.0,
+      "top_p": 1.0
+    },
+    "schema": "kiln.serving-benchmark-workload.v1",
+    "slo": {
+      "client_visible_itl_ms": 250.0,
+      "e2e_ms": 60000.0,
+      "ttft_ms": 5000.0
+    },
+    "stream": true,
+    "stream_include_usage": true,
+    "warmup_requests": 1
+  },
+  "workload_fingerprint": "sha256:870f1b92483e58d9c9181f9716e843471a0beece280f65f525dafa6b00d72d65"
+}

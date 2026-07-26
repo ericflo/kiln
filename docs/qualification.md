@@ -1856,6 +1856,80 @@ These are source repairs and retained counterevidence, not c1 acceptance.
 Commit and push them before the next exact retry; paired c1, wider concurrency,
 endurance, native Linux, and desktop RTX 4090 remain open.
 
+The next exact retry ran from clean pushed source
+`48b0727667c75668925b8e2863fdaf85ab74afb4`, source tree
+`sha256:6c9c6651f25961f02bf1762c8c13fdaf87f45e5c0c6770112b3928f43be07048`.
+It retained failed parent
+`qualification/receipts/cuda/rtx4090-laptop/20260726t150427314829z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`
+with file
+`sha256:292d2c8da00adfcf825aea4532415c30e6556016ada40c8cada36aa104675290`.
+Before corrective edits, that parent passed structural, current-source,
+local-artifact, and known-commit validation. It binds all 16 available WSL2
+capabilities and identical initial/final model fingerprints at
+`sha256:31b656e8b4992a7dd56d31f0c4cf18fcb360601e69af4f538b780c40de585612`.
+
+Greedy-short copied and verified the model, uploaded all 8,411,510,272 source
+bytes to CUDA, and released the CPU/source cache, but its one-shot selected
+NVIDIA capacity query returned no valid sample within the two-second probe
+bound. Kiln correctly converted that to zero safe capacity and exited before
+KV allocation, readiness, or a request. The strict-valid failed receipt is
+`20260726t153243-cuda-rtx4090-laptop-c1-greedy-short-48b07276-v1.kiln.json`
+(file
+`sha256:d440b19f1366e3d0d10f92aee242210f06311815d8708a4d84ec6710cb83c8a9`);
+its log is 37,285 bytes at
+`sha256:8a64340154a705d9e159344ef222d32f06ca5e8ba78224a4733ea0434d2b8f28`.
+The next four launches passed the same capacity boundary, making this bounded
+probe failure transient rather than proof that the device disappeared.
+
+Long-prefill retained a strict-valid passed receipt at
+`20260726t161751-cuda-rtx4090-laptop-c1-long-prefill-48b07276-v1.kiln.json`
+(file
+`sha256:30e79e072c2b4ff156434e40cf5245ce29c67f8e397d241b550abc5b9853994e`).
+It completed the exact 3,876+64-token request, peaked at 15,618,965,504 device
+bytes, shut down unforced with return code zero, and passed every identity,
+artifact, repository, log, and lifecycle finalization check. API-default,
+prefix-hit, and mixed also passed warmup and their measured 148+64,
+3,883+64, and 152+64-token requests, and every server log recorded a clean
+drained shutdown. Their drivers nevertheless exited two without receipts:
+after the leader was reaped, `killpg(..., 0)` continued to report the group for
+10.023, 10.041, and 10.007 active seconds even after `SIGKILL`. Driver v23
+surfaced the original cleanup error, so the failure was no longer masked by
+receipt validation. The failure shape is consistent with a short-lived
+`nvidia-smi` descendant becoming an orphaned zombie during shutdown; the
+retained run did not capture member states, so it does not itself prove that
+identity.
+
+The case scope completed in 6,407.558 seconds with
+873,562,384/3,203,778,790 CPU microseconds used/allowed,
+10,737,684,480-byte and 70-PID peaks, 238,161 `memory.max` events, and zero
+OOM, OOM-kill, or group-kill events. All 247 authenticated pauses completed,
+totaling 3,059.825 seconds with a 60.418-second longest interval. Host/GPU
+peaks were 92.05/68 C, the scope was removed, and outer stable handoff ended at
+77.05/64 C. The repaired telemetry settlement preserved child return code one
+with `supervision_outcome=child_exit`; there was no false `EPIPE` thermal trip.
+Both independent fingerprint scopes also returned zero, removed cleanly, and
+completed stable handoff.
+
+The corrective lifecycle classifier first requires the kernel process-group
+identity to exist, then performs a complete `/proc` membership scan. It accepts
+quiescence only when every exact-PGID member is a zombie; any live, missing,
+unreadable, malformed, or permission-uncertain membership remains fatal. A
+real root-mapped PID/mount-namespace probe proves a live group is blocked while
+a kernel-visible zombie-only group is quiescent. The corrected driver is
+`sha256:fa6a903408855797cc3bfe5a10b4f7def6a78a25669745222dcd7301af468d46`.
+The selected NVIDIA identity/capacity startup path now permits three strict
+two-second attempts separated by 100 ms; all three failing still yields zero
+capacity, while live governor probes retain their single-attempt failure
+behavior. The corrected VRAM owner is
+`sha256:1cff2a720cb2e6ebfab067f0b347379c6834f7ec644b3e3eb68354fc4f68aa9c`.
+All 74 focused serving-driver tests, 854 qualification tests, 68 runnable
+`kiln-memory` tests, and the 1,103-test server library plus every server
+integration target pass; the existing hardware-only live-governor test remains
+ignored. All retained workloads, compact and detailed receipts, and specialized
+oracle results validate. vLLM correctly did not start after the failed Kiln
+campaign. This counterevidence and repair do not accept c1, wider concurrency,
+endurance, native Linux, or desktop RTX 4090.
+
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
 `sha256:2e81344e95637821046fd0dee2ff61495af6b91a5e728214975eeb7785507d63`).

@@ -1299,14 +1299,61 @@ def launch_owned_server(config: ServerLaunchConfig, run_id: str) -> OwnedServer:
         raise
 
 
-def process_group_alive(process_group_id: int) -> bool:
+def _process_group_member_states(
+    process_group_id: int,
+    proc_root: Path,
+) -> tuple[list[str], bool]:
+    states: list[str] = []
+    certain = True
+    try:
+        process_paths = list(proc_root.iterdir())
+    except OSError:
+        return states, False
+    for process_path in process_paths:
+        if not process_path.name.isdigit():
+            continue
+        try:
+            raw = (process_path / "stat").read_text(encoding="utf-8")
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError:
+            certain = False
+            continue
+        close = raw.rfind(")")
+        if close < 0:
+            certain = False
+            continue
+        fields = raw[close + 2 :].split()
+        if len(fields) < 3:
+            certain = False
+            continue
+        try:
+            observed_group = int(fields[2])
+        except ValueError:
+            certain = False
+            continue
+        if observed_group == process_group_id:
+            states.append(fields[0])
+    return states, certain
+
+
+def process_group_alive(
+    process_group_id: int,
+    proc_root: Path = Path("/proc"),
+) -> bool:
+    # killpg(..., 0) also succeeds for a zombie-only group. Such members cannot
+    # execute or retain descriptors, but any uncertain or non-zombie member
+    # still means cleanup is incomplete.
     try:
         os.killpg(process_group_id, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
-    return True
+    states, certain = _process_group_member_states(process_group_id, proc_root)
+    if not certain or not states:
+        return True
+    return any(state != "Z" for state in states)
 
 
 def loopback_base_url_port(base_url: str) -> int:

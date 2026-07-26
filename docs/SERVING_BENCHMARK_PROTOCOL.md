@@ -53,6 +53,17 @@ independent emergency wall bound before surfacing the failure. No controller
 freeze can by itself force shutdown escalation or consume the readiness
 allowance; ordinary delay and CPU-feedback freezes still consume it.
 
+Linux `killpg(pgid, 0)` also succeeds when every remaining member is a zombie.
+After the owned leader has been reaped, the driver therefore enumerates
+`/proc/*/stat` and treats the group as execution-quiescent only when a complete
+scan finds at least one exact-PGID member and every such member is in state
+`Z`. Zombies cannot execute or retain descriptors. A live member, an empty
+scan while `killpg` still succeeds, unreadable or malformed process evidence,
+or a permission failure continues to mean that cleanup is incomplete. This
+avoids escalating a clean shutdown solely because PID-namespace init has not
+reaped an orphan while preserving fail-closed handling for executable
+descendants, uninterruptible processes, and uncertain membership.
+
 Owned launch eliminates the manual gap in which model loading or inference
 prewarm could run before the guard attached. Driver v8 also removes the
 model-provenance gap: both full model fingerprints run as start-gated child
@@ -128,6 +139,14 @@ The closed `kiln.serving-benchmark-server-launch.v1` document has these fields:
 | `startup_timeout_seconds` | Positive readiness deadline. Native execution counts wall time; external WSL2 execution subtracts only authenticated thermal-pacing overlap. Individual probes are bounded to two seconds and failed probes are retried. |
 | `shutdown_timeout_seconds` | Positive grace period after process-group `SIGTERM` before containment uses `SIGKILL` and fails the run. Native execution counts wall time; external WSL2 execution subtracts only authenticated thermal-pacing overlap. |
 | `acceptable_exit_codes` | Sorted, unique, non-empty accepted status list. A forced shutdown fails regardless of status. |
+
+Kiln's selected NVIDIA startup identity and capacity probes use strict
+`nvidia-smi` output parsing and a two-second child lifetime. Startup now allows
+at most three attempts separated by 100 ms. A failed or malformed third sample
+still establishes zero capacity and rejects accelerator startup; a configured
+capacity remains a cap and cannot replace hardware evidence. The persistent
+live memory governor keeps its single-sample fail-closed behavior, preserving
+the distinction between bounded startup recovery and runtime counter loss.
 
 The launch contract intentionally has no environment map and accepts no shell
 command string. Runtime behavior belongs in the server's typed configuration;

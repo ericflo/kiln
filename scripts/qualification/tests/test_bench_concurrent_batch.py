@@ -2820,6 +2820,48 @@ class ServingBenchmarkTests(unittest.TestCase):
             raised.exception.shutdown["process_group_alive_end"],
         )
 
+    def test_zombie_only_process_group_is_execution_quiescent(self) -> None:
+        if sys.platform != "linux" or not Path("/proc/self/stat").is_file():
+            self.skipTest("Linux procfs process states are required")
+        process = bench.subprocess.Popen(
+            [sys.executable, "-c", "pass"],
+            stdin=bench.subprocess.DEVNULL,
+            stdout=bench.subprocess.DEVNULL,
+            stderr=bench.subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 5.0
+            while True:
+                state, process_group_id, _start = bench.AttachedProcessGroup._read_stat(
+                    process.pid,
+                    Path("/proc"),
+                )
+                if state == "Z":
+                    break
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.005)
+            self.assertEqual(process_group_id, process.pid)
+            bench.os.killpg(process.pid, 0)
+            self.assertFalse(bench.process_group_alive(process.pid))
+        finally:
+            process.wait()
+
+    def test_process_group_liveness_fails_closed_on_proc_uncertainty(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            proc_root = Path(directory)
+            (proc_root / "101").mkdir()
+            stat_path = proc_root / "101" / "stat"
+            with mock.patch.object(bench.os, "killpg"):
+                stat_path.write_text("101 (fixture) Z 1 101 101 0\n", encoding="ascii")
+                self.assertFalse(bench.process_group_alive(101, proc_root))
+                stat_path.write_text("101 (fixture) S 1 101 101 0\n", encoding="ascii")
+                self.assertTrue(bench.process_group_alive(101, proc_root))
+                stat_path.write_text("malformed\n", encoding="ascii")
+                self.assertTrue(bench.process_group_alive(101, proc_root))
+                stat_path.unlink()
+                self.assertTrue(bench.process_group_alive(101, proc_root))
+
     def test_owned_server_log_retries_transient_fsync_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "server.log"

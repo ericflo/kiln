@@ -5,6 +5,10 @@
 
 use crate::startup_environment::{DeviceRemapFamily, present_device_remap_variables};
 
+const NVIDIA_SMI_STARTUP_PROBE_ATTEMPTS: usize = 3;
+const NVIDIA_SMI_STARTUP_PROBE_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(100);
+
 /// Effective GPU memory capacity plus physical-memory topology.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GpuVramInfo {
@@ -1388,19 +1392,30 @@ fn query_meminfo_available_bytes_at(path: &std::path::Path) -> Option<u64> {
 /// which returns total memory in MiB. Returns None if nvidia-smi is not available
 /// or fails.
 fn query_nvidia_smi_for(index: usize) -> Option<u64> {
-    query_nvidia_smi_memory_for(index).map(|(total, _used, _free)| total)
+    retry_optional_probe(
+        NVIDIA_SMI_STARTUP_PROBE_ATTEMPTS,
+        NVIDIA_SMI_STARTUP_PROBE_RETRY_DELAY,
+        || query_nvidia_smi_memory_for(index),
+    )
+    .map(|(total, _used, _free)| total)
 }
 
 /// Enumerate physical NVIDIA indices and stable UUIDs in one bounded process.
 /// The UUID column makes malformed/remapped-looking output fail closed instead
 /// of treating an arbitrary number of lines as an identity proof.
 fn query_nvidia_physical_indices() -> Option<Vec<usize>> {
-    let stdout = bounded_command_stdout(
-        "nvidia-smi",
-        &["--query-gpu=index,uuid", "--format=csv,noheader,nounits"],
-        std::time::Duration::from_secs(2),
-    )?;
-    parse_nvidia_physical_indices(&stdout)
+    retry_optional_probe(
+        NVIDIA_SMI_STARTUP_PROBE_ATTEMPTS,
+        NVIDIA_SMI_STARTUP_PROBE_RETRY_DELAY,
+        || {
+            let stdout = bounded_command_stdout(
+                "nvidia-smi",
+                &["--query-gpu=index,uuid", "--format=csv,noheader,nounits"],
+                std::time::Duration::from_secs(2),
+            )?;
+            parse_nvidia_physical_indices(&stdout)
+        },
+    )
 }
 
 fn parse_nvidia_physical_indices(stdout: &[u8]) -> Option<Vec<usize>> {
@@ -1460,6 +1475,22 @@ fn parse_nvidia_smi_memory(stdout: &[u8]) -> Option<(u64, u64, u64)> {
         used_mib.checked_mul(1024 * 1024)?,
         free_mib.checked_mul(1024 * 1024)?,
     ))
+}
+
+fn retry_optional_probe<T>(
+    attempts: usize,
+    delay: std::time::Duration,
+    mut probe: impl FnMut() -> Option<T>,
+) -> Option<T> {
+    for attempt in 0..attempts {
+        if let Some(value) = probe() {
+            return Some(value);
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(delay);
+        }
+    }
+    None
 }
 
 /// Run a small system probe with a hard child lifetime. Probe failures and
@@ -1865,6 +1896,25 @@ mod tests {
         assert_eq!(parse_nvidia_smi_memory(b"0, 0, 0\n"), None);
         assert_eq!(parse_nvidia_smi_memory(b"24564, 24565, 0\n"), None);
         assert_eq!(parse_nvidia_smi_memory(b"24564, 0, 24565\n"), None);
+    }
+
+    #[test]
+    fn startup_probe_retry_is_bounded_and_stops_after_success() {
+        let mut calls = 0;
+        let recovered = retry_optional_probe(3, std::time::Duration::ZERO, || {
+            calls += 1;
+            (calls == 2).then_some(17u64)
+        });
+        assert_eq!(recovered, Some(17));
+        assert_eq!(calls, 2);
+
+        let mut failed_calls = 0;
+        let failed: Option<u64> = retry_optional_probe(3, std::time::Duration::ZERO, || {
+            failed_calls += 1;
+            None
+        });
+        assert_eq!(failed, None);
+        assert_eq!(failed_calls, 3);
     }
 
     #[test]
