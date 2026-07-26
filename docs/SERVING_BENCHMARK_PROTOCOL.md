@@ -666,6 +666,28 @@ removed the scope, and handed off at 74.05/64 C; its nine-sample outer peak
 retained the earlier 77.05 C reading. This is a boundary probe, not serving
 evidence. Push the repair before fixed c1.
 
+The clean pushed-source retry at
+`7e3406917ec369a2bf10f83918d637944932d805` retained strict failed receipt
+`qualification/receipts/cuda/rtx4090-laptop/20260726t002130041819z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`,
+file
+`sha256:bac0abc5fc9a8469738c13758c4a4d57619f1aa3633ad6744189773c4c94b26e`.
+Formal preflight was the intended 74.05/64 C. The fingerprint scope ran
+475.132 seconds, reached 5,503,045,632 bytes/four PIDs, used 5,939,727 of
+237,565,837 allowed CPU microseconds, and recorded zero memory-limit/OOM
+events. Three of four pauses completed; total pacing was 442.090 seconds and
+the active fourth pause expired at 300.360 seconds after a 90.05/64 C peak.
+Scope removal and 74.05/64 C outer handoff completed after 483 samples with no
+residue. Model identity, environment, build, server, and request work did not
+complete, so this remains pre-model counterevidence.
+
+The fingerprint limiter's cumulative deadline explains the repeated reheating.
+SIGSTOP time advances `time.monotonic()` while the scoped reader cannot run;
+on resume the deadline is far behind current time, allowing full-speed reads
+until cumulative bytes catch up. Rebase a stale deadline at the first
+post-pause chunk so frozen/idle time grants no credit. Keep the same 32 MiB/s
+maximum, shared limiter across both integrity passes, and unchanged thermal
+policy before retrying fixed c1.
+
 For the first Kiln campaign, use the exact UUID from
 `.environment.device.device_uuid` in the environment receipt, the matching
 bootstrap launch JSON, and `target/release/kiln` as `--runtime-artifact`. Use a

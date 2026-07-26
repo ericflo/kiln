@@ -1349,6 +1349,31 @@ with zero scope pauses, 51,108 of 59,376 allowed CPU microseconds, a
 77.05 C pre-admission peak. This proves only the repaired dirty-source
 admission and lifecycle. Commit and push before another exact c1 attempt.
 
+The exact clean pushed-source retry at
+`7e3406917ec369a2bf10f83918d637944932d805` retained failed receipt
+`qualification/receipts/cuda/rtx4090-laptop/20260726t002130041819z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`,
+file
+`sha256:bac0abc5fc9a8469738c13758c4a4d57619f1aa3633ad6744189773c4c94b26e`.
+Formal preflight correctly began at the stable 74.05/64 C boundary. The
+475.132-second initial fingerprint scope reached 5,503,045,632 bytes/four PIDs
+and used 5,939,727 of 237,565,837 allowed CPU microseconds. Four pauses totaled
+442.090 seconds; three completed and the fourth remained active for 300.360
+seconds. Host/GPU peaks were 90.05/64 C. Every memory-limit, OOM, OOM-kill, and
+swap-limit event stayed zero. The scope was removed and outer supervision
+completed its 74.05/64 C stable handoff after 483 samples.
+
+The strict validator accepts the receipt and all five local artifacts. Model
+fingerprint output is empty, `model` is null, environment and case collection
+did not start, effective config is empty, and no build, server, request,
+campaign root, process, sensor, or scope survived. This establishes that stable
+admission works and isolates the remaining heat to the fingerprint lifecycle.
+Source audit found that `_ReadRateLimiter` uses an absolute cumulative
+wall-clock deadline. A cgroup freeze advances that clock while the reader
+cannot run, so resume gives it accumulated read credit and permits an
+unthrottled catch-up burst. The next repair must rebase a stale deadline on
+resume so idle or frozen time never creates credit, while retaining the exact
+32 MiB/s maximum, two integrity passes, thermal limits, and workload semantics.
+
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
 `sha256:2f34ab2dc62641d247306c9ce29d62c68e5c12b16cd326e2860ce00061a345ac`).
