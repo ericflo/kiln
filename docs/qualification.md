@@ -1967,6 +1967,34 @@ unchanged command from clean pushed source so Cargo can reuse the completed
 incremental objects. c1, wider concurrency, endurance, native Linux, and
 desktop RTX 4090 remain open.
 
+After committing that rejection, the exact unchanged retry ran from clean
+pushed source `b097c4a77d0aa4ea5668be62fe42d432c8cee7a4` with the same source
+tree. It retained failed parent
+`qualification/receipts/cuda/rtx4090-laptop/20260726t180208927103z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`
+at
+`sha256:7046827f59b877cc8c17132c2be5fbd5104ef108ef663b3a70e891fa608e328d`.
+The parent is strict current-source/local-artifact/known-commit valid, binds all
+16 capabilities, repeats the identical initial/final model fingerprint, and
+again passes the exact ten-profile prompt preflight.
+
+Cargo reused the prior incremental objects, completed `kiln-train`, compiled
+the `kiln-server` library, and entered the final `kiln` binary link. The outer
+guard again observed 95.05 C against the unchanged 95.00 C host hard limit and
+terminated the build before artifact publication. The 921.385-second case
+scope used 226,286,089/460,692,614 CPU microseconds, peaked at 2,856,509,440
+bytes and 47 PIDs, recorded zero memory/OOM events, completed all 143 pauses
+totaling 691.551 seconds with a 14.052-second longest pause, and removed
+cleanly. The scope sampler peaked at 94.05/65 C before the outer trip at
+95.05/65 C; stable handoff completed at 75.05/64 C. The initial fingerprint
+needed no pauses. The final fingerprint returned zero after three completed
+pauses totaling 46.157 seconds, and both scopes removed cleanly.
+
+No campaign, server, teacher, request, or detailed receipt started. This second
+thermal rejection proves forward incremental-build progress, not c1. Preserve
+the hard limit, retain and commit the receipt, allow another authenticated full
+cooldown, and make one exact link-only retry. c1 and every later laptop
+performance/endurance requirement remain open.
+
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
 `sha256:2e81344e95637821046fd0dee2ff61495af6b91a5e728214975eeb7785507d63`).
