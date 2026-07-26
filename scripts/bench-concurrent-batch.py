@@ -14,6 +14,7 @@ import base64
 import binascii
 import dataclasses
 import datetime as dt
+import errno
 import hashlib
 import io
 import json
@@ -40,7 +41,7 @@ from typing import Any, Callable, Iterable
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "22"
+DRIVER_VERSION = "23"
 SUPPORTED_DRIVER_VERSIONS = {
     "2",
     "3",
@@ -62,50 +63,51 @@ SUPPORTED_DRIVER_VERSIONS = {
     "19",
     "20",
     "21",
+    "22",
     DRIVER_VERSION,
 }
 THERMAL_DRIVER_VERSIONS = {
     "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", "19", "20", "21", DRIVER_VERSION,
+    "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION,
 }
 LIFECYCLE_DRIVER_VERSIONS = {
     "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", "19", "20", "21", DRIVER_VERSION,
+    "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION,
 }
 PRELAUNCH_DRIVER_VERSIONS = {
     "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", "19", "20", "21", DRIVER_VERSION,
+    "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION,
 }
 OUTPUT_EVIDENCE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", DRIVER_VERSION,
+    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION,
 }
 MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {
-    "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", DRIVER_VERSION,
+    "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION,
 }
 RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS = {
-    "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", DRIVER_VERSION,
+    "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION,
 }
 ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", DRIVER_VERSION,
+    "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION,
 }
 ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", DRIVER_VERSION,
+    "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION,
 }
 REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", DRIVER_VERSION,
+    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION,
 }
 IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS = {
-    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", DRIVER_VERSION,
+    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION,
 }
-COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", "15", "16", "17", "18", "19", "20", "21", DRIVER_VERSION}
-MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", "15", "16", "17", "18", "19", "20", "21", DRIVER_VERSION}
-REQUEST_PERFORMANCE_DRIVER_VERSIONS = {"15", "16", "17", "18", "19", "20", "21", DRIVER_VERSION}
-PROMPT_SET_IDENTITY_DRIVER_VERSIONS = {"16", "17", "18", "19", "20", "21", DRIVER_VERSION}
-GRAPH_PARITY_DRIVER_VERSIONS = {"17", "18", "19", "20", "21", DRIVER_VERSION}
-REFERENCE_ROLE_DRIVER_VERSIONS = {"17", "18", "19", "20", "21", DRIVER_VERSION}
-ACTOR_ONLY_DIAGNOSTICS_DRIVER_VERSIONS = {"18", "19", "20", "21", DRIVER_VERSION}
-TYPED_MEMORY_SOURCE_DRIVER_VERSIONS = {"19", "20", "21", DRIVER_VERSION}
-EXTERNAL_WSL2_THERMAL_DRIVER_VERSIONS = {"20", "21", DRIVER_VERSION}
+COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", "15", "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION}
+MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", "15", "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION}
+REQUEST_PERFORMANCE_DRIVER_VERSIONS = {"15", "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION}
+PROMPT_SET_IDENTITY_DRIVER_VERSIONS = {"16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION}
+GRAPH_PARITY_DRIVER_VERSIONS = {"17", "18", "19", "20", "21", "22", DRIVER_VERSION}
+REFERENCE_ROLE_DRIVER_VERSIONS = {"17", "18", "19", "20", "21", "22", DRIVER_VERSION}
+ACTOR_ONLY_DIAGNOSTICS_DRIVER_VERSIONS = {"18", "19", "20", "21", "22", DRIVER_VERSION}
+TYPED_MEMORY_SOURCE_DRIVER_VERSIONS = {"19", "20", "21", "22", DRIVER_VERSION}
+EXTERNAL_WSL2_THERMAL_DRIVER_VERSIONS = {"20", "21", "22", DRIVER_VERSION}
 REFERENCE_ROLES = {
     "qualification_gate",
     "same_artifact_graph_eager_discriminator",
@@ -523,6 +525,22 @@ VLLM_RUNTIME_MANIFEST_KEYS = {
 
 class BenchmarkError(RuntimeError):
     """A benchmark contract or preflight failure."""
+
+
+class OwnedServerShutdownError(BenchmarkError):
+    """A shutdown accounting failure with conservative lifecycle evidence."""
+
+    def __init__(self, detail: str, shutdown: dict[str, Any]) -> None:
+        super().__init__(detail)
+        self.shutdown = shutdown
+
+
+class OwnedServerLogError(BenchmarkError):
+    """A log durability failure with the readable artifact identity retained."""
+
+    def __init__(self, detail: str, log: dict[str, Any]) -> None:
+        super().__init__(detail)
+        self.log = log
 
 
 def canonical_sha256(value: Any) -> str:
@@ -1464,6 +1482,8 @@ def shutdown_owned_server(
     *,
     external_wsl2_policy_sha256: str | None = None,
 ) -> dict[str, Any]:
+    started = time.monotonic()
+    signal_sent = server.process.poll() is None
     try:
         return _shutdown_owned_server(
             server,
@@ -1476,7 +1496,22 @@ def shutdown_owned_server(
                 "owned server cleanup failed after shutdown accounting error: "
                 f"{exc}"
             ) from exc
-        raise
+        if not isinstance(exc, Exception):
+            raise
+        shutdown = {
+            "signal": "SIGTERM",
+            "signal_sent": signal_sent,
+            "forced": True,
+            "returncode": returncode,
+            "acceptable_exit_codes": list(server.config.acceptable_exit_codes),
+            "elapsed_seconds": time.monotonic() - started,
+            "process_group_alive_end": False,
+        }
+        raise OwnedServerShutdownError(
+            "owned server shutdown accounting failed after bounded force drain: "
+            f"{type(exc).__name__}: {exc}",
+            shutdown,
+        ) from exc
 
 
 def _shutdown_owned_server(
@@ -1555,12 +1590,31 @@ def _shutdown_owned_server(
     }
 
 
-def close_owned_server_log(server: OwnedServer) -> dict[str, Any]:
-    if not server.log_handle.closed:
-        server.log_handle.flush()
-        os.fsync(server.log_handle.fileno())
-        server.log_handle.close()
-    path = server.log_path.absolute()
+TRANSIENT_LOG_FSYNC_ERRNOS = {
+    errno.EAGAIN,
+    errno.EBUSY,
+    errno.EINTR,
+    errno.ETIMEDOUT,
+}
+LOG_FSYNC_ATTEMPTS = 3
+
+
+def _fsync_owned_server_log(handle: Any) -> None:
+    for attempt in range(1, LOG_FSYNC_ATTEMPTS + 1):
+        try:
+            os.fsync(handle.fileno())
+            return
+        except OSError as exc:
+            if (
+                exc.errno not in TRANSIENT_LOG_FSYNC_ERRNOS
+                or attempt == LOG_FSYNC_ATTEMPTS
+            ):
+                raise
+            time.sleep(0.05)
+
+
+def _owned_server_log_identity(path: Path) -> dict[str, Any]:
+    path = path.absolute()
     before = path.stat(follow_symlinks=False)
     if not stat.S_ISREG(before.st_mode):
         raise BenchmarkError(f"server log is not a regular file: {path}")
@@ -1576,6 +1630,63 @@ def close_owned_server_log(server: OwnedServer) -> dict[str, Any]:
         "bytes": before.st_size,
         "sha256": "sha256:" + digest.hexdigest(),
     }
+
+
+def close_owned_server_log(server: OwnedServer) -> dict[str, Any]:
+    durability_error: Exception | None = None
+    if not server.log_handle.closed:
+        try:
+            server.log_handle.flush()
+            _fsync_owned_server_log(server.log_handle)
+        except Exception as exc:
+            durability_error = exc
+        finally:
+            try:
+                server.log_handle.close()
+            except Exception as exc:
+                if durability_error is None:
+                    durability_error = exc
+                else:
+                    durability_error = BenchmarkError(
+                        f"{type(durability_error).__name__}: {durability_error}; "
+                        f"log close also failed: {type(exc).__name__}: {exc}"
+                    )
+    log = _owned_server_log_identity(server.log_path)
+    if durability_error is not None:
+        raise OwnedServerLogError(
+            "owned server log durability failed before artifact hashing: "
+            f"{type(durability_error).__name__}: {durability_error}",
+            log,
+        ) from durability_error
+    return log
+
+
+def finalize_owned_server(
+    server: OwnedServer,
+    *,
+    external_wsl2_policy_sha256: str | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, list[Exception]]:
+    shutdown: dict[str, Any] | None = None
+    log: dict[str, Any] | None = None
+    failures: list[Exception] = []
+    try:
+        shutdown = shutdown_owned_server(
+            server,
+            external_wsl2_policy_sha256=external_wsl2_policy_sha256,
+        )
+    except OwnedServerShutdownError as exc:
+        shutdown = exc.shutdown
+        failures.append(exc)
+    except Exception as exc:
+        failures.append(exc)
+    try:
+        log = close_owned_server_log(server)
+    except OwnedServerLogError as exc:
+        log = exc.log
+        failures.append(exc)
+    except Exception as exc:
+        failures.append(exc)
+    return shutdown, log, failures
 
 
 def server_log_tail(path: Path, limit_bytes: int = 16 * 1024) -> str:
@@ -7496,11 +7607,19 @@ def main(argv: list[str] | None = None) -> int:
                 nonlocal owned_shutdown, owned_log
                 if thermal_guard is not None:
                     thermal_guard.prepare_for_process_exit()
-                owned_shutdown = shutdown_owned_server(
+                owned_shutdown, owned_log, failures = finalize_owned_server(
                     owned_server,
                     external_wsl2_policy_sha256=external_wsl2_policy_sha256,
                 )
-                owned_log = close_owned_server_log(owned_server)
+                if failures:
+                    raise BenchmarkError(
+                        "owned server finalization failed: "
+                        + "; ".join(
+                            f"{type(exc).__name__}: {exc}" for exc in failures
+                        )
+                    )
+                assert owned_shutdown is not None
+                assert owned_log is not None
                 if owned_shutdown["forced"]:
                     raise BenchmarkError("owned server required SIGKILL during shutdown")
                 if owned_shutdown["process_group_alive_end"]:
@@ -7651,6 +7770,20 @@ def main(argv: list[str] | None = None) -> int:
             finalization_checks["runtime_manifest_unchanged"] = "not_applicable"
 
         if owned_server is not None:
+            if owned_shutdown is None or owned_log is None:
+                shutdown_failures = [
+                    failure["detail"]
+                    for failure in completion_failures
+                    if failure["phase"] == "server_shutdown"
+                ]
+                detail = (
+                    shutdown_failures[-1]
+                    if shutdown_failures
+                    else "server shutdown evidence is unavailable"
+                )
+                raise BenchmarkError(
+                    "cannot serialize owned server lifecycle evidence: " + detail
+                )
             server_lifecycle = {
                 "mode": "owned_process_group",
                 "launch_config": owned_server.config.record,

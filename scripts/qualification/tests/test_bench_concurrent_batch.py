@@ -1499,11 +1499,14 @@ class ServingBenchmarkTests(unittest.TestCase):
         )
         self.assertTrue(all(prompt.startswith(shared_prefix) for prompt in prefix_prompts))
         self.assertEqual(len(mixed_lengths), 4)
-        self.assertEqual(bench.DRIVER_VERSION, "22")
+        self.assertEqual(bench.DRIVER_VERSION, "23")
         self.assertEqual(
             bench.PROMPT_TEMPLATE_VERSION, "fixed-serving-profiles-v2"
         )
-        self.assertEqual(bench.FIXED_PROMPT_TEMPLATE_V2_DRIVER_VERSIONS, {"22"})
+        self.assertEqual(
+            bench.FIXED_PROMPT_TEMPLATE_V2_DRIVER_VERSIONS,
+            {"22", "23"},
+        )
         self.assertEqual(bench.LONG_PROMPT_REPETITIONS, 61)
         self.assertEqual(bench.LONG_PROMPT_REPETITIONS_V1, 64)
         qualified_prompt_hashes = {
@@ -2796,7 +2799,10 @@ class ServingBenchmarkTests(unittest.TestCase):
                 "_wait_for_owned_process",
                 side_effect=bench.BenchmarkError("invalid pacing stream"),
             ),
-            self.assertRaisesRegex(bench.BenchmarkError, "invalid pacing stream"),
+            self.assertRaisesRegex(
+                bench.OwnedServerShutdownError,
+                "invalid pacing stream",
+            ) as raised,
         ):
             bench.shutdown_owned_server(
                 server,
@@ -2805,6 +2811,125 @@ class ServingBenchmarkTests(unittest.TestCase):
 
         self.assertIsNotNone(process.poll())
         self.assertFalse(bench.process_group_alive(process.pid))
+        self.assertTrue(raised.exception.shutdown["forced"])
+        self.assertEqual(
+            raised.exception.shutdown["returncode"],
+            process.returncode,
+        )
+        self.assertFalse(
+            raised.exception.shutdown["process_group_alive_end"],
+        )
+
+    def test_owned_server_log_retries_transient_fsync_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "server.log"
+            handle = path.open("wb")
+            handle.write(b"complete server log\n")
+            server = bench.OwnedServer(
+                process=None,
+                identity=None,
+                config=None,
+                log_path=path,
+                log_handle=handle,
+            )
+            real_fsync = bench.os.fsync
+            attempts = 0
+
+            def flaky_fsync(fd: int) -> None:
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise BlockingIOError(bench.errno.EAGAIN, "injected transient")
+                real_fsync(fd)
+
+            with mock.patch.object(bench.os, "fsync", side_effect=flaky_fsync):
+                log = bench.close_owned_server_log(server)
+
+        self.assertEqual(attempts, 2)
+        self.assertTrue(handle.closed)
+        self.assertEqual(log["bytes"], len(b"complete server log\n"))
+
+    def test_owned_server_log_retains_identity_after_durability_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "server.log"
+            handle = path.open("wb")
+            handle.write(b"readable server log\n")
+            server = bench.OwnedServer(
+                process=None,
+                identity=None,
+                config=None,
+                log_path=path,
+                log_handle=handle,
+            )
+            with (
+                mock.patch.object(
+                    bench.os,
+                    "fsync",
+                    side_effect=OSError(bench.errno.EIO, "injected durability failure"),
+                ),
+                self.assertRaisesRegex(
+                    bench.OwnedServerLogError,
+                    "injected durability failure",
+                ) as raised,
+            ):
+                bench.close_owned_server_log(server)
+
+        self.assertTrue(handle.closed)
+        self.assertEqual(
+            raised.exception.log["bytes"],
+            len(b"readable server log\n"),
+        )
+        self.assertRegex(
+            raised.exception.log["sha256"],
+            r"\Asha256:[0-9a-f]{64}\Z",
+        )
+
+    def test_owned_server_finalizer_retains_independent_failure_evidence(self) -> None:
+        shutdown = {
+            "signal": "SIGTERM",
+            "signal_sent": True,
+            "forced": True,
+            "returncode": 0,
+            "acceptable_exit_codes": [0],
+            "elapsed_seconds": 0.5,
+            "process_group_alive_end": False,
+        }
+        log = {
+            "path": "/tmp/server.log",
+            "bytes": 42,
+            "sha256": "sha256:" + "a" * 64,
+        }
+        with (
+            mock.patch.object(
+                bench,
+                "shutdown_owned_server",
+                side_effect=bench.OwnedServerShutdownError(
+                    "injected shutdown accounting failure",
+                    shutdown,
+                ),
+            ),
+            mock.patch.object(
+                bench,
+                "close_owned_server_log",
+                side_effect=bench.OwnedServerLogError(
+                    "injected log durability failure",
+                    log,
+                ),
+            ),
+        ):
+            observed_shutdown, observed_log, failures = (
+                bench.finalize_owned_server(
+                    mock.Mock(),
+                    external_wsl2_policy_sha256="sha256:" + "b" * 64,
+                )
+            )
+
+        self.assertEqual(observed_shutdown, shutdown)
+        self.assertEqual(observed_log, log)
+        self.assertEqual(
+            [type(failure) for failure in failures],
+            [bench.OwnedServerShutdownError, bench.OwnedServerLogError],
+        )
 
     def test_host_thermal_hard_limit_only_policy_never_arms_process_stop(self) -> None:
         value = valid_host_thermal_policy()
@@ -3188,6 +3313,14 @@ class ServingBenchmarkTests(unittest.TestCase):
                     "HostThermalGuard",
                     side_effect=FakeThermalGuard,
                 ),
+                mock.patch.object(
+                    bench,
+                    "_fsync_owned_server_log",
+                    side_effect=OSError(
+                        bench.errno.EIO,
+                        "injected owned log durability failure",
+                    ),
+                ),
             ):
                 return_code = bench.main(
                     [
@@ -3217,6 +3350,10 @@ class ServingBenchmarkTests(unittest.TestCase):
             self.assertEqual(
                 [failure["phase"] for failure in receipt["completion"]["failures"]],
                 ["server_startup", "server_shutdown"],
+            )
+            self.assertIn(
+                "injected owned log durability failure",
+                receipt["completion"]["failures"][1]["detail"],
             )
             lifecycle = receipt["server_lifecycle"]
             self.assertEqual(lifecycle["shutdown"]["returncode"], 1)

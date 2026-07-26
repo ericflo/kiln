@@ -1751,6 +1751,45 @@ sample still refuses allocation. This corrective source checkpoint is not c1
 evidence: commit and push it, then rerun the exact command above and retain all
 parent and nested receipts before making a paired performance claim.
 
+The exact retry from clean pushed source
+`bf1b385fd1c6da1df266e296014b73660ffa7c1f` proved both repairs on the
+Laptop GPU but did not pass aggregate c1. `long-prefill` completed with 3,876
+input plus 64 output tokens, and `prefix-hit` completed with the exact
+3,883-input/64-output ceiling. `mixed` refreshed the initial KV governor to
+2,260,729,856 free and 1,186,988,032 available bytes with a sub-millisecond
+sample age, then allocated all 62 explicit blocks, 130,023,424 bytes, on
+attempt one. Greedy, long-prefill, prefix-hit, and mixed each emitted a
+strict-valid passed driver-v22 receipt below the 16.5 GB device-memory limit
+and shut down without force:
+
+- `20260726t093501-cuda-rtx4090-laptop-c1-greedy-short-bf1b385f-v1.kiln.json`
+- `20260726t102019-cuda-rtx4090-laptop-c1-long-prefill-bf1b385f-v1.kiln.json`
+- `20260726t104656-cuda-rtx4090-laptop-c1-prefix-hit-bf1b385f-v1.kiln.json`
+- `20260726t110614-cuda-rtx4090-laptop-c1-mixed-bf1b385f-v1.kiln.json`
+
+The API-default measured request also completed 64 tokens and its server
+logged an unforced return-code-zero drained shutdown, but a recoverable
+finalizer exception was swallowed before log evidence assignment. Receipt
+validation then reported only `receipt.server_lifecycle.log must be an
+object`, so no API-default receipt exists. The failed compact parent is
+`20260726t085636979438z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`.
+It binds identical initial and final model fingerprints, all 16 environment
+capabilities, zero OOM events, and complete scope removal. The Kiln campaign
+failed and vLLM correctly did not start.
+
+Driver v23 makes owned finalization evidence-preserving. Shutdown and log
+closure are attempted independently. A recoverable shutdown-accounting
+exception carries conservative forced-shutdown evidence after the bounded
+emergency drain; a log durability exception carries the readable stable log
+identity. Only `EINTR`, `EAGAIN`, `EBUSY`, and `ETIMEDOUT` log `fsync`
+failures receive up to three bounded attempts. Non-transient durability errors
+still fail the receipt. If catastrophic cleanup prevents lifecycle evidence,
+the driver reports the original structured finalization failure before receipt
+validation instead of masking it with a null-field schema error. Driver v22
+receipts remain validation-compatible. Commit and push v23 before the next
+exact c1 retry; none of the evidence above is paired c1, wider-concurrency, or
+endurance acceptance.
+
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
 `sha256:2e81344e95637821046fd0dee2ff61495af6b91a5e728214975eeb7785507d63`).

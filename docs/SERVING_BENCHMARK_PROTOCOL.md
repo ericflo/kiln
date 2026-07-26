@@ -847,6 +847,18 @@ stop, and keeps hard-limit monitoring active until the child exits. Attached
 mode instead cools the live process to the safe-handoff target before releasing
 the operator back to an unguarded server.
 
+Driver v23 attempts owned shutdown and log finalization independently, so one
+recoverable exception cannot suppress the other artifact. A shutdown-accounting
+error that still reaches the bounded emergency drain carries conservative
+`forced=true` lifecycle evidence and fails the receipt. A durability error that
+leaves a stable readable log carries that log's exact path, byte count, and
+hash while also failing the receipt. Log `fsync` retries are restricted to
+`EINTR`, `EAGAIN`, `EBUSY`, and `ETIMEDOUT`, with three bounded attempts;
+non-transient errors are never converted into passing evidence. When lifecycle
+evidence cannot be serialized after catastrophic cleanup, the driver surfaces
+the original finalization detail before schema validation. Historical v22
+receipts keep their original lifecycle contract.
+
 ## Workload Matrix
 
 The fixed profiles are:
