@@ -2061,6 +2061,39 @@ Focused governor and initial-KV tests pass. This is a portable repair pending a
 clean pushed-source exact rerun; it does not accept c1, wider concurrency,
 endurance, native Linux, or desktop RTX 4090.
 
+The first exact retry of that repair ran from clean pushed
+`9bf9039323be22551031cb4944c33b8c7a36b915`, source tree
+`sha256:1b9897a979abe50b9f73766d0c7e388d9595152f70fc59882cfc1295a7537773`.
+It retained strict current-source, local-artifact, and known-commit valid failed
+parent
+`qualification/receipts/cuda/rtx4090-laptop/20260726t212823748363z-cuda-rtx4090-laptop-serving-cuda-performance-54e7111044-v1.json`
+at file
+`sha256:05c1ac69600fda2f236a5d5fe73c9b3a3dd021935f4647a1ffdbb2938ab8071f`.
+Both independent model fingerprints remained
+`sha256:31b656e8b4992a7dd56d31f0c4cf18fcb360601e69af4f538b780c40de585612`,
+all 16 WSL2 capabilities were available, and the exact ten-profile prompt
+preflight again passed at 3,883 input and 3,947 total tokens.
+
+The changed governor forced a CUDA rebuild through `kiln-memory`, the dependent
+tensor/model/training libraries, and into optimized `kiln-server` library
+compilation. The unchanged outer authority then observed 95.05 C against the
+exact 95.00 C host hard limit and terminated the scope before a current-source
+binary or campaign could be published. The 1,352.877-second case scope used
+212,622,636/676,438,470 CPU microseconds, peaked at 2,949,484,544 bytes and
+47 PIDs, recorded zero memory or OOM events, completed all 160 pauses totaling
+1,138.118 seconds with a 29.095-second longest pause, and removed cleanly.
+Contained host/GPU peaks were 94.05/65 C before the independent outer sample
+tripped at 95.05 C; stable handoff completed at 76.05/64 C. The initial and
+final fingerprint scopes also returned zero and removed cleanly. The complete
+parent lasted 2,768.520 seconds.
+
+This is incremental-build thermal counterevidence, not a failure of the new
+startup probe logic. No server, teacher, request, detailed benchmark receipt,
+paired comparison, or performance measurement exists in this attempt. Retain
+and push the failed parent, allow a full authenticated cooldown, and retry the
+exact command so completed release objects can be reused. c1, wider
+concurrency, endurance, native Linux, and desktop RTX 4090 remain open.
+
 The source-bound laptop endurance gate is now declared separately as
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
 `sha256:2e81344e95637821046fd0dee2ff61495af6b91a5e728214975eeb7785507d63`).
