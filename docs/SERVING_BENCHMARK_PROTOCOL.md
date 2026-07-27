@@ -51,6 +51,9 @@ or a permission failure continues to mean that cleanup is incomplete. This
 avoids escalating a clean shutdown solely because PID-namespace init has not
 reaped an orphan while preserving fail-closed handling for executable
 descendants, uninterruptible processes, and uncertain membership.
+The vLLM launcher applies the same rule when it drains peers from an inherited
+owned group: zombie peers are already execution-quiescent and are not treated
+as signalable residue.
 
 Owned launch eliminates the manual gap in which model loading or inference
 prewarm could run outside the benchmark's process ownership. Legacy guarded

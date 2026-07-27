@@ -2637,8 +2637,23 @@ without waiting for the remaining repository-wide cleanup phases.
   `1114206b201c82cb07efff67b863413964a6d3064b9ab0e445b9527e3e1bc19b`
   configuration at manifest file
   `sha256:3e40ed7368af99b8b75eaaa2910bab3ba323df8b58b53895beab6a4a6248472c`.
-  Runtime identity is closed before another c1; deterministic output
-  divergence still requires localization.
+  Runtime identity is closed before another c1.
+  A bounded full-output replay localized the greedy-short divergence to
+  completion token 56. The first 55 completion tokens matched. Independent
+  Transformers BF16 forward evidence gave token IDs 11 and 28,240 the same
+  `19.875` logit at that position; vLLM selected 11 and Kiln selected 28,240.
+  Kiln's portable sampler already specifies and tests lowest-index selection
+  for equal input logits, so the evidence is consistent with different
+  inference kernels perturbing a tied boundary rather than a missing
+  machine-specific sampler rule. Do not tune Kiln to this device or waive the
+  comparison: retain the c1 exact-output gate as failed cross-engine parity.
+  The separate vLLM status-2 failure was zombie accounting after application
+  shutdown. The inherited launcher now excludes `/proc` state `Z` peers from
+  signalable residue. A bounded dirty-source lifecycle check reached readiness,
+  shut down unforced in 3.462 seconds with return code zero, passed the shutdown
+  gate, and left no process or GPU residue. Its request correctly failed the
+  clean-manifest fingerprint gate, so it is lifecycle diagnostic evidence only,
+  not c1 correctness or performance evidence.
   The parent repeated the identical model fingerprint, removed its
   accounting-only scope with zero memory-limit/OOM events, and left no process,
   snapshot, cache, cgroup, or GPU residue. This is retained correctness and

@@ -1720,6 +1720,32 @@ class ArgumentAndCommandTests(unittest.TestCase):
 
 
 class ProcessSupervisionTests(unittest.TestCase):
+    def test_proc_process_identity_excludes_zombies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            live = proc_root / "4242"
+            zombie = proc_root / "4243"
+            live.mkdir()
+            zombie.mkdir()
+            fields = ["S", "1", "4000", *(["0"] * 16), "99"]
+            (live / "stat").write_text(
+                f"4242 (worker with spaces) {' '.join(fields)}\n",
+                encoding="ascii",
+            )
+            fields[0] = "Z"
+            (zombie / "stat").write_text(
+                f"4243 (finished worker) {' '.join(fields)}\n",
+                encoding="ascii",
+            )
+
+            self.assertEqual(
+                vllm_teacher._proc_process_identity(4242, proc_root),
+                (4000, 99),
+            )
+            self.assertIsNone(
+                vllm_teacher._proc_process_identity(4243, proc_root)
+            )
+
     def test_child_uses_no_shell_new_session_fixed_cwd_and_maps_signal_exit(self) -> None:
         child = mock.Mock(pid=4242)
         child.wait.return_value = -signal.SIGTERM

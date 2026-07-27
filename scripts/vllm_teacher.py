@@ -3607,11 +3607,13 @@ def _drain_process_group(process_group: int) -> None:
         )
 
 
-def _proc_process_identity(pid: int) -> tuple[int, int] | None:
-    """Return (process group, start ticks) without trusting a reused PID."""
+def _proc_process_identity(
+    pid: int, proc_root: Path = Path("/proc")
+) -> tuple[int, int] | None:
+    """Return a live process's (process group, start ticks)."""
 
     try:
-        payload = (Path("/proc") / str(pid) / "stat").read_text(encoding="ascii")
+        payload = (proc_root / str(pid) / "stat").read_text(encoding="ascii")
     except (FileNotFoundError, PermissionError, OSError, UnicodeError):
         return None
     closing = payload.rfind(")")
@@ -3619,6 +3621,8 @@ def _proc_process_identity(pid: int) -> tuple[int, int] | None:
         return None
     fields = payload[closing + 2 :].split()
     if len(fields) < 20:
+        return None
+    if fields[0] == "Z":
         return None
     try:
         return int(fields[2]), int(fields[19])
