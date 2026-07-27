@@ -532,6 +532,11 @@ class RuntimeContentSnapshot:
     logical_bytes: int
 
 
+@dataclass(frozen=True)
+class RuntimeLibraryBinding:
+    directory: Path
+
+
 @dataclass
 class ImmutableSnapshot:
     snapshot_root: Path
@@ -1960,9 +1965,84 @@ def _distribution_metadata_path(distribution: Any) -> Path | None:
     return Path(path) if path is not None else None
 
 
+def _installed_cuda_runtime_library_binding() -> RuntimeLibraryBinding | None:
+    if platform.system() != "Linux":
+        return None
+    runtime_name = "nvidia-cuda-runtime"
+    try:
+        runtime_distribution = importlib.metadata.distribution(runtime_name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    runtime_files = runtime_distribution.files
+    if runtime_files is None:
+        raise TeacherLaunchError(
+            f"{runtime_name} has no installed-file metadata for CUDA loader binding"
+        )
+
+    candidates: list[Path] = []
+    for item in runtime_files:
+        if re.fullmatch(r"libcudart\.so\.[0-9]+", Path(os.fspath(item)).name) is None:
+            continue
+        try:
+            located = Path(
+                os.path.abspath(os.fspath(runtime_distribution.locate_file(item)))
+            )
+            info = located.lstat()
+        except (OSError, TypeError, ValueError) as exc:
+            raise TeacherLaunchError(
+                f"cannot inspect {runtime_name} CUDA runtime library: {exc}"
+            ) from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise TeacherLaunchError(
+                f"{runtime_name} CUDA runtime library must be a regular non-symlink file"
+            )
+        candidates.append(located)
+    if len(candidates) != 1:
+        raise TeacherLaunchError(
+            f"{runtime_name} must own exactly one versioned libcudart shared library"
+        )
+
+    directory = _resolve_runtime_path(
+        candidates[0].parent,
+        f"distribution/{runtime_name}/loader-directory",
+    )
+    try:
+        directory_info = directory.lstat()
+    except OSError as exc:
+        raise TeacherLaunchError(
+            f"cannot inspect CUDA runtime loader directory {directory}: {exc}"
+        ) from exc
+    if stat.S_ISLNK(directory_info.st_mode) or not stat.S_ISDIR(directory_info.st_mode):
+        raise TeacherLaunchError(
+            "CUDA runtime loader directory must be a regular non-symlink directory"
+        )
+
+    try:
+        entries = sorted(os.scandir(directory), key=lambda entry: os.fsencode(entry.name))
+    except OSError as exc:
+        raise TeacherLaunchError(
+            f"cannot enumerate CUDA runtime loader directory {directory}: {exc}"
+        ) from exc
+    if not entries:
+        raise TeacherLaunchError("CUDA runtime loader directory is empty")
+    for entry in entries:
+        try:
+            info = entry.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise TeacherLaunchError(
+                f"cannot inspect CUDA runtime loader entry {entry.name!r}: {exc}"
+            ) from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise TeacherLaunchError(
+                f"CUDA runtime loader entry must be a regular non-symlink file: {entry.name!r}"
+            )
+    return RuntimeLibraryBinding(directory=directory)
+
+
 def _collect_runtime_content(
     python_executable: Path,
     package_names: Sequence[str],
+    library_binding: RuntimeLibraryBinding | None = None,
 ) -> _RuntimeContentInventory:
     inventory = _RuntimeContentInventory.empty()
     inventory.add_file("python/executable", python_executable, 0)
@@ -2020,7 +2100,8 @@ def _collect_runtime_content(
                 )
             else:
                 raise TeacherLaunchError(
-                    f"distribution metadata for {package!r} is not a regular file or directory"
+                    f"distribution metadata for {package!r} "
+                    "is not a regular file or directory"
                 )
 
         distribution_files = distribution.files
@@ -2029,7 +2110,10 @@ def _collect_runtime_content(
             # tree above is authoritative in that case; metadata is still
             # included when importlib exposes its concrete path.
             continue
-        for item in sorted(distribution_files, key=lambda value: os.fsencode(os.fspath(value))):
+        for item in sorted(
+            distribution_files,
+            key=lambda value: os.fsencode(os.fspath(value)),
+        ):
             raw_label = os.fspath(item).replace(os.sep, "/")
             label = f"package/{package}/distribution/{raw_label}"
             try:
@@ -2045,8 +2129,16 @@ def _collect_runtime_content(
                 inventory.add_file(label, located, 1)
             else:
                 raise TeacherLaunchError(
-                    f"installed distribution entry is not a regular file or directory: {label!r}"
+                    "installed distribution entry is not a regular file "
+                    f"or directory: {label!r}"
                 )
+
+    if library_binding is not None:
+        _scan_runtime_content_tree(
+            library_binding.directory,
+            "runtime-library/cuda",
+            inventory,
+        )
     return inventory
 
 
@@ -2107,7 +2199,16 @@ def capture_runtime_content(
         "python/executable",
     )
     packages = tuple(package_names)
-    inventory = _collect_runtime_content(executable, packages)
+    library_binding = (
+        _installed_cuda_runtime_library_binding()
+        if packages == RUNTIME_PACKAGES
+        else None
+    )
+    inventory = _collect_runtime_content(
+        executable,
+        packages,
+        library_binding,
+    )
     records: list[RuntimeContentRecord] = []
     hashed_paths: dict[Path, tuple[str, int]] = {}
     for label, (original, resolved) in sorted(inventory.files.items()):
@@ -2127,7 +2228,18 @@ def capture_runtime_content(
             record = RuntimeContentRecord(label=label, byte_len=cached[1], sha256=cached[0])
         records.append(record)
 
-    observed_after = _collect_runtime_content(executable, packages)
+    observed_library_binding = (
+        _installed_cuda_runtime_library_binding()
+        if packages == RUNTIME_PACKAGES
+        else None
+    )
+    if observed_library_binding != library_binding:
+        raise TeacherLaunchError("CUDA runtime loader binding changed across its complete hash")
+    observed_after = _collect_runtime_content(
+        executable,
+        packages,
+        library_binding,
+    )
     expected_files = {
         label: resolved for label, (_original, resolved) in inventory.files.items()
     }
@@ -2951,6 +3063,17 @@ def inference_config_fingerprint(
     accelerator: Mapping[str, Any],
 ) -> str:
     for key, raw_value in environment.items():
+        if key == "LD_LIBRARY_PATH" and raw_value.strip():
+            library_binding = _installed_cuda_runtime_library_binding()
+            if (
+                library_binding is None
+                or raw_value != os.fspath(library_binding.directory)
+            ):
+                raise TeacherLaunchError(
+                    "LD_LIBRARY_PATH must be unset or equal the derived, "
+                    "content-bound CUDA runtime library directory"
+                )
+            continue
         if raw_value.strip() and _unbound_environment_key(key):
             raise TeacherLaunchError(
                 f"{key} is forbidden because file content cannot be represented by path alone"
@@ -3376,6 +3499,9 @@ def launch_environment(runtime_cache: Path | None = None) -> dict[str, str]:
     environment.pop("VLLM_LORA_RESOLVER_CACHE_DIR", None)
     for key in FORBIDDEN_FILE_ENV_KEYS:
         environment.pop(key, None)
+    library_binding = _installed_cuda_runtime_library_binding()
+    if library_binding is not None:
+        environment["LD_LIBRARY_PATH"] = os.fspath(library_binding.directory)
     return environment
 
 

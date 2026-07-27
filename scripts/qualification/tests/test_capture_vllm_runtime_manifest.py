@@ -88,9 +88,13 @@ def load_wsl_supervision(policy_name: str) -> object:
         "_repository_regular_file",
         side_effect=repository_file,
     ):
-        return capture.load_wsl2_thermal_supervision(
+        thermal = capture.load_wsl2_thermal_supervision(
             Path("qualification/host-policies") / policy_name
         )
+    return capture.Wsl2ScopeSupervision(
+        unshare_path=thermal.unshare_path,
+        thermal=thermal,
+    )
 
 
 def write_capture_program(path: Path, body: str) -> None:
@@ -99,7 +103,7 @@ def write_capture_program(path: Path, body: str) -> None:
 
 
 def thermal_stderr(supervision: object) -> bytes:
-    policy = supervision.policy
+    policy = supervision.thermal.policy
     preflight = {
         "schema": capture.WSL_THERMAL_EVENT_SCHEMA,
         "event": "preflight",
@@ -140,7 +144,8 @@ def scope_stderr(supervision: object) -> bytes:
     unit = "kiln-wsl-scope-" + "a" * 32
     duration_seconds = 10.0
     cpu_allowed_usec = 5_000_000
-    pacing = supervision.policy.pacing
+    policy = supervision.thermal.policy
+    pacing = policy.pacing
     assert pacing is not None
     start = {
         "schema": capture.WSL_SCOPE_EVENT_SCHEMA,
@@ -158,9 +163,9 @@ def scope_stderr(supervision: object) -> bytes:
         "cpu_controller": "usage-feedback-cgroup-freeze-v1",
         "cpu_poll_interval_ms": capture.WSL_SCOPE_CPU_POLL_INTERVAL_MS,
         "runtime_max_seconds": 1470.0,
-        "thermal_policy_sha256": supervision.policy.content_sha256,
+        "thermal_policy_sha256": policy.content_sha256,
         "thermal_pacing": {
-            "policy_sha256": supervision.policy.content_sha256,
+            "policy_sha256": policy.content_sha256,
             "mode": pacing.mode,
             "telemetry_source": "outer-supervisor-inherited-pipe-v1",
             "freeze_verification": "cgroup-freeze-and-events-roundtrip-v1",
@@ -194,7 +199,7 @@ def scope_stderr(supervision: object) -> bytes:
         "child_returncode": 0,
         "reason": None,
         "thermal_pacing": {
-            "policy_sha256": supervision.policy.content_sha256,
+            "policy_sha256": policy.content_sha256,
             "mode": pacing.mode,
             "active": False,
             "sample_count": 10,
@@ -207,6 +212,56 @@ def scope_stderr(supervision: object) -> bytes:
             "ending_host_millicelsius": 72_000,
             "ending_gpu_millicelsius": 64_000,
         },
+    }
+    return (
+        f"{capture.WSL_SCOPE_EVENT_PREFIX}"
+        f"{json.dumps(start, separators=(',', ':'))}\n"
+        f"{capture.WSL_SCOPE_EVENT_PREFIX}"
+        f"{json.dumps(complete, separators=(',', ':'))}\n"
+    ).encode()
+
+
+def unpaced_scope_stderr() -> bytes:
+    unit = "kiln-wsl-scope-" + "b" * 32
+    start = {
+        "schema": capture.WSL_SCOPE_EVENT_SCHEMA_UNPACED,
+        "event": "start",
+        "unit": unit,
+        "cgroup": (
+            f"/sys/fs/cgroup/user.slice/user-{capture.os.getuid()}.slice/"
+            f"user@{capture.os.getuid()}.service/app.slice/{unit}.scope"
+        ),
+        "containment": capture.benchmark.WSL2_NETWORK_BOUNDARY,
+        "memory_max_bytes": capture.benchmark.WSL2_SCOPE_MEMORY_MAX_BYTES,
+        "memory_swap_max_bytes": 0,
+        "pids_max": capture.benchmark.WSL2_SCOPE_PIDS_MAX,
+        "cpu_quota_percent": 0,
+        "cpu_controller": "not_configured",
+        "cpu_poll_interval_ms": capture.WSL_SCOPE_CPU_POLL_INTERVAL_MS,
+        "runtime_max_seconds": 1770.0,
+        "thermal_policy_sha256": None,
+    }
+    complete = {
+        "schema": capture.WSL_SCOPE_EVENT_SCHEMA_UNPACED,
+        "event": "complete",
+        "unit": unit,
+        "duration_seconds": 10.0,
+        "cpu_usage_usec": 5_000_001,
+        "cpu_allowed_usec": None,
+        "cpu_quota_percent": 0,
+        "memory_peak_bytes": 1024 * 1024,
+        "memory_events": {
+            "low": 0,
+            "high": 0,
+            "max": 0,
+            "oom": 0,
+            "oom_kill": 0,
+            "oom_group_kill": 0,
+        },
+        "pids_peak": 2,
+        "scope_removed": True,
+        "child_returncode": 0,
+        "reason": None,
     }
     return (
         f"{capture.WSL_SCOPE_EVENT_PREFIX}"
@@ -235,6 +290,8 @@ class VllmRuntimeManifestCaptureTests(unittest.TestCase):
         supervision = load_wsl_supervision(
             "rtx4090-laptop-wsl2-cgroup-pacing-v2.json"
         )
+        thermal = supervision.thermal
+        self.assertIsNotNone(thermal)
         config = launch_config(Path("/tmp/fixture-python"))
         command = capture.supervised_manifest_command(config, supervision, 1800.0)
         self.assertEqual(
@@ -243,7 +300,7 @@ class VllmRuntimeManifestCaptureTests(unittest.TestCase):
                 sys.executable,
                 str(capture.WSL_THERMAL_EXEC),
                 "--policy",
-                str(supervision.path),
+                str(thermal.path),
                 "--",
             ],
         )
@@ -251,7 +308,7 @@ class VllmRuntimeManifestCaptureTests(unittest.TestCase):
         self.assertIn(str(capture.benchmark.WSL2_SCOPE_MEMORY_MAX_BYTES), command)
         self.assertIn(str(capture.benchmark.WSL2_SCOPE_CPU_QUOTA_PERCENT), command)
         pacing_index = command.index("--thermal-pacing-policy")
-        self.assertEqual(command[pacing_index + 1], str(supervision.path))
+        self.assertEqual(command[pacing_index + 1], str(thermal.path))
         self.assertIn(str(supervision.unshare_path), command)
         self.assertIn(str(capture.LINUX_NAMESPACE_EXEC), command)
         self.assertIn("/tmp/fixture-python", command)
@@ -259,9 +316,9 @@ class VllmRuntimeManifestCaptureTests(unittest.TestCase):
 
         evidence = capture.validate_wsl2_thermal_stderr(
             thermal_stderr(supervision),
-            supervision,
+            thermal,
         )
-        self.assertEqual(evidence["policy_sha256"], supervision.policy.content_sha256)
+        self.assertEqual(evidence["policy_sha256"], thermal.policy.content_sha256)
         self.assertEqual(evidence["ending_host_millicelsius"], 80_000)
         scope_evidence = capture.validate_wsl2_scope_stderr(
             scope_stderr(supervision),
@@ -281,7 +338,7 @@ class VllmRuntimeManifestCaptureTests(unittest.TestCase):
             b'"supervision_outcome":"thermal_trip"',
         )
         with self.assertRaisesRegex(capture.CaptureError, "child_exit"):
-            capture.validate_wsl2_thermal_stderr(mutated, supervision)
+            capture.validate_wsl2_thermal_stderr(mutated, thermal)
         scope_mutated = scope_stderr(supervision).replace(
             b'"scope_removed":true',
             b'"scope_removed":false',
@@ -309,11 +366,45 @@ class VllmRuntimeManifestCaptureTests(unittest.TestCase):
             + thermal_stderr(supervision).splitlines()[2]
             + b"\n"
         )
-        capture.validate_wsl2_event_order(ordered)
+        capture.validate_wsl2_event_order(ordered, thermal_requested=True)
         with self.assertRaisesRegex(capture.CaptureError, "event order"):
             capture.validate_wsl2_event_order(
-                scope_stderr(supervision) + thermal_stderr(supervision)
+                scope_stderr(supervision) + thermal_stderr(supervision),
+                thermal_requested=True,
             )
+
+    def test_wsl2_unpaced_supervision_keeps_scope_without_thermal_or_cpu_quota(
+        self,
+    ) -> None:
+        supervision = capture.Wsl2ScopeSupervision(
+            unshare_path=Path("/usr/bin/unshare"),
+            thermal=None,
+        )
+        command = capture.supervised_manifest_command(
+            launch_config(Path("/tmp/fixture-python")),
+            supervision,
+            1800.0,
+        )
+        self.assertEqual(command[:2], [sys.executable, str(capture.WSL_SCOPE_EXEC)])
+        quota_index = command.index("--cpu-quota-percent")
+        self.assertEqual(command[quota_index + 1], "0")
+        self.assertNotIn("--thermal-pacing-policy", command)
+        self.assertNotIn(str(capture.WSL_THERMAL_EXEC), command)
+        self.assertIn(str(supervision.unshare_path), command)
+
+        evidence = capture.validate_wsl2_scope_stderr(
+            unpaced_scope_stderr(),
+            supervision,
+            1770.0,
+        )
+        self.assertEqual(evidence["mechanism"], "systemd-user-scope-v1")
+        self.assertEqual(evidence["cpu_quota_percent"], 0)
+        self.assertIsNone(evidence["cpu_allowed_usec"])
+        self.assertIsNone(evidence["thermal_pacing"])
+        capture.validate_wsl2_event_order(
+            unpaced_scope_stderr(),
+            thermal_requested=False,
+        )
 
     def test_wsl2_policy_must_be_a_repository_regular_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -328,22 +419,27 @@ class VllmRuntimeManifestCaptureTests(unittest.TestCase):
                 "rtx4090-laptop-wsl2-boundary-v1.json"
             )
 
-    def test_wsl2_platform_requires_thermal_supervision(self) -> None:
+    def test_wsl2_platform_uses_unpaced_scope_without_thermal_policy(self) -> None:
         with mock.patch.object(
             capture.platform,
             "release",
             return_value="6.6.87.2-microsoft-standard-WSL2",
+        ), mock.patch.object(
+            capture,
+            "_load_wsl2_scope_prerequisites",
+            return_value=Path("/usr/bin/unshare"),
         ):
-            with self.assertRaisesRegex(capture.CaptureError, "required on WSL2"):
-                capture.load_platform_thermal_supervision(None)
+            supervision = capture.load_platform_supervision(None)
+            self.assertEqual(supervision.unshare_path, Path("/usr/bin/unshare"))
+            self.assertIsNone(supervision.thermal)
         with mock.patch.object(
             capture.platform,
             "release",
             return_value="6.8.0-generic",
         ):
             with self.assertRaisesRegex(capture.CaptureError, "only valid on WSL2"):
-                capture.load_platform_thermal_supervision(Path("policy.json"))
-            self.assertIsNone(capture.load_platform_thermal_supervision(None))
+                capture.load_platform_supervision(Path("policy.json"))
+            self.assertIsNone(capture.load_platform_supervision(None))
 
     def test_capture_timeout_terminates_the_complete_child_session(self) -> None:
         process = mock.Mock()

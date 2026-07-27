@@ -1031,6 +1031,92 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(result["torch"], "2.9.1+cu129")
         self.assertEqual(result["python"], vllm_teacher.platform.python_version())
 
+    def _cuda_runtime_distributions(
+        self,
+    ) -> tuple[Path, dict[str, object]]:
+        site = Path(self.tmp.name) / "site"
+        library = site / "nvidia" / "cu13" / "lib"
+        library.mkdir(parents=True)
+        (library / "libcudart.so.13").write_bytes(b"cudart")
+        (library / "libnvrtc.so.13").write_bytes(b"nvrtc")
+
+        distributions: dict[str, object] = {}
+        for name, files in (
+            ("nvidia-cuda-runtime", ["nvidia/cu13/lib/libcudart.so.13"]),
+            ("nvidia-cuda-nvrtc", ["nvidia/cu13/lib/libnvrtc.so.13"]),
+        ):
+            metadata = site / f"{name}.dist-info"
+            metadata.mkdir()
+            (metadata / "METADATA").write_text(f"Name: {name}\nVersion: 13.0\n")
+            distributions[name] = types.SimpleNamespace(
+                _path=metadata,
+                files=[Path(value) for value in files],
+                locate_file=lambda item, site=site: site / item,
+            )
+        return library, distributions
+
+    def test_cuda_runtime_loader_binding_is_derived_from_distribution_ownership(
+        self,
+    ) -> None:
+        library, distributions = self._cuda_runtime_distributions()
+        with mock.patch.object(
+            vllm_teacher.platform, "system", return_value="Linux"
+        ), mock.patch.object(
+            vllm_teacher.importlib.metadata,
+            "distribution",
+            side_effect=lambda name: distributions[name],
+        ):
+            binding = vllm_teacher._installed_cuda_runtime_library_binding()
+
+        self.assertEqual(binding.directory, library.resolve())
+
+    def test_cuda_runtime_loader_binding_rejects_nonregular_loader_entries(
+        self,
+    ) -> None:
+        for failure in ("symlink", "directory"):
+            with self.subTest(failure=failure):
+                library, distributions = self._cuda_runtime_distributions()
+                if failure == "symlink":
+                    (library / "librogue.so").symlink_to(library / "libnvrtc.so.13")
+                else:
+                    (library / "nested").mkdir()
+                with mock.patch.object(
+                    vllm_teacher.platform, "system", return_value="Linux"
+                ), mock.patch.object(
+                    vllm_teacher.importlib.metadata,
+                    "distribution",
+                    side_effect=lambda name: distributions[name],
+                ), self.assertRaisesRegex(
+                    vllm_teacher.TeacherLaunchError,
+                    "regular non-symlink",
+                ):
+                    vllm_teacher._installed_cuda_runtime_library_binding()
+                shutil.rmtree(Path(self.tmp.name) / "site")
+
+    def test_cuda_runtime_loader_binding_requires_one_versioned_libcudart(self) -> None:
+        for failure in ("missing", "multiple"):
+            with self.subTest(failure=failure):
+                library, distributions = self._cuda_runtime_distributions()
+                runtime = distributions["nvidia-cuda-runtime"]
+                if failure == "missing":
+                    runtime.files.clear()
+                else:
+                    second = library / "libcudart.so.14"
+                    second.write_bytes(b"cudart-14")
+                    runtime.files.append(Path("nvidia/cu13/lib/libcudart.so.14"))
+                with mock.patch.object(
+                    vllm_teacher.platform, "system", return_value="Linux"
+                ), mock.patch.object(
+                    vllm_teacher.importlib.metadata,
+                    "distribution",
+                    return_value=runtime,
+                ), self.assertRaisesRegex(
+                    vllm_teacher.TeacherLaunchError,
+                    "exactly one versioned libcudart",
+                ):
+                    vllm_teacher._installed_cuda_runtime_library_binding()
+                shutil.rmtree(Path(self.tmp.name) / "site")
+
     def test_runtime_content_binds_resolved_executable_editable_source_and_native_extension(
         self,
     ) -> None:
@@ -1146,6 +1232,57 @@ class RuntimeContractTests(unittest.TestCase):
                         python_executable=executable,
                         package_names=("package",),
                     )
+
+    def test_runtime_content_binds_derived_cuda_library_directory(self) -> None:
+        executable = Path(self.tmp.name) / "python"
+        executable.write_bytes(b"python")
+        package_root = Path(self.tmp.name) / "package"
+        package_root.mkdir()
+        origin = package_root / "__init__.py"
+        origin.write_bytes(b"package")
+        package_metadata = Path(self.tmp.name) / "package.dist-info"
+        package_metadata.mkdir()
+        library = Path(self.tmp.name) / "libcudart.so.13"
+        library.write_bytes(b"first")
+        library_directory = library.parent / "cuda-lib"
+        library_directory.mkdir()
+        library = library.rename(library_directory / library.name)
+        distribution = types.SimpleNamespace(
+            _path=package_metadata,
+            files=[],
+            locate_file=lambda item: item,
+        )
+        package_spec = types.SimpleNamespace(
+            submodule_search_locations=[str(package_root)],
+            origin=str(origin),
+        )
+        with mock.patch.object(
+            vllm_teacher.importlib.util, "find_spec", return_value=package_spec
+        ), mock.patch.object(
+            vllm_teacher.importlib.metadata,
+            "distribution",
+            return_value=distribution,
+        ), mock.patch.object(
+            vllm_teacher,
+            "RUNTIME_PACKAGES",
+            ("package",),
+        ), mock.patch.object(
+            vllm_teacher,
+            "_installed_cuda_runtime_library_binding",
+            return_value=vllm_teacher.RuntimeLibraryBinding(
+                directory=library_directory,
+            ),
+        ):
+            first = vllm_teacher.capture_runtime_content(
+                python_executable=executable,
+                package_names=("package",),
+            )
+            library.write_bytes(b"other")
+            changed = vllm_teacher.capture_runtime_content(
+                python_executable=executable,
+                package_names=("package",),
+            )
+        self.assertNotEqual(first.sha256, changed.sha256)
 
     def test_rocm_probe_binds_driver_name_architecture_and_memory(self) -> None:
         properties = types.SimpleNamespace(
@@ -1332,6 +1469,35 @@ class ArgumentAndCommandTests(unittest.TestCase):
             environment={"CUDA_VISIBLE_DEVICES": "0,1"},
         )
         self.assertEqual(first, reordered)
+        library_binding = vllm_teacher.RuntimeLibraryBinding(
+            directory=Path("/content-bound/cuda/lib"),
+        )
+        with mock.patch.object(
+            vllm_teacher,
+            "_installed_cuda_runtime_library_binding",
+            return_value=library_binding,
+        ):
+            derived_loader_path = vllm_teacher.inference_config_fingerprint(
+                **kwargs,
+                extra_args=["--dtype=bfloat16", "--tensor-parallel-size=2"],
+                environment={
+                    "CUDA_VISIBLE_DEVICES": "0,1",
+                    "LD_LIBRARY_PATH": "/content-bound/cuda/lib",
+                },
+            )
+            with self.assertRaisesRegex(
+                vllm_teacher.TeacherLaunchError,
+                "derived, content-bound CUDA runtime",
+            ):
+                vllm_teacher.inference_config_fingerprint(
+                    **kwargs,
+                    extra_args=["--dtype=bfloat16", "--tensor-parallel-size=2"],
+                    environment={
+                        "CUDA_VISIBLE_DEVICES": "0,1",
+                        "LD_LIBRARY_PATH": "/other/cuda/lib",
+                    },
+                )
+        self.assertEqual(first, derived_loader_path)
         derived_cache = vllm_teacher.inference_config_fingerprint(
             **kwargs,
             extra_args=["--dtype=bfloat16", "--tensor-parallel-size=2"],
@@ -1473,6 +1639,9 @@ class ArgumentAndCommandTests(unittest.TestCase):
         )
 
     def test_launch_environment_disables_mutation_and_rejects_resolver_plugins(self) -> None:
+        library_binding = vllm_teacher.RuntimeLibraryBinding(
+            directory=Path("/content-bound/cuda/lib"),
+        )
         with mock.patch.dict(
             os.environ,
             {
@@ -1480,14 +1649,23 @@ class ArgumentAndCommandTests(unittest.TestCase):
                 "VLLM_CACHE_ROOT": "/tmp/ambient-cache",
                 "PYTHONPATH": "/tmp/shadow",
                 "LD_PRELOAD": "/tmp/inject.so",
+                "LD_LIBRARY_PATH": "/tmp/ambient-loader",
             },
             clear=True,
+        ), mock.patch.object(
+            vllm_teacher,
+            "_installed_cuda_runtime_library_binding",
+            return_value=library_binding,
         ):
             environment = vllm_teacher.launch_environment()
         self.assertEqual(environment["VLLM_ALLOW_RUNTIME_LORA_UPDATING"], "0")
         self.assertNotIn("PYTHONPATH", environment)
         self.assertNotIn("LD_PRELOAD", environment)
         self.assertNotIn("VLLM_CACHE_ROOT", environment)
+        self.assertEqual(
+            environment["LD_LIBRARY_PATH"],
+            "/content-bound/cuda/lib",
+        )
         derived = vllm_teacher.launch_environment(Path("/tmp/private-cache"))
         self.assertEqual(derived["VLLM_CACHE_ROOT"], "/tmp/private-cache")
         vllm_teacher.validate_launch_environment({})

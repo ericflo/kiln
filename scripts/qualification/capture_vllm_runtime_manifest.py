@@ -45,10 +45,13 @@ LINUX_NAMESPACE_EXEC = ROOT / "scripts" / "qualification" / "linux_namespace_exe
 WSL_PLATFORM = ROOT / "scripts" / "qualification" / "wsl_platform.py"
 UNSHARE_EXECUTABLE = Path("/usr/bin/unshare")
 WSL_SCOPE_CPU_POLL_INTERVAL_MS = 5
+WSL_SCOPE_UNPACED_CPU_QUOTA_PERCENT = 0
 WSL_THERMAL_EVENT_PREFIX = "wsl2-thermal: "
 WSL_THERMAL_EVENT_SCHEMA = "kiln.wsl2-thermal-event.v1"
 WSL_SCOPE_EVENT_PREFIX = "wsl2-scope: "
-WSL_SCOPE_EVENT_SCHEMA = "kiln.wsl2-scope-event.v2"
+WSL_SCOPE_EVENT_SCHEMA_UNPACED = "kiln.wsl2-scope-event.v1"
+WSL_SCOPE_EVENT_SCHEMA_PACED = "kiln.wsl2-scope-event.v2"
+WSL_SCOPE_EVENT_SCHEMA = WSL_SCOPE_EVENT_SCHEMA_PACED
 WSL_THERMAL_PREFLIGHT_KEYS = {
     "schema",
     "event",
@@ -92,6 +95,7 @@ WSL_SCOPE_START_KEYS = {
     "thermal_policy_sha256",
     "thermal_pacing",
 }
+WSL_SCOPE_START_KEYS_UNPACED = WSL_SCOPE_START_KEYS - {"thermal_pacing"}
 WSL_SCOPE_COMPLETE_KEYS = {
     "schema",
     "event",
@@ -108,6 +112,7 @@ WSL_SCOPE_COMPLETE_KEYS = {
     "reason",
     "thermal_pacing",
 }
+WSL_SCOPE_COMPLETE_KEYS_UNPACED = WSL_SCOPE_COMPLETE_KEYS - {"thermal_pacing"}
 WSL_SCOPE_PACING_START_KEYS = {
     "policy_sha256",
     "mode",
@@ -156,6 +161,12 @@ class Wsl2ThermalSupervision:
     repository_path: str
     policy: Any
     unshare_path: Path
+
+
+@dataclasses.dataclass(frozen=True)
+class Wsl2ScopeSupervision:
+    unshare_path: Path
+    thermal: Wsl2ThermalSupervision | None
 
 
 def require_clean_repository(root: Path = ROOT) -> str:
@@ -252,12 +263,7 @@ def _repository_regular_file(path: Path, label: str) -> tuple[Path, str]:
     return absolute, repository_path
 
 
-def load_wsl2_thermal_supervision(path: Path) -> Wsl2ThermalSupervision:
-    absolute, repository_path = _repository_regular_file(
-        path,
-        "WSL2 thermal policy",
-    )
-    _repository_regular_file(WSL_THERMAL_EXEC, "WSL2 thermal supervisor")
+def _load_wsl2_scope_prerequisites() -> Path:
     _repository_regular_file(WSL_SCOPE_EXEC, "WSL2 scope supervisor")
     _repository_regular_file(WSL_SCOPE_PAYLOAD, "WSL2 scope payload")
     _repository_regular_file(LINUX_NAMESPACE_EXEC, "Linux namespace helper")
@@ -277,6 +283,16 @@ def load_wsl2_thermal_supervision(path: Path) -> Wsl2ThermalSupervision:
         raise CaptureError(
             "WSL2 manifest capture requires root-owned non-writable /usr/bin/unshare"
         )
+    return unshare_path
+
+
+def load_wsl2_thermal_supervision(path: Path) -> Wsl2ThermalSupervision:
+    absolute, repository_path = _repository_regular_file(
+        path,
+        "WSL2 thermal policy",
+    )
+    _repository_regular_file(WSL_THERMAL_EXEC, "WSL2 thermal supervisor")
+    unshare_path = _load_wsl2_scope_prerequisites()
     try:
         policy = benchmark.wsl_thermal_exec.load_policy(absolute)
     except benchmark.wsl_thermal_exec.ThermalGuardError as exc:
@@ -293,33 +309,45 @@ def load_wsl2_thermal_supervision(path: Path) -> Wsl2ThermalSupervision:
     )
 
 
-def load_platform_thermal_supervision(
+def load_platform_supervision(
     path: Path | None,
-) -> Wsl2ThermalSupervision | None:
+) -> Wsl2ScopeSupervision | None:
     running_on_wsl2 = "microsoft-standard-wsl2" in platform.release().lower()
-    if running_on_wsl2 and path is None:
-        raise CaptureError("--wsl2-thermal-policy is required on WSL2")
     if not running_on_wsl2 and path is not None:
         raise CaptureError("--wsl2-thermal-policy is only valid on WSL2")
-    return None if path is None else load_wsl2_thermal_supervision(path)
+    if not running_on_wsl2:
+        return None
+    if path is None:
+        return Wsl2ScopeSupervision(
+            unshare_path=_load_wsl2_scope_prerequisites(),
+            thermal=None,
+        )
+    thermal = load_wsl2_thermal_supervision(path)
+    return Wsl2ScopeSupervision(
+        unshare_path=thermal.unshare_path,
+        thermal=thermal,
+    )
 
 
 def supervised_manifest_command(
     config: Any,
-    supervision: Wsl2ThermalSupervision | None,
+    supervision: Wsl2ScopeSupervision | None,
     timeout_seconds: float,
 ) -> list[str]:
     command = manifest_command(config)
     if supervision is None:
         return command
+    thermal = supervision.thermal
+    handoff_seconds = (
+        0.0 if thermal is None else thermal.policy.handoff_timeout_seconds
+    )
     scope_runtime_seconds = (
-        timeout_seconds
-        - supervision.policy.handoff_timeout_seconds
-        - CAPTURE_TERMINATION_GRACE_SECONDS
+        timeout_seconds - handoff_seconds - CAPTURE_TERMINATION_GRACE_SECONDS
     )
     if scope_runtime_seconds < 1.0:
         raise CaptureError(
-            "capture timeout cannot contain the WSL2 scope plus thermal handoff"
+            "capture timeout cannot contain the WSL2 scope"
+            + (" plus thermal handoff" if thermal is not None else "")
         )
     namespaced_command = [
         os.fspath(supervision.unshare_path),
@@ -344,21 +372,31 @@ def supervised_manifest_command(
         "--pids-max",
         str(benchmark.WSL2_SCOPE_PIDS_MAX),
         "--cpu-quota-percent",
-        str(benchmark.WSL2_SCOPE_CPU_QUOTA_PERCENT),
+        str(
+            WSL_SCOPE_UNPACED_CPU_QUOTA_PERCENT
+            if thermal is None
+            else benchmark.WSL2_SCOPE_CPU_QUOTA_PERCENT
+        ),
         "--cpu-poll-interval-ms",
         str(WSL_SCOPE_CPU_POLL_INTERVAL_MS),
         "--runtime-max-seconds",
         f"{scope_runtime_seconds:g}",
-        "--thermal-pacing-policy",
-        os.fspath(supervision.path),
-        "--",
-        *namespaced_command,
     ]
+    if thermal is not None:
+        scoped_command.extend(
+            [
+                "--thermal-pacing-policy",
+                os.fspath(thermal.path),
+            ]
+        )
+    scoped_command.extend(["--", *namespaced_command])
+    if thermal is None:
+        return scoped_command
     return [
         sys.executable,
         os.fspath(WSL_THERMAL_EXEC),
         "--policy",
-        os.fspath(supervision.path),
+        os.fspath(thermal.path),
         "--",
         *scoped_command,
     ]
@@ -644,7 +682,7 @@ def _validate_scope_thermal_pacing(
 
 def validate_wsl2_scope_stderr(
     stderr_payload: bytes,
-    supervision: Wsl2ThermalSupervision,
+    supervision: Wsl2ScopeSupervision,
     expected_runtime_max_seconds: float,
 ) -> dict[str, Any]:
     events: list[dict[str, Any]] = []
@@ -662,12 +700,28 @@ def validate_wsl2_scope_stderr(
     if [event.get("event") for event in events] != ["start", "complete"]:
         raise CaptureError("WSL2 scope must emit exactly start then complete")
     start, complete = events
-    if set(start) != WSL_SCOPE_START_KEYS:
+    thermal = supervision.thermal
+    expected_start_keys = (
+        WSL_SCOPE_START_KEYS_UNPACED
+        if thermal is None
+        else WSL_SCOPE_START_KEYS
+    )
+    expected_complete_keys = (
+        WSL_SCOPE_COMPLETE_KEYS_UNPACED
+        if thermal is None
+        else WSL_SCOPE_COMPLETE_KEYS
+    )
+    expected_schema = (
+        WSL_SCOPE_EVENT_SCHEMA_UNPACED
+        if thermal is None
+        else WSL_SCOPE_EVENT_SCHEMA_PACED
+    )
+    if set(start) != expected_start_keys:
         raise CaptureError("WSL2 scope start event fields are invalid")
-    if set(complete) != WSL_SCOPE_COMPLETE_KEYS:
+    if set(complete) != expected_complete_keys:
         raise CaptureError("WSL2 scope complete event fields are invalid")
     for label, event in (("start", start), ("complete", complete)):
-        if event.get("schema") != WSL_SCOPE_EVENT_SCHEMA:
+        if event.get("schema") != expected_schema:
             raise CaptureError(f"WSL2 scope {label} event schema is invalid")
 
     unit = start.get("unit")
@@ -683,23 +737,38 @@ def validate_wsl2_scope_stderr(
     )
     if start.get("cgroup") != expected_cgroup:
         raise CaptureError("WSL2 scope cgroup path is invalid")
+    cpu_quota_percent = (
+        WSL_SCOPE_UNPACED_CPU_QUOTA_PERCENT
+        if thermal is None
+        else benchmark.WSL2_SCOPE_CPU_QUOTA_PERCENT
+    )
     expected_start = {
         "containment": benchmark.WSL2_NETWORK_BOUNDARY,
         "memory_max_bytes": benchmark.WSL2_SCOPE_MEMORY_MAX_BYTES,
         "memory_swap_max_bytes": 0,
         "pids_max": benchmark.WSL2_SCOPE_PIDS_MAX,
-        "cpu_quota_percent": benchmark.WSL2_SCOPE_CPU_QUOTA_PERCENT,
-        "cpu_controller": "usage-feedback-cgroup-freeze-v1",
+        "cpu_quota_percent": cpu_quota_percent,
+        "cpu_controller": (
+            "not_configured"
+            if thermal is None
+            else "usage-feedback-cgroup-freeze-v1"
+        ),
         "cpu_poll_interval_ms": WSL_SCOPE_CPU_POLL_INTERVAL_MS,
-        "thermal_policy_sha256": supervision.policy.content_sha256,
+        "thermal_policy_sha256": (
+            None if thermal is None else thermal.policy.content_sha256
+        ),
     }
     for field, expected in expected_start.items():
         if start.get(field) != expected:
             raise CaptureError(f"WSL2 scope start {field} is invalid")
-    pacing_evidence = _validate_scope_thermal_pacing(
-        start.get("thermal_pacing"),
-        complete.get("thermal_pacing"),
-        supervision,
+    pacing_evidence = (
+        None
+        if thermal is None
+        else _validate_scope_thermal_pacing(
+            start.get("thermal_pacing"),
+            complete.get("thermal_pacing"),
+            thermal,
+        )
     )
     runtime_max_seconds = _scope_number(
         start.get("runtime_max_seconds"),
@@ -716,8 +785,7 @@ def validate_wsl2_scope_stderr(
     if duration_seconds > runtime_max_seconds + 1.0:
         raise CaptureError("WSL2 scope duration exceeded its bounded allowance")
     if (
-        complete.get("cpu_quota_percent")
-        != benchmark.WSL2_SCOPE_CPU_QUOTA_PERCENT
+        complete.get("cpu_quota_percent") != cpu_quota_percent
         or complete.get("scope_removed") is not True
         or complete.get("child_returncode") != 0
         or complete.get("reason") is not None
@@ -727,18 +795,25 @@ def validate_wsl2_scope_stderr(
         complete.get("cpu_usage_usec"),
         "WSL2 scope CPU usage",
     )
-    cpu_allowed = _thermal_integer(
-        complete.get("cpu_allowed_usec"),
-        "WSL2 scope CPU allowance",
-    )
-    expected_allowed = int(
-        duration_seconds
-        * 1_000_000
-        * benchmark.WSL2_SCOPE_CPU_QUOTA_PERCENT
-        / 100
-    )
-    if cpu_allowed != expected_allowed or cpu_usage > cpu_allowed:
-        raise CaptureError("WSL2 scope CPU accounting is invalid")
+    if thermal is None:
+        if complete.get("cpu_allowed_usec") is not None:
+            raise CaptureError(
+                "WSL2 unpaced scope must not report a CPU allowance"
+            )
+        cpu_allowed: int | None = None
+    else:
+        cpu_allowed = _thermal_integer(
+            complete.get("cpu_allowed_usec"),
+            "WSL2 scope CPU allowance",
+        )
+        expected_allowed = int(
+            duration_seconds
+            * 1_000_000
+            * benchmark.WSL2_SCOPE_CPU_QUOTA_PERCENT
+            / 100
+        )
+        if cpu_allowed != expected_allowed or cpu_usage > cpu_allowed:
+            raise CaptureError("WSL2 scope CPU accounting is invalid")
     memory_peak = _thermal_integer(
         complete.get("memory_peak_bytes"),
         "WSL2 scope memory peak",
@@ -771,7 +846,11 @@ def validate_wsl2_scope_stderr(
         if memory_events.get(field) != 0:
             raise CaptureError(f"WSL2 scope memory event {field} was not zero")
     return {
-        "mechanism": "systemd-user-scope-feedback-v1",
+        "mechanism": (
+            "systemd-user-scope-v1"
+            if thermal is None
+            else "systemd-user-scope-feedback-v1"
+        ),
         "unit": unit,
         "cgroup": expected_cgroup,
         "network_containment": benchmark.WSL2_NETWORK_BOUNDARY,
@@ -781,7 +860,7 @@ def validate_wsl2_scope_stderr(
         "memory_events": memory_events,
         "pids_max": benchmark.WSL2_SCOPE_PIDS_MAX,
         "pids_peak": pids_peak,
-        "cpu_quota_percent": benchmark.WSL2_SCOPE_CPU_QUOTA_PERCENT,
+        "cpu_quota_percent": cpu_quota_percent,
         "cpu_poll_interval_ms": WSL_SCOPE_CPU_POLL_INTERVAL_MS,
         "cpu_usage_usec": cpu_usage,
         "cpu_allowed_usec": cpu_allowed,
@@ -791,7 +870,11 @@ def validate_wsl2_scope_stderr(
     }
 
 
-def validate_wsl2_event_order(stderr_payload: bytes) -> None:
+def validate_wsl2_event_order(
+    stderr_payload: bytes,
+    *,
+    thermal_requested: bool,
+) -> None:
     observed: list[tuple[str, Any]] = []
     for raw_line in stderr_payload.decode("utf-8", errors="replace").splitlines():
         for source, prefix in (
@@ -814,12 +897,20 @@ def validate_wsl2_event_order(stderr_payload: bytes) -> None:
                 )
             )
             break
-    if observed != [
-        ("thermal", "preflight"),
-        ("scope", "start"),
-        ("scope", "complete"),
-        ("thermal", "complete"),
-    ]:
+    expected = (
+        [
+            ("thermal", "preflight"),
+            ("scope", "start"),
+            ("scope", "complete"),
+            ("thermal", "complete"),
+        ]
+        if thermal_requested
+        else [
+            ("scope", "start"),
+            ("scope", "complete"),
+        ]
+    )
+    if observed != expected:
         raise CaptureError("WSL2 thermal/scope event order is invalid")
 
 
@@ -827,19 +918,27 @@ def capture_once(
     config: Any,
     *,
     timeout_seconds: float,
-    wsl2_thermal: Wsl2ThermalSupervision | None = None,
+    wsl2_supervision: Wsl2ScopeSupervision | None = None,
 ) -> Capture:
     """Execute one bounded manifest-only child and validate its exact output."""
 
-    command = supervised_manifest_command(config, wsl2_thermal, timeout_seconds)
+    command = supervised_manifest_command(config, wsl2_supervision, timeout_seconds)
     termination_grace_seconds = CAPTURE_TERMINATION_GRACE_SECONDS
     environment: dict[str, str] | None = None
     scope_runtime_seconds: float | None = None
-    if wsl2_thermal is not None:
-        termination_grace_seconds += wsl2_thermal.policy.handoff_timeout_seconds
+    thermal = (
+        None if wsl2_supervision is None else wsl2_supervision.thermal
+    )
+    if thermal is not None:
+        termination_grace_seconds += thermal.policy.handoff_timeout_seconds
+    if wsl2_supervision is not None:
         scope_runtime_seconds = (
             timeout_seconds
-            - wsl2_thermal.policy.handoff_timeout_seconds
+            - (
+                0.0
+                if thermal is None
+                else thermal.policy.handoff_timeout_seconds
+            )
             - CAPTURE_TERMINATION_GRACE_SECONDS
         )
         environment = dict(os.environ)
@@ -883,22 +982,25 @@ def capture_once(
         raise CaptureError(f"captured vLLM runtime manifest is invalid: {exc}") from exc
     thermal_evidence = (
         None
-        if wsl2_thermal is None
-        else validate_wsl2_thermal_stderr(stderr_payload, wsl2_thermal)
+        if thermal is None
+        else validate_wsl2_thermal_stderr(stderr_payload, thermal)
     )
-    if wsl2_thermal is not None and scope_runtime_seconds is None:
+    if wsl2_supervision is not None and scope_runtime_seconds is None:
         raise CaptureError("WSL2 scope runtime bound was not derived")
     scope_evidence = (
         None
-        if wsl2_thermal is None
+        if wsl2_supervision is None
         else validate_wsl2_scope_stderr(
             stderr_payload,
-            wsl2_thermal,
+            wsl2_supervision,
             scope_runtime_seconds,
         )
     )
-    if wsl2_thermal is not None:
-        validate_wsl2_event_order(stderr_payload)
+    if wsl2_supervision is not None:
+        validate_wsl2_event_order(
+            stderr_payload,
+            thermal_requested=thermal is not None,
+        )
     return Capture(
         payload=payload,
         manifest=manifest,
@@ -913,19 +1015,19 @@ def capture_twice(
     config: Any,
     *,
     timeout_seconds: float,
-    wsl2_thermal: Wsl2ThermalSupervision | None = None,
+    wsl2_supervision: Wsl2ScopeSupervision | None = None,
 ) -> tuple[Capture, Capture]:
     """Require two byte-identical runtime and accelerator observations."""
 
     first = capture_once(
         config,
         timeout_seconds=timeout_seconds,
-        wsl2_thermal=wsl2_thermal,
+        wsl2_supervision=wsl2_supervision,
     )
     second = capture_once(
         config,
         timeout_seconds=timeout_seconds,
-        wsl2_thermal=wsl2_thermal,
+        wsl2_supervision=wsl2_supervision,
     )
     if first.payload != second.payload:
         raise CaptureError(
@@ -985,8 +1087,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--wsl2-thermal-policy",
         type=Path,
         help=(
-            "content-hashed repository v2 policy used to pace, supervise, and "
-            "cool each capture independently"
+            "optional content-hashed repository v2 lab policy used to pace, "
+            "supervise, and cool each capture independently"
         ),
     )
     parser.add_argument(
@@ -1014,11 +1116,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "server launch config",
         )
         config = benchmark.load_server_launch_config(launch_path)
-        wsl2_thermal = load_platform_thermal_supervision(args.wsl2_thermal_policy)
+        wsl2_supervision = load_platform_supervision(args.wsl2_thermal_policy)
         first, second = capture_twice(
             config,
             timeout_seconds=args.timeout_seconds,
-            wsl2_thermal=wsl2_thermal,
+            wsl2_supervision=wsl2_supervision,
         )
         if require_clean_repository() != commit:
             raise CaptureError(
@@ -1045,12 +1147,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             "system_fingerprint": first.manifest["system_fingerprint"],
             "wsl2_thermal_supervision": (
                 None
-                if wsl2_thermal is None
+                if (
+                    wsl2_supervision is None
+                    or wsl2_supervision.thermal is None
+                )
                 else [first.wsl2_thermal, second.wsl2_thermal]
             ),
             "wsl2_scope_supervision": (
                 None
-                if wsl2_thermal is None
+                if wsl2_supervision is None
                 else [first.wsl2_scope, second.wsl2_scope]
             ),
         }
