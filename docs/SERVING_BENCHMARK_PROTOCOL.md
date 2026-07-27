@@ -35,7 +35,11 @@ Current WSL2 performance runs retain network/Landlock, UID-qualified systemd
 scope, memory accounting, zero-swap, PID, group-OOM, process, and cleanup
 checks. The no-policy scope round-trips `memory.max=max`, so it applies no
 host-memory ceiling. It also does not apply a CPU or thermal freeze. Startup,
-shutdown, request, and build deadlines are ordinary wall time.
+shutdown, request, and build deadlines are ordinary wall time. Interruption
+first gives leaf commands a short cleanup opportunity, then signals their
+supervisors with the remaining grace period available. After stopping a
+transient scope, the wrapper clears that scope's failed state so one rejected
+case cannot leave the user manager degraded and block the next independent run.
 
 Linux `killpg(pgid, 0)` also succeeds when every remaining member is a zombie.
 After the owned leader has been reaped, the driver therefore enumerates
@@ -357,9 +361,18 @@ cp --reflink=auto "$base/lib/libpython3.12.so.1.0" \
 chmod 0755 .qualification/vllm-cuda-venv/bin/python-kiln
 ```
 
-The checked-in laptop runtime manifest is already the immutable input for c1.
-Its older `scripts/qualification/capture_vllm_runtime_manifest.py` procedure
-coupled artifact identity to the now-rejected thermal/CPU pacing wrapper.
+Activating the environment is not required. `vllm_teacher.py` prepends the
+directory containing the interpreter that is actually executing it to the
+child `PATH`, so console tools installed with the reviewed runtime, including
+`ninja`, are available to vLLM and its JIT dependencies. Ambient path entries
+remain inference-identity inputs. Changing this derived launch environment
+requires a new two-pass runtime-manifest capture before c1.
+
+The checked-in laptop runtime manifest is the immutable c1 input only when it
+matches the current derived launch environment. The interpreter-path correction
+therefore requires a replacement capture before the next c1 attempt. Its older
+`scripts/qualification/capture_vllm_runtime_manifest.py` procedure coupled
+artifact identity to the now-rejected thermal/CPU pacing wrapper.
 Preserve that capture as historical artifact evidence, but do not rerun the
 paced command or treat its wall time as performance. The capture tool now keeps
 the clean-source requirement, two byte-identical strict-valid results,

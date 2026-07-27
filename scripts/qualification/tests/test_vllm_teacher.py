@@ -1645,6 +1645,7 @@ class ArgumentAndCommandTests(unittest.TestCase):
         with mock.patch.dict(
             os.environ,
             {
+                "PATH": "/usr/bin:/bin",
                 "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True",
                 "VLLM_CACHE_ROOT": "/tmp/ambient-cache",
                 "PYTHONPATH": "/tmp/shadow",
@@ -1658,6 +1659,14 @@ class ArgumentAndCommandTests(unittest.TestCase):
             return_value=library_binding,
         ):
             environment = vllm_teacher.launch_environment()
+        runtime_bin = os.fspath(Path(sys.executable).absolute().parent)
+        self.assertEqual(
+            environment["PATH"].split(os.pathsep),
+            [
+                runtime_bin,
+                *(entry for entry in ("/usr/bin", "/bin") if entry != runtime_bin),
+            ],
+        )
         self.assertEqual(environment["VLLM_ALLOW_RUNTIME_LORA_UPDATING"], "0")
         self.assertNotIn("PYTHONPATH", environment)
         self.assertNotIn("LD_PRELOAD", environment)

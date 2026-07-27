@@ -914,6 +914,45 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(cleaned.read_text(encoding="utf-8"), "cleaned")
             self.assertEqual(process.returncode, 0)
 
+    def test_process_group_cleanup_reserves_time_for_supervisor_teardown(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            ready = root / "ready"
+            cleaned = root / "cleaned"
+            child_code = (
+                "import pathlib,signal,time; "
+                "signal.signal(signal.SIGINT,signal.SIG_IGN); "
+                "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+                f"pathlib.Path({str(ready)!r}).write_text('ready'); "
+                "time.sleep(30)"
+            )
+            wrapper_code = (
+                "import os,pathlib,signal,subprocess,sys,time\n"
+                f"cleaned=pathlib.Path({str(cleaned)!r})\n"
+                f"child=subprocess.Popen([sys.executable,'-c',{child_code!r}])\n"
+                "def stop(*_):\n"
+                " time.sleep(1.2)\n"
+                " os.kill(child.pid,signal.SIGKILL)\n"
+                " cleaned.write_text('cleaned')\n"
+                " os._exit(0)\n"
+                "signal.signal(signal.SIGTERM,stop)\n"
+                "raise SystemExit(child.wait())"
+            )
+            process = subprocess.Popen(
+                [sys.executable, "-c", wrapper_code],
+                start_new_session=True,
+            )
+            self.addCleanup(lambda: process.poll() is None and process.kill())
+            deadline = time.monotonic() + 2.0
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(), "supervisor did not become ready")
+
+            run_module._terminate_process_group(process, 3.0)
+
+            self.assertEqual(cleaned.read_text(encoding="utf-8"), "cleaned")
+            self.assertEqual(process.returncode, 0)
+
     def test_keyboard_interrupt_removes_owned_run_directory(self) -> None:
         repository = Repository(
             environment_workload([sys.executable, "-c", "pass"])

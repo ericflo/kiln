@@ -3490,6 +3490,14 @@ def build_vllm_command(
 
 def launch_environment(runtime_cache: Path | None = None) -> dict[str, str]:
     environment = dict(os.environ)
+    runtime_bin = os.fspath(Path(sys.executable).absolute().parent)
+    inherited_path = environment.get("PATH", "")
+    path_entries = [
+        entry
+        for entry in inherited_path.split(os.pathsep)
+        if entry and entry != runtime_bin
+    ]
+    environment["PATH"] = os.pathsep.join((runtime_bin, *path_entries))
     environment["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "0"
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     if runtime_cache is not None:

@@ -6,6 +6,7 @@ import io
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -164,6 +165,52 @@ class WslScopeExecTests(unittest.TestCase):
     def test_empty_host_build_inventory_is_accepted(self) -> None:
         with mock.patch.object(scope.Path, "iterdir", return_value=[]):
             self.assertEqual(scope._active_host_builds(), [])
+
+    def test_failed_transient_scope_is_reset_after_stop(self) -> None:
+        failed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=b"failed\n",
+            stderr=b"",
+        )
+        reset = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=b"",
+            stderr=b"",
+        )
+        with mock.patch.object(
+            scope.subprocess,
+            "run",
+            side_effect=(failed, reset),
+        ) as run:
+            scope._reset_scope_failure("kiln-wsl-scope-fixture", {"A": "B"})
+
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            [
+                "/usr/bin/systemctl",
+                "--user",
+                "reset-failed",
+                "kiln-wsl-scope-fixture.scope",
+            ],
+        )
+
+    def test_inactive_transient_scope_needs_no_reset(self) -> None:
+        inactive = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout=b"inactive\n",
+            stderr=b"",
+        )
+        with mock.patch.object(
+            scope.subprocess,
+            "run",
+            return_value=inactive,
+        ) as run:
+            scope._reset_scope_failure("kiln-wsl-scope-fixture", {"A": "B"})
+
+        run.assert_called_once()
 
     def test_cgroup_freeze_waits_for_kernel_state_and_times_out_closed(self) -> None:
         cgroup = Path("/fixture/cgroup")

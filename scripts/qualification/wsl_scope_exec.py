@@ -469,6 +469,35 @@ def _run(
     return stdout
 
 
+def _reset_scope_failure(unit: str, environment: dict[str, str]) -> None:
+    scope_name = f"{unit}.scope"
+    try:
+        completed = subprocess.run(
+            ["/usr/bin/systemctl", "--user", "is-failed", scope_name],
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=15.0,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ScopeExecError(f"scope failed-state probe failed: {exc}") from exc
+    stderr = completed.stderr.decode(errors="replace").strip()
+    if completed.returncode == 1 and not stderr:
+        return
+    if completed.returncode != 0:
+        raise ScopeExecError(
+            f"scope failed-state probe exited {completed.returncode}"
+            + (f": {stderr}" if stderr else "")
+        )
+    _run(
+        ["/usr/bin/systemctl", "--user", "reset-failed", scope_name],
+        "scope failed-state reset",
+        environment=environment,
+    )
+
+
 def _atomic_runtime_unit(path: Path, content: str) -> None:
     payload = content.encode("ascii")
     try:
@@ -1269,6 +1298,14 @@ def execute(args: argparse.Namespace) -> int:
         except ScopeExecError:
             if cgroup.exists() and failure is None:
                 failure = ScopeExecError("scope remained after command completion")
+        try:
+            _reset_scope_failure(unit, environment)
+        except ScopeExecError as reset_error:
+            failure = (
+                reset_error
+                if failure is None
+                else ScopeExecError(f"{failure}; {reset_error}")
+            )
         handoff.cleanup()
 
     duration = time.monotonic() - controlled_started

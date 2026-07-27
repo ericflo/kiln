@@ -1253,6 +1253,7 @@ def _signal_process_member(pid: int, process_group: int, signal_number: int) -> 
 
 def _terminate_process_group(process: subprocess.Popen[bytes], grace_seconds: float) -> None:
     process_group = process.pid
+    started = time.monotonic()
     members = _process_group_members(process_group)
     parent_pids = {parent_pid for _pid, _state, parent_pid in members}
     # Interrupt leaf commands while sandbox supervisors remain alive so driver
@@ -1271,15 +1272,19 @@ def _terminate_process_group(process: subprocess.Popen[bytes], grace_seconds: fl
         except ProcessLookupError:
             process.wait()
             return
-    deadline = time.monotonic() + grace_seconds
-    while time.monotonic() < deadline and _group_exists(process_group):
-        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    leaf_deadline = started + min(5.0, max(0.0, grace_seconds / 3.0))
+    while time.monotonic() < leaf_deadline and _group_exists(process_group):
+        time.sleep(min(0.05, max(0.0, leaf_deadline - time.monotonic())))
     if _group_exists(process_group):
         try:
             os.killpg(process_group, signal.SIGTERM)
         except ProcessLookupError:
             pass
-        _wait_for_process_group_exit(process_group, min(1.0, grace_seconds))
+        elapsed = time.monotonic() - started
+        _wait_for_process_group_exit(
+            process_group,
+            max(0.0, grace_seconds - elapsed),
+        )
     if _group_exists(process_group):
         try:
             os.killpg(process_group, signal.SIGKILL)

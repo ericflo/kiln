@@ -172,11 +172,14 @@ memory, memory/OOM events, and aggregate CPU use without imposing a host-memory
 or CPU ceiling. A finite memory maximum remains available only to an explicitly
 bounded lab run; retained historical receipts keep their original 10 GiB
 contract. Missing bus units, control drift, absent containment, timeout, or
-scope residue fails the case. The outer process inventory also rejects an
-already-running host Cargo/rustc process before the private PID namespace can
-hide it. User-manager launch is deliberately not attempted inside Landlock
-because the manager would execute the requested process outside the private
-namespaces.
+scope residue fails the case. Interruption reserves most of the termination
+grace for supervisor cleanup after first signaling leaf commands. Once its
+transient unit is stopped, the wrapper resets only that unit's failed state so
+a rejected case does not leave the user manager degraded. The outer process
+inventory also rejects an already-running host Cargo/rustc process before the
+private PID namespace can hide it. User-manager launch is deliberately not
+attempted inside Landlock because the manager would execute the requested
+process outside the private namespaces.
 
 Toolkit provenance is descriptive: recording CUDA 12.4 does not by itself
 establish the workload manifests' cudarc CUDA 12.8 API contract or any
@@ -1060,6 +1063,12 @@ with 27 PIDs each, recorded zero memory-limit/OOM events, and were both removed.
 Neither scope had a CPU allowance, temperature process, or pacing lifecycle.
 This closes the runtime-manifest prerequisite only. It is not a server startup,
 request, performance-matrix, soak, native-Linux, or desktop-4090 claim.
+
+The owned teacher does not require venv activation. It prepends the directory
+of its executing interpreter to the child `PATH`, making runtime-installed
+console tools such as `ninja` available to vLLM JIT dependencies. That derived
+environment is inference-identity bound, so a launcher change requires a fresh
+two-pass runtime-manifest capture before another c1 attempt.
 
 Every current model-bearing CUDA run brackets its case with initial and final
 double-read model fingerprints. Both the qualification parent and driver v25
