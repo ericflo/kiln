@@ -1049,25 +1049,22 @@ separately requested lab controls.
 The current retained laptop performance runtime manifest is
 `qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json`, captured
 twice from exact clean pushed source
-`76dc8f830a88dcd0f2321cd2737d1b43b4851311`. Its file hash is
-`sha256:1419a2d481c2439b334c8f67c71fe3f291150616b8f44b6249274e5546cb04bd`
+`45c3513f208142a4a534586e2e89dae8e20afbcd`. Its file hash is
+`sha256:905ce6c738cf7d502cc16cd0b2ca25e36b45e6ad9963045dfd10a2ae1f603d24`
 and its installed-runtime content hash is
 `6bf6259d333d08bcf010eaac2511cd9ca9280fcf7e3cb32346b3fe1a5bcdbf55`.
-Both strict-valid captures produced the same 2,608 bytes and bind vLLM 0.23.0,
-the closed Qwen3.5-4B content, 32,768-token context, top-K 20, BF16, and the
-rejected predecessor launch. The current performance launch instead binds both
-the model-length and batched-token bounds to the paired Kiln workload's
-3,968-token context ceiling. Its largest preflighted prompt-plus-output total is
-3,947 tokens, leaving 21 tokens of declared headroom. A new two-pass capture
-from that launch is required before another c1 attempt.
+Both strict-valid captures produced the same 2,601 bytes and bind vLLM 0.23.0,
+the closed Qwen3.5-4B content, top-K 20, BF16, and both model-length and
+batched-token bounds at the paired Kiln workload's 3,968-token context ceiling.
+Its largest preflighted prompt-plus-output total is 3,947 tokens, leaving 21
+tokens of declared headroom.
 
-The two scopes completed in 44.713 and 34.835 seconds. They used 42,590,540 and
-36,833,050 CPU microseconds, peaked at 13,627,305,984 and 783,560,704 bytes
+The two scopes completed in 44.730 and 35.016 seconds. They used 42,771,188 and
+36,852,899 CPU microseconds, peaked at 13,625,831,424 and 783,572,992 bytes
 with 27 PIDs each, recorded zero memory-limit/OOM events, and were both removed.
 Neither scope had a CPU allowance, temperature process, or pacing lifecycle.
-This historical capture no longer closes the runtime-manifest prerequisite. It
-is not a server startup, request, performance-matrix, soak, native-Linux, or
-desktop-4090 claim.
+This closes the runtime-manifest prerequisite only. It is not a server startup,
+request, performance-matrix, soak, native-Linux, or desktop-4090 claim.
 
 The owned teacher does not require venv activation. It prepends the directory
 of its executing interpreter to the child `PATH`, making runtime-installed

@@ -592,16 +592,17 @@ ordered scope events, zero memory-limit/OOM events, resource accounting, and
 scope removal.
 The current retained Laptop GPU performance identity is
 `qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json`, with file
-`sha256:1419a2d481c2439b334c8f67c71fe3f291150616b8f44b6249274e5546cb04bd`
+`sha256:905ce6c738cf7d502cc16cd0b2ca25e36b45e6ad9963045dfd10a2ae1f603d24`
 and runtime-content
 `6bf6259d333d08bcf010eaac2511cd9ca9280fcf7e3cb32346b3fe1a5bcdbf55`.
-Two exact clean-source captures produced the same 2,608 bytes in 44.713 and
-34.835 seconds. Their distinct accounting-only scopes had no CPU allowance or
-thermal lifecycle, recorded zero memory-limit/OOM events, and were removed.
-That manifest records the rejected 32,768-token predecessor launch. It must be
-replaced by a two-pass capture from the current 3,968-token performance launch
-before another c1 attempt. It establishes no serving correctness or performance
-claim.
+Two captures from exact clean pushed source
+`45c3513f208142a4a534586e2e89dae8e20afbcd` produced the same 2,601 bytes
+in 44.730 and 35.016 seconds. Their distinct accounting-only scopes had no CPU
+allowance or thermal lifecycle, recorded zero memory-limit/OOM events, and were
+removed.
+The identity binds the 3,968-token performance launch and closes the manifest
+prerequisite for another exact-source c1 attempt. It establishes no serving
+correctness or performance claim.
 
 Current model-bearing qualification also brackets the serving case itself. The
 parent qualification runner and benchmark perform their initial and final

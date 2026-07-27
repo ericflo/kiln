@@ -374,15 +374,13 @@ child `PATH`, so console tools installed with the reviewed runtime, including
 remain inference-identity inputs. Changing this derived launch environment
 requires a new two-pass runtime-manifest capture before c1.
 
-The checked-in laptop runtime manifest records the rejected 32,768-token
-predecessor launch. It does not match the current 3,968-token performance
-envelope and must be replaced by a new two-pass capture before another c1. Its
-older
-`scripts/qualification/capture_vllm_runtime_manifest.py` procedure coupled
-artifact identity to the now-rejected thermal/CPU pacing wrapper.
-Preserve that capture as historical artifact evidence, but do not rerun the
-paced command or treat its wall time as performance. The capture tool now keeps
-the clean-source requirement, two byte-identical strict-valid results,
+The checked-in laptop runtime manifest matches the current 3,968-token
+performance envelope and derived launch environment. An older revision of
+`scripts/qualification/capture_vllm_runtime_manifest.py` coupled artifact
+identity to the now-rejected thermal/CPU pacing wrapper. The resulting retired
+manifests remain historical artifact evidence, but do not rerun the paced
+command or treat its wall time as performance. The capture tool now keeps the
+clean-source requirement, two byte-identical strict-valid results,
 owned-process lifecycle, bounded output, scope cleanup, and no-overwrite checks
 without requiring thermal or CPU pacing. On WSL2 each pass still uses the
 private network/PID/mount/Landlock boundary and an accounting-only
@@ -394,18 +392,18 @@ qualification fingerprint both omit their optional read ceilings.
 The retained Laptop GPU manifest at
 `qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json` was
 captured twice from exact clean pushed source
-`76dc8f830a88dcd0f2321cd2737d1b43b4851311`. Both captures produced the same
-2,608-byte file with
-`sha256:1419a2d481c2439b334c8f67c71fe3f291150616b8f44b6249274e5546cb04bd`;
+`45c3513f208142a4a534586e2e89dae8e20afbcd`. Both captures produced the same
+2,601-byte file with
+`sha256:905ce6c738cf7d502cc16cd0b2ca25e36b45e6ad9963045dfd10a2ae1f603d24`;
 the bound installed-runtime content hash is
 `6bf6259d333d08bcf010eaac2511cd9ca9280fcf7e3cb32346b3fe1a5bcdbf55`.
-The separate scopes completed in 44.713 and 34.835 seconds with
-13,627,305,984- and 783,560,704-byte memory peaks, 27-PID peaks, zero
-memory-limit/OOM events, and clean removal. They used 42.591 and 36.833 CPU
+The separate scopes completed in 44.730 and 35.016 seconds with
+13,625,831,424- and 783,572,992-byte memory peaks, 27-PID peaks, zero
+memory-limit/OOM events, and clean removal. They used 42.771 and 36.853 CPU
 seconds with no CPU allowance, thermal process, or pacing lifecycle. This
-artifact is counterevidence for the rejected predecessor launch, not a valid
-input for the next exact-source performance run. It does not establish server
-startup, request correctness, throughput, or endurance.
+artifact is the immutable vLLM input for the next exact-source performance run.
+It does not establish server startup, request correctness, throughput, or
+endurance.
 
 Before a model-bearing current case starts, the benchmark driver performs the
 initial double-read model fingerprint without a read-rate limiter. It repeats
