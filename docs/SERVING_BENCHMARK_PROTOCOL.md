@@ -379,8 +379,8 @@ remain inference-identity inputs. Changing this derived launch environment
 requires a new two-pass runtime-manifest capture before c1.
 
 The checked-in laptop runtime manifest matches the current 3,968-token
-performance envelope, but the first real c1 launch exposed a remaining
-derived-environment mismatch. All five real launches reported inference
+performance envelope. The first real c1 launch exposed a
+derived-environment mismatch: all five real launches reported inference
 configuration
 `1114206b201c82cb07efff67b863413964a6d3064b9ab0e445b9527e3e1bc19b`
 instead of the manifest's
@@ -392,8 +392,9 @@ an ambient `HF_TOKEN` included by manifest capture but correctly removed by the
 qualification runner's closed environment. Registry credentials are now
 removed before child launch and excluded from inference identity, and the
 benchmark now rejects missing or conflicting response fingerprints during
-warmup. The checked-in manifest remains stale until its clean two-pass
-replacement. An older revision of
+warmup. Two clean replacement captures now bind the real-launch
+`1114206b201c82cb07efff67b863413964a6d3064b9ab0e445b9527e3e1bc19b`
+identity. An older revision of
 `scripts/qualification/capture_vllm_runtime_manifest.py` coupled artifact
 identity to the now-rejected thermal/CPU pacing wrapper. The resulting retired
 manifests remain historical artifact evidence, but do not rerun the paced
@@ -410,19 +411,18 @@ qualification fingerprint both omit their optional read ceilings.
 The retained Laptop GPU manifest at
 `qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json` was
 captured twice from exact clean pushed source
-`45c3513f208142a4a534586e2e89dae8e20afbcd`. Both captures produced the same
+`a7313f3d25c76b30c9747ddcecefef1a067496d1`. Both captures produced the same
 2,601-byte file with
-`sha256:905ce6c738cf7d502cc16cd0b2ca25e36b45e6ad9963045dfd10a2ae1f603d24`;
+`sha256:3e40ed7368af99b8b75eaaa2910bab3ba323df8b58b53895beab6a4a6248472c`;
 the bound installed-runtime content hash is
 `6bf6259d333d08bcf010eaac2511cd9ca9280fcf7e3cb32346b3fe1a5bcdbf55`.
-The separate scopes completed in 44.730 and 35.016 seconds with
-13,625,831,424- and 783,572,992-byte memory peaks, 27-PID peaks, zero
-memory-limit/OOM events, and clean removal. They used 42.771 and 36.853 CPU
-seconds with no CPU allowance, thermal process, or pacing lifecycle. This
-artifact records the intended vLLM input, but the later real-launch mismatch
-means it is not yet a valid immutable input for another exact-source
-performance run. It does not establish server startup, request correctness,
-throughput, or endurance.
+The separate scopes completed in 32.152 and 32.137 seconds with
+783,310,848- and 783,699,968-byte memory peaks, 27-PID peaks, zero
+memory-limit/OOM events, and clean removal. They used 34.026 and 33.883 CPU
+seconds with no CPU allowance, thermal process, or pacing lifecycle. The
+manifest now matches the preceding real-launch inference configuration exactly
+and is a valid immutable input for the next exact-source run. It does not
+establish server startup, request correctness, throughput, or endurance.
 
 Before a model-bearing current case starts, the benchmark driver performs the
 initial double-read model fingerprint without a read-rate limiter. It repeats

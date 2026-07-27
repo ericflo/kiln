@@ -91,7 +91,7 @@ KILN_CONFIG_SHA256 = (
     "sha256:fa362ece580f91b2752cd6d56984a186b699b83da99663ef015a79b2e2005428"
 )
 VLLM_RUNTIME_MANIFEST_SHA256 = (
-    "sha256:905ce6c738cf7d502cc16cd0b2ca25e36b45e6ad9963045dfd10a2ae1f603d24"
+    "sha256:3e40ed7368af99b8b75eaaa2910bab3ba323df8b58b53895beab6a4a6248472c"
 )
 def _load_benchmark_module() -> Any:
     path = ROOT / "scripts/bench-concurrent-batch.py"

@@ -594,31 +594,26 @@ ordered scope events, zero memory-limit/OOM events, resource accounting, and
 scope removal.
 The current retained Laptop GPU performance identity is
 `qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json`, with file
-`sha256:905ce6c738cf7d502cc16cd0b2ca25e36b45e6ad9963045dfd10a2ae1f603d24`
+`sha256:3e40ed7368af99b8b75eaaa2910bab3ba323df8b58b53895beab6a4a6248472c`
 and runtime-content
 `6bf6259d333d08bcf010eaac2511cd9ca9280fcf7e3cb32346b3fe1a5bcdbf55`.
 Two captures from exact clean pushed source
-`45c3513f208142a4a534586e2e89dae8e20afbcd` produced the same 2,601 bytes
-in 44.730 and 35.016 seconds. Their distinct accounting-only scopes had no CPU
+`a7313f3d25c76b30c9747ddcecefef1a067496d1` produced the same 2,601 bytes
+in 32.152 and 32.137 seconds. Their distinct accounting-only scopes had no CPU
 allowance or thermal lifecycle, recorded zero memory-limit/OOM events, and were
 removed.
-The identity binds the 3,968-token performance launch and closes the manifest
-capture checkpoint. The first real c1 launches later reported inference
+The identity binds the 3,968-token performance launch and inference
 configuration
 `1114206b201c82cb07efff67b863413964a6d3064b9ab0e445b9527e3e1bc19b`,
-not the manifest's
-`17c0a38180758283005aeb4c6ab82954eb225ca7535e01a9a29058c7bcdaaeee`.
-The source and immutable-snapshot content hashes matched exactly, so snapshot
-construction is not the cause. The difference was an ambient `HF_TOKEN`:
-manifest capture inherited it because the launcher had classified every
-`HF_*` name as an inference input, while the qualification runner's closed
-environment correctly omitted credentials. The launcher now removes known
-Hugging Face credential variables before child creation and excludes them from
-inference identity. The owned benchmark also requires each vLLM response
-stream to report the manifest fingerprint and rejects a missing or conflicting
-value during warmup. This old manifest remains stale until a clean two-pass
-replacement is published, and it establishes no serving correctness or
-performance claim.
+exactly matching all five real launches from the preceding failed c1. The old
+manifest had instead included an ambient `HF_TOKEN` because the launcher had
+classified every `HF_*` name as an inference input, while the qualification
+runner's closed environment correctly omitted credentials. The launcher now
+removes known Hugging Face credential variables before child creation and
+excludes them from inference identity. The owned benchmark also requires each
+vLLM response stream to report this manifest fingerprint and rejects a missing
+or conflicting value during warmup. This closes the runtime-identity
+prerequisite, but establishes no serving-correctness or performance claim.
 
 Current model-bearing qualification also brackets the serving case itself. The
 parent qualification runner and benchmark perform their initial and final

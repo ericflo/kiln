@@ -1049,8 +1049,8 @@ separately requested lab controls.
 The current retained laptop performance runtime manifest is
 `qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json`, captured
 twice from exact clean pushed source
-`45c3513f208142a4a534586e2e89dae8e20afbcd`. Its file hash is
-`sha256:905ce6c738cf7d502cc16cd0b2ca25e36b45e6ad9963045dfd10a2ae1f603d24`
+`a7313f3d25c76b30c9747ddcecefef1a067496d1`. Its file hash is
+`sha256:3e40ed7368af99b8b75eaaa2910bab3ba323df8b58b53895beab6a4a6248472c`
 and its installed-runtime content hash is
 `6bf6259d333d08bcf010eaac2511cd9ca9280fcf7e3cb32346b3fe1a5bcdbf55`.
 Both strict-valid captures produced the same 2,601 bytes and bind vLLM 0.23.0,
@@ -1059,26 +1059,22 @@ batched-token bounds at the paired Kiln workload's 3,968-token context ceiling.
 Its largest preflighted prompt-plus-output total is 3,947 tokens, leaving 21
 tokens of declared headroom.
 
-The two scopes completed in 44.730 and 35.016 seconds. They used 42,771,188 and
-36,852,899 CPU microseconds, peaked at 13,625,831,424 and 783,572,992 bytes
+The two scopes completed in 32.152 and 32.137 seconds. They used 34,026,363 and
+33,883,389 CPU microseconds, peaked at 783,310,848 and 783,699,968 bytes
 with 27 PIDs each, recorded zero memory-limit/OOM events, and were both removed.
 Neither scope had a CPU allowance, temperature process, or pacing lifecycle.
-The later exact c1 launch reported inference configuration
+The manifest now binds inference configuration
 `1114206b201c82cb07efff67b863413964a6d3064b9ab0e445b9527e3e1bc19b`
-on all five vLLM lifecycles instead of the manifest's
-`17c0a38180758283005aeb4c6ab82954eb225ca7535e01a9a29058c7bcdaaeee`.
-Source and immutable-snapshot content independently matched at
-`9e153346518cd043a237cbcab7a561f6fdf6924e6320fdbe2197a5456e0b3dd3`,
-so snapshot construction is not the cause. The manifest capture had inherited
+which matches all five vLLM lifecycles in the preceding exact c1. The replaced
+manifest had inherited
 an ambient `HF_TOKEN` because all `HF_*` variables were treated as inference
 inputs; the qualification runner's closed environment correctly removed that
 credential. The launcher now removes known Hugging Face credentials before
 child creation and excludes them from inference identity. The benchmark now
 requires every vLLM stream to report the manifest fingerprint, rejecting a
-missing or conflicting value during warmup before measurement. The manifest
-prerequisite remains open until a clean two-pass replacement is published.
-This is not a server-startup, request, performance-matrix, soak, native-Linux,
-or desktop-4090 claim.
+missing or conflicting value during warmup before measurement. This closes the
+runtime-identity prerequisite. It is not a server-startup, request,
+performance-matrix, soak, native-Linux, or desktop-4090 claim.
 
 The owned teacher does not require venv activation. It prepends the directory
 of its executing interpreter to the child `PATH`, making runtime-installed
