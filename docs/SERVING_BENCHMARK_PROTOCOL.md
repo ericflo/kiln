@@ -229,6 +229,12 @@ runtime fields are byte-for-byte equivalent to the laptop bootstrap after
 normalizing only `model.path`, `model.adapter_dir`, and `model.snapshot_dir`.
 Both performance arms use
 `.qualification/cuda-rtx4090-laptop/performance-model-v1`.
+The vLLM performance launch is intentionally narrower than the shared 32K
+bootstrap: both `--max-model-len` and `--max-num-batched-tokens` are 3,968,
+matching the paired Kiln context ceiling. The largest preflighted
+prompt-plus-output total is 3,947 tokens, leaving 21 tokens of declared
+headroom. This bounds the workload contract rather than tuning device-memory
+utilization for one laptop.
 
 That closed model view is necessary because a development model directory may
 also contain operational `.cache` and `adapters` trees, including adapter
@@ -368,8 +374,10 @@ child `PATH`, so console tools installed with the reviewed runtime, including
 remain inference-identity inputs. Changing this derived launch environment
 requires a new two-pass runtime-manifest capture before c1.
 
-The checked-in laptop runtime manifest is the immutable c1 input and matches
-the current derived launch environment. Its older
+The checked-in laptop runtime manifest records the rejected 32,768-token
+predecessor launch. It does not match the current 3,968-token performance
+envelope and must be replaced by a new two-pass capture before another c1. Its
+older
 `scripts/qualification/capture_vllm_runtime_manifest.py` procedure coupled
 artifact identity to the now-rejected thermal/CPU pacing wrapper.
 Preserve that capture as historical artifact evidence, but do not rerun the
@@ -395,9 +403,9 @@ The separate scopes completed in 44.713 and 34.835 seconds with
 13,627,305,984- and 783,560,704-byte memory peaks, 27-PID peaks, zero
 memory-limit/OOM events, and clean removal. They used 42.591 and 36.833 CPU
 seconds with no CPU allowance, thermal process, or pacing lifecycle. This
-artifact is the immutable vLLM input for the next exact-source performance run;
-it does not itself establish server startup, request correctness, throughput,
-or endurance.
+artifact is counterevidence for the rejected predecessor launch, not a valid
+input for the next exact-source performance run. It does not establish server
+startup, request correctness, throughput, or endurance.
 
 Before a model-bearing current case starts, the benchmark driver performs the
 initial double-read model fingerprint without a read-rate limiter. It repeats

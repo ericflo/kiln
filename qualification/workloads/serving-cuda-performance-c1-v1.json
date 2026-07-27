@@ -82,7 +82,9 @@
         },
         "vllm": {
           "base_url": "http://127.0.0.1:8421",
-          "launch_sha256": "sha256:bbf2bddc67a1a796afd86f6d622fd3e025f40741a1805432c17dd3bdb1ce5b81",
+          "launch_sha256": "sha256:83a10e3f39b27ba015af2cb2a1ac8aca011223c3f0422e259bcf88754bb15bf8",
+          "max_model_len": 3968,
+          "max_num_batched_tokens": 3968,
           "runtime_manifest_sha256": "sha256:1419a2d481c2439b334c8f67c71fe3f291150616b8f44b6249274e5546cb04bd"
         }
       },

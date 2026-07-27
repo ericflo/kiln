@@ -85,7 +85,7 @@ KILN_LAUNCH_SHA256 = (
     "sha256:2d351c605bb0da71dde85521b6a0a4546fb9990a7f0c45f84f926dcb157f344d"
 )
 VLLM_LAUNCH_SHA256 = (
-    "sha256:bbf2bddc67a1a796afd86f6d622fd3e025f40741a1805432c17dd3bdb1ce5b81"
+    "sha256:83a10e3f39b27ba015af2cb2a1ac8aca011223c3f0422e259bcf88754bb15bf8"
 )
 KILN_CONFIG_SHA256 = (
     "sha256:fa362ece580f91b2752cd6d56984a186b699b83da99663ef015a79b2e2005428"
@@ -176,6 +176,8 @@ EFFECTIVE_CONFIG: dict[str, Any] = {
     "vllm": {
         "base_url": "http://127.0.0.1:8421",
         "launch_sha256": VLLM_LAUNCH_SHA256,
+        "max_model_len": KILN_CONTEXT_CEILING_TOKENS,
+        "max_num_batched_tokens": KILN_CONTEXT_CEILING_TOKENS,
         "runtime_manifest_sha256": VLLM_RUNTIME_MANIFEST_SHA256,
     },
 }

@@ -565,11 +565,14 @@ text-only model surface. It deliberately omits the ROCm-only `TRITON_ATTN`
 choice; the captured CUDA runtime must report its actual supported attention
 route.
 
-The current laptop performance launch omits the optional cumulative
-provenance-read ceiling. Its manifest-only captures and real launches therefore
-hash model, snapshot, adapter, and runtime content without automatic read
-pacing. Historical launch documents and receipts retain the explicit limits
-they actually used.
+The current laptop performance launch is separate from the shared 32,768-token
+bootstrap. It sets both the model-length and batched-token bounds to the paired
+Kiln workload's existing 3,968-token ceiling. The preflighted largest
+prompt-plus-output total is 3,947 tokens, leaving 21 tokens of declared
+headroom. The launch also omits the optional cumulative provenance-read
+ceiling, so manifest-only captures and real launches hash model, snapshot,
+adapter, and runtime content without automatic read pacing. Historical launch
+documents and receipts retain the explicit limits they actually used.
 
 This JSON is not a runtime manifest and does not pin an installed vLLM wheel by
 itself. On each NVIDIA machine, install an explicit reviewed CUDA-compatible
@@ -595,8 +598,10 @@ and runtime-content
 Two exact clean-source captures produced the same 2,608 bytes in 44.713 and
 34.835 seconds. Their distinct accounting-only scopes had no CPU allowance or
 thermal lifecycle, recorded zero memory-limit/OOM events, and were removed.
-This establishes the immutable runtime identity used by later serving evidence,
-not serving correctness or performance by itself.
+That manifest records the rejected 32,768-token predecessor launch. It must be
+replaced by a two-pass capture from the current 3,968-token performance launch
+before another c1 attempt. It establishes no serving correctness or performance
+claim.
 
 Current model-bearing qualification also brackets the serving case itself. The
 parent qualification runner and benchmark perform their initial and final
@@ -609,8 +614,9 @@ from the older laptop procedure.
 The accelerator identity must match the environment receipt's 4090 class,
 `sm_89`, capacity, and selected logical device. The benchmark then binds the
 manifest as `--runtime-artifact`, the environment receipt's stable GPU UUID as
-the NVML selector, and the same host thermal policy/memory ceiling used by the
-Kiln reference. See [Serving Benchmark
+the NVML selector, and the same explicit host policy or finite memory ceiling
+used by the Kiln reference, if either separate lab control was selected. See
+[Serving Benchmark
 Protocol](SERVING_BENCHMARK_PROTOCOL.md#rtx-4090-serving-bootstrap) for the
 complete machine sequence and failure gates.
 

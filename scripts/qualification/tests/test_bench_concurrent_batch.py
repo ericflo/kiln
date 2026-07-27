@@ -31,13 +31,17 @@ sys.modules[SPEC.name] = bench
 SPEC.loader.exec_module(bench)
 
 
-def valid_vllm_manifest(model: str = "test-model") -> dict:
+def valid_vllm_manifest(
+    model: str = "test-model",
+    *,
+    max_model_len: int = 32_768,
+) -> dict:
     identity = {
         "schema": "kiln.teacher-identity.v1",
         "served_model_id": model,
         "implementation": "vllm:0.25.0",
         "max_top_k": 20,
-        "max_model_len": 32_768,
+        "max_model_len": max_model_len,
     }
     canonical_json = json.dumps(
         identity, ensure_ascii=False, allow_nan=False, separators=(",", ":")
@@ -1020,7 +1024,7 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertEqual(args.served_model_id, "Qwen3.5-4B")
         self.assertEqual(args.process_group_mode, "inherited")
 
-    def test_cuda_laptop_performance_inputs_change_only_storage_paths(self) -> None:
+    def test_cuda_laptop_performance_inputs_are_workload_bounded(self) -> None:
         config_root = ROOT / "qualification" / "server-config"
         launch_root = ROOT / "qualification" / "server-launch"
         bootstrap_name = "kiln-cuda-rtx4090-laptop-serving-bootstrap-v1"
@@ -1070,7 +1074,8 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertIn(f"--model-path={serving_model}", command)
         self.assertIn("--gpu-memory-utilization=0.75", command)
         self.assertIn("--max-num-seqs=64", command)
-        self.assertIn("--max-num-batched-tokens=32768", command)
+        self.assertIn("--max-model-len=3968", command)
+        self.assertIn("--max-num-batched-tokens=3968", command)
         self.assertIn("--language-model-only", command)
         self.assertFalse(
             any(
@@ -1080,7 +1085,7 @@ class ServingBenchmarkTests(unittest.TestCase):
         )
         args = bench.validate_vllm_owned_launch(
             vllm_launch,
-            valid_vllm_manifest("Qwen3.5-4B"),
+            valid_vllm_manifest("Qwen3.5-4B", max_model_len=3_968),
         )
         self.assertEqual(args.model_path, Path(serving_model))
         self.assertEqual(args.process_group_mode, "inherited")

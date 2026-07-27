@@ -1055,14 +1055,19 @@ and its installed-runtime content hash is
 `6bf6259d333d08bcf010eaac2511cd9ca9280fcf7e3cb32346b3fe1a5bcdbf55`.
 Both strict-valid captures produced the same 2,608 bytes and bind vLLM 0.23.0,
 the closed Qwen3.5-4B content, 32,768-token context, top-K 20, BF16, and the
-reviewed performance launch.
+rejected predecessor launch. The current performance launch instead binds both
+the model-length and batched-token bounds to the paired Kiln workload's
+3,968-token context ceiling. Its largest preflighted prompt-plus-output total is
+3,947 tokens, leaving 21 tokens of declared headroom. A new two-pass capture
+from that launch is required before another c1 attempt.
 
 The two scopes completed in 44.713 and 34.835 seconds. They used 42,590,540 and
 36,833,050 CPU microseconds, peaked at 13,627,305,984 and 783,560,704 bytes
 with 27 PIDs each, recorded zero memory-limit/OOM events, and were both removed.
 Neither scope had a CPU allowance, temperature process, or pacing lifecycle.
-This closes the runtime-manifest prerequisite only. It is not a server startup,
-request, performance-matrix, soak, native-Linux, or desktop-4090 claim.
+This historical capture no longer closes the runtime-manifest prerequisite. It
+is not a server startup, request, performance-matrix, soak, native-Linux, or
+desktop-4090 claim.
 
 The owned teacher does not require venv activation. It prepends the directory
 of its executing interpreter to the child `PATH`, making runtime-installed
