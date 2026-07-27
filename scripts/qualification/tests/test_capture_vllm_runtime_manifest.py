@@ -232,7 +232,7 @@ def unpaced_scope_stderr() -> bytes:
             f"user@{capture.os.getuid()}.service/app.slice/{unit}.scope"
         ),
         "containment": capture.benchmark.WSL2_NETWORK_BOUNDARY,
-        "memory_max_bytes": capture.benchmark.WSL2_SCOPE_MEMORY_MAX_BYTES,
+        "memory_max_bytes": capture.WSL_SCOPE_UNPACED_MEMORY_MAX_BYTES,
         "memory_swap_max_bytes": 0,
         "pids_max": capture.benchmark.WSL2_SCOPE_PIDS_MAX,
         "cpu_quota_percent": 0,
@@ -388,6 +388,11 @@ class VllmRuntimeManifestCaptureTests(unittest.TestCase):
         self.assertEqual(command[:2], [sys.executable, str(capture.WSL_SCOPE_EXEC)])
         quota_index = command.index("--cpu-quota-percent")
         self.assertEqual(command[quota_index + 1], "0")
+        memory_index = command.index("--memory-max-bytes")
+        self.assertEqual(
+            command[memory_index + 1],
+            str(capture.WSL_SCOPE_UNPACED_MEMORY_MAX_BYTES),
+        )
         self.assertNotIn("--thermal-pacing-policy", command)
         self.assertNotIn(str(capture.WSL_THERMAL_EXEC), command)
         self.assertIn(str(supervision.unshare_path), command)
@@ -398,6 +403,7 @@ class VllmRuntimeManifestCaptureTests(unittest.TestCase):
             1770.0,
         )
         self.assertEqual(evidence["mechanism"], "systemd-user-scope-v1")
+        self.assertEqual(evidence["memory_max_bytes"], 0)
         self.assertEqual(evidence["cpu_quota_percent"], 0)
         self.assertIsNone(evidence["cpu_allowed_usec"])
         self.assertIsNone(evidence["thermal_pacing"])

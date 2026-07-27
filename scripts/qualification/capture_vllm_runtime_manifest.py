@@ -46,6 +46,7 @@ WSL_PLATFORM = ROOT / "scripts" / "qualification" / "wsl_platform.py"
 UNSHARE_EXECUTABLE = Path("/usr/bin/unshare")
 WSL_SCOPE_CPU_POLL_INTERVAL_MS = 5
 WSL_SCOPE_UNPACED_CPU_QUOTA_PERCENT = 0
+WSL_SCOPE_UNPACED_MEMORY_MAX_BYTES = 0
 WSL_THERMAL_EVENT_PREFIX = "wsl2-thermal: "
 WSL_THERMAL_EVENT_SCHEMA = "kiln.wsl2-thermal-event.v1"
 WSL_SCOPE_EVENT_PREFIX = "wsl2-scope: "
@@ -338,6 +339,11 @@ def supervised_manifest_command(
     if supervision is None:
         return command
     thermal = supervision.thermal
+    memory_max_bytes = (
+        WSL_SCOPE_UNPACED_MEMORY_MAX_BYTES
+        if thermal is None
+        else benchmark.WSL2_SCOPE_MEMORY_MAX_BYTES
+    )
     handoff_seconds = (
         0.0 if thermal is None else thermal.policy.handoff_timeout_seconds
     )
@@ -368,7 +374,7 @@ def supervised_manifest_command(
         sys.executable,
         os.fspath(WSL_SCOPE_EXEC),
         "--memory-max-bytes",
-        str(benchmark.WSL2_SCOPE_MEMORY_MAX_BYTES),
+        str(memory_max_bytes),
         "--pids-max",
         str(benchmark.WSL2_SCOPE_PIDS_MAX),
         "--cpu-quota-percent",
@@ -742,9 +748,14 @@ def validate_wsl2_scope_stderr(
         if thermal is None
         else benchmark.WSL2_SCOPE_CPU_QUOTA_PERCENT
     )
+    memory_max_bytes = (
+        WSL_SCOPE_UNPACED_MEMORY_MAX_BYTES
+        if thermal is None
+        else benchmark.WSL2_SCOPE_MEMORY_MAX_BYTES
+    )
     expected_start = {
         "containment": benchmark.WSL2_NETWORK_BOUNDARY,
-        "memory_max_bytes": benchmark.WSL2_SCOPE_MEMORY_MAX_BYTES,
+        "memory_max_bytes": memory_max_bytes,
         "memory_swap_max_bytes": 0,
         "pids_max": benchmark.WSL2_SCOPE_PIDS_MAX,
         "cpu_quota_percent": cpu_quota_percent,
@@ -824,7 +835,7 @@ def validate_wsl2_scope_stderr(
         "WSL2 scope PID peak",
         minimum=1,
     )
-    if memory_peak > benchmark.WSL2_SCOPE_MEMORY_MAX_BYTES:
+    if memory_max_bytes > 0 and memory_peak > memory_max_bytes:
         raise CaptureError("WSL2 scope memory peak exceeded its maximum")
     if pids_peak > benchmark.WSL2_SCOPE_PIDS_MAX:
         raise CaptureError("WSL2 scope PID peak exceeded its maximum")
@@ -854,7 +865,7 @@ def validate_wsl2_scope_stderr(
         "unit": unit,
         "cgroup": expected_cgroup,
         "network_containment": benchmark.WSL2_NETWORK_BOUNDARY,
-        "memory_max_bytes": benchmark.WSL2_SCOPE_MEMORY_MAX_BYTES,
+        "memory_max_bytes": memory_max_bytes,
         "memory_swap_max_bytes": 0,
         "memory_peak_bytes": memory_peak,
         "memory_events": memory_events,

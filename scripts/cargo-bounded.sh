@@ -345,7 +345,12 @@ if [[ -n "$cpu_quota_percent" ]]; then
     cpu_quota_args=(-p "CPUQuota=${cpu_quota_percent}%")
     cpu_quota_summary="${cpu_quota_percent}%"
 fi
-echo "bounded-cargo: mode=$execution_mode jobs=$jobs cpu_quota=$cpu_quota_summary available=${available_gib}GiB reserve=${reserve_gib}GiB aggregate_limit=${limit_gib}GiB swap_limit=0 private_network=$private_network environment_policy=$environment_policy thermal=$thermal_summary" >&2
+memory_summary="aggregate_limit=${limit_gib}GiB"
+if [[ "$execution_mode" == "delegated-cgroup" ]] \
+    && [[ "${KILN_WSL2_SCOPE_MEMORY_MAX_BYTES:-}" == "0" ]]; then
+    memory_summary="aggregate_limit=unbounded admission_budget=${limit_gib}GiB"
+fi
+echo "bounded-cargo: mode=$execution_mode jobs=$jobs cpu_quota=$cpu_quota_summary available=${available_gib}GiB reserve=${reserve_gib}GiB $memory_summary swap_limit=0 private_network=$private_network environment_policy=$environment_policy thermal=$thermal_summary" >&2
 read -r bounded_uuid < /proc/sys/kernel/random/uuid
 if [[ "$execution_mode" == "scope" ]]; then
     bounded_unit="kiln-cargo-bounded-${bounded_uuid//-/}.scope"
@@ -378,7 +383,7 @@ if [[ "$execution_mode" == "delegated-cgroup" ]]; then
     scope_pids_max="${KILN_WSL2_SCOPE_PIDS_MAX:-}"
     scope_cpu_quota="${KILN_WSL2_SCOPE_CPU_QUOTA_PERCENT:-}"
     scope_host_uid="${KILN_WSL2_SCOPE_HOST_UID:-}"
-    if [[ ! "$scope_memory_max" =~ ^[1-9][0-9]*$ ]] \
+    if [[ ! "$scope_memory_max" =~ ^(0|[1-9][0-9]*)$ ]] \
         || [[ ! "$scope_pids_max" =~ ^[1-9][0-9]*$ ]] \
         || [[ ! "$scope_host_uid" =~ ^[1-9][0-9]*$ ]]; then
         echo "error: malformed WSL2 scope resource binding" >&2
@@ -404,8 +409,11 @@ if [[ "$execution_mode" == "delegated-cgroup" ]]; then
     IFS= read -r observed_swap_max < "$scope_cgroup/memory.swap.max" || observed_swap_max=""
     IFS= read -r observed_pids_max < "$scope_cgroup/pids.max" || observed_pids_max=""
     IFS= read -r observed_oom_group < "$scope_cgroup/memory.oom.group" || observed_oom_group=""
-    if [[ "$observed_memory_max" != "$scope_memory_max" ]] \
-        || (( observed_memory_max > limit_gib * 1024 * 1024 * 1024 )); then
+    expected_memory_max="$scope_memory_max"
+    [[ "$scope_memory_max" == "0" ]] && expected_memory_max="max"
+    if [[ "$observed_memory_max" != "$expected_memory_max" ]] \
+        || { [[ "$scope_memory_max" != "0" ]] \
+            && (( observed_memory_max > limit_gib * 1024 * 1024 * 1024 )); }; then
         echo "error: outer WSL2 scope memory.max '$observed_memory_max' exceeds or contradicts the Cargo ceiling" >&2
         exit 2
     fi

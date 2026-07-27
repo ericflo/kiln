@@ -977,6 +977,12 @@ def execute(args: argparse.Namespace) -> int:
             ),
         }
     )
+    memory_max_property = (
+        "infinity" if args.memory_max_bytes == 0 else str(args.memory_max_bytes)
+    )
+    memory_max_cgroup = (
+        "max" if args.memory_max_bytes == 0 else str(args.memory_max_bytes)
+    )
     command = [
         "/usr/bin/systemd-run",
         "--user",
@@ -984,7 +990,7 @@ def execute(args: argparse.Namespace) -> int:
         "--quiet",
         f"--unit={unit}",
         "-p",
-        f"MemoryMax={args.memory_max_bytes}",
+        f"MemoryMax={memory_max_property}",
         "-p",
         "MemorySwapMax=0",
         "-p",
@@ -1035,7 +1041,7 @@ def execute(args: argparse.Namespace) -> int:
     try:
         _wait_scope(cgroup, process)
         for filename, expected in (
-            ("memory.max", str(args.memory_max_bytes)),
+            ("memory.max", memory_max_cgroup),
             ("memory.swap.max", "0"),
             ("pids.max", str(args.pids_max)),
         ):
@@ -1317,8 +1323,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         args.command = args.command[1:]
     if not args.command:
         parser.error("a command is required after --")
-    if args.memory_max_bytes < 64 * 1024 * 1024:
-        parser.error("--memory-max-bytes must be at least 64 MiB")
+    if (
+        args.memory_max_bytes != 0
+        and args.memory_max_bytes < 64 * 1024 * 1024
+    ):
+        parser.error("--memory-max-bytes must be zero or at least 64 MiB")
     if not 1 <= args.pids_max <= 1_000_000:
         parser.error("--pids-max must be in 1..=1000000")
     if not 0 <= args.cpu_quota_percent <= 100:

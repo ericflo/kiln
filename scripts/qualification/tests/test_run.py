@@ -380,6 +380,11 @@ class RunnerTests(unittest.TestCase):
             30.0,
         )
         self.assertEqual(command[1], str(run_module.WSL_THERMAL_EXEC))
+        memory_index = command.index("--memory-max-bytes")
+        self.assertEqual(
+            command[memory_index + 1],
+            str(run_module.WSL_SCOPE_PACED_MEMORY_MAX_BYTES),
+        )
         pacing_index = command.index("--thermal-pacing-policy")
         self.assertEqual(command[pacing_index + 1], str(policy_path))
         self.assertEqual(command.count(str(policy_path)), 2)
@@ -405,10 +410,15 @@ class RunnerTests(unittest.TestCase):
             30.0,
         )
         self.assertEqual(unpaced_command[1], str(run_module.WSL_SCOPE_EXEC))
+        memory_index = unpaced_command.index("--memory-max-bytes")
+        self.assertEqual(
+            unpaced_command[memory_index + 1],
+            str(run_module.WSL_SCOPE_UNPACED_MEMORY_MAX_BYTES),
+        )
         self.assertNotIn(str(run_module.WSL_THERMAL_EXEC), unpaced_command)
         self.assertNotIn("--thermal-pacing-policy", unpaced_command)
 
-    def test_wsl_model_fingerprint_is_paced_scoped_and_bounded(self) -> None:
+    def test_wsl_model_fingerprint_is_scoped_and_unlimited_by_default(self) -> None:
         policy_path = (
             QUALIFICATION_DIR.parents[1]
             / "qualification/host-policies/"
@@ -464,12 +474,7 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(observed, payload)
             contained = wrapped.call_args.args[0]
             self.assertEqual(contained[:2], list(isolation.argv_prefix))
-            self.assertIn("--max-read-mib-per-second", contained)
-            rate_index = contained.index("--max-read-mib-per-second")
-            self.assertEqual(
-                contained[rate_index + 1],
-                str(run_module.WSL_MODEL_FINGERPRINT_READ_MIB_PER_SECOND),
-            )
+            self.assertNotIn("--max-read-mib-per-second", contained)
             self.assertEqual(stdout_path.read_bytes(), completed.stdout)
             self.assertEqual(stderr_path.read_bytes(), completed.stderr)
             self.assertEqual(

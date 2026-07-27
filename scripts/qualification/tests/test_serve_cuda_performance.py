@@ -198,7 +198,12 @@ class CudaPerformanceTests(unittest.TestCase):
         self.assertEqual(
             environment["KILN_CARGO_EXECUTION_MODE"], "delegated-cgroup"
         )
-        self.assertEqual(environment["KILN_CARGO_MAX_MEMORY_GIB"], "10")
+        for name in (
+            "KILN_CARGO_HOST_RESERVE_GIB",
+            "KILN_CARGO_MAX_MEMORY_GIB",
+            "KILN_CARGO_MIN_AVAILABLE_GIB",
+        ):
+            self.assertNotIn(name, environment)
         self.assertNotIn("KILN_CARGO_CPU_QUOTA_PERCENT", environment)
         self.assertNotIn("KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS", environment)
         self.assertNotEqual(environment, os.environ)

@@ -32,8 +32,9 @@ scope:
   is rejected by current measured runs.
 
 Current WSL2 performance runs retain network/Landlock, UID-qualified systemd
-scope, memory, zero-swap, PID, group-OOM, process, and cleanup checks. They do
-not require a thermal policy and do not apply a CPU or thermal freeze. Startup,
+scope, memory accounting, zero-swap, PID, group-OOM, process, and cleanup
+checks. The no-policy scope round-trips `memory.max=max`, so it applies no
+host-memory ceiling. It also does not apply a CPU or thermal freeze. Startup,
 shutdown, request, and build deadlines are ordinary wall time.
 
 Linux `killpg(pgid, 0)` also succeeds when every remaining member is a zombie.
@@ -249,9 +250,9 @@ The current vLLM performance launch omits
 `--max-provenance-read-mib-per-second`, so model, snapshot, adapter, and runtime
 hashing plus the fresh-child runtime recheck are not rate-limited. The current
 Kiln performance config likewise omits its optional checkpoint-read and
-accelerator-upload limits. WSL2 still supplies namespace, Landlock, memory,
-swap, PID, OOM, process-lifecycle, and network containment without thermal or
-CPU pacing.
+accelerator-upload limits. WSL2 still supplies namespace, Landlock, memory
+accounting, zero-swap, PID, OOM, process-lifecycle, and network containment
+without a host-memory ceiling or thermal/CPU pacing.
 The readiness deadline remains 3,600 seconds because a copy-fallback real launch
 performs nine complete model reads across staging, verification, identity, and
 pre-spawn revalidation before vLLM loads weights. The deadline is containment,
@@ -364,10 +365,11 @@ paced command or treat its wall time as performance. The capture tool now keeps
 the clean-source requirement, two byte-identical strict-valid results,
 owned-process lifecycle, bounded output, scope cleanup, and no-overwrite checks
 without requiring thermal or CPU pacing. On WSL2 each pass still uses the
-private network/PID/mount/Landlock boundary and a 10 GiB/zero-swap/512-PID
-systemd user scope. CPU quota is zero (unlimited), and thermal supervision is
-absent unless a caller explicitly supplies a separate lab policy. The current
-laptop launch also omits a provenance-read ceiling.
+private network/PID/mount/Landlock boundary and an accounting-only
+`memory.max=max`/zero-swap/512-PID systemd user scope. CPU quota is zero
+(unlimited), and thermal supervision is absent unless a caller explicitly
+supplies a separate lab policy. The current laptop launch and parent
+qualification fingerprint both omit their optional read ceilings.
 
 The retained Laptop GPU manifest at
 `qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json` was

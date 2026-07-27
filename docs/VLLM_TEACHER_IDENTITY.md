@@ -578,14 +578,15 @@ version in the ignored venv, then run
 JSON. The tool inserts only `--manifest-only`, requires two byte-identical
 strict-valid results, and publishes without overwrite. Commit that machine's
 manifest under `qualification/runtime/vllm/cuda/<machine>/` before startup.
-On WSL2, every pass runs within a separate
-10 GiB/zero-swap/512-PID systemd user scope and private
-network/PID/mount/Landlock boundary. The default CPU quota is zero (unlimited),
-and no temperature policy is inferred from the machine. A caller may explicitly
-provide `--wsl2-thermal-policy` for a separate lab experiment; only then does
-the capture validate the policy, thermal lifecycle, and paced-scope evidence.
-Publication always requires strict ordered scope events, zero
-memory-limit/OOM events, bounded resource accounting, and scope removal.
+On WSL2, every pass runs within a separate systemd user scope and private
+network/PID/mount/Landlock boundary. The default scope uses
+`memory.max=max`, zero swap, 512 PIDs, and CPU quota zero, retaining resource
+accounting without memory or CPU throttling. No temperature policy is inferred
+from the machine. A caller may explicitly provide `--wsl2-thermal-policy` for a
+separate lab experiment; only then does the capture validate the policy,
+thermal lifecycle, and paced-scope evidence. Publication always requires strict
+ordered scope events, zero memory-limit/OOM events, resource accounting, and
+scope removal.
 The first retained Laptop GPU performance identity is
 `qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json`, with file
 `sha256:50d46bd54df16f1ea9095dace7656708b7347db3591ad8ebc74d1238d284d125`
@@ -599,10 +600,12 @@ immutable runtime identity used by later serving evidence, not serving
 correctness or performance by itself.
 
 Current model-bearing qualification also brackets the serving case itself. The
-parent benchmark performs initial and final double-read model fingerprints with
-no read-rate limiter by default. It creates independent thermal fingerprint
-lifecycles only when a caller explicitly selects a host policy. Historical
-receipts retain the scoped and paced evidence from the older laptop procedure.
+parent qualification runner and benchmark perform their initial and final
+double-read model fingerprints with no read-rate limiter by default. WSL2
+parent scopes retain isolation and resource accounting but no memory/CPU
+ceiling; thermal fingerprint lifecycles exist only when a caller explicitly
+selects a host policy. Historical receipts retain the bounded and paced evidence
+from the older laptop procedure.
 
 The accelerator identity must match the environment receipt's 4090 class,
 `sm_89`, capacity, and selected logical device. The benchmark then binds the

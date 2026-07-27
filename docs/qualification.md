@@ -165,11 +165,14 @@ workload, or determine whether a portable qualification may run. The optional
 `--wsl2-thermal-policy` switch is reserved for explicitly requested lab
 supervision and is not part of the current performance procedure.
 
-Every WSL2 CUDA case is also placed in a user scope before `unshare`. The scope
-round-trips a 10 GiB aggregate `memory.max`, zero `memory.swap.max`, group OOM
-kill, and 512-PID limit. It records aggregate CPU use but does not throttle or
-freeze measured work. Missing bus units, an inert limit, absent containment,
-timeout, or scope residue fails the case. The outer process inventory also rejects an
+Every WSL2 CUDA case is also placed in a user scope before `unshare`. The
+current no-policy scope round-trips `memory.max=max`, zero
+`memory.swap.max`, group OOM handling, and a 512-PID limit. It records peak
+memory, memory/OOM events, and aggregate CPU use without imposing a host-memory
+or CPU ceiling. A finite memory maximum remains available only to an explicitly
+bounded lab run; retained historical receipts keep their original 10 GiB
+contract. Missing bus units, control drift, absent containment, timeout, or
+scope residue fails the case. The outer process inventory also rejects an
 already-running host Cargo/rustc process before the private PID namespace can
 hide it. User-manager launch is deliberately not attempted inside Landlock
 because the manager would execute the requested process outside the private
@@ -1030,8 +1033,8 @@ launch JSON must be a tracked regular file with bytes identical to `HEAD`.
 The retained laptop manifest was captured under an older paced lab wrapper.
 That history establishes artifact identity only and is not performance
 evidence. New performance qualification uses the WSL2
-network/PID/mount/Landlock boundary plus its memory, swap, PID, OOM, and cleanup
-checks without CPU or thermal pacing.
+network/PID/mount/Landlock boundary plus memory accounting, zero-swap, PID, OOM,
+and cleanup checks without a host-memory ceiling or CPU/thermal pacing.
 The current laptop performance launch omits
 `--max-provenance-read-mib-per-second`, so launcher-owned
 model/snapshot/adapter/runtime hashing and the fresh-child runtime recheck are
@@ -1063,12 +1066,14 @@ server startup, request, performance-matrix, soak, native-Linux, or desktop-4090
 claim.
 
 Every current model-bearing CUDA run brackets its case with initial and final
-double-read model fingerprints. Driver v25 performs them without a read-rate
-limiter by default and does not create independent thermal scopes unless a
-caller explicitly selects a separate host policy. They remain inside the owned
-qualification lifecycle: the case starts only after the initial fingerprint,
-and final source/commit validation occurs only after the final fingerprint.
-Historical receipts retain their older scoped, paced fingerprint evidence.
+double-read model fingerprints. Both the qualification parent and driver v25
+perform them without a read-rate limiter by default. The WSL2 parent keeps each
+fingerprint in an independent namespace and resource-accounting scope, but does
+not impose a memory/CPU ceiling or create a thermal lifecycle unless a caller
+explicitly selects a separate host policy. The case starts only after the
+initial fingerprint scope is removed, and final source/commit validation occurs
+only after the final scope is removed. Historical receipts retain their older
+bounded and paced fingerprint evidence.
 
 The first source-bound performance checkpoint is the complete five-profile c1
 pair:

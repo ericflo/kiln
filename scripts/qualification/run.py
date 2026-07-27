@@ -108,12 +108,14 @@ MAX_RUN_STRUCTURED_BYTES = 64 * 1024 * 1024
 MAX_TERMINATION_GRACE_SECONDS = 75.0
 DEFAULT_TERMINATION_GRACE_SECONDS = 65.0
 SUCCESS_DESCENDANT_SETTLEMENT_SECONDS = 1.0
-WSL_SCOPE_MEMORY_MAX_BYTES = 10 * 1024 * 1024 * 1024
+WSL_SCOPE_UNPACED_MEMORY_MAX_BYTES = 0
+WSL_SCOPE_PACED_MEMORY_MAX_BYTES = 10 * 1024 * 1024 * 1024
+WSL_SCOPE_MEMORY_MAX_BYTES = WSL_SCOPE_PACED_MEMORY_MAX_BYTES
 WSL_SCOPE_PIDS_MAX = 512
 WSL_SCOPE_CPU_QUOTA_PERCENT = 0
 WSL_PACED_SCOPE_CPU_QUOTA_PERCENT = 50
 WSL_SCOPE_CPU_POLL_INTERVAL_MS = 5
-WSL_MODEL_FINGERPRINT_READ_MIB_PER_SECOND = 32
+WSL_MODEL_FINGERPRINT_READ_MIB_PER_SECOND = 0
 WSL_MODEL_FINGERPRINT_RUNTIME_MAX_SECONDS = 1_800.0
 WSL_MODEL_FINGERPRINT_TIMEOUT_SECONDS = 2_130.0
 WSL_MODEL_FINGERPRINT_STDOUT_MAX_BYTES = 1024 * 1024
@@ -396,6 +398,16 @@ def _wsl_scope_cpu_quota_percent(
     )
 
 
+def _wsl_scope_memory_max_bytes(
+    policy: wsl_thermal_exec.ThermalPolicy | None,
+) -> int:
+    return (
+        WSL_SCOPE_UNPACED_MEMORY_MAX_BYTES
+        if policy is None
+        else WSL_SCOPE_PACED_MEMORY_MAX_BYTES
+    )
+
+
 def _wsl_supervised_argv(
     contained_argv: list[str],
     policy_path: Path | None,
@@ -407,11 +419,12 @@ def _wsl_supervised_argv(
             "WSL2 thermal policy path and parsed policy must be supplied together"
         )
     cpu_quota_percent = _wsl_scope_cpu_quota_percent(policy)
+    memory_max_bytes = _wsl_scope_memory_max_bytes(policy)
     scoped_argv = [
         sys.executable,
         str(WSL_SCOPE_EXEC),
         "--memory-max-bytes",
-        str(WSL_SCOPE_MEMORY_MAX_BYTES),
+        str(memory_max_bytes),
         "--pids-max",
         str(WSL_SCOPE_PIDS_MAX),
         "--cpu-quota-percent",
@@ -465,9 +478,14 @@ def _supervised_wsl_model_fingerprint(
         "--model-path",
         str(model_path),
         "--json",
-        "--max-read-mib-per-second",
-        str(WSL_MODEL_FINGERPRINT_READ_MIB_PER_SECOND),
     ]
+    if WSL_MODEL_FINGERPRINT_READ_MIB_PER_SECOND > 0:
+        command.extend(
+            (
+                "--max-read-mib-per-second",
+                str(WSL_MODEL_FINGERPRINT_READ_MIB_PER_SECOND),
+            )
+        )
     if model_id is not None:
         command.extend(("--model-id", model_id))
     executed = _wsl_supervised_argv(
@@ -1691,7 +1709,9 @@ def _retain_initial_model_failure(
                     "policy_sha256": wsl_thermal_policy_value.content_sha256,
                     "scope": {
                         "mechanism": "systemd-user-scope-feedback-v1",
-                        "memory_max_bytes": WSL_SCOPE_MEMORY_MAX_BYTES,
+                        "memory_max_bytes": _wsl_scope_memory_max_bytes(
+                            wsl_thermal_policy_value
+                        ),
                         "memory_swap_max_bytes": 0,
                         "pids_max": WSL_SCOPE_PIDS_MAX,
                         "cpu_quota_percent": _wsl_scope_cpu_quota_percent(
@@ -1714,7 +1734,9 @@ def _retain_initial_model_failure(
                         WSL_MODEL_FINGERPRINT_RUNTIME_MAX_SECONDS
                     ),
                     "scope": {
-                        "memory_max_bytes": WSL_SCOPE_MEMORY_MAX_BYTES,
+                        "memory_max_bytes": _wsl_scope_memory_max_bytes(
+                            wsl_thermal_policy_value
+                        ),
                         "memory_swap_max_bytes": 0,
                         "pids_max": WSL_SCOPE_PIDS_MAX,
                         "cpu_quota_percent": _wsl_scope_cpu_quota_percent(
@@ -2336,7 +2358,9 @@ def _run_qualification_impl(
                             },
                             "scope": {
                                 "mechanism": "systemd-user-scope-feedback-v1",
-                                "memory_max_bytes": WSL_SCOPE_MEMORY_MAX_BYTES,
+                                "memory_max_bytes": _wsl_scope_memory_max_bytes(
+                                    wsl_thermal_policy_value
+                                ),
                                 "memory_swap_max_bytes": 0,
                                 "pids_max": WSL_SCOPE_PIDS_MAX,
                                 "cpu_quota_percent": (
@@ -2656,7 +2680,9 @@ def _run_qualification_impl(
                     "policy_sha256": wsl_thermal_policy_value.content_sha256,
                     "scope": {
                         "mechanism": "systemd-user-scope-feedback-v1",
-                        "memory_max_bytes": WSL_SCOPE_MEMORY_MAX_BYTES,
+                        "memory_max_bytes": _wsl_scope_memory_max_bytes(
+                            wsl_thermal_policy_value
+                        ),
                         "memory_swap_max_bytes": 0,
                         "pids_max": WSL_SCOPE_PIDS_MAX,
                         "cpu_quota_percent": _wsl_scope_cpu_quota_percent(
@@ -2679,7 +2705,9 @@ def _run_qualification_impl(
                         WSL_MODEL_FINGERPRINT_RUNTIME_MAX_SECONDS
                     ),
                     "scope": {
-                        "memory_max_bytes": WSL_SCOPE_MEMORY_MAX_BYTES,
+                        "memory_max_bytes": _wsl_scope_memory_max_bytes(
+                            wsl_thermal_policy_value
+                        ),
                         "memory_swap_max_bytes": 0,
                         "pids_max": WSL_SCOPE_PIDS_MAX,
                         "cpu_quota_percent": _wsl_scope_cpu_quota_percent(

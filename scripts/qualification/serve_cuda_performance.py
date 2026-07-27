@@ -113,11 +113,9 @@ EFFECTIVE_CONFIG: dict[str, Any] = {
         "binary": "kiln",
         "cargo_environment_policy": "closed-qualification-test-v1",
         "cargo_execution_mode": "delegated-cgroup",
-        "cargo_host_reserve_gib": 3,
         "cargo_jobs": 1,
-        "cargo_max_memory_gib": 10,
-        "cargo_memory_scope": "outer-wsl2-qualification-scope",
-        "cargo_min_available_gib": 13,
+        "cargo_memory_policy": "adaptive-host-availability",
+        "cargo_memory_scope": "outer-wsl2-accounting-scope",
         "cargo_private_network": True,
         "cargo_runtime_authority": (
             "contained-parent-pause-aware-process-group-v1"
@@ -371,17 +369,21 @@ def run_prompt_context_check(model_path: Path, deadline: float) -> dict[str, Any
 
 def build_environment(source: dict[str, str]) -> dict[str, str]:
     environment = dict(source)
-    environment.pop("KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS", None)
+    for name in (
+        "KILN_CARGO_CPU_QUOTA_PERCENT",
+        "KILN_CARGO_HOST_RESERVE_GIB",
+        "KILN_CARGO_MAX_MEMORY_GIB",
+        "KILN_CARGO_MIN_AVAILABLE_GIB",
+        "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS",
+    ):
+        environment.pop(name, None)
     environment.update(
         {
             "CARGO_NET_OFFLINE": "true",
             "CUDARC_CUDA_VERSION": "12080",
             "KILN_CARGO_ENVIRONMENT_POLICY": "closed-qualification-test-v1",
             "KILN_CARGO_EXECUTION_MODE": "delegated-cgroup",
-            "KILN_CARGO_HOST_RESERVE_GIB": "3",
             "KILN_CARGO_JOBS": "1",
-            "KILN_CARGO_MAX_MEMORY_GIB": "10",
-            "KILN_CARGO_MIN_AVAILABLE_GIB": "13",
             "KILN_CARGO_PRIVATE_NETWORK": "1",
             "KILN_CUDA_ARCHS": "89",
             "KILN_QUALIFICATION": "1",
