@@ -396,25 +396,10 @@ multi-row decode. Aggregate throughput describes the eight-request service
 window; the per-request p50 describes individual request wall time. They answer
 different questions and must not be substituted for one another.
 
-The same mixed-load window retains host thermal pacing as an external causal
-interval. The Strix Halo controller samples `k10temp/Tctl` every 250 ms, stops
-the complete server process group at 88 C, resumes it at 86 C, and independently
-fails closed at 97 C. A token gap overlapping a stop/resume interval is assigned
-the bounded `host_thermal_pacing` category. Start/peak/end temperature, guard
-errors and trips, pacing counts, duration, maximum interval, and active-at-end
-state are receipt metrics. Cooling time remains inside request and workload wall
-clocks, so throughput and latency describe sustainable service on the named
-host rather than an unpaced burst. This external attribution does not change or
-populate any request-local backend phase. Mixed-load receipts partition the
-total attributed gap count into thermal-paced and non-thermal runtime counts;
-only a fully reconciled thermal-only attributed population may pass, and the
-unexplained count must remain zero. The client and server share a 180-second
-request containment bound, with pacing time still included. At teardown, pacing is disabled and
-any active stop is released before `SIGTERM`, while hard-limit monitoring stays
-active through server exit. Post-exit cooldown is not an ITL category because no
-request remains: the runner separately requires eight consecutive 250 ms samples
-at or below 75 C within 180 seconds and retains its duration, sample count,
-stable count, peak, completion, timeout, and active-at-end evidence.
+The mixed-load client and server share a 180-second request containment bound.
+All latency and throughput metrics use ordinary wall-clock time. External host
+temperature or CPU controllers are not latency-attribution categories and do
+not extend a request deadline.
 
 Phase values are blocking candidates, not an additive critical-path
 decomposition. Work can overlap, especially response delivery with the next

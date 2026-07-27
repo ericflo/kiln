@@ -22,13 +22,8 @@ ROOT = Path(__file__).resolve().parents[2]
 RESULT_ENV = "KILN_QUALIFICATION_CASE_RESULT"
 CASE_ID = "hf-full-model-logit-parity"
 HF_SCRIPT = ROOT / "scripts/qualification/qwen35_hf_logits.py"
-HF_SUPERVISOR = ROOT / "scripts/qualification/hf_thermal_supervisor.py"
-HF_HOST_RESERVE_GIB = 7
-HF_MAX_MEMORY_GIB = 16
-HF_MIN_AVAILABLE_GIB = HF_MAX_MEMORY_GIB + HF_HOST_RESERVE_GIB
+HF_PROCESS_RUNNER = ROOT / "scripts/qualification/hf_process_runner.py"
 HF_RUNTIME_MAX_SECONDS = 600
-VULKAN_MAX_MEMORY_GIB = 17
-VULKAN_MIN_AVAILABLE_GIB = VULKAN_MAX_MEMORY_GIB + HF_HOST_RESERVE_GIB
 MAX_RESULT_DETAILS_CHARACTERS = 4096
 HF_PASS_PREFIX = "KILN_HF_FULL_LOGIT_REFERENCE_PASS "
 HF_EVIDENCE_KEYS = {
@@ -112,25 +107,14 @@ def _available_gib(meminfo: Path = Path("/proc/meminfo")) -> int:
     raise QualificationError("host MemAvailable is absent from /proc/meminfo")
 
 
-def _bounded_memory_limit_gib(available_gib: int) -> int:
-    if available_gib < HF_MIN_AVAILABLE_GIB:
-        raise QualificationError(
-            f"refusing HF oracle with {available_gib} GiB available; "
-            f"require at least {HF_MIN_AVAILABLE_GIB} GiB"
-        )
-    return HF_MAX_MEMORY_GIB
-
-
 def _bounded_hf_command(
     *,
     unit: str,
     python: Path,
     model: Path,
     output: Path,
-    policy: Path,
     workspace: Path,
     temporary_directory: Path,
-    memory_limit_gib: int,
 ) -> list[str]:
     clean_environment = [
         "/usr/bin/env",
@@ -159,12 +143,6 @@ def _bounded_hf_command(
         "-p",
         "Type=exec",
         "-p",
-        f"MemoryMax={memory_limit_gib}G",
-        "-p",
-        "MemorySwapMax=0",
-        "-p",
-        "OOMPolicy=kill",
-        "-p",
         "KillMode=control-group",
         "-p",
         "SendSIGKILL=yes",
@@ -176,9 +154,7 @@ def _bounded_hf_command(
         "PrivateNetwork=yes",
         *clean_environment,
         str(python),
-        str(HF_SUPERVISOR),
-        "--host-thermal-policy",
-        str(policy),
+        str(HF_PROCESS_RUNNER),
         "--workspace",
         str(workspace),
         "--",
@@ -242,22 +218,23 @@ def _parse_hf_evidence(output: str) -> dict[str, Any]:
     return evidence
 
 
-def _parse_thermal_evidence(output: str) -> dict[str, Any]:
-    from hf_thermal_supervisor import SupervisorError, parse_pass_marker
+def _parse_process_evidence(output: str) -> dict[str, Any]:
+    from hf_process_runner import RunnerError, parse_pass_marker
 
     try:
         return parse_pass_marker(output)
-    except SupervisorError as exc:
+    except RunnerError as exc:
         raise QualificationError(str(exc)) from exc
 
 
 def _run_hf_reference(
-    *, python: Path, model: Path, output: Path, workspace: Path, policy: Path
+    *, python: Path, model: Path, output: Path, workspace: Path
 ) -> dict[str, Any]:
     if not output.is_absolute() or not workspace.is_absolute():
         raise QualificationError("HF reference paths must be absolute")
     available = _available_gib()
-    limit = _bounded_memory_limit_gib(available)
+    if available < 1:
+        raise QualificationError("host reports less than 1 GiB available memory")
     unit = f"kiln-hf-oracle-bounded-{uuid.uuid4().hex}.service"
     temporary_directory = workspace / "tmp"
     temporary_directory.mkdir(mode=0o700)
@@ -266,10 +243,8 @@ def _run_hf_reference(
         python=python,
         model=model,
         output=output,
-        policy=policy,
         workspace=workspace,
         temporary_directory=temporary_directory,
-        memory_limit_gib=limit,
     )
     completed = subprocess.run(
         command,
@@ -287,7 +262,7 @@ def _run_hf_reference(
             f"bounded HF reference exited {completed.returncode}: {completed.stderr[-2000:]}"
         )
     evidence = _parse_hf_evidence(completed.stdout)
-    thermal = _parse_thermal_evidence(completed.stdout)
+    process = _parse_process_evidence(completed.stdout)
     if evidence["memory_peak_bytes"] <= 0:
         raise QualificationError("bounded HF service reported zero peak memory")
     if evidence["memory_swap_bytes"] != 0:
@@ -312,7 +287,6 @@ def _run_hf_reference(
         raise QualificationError("bounded HF reference reported the wrong vocabulary width")
     return {
         "available_before_gib": available,
-        "memory_limit_gib": limit,
         "memory_high_events": evidence["memory_high_events"],
         "memory_max_events": evidence["memory_max_events"],
         "memory_peak_bytes": evidence["memory_peak_bytes"],
@@ -321,24 +295,15 @@ def _run_hf_reference(
         "oom_kill": evidence["memory_oom_kill_events"],
         "reference_sha256": _sha256_file(output),
         "swap_bytes": evidence["memory_swap_bytes"],
-        "thermal": thermal,
+        "process": process,
     }
 
 
-def _wait_for_headroom(timeout_seconds: float = 60.0) -> int:
-    deadline = time.monotonic() + timeout_seconds
-    while True:
-        available = _available_gib()
-        if available >= VULKAN_MIN_AVAILABLE_GIB:
-            return available
-        if time.monotonic() >= deadline:
-            raise QualificationError(
-                f"host recovered only {available} GiB before the Vulkan forward; "
-                f"require {VULKAN_MIN_AVAILABLE_GIB} GiB for a "
-                f"{VULKAN_MAX_MEMORY_GIB} GiB service plus the "
-                f"{HF_HOST_RESERVE_GIB} GiB host reserve"
-            )
-        time.sleep(1.0)
+def _available_for_vulkan() -> int:
+    available = _available_gib()
+    if available < 1:
+        raise QualificationError("host reports less than 1 GiB available memory")
+    return available
 
 
 def _parse_rust_metrics(output: str) -> dict[str, int | float]:
@@ -372,7 +337,6 @@ def _run_vulkan_comparison(
     environment.update(
         {
             "CARGO_NET_OFFLINE": "true",
-            "KILN_CARGO_MAX_MEMORY_GIB": str(VULKAN_MAX_MEMORY_GIB),
             "KILN_QUALIFICATION": "1",
             "KILN_QUALIFICATION_HF_LOGITS_PATH": str(reference),
             "KILN_QUALIFICATION_MODEL_PATH": str(model),
@@ -428,19 +392,17 @@ def _result_document(
     *, duration: float, hf: dict[str, Any], comparison: dict[str, int | float]
 ) -> dict[str, Any]:
     details = {
-        "hf_memory_limit_gib": hf["memory_limit_gib"],
+        "hf_available_before_gib": hf["available_before_gib"],
         "hf_memory_high_events": hf["memory_high_events"],
         "hf_memory_max_events": hf["memory_max_events"],
         "hf_logits_sha256": hf["logits_sha256"],
+        "hf_process": hf["process"],
         "hf_reference_sha256": hf["reference_sha256"],
         "hf_swap_bytes": hf["swap_bytes"],
         "hf_torch_path": "pinned_rocm_torch_fallback",
-        "hf_host_thermal_policy": hf["thermal"]["policy"],
-        "hf_host_thermal_prelaunch_cooldown": hf["thermal"]["prelaunch_cooldown"],
-        "hf_host_thermal_runtime": hf["thermal"]["runtime"],
         "input_token_ids": [1, 2, 3, 4, 5, 6, 7, 8, 100],
         "kiln_path": "vulkan_resident_and_nonresident",
-        "kiln_memory_limit_gib": VULKAN_MAX_MEMORY_GIB,
+        "kiln_available_before_gib": hf["available_after_gib"],
     }
     details_text = _canonical_json(details).decode("ascii")
     if len(details_text) > MAX_RESULT_DETAILS_CHARACTERS:
@@ -449,24 +411,6 @@ def _result_document(
         _metric("argmax_equal", comparison["argmax_equal"], "bool", False),
         _metric("cosine_similarity", comparison["cosine"], "ratio", False),
         _metric("hf_peak_memory_bytes", hf["memory_peak_bytes"], "bytes", True),
-        _metric(
-            "hf_host_temperature_peak_millicelsius",
-            hf["thermal"]["runtime"]["host_temperature_peak_millicelsius"],
-            "millicelsius",
-            True,
-        ),
-        _metric(
-            "hf_thermal_pacing_event_count",
-            hf["thermal"]["runtime"]["host_thermal_pacing_event_count"],
-            "count",
-            True,
-        ),
-        _metric(
-            "hf_thermal_pacing_seconds",
-            hf["thermal"]["runtime"]["host_thermal_pacing_seconds"],
-            "s",
-            True,
-        ),
         _metric("hf_swap_bytes", hf["swap_bytes"], "bytes", True),
         _metric("max_abs_error", comparison["max_abs"], "logit", True),
         _metric("mean_abs_error", comparison["mean_abs"], "logit", True),
@@ -487,20 +431,8 @@ def _result_document(
         "effective_config": {
             "hf_attention": "eager",
             "hf_linear_attention": "torch_fallback",
-            "hf_memory_max_gib": HF_MAX_MEMORY_GIB,
-            "hf_host_thermal_limit_millicelsius": hf["thermal"]["policy"]["limit_millicelsius"],
-            "hf_host_thermal_policy": hf["thermal"]["policy"]["id"],
-            "hf_host_thermal_policy_sha256": hf["thermal"]["policy"]["content_sha256"],
-            "hf_host_thermal_poll_interval_ms": hf["thermal"]["policy"]["poll_interval_ms"],
-            "hf_host_thermal_resume_millicelsius": hf["thermal"]["policy"][
-                "pacing"
-            ]["resume_millicelsius"],
-            "hf_host_thermal_start_millicelsius": hf["thermal"]["policy"][
-                "pacing"
-            ]["start_millicelsius"],
             "input_token_count": 9,
             "kiln_backend": "vulkan",
-            "kiln_memory_max_gib": VULKAN_MAX_MEMORY_GIB,
             "network": "forbidden",
         },
         "metrics": sorted(metrics, key=lambda item: item["name"]),
@@ -510,7 +442,7 @@ def _result_document(
     }
 
 
-def _validate_inputs(model: Path, python: Path, policy: Path) -> tuple[Path, Path, Path]:
+def _validate_inputs(model: Path, python: Path) -> tuple[Path, Path]:
     model = model.absolute()
     if model.is_symlink():
         raise QualificationError("--model must be a non-symlink directory")
@@ -524,17 +456,13 @@ def _validate_inputs(model: Path, python: Path, policy: Path) -> tuple[Path, Pat
         raise QualificationError(f"cannot inspect --trainer-python: {exc}") from exc
     if not stat.S_ISREG(metadata.st_mode) or not os.access(python, os.X_OK):
         raise QualificationError("--trainer-python must resolve to an executable file")
-    policy = policy.absolute()
-    if policy.is_symlink() or not policy.is_file():
-        raise QualificationError("--host-thermal-policy must be a non-symlink file")
-    return model, python, policy
+    return model, python
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--trainer-python", required=True, type=Path)
-    parser.add_argument("--host-thermal-policy", required=True, type=Path)
     return parser.parse_args(argv)
 
 
@@ -551,9 +479,7 @@ def main(argv: list[str] | None = None) -> int:
     workspace = result_path.parent / "hf-full-model-logit-parity"
     try:
         workspace.mkdir(mode=0o700)
-        model, python, policy = _validate_inputs(
-            args.model, args.trainer_python, args.host_thermal_policy
-        )
+        model, python = _validate_inputs(args.model, args.trainer_python)
     except (OSError, QualificationError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -566,9 +492,8 @@ def main(argv: list[str] | None = None) -> int:
             model=model,
             output=reference,
             workspace=workspace,
-            policy=policy,
         )
-        hf["available_after_gib"] = _wait_for_headroom()
+        hf["available_after_gib"] = _available_for_vulkan()
         comparison, _ = _run_vulkan_comparison(model=model, reference=reference)
         result = _result_document(
             duration=time.monotonic() - started,

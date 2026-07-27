@@ -84,7 +84,6 @@ class CudaPerformanceTests(unittest.TestCase):
         )
         self.assertIn("1", kiln)
         self.assertIn(performance.GPU_UUID, kiln)
-        self.assertNotIn("--external-wsl2-thermal-policy", kiln)
         self.assertIn(str(performance.KILN_LAUNCH), kiln)
         self.assertNotIn("--reference-dir", kiln)
         self.assertIn(str(performance.VLLM_RUNTIME_MANIFEST), vllm)
@@ -324,7 +323,6 @@ class CudaPerformanceTests(unittest.TestCase):
                 "model_fingerprint_read_mib_per_second": 0,
                 "execution_policy": "continue_after_failure",
                 "memory_sampler": {},
-                "thermal_policy": {},
                 "server_owner": {},
                 "profiles": rows,
                 "verdict": "passed",

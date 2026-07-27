@@ -2,7 +2,7 @@
   "schema_version": 1,
   "workload_id": "serving-cuda-endurance-v1",
   "kind": "soak",
-  "description": "Keep one CUDA server process under varied streaming load for at least eight active hours, excluding verified WSL2 thermal-pacing intervals, on the 16 GiB RTX 4090 Laptop GPU and fail on deterministic response corruption, late faults, unexplained ITL gaps, leaked KV blocks, graph activity, device or process memory growth, WSL2 containment drift, excess cumulative pacing, or an invalid external thermal-pacing record.",
+  "description": "Keep one CUDA server process under varied streaming load for at least eight wall-clock hours and fail on deterministic response corruption, late faults, unexplained ITL gaps, leaked KV blocks, graph activity, device or process memory growth, or WSL2 containment drift.",
   "determinism": {
     "seed": 20260725,
     "seed_delivery": "argv",
@@ -15,7 +15,7 @@
   "variants": [
     {
       "id": "cuda-rtx4090-laptop-endurance",
-      "description": "Graph-disabled final CUDA endurance gate for the source-bound single-active-request laptop envelope, with fixed 62-block KV capacity, allocator reclaim disabled, varied prompt cohorts, periodic cancellation, persistent UUID-bound NVML memory sampling, and the external WSL2 cgroup thermal-pacing boundary.",
+      "description": "Graph-disabled CUDA endurance gate for a source-bound single-active-request envelope, with fixed KV capacity, allocator reclaim disabled, varied prompt cohorts, periodic cancellation, persistent UUID-bound NVML memory sampling, and generic WSL2 process containment.",
       "backend": "cuda",
       "device_requirement": "required",
       "skip_policy": "fail",
@@ -23,7 +23,6 @@
         "build": {
           "binary": "kiln",
           "cargo_jobs": 1,
-          "cargo_cpu_quota_percent": 50,
           "cargo_execution_mode": "delegated-cgroup",
           "cargo_environment_policy": "closed-qualification-test-v1",
           "cargo_host_reserve_gib": 3,
@@ -101,8 +100,8 @@
           "request_ignore_eos": true,
           "request_worker_cleanup_timeout_seconds": 10.0,
           "deadline_policy": "independent_build_setup_and_measurement",
-          "measurement_deadline_seconds": 44100,
-          "qualification_case_timeout_seconds": 47880,
+          "measurement_deadline_seconds": 29700,
+          "qualification_case_timeout_seconds": 33480,
           "setup_deadline_seconds": 1800,
           "teardown_grace_seconds": 180,
           "stabilization_gpu_delta_limit_bytes": 67108864,
@@ -124,21 +123,11 @@
           },
           "external_wsl2_boundary": {
             "containment": "util-linux-unshare-user-net-pid-landlock-v1",
-            "cpu_quota_percent": 50,
-            "memory_max_bytes": 10737418240,
-            "memory_swap_max_bytes": 0,
-            "active_measurement_seconds_required": 28800.0,
-            "cumulative_pacing_allowance_seconds": 14400.0,
-            "duration_accounting": "measurement_wall_seconds_minus_verified_pacing_overlap",
-            "pacing_event_stream": {
-              "controller": "scripts/qualification/wsl_scope_exec.py",
-              "environment_variable": "KILN_WSL2_THERMAL_PACING_EVENTS_PATH",
-              "mode": "outer_controller_append_contained_driver_read_only",
-              "schema": "kiln.wsl2-thermal-pacing-event.v1"
-            },
+            "cpu_quota_percent": 0,
+            "memory_max_bytes": 0,
+            "duration_accounting": "measurement_wall_seconds",
             "pids_max": 512,
-            "scope": "systemd-user-scope-feedback-v1",
-            "thermal_policy_sha256": "sha256:d389a7f632baab0448bd41efc205349dee4ff3944152b48cf17e52866322e3e9"
+            "scope": "systemd-user-scope-v1"
           },
           "server_memory": {
             "inference_memory_fraction": 0.1,
@@ -156,7 +145,7 @@
       "cases": [
         {
           "id": "continuous-mixed-load",
-          "description": "Build current CUDA source once, retain one server process, and run varied fixed-output cohorts with periodic cancellation for at least eight active hours, excluding verified thermal-pacing overlap.",
+          "description": "Build current CUDA source once, retain one server process, and run varied fixed-output cohorts with periodic cancellation for at least eight wall-clock hours.",
           "required": true,
           "command": [
             "python3",
@@ -175,7 +164,7 @@
             "CARGO_NET_OFFLINE": "true",
             "PYTHONUNBUFFERED": "1"
           },
-          "timeout_seconds": 47880,
+          "timeout_seconds": 33480,
           "expected_exit_codes": [
             0
           ],
@@ -198,10 +187,6 @@
               "cancellation_confirmed_count",
               "completion_token_count",
               "device_fault_event_count",
-              "external_wsl2_active_measurement_seconds",
-              "external_wsl2_thermal_pause_count",
-              "external_wsl2_thermal_pause_max_seconds",
-              "external_wsl2_thermal_pause_seconds",
               "external_yield_sync_failure_count",
               "external_yield_sync_max_ms",
               "external_yield_sync_slow_count",

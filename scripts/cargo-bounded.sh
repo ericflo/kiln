@@ -5,15 +5,12 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: scripts/cargo-bounded.sh [--host-thermal-policy PATH] <cargo-subcommand> [args...]
+Usage: scripts/cargo-bounded.sh <cargo-subcommand> [args...]
 
 Runs Cargo with one build job after checking Linux MemAvailable. A transient
 systemd scope/service, or a WSL2 delegated cgroup for contained qualification,
 places Cargo and every compiler/linker child under one aggregate memory ceiling
 with swap disabled. It also refuses to overlap another Cargo or rustc process.
-
-  --host-thermal-policy PATH      Reuse a content-hashed hard-limit-only
-                                  kiln.host-thermal-policy.v1 document.
 
 Overrides:
   CARGO                           Cargo executable/name (default: PATH, then ~/.cargo/bin/cargo)
@@ -28,45 +25,12 @@ Overrides:
                                   closed-qualification-test-v1, or inherit
   KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS
                                   Hard transient-service deadline (default: 3600)
-  KILN_CARGO_HOST_THERMAL_SENSOR_NAME
-  KILN_CARGO_HOST_THERMAL_SENSOR_LABEL
-  KILN_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS
-  KILN_CARGO_HOST_THERMAL_POLL_MILLISECONDS
-                                  Optional package-temperature guard for scopes and services.
-                                  All four fields must be set together.
-  KILN_WSL2_THERMAL_POLICY_SHA256
-                                  Optional outer thermal supervisor binding in
-                                  delegated-cgroup mode.
 EOF
 }
 
 if [[ $# -eq 0 || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     usage
     [[ $# -gt 0 ]] && exit 0
-    exit 2
-fi
-
-host_thermal_policy=""
-case "${1:-}" in
-    --host-thermal-policy)
-        if [[ $# -lt 3 || -z "${2:-}" ]]; then
-            echo "error: --host-thermal-policy requires a path before the Cargo subcommand" >&2
-            exit 2
-        fi
-        host_thermal_policy="$2"
-        shift 2
-        ;;
-    --host-thermal-policy=*)
-        host_thermal_policy="${1#*=}"
-        if [[ -z "$host_thermal_policy" ]]; then
-            echo "error: --host-thermal-policy requires a nonempty path" >&2
-            exit 2
-        fi
-        shift
-        ;;
-esac
-if [[ $# -eq 0 ]]; then
-    echo "error: a Cargo subcommand is required" >&2
     exit 2
 fi
 
@@ -218,127 +182,6 @@ if [[ ! "$service_runtime_max_seconds" =~ ^[1-9][0-9]*$ ]]; then
     exit 2
 fi
 
-thermal_sensor_name="${KILN_CARGO_HOST_THERMAL_SENSOR_NAME:-}"
-thermal_sensor_label="${KILN_CARGO_HOST_THERMAL_SENSOR_LABEL:-}"
-thermal_limit_millicelsius="${KILN_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS:-}"
-thermal_poll_milliseconds="${KILN_CARGO_HOST_THERMAL_POLL_MILLISECONDS:-}"
-thermal_fields_set=0
-for value in \
-    "$thermal_sensor_name" \
-    "$thermal_sensor_label" \
-    "$thermal_limit_millicelsius" \
-    "$thermal_poll_milliseconds"; do
-    [[ -n "$value" ]] && thermal_fields_set=$((thermal_fields_set + 1))
-done
-if (( thermal_fields_set != 0 && thermal_fields_set != 4 )); then
-    echo "error: all four KILN_CARGO_HOST_THERMAL_* fields must be set together" >&2
-    exit 2
-fi
-hwmon_root="${KILN_CARGO_HWMON_ROOT:-/sys/class/hwmon}"
-thermal_config_source="explicit"
-external_thermal_policy_sha256="${KILN_WSL2_THERMAL_POLICY_SHA256:-}"
-if [[ "$execution_mode" == "delegated-cgroup" ]]; then
-    if [[ -n "$host_thermal_policy" ]] || (( thermal_fields_set != 0 )); then
-        echo "error: delegated-cgroup mode requires the outer WSL2 thermal supervisor, not a Linux hwmon policy" >&2
-        exit 2
-    fi
-    if [[ -n "$external_thermal_policy_sha256" ]] \
-        && [[ ! "$external_thermal_policy_sha256" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-        echo "error: KILN_WSL2_THERMAL_POLICY_SHA256 must be a valid SHA-256 binding" >&2
-        exit 2
-    fi
-    if [[ -n "$external_thermal_policy_sha256" ]]; then
-        thermal_config_source="external-wsl2-policy:$external_thermal_policy_sha256"
-    else
-        thermal_config_source="disabled"
-    fi
-elif [[ -n "$host_thermal_policy" ]]; then
-    if (( thermal_fields_set != 0 )); then
-        echo "error: --host-thermal-policy conflicts with KILN_CARGO_HOST_THERMAL_* fields" >&2
-        exit 2
-    fi
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo "error: --host-thermal-policy requires python3" >&2
-        exit 2
-    fi
-    script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-    policy_helper="$script_directory/qualification/prepare_host_thermal_policy.py"
-    if [[ ! -f "$policy_helper" ]]; then
-        echo "error: host thermal policy helper is missing: $policy_helper" >&2
-        exit 2
-    fi
-    if ! policy_output="$(
-        python3 "$policy_helper" \
-            --hwmon-root "$hwmon_root" \
-            cargo-fields \
-            --policy "$host_thermal_policy"
-    )"; then
-        exit 2
-    fi
-    mapfile -t policy_fields <<< "$policy_output"
-    if (( ${#policy_fields[@]} != 4 )); then
-        echo "error: host thermal policy helper returned ${#policy_fields[@]} fields, expected 4" >&2
-        exit 2
-    fi
-    thermal_sensor_name="${policy_fields[0]}"
-    thermal_sensor_label="${policy_fields[1]}"
-    thermal_limit_millicelsius="${policy_fields[2]}"
-    thermal_poll_milliseconds="${policy_fields[3]}"
-    thermal_fields_set=4
-    thermal_config_source="policy:$host_thermal_policy"
-fi
-thermal_sensor_path=""
-thermal_poll_seconds=""
-if (( thermal_fields_set == 4 )); then
-    if [[ ! "$thermal_limit_millicelsius" =~ ^[1-9][0-9]*$ ]] \
-        || (( thermal_limit_millicelsius > 200000 )); then
-        echo "error: KILN_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS must be in 1..=200000, got '$thermal_limit_millicelsius'" >&2
-        exit 2
-    fi
-    if [[ ! "$thermal_poll_milliseconds" =~ ^[1-9][0-9]*$ ]] \
-        || (( thermal_poll_milliseconds < 50 || thermal_poll_milliseconds > 60000 )); then
-        echo "error: KILN_CARGO_HOST_THERMAL_POLL_MILLISECONDS must be in 50..=60000, got '$thermal_poll_milliseconds'" >&2
-        exit 2
-    fi
-    thermal_matches=()
-    for hwmon_dir in "$hwmon_root"/hwmon*; do
-        [[ -d "$hwmon_dir" && -r "$hwmon_dir/name" ]] || continue
-        IFS= read -r observed_name < "$hwmon_dir/name" || continue
-        [[ "$observed_name" == "$thermal_sensor_name" ]] || continue
-        for label_path in "$hwmon_dir"/temp*_label; do
-            [[ -r "$label_path" ]] || continue
-            IFS= read -r observed_label < "$label_path" || continue
-            [[ "$observed_label" == "$thermal_sensor_label" ]] || continue
-            input_path="${label_path%_label}_input"
-            [[ -r "$input_path" ]] || continue
-            thermal_matches+=("$input_path")
-        done
-    done
-    if (( ${#thermal_matches[@]} != 1 )); then
-        echo "error: Cargo host thermal selector name='$thermal_sensor_name' label='$thermal_sensor_label' matched ${#thermal_matches[@]} readable sensors under '$hwmon_root'" >&2
-        exit 2
-    else
-        thermal_sensor_path="${thermal_matches[0]}"
-        IFS= read -r starting_temperature < "$thermal_sensor_path" || starting_temperature=""
-        if [[ ! "$starting_temperature" =~ ^[0-9]+$ ]] \
-            || (( starting_temperature == 0 || starting_temperature > 200000 )); then
-            echo "error: Cargo host thermal sensor '$thermal_sensor_path' returned implausible reading '$starting_temperature'" >&2
-            exit 2
-        fi
-        if (( starting_temperature >= thermal_limit_millicelsius )); then
-            echo "error: refusing Cargo at ${starting_temperature} millicelsius; thermal limit is ${thermal_limit_millicelsius}" >&2
-            exit 2
-        fi
-        thermal_poll_seconds="$(awk -v milliseconds="$thermal_poll_milliseconds" 'BEGIN { printf "%.3f", milliseconds / 1000 }')"
-    fi
-fi
-
-thermal_summary="disabled"
-if [[ -n "$thermal_sensor_path" ]]; then
-    thermal_summary="${thermal_config_source}:${thermal_sensor_name}/${thermal_sensor_label}:${thermal_limit_millicelsius}mC@${thermal_poll_milliseconds}ms"
-elif [[ "$execution_mode" == "delegated-cgroup" ]]; then
-    thermal_summary="$thermal_config_source"
-fi
 cpu_quota_args=()
 cpu_quota_summary="disabled"
 if [[ -n "$cpu_quota_percent" ]]; then
@@ -350,7 +193,7 @@ if [[ "$execution_mode" == "delegated-cgroup" ]] \
     && [[ "${KILN_WSL2_SCOPE_MEMORY_MAX_BYTES:-}" == "0" ]]; then
     memory_summary="aggregate_limit=unbounded admission_budget=${limit_gib}GiB"
 fi
-echo "bounded-cargo: mode=$execution_mode jobs=$jobs cpu_quota=$cpu_quota_summary available=${available_gib}GiB reserve=${reserve_gib}GiB $memory_summary swap_limit=0 private_network=$private_network environment_policy=$environment_policy thermal=$thermal_summary" >&2
+echo "bounded-cargo: mode=$execution_mode jobs=$jobs cpu_quota=$cpu_quota_summary available=${available_gib}GiB reserve=${reserve_gib}GiB $memory_summary swap_limit=0 private_network=$private_network environment_policy=$environment_policy" >&2
 read -r bounded_uuid < /proc/sys/kernel/random/uuid
 if [[ "$execution_mode" == "scope" ]]; then
     bounded_unit="kiln-cargo-bounded-${bounded_uuid//-/}.scope"
@@ -485,65 +328,23 @@ PY
 fi
 
 bounded_runner_pid=""
-thermal_watchdog_pid=""
-thermal_trip_file="${TMPDIR:-/tmp}/kiln-cargo-bounded-${bounded_uuid//-/}.thermal-trip"
 cleanup_unit() {
-    if [[ -n "$thermal_watchdog_pid" ]]; then
-        kill "$thermal_watchdog_pid" >/dev/null 2>&1 || true
-        wait "$thermal_watchdog_pid" >/dev/null 2>&1 || true
-    fi
     systemctl --user stop "$bounded_unit" >/dev/null 2>&1 || true
     if [[ -n "$bounded_runner_pid" ]]; then
         kill -TERM "$bounded_runner_pid" >/dev/null 2>&1 || true
         wait "$bounded_runner_pid" >/dev/null 2>&1 || true
     fi
-    rm -f "$thermal_trip_file"
 }
 trap cleanup_unit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-start_thermal_watchdog() {
-    [[ -n "$thermal_sensor_path" ]] || return 0
-    (
-        while kill -0 "$bounded_runner_pid" >/dev/null 2>&1; do
-            IFS= read -r current_temperature < "$thermal_sensor_path" || current_temperature=""
-            trip_reason=""
-            if [[ ! "$current_temperature" =~ ^[0-9]+$ ]] \
-                || (( current_temperature == 0 || current_temperature > 200000 )); then
-                trip_reason="sensor '$thermal_sensor_path' returned implausible reading '$current_temperature'"
-            elif (( current_temperature >= thermal_limit_millicelsius )); then
-                trip_reason="temperature ${current_temperature} millicelsius reached limit ${thermal_limit_millicelsius}"
-            fi
-            if [[ -n "$trip_reason" ]]; then
-                printf '%s\n' "$trip_reason" > "$thermal_trip_file"
-                echo "error: Cargo host thermal guard tripped: $trip_reason" >&2
-                systemctl --user stop "$bounded_unit" >/dev/null 2>&1 || true
-                kill -TERM "$bounded_runner_pid" >/dev/null 2>&1 || true
-                exit 0
-            fi
-            sleep "$thermal_poll_seconds"
-        done
-    ) &
-    thermal_watchdog_pid=$!
-}
-
 wait_for_bounded_runner() {
-    start_thermal_watchdog
     if wait "$bounded_runner_pid"; then
-        bounded_status=0
+        return 0
     else
-        bounded_status=$?
+        return $?
     fi
-    if [[ -n "$thermal_watchdog_pid" ]]; then
-        kill "$thermal_watchdog_pid" >/dev/null 2>&1 || true
-        wait "$thermal_watchdog_pid" >/dev/null 2>&1 || true
-        thermal_watchdog_pid=""
-    fi
-    if [[ -f "$thermal_trip_file" ]]; then
-        return 3
-    fi
-    return "$bounded_status"
 }
 
 if [[ "$execution_mode" == "scope" ]]; then

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ericflo.github.io/kiln/schemas/rocm-hf-layer-attribution-v1.schema.json",
-  "title": "Kiln ROCm/HF Layer Attribution Result v1",
+  "$id": "https://ericflo.github.io/kiln/schemas/rocm-hf-layer-attribution-v2.schema.json",
+  "title": "Kiln ROCm/HF Layer Attribution Result v2",
   "description": "Source-bound sequential HF and Kiln evidence comparing the final hidden row after embedding, every Qwen3.5 transformer layer, and final RMSNorm for the exact serving divergence state.",
   "type": "object",
   "additionalProperties": false,
@@ -11,6 +11,7 @@
     "created_at_utc",
     "duration_seconds",
     "implementation",
+    "model_fingerprint",
     "model_identity",
     "reference",
     "request",
@@ -20,7 +21,7 @@
     "worker"
   ],
   "properties": {
-    "schema": { "const": "kiln.rocm-hf-layer-attribution-result.v1" },
+    "schema": { "const": "kiln.rocm-hf-layer-attribution-result.v2" },
     "result_sha256": { "$ref": "#/$defs/sha256" },
     "created_at_utc": { "type": "string", "format": "date-time" },
     "duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
@@ -28,10 +29,10 @@
     "binary": { "$ref": "#/$defs/binary" },
     "implementation": { "$ref": "#/$defs/implementation" },
     "model_identity": {
-      "$ref": "rocm-hf-next-token-oracle-v1.schema.json#/$defs/modelIdentity"
+      "$ref": "rocm-hf-next-token-oracle-v2.schema.json#/$defs/modelIdentity"
     },
     "model_fingerprint": {
-      "$ref": "rocm-hf-next-token-oracle-v1.schema.json#/$defs/modelFingerprintEvidence"
+      "$ref": "rocm-hf-next-token-oracle-v2.schema.json#/$defs/modelFingerprintEvidence"
     },
     "request": { "$ref": "#/$defs/request" },
     "reference": { "$ref": "#/$defs/reference" },
@@ -69,20 +70,12 @@
         "build_duration_seconds",
         "build_environment_policy",
         "path",
-        "rocm_archs",
         "sha256"
       ],
       "properties": {
         "build_duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
         "build_environment_policy": { "const": "closed-source-build-v1" },
         "path": { "const": "target/release/examples/rocm_hf_path_attribution" },
-        "rocm_archs": {
-          "type": "array",
-          "prefixItems": [{ "const": "gfx1151" }],
-          "items": false,
-          "minItems": 1,
-          "maxItems": 1
-        },
         "sha256": { "$ref": "#/$defs/sha256" }
       }
     },
@@ -92,16 +85,16 @@
       "required": [
         "guarded_exec_sha256",
         "hf_worker_sha256",
+        "process_runner_sha256",
         "python_sha256",
-        "runner_sha256",
-        "supervisor_sha256"
+        "runner_sha256"
       ],
       "properties": {
         "guarded_exec_sha256": { "$ref": "#/$defs/sha256" },
         "hf_worker_sha256": { "$ref": "#/$defs/sha256" },
+        "process_runner_sha256": { "$ref": "#/$defs/sha256" },
         "python_sha256": { "$ref": "#/$defs/sha256" },
-        "runner_sha256": { "$ref": "#/$defs/sha256" },
-        "supervisor_sha256": { "$ref": "#/$defs/sha256" }
+        "runner_sha256": { "$ref": "#/$defs/sha256" }
       }
     },
     "request": {
@@ -169,7 +162,7 @@
           "minItems": 2,
           "maxItems": 2,
           "items": {
-            "$ref": "rocm-hf-next-token-oracle-v1.schema.json#/$defs/candidateToken"
+            "$ref": "rocm-hf-next-token-oracle-v2.schema.json#/$defs/candidateToken"
           }
         },
         "configuration_sha256": { "$ref": "#/$defs/sha256" },
@@ -202,7 +195,7 @@
           "minItems": 10,
           "maxItems": 10,
           "items": {
-            "$ref": "rocm-hf-next-token-oracle-v1.schema.json#/$defs/topToken"
+            "$ref": "rocm-hf-next-token-oracle-v2.schema.json#/$defs/topToken"
           }
         },
         "torch_commit": { "$ref": "#/$defs/gitObject" },
@@ -226,13 +219,12 @@
     "containmentArm": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["host_available_before_gib", "memory_max_gib", "network", "thermal"],
+      "required": ["host_available_before_gib", "network", "process"],
       "properties": {
-        "host_available_before_gib": { "type": "integer", "minimum": 23 },
-        "memory_max_gib": { "enum": [16, 20, 48] },
+        "host_available_before_gib": { "type": "integer", "minimum": 1 },
         "network": { "const": "forbidden" },
-        "thermal": {
-          "$ref": "rocm-hf-next-token-oracle-v1.schema.json#/$defs/thermalEvidence"
+        "process": {
+          "$ref": "rocm-hf-next-token-oracle-v2.schema.json#/$defs/processEvidence"
         }
       }
     },
@@ -243,32 +235,6 @@
       "properties": {
         "hf": { "$ref": "#/$defs/containmentArm" },
         "kiln": { "$ref": "#/$defs/containmentArm" }
-      }
-    },
-    "cgroup": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "memory_current_bytes",
-        "memory_high_events",
-        "memory_max_bytes",
-        "memory_max_events",
-        "memory_oom_events",
-        "memory_oom_kill_events",
-        "memory_peak_bytes",
-        "memory_swap_bytes",
-        "memory_swap_max_bytes"
-      ],
-      "properties": {
-        "memory_current_bytes": { "type": "integer", "minimum": 0 },
-        "memory_high_events": { "const": 0 },
-        "memory_max_bytes": { "const": 51539607552 },
-        "memory_max_events": { "const": 0 },
-        "memory_oom_events": { "const": 0 },
-        "memory_oom_kill_events": { "const": 0 },
-        "memory_peak_bytes": { "type": "integer", "minimum": 0 },
-        "memory_swap_bytes": { "const": 0 },
-        "memory_swap_max_bytes": { "const": 0 }
       }
     },
     "boundary": {
@@ -314,7 +280,6 @@
       "additionalProperties": false,
       "required": [
         "boundaries",
-        "containment",
         "final_logits_sha256",
         "hf_layer_last_rows_sha256",
         "input_token_count",
@@ -326,14 +291,13 @@
         "schema"
       ],
       "properties": {
-        "schema": { "const": "kiln.rocm-hf-layer-attribution.v1" },
+        "schema": { "const": "kiln.rocm-hf-layer-attribution.v2" },
         "boundaries": {
           "type": "array",
           "minItems": 34,
           "maxItems": 34,
           "items": { "$ref": "#/$defs/boundary" }
         },
-        "containment": { "$ref": "#/$defs/cgroup" },
         "final_logits_sha256": { "$ref": "#/$defs/sha256" },
         "hf_layer_last_rows_sha256": { "$ref": "#/$defs/sha256" },
         "input_token_count": { "const": 166 },

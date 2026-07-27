@@ -86,8 +86,6 @@ WSL2_CAPABILITY_KEYS = {
     "systemd_user_transient",
     "cgroup_memory_delegation",
     "memory_accounting",
-    "host_thermal_guard",
-    "gpu_temperature",
 }
 CAPABILITY_STATUSES = {"available", "unavailable"}
 DEVICE_REQUIRED_KEYS = {

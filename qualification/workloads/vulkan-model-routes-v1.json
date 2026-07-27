@@ -15,7 +15,7 @@
   "variants": [
     {
       "id": "vulkan",
-      "description": "Run fail-closed model-route contracts on the required RADV Strix Halo Vulkan device.",
+      "description": "Run fail-closed model-route contracts on a Vulkan device.",
       "backend": "vulkan",
       "device_requirement": "required",
       "skip_policy": "fail",

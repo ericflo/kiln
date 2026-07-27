@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import hf_next_token_contract as contract
-import hf_thermal_supervisor as supervisor
+import hf_process_runner as process_runner
 import qwen35_hf_logits as hf_worker
 import rocm_hf_next_token_oracle as hf_oracle
 import rocm_hf_path_attribution as path_attribution
@@ -25,17 +25,10 @@ from strict_json import loads as strict_json_loads
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SCHEMA = "kiln.rocm-hf-layer-attribution-result.v1"
-LEGACY_UNGUARDED_FINGERPRINT_RESULTS = {
-    "sha256:8134c9c4a42f4d0fd5582ea72a7b4e8548e65fd12e80ca336af2bdadea1f370d",
-    "sha256:f14ca700b0df823b8c8e6d3f592b7ed876c0345482aa7b57079dc6a439dba372",
-}
-WORKER_SCHEMA = "kiln.rocm-hf-layer-attribution.v1"
+SCHEMA = "kiln.rocm-hf-layer-attribution-result.v2"
+WORKER_SCHEMA = "kiln.rocm-hf-layer-attribution.v2"
 WORKER_PREFIX = "KILN_ROCM_HF_LAYER_ATTRIBUTION "
-LEGACY_HF_MEMORY_MAX_GIB = 16
-HF_MEMORY_MAX_GIB = 20
 HF_RUNTIME_MAX_SECONDS = 600
-RECOVERY_TIMEOUT_SECONDS = 300
 KERNEL_PROFILES = (
     "qualified",
     "portable_fallback",
@@ -124,7 +117,6 @@ def _bounded_hf_command(
     model: Path,
     request: Path,
     output: Path,
-    policy: Path,
     workspace: Path,
 ) -> list[str]:
     return [
@@ -134,9 +126,7 @@ def _bounded_hf_command(
             model=model,
             request=request,
             output=output,
-            policy=policy,
             workspace=workspace,
-            memory_max_gib=HF_MEMORY_MAX_GIB,
         ),
         "--capture-layer-last-rows",
     ]
@@ -188,36 +178,9 @@ def _layer_worker_spec(
     return path
 
 
-def _validate_worker_containment(value: Any) -> None:
-    fields = {
-        "memory_current_bytes",
-        "memory_high_events",
-        "memory_max_bytes",
-        "memory_max_events",
-        "memory_oom_events",
-        "memory_oom_kill_events",
-        "memory_peak_bytes",
-        "memory_swap_bytes",
-        "memory_swap_max_bytes",
-    }
-    if (
-        not isinstance(value, dict)
-        or set(value) != fields
-        or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in value.values())
-        or value["memory_max_bytes"] != path_attribution.MEMORY_MAX_GIB * 1024**3
-        or value["memory_swap_max_bytes"] != 0
-        or value["memory_swap_bytes"] != 0
-        or any(value[name] != 0 for name in ("memory_high_events", "memory_max_events", "memory_oom_events", "memory_oom_kill_events"))
-        or value["memory_peak_bytes"] < value["memory_current_bytes"]
-        or value["memory_peak_bytes"] > value["memory_max_bytes"]
-    ):
-        raise LayerAttributionError("Kiln layer worker containment is invalid")
-
-
 def validate_worker_marker(value: Any) -> dict[str, Any]:
     fields = {
         "boundaries",
-        "containment",
         "final_logits_sha256",
         "hf_layer_last_rows_sha256",
         "input_token_count",
@@ -327,7 +290,6 @@ def validate_worker_marker(value: Any) -> dict[str, Any]:
         or not value["request_id"]
     ):
         raise LayerAttributionError("Kiln layer worker request or output evidence is invalid")
-    _validate_worker_containment(value["containment"])
     return value
 
 
@@ -348,24 +310,10 @@ def _parse_worker_marker(output: str) -> dict[str, Any]:
     return validate_worker_marker(value)
 
 
-def _wait_for_available_memory(minimum_gib: int) -> int:
-    deadline = time.monotonic() + RECOVERY_TIMEOUT_SECONDS
-    while True:
-        available = hf_oracle._available_gib()
-        if available >= minimum_gib:
-            return available
-        if time.monotonic() >= deadline:
-            raise LayerAttributionError(
-                f"host recovered only {available} GiB; require {minimum_gib} GiB"
-            )
-        time.sleep(1.0)
-
-
 def execute(
     *,
     model_path: Path,
     request_path: Path,
-    policy_path: Path,
     python_path: Path,
     result_path: Path,
     kernel_profile: str,
@@ -374,7 +322,6 @@ def execute(
     for path, label in (
         (model_path, "model"),
         (request_path, "request"),
-        (policy_path, "host-thermal-policy"),
         (python_path, "python"),
         (result_path, "out"),
     ):
@@ -389,20 +336,16 @@ def execute(
     request, request_sha256 = contract.load_request(request_path)
     contract.validate_source_receipts(request, ROOT)
     python = hf_oracle._validate_executable(python_path)
-    policy = policy_path.resolve(strict=True)
     model, model_identity, model_fingerprint = hf_oracle._validate_model(
         model_path,
         request["model_identity"],
-        policy=policy,
         python=python,
     )
     if hf_oracle._repository_identity() != source:
         raise LayerAttributionError("repository identity changed during model fingerprinting")
     available_before_hf = hf_oracle._available_gib()
-    if available_before_hf < hf_oracle.MIN_AVAILABLE_GIB:
-        raise LayerAttributionError(
-            f"host has only {available_before_hf} GiB; require {hf_oracle.MIN_AVAILABLE_GIB} GiB"
-        )
+    if available_before_hf < 1:
+        raise LayerAttributionError("host reports less than 1 GiB available memory")
     workspace = result_path.parent / f".{result_path.stem}.artifacts"
     workspace.mkdir(parents=True, mode=0o700, exist_ok=False)
     hf_workspace = workspace / "hf"
@@ -414,7 +357,6 @@ def execute(
         model=model,
         request=request_path,
         output=reference,
-        policy=policy,
         workspace=hf_workspace,
     )
     hf_completed = subprocess.run(
@@ -434,7 +376,10 @@ def execute(
             f"guarded HF layer service exited {hf_completed.returncode}: {hf_combined[-4000:]}"
         )
     hf_evidence = _parse_hf_marker(hf_combined)
-    hf_thermal = supervisor.parse_pass_marker(hf_combined)
+    try:
+        hf_process = process_runner.parse_pass_marker(hf_combined)
+    except process_runner.RunnerError as exc:
+        raise LayerAttributionError(str(exc)) from exc
     if (
         hf_evidence["request_id"] != request["id"]
         or hf_evidence["request_sha256"] != request_sha256
@@ -455,7 +400,9 @@ def execute(
         )
     ):
         raise LayerAttributionError("HF layer evidence does not bind the request or containment")
-    available_before_kiln = _wait_for_available_memory(path_attribution.MIN_AVAILABLE_GIB)
+    available_before_kiln = hf_oracle._available_gib()
+    if available_before_kiln < 1:
+        raise LayerAttributionError("host reports less than 1 GiB available memory")
     binary, binary_sha256, build_seconds = path_attribution._build_binary()
     if hf_oracle._repository_identity() != source:
         raise LayerAttributionError("repository identity changed during layer build")
@@ -473,7 +420,6 @@ def execute(
     )
     kiln_command = path_attribution._service_command(
         python=python,
-        policy=policy,
         workspace=kiln_workspace,
         spec=spec,
         unit=f"kiln-rocm-layer-attribution-{uuid.uuid4().hex[:12]}.service",
@@ -495,7 +441,10 @@ def execute(
             f"guarded Kiln layer service exited {kiln_completed.returncode}: {kiln_combined[-4000:]}"
         )
     worker = _parse_worker_marker(kiln_combined)
-    kiln_thermal = supervisor.parse_pass_marker(kiln_combined)
+    try:
+        kiln_process = process_runner.parse_pass_marker(kiln_combined)
+    except process_runner.RunnerError as exc:
+        raise LayerAttributionError(str(exc)) from exc
     if (
         worker["request_id"] != request["id"]
         or worker["input_token_ids_sha256"] != request["input_token_ids_sha256"]
@@ -512,21 +461,18 @@ def execute(
             "build_duration_seconds": build_seconds,
             "build_environment_policy": path_attribution.BUILD_ENVIRONMENT_POLICY,
             "path": binary.relative_to(ROOT).as_posix(),
-            "rocm_archs": [path_attribution.BUILD_ROCM_ARCHS],
             "sha256": binary_sha256,
         },
         "containment": {
             "hf": {
                 "host_available_before_gib": available_before_hf,
-                "memory_max_gib": HF_MEMORY_MAX_GIB,
                 "network": "forbidden",
-                "thermal": hf_thermal,
+                "process": hf_process,
             },
             "kiln": {
                 "host_available_before_gib": available_before_kiln,
-                "memory_max_gib": path_attribution.MEMORY_MAX_GIB,
                 "network": "forbidden",
-                "thermal": kiln_thermal,
+                "process": kiln_process,
             },
         },
         "created_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -534,9 +480,11 @@ def execute(
         "implementation": {
             "guarded_exec_sha256": hf_oracle._file_sha256(path_attribution.GUARDED_EXEC),
             "hf_worker_sha256": hf_oracle._file_sha256(Path(hf_worker.__file__)),
+            "process_runner_sha256": hf_oracle._file_sha256(
+                path_attribution.PROCESS_RUNNER
+            ),
             "python_sha256": hf_oracle._file_sha256(python),
             "runner_sha256": hf_oracle._file_sha256(Path(__file__)),
-            "supervisor_sha256": hf_oracle._file_sha256(path_attribution.SUPERVISOR),
         },
         "model_fingerprint": model_fingerprint,
         "model_identity": model_identity,
@@ -576,6 +524,7 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         "created_at_utc",
         "duration_seconds",
         "implementation",
+        "model_fingerprint",
         "model_identity",
         "reference",
         "request",
@@ -584,10 +533,9 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         "source",
         "worker",
     }
-    allowed_fields = (fields, fields | {"model_fingerprint"})
     if (
         not isinstance(value, dict)
-        or set(value) not in allowed_fields
+        or set(value) != fields
         or value["schema"] != SCHEMA
     ):
         raise LayerAttributionError("layer result fields or schema are invalid")
@@ -597,9 +545,7 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         raise LayerAttributionError("result_sha256 is inconsistent")
     try:
         hf_oracle.validate_model_fingerprint_evidence(
-            value.get("model_fingerprint"),
-            result_sha256=value["result_sha256"],
-            legacy_result_sha256s=LEGACY_UNGUARDED_FINGERPRINT_RESULTS,
+            value["model_fingerprint"],
         )
     except hf_oracle.OracleRunError as exc:
         raise LayerAttributionError(str(exc)) from exc
@@ -655,35 +601,22 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
     containment = value["containment"]
     if not isinstance(containment, dict) or set(containment) != {"hf", "kiln"}:
         raise LayerAttributionError("layer result containment fields are invalid")
-    for name, memories, minimum in (
-        (
-            "hf",
-            {LEGACY_HF_MEMORY_MAX_GIB, HF_MEMORY_MAX_GIB},
-            hf_oracle.MIN_AVAILABLE_GIB,
-        ),
-        (
-            "kiln",
-            {path_attribution.MEMORY_MAX_GIB},
-            path_attribution.MIN_AVAILABLE_GIB,
-        ),
-    ):
+    for name in ("hf", "kiln"):
         record = containment[name]
+        if not isinstance(record, dict):
+            raise LayerAttributionError(f"layer result {name} containment is invalid")
+        try:
+            process = process_runner.validate_evidence(record.get("process"))
+        except process_runner.RunnerError as exc:
+            raise LayerAttributionError(str(exc)) from exc
         if (
-            not isinstance(record, dict)
-            or set(record)
-            != {"host_available_before_gib", "memory_max_gib", "network", "thermal"}
-            or record["memory_max_gib"] not in memories
+            set(record) != {"host_available_before_gib", "network", "process"}
             or record["network"] != "forbidden"
-            or record["host_available_before_gib"] < minimum
-            or supervisor.validate_evidence(record["thermal"]) != record["thermal"]
+            or record["host_available_before_gib"] < 1
+            or process != record["process"]
         ):
             raise LayerAttributionError(f"layer result {name} containment is invalid")
-    model_fingerprint = value.get("model_fingerprint")
-    if model_fingerprint is not None and any(
-        model_fingerprint["thermal"]["policy"] != containment[name]["thermal"]["policy"]
-        for name in ("hf", "kiln")
-    ):
-        raise LayerAttributionError("model fingerprint and layer thermal policies differ")
+    model_fingerprint = value["model_fingerprint"]
     source = value["source"]
     if (
         not isinstance(source, dict)
@@ -694,8 +627,6 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         raise LayerAttributionError("layer result source identity is invalid")
     if require_current_source and source != hf_oracle._repository_identity():
         raise LayerAttributionError("layer result source does not match current pushed source")
-    if require_current_source and containment["hf"]["memory_max_gib"] != HF_MEMORY_MAX_GIB:
-        raise LayerAttributionError("layer result HF containment does not match current source")
     binary = value["binary"]
     if (
         not isinstance(binary, dict)
@@ -704,14 +635,12 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
             "build_duration_seconds",
             "build_environment_policy",
             "path",
-            "rocm_archs",
             "sha256",
         }
         or binary["path"]
         != f"target/release/examples/{path_attribution.EXAMPLE}"
         or binary["build_environment_policy"]
         != path_attribution.BUILD_ENVIRONMENT_POLICY
-        or binary["rocm_archs"] != [path_attribution.BUILD_ROCM_ARCHS]
         or _finite(binary["build_duration_seconds"], "binary build duration") <= 0
     ):
         raise LayerAttributionError("layer result binary identity is invalid")
@@ -719,15 +648,12 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
     if not isinstance(implementation, dict) or set(implementation) != {
         "guarded_exec_sha256",
         "hf_worker_sha256",
+        "process_runner_sha256",
         "python_sha256",
         "runner_sha256",
-        "supervisor_sha256",
     }:
         raise LayerAttributionError("layer result implementation fields are invalid")
-    if (
-        model_fingerprint is not None
-        and model_fingerprint["python_sha256"] != implementation["python_sha256"]
-    ):
+    if model_fingerprint["python_sha256"] != implementation["python_sha256"]:
         raise LayerAttributionError("model fingerprint and layer interpreter hashes differ")
     digests = [
         value["result_sha256"],
@@ -741,9 +667,11 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         expected_implementation = {
             "guarded_exec_sha256": hf_oracle._file_sha256(path_attribution.GUARDED_EXEC),
             "hf_worker_sha256": hf_oracle._file_sha256(Path(hf_worker.__file__)),
+            "process_runner_sha256": hf_oracle._file_sha256(
+                path_attribution.PROCESS_RUNNER
+            ),
             "python_sha256": implementation["python_sha256"],
             "runner_sha256": hf_oracle._file_sha256(Path(__file__)),
-            "supervisor_sha256": hf_oracle._file_sha256(path_attribution.SUPERVISOR),
         }
         if implementation != expected_implementation:
             raise LayerAttributionError("layer implementation does not match current source")
@@ -764,7 +692,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     run = commands.add_parser("run", help="execute sequential guarded layer attribution")
     run.add_argument("--model", required=True, type=Path)
     run.add_argument("--request", required=True, type=Path)
-    run.add_argument("--host-thermal-policy", required=True, type=Path)
     run.add_argument("--python", required=True, type=Path)
     run.add_argument("--out", required=True, type=Path)
     run.add_argument(
@@ -794,7 +721,6 @@ def main(argv: list[str] | None = None) -> int:
         result = execute(
             model_path=args.model,
             request_path=args.request,
-            policy_path=args.host_thermal_policy,
             python_path=args.python,
             result_path=args.out,
             kernel_profile=args.kernel_profile,

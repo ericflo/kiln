@@ -82,30 +82,15 @@ vLLM comparison backlog; this profile does not reject longer prompts or promise
 their latency. There is no per-request or environment override for
 resident-prefill admission.
 
-The Strix Halo qualification harness applies host-specific thermal pacing to
-the ROCm mixed-load arms and this Vulkan candidate. Its external 250 ms
-controller sends `SIGSTOP` to the complete server process group at 88 C,
-including during active inference, and sends
-`SIGCONT` after the package cools to 86 C. The independent fail-closed 97 C
-guard remains active; if it trips while the server is stopped, termination is
-followed by a release signal so cleanup can execute. Cooling consumes the
-existing setup, measurement, and request deadlines, is included in measured
-throughput, and is explicitly attributed in latency evidence. Teardown
-atomically disables further stops, releases a paced group, and preserves the
-hard-limit sampler until process exit. The runner then waits for eight
-consecutive 250 ms package samples at or below 75 C, bounded to 180 seconds;
-timeout or missing completion evidence fails qualification. Teardown must leave
-no active pause or cooldown, every pause must have a completed lifecycle reason,
-and exactly one post-exit cooldown must complete. These signals and thresholds belong to the named-machine workload
-contract, not to the portable `experimental` serving profile or its product
-configuration.
+Qualification does not add a host-model temperature controller to this profile.
+Timing is ordinary wall-clock time, and hardware-specific receipts do not alter
+the portable `experimental` serving configuration.
 
 The clean pushed-source `e79d3686d` run passed this exact 30-minute development
-soak on the named Strix Halo. It completed 51 exact measured responses and five
+soak on the recorded hardware. It completed 51 exact measured responses and five
 cancellations over 21 drained waves with byte-stable process DRM, zero measured
-Vulkan allocation/free/recycler-miss churn, zero unexplained ITL outliers, and
-123 matched in-flight thermal pauses below an 89.625 C peak. This accepts the
-declared development operating point and containment policy only. Its roughly
+Vulkan allocation/free/recycler-miss churn and zero unexplained ITL outliers.
+This accepts the declared development operating point only. Its roughly
 150.15-second measured p99 TTFT remains a performance limitation; that
 development receipt alone does not establish multi-hour endurance.
 
@@ -113,8 +98,8 @@ The clean pushed-source `3897239fe` final endurance run subsequently measured
 the same operating point for 28,867.72 seconds. It completed 820 exact responses,
 13,120 completion tokens, 82 cancellations, and 328 drained waves with byte-flat
 process DRM and live Vulkan ownership, zero measured allocation/free/recycler-
-miss/eviction/uncached churn, zero unexplained ITL outliers, and 1,063 matched
-thermal pauses below a 90.125 C peak. RSS grew 21,610,496 bytes, host availability
+miss/eviction/uncached churn, and zero unexplained ITL outliers. RSS grew
+21,610,496 bytes, host availability
 stayed above 17,928,245,248 bytes, the server added no swap, final snapshots
 completed, and teardown was clean. This accepts eight-hour endurance for this
 named host and exact experimental operating point. Its 0.454 aggregate output

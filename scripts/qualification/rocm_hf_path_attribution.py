@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and run the guarded Kiln ROCm first-divergence path attribution."""
+"""Build and run the Kiln ROCm first-divergence path attribution."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import hf_next_token_contract as contract
-import hf_thermal_supervisor as supervisor
+import hf_process_runner as process_runner
 import rocm_hf_next_token_oracle as hf_oracle
 from strict_json import loads as strict_json_loads
 
@@ -26,18 +26,12 @@ ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = "rocm_hf_path_attribution"
 BUILD_SCRIPT = ROOT / "scripts/cargo-bounded.sh"
 GUARDED_EXEC = ROOT / "scripts/qualification/guarded_exec.py"
-SUPERVISOR = ROOT / "scripts/qualification/hf_thermal_supervisor.py"
-SCHEMA = "kiln.rocm-hf-path-attribution-result.v1"
-LEGACY_UNGUARDED_FINGERPRINT_RESULTS = {
-    "sha256:47206ec2cd5e91d53f3f8652ba34dc51e5a0a2dfa93ba1122369527741df874a",
-}
-WORKER_SCHEMA = "kiln.rocm-hf-path-attribution.v1"
+PROCESS_RUNNER = ROOT / "scripts/qualification/hf_process_runner.py"
+SCHEMA = "kiln.rocm-hf-path-attribution-result.v2"
+WORKER_SCHEMA = "kiln.rocm-hf-path-attribution.v2"
 WORKER_PREFIX = "KILN_ROCM_HF_PATH_ATTRIBUTION "
-MEMORY_MAX_GIB = 48
-MIN_AVAILABLE_GIB = 23
 RUNTIME_MAX_SECONDS = 900
 BUILD_ENVIRONMENT_POLICY = "closed-source-build-v1"
-BUILD_ROCM_ARCHS = "gfx1151"
 
 
 class AttributionError(RuntimeError):
@@ -94,13 +88,11 @@ def _build_environment(source: Mapping[str, str] | None = None) -> dict[str, str
     environment.update(
         {
             "CARGO_NET_OFFLINE": "true",
-            "KILN_CARGO_CPU_QUOTA_PERCENT": "50",
             "KILN_CARGO_ENVIRONMENT_POLICY": BUILD_ENVIRONMENT_POLICY,
             "KILN_CARGO_EXECUTION_MODE": "transient-service",
-            "KILN_CARGO_MIN_AVAILABLE_GIB": "15",
+            "KILN_CARGO_MIN_AVAILABLE_GIB": "1",
             "KILN_CARGO_PRIVATE_NETWORK": "1",
             "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS": "1800",
-            "KILN_ROCM_ARCHS": BUILD_ROCM_ARCHS,
         }
     )
     return environment
@@ -185,7 +177,7 @@ def _worker_spec(
 
 
 def _service_command(
-    *, python: Path, policy: Path, workspace: Path, spec: Path, unit: str
+    *, python: Path, workspace: Path, spec: Path, unit: str
 ) -> list[str]:
     return [
         "systemd-run",
@@ -199,12 +191,6 @@ def _service_command(
         unit,
         "-p",
         "Type=exec",
-        "-p",
-        f"MemoryMax={MEMORY_MAX_GIB}G",
-        "-p",
-        "MemorySwapMax=0",
-        "-p",
-        "OOMPolicy=kill",
         "-p",
         "KillMode=control-group",
         "-p",
@@ -224,9 +210,7 @@ def _service_command(
         "PYTHONHASHSEED=20260715",
         f"TMPDIR={workspace / 'tmp'}",
         str(python),
-        str(SUPERVISOR),
-        "--host-thermal-policy",
-        str(policy),
+        str(PROCESS_RUNNER),
         "--workspace",
         str(workspace),
         "--",
@@ -358,7 +342,6 @@ def _validate_greedy_path(value: Any, name: str, hf_argmax: int) -> None:
 def validate_worker_marker(value: Any) -> dict[str, Any]:
     fields = {
         "attribution",
-        "containment",
         "eager_full",
         "eager_greedy",
         "graph",
@@ -420,34 +403,6 @@ def validate_worker_marker(value: Any) -> dict[str, Any]:
         or graph["fallbacks"] != 0
     ):
         raise AttributionError("worker graph evidence does not prove retained replay")
-    containment = value["containment"]
-    containment_fields = {
-        "memory_current_bytes",
-        "memory_high_events",
-        "memory_max_bytes",
-        "memory_max_events",
-        "memory_oom_events",
-        "memory_oom_kill_events",
-        "memory_peak_bytes",
-        "memory_swap_bytes",
-        "memory_swap_max_bytes",
-    }
-    if (
-        not isinstance(containment, dict)
-        or set(containment) != containment_fields
-        or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in containment.values())
-        or containment["memory_max_bytes"] != MEMORY_MAX_GIB * 1024**3
-        or containment["memory_swap_max_bytes"] != 0
-        or containment["memory_swap_bytes"] != 0
-        or containment["memory_high_events"] != 0
-        or containment["memory_max_events"] != 0
-        or containment["memory_oom_events"] != 0
-        or containment["memory_oom_kill_events"] != 0
-        or containment["memory_peak_bytes"] < containment["memory_current_bytes"]
-        or containment["memory_current_bytes"] > containment["memory_max_bytes"]
-        or containment["memory_peak_bytes"] > containment["memory_max_bytes"]
-    ):
-        raise AttributionError("worker cgroup containment is invalid")
     recomputed = (
         "eager_full_logits"
         if not value["eager_full"]["comparison"]["argmax_equal"]
@@ -478,7 +433,6 @@ def execute(
     request_path: Path,
     oracle_result_path: Path,
     reference_path: Path,
-    policy_path: Path,
     python_path: Path,
     result_path: Path,
 ) -> dict[str, Any]:
@@ -506,20 +460,16 @@ def execute(
     ):
         raise AttributionError("raw HF reference does not match the retained result")
     python = hf_oracle._validate_executable(python_path)
-    policy_path = policy_path.resolve(strict=True)
     model, model_identity, model_fingerprint = hf_oracle._validate_model(
         model_path,
         request["model_identity"],
-        policy=policy_path,
         python=python,
     )
     if hf_oracle._repository_identity() != source:
         raise AttributionError("repository identity changed during model fingerprinting")
     available = hf_oracle._available_gib()
-    if available < MIN_AVAILABLE_GIB:
-        raise AttributionError(
-            f"host has only {available} GiB available; require {MIN_AVAILABLE_GIB} GiB"
-        )
+    if available < 1:
+        raise AttributionError("host reports less than 1 GiB available memory")
     binary, binary_sha256, build_seconds = _build_binary()
     if hf_oracle._repository_identity() != source:
         raise AttributionError("repository identity changed during the bounded build")
@@ -537,7 +487,6 @@ def execute(
     unit = f"kiln-rocm-hf-path-{uuid.uuid4().hex[:12]}.service"
     command = _service_command(
         python=python,
-        policy=policy_path,
         workspace=workspace,
         spec=spec,
         unit=unit,
@@ -559,7 +508,10 @@ def execute(
             f"guarded ROCm attribution service exited {completed.returncode}: {combined[-4000:]}"
         )
     worker = _parse_worker_marker(combined)
-    thermal = supervisor.parse_pass_marker(combined)
+    try:
+        process = process_runner.parse_pass_marker(combined)
+    except process_runner.RunnerError as exc:
+        raise AttributionError(str(exc)) from exc
     if (
         worker["request_id"] != request["id"]
         or worker["input_token_ids_sha256"] != request["input_token_ids_sha256"]
@@ -578,21 +530,19 @@ def execute(
             "build_duration_seconds": build_seconds,
             "build_environment_policy": BUILD_ENVIRONMENT_POLICY,
             "path": binary.relative_to(ROOT).as_posix(),
-            "rocm_archs": [BUILD_ROCM_ARCHS],
             "sha256": binary_sha256,
         },
         "containment": {
             "host_available_before_gib": available,
-            "memory_max_gib": MEMORY_MAX_GIB,
             "network": "forbidden",
-            "thermal": thermal,
+            "process": process,
         },
         "created_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "duration_seconds": time.monotonic() - started,
         "implementation": {
             "guarded_exec_sha256": hf_oracle._file_sha256(GUARDED_EXEC),
+            "process_runner_sha256": hf_oracle._file_sha256(PROCESS_RUNNER),
             "runner_sha256": hf_oracle._file_sha256(Path(__file__)),
-            "supervisor_sha256": hf_oracle._file_sha256(SUPERVISOR),
         },
         "model_fingerprint": model_fingerprint,
         "model_identity": model_identity,
@@ -629,6 +579,7 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         "created_at_utc",
         "duration_seconds",
         "implementation",
+        "model_fingerprint",
         "model_identity",
         "oracle_reference",
         "request",
@@ -637,10 +588,9 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         "source",
         "worker",
     }
-    allowed_fields = (fields, fields | {"model_fingerprint"})
     if (
         not isinstance(value, dict)
-        or set(value) not in allowed_fields
+        or set(value) != fields
         or value["schema"] != SCHEMA
     ):
         raise AttributionError("result fields or schema are invalid")
@@ -651,31 +601,25 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         raise AttributionError("result_sha256 is inconsistent")
     try:
         hf_oracle.validate_model_fingerprint_evidence(
-            value.get("model_fingerprint"),
-            result_sha256=value["result_sha256"],
-            legacy_result_sha256s=LEGACY_UNGUARDED_FINGERPRINT_RESULTS,
+            value["model_fingerprint"],
         )
     except hf_oracle.OracleRunError as exc:
         raise AttributionError(str(exc)) from exc
     worker = validate_worker_marker(value["worker"])
     if not isinstance(value["containment"], dict):
         raise AttributionError("result containment must be an object")
-    thermal = supervisor.validate_evidence(value["containment"].get("thermal"))
+    try:
+        process = process_runner.validate_evidence(value["containment"].get("process"))
+    except process_runner.RunnerError as exc:
+        raise AttributionError(str(exc)) from exc
     if (
         set(value["containment"])
-        != {"host_available_before_gib", "memory_max_gib", "network", "thermal"}
-        or value["containment"]["memory_max_gib"] != MEMORY_MAX_GIB
+        != {"host_available_before_gib", "network", "process"}
         or value["containment"]["network"] != "forbidden"
-        or value["containment"]["host_available_before_gib"] < MIN_AVAILABLE_GIB
-        or thermal != value["containment"]["thermal"]
+        or value["containment"]["host_available_before_gib"] < 1
+        or process != value["containment"]["process"]
     ):
         raise AttributionError("result containment is inconsistent")
-    model_fingerprint = value.get("model_fingerprint")
-    if (
-        model_fingerprint is not None
-        and model_fingerprint["thermal"]["policy"] != thermal["policy"]
-    ):
-        raise AttributionError("model fingerprint and attribution thermal policies differ")
     if not isinstance(value["request"], dict):
         raise AttributionError("result request must be an object")
     request_path = _path_from_repository(value["request"].get("path"), "request.path")
@@ -741,13 +685,12 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
                 "build_duration_seconds",
                 "build_environment_policy",
                 "path",
-                "rocm_archs",
                 "sha256",
             },
         ),
         (
             "implementation",
-            {"guarded_exec_sha256", "runner_sha256", "supervisor_sha256"},
+            {"guarded_exec_sha256", "process_runner_sha256", "runner_sha256"},
         ),
     ):
         record = value[record_name]
@@ -755,11 +698,8 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
             raise AttributionError(f"{record_name} fields are not closed")
     if value["binary"]["path"] != f"target/release/examples/{EXAMPLE}":
         raise AttributionError("result binary path is not the qualified example")
-    if (
-        value["binary"]["build_environment_policy"] != BUILD_ENVIRONMENT_POLICY
-        or value["binary"]["rocm_archs"] != [BUILD_ROCM_ARCHS]
-    ):
-        raise AttributionError("result binary build policy or ROCm target is inconsistent")
+    if value["binary"]["build_environment_policy"] != BUILD_ENVIRONMENT_POLICY:
+        raise AttributionError("result binary build policy is inconsistent")
     for digest in [
         value["binary"]["sha256"],
         *value["implementation"].values(),
@@ -770,8 +710,8 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
     if require_current_source:
         expected_implementation = {
             "guarded_exec_sha256": hf_oracle._file_sha256(GUARDED_EXEC),
+            "process_runner_sha256": hf_oracle._file_sha256(PROCESS_RUNNER),
             "runner_sha256": hf_oracle._file_sha256(Path(__file__)),
-            "supervisor_sha256": hf_oracle._file_sha256(SUPERVISOR),
         }
         if value["implementation"] != expected_implementation:
             raise AttributionError("result implementation does not match current source")
@@ -799,7 +739,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     run.add_argument("--request", required=True, type=Path)
     run.add_argument("--oracle-result", required=True, type=Path)
     run.add_argument("--hf-reference", required=True, type=Path)
-    run.add_argument("--host-thermal-policy", required=True, type=Path)
     run.add_argument("--python", required=True, type=Path)
     run.add_argument("--out", required=True, type=Path)
     check = commands.add_parser("check", help="strictly validate retained results")
@@ -825,7 +764,6 @@ def main(argv: list[str] | None = None) -> int:
             request_path=args.request,
             oracle_result_path=args.oracle_result,
             reference_path=args.hf_reference,
-            policy_path=args.host_thermal_policy,
             python_path=args.python,
             result_path=args.out,
         )

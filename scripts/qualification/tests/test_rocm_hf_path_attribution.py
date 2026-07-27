@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 QUALIFICATION_DIR = Path(__file__).resolve().parents[1]
@@ -49,20 +50,22 @@ def comparison(argmax: int, *, matches: bool) -> dict[str, object]:
     }
 
 
+def process_evidence() -> dict[str, object]:
+    return {
+        "elapsed_seconds": 1.0,
+        "schema": "kiln.hf-process-containment.v1",
+        "timeout_seconds": 570.0,
+        "worker_exit_code": 0,
+    }
+
+
+def oracle_fixture() -> dict[str, object]:
+    return json.loads(ORACLE_RESULT_PATH.read_text(encoding="utf-8"))
+
+
 def worker_marker() -> dict[str, object]:
     return {
         "attribution": "eager_full_logits",
-        "containment": {
-            "memory_current_bytes": 10_000_000_000,
-            "memory_high_events": 0,
-            "memory_max_bytes": attribution.MEMORY_MAX_GIB * 1024**3,
-            "memory_max_events": 0,
-            "memory_oom_events": 0,
-            "memory_oom_kill_events": 0,
-            "memory_peak_bytes": 12_000_000_000,
-            "memory_swap_bytes": 0,
-            "memory_swap_max_bytes": 0,
-        },
         "eager_full": {
             "comparison": comparison(25045, matches=False),
             "observed_next_tokens": [1206, 5517, 264, 25045],
@@ -111,7 +114,9 @@ class RocmHfPathAttributionTests(unittest.TestCase):
             }
         )
         self.assertNotIn("KILN_AMBIENT_PRODUCT_CONTROL", environment)
-        self.assertEqual(environment["KILN_ROCM_ARCHS"], "gfx1151")
+        self.assertNotIn("KILN_ROCM_ARCHS", environment)
+        self.assertNotIn("KILN_CARGO_CPU_QUOTA_PERCENT", environment)
+        self.assertEqual(environment["KILN_CARGO_MIN_AVAILABLE_GIB"], "1")
         self.assertEqual(
             environment["KILN_CARGO_ENVIRONMENT_POLICY"], "closed-source-build-v1"
         )
@@ -132,55 +137,52 @@ class RocmHfPathAttributionTests(unittest.TestCase):
         with self.assertRaisesRegex(attribution.AttributionError, "attribution"):
             attribution.validate_worker_marker(changed)
 
-    def test_service_is_private_zero_swap_and_runs_hash_bound_shim(self) -> None:
+    def test_service_is_private_and_runs_hash_bound_shim(self) -> None:
         command = attribution._service_command(
             python=Path("/venv/bin/python"),
-            policy=Path("/repo/policy.json"),
             workspace=Path("/run/workspace"),
             spec=Path("/run/workspace/spec.json"),
             unit="kiln-test.service",
         )
         for expected in (
-            "MemoryMax=48G",
-            "MemorySwapMax=0",
             "KillMode=control-group",
             "PrivateNetwork=yes",
-            str(attribution.SUPERVISOR),
+            str(attribution.PROCESS_RUNNER),
             str(attribution.GUARDED_EXEC),
             "--spec",
         ):
             self.assertIn(expected, command)
+        self.assertFalse(any(item.startswith("MemoryMax=") for item in command))
+        self.assertNotIn("MemorySwapMax=0", command)
         self.assertNotIn("KILN_", "\0".join(command))
 
     def test_result_checker_binds_retained_oracle_request_and_self_hash(self) -> None:
         request, request_sha256 = contract.load_request(REQUEST_PATH)
-        oracle = hf_oracle.validate_result(ORACLE_RESULT_PATH)
+        oracle = oracle_fixture()
         marker = worker_marker()
         result = {
             "binary": {
                 "build_duration_seconds": 1.0,
                 "build_environment_policy": attribution.BUILD_ENVIRONMENT_POLICY,
                 "path": "target/release/examples/rocm_hf_path_attribution",
-                "rocm_archs": [attribution.BUILD_ROCM_ARCHS],
                 "sha256": "sha256:" + "2" * 64,
             },
             "containment": {
-                "host_available_before_gib": 25,
-                "memory_max_gib": attribution.MEMORY_MAX_GIB,
+                "host_available_before_gib": 1,
                 "network": "forbidden",
-                "thermal": oracle["containment"]["service"],
+                "process": process_evidence(),
             },
             "created_at_utc": "2026-07-19T01:00:00Z",
             "duration_seconds": 30.0,
             "implementation": {
                 "guarded_exec_sha256": "sha256:" + "3" * 64,
+                "process_runner_sha256": "sha256:" + "5" * 64,
                 "runner_sha256": "sha256:" + "4" * 64,
-                "supervisor_sha256": "sha256:" + "5" * 64,
             },
             "model_fingerprint": {
                 "implementation_sha256": "sha256:" + "6" * 64,
                 "python_sha256": "sha256:" + "7" * 64,
-                "thermal": oracle["containment"]["service"],
+                "process": process_evidence(),
             },
             "model_identity": request["model_identity"],
             "oracle_reference": {
@@ -206,13 +208,13 @@ class RocmHfPathAttributionTests(unittest.TestCase):
         schema = json.loads(
             (
                 ROOT
-                / "qualification/schema/rocm-hf-path-attribution-v1.schema.json"
+                / "qualification/schema/rocm-hf-path-attribution-v2.schema.json"
             ).read_text()
         )
         oracle_schema = json.loads(
             (
                 ROOT
-                / "qualification/schema/rocm-hf-next-token-oracle-v1.schema.json"
+                / "qualification/schema/rocm-hf-next-token-oracle-v2.schema.json"
             ).read_text()
         )
         self.assertEqual(
@@ -220,18 +222,21 @@ class RocmHfPathAttributionTests(unittest.TestCase):
                 result,
                 schema,
                 schema,
-                registry={"rocm-hf-next-token-oracle-v1.schema.json": oracle_schema},
+                registry={"rocm-hf-next-token-oracle-v2.schema.json": oracle_schema},
             ),
             [],
         )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "result.json"
             path.write_text(json.dumps(result), encoding="ascii")
-            self.assertEqual(attribution.validate_result(path), result)
-            result["worker"]["attribution"] = "hip_graph_full_logits"
-            path.write_text(json.dumps(result), encoding="ascii")
-            with self.assertRaisesRegex(attribution.AttributionError, "result_sha256"):
-                attribution.validate_result(path)
+            with mock.patch.object(
+                attribution.hf_oracle, "validate_result", return_value=oracle
+            ):
+                self.assertEqual(attribution.validate_result(path), result)
+                result["worker"]["attribution"] = "hip_graph_full_logits"
+                path.write_text(json.dumps(result), encoding="ascii")
+                with self.assertRaisesRegex(attribution.AttributionError, "result_sha256"):
+                    attribution.validate_result(path)
 
 
 if __name__ == "__main__":

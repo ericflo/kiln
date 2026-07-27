@@ -26,7 +26,6 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Iterable
 
-import host_thermal_guard as thermal
 from request_latency_contract import (
     LATENCY_PHASE_FIELDS,
     LATENCY_PHASE_NAMES,
@@ -49,8 +48,6 @@ WSL2_RUNNER_OWNED_KILN_ENVIRONMENT = frozenset(
         "KILN_WSL2_SCOPE_MEMORY_MAX_BYTES",
         "KILN_WSL2_SCOPE_PIDS_MAX",
         "KILN_WSL2_SCOPE_UNIT",
-        "KILN_WSL2_THERMAL_PACING_EVENTS_PATH",
-        "KILN_WSL2_THERMAL_POLICY_SHA256",
     }
 )
 MODEL_ID = "Qwen3.5-4B"
@@ -60,29 +57,14 @@ BUILD_BINARY = "kiln"
 BUILD_PROFILE = "release"
 BUILD_FEATURES = "rocm"
 BUILD_ROCM_PATH = "/opt/rocm"
-BUILD_ROCM_ARCHS = "gfx1151"
 BUILD_CARGO_WRAPPER = "scripts/cargo-bounded.sh"
 BUILD_CARGO_JOBS = 1
-BUILD_CARGO_CPU_QUOTA_PERCENT = 50
-BUILD_CARGO_MIN_AVAILABLE_GIB = 15
+BUILD_CARGO_MIN_AVAILABLE_GIB = 1
 BUILD_CARGO_MEMORY_SCOPE = "systemd_user_transient_service_memory_max_no_swap"
 BUILD_CARGO_EXECUTION_MODE = "transient-service"
 BUILD_CARGO_PRIVATE_NETWORK = True
 BUILD_CARGO_ENVIRONMENT_POLICY = "closed-source-build-v1"
 BUILD_CARGO_SERVICE_RUNTIME_MAX_SECONDS = 840
-BUILD_CARGO_HOST_THERMAL_SENSOR_NAME = "k10temp"
-BUILD_CARGO_HOST_THERMAL_SENSOR_LABEL = "Tctl"
-BUILD_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS = 90_000
-BUILD_CARGO_HOST_THERMAL_POLL_MILLISECONDS = 250
-RUNTIME_HOST_THERMAL_POLICY = thermal.HostThermalPolicy(
-    hwmon_name="k10temp",
-    label="Tctl",
-    limit_millicelsius=97_000,
-    poll_interval_ms=250,
-    cooldown_target_millicelsius=75_000,
-    cooldown_stable_samples=8,
-    cooldown_timeout_seconds=180.0,
-)
 BUILD_TIMEOUT_SECONDS = 900.0
 STARTUP_TIMEOUT_SECONDS = 240.0
 REQUEST_TIMEOUT_SECONDS = 180.0
@@ -175,10 +157,6 @@ class SourceBuildSpec:
     cargo_service_runtime_max_seconds: int = BUILD_CARGO_SERVICE_RUNTIME_MAX_SECONDS
     cargo_host_reserve_gib: int | None = None
     cargo_max_memory_gib: int | None = None
-    cargo_host_thermal_sensor_name: str | None = None
-    cargo_host_thermal_sensor_label: str | None = None
-    cargo_host_thermal_limit_millicelsius: int | None = None
-    cargo_host_thermal_poll_milliseconds: int | None = None
     timeout_seconds: float = BUILD_TIMEOUT_SECONDS
     cudarc_cuda_version: str | None = None
     cuda_archs: str | None = None
@@ -231,41 +209,6 @@ class SourceBuildSpec:
             raise ValueError(
                 "source-build qualification-device requirement must be boolean"
             )
-        thermal = (
-            self.cargo_host_thermal_sensor_name,
-            self.cargo_host_thermal_sensor_label,
-            self.cargo_host_thermal_limit_millicelsius,
-            self.cargo_host_thermal_poll_milliseconds,
-        )
-        configured = sum(value is not None for value in thermal)
-        if configured not in (0, len(thermal)):
-            raise ValueError("source-build thermal fields must be configured together")
-        if configured == 0:
-            return
-        if (
-            not isinstance(self.cargo_host_thermal_sensor_name, str)
-            or not self.cargo_host_thermal_sensor_name
-        ):
-            raise ValueError("source-build thermal sensor name must be non-empty")
-        if (
-            not isinstance(self.cargo_host_thermal_sensor_label, str)
-            or not self.cargo_host_thermal_sensor_label
-        ):
-            raise ValueError("source-build thermal sensor label must be non-empty")
-        limit = self.cargo_host_thermal_limit_millicelsius
-        poll = self.cargo_host_thermal_poll_milliseconds
-        if (
-            isinstance(limit, bool)
-            or not isinstance(limit, int)
-            or not 1 <= limit <= 200_000
-        ):
-            raise ValueError("source-build thermal limit must be in 1..=200000")
-        if (
-            isinstance(poll, bool)
-            or not isinstance(poll, int)
-            or not 50 <= poll <= 60_000
-        ):
-            raise ValueError("source-build thermal poll interval must be in 50..=60000")
 
     def effective_config(self) -> dict[str, Any]:
         config: dict[str, Any] = {
@@ -286,20 +229,6 @@ class SourceBuildSpec:
             **(
                 {"cargo_max_memory_gib": self.cargo_max_memory_gib}
                 if self.cargo_max_memory_gib is not None
-                else {}
-            ),
-            **(
-                {
-                    "cargo_host_thermal_limit_millicelsius": (
-                        self.cargo_host_thermal_limit_millicelsius
-                    ),
-                    "cargo_host_thermal_poll_milliseconds": (
-                        self.cargo_host_thermal_poll_milliseconds
-                    ),
-                    "cargo_host_thermal_sensor_label": self.cargo_host_thermal_sensor_label,
-                    "cargo_host_thermal_sensor_name": self.cargo_host_thermal_sensor_name,
-                }
-                if self.cargo_host_thermal_sensor_name is not None
                 else {}
             ),
             "cargo_memory_scope": self.cargo_memory_scope,
@@ -363,25 +292,14 @@ SAMPLED_PROFILE_SAMPLING = RequestSampling(
 ROCM_BUILD_SPEC = SourceBuildSpec(
     backend="ROCm",
     features=BUILD_FEATURES,
-    cargo_cpu_quota_percent=BUILD_CARGO_CPU_QUOTA_PERCENT,
-    cargo_host_thermal_sensor_name=BUILD_CARGO_HOST_THERMAL_SENSOR_NAME,
-    cargo_host_thermal_sensor_label=BUILD_CARGO_HOST_THERMAL_SENSOR_LABEL,
-    cargo_host_thermal_limit_millicelsius=BUILD_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS,
-    cargo_host_thermal_poll_milliseconds=BUILD_CARGO_HOST_THERMAL_POLL_MILLISECONDS,
     environment=(
-        ("rocm_archs", BUILD_ROCM_ARCHS),
         ("rocm_path", BUILD_ROCM_PATH),
     ),
 )
 VULKAN_BUILD_SPEC = SourceBuildSpec(
     backend="Vulkan",
     features="vulkan",
-    cargo_cpu_quota_percent=BUILD_CARGO_CPU_QUOTA_PERCENT,
     cargo_service_runtime_max_seconds=840,
-    cargo_host_thermal_sensor_name=BUILD_CARGO_HOST_THERMAL_SENSOR_NAME,
-    cargo_host_thermal_sensor_label=BUILD_CARGO_HOST_THERMAL_SENSOR_LABEL,
-    cargo_host_thermal_limit_millicelsius=BUILD_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS,
-    cargo_host_thermal_poll_milliseconds=BUILD_CARGO_HOST_THERMAL_POLL_MILLISECONDS,
     timeout_seconds=900.0,
 )
 VULKAN_DECODE_WEIGHT_PREWARM = True
@@ -514,20 +432,6 @@ def _mixed_variant_config(**kwargs: Any) -> dict[str, Any]:
     )
 
 
-def _mixed_load_host_safety(config: dict[str, Any]) -> dict[str, Any]:
-    result = {
-        "build": config["build"],
-        "model": config["model"],
-        "runtime": config["runtime"],
-        "host_safety": RUNTIME_HOST_THERMAL_POLICY.effective_config(),
-        "server": config["server"],
-        "workload": config["workload"],
-    }
-    if "batching" in config:
-        result["batching"] = config["batching"]
-    return result
-
-
 VARIANT_CONFIGS: dict[str, dict[str, Any]] = {
     "default": _mixed_variant_config(
         serving_profile="experimental",
@@ -595,12 +499,6 @@ for variant_id, config in VARIANT_CONFIGS.items():
             "prefix_cache_requested_enabled": prefix_cache_enabled,
         }
     )
-VARIANT_CONFIGS = {
-    variant_id: _mixed_load_host_safety(config)
-    for variant_id, config in VARIANT_CONFIGS.items()
-}
-
-
 PROFILE_POLICIES: dict[str, dict[str, bool | str]] = {
     "experimental": {
         "inference_admission": True,
@@ -722,29 +620,6 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "graph_pre_measurement_capture_success_count": ("count", "exact", False),
     "graph_pre_measurement_failure_count": ("count", "exact", True),
     "graph_pre_measurement_replay_success_count": ("count", "exact", False),
-    "host_temperature_end_millicelsius": ("millicelsius", "exact", True),
-    "host_temperature_peak_millicelsius": ("millicelsius", "max", True),
-    "host_temperature_start_millicelsius": ("millicelsius", "exact", True),
-    "host_thermal_cooldown_active_end": ("bool", "exact", True),
-    "host_thermal_cooldown_completed_count": ("count", "sum", False),
-    "host_thermal_cooldown_peak_millicelsius": ("millicelsius", "max", True),
-    "host_thermal_cooldown_sample_count": ("count", "sum", False),
-    "host_thermal_cooldown_seconds": ("s", "sum", True),
-    "host_thermal_cooldown_stable_sample_count": ("count", "exact", False),
-    "host_thermal_cooldown_timeout_count": ("count", "sum", True),
-    "host_thermal_guard_error_count": ("count", "sum", True),
-    "host_thermal_guard_trip_count": ("count", "sum", True),
-    "host_thermal_pacing_active_end": ("bool", "exact", True),
-    "host_thermal_pacing_completed_event_count": ("count", "sum", False),
-    "host_thermal_pacing_event_count": ("count", "sum", True),
-    "host_thermal_pacing_itl_outlier_count": ("count", "sum", True),
-    "host_thermal_pacing_max_seconds": ("s", "max", True),
-    "host_thermal_pacing_max_start_millicelsius": (
-        "millicelsius",
-        "max",
-        True,
-    ),
-    "host_thermal_pacing_seconds": ("s", "sum", True),
     "itl_ms_p50": ("ms", "p50", True),
     "itl_ms_p99": ("ms", "p99", True),
     "itl_ms_p999": ("ms", "p99.9", True),
@@ -755,7 +630,7 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "long_prefill_prompt_tokens": ("tokens", "exact", False),
     "memory_reclaim_event_count": ("count", "sum", True),
     "measurement_duration_seconds": ("s", "exact", True),
-    "non_thermal_attributed_itl_outlier_count": ("count", "sum", True),
+    "runtime_attributed_itl_outlier_count": ("count", "sum", True),
     "observed_completion_token_count": ("tokens", "sum", False),
     "observed_output_token_throughput_per_second": ("tokens/s", "rate", False),
     "output_token_throughput_per_second": ("tokens/s", "rate", False),
@@ -2291,8 +2166,7 @@ class ObservedEvent:
 @dataclasses.dataclass(frozen=True)
 class ItlOutlierCounts:
     attributed: int
-    host_thermal_pacing: int
-    non_thermal_attributed: int
+    runtime_attributed: int
     unexplained: int
 
 
@@ -2843,19 +2717,6 @@ def source_bound_build_environment(
         environment["KILN_CUDA_ARCHS"] = spec.cuda_archs
     if spec.qualification_device_required:
         environment["KILN_QUALIFICATION"] = "1"
-    if spec.cargo_host_thermal_sensor_name is not None:
-        environment.update(
-            {
-                "KILN_CARGO_HOST_THERMAL_SENSOR_NAME": spec.cargo_host_thermal_sensor_name,
-                "KILN_CARGO_HOST_THERMAL_SENSOR_LABEL": spec.cargo_host_thermal_sensor_label,
-                "KILN_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS": str(
-                    spec.cargo_host_thermal_limit_millicelsius
-                ),
-                "KILN_CARGO_HOST_THERMAL_POLL_MILLISECONDS": str(
-                    spec.cargo_host_thermal_poll_milliseconds
-                ),
-            }
-        )
     for key, value in spec.environment:
         environment_key = {
             "rocm_archs": "KILN_ROCM_ARCHS",
@@ -4933,8 +4794,7 @@ def classify_itl_outliers(
             gaps.append((after, before, (after - before) * 1000.0))
     gaps.sort(key=lambda item: item[0])
     attributed = 0
-    host_thermal_pacing = 0
-    non_thermal_attributed = 0
+    runtime_attributed = 0
     unexplained = 0
     attributable = {
         "actor_admission",
@@ -4946,7 +4806,6 @@ def classify_itl_outliers(
         "graph_fallback",
         "graph_sync",
         "external_yield_sync",
-        "host_thermal_pacing",
         "client_backpressure_start",
         "client_backpressure_timeout",
     }
@@ -4963,12 +4822,8 @@ def classify_itl_outliers(
             nearby_categories = {event.category for event in nearby}
             if nearby:
                 attributed += 1
-                if "host_thermal_pacing" in nearby_categories:
-                    host_thermal_pacing += 1
-                    attribution_class = "host_thermal_pacing"
-                else:
-                    non_thermal_attributed += 1
-                    attribution_class = "runtime_event"
+                runtime_attributed += 1
+                attribution_class = "runtime_event"
             else:
                 unexplained += 1
                 attribution_class = "unexplained"
@@ -4983,35 +4838,27 @@ def classify_itl_outliers(
         history.append(gap_ms)
     return ItlOutlierCounts(
         attributed=attributed,
-        host_thermal_pacing=host_thermal_pacing,
-        non_thermal_attributed=non_thermal_attributed,
+        runtime_attributed=runtime_attributed,
         unexplained=unexplained,
     )
 
 
 def itl_outlier_gate_failures(values: dict[str, float | int]) -> list[str]:
     attributed = values["attributed_itl_outlier_count"]
-    thermal = values["host_thermal_pacing_itl_outlier_count"]
-    non_thermal = values["non_thermal_attributed_itl_outlier_count"]
+    runtime_attributed = values["runtime_attributed_itl_outlier_count"]
     unexplained = values["unexplained_itl_outlier_count"]
     failures: list[str] = []
-    if attributed != thermal + non_thermal:
+    if attributed != runtime_attributed:
         failures.append(
             "ITL outlier attribution counts did not reconcile: "
-            f"attributed={attributed}, host_thermal_pacing={thermal}, "
-            f"non_thermal={non_thermal}"
+            f"attributed={attributed}, runtime_attributed={runtime_attributed}"
         )
     if unexplained != 0:
         failures.append(f"{unexplained} ITL outliers were unexplained")
-    if non_thermal != 0:
+    if runtime_attributed != 0:
         failures.append(
-            f"{non_thermal} healthy-request ITL outliers coincided with "
-            "non-thermal runtime events"
-        )
-    if thermal != 0:
-        failures.append(
-            f"{thermal} ITL outliers were attributed to prohibited active-work "
-            "thermal pacing"
+            f"{runtime_attributed} healthy-request ITL outliers coincided with "
+            "runtime events"
         )
     return failures
 
@@ -5063,7 +4910,6 @@ def partial_metric_values(
             "e2e_latency_ms_p50": percentile_r7(e2es, 0.5),
             "e2e_latency_ms_p99": percentile_r7(e2es, 0.99),
             "e2e_latency_ms_p999": percentile_r7(e2es, 0.999),
-            "host_thermal_pacing_itl_outlier_count": outliers.host_thermal_pacing,
             "itl_ms_p50": percentile_r7(itls, 0.5),
             "itl_ms_p99": percentile_r7(itls, 0.99),
             "itl_ms_p999": percentile_r7(itls, 0.999),
@@ -5071,9 +4917,7 @@ def partial_metric_values(
                 result.finish_reason == "length" for result in successes
             ),
             "measurement_duration_seconds": window,
-            "non_thermal_attributed_itl_outlier_count": (
-                outliers.non_thermal_attributed
-            ),
+            "runtime_attributed_itl_outlier_count": outliers.runtime_attributed,
             "observed_completion_token_count": observed_tokens,
             "observed_output_token_throughput_per_second": (
                 observed_tokens / window if window > 0 else 0.0
@@ -5507,16 +5351,13 @@ def metric_values(
         "e2e_latency_ms_p50": percentile_r7(e2es, 0.5),
         "e2e_latency_ms_p99": percentile_r7(e2es, 0.99),
         "e2e_latency_ms_p999": percentile_r7(e2es, 0.999),
-        "host_thermal_pacing_itl_outlier_count": outliers.host_thermal_pacing,
         "itl_ms_p50": percentile_r7(itls, 0.5),
         "itl_ms_p99": percentile_r7(itls, 0.99),
         "itl_ms_p999": percentile_r7(itls, 0.999),
         "length_terminated_request_count": length_terminated_requests,
         "long_prefill_prompt_tokens": long_prefill.prompt_tokens,
         "measurement_duration_seconds": window,
-        "non_thermal_attributed_itl_outlier_count": (
-            outliers.non_thermal_attributed
-        ),
+        "runtime_attributed_itl_outlier_count": outliers.runtime_attributed,
         "observed_completion_token_count": observed_completion_tokens,
         "observed_output_token_throughput_per_second": (
             observed_completion_tokens / window
@@ -5834,12 +5675,6 @@ def execute(
     )
     policy_events_started = time.monotonic()
     process, server_log = start_server(binary, config_path, variant)
-    thermal_guard = thermal.HostThermalGuard(
-        process,
-        **RUNTIME_HOST_THERMAL_POLICY.guard_kwargs(),
-        trace_callback=trace,
-        error_type=QualificationError,
-    )
     sampler = MemorySampler(port)
     evidence = MixedLoadRunEvidence()
     slow: SlowConsumer | None = None
@@ -5848,8 +5683,6 @@ def execute(
     shutdown_outcome: ShutdownOutcome | None = None
     snapshot_residue: list[str] = []
     try:
-        thermal_guard.start()
-        thermal_guard.set_phase("startup")
         wait_ready(port, process, server_log, overall_deadline)
         health_before_warmup = read_stable_health(
             port, overall_deadline, "startup graph snapshot"
@@ -5864,7 +5697,6 @@ def execute(
         health_measurement_start: dict[str, Any] = {}
         expect_graphs = VARIANT_CONFIGS[variant]["runtime"]["rocm_graphs_enabled"]
         for attempt in range(MAX_WARMUP_REQUESTS):
-            thermal_guard.set_phase(f"warmup-{attempt + 1}")
             warmup = run_stream(
                 port,
                 name=f"warmup-{attempt + 1}",
@@ -5917,7 +5749,6 @@ def execute(
         health_after_warmup = health_measurement_start
         measurement_started = time.monotonic()
         evidence.begin_measurement(measurement_started, health_measurement_start)
-        thermal_guard.set_phase("measurement")
         sampler.start()
         first_token = threading.Event()
         normal_word_counts = (16, 32, 64, 128, 256, 384, 512, 768)
@@ -6100,16 +5931,12 @@ def execute(
         if process.poll() is not None:
             raise QualificationError(f"server exited during mixed load ({process.returncode})")
         measurement_events = server_log.events_since(measurement_started)
-        measurement_events.extend(
-            thermal_guard.pacing_events_since(measurement_started)
-        )
 
         # Keep randomized sampling out of the deterministic acceptance window.
         # The server process remains shared so the profile still exercises the
         # production lifecycle, but its cache and recurrent-state effects cannot
         # alter the fixed-output correctness and historical performance sample.
         health_before_sampled_profile = health_end
-        thermal_guard.set_phase("sampled-profile")
         sampled_profile = run_sampled_profile(port, seed, overall_deadline)
         health_after_sampled_profile = wait_for_batching_drain(
             port, overall_deadline, "sampled profile"
@@ -6127,7 +5954,6 @@ def execute(
         determinism_baseline = next(
             result for result in measured if result.name == "normal-00"
         )
-        thermal_guard.set_phase("post-sampled-determinism-canary")
         post_sampled_determinism_canary = run_stream(
             port,
             name="post-sampled-determinism-canary",
@@ -6180,9 +6006,6 @@ def execute(
             health_end=health_end,
             events=measurement_events,
         )
-        values.update(thermal_guard.metric_values())
-        values.update(thermal_guard.pacing_metric_values())
-        values["host_thermal_guard_error_count"] = len(thermal_guard.errors)
         status_failures = [
             *final_attestation,
             *execution_attestation,
@@ -6204,14 +6027,6 @@ def execute(
                 determinism_baseline, post_sampled_determinism_canary
             )
         )
-        if thermal_guard.trip_reason is not None:
-            status_failures.append(thermal_guard.trip_reason)
-        if thermal_guard.errors:
-            status_failures.append(
-                "host thermal guard errors: " + ", ".join(thermal_guard.errors)
-            )
-        if values["host_thermal_guard_trip_count"] != 0:
-            status_failures.append("host thermal guard tripped during mixed load")
         for phase, metric_name in (
             ("admission", "batching_slow_admission_count"),
             ("prefill", "batching_slow_prefill_forward_count"),
@@ -6390,11 +6205,7 @@ def execute(
         if slow is not None:
             slow.close()
         sampler.close()
-        thermal_guard.prepare_for_process_exit()
-        try:
-            shutdown_outcome = terminate_process(process)
-        finally:
-            thermal_guard.close()
+        shutdown_outcome = terminate_process(process)
         server_log.join()
         snapshot_residue = snapshot_payload_residue(snapshot_dir)
         trace(
@@ -6408,20 +6219,12 @@ def execute(
 
     if shutdown_outcome is None:
         raise AssertionError("mixed-load execution completed without shutdown evidence")
-    final_thermal_values: dict[str, float | int] = {
-        **thermal_guard.metric_values(),
-        **thermal_guard.pacing_metric_values(),
-        "host_thermal_guard_error_count": len(thermal_guard.errors),
-    }
     if result is None:
         if execution_failure is None:
             raise AssertionError("mixed-load execution completed without a result")
         partial_events: list[ObservedEvent] = []
         if evidence.measurement_started is not None:
             partial_events = server_log.events_since(evidence.measurement_started)
-            partial_events.extend(
-                thermal_guard.pacing_events_since(evidence.measurement_started)
-            )
         partial_results = evidence.ordered_measured_results()
         returned_names = {request.name for request in partial_results}
         trace(
@@ -6468,40 +6271,9 @@ def execute(
             )
             failed_values = {name: 0 for name in METRIC_DEFINITIONS}
             failed_values["request_failure_count"] = 1
-        failed_values.update(final_thermal_values)
         result = metrics_from_values(failed_values), execution_failure
     metrics, details = result
-    metrics_by_name = {metric["name"]: metric for metric in metrics}
-    for name, value in final_thermal_values.items():
-        metrics_by_name[name]["value"] = value
     lifecycle_failures: list[str] = []
-    if thermal_guard.trip_reason is not None:
-        lifecycle_failures.append(thermal_guard.trip_reason)
-    if thermal_guard.errors:
-        lifecycle_failures.append(
-            "host thermal guard errors: " + ", ".join(thermal_guard.errors)
-        )
-    if final_thermal_values["host_thermal_guard_trip_count"] != 0:
-        lifecycle_failures.append("host thermal guard tripped during mixed load")
-    if final_thermal_values["host_thermal_cooldown_active_end"] != 0:
-        lifecycle_failures.append("host thermal cooldown remained active after teardown")
-    if final_thermal_values["host_thermal_cooldown_completed_count"] != 1:
-        lifecycle_failures.append("host thermal cooldown did not complete after teardown")
-    if final_thermal_values["host_thermal_cooldown_timeout_count"] != 0:
-        lifecycle_failures.append("host thermal cooldown timed out after teardown")
-    if final_thermal_values["host_thermal_pacing_active_end"] != 0:
-        lifecycle_failures.append("host thermal pacing remained active after teardown")
-    if final_thermal_values["host_thermal_pacing_event_count"] != 0:
-        lifecycle_failures.append(
-            "hard-limit-only serving policy unexpectedly started "
-            f"{final_thermal_values['host_thermal_pacing_event_count']} pacing events"
-        )
-    if final_thermal_values["host_thermal_pacing_completed_event_count"] != 0:
-        lifecycle_failures.append(
-            "hard-limit-only serving policy unexpectedly completed "
-            f"{final_thermal_values['host_thermal_pacing_completed_event_count']} "
-            "pacing events"
-        )
     if shutdown_outcome.forced:
         lifecycle_failures.append(
             "server did not exit within the 60-second graceful teardown window"

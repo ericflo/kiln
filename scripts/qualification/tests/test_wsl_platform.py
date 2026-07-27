@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import os
 import sys
 import tempfile
@@ -86,23 +85,6 @@ class WslPlatformTests(unittest.TestCase):
             "invalid",
         ):
             wsl_platform.windows_nvidia_driver_version("596.36")
-
-    def test_windows_formatted_thermal_zone_is_strict_and_converted(self) -> None:
-        row = {
-            "Name": "\\_TZ.THRM",
-            "Temperature": 345,
-            "HighPrecisionTemperature": 3452,
-            "PercentPassiveLimit": 100,
-            "ThrottleReasons": 0,
-        }
-        parsed = wsl_platform.parse_windows_thermal_zones(json.dumps(row))
-        self.assertEqual(parsed[0]["temperature_millicelsius"], 72_050)
-        row["HighPrecisionTemperature"] = 3600
-        with self.assertRaisesRegex(
-            wsl_platform.PlatformProbeError,
-            "disagree",
-        ):
-            wsl_platform.parse_windows_thermal_zones(json.dumps(row))
 
     def test_containment_binding_is_fail_closed(self) -> None:
         platform_value = {

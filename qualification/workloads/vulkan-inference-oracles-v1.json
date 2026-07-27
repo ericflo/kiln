@@ -15,7 +15,7 @@
   "variants": [
     {
       "id": "vulkan",
-      "description": "Run fail-closed inference-oracle cases on the required RADV Strix Halo Vulkan device and source-pinned Qwen3.5-4B artifacts.",
+      "description": "Run fail-closed inference-oracle cases on a Vulkan device and source-pinned Qwen3.5-4B artifacts.",
       "backend": "vulkan",
       "device_requirement": "required",
       "skip_policy": "fail",

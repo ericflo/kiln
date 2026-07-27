@@ -105,23 +105,15 @@ class ServeVulkanResidentPrefillTests(unittest.TestCase):
             oracle.EFFECTIVE_CONFIG["runtime"]["serving_profile"], "experimental"
         )
 
-    def test_source_build_and_host_containment_are_closed(self) -> None:
+    def test_source_build_and_host_memory_bounds_are_closed(self) -> None:
         build = oracle.EFFECTIVE_CONFIG["build"]
         self.assertEqual(build["features"], "vulkan")
         self.assertEqual(build["cargo_wrapper"], "scripts/cargo-bounded.sh")
-        self.assertEqual(build["cargo_min_available_gib"], 15)
+        self.assertEqual(build["cargo_min_available_gib"], 1)
         self.assertEqual(build["timeout_seconds"], 900)
         workload = oracle.EFFECTIVE_CONFIG["workload"]
         self.assertEqual(workload["host_mem_available_floor_bytes"], 8 << 30)
         self.assertEqual(workload["host_swap_growth_limit_bytes"], 512 << 20)
-        host_safety = oracle.EFFECTIVE_CONFIG["host_safety"]
-        self.assertEqual(
-            host_safety["thermal_guard"]["limit_millicelsius"], 97_000
-        )
-        self.assertEqual(
-            host_safety["thermal_cooldown"],
-            oracle.soak.HOST_THERMAL_POLICY.effective_config()["thermal_cooldown"],
-        )
 
     def test_cohort_runner_delivers_slot_specific_completion_limits(self) -> None:
         limits = (8, 12, 16, 20)

@@ -135,7 +135,7 @@ class ServeVulkanBaselineTests(unittest.TestCase):
         build = baseline.EFFECTIVE_CONFIG["build"]
         self.assertEqual(build["features"], "vulkan")
         self.assertEqual(build["cargo_wrapper"], "scripts/cargo-bounded.sh")
-        self.assertEqual(build["cargo_min_available_gib"], 15)
+        self.assertEqual(build["cargo_min_available_gib"], 1)
         self.assertEqual(build["timeout_seconds"], 900)
         self.assertNotIn("rocm_path", build)
         self.assertNotIn("rocm_archs", build)

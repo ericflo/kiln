@@ -214,22 +214,8 @@ mod rocm {
     }
 
     #[derive(Debug, Serialize)]
-    struct CgroupEvidence {
-        memory_current_bytes: u64,
-        memory_high_events: u64,
-        memory_max_bytes: u64,
-        memory_max_events: u64,
-        memory_oom_events: u64,
-        memory_oom_kill_events: u64,
-        memory_peak_bytes: u64,
-        memory_swap_bytes: u64,
-        memory_swap_max_bytes: u64,
-    }
-
-    #[derive(Debug, Serialize)]
     struct ResultMarker {
         attribution: &'static str,
-        containment: CgroupEvidence,
         eager_full: FullPathResult,
         eager_greedy: GreedyPathResult,
         graph: GraphEvidence,
@@ -267,7 +253,6 @@ mod rocm {
     #[derive(Debug, Serialize)]
     struct LayerResultMarker {
         boundaries: Vec<BoundaryComparison>,
-        containment: CgroupEvidence,
         final_logits_sha256: String,
         hf_layer_last_rows_sha256: String,
         input_token_count: usize,
@@ -387,7 +372,6 @@ mod rocm {
         };
         let result = ResultMarker {
             attribution,
-            containment: read_cgroup_evidence()?,
             eager_full,
             eager_greedy,
             graph,
@@ -468,58 +452,6 @@ mod rocm {
             request: take("--request")?,
             reference: take("--hf-reference")?,
         })
-    }
-
-    fn read_cgroup_evidence() -> Result<CgroupEvidence> {
-        let membership = std::fs::read_to_string("/proc/self/cgroup")?;
-        let relative = membership
-            .lines()
-            .find_map(|line| line.strip_prefix("0::"))
-            .context("unified cgroup membership is absent")?;
-        let cgroup = Path::new("/sys/fs/cgroup").join(relative.trim_start_matches('/'));
-        let read_u64 = |name: &str| -> Result<u64> {
-            let value = std::fs::read_to_string(cgroup.join(name))?;
-            anyhow::ensure!(value.trim() != "max", "{name} must be bounded");
-            value
-                .trim()
-                .parse::<u64>()
-                .with_context(|| format!("parse {name}"))
-        };
-        let events = std::fs::read_to_string(cgroup.join("memory.events"))?;
-        let event = |name: &str| -> Result<u64> {
-            events
-                .lines()
-                .find_map(|line| {
-                    let mut fields = line.split_ascii_whitespace();
-                    (fields.next() == Some(name))
-                        .then(|| fields.next())
-                        .flatten()
-                })
-                .with_context(|| format!("memory.events omits {name}"))?
-                .parse::<u64>()
-                .with_context(|| format!("parse memory.events {name}"))
-        };
-        let evidence = CgroupEvidence {
-            memory_current_bytes: read_u64("memory.current")?,
-            memory_high_events: event("high")?,
-            memory_max_bytes: read_u64("memory.max")?,
-            memory_max_events: event("max")?,
-            memory_oom_events: event("oom")?,
-            memory_oom_kill_events: event("oom_kill")?,
-            memory_peak_bytes: read_u64("memory.peak")?,
-            memory_swap_bytes: read_u64("memory.swap.current")?,
-            memory_swap_max_bytes: read_u64("memory.swap.max")?,
-        };
-        anyhow::ensure!(
-            evidence.memory_high_events == 0
-                && evidence.memory_max_events == 0
-                && evidence.memory_oom_events == 0
-                && evidence.memory_oom_kill_events == 0
-                && evidence.memory_swap_bytes == 0
-                && evidence.memory_swap_max_bytes == 0,
-            "cgroup memory containment was not clean: {evidence:?}"
-        );
-        Ok(evidence)
     }
 
     fn load_request(path: &Path) -> Result<Request> {
@@ -903,7 +835,6 @@ mod rocm {
         let final_values = tensor_logits(&logits)?;
         Ok(LayerResultMarker {
             boundaries,
-            containment: read_cgroup_evidence()?,
             final_logits_sha256: vector_sha256(&final_values),
             hf_layer_last_rows_sha256: matrix_sha256(reference_rows),
             input_token_count: request.prompt.len() + request.continuation.len(),

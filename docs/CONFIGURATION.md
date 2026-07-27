@@ -1111,10 +1111,9 @@ configured milliseconds and source are immutable for the process. The actor
 applies it only after a cycle performed model work, not while idle, queued, or
 waiting for a request. Because the delay begins only after synchronous
 accelerator return, it does not suspend outstanding device work. It is
-intentionally separate from external thermal containment: operators must still
-use a hardware guard for qualification and measure the resulting throughput and
-ITL cost. A configured quantum is retained even when clamped, so intent and
-execution cannot be confused.
+reported so qualification can measure its throughput and ITL cost. A configured
+quantum is retained even when clamped, so intent and execution cannot be
+confused.
 
 `GET /health` repeats the same immutable object at
 `decode_runtime.batching_configuration` beside the optional live

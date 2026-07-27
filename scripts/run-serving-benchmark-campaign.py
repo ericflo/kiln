@@ -134,9 +134,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_MODEL_FINGERPRINT_READ_MIB_PER_SECOND,
         help="optional cumulative model read limit; zero disables it",
     )
-    thermal = parser.add_mutually_exclusive_group()
-    thermal.add_argument("--host-thermal-policy", type=Path)
-    thermal.add_argument("--external-wsl2-thermal-policy", type=Path)
     server_owner = parser.add_mutually_exclusive_group(required=True)
     server_owner.add_argument("--server-pid", type=int)
     server_owner.add_argument("--server-launch-config", type=Path)
@@ -216,27 +213,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error(
             "--model-fingerprint-read-mib-per-second must be zero or in 64..=16384"
         )
-    thermal_path = (
-        args.host_thermal_policy
-        if args.host_thermal_policy is not None
-        else args.external_wsl2_thermal_policy
-    )
-    if thermal_path is not None and (
-        thermal_path.is_symlink() or not thermal_path.is_file()
-    ):
-        parser.error("the selected thermal policy must name a regular file")
-    if args.server_pid is not None and args.host_thermal_policy is None:
-        parser.error(
-            "--server-pid is only supported with --host-thermal-policy; "
-            "use --server-launch-config without a thermal policy"
-        )
-    if (
-        args.external_wsl2_thermal_policy is not None
-        and args.server_launch_config is None
-    ):
-        parser.error(
-            "--external-wsl2-thermal-policy requires --server-launch-config"
-        )
     if args.server_launch_config is not None and (
         args.server_launch_config.is_symlink()
         or not args.server_launch_config.is_file()
@@ -306,15 +282,6 @@ def benchmark_command(
         "--out",
         str(output),
     ]
-    if args.host_thermal_policy is not None:
-        command.extend(("--host-thermal-policy", str(args.host_thermal_policy)))
-    elif args.external_wsl2_thermal_policy is not None:
-        command.extend(
-            (
-                "--external-wsl2-thermal-policy",
-                str(args.external_wsl2_thermal_policy),
-            )
-        )
     if args.server_launch_config is not None:
         command.extend(("--server-launch-config", str(args.server_launch_config)))
     else:
@@ -339,11 +306,6 @@ def build_summary(
     args: argparse.Namespace,
     rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    thermal_path = (
-        args.host_thermal_policy
-        if args.host_thermal_policy is not None
-        else args.external_wsl2_thermal_policy
-    )
     summary: dict[str, Any] = {
         "schema": SCHEMA,
         "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -381,23 +343,6 @@ def build_summary(
             "interval_ms": args.memory_sample_ms,
             "limit_bytes": args.memory_limit_bytes,
         },
-        "thermal_policy": (
-            {
-                "mode": (
-                    "native_hwmon"
-                    if args.host_thermal_policy is not None
-                    else "external_wsl2_boundary"
-                ),
-                "path": str(thermal_path.resolve()),
-                "sha256": file_sha256(thermal_path),
-            }
-            if thermal_path is not None
-            else {
-                "mode": "not_requested",
-                "path": None,
-                "sha256": None,
-            }
-        ),
         "server_owner": (
             {
                 "mode": "owned_process_group",

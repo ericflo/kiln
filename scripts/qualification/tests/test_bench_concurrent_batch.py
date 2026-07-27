@@ -58,120 +58,6 @@ def valid_vllm_manifest(
     }
 
 
-def valid_host_thermal_policy() -> dict:
-    return {
-        "schema": bench.HOST_THERMAL_POLICY_SCHEMA,
-        "id": "test-host-policy-v1",
-        "sensor": {"hwmon_name": "fixture", "label": "package"},
-        "limit_millicelsius": 90_000,
-        "poll_interval_ms": 250,
-        "pacing": {
-            "mode": "process_group_stop",
-            "start_millicelsius": 78_000,
-            "resume_millicelsius": 70_000,
-            "resume_stable_samples": 2,
-        },
-        "safe_handoff": {
-            "target_millicelsius": 65_000,
-            "stable_samples": 2,
-            "timeout_seconds": 30.0,
-        },
-        "phase_settlement_timeout_seconds": 30.0,
-    }
-
-
-def valid_wsl2_thermal_policy(*, pacing: bool = False) -> dict:
-    policy = {
-        "schema": (
-            bench.wsl_thermal_exec.SCHEMA_V2
-            if pacing
-            else bench.WSL2_THERMAL_POLICY_SCHEMA
-        ),
-        "id": "test-wsl2-policy-v2" if pacing else "test-wsl2-policy-v1",
-        "content_sha256": "",
-        "host": {
-            "cpu_name": "Test CPU",
-            "thermal_zone_name": "\\_TZ.THRM",
-            "limit_millicelsius": 95_000,
-            "vendor_tjunction_millicelsius": 110_000,
-        },
-        "gpu": {
-            "name": "Test GPU",
-            "uuid": "GPU-test",
-            "limit_millicelsius": 85_000,
-        },
-        "poll_interval_ms": 100,
-        "safe_handoff": {
-            "host_target_millicelsius": 85_000,
-            "gpu_target_millicelsius": 75_000,
-            "stable_samples": 2,
-            "timeout_seconds": 5,
-        },
-    }
-    if pacing:
-        policy["pacing"] = {
-            "mode": "cgroup_freeze",
-            "host_start_millicelsius": 80_000,
-            "host_resume_millicelsius": 72_000,
-            "gpu_start_millicelsius": 75_000,
-            "gpu_resume_millicelsius": 70_000,
-            "resume_stable_samples": 2,
-            "timeout_seconds": 5,
-        }
-    hashed = dict(policy)
-    hashed.pop("content_sha256")
-    payload = json.dumps(
-        hashed,
-        allow_nan=False,
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("ascii")
-    policy["content_sha256"] = f"sha256:{hashlib.sha256(payload).hexdigest()}"
-    return policy
-
-
-def valid_external_wsl2_boundary_evidence(policy: dict) -> dict:
-    unit = "kiln-wsl-scope-" + "a" * 32
-    host_uid = 1000
-    return {
-        "mechanism": "qualification-runner-windows-nvml-outer-supervisor-v1",
-        "policy_sha256": policy["content_sha256"],
-        "network_containment": bench.WSL2_NETWORK_BOUNDARY,
-        "scope_boundary": bench.WSL2_SCOPE_BOUNDARY,
-        "scope_unit": unit,
-        "scope_host_uid": host_uid,
-        "cgroup_path": (
-            f"/sys/fs/cgroup/user.slice/user-{host_uid}.slice/"
-            f"user@{host_uid}.service/app.slice/{unit}.scope"
-        ),
-        "memory_max_bytes": bench.WSL2_SCOPE_MEMORY_MAX_BYTES,
-        "memory_swap_max_bytes": 0,
-        "pids_max": bench.WSL2_SCOPE_PIDS_MAX,
-        "memory_oom_group": 1,
-        "cpu_quota_percent": bench.WSL2_SCOPE_CPU_QUOTA_PERCENT,
-        "cpu_controller": "usage-feedback-cgroup-freeze-v1",
-        "parent_qualification_receipt_required": True,
-    }
-
-
-def valid_prelaunch_cooldown() -> dict:
-    return {
-        "scope": "host_package_before_process_creation",
-        "sensor_path": "/fixture/temp1_input",
-        "poll_interval_ms": 250,
-        "target_millicelsius": 65_000,
-        "stable_samples_required": 2,
-        "stable_samples_observed": 2,
-        "timeout_seconds": 30.0,
-        "sample_count": 3,
-        "temperature_start_millicelsius": 70_000,
-        "temperature_peak_millicelsius": 70_000,
-        "temperature_end_millicelsius": 50_000,
-        "elapsed_seconds": 0.5,
-        "completed": True,
-    }
-
 
 def valid_request_performance(max_tokens: int, *, batching: bool = True) -> dict:
     gap_samples = max(0, max_tokens - 1)
@@ -242,43 +128,6 @@ def as_v5_server_diagnostics(server: dict) -> dict:
     return legacy
 
 
-def valid_fingerprint_thermal_evidence(
-    policy_value: dict | None = None,
-) -> dict:
-    policy_record, policy, settlement = bench.validate_host_thermal_policy_value(
-        policy_value or valid_host_thermal_policy(), "fixture policy"
-    )
-    pacing_enabled = policy.pacing_start_millicelsius is not None
-    return {
-        "phase_settlement_timeout_seconds": settlement,
-        "policy": policy_record,
-        "prelaunch_cooldown": valid_prelaunch_cooldown(),
-        "runtime": {
-            "host_temperature_end_millicelsius": 50_000,
-            "host_temperature_peak_millicelsius": 60_000,
-            "host_temperature_start_millicelsius": 50_000,
-            "host_thermal_cooldown_active_end": 0,
-            "host_thermal_cooldown_completed_count": 1,
-            "host_thermal_cooldown_peak_millicelsius": 60_000,
-            "host_thermal_cooldown_sample_count": 4,
-            "host_thermal_cooldown_seconds": 0.25,
-            "host_thermal_cooldown_stable_sample_count": policy.cooldown_stable_samples,
-            "host_thermal_cooldown_timeout_count": 0,
-            "host_thermal_guard_trip_count": 0,
-            "host_thermal_pacing_active_end": 0,
-            "host_thermal_pacing_completed_event_count": int(pacing_enabled),
-            "host_thermal_pacing_event_count": int(pacing_enabled),
-            "host_thermal_pacing_max_seconds": 0.1 if pacing_enabled else 0.0,
-            "host_thermal_pacing_max_start_millicelsius": (
-                policy.pacing_start_millicelsius or 0
-            ),
-            "host_thermal_pacing_seconds": 0.1 if pacing_enabled else 0.0,
-        },
-        "schema": bench.fingerprint_supervisor.SCHEMA,
-        "worker_exit_code": 0,
-    }
-
-
 class FakeAttachedProcessGroup:
     pid = 4321
 
@@ -294,105 +143,6 @@ class FakeAttachedProcessGroup:
             "executable": "/fixture/kiln-server",
             "cmdline_sha256": "sha256:" + "a" * 64,
         }
-
-
-class FakeThermalGuard:
-    def __init__(self, *_args: object, **_kwargs: object) -> None:
-        self.trip_reason = None
-        self.errors: list[str] = []
-        self.samples = [50_000]
-        self.input_path = Path("/fixture/temp1_input")
-        self.phase = "startup"
-
-    def set_phase(self, phase: str) -> None:
-        self.phase = phase
-
-    def start(self) -> None:
-        return
-
-    def close(self) -> None:
-        return
-
-    def prepare_for_process_exit(self) -> None:
-        return
-
-    def wait_for_pacing_settlement(self, _timeout_seconds: float) -> bool:
-        return True
-
-    def wait_for_idle_boundary_cooldown(
-        self, *, position: str, timeout_seconds: float
-    ) -> dict:
-        time.sleep(0.001)
-        return {
-            "completed": True,
-            "elapsed_seconds": 0.001,
-            "poll_interval_ms": 250,
-            "position": position,
-            "sample_count": 2,
-            "scope": "live_server_idle_phase_boundary",
-            "sensor_path": "/fixture/temp1_input",
-            "stable_samples_observed": 2,
-            "stable_samples_required": 2,
-            "target_millicelsius": 65_000,
-            "temperature_end_millicelsius": 50_000,
-            "temperature_peak_millicelsius": 50_000,
-            "temperature_start_millicelsius": 50_000,
-            "timeout_seconds": timeout_seconds,
-        }
-
-    def sample_now(self) -> int:
-        self.samples.append(50_000)
-        return 50_000
-
-    def phase_metric_values(self, _started: float) -> dict:
-        return {
-            "host_temperature_start_millicelsius": 50_000,
-            "host_temperature_end_millicelsius": 50_000,
-            "host_temperature_peak_millicelsius": 50_000,
-            "host_temperature_sample_count": 4,
-            "host_thermal_guard_trip_count": 0,
-            "host_thermal_pacing_event_count": 0,
-            "host_thermal_pacing_completed_event_count": 0,
-            "host_thermal_pacing_seconds": 0.0,
-        }
-
-    def metric_values(self) -> dict:
-        return {
-            "host_temperature_end_millicelsius": 50_000,
-            "host_temperature_peak_millicelsius": 50_000,
-            "host_temperature_start_millicelsius": 50_000,
-            "host_thermal_guard_trip_count": 0,
-            "host_thermal_cooldown_active_end": 0,
-            "host_thermal_cooldown_completed_count": 1,
-            "host_thermal_cooldown_peak_millicelsius": 50_000,
-            "host_thermal_cooldown_sample_count": 2,
-            "host_thermal_cooldown_seconds": 0.25,
-            "host_thermal_cooldown_stable_sample_count": 2,
-            "host_thermal_cooldown_timeout_count": 0,
-        }
-
-    def pacing_metric_values(self) -> dict:
-        return {
-            "host_thermal_pacing_active_end": 0,
-            "host_thermal_pacing_completed_event_count": 0,
-            "host_thermal_pacing_event_count": 0,
-            "host_thermal_pacing_max_seconds": 0.0,
-            "host_thermal_pacing_max_start_millicelsius": 0,
-            "host_thermal_pacing_seconds": 0.0,
-        }
-
-
-class FakeStartupTrippedThermalGuard(FakeThermalGuard):
-    def start(self) -> None:
-        self.trip_reason = "injected startup thermal trip"
-
-    def wait_for_pacing_settlement(self, _timeout_seconds: float) -> bool:
-        return False
-
-    def metric_values(self) -> dict:
-        values = super().metric_values()
-        values["host_thermal_guard_trip_count"] = 1
-        return values
 
 
 class FakeState:
@@ -1188,10 +938,7 @@ class ServingBenchmarkTests(unittest.TestCase):
         directory: str,
         *,
         fetch_json: object | None = None,
-        guarded: bool = True,
-        thermal_guard_factory: object = FakeThermalGuard,
         engine: str = "kiln",
-        hard_limit_only: bool = False,
         extra_args: list[str] | None = None,
         memory_counter_path: Path | None = None,
     ) -> tuple[int, Path]:
@@ -1206,11 +953,6 @@ class ServingBenchmarkTests(unittest.TestCase):
             )
         memory_counter = memory_counter_path or Path(directory) / "vram-used"
         memory_counter.write_text("1024")
-        thermal_policy = Path(directory) / "host-thermal-policy.json"
-        thermal_policy_value = valid_host_thermal_policy()
-        if hard_limit_only:
-            thermal_policy_value["pacing"] = {"mode": "hard_limit_only"}
-        thermal_policy.write_text(json.dumps(thermal_policy_value))
         model_path = Path(directory) / "model"
         model_fingerprint = {
             "id": "test-model",
@@ -1232,25 +974,15 @@ class ServingBenchmarkTests(unittest.TestCase):
             "source_tree_sha256": "sha256:" + "b" * 64,
         }
 
-        def contained_fingerprint(
+        def fixture_fingerprint(
             _model_path: Path,
-            _model_id: str,
+            _model_id: str | None,
             *,
-            policy_path: Path | None,
-            phase: str,
-            read_mib_per_second: int,
-        ) -> tuple[dict, dict | None]:
-            self.assertEqual(read_mib_per_second, 0)
-            self.assertIn(
-                phase,
-                {"model-fingerprint-initial", "model-fingerprint-final"},
-            )
-            return (
-                model_fingerprint,
-                valid_fingerprint_thermal_evidence(thermal_policy_value)
-                if policy_path is not None
-                else None,
-            )
+            max_read_mib_per_second: int | None = None,
+            **_kwargs: object,
+        ) -> dict:
+            self.assertIsNone(max_read_mib_per_second)
+            return model_fingerprint
 
         with ExitStack() as stack:
             stack.enter_context(
@@ -1261,8 +993,8 @@ class ServingBenchmarkTests(unittest.TestCase):
             stack.enter_context(
                 mock.patch.object(
                     bench,
-                    "fingerprint_model_with_thermal_containment",
-                    side_effect=contained_fingerprint,
+                    "fingerprint_model",
+                    side_effect=fixture_fingerprint,
                 )
             )
             if fetch_json is not None:
@@ -1276,23 +1008,13 @@ class ServingBenchmarkTests(unittest.TestCase):
                     return_value=FakeAttachedProcessGroup(),
                 )
             )
-            stack.enter_context(
-                mock.patch.object(
-                    bench.thermal,
-                    "HostThermalGuard",
-                    side_effect=thermal_guard_factory,
-                )
+            provided_extra_args = extra_args or []
+            owns_server = any(
+                argument == "--server-launch-config"
+                or argument.startswith("--server-launch-config=")
+                for argument in provided_extra_args
             )
-            thermal_args = (
-                [
-                    "--host-thermal-policy",
-                    str(thermal_policy),
-                    "--server-pid",
-                    "4321",
-                ]
-                if guarded
-                else ["--unsafe-no-host-thermal-guard"]
-            )
+            ownership_args = [] if owns_server else ["--server-pid", "4321"]
             arguments = [
                     "--engine",
                     engine,
@@ -1322,9 +1044,9 @@ class ServingBenchmarkTests(unittest.TestCase):
                     "2048",
                     "--out",
                     str(output),
-                    *thermal_args,
+                    *ownership_args,
                 ]
-            arguments.extend(extra_args or [])
+            arguments.extend(provided_extra_args)
             return_code = bench.main(arguments)
         return return_code, output
 
@@ -1469,7 +1191,7 @@ class ServingBenchmarkTests(unittest.TestCase):
     def test_measured_cli_requires_explicit_prompt_set_identity(self) -> None:
         stderr = io.StringIO()
         with redirect_stderr(stderr):
-            return_code = bench.main(["--unsafe-no-host-thermal-guard"])
+            return_code = bench.main([])
         self.assertEqual(return_code, 2)
         self.assertIn("explicit --run-id and --prompt-set-id", stderr.getvalue())
 
@@ -1477,7 +1199,6 @@ class ServingBenchmarkTests(unittest.TestCase):
         with redirect_stderr(stderr):
             return_code = bench.main(
                 [
-                    "--unsafe-no-host-thermal-guard",
                     "--run-id",
                     "coupled-identity-v1",
                     "--prompt-set-id",
@@ -1523,13 +1244,13 @@ class ServingBenchmarkTests(unittest.TestCase):
         )
         self.assertTrue(all(prompt.startswith(shared_prefix) for prompt in prefix_prompts))
         self.assertEqual(len(mixed_lengths), 4)
-        self.assertEqual(bench.DRIVER_VERSION, "25")
+        self.assertEqual(bench.DRIVER_VERSION, "26")
         self.assertEqual(
             bench.PROMPT_TEMPLATE_VERSION, "fixed-serving-profiles-v2"
         )
         self.assertEqual(
             bench.FIXED_PROMPT_TEMPLATE_V2_DRIVER_VERSIONS,
-            {"22", "23", "24", "25"},
+            {"26"},
         )
         self.assertEqual(bench.LONG_PROMPT_REPETITIONS, 61)
         self.assertEqual(bench.LONG_PROMPT_REPETITIONS_V1, 64)
@@ -2108,7 +1829,6 @@ class ServingBenchmarkTests(unittest.TestCase):
             summary["errors"],
             [{"index": 0, "error": "RuntimeError: injected request failure"}],
         )
-        summary["host_thermal"] = None
         bench.validate_benchmark_run(
             summary,
             label="counterexample",
@@ -2137,9 +1857,6 @@ class ServingBenchmarkTests(unittest.TestCase):
             "workload_fingerprint": "sha256:workload",
             "workload": {"comparison_mode": "exact_output"},
             "engine": {"model_identity": {"content_sha256": "sha256:model"}},
-            "host_thermal": {
-                "policy": {"content_sha256": "sha256:thermal-policy"}
-            },
             "memory_sampler": {
                 "source": "drm_vram_used",
                 "path": "/sys/class/drm/card0/device/mem_info_vram_used",
@@ -2170,7 +1887,7 @@ class ServingBenchmarkTests(unittest.TestCase):
             ],
         }
         reference = json.loads(json.dumps(current))
-        reference["driver_version"] = "7"
+        reference["driver_version"] = bench.DRIVER_VERSION
         reference["engine"]["name"] = "kiln"
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "reference.json"
@@ -2210,15 +1927,6 @@ class ServingBenchmarkTests(unittest.TestCase):
                     comparison["mismatches"][0]["reason"],
                     "prompt_token_mismatch",
                 )
-
-                reference["host_thermal"]["policy"]["content_sha256"] = (
-                    "sha256:different-thermal-policy"
-                )
-                path.write_text(json.dumps(reference))
-                with self.assertRaisesRegex(
-                    bench.BenchmarkError, "different host thermal policy"
-                ):
-                    bench.compare_reference(current, path)
 
                 path.write_text('{"schema":"first","schema":"second"}')
                 with self.assertRaisesRegex(
@@ -2294,9 +2002,6 @@ class ServingBenchmarkTests(unittest.TestCase):
             "workload_fingerprint": "sha256:workload",
             "workload": {"comparison_mode": "exact_output"},
             "engine": engine,
-            "host_thermal": {
-                "policy": {"content_sha256": "sha256:thermal-policy"}
-            },
             "memory_sampler": {
                 "source": "drm_vram_used",
                 "path": "/sys/class/drm/card0/device/mem_info_vram_used",
@@ -2375,93 +2080,6 @@ class ServingBenchmarkTests(unittest.TestCase):
                     bench.BenchmarkError, "lacks measured graph parity evidence"
                 ):
                     bench.compare_reference(broken_candidate, path)
-
-    def test_historical_v17_graph_discriminator_keeps_v6_diagnostics(self) -> None:
-        receipt = ROOT / (
-            "benchmarks/receipts/rocm/strix-halo/"
-            "20260720t031650-rocm-strix-halo-parity-graphs-v17-c8.kiln.json"
-        )
-        validated = bench.validate_benchmark_receipt_path(receipt)
-        self.assertEqual(validated["driver_version"], "17")
-        self.assertTrue(
-            all(
-                row["server"]["schema"] == bench.SERVER_DIAGNOSTICS_SCHEMA_V6
-                for row in validated["runs"]
-            )
-        )
-
-    def test_model_fingerprint_runs_in_guarded_closed_worker(self) -> None:
-        raw_identity = {
-            "id": "test-model",
-            "path": "/models/test-model",
-            "weight_files": [],
-            "config_hash": "sha256:" + "a" * 64,
-            "tokenizer_hash": "sha256:" + "b" * 64,
-            "chat_template_hash": None,
-        }
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            policy = root / "policy.json"
-            policy.write_text(json.dumps(valid_host_thermal_policy()))
-            with mock.patch.object(
-                bench.fingerprint_supervisor,
-                "supervise",
-                return_value=(
-                    0,
-                    json.dumps(raw_identity),
-                    "",
-                    valid_fingerprint_thermal_evidence(),
-                ),
-            ) as supervise:
-                identity, evidence = bench.fingerprint_model_with_thermal_containment(
-                    Path("/models/test-model"),
-                    "test-model",
-                    policy_path=policy,
-                    phase="model-fingerprint-initial",
-                )
-        self.assertEqual(identity, raw_identity)
-        self.assertEqual(evidence, valid_fingerprint_thermal_evidence())
-        call = supervise.call_args.kwargs
-        self.assertEqual(call["worker_phase"], "model-fingerprint-initial")
-        self.assertEqual(call["worker_command"][1], str(bench.MODEL_FINGERPRINT_SCRIPT))
-        self.assertNotIn("--max-read-mib-per-second", call["worker_command"])
-        self.assertNotIn("--start-gate", call["worker_command"])
-        self.assertEqual(
-            set(call["worker_environment"]),
-            {"HOME", "LANG", "LC_ALL", "PATH", "PYTHONHASHSEED", "TMPDIR"},
-        )
-        inherited = "\0".join(
-            f"{key}={value}" for key, value in call["worker_environment"].items()
-        )
-        self.assertNotIn("HF_TOKEN", inherited)
-        self.assertNotIn("KILN_", inherited)
-
-    def test_model_fingerprint_applies_only_an_explicit_read_limit(self) -> None:
-        with mock.patch.object(
-            bench,
-            "fingerprint_model",
-            return_value={"id": "fixture"},
-        ) as fingerprint:
-            bench.fingerprint_model_with_thermal_containment(
-                Path("/models/test-model"),
-                "test-model",
-                policy_path=None,
-                phase="model-fingerprint-initial",
-            )
-            bench.fingerprint_model_with_thermal_containment(
-                Path("/models/test-model"),
-                "test-model",
-                policy_path=None,
-                phase="model-fingerprint-final",
-                read_mib_per_second=256,
-            )
-        self.assertIsNone(
-            fingerprint.call_args_list[0].kwargs["max_read_mib_per_second"]
-        )
-        self.assertEqual(
-            fingerprint.call_args_list[1].kwargs["max_read_mib_per_second"],
-            256,
-        )
 
     def test_full_output_evidence_is_bounded_validated_and_locates_divergence(
         self,
@@ -2565,318 +2183,7 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertEqual(snapshot["peak_delta_bytes"], 75)
         self.assertGreaterEqual(snapshot["samples"], 2)
 
-    def test_host_thermal_policy_is_closed_hashed_and_hysteresis_checked(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "policy.json"
-            value = valid_host_thermal_policy()
-            path.write_text(json.dumps(value))
-            record, policy, settlement_timeout = bench.load_host_thermal_policy(path)
-
-            self.assertEqual(record["content_sha256"], bench.canonical_sha256(value))
-            self.assertEqual(policy.cooldown_mode, "live_process_safe_handoff")
-            self.assertEqual(policy.pacing_resume_stable_samples, 2)
-            self.assertEqual(settlement_timeout, 30.0)
-            self.assertEqual(policy.pacing_timeout_seconds, settlement_timeout)
-            self.assertEqual(
-                policy.guard_kwargs()["pacing_timeout_seconds"],
-                settlement_timeout,
-            )
-            self.assertEqual(
-                policy.effective_config()["thermal_pacing"]["timeout_seconds"],
-                settlement_timeout,
-            )
-            bench.validate_host_thermal_policy_value(record, "fixture")
-
-            legacy_record = json.loads(json.dumps(record))
-            legacy_record["pacing"].pop("mode")
-            legacy_record["pacing"].pop("resume_stable_samples")
-            legacy_record.pop("content_sha256")
-            legacy_record["content_sha256"] = bench.canonical_sha256(legacy_record)
-            _legacy, legacy_policy, _timeout = (
-                bench.validate_host_thermal_policy_value(legacy_record, "legacy")
-            )
-            self.assertEqual(legacy_policy.pacing_resume_stable_samples, 1)
-            legacy_run_evidence = {
-                "phase": "fixture",
-                "phase_wall_seconds": 2.0,
-                "thermally_sustainable_output_token_throughput_per_s": 1.0,
-                "host_temperature_start_millicelsius": 50_000,
-                "host_temperature_end_millicelsius": 50_000,
-                "host_temperature_peak_millicelsius": 50_000,
-                "host_temperature_sample_count": 2,
-                "host_thermal_guard_trip_count": 0,
-                "host_thermal_pacing_event_count": 1,
-                "host_thermal_pacing_completed_event_count": 1,
-                "host_thermal_pacing_seconds": 0.1,
-            }
-            bench.validate_run_host_thermal(
-                legacy_run_evidence,
-                label="legacy run",
-                phase="fixture",
-                completion_tokens=2,
-                driver_version="10",
-                policy_record=legacy_record,
-            )
-            current_run_evidence = {
-                **legacy_run_evidence,
-                "idle_boundary_cooldowns": [],
-            }
-            with self.assertRaisesRegex(bench.BenchmarkError, "tagged"):
-                bench.validate_run_host_thermal(
-                    current_run_evidence,
-                    label="current run",
-                    phase="fixture",
-                    completion_tokens=2,
-                    driver_version=bench.DRIVER_VERSION,
-                    policy_record=legacy_record,
-                )
-
-            legacy_input = json.loads(json.dumps(value))
-            legacy_input["pacing"].pop("mode")
-            legacy_input["pacing"].pop("resume_stable_samples")
-            with self.assertRaisesRegex(bench.BenchmarkError, "pacing.mode"):
-                bench.validate_host_thermal_policy_value(legacy_input, "input")
-
-            tampered = json.loads(json.dumps(record))
-            tampered["pacing"]["start_millicelsius"] = 79_000
-            with self.assertRaisesRegex(bench.BenchmarkError, "content_sha256"):
-                bench.validate_host_thermal_policy_value(tampered, "fixture")
-
-            value["pacing"]["resume_millicelsius"] = 80_000
-            path.write_text(json.dumps(value))
-            with self.assertRaisesRegex(bench.BenchmarkError, "resume < start"):
-                bench.load_host_thermal_policy(path)
-
-    def test_external_wsl2_boundary_receipt_is_closed_and_parent_bound(self) -> None:
-        policy = valid_wsl2_thermal_policy()
-        evidence = valid_external_wsl2_boundary_evidence(policy)
-        receipt = {
-            "mode": "external_wsl2_boundary",
-            "unsafe_no_guard_acknowledged": False,
-            "policy": policy,
-            "process_group": None,
-            "model_fingerprint": None,
-            "evidence": evidence,
-        }
-        self.assertEqual(
-            bench.validate_host_thermal_receipt(
-                receipt, driver_version=bench.DRIVER_VERSION
-            ),
-            ("external_wsl2_boundary", True, None),
-        )
-
-        mutations = (
-            ("policy_sha256", "sha256:" + "0" * 64, "policy_sha256"),
-            (
-                "cgroup_path",
-                evidence["cgroup_path"].removesuffix(".scope"),
-                "bound scope",
-            ),
-            (
-                "parent_qualification_receipt_required",
-                False,
-                "parent_qualification_receipt_required",
-            ),
-        )
-        for field, value, message in mutations:
-            with self.subTest(field=field):
-                mutated = json.loads(json.dumps(receipt))
-                mutated["evidence"][field] = value
-                with self.assertRaisesRegex(bench.BenchmarkError, message):
-                    bench.validate_host_thermal_receipt(
-                        mutated, driver_version=bench.DRIVER_VERSION
-                    )
-
-    def test_current_receipt_can_explicitly_omit_thermal_policy(self) -> None:
-        receipt = {
-            "mode": "not_requested",
-            "unsafe_no_guard_acknowledged": False,
-            "policy": None,
-            "process_group": None,
-            "model_fingerprint": None,
-            "evidence": None,
-        }
-        self.assertEqual(
-            bench.validate_host_thermal_receipt(
-                receipt, driver_version=bench.DRIVER_VERSION
-            ),
-            ("not_requested", True, None),
-        )
-        legacy = json.loads(json.dumps(receipt))
-        with self.assertRaisesRegex(bench.BenchmarkError, "unsupported"):
-            bench.validate_host_thermal_receipt(legacy, driver_version="23")
-
-    def test_external_wsl2_scope_requires_exact_cgroup_controls(self) -> None:
-        unit = "kiln-wsl-scope-" + "b" * 32
-        host_uid = 1000
-        relative = (
-            f"user.slice/user-{host_uid}.slice/user@{host_uid}.service/"
-            f"app.slice/{unit}.scope"
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            proc_cgroup = root / "self.cgroup"
-            cgroup_root = root / "cgroup"
-            cgroup = cgroup_root / relative
-            cgroup.mkdir(parents=True)
-            proc_cgroup.write_text(f"0::/{relative}\n", encoding="ascii")
-            controls = {
-                "memory.max": bench.WSL2_SCOPE_MEMORY_MAX_BYTES,
-                "memory.swap.max": 0,
-                "pids.max": bench.WSL2_SCOPE_PIDS_MAX,
-                "memory.oom.group": 1,
-            }
-            for name, value in controls.items():
-                (cgroup / name).write_text(str(value), encoding="ascii")
-
-            observed_path, observed = bench.verify_external_wsl2_scope(
-                unit,
-                host_uid,
-                proc_cgroup_path=proc_cgroup,
-                cgroup_root=cgroup_root,
-            )
-            self.assertEqual(observed_path, cgroup)
-            self.assertEqual(
-                observed["memory_max_bytes"],
-                bench.WSL2_SCOPE_MEMORY_MAX_BYTES,
-            )
-
-            (cgroup / "memory.max").write_text("max", encoding="ascii")
-            with self.assertRaisesRegex(
-                bench.BenchmarkError, "scope controls"
-            ):
-                bench.verify_external_wsl2_scope(
-                    unit,
-                    host_uid,
-                    proc_cgroup_path=proc_cgroup,
-                    cgroup_root=cgroup_root,
-                )
-            (cgroup / "memory.max").write_text(
-                str(bench.WSL2_SCOPE_MEMORY_MAX_BYTES), encoding="ascii"
-            )
-            (cgroup / "cpu.max").write_text("50000 100000", encoding="ascii")
-            with self.assertRaisesRegex(bench.BenchmarkError, "delegates cpu.max"):
-                bench.verify_external_wsl2_scope(
-                    unit,
-                    host_uid,
-                    proc_cgroup_path=proc_cgroup,
-                    cgroup_root=cgroup_root,
-                )
-
-    def test_external_wsl2_boundary_revalidates_the_live_runner(self) -> None:
-        policy = valid_wsl2_thermal_policy(pacing=True)
-        unit = "kiln-wsl-scope-" + "c" * 32
-        host_uid = 1000
-        cgroup = Path(
-            f"/sys/fs/cgroup/user.slice/user-{host_uid}.slice/"
-            f"user@{host_uid}.service/app.slice/{unit}.scope"
-        )
-        controls = {
-            "memory_max_bytes": bench.WSL2_SCOPE_MEMORY_MAX_BYTES,
-            "memory_swap_max_bytes": 0,
-            "pids_max": bench.WSL2_SCOPE_PIDS_MAX,
-            "memory_oom_group": 1,
-        }
-        environment = {
-            bench.WSL2_THERMAL_POLICY_ENV: policy["content_sha256"],
-            bench.WSL2_THERMAL_PACING_POLICY_ENV: policy["content_sha256"],
-            bench.WSL2_SCOPE_BOUNDARY_ENV: bench.WSL2_SCOPE_BOUNDARY,
-            bench.WSL2_SCOPE_MEMORY_MAX_ENV: str(
-                bench.WSL2_SCOPE_MEMORY_MAX_BYTES
-            ),
-            bench.WSL2_SCOPE_PIDS_MAX_ENV: str(bench.WSL2_SCOPE_PIDS_MAX),
-            bench.WSL2_SCOPE_CPU_QUOTA_ENV: str(
-                bench.WSL2_SCOPE_CPU_QUOTA_PERCENT
-            ),
-            bench.WSL2_SCOPE_UNIT_ENV: unit,
-            bench.WSL2_SCOPE_HOST_UID_ENV: str(host_uid),
-            bench.wsl_platform.NETWORK_ISOLATION_ENV: bench.WSL2_NETWORK_BOUNDARY,
-        }
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "policy.json"
-            path.write_text(json.dumps(policy), encoding="ascii")
-            with (
-                mock.patch.object(
-                    bench.platform,
-                    "release",
-                    return_value="6.6.87.2-microsoft-standard-WSL2",
-                ),
-                mock.patch.dict(bench.os.environ, environment, clear=False),
-                mock.patch.object(
-                    bench,
-                    "verify_external_wsl2_scope",
-                    return_value=(cgroup, controls),
-                ) as verify_scope,
-                mock.patch.object(
-                    bench.wsl_platform, "verify_contained_case"
-                ) as verify_containment,
-            ):
-                record, evidence = bench.load_external_wsl2_boundary(path)
-
-        self.assertEqual(record, policy)
-        self.assertEqual(evidence["cgroup_path"], str(cgroup))
-        self.assertTrue(evidence["parent_qualification_receipt_required"])
-        verify_scope.assert_called_once_with(unit, host_uid)
-        verify_containment.assert_called_once_with(bench.WSL2_NETWORK_BOUNDARY)
-
-    def test_external_wsl2_active_deadline_credits_only_verified_pauses(self) -> None:
-        class Snapshot:
-            @staticmethod
-            def overlap_seconds(started: float, finished: float) -> float:
-                self.assertEqual(started, 100.0)
-                self.assertIn(finished, {110.0, 117.0})
-                return 7.0
-
-        deadline = bench.WslActiveDeadline(
-            started_monotonic_seconds=100.0,
-            timeout_seconds=10.0,
-            policy_sha256="sha256:" + "a" * 64,
-            source={"fixture": "value"},
-            next_evidence_check_monotonic_seconds=110.0,
-        )
-        with mock.patch.object(
-            bench.pacing,
-            "read_pacing_snapshot",
-            return_value=Snapshot(),
-        ) as read_snapshot:
-            self.assertFalse(deadline.expired(109.0))
-            read_snapshot.assert_not_called()
-            self.assertFalse(deadline.expired(110.0))
-            self.assertEqual(deadline.active_seconds, 3.0)
-            self.assertEqual(deadline.pause_seconds, 7.0)
-            self.assertEqual(deadline.next_evidence_check_monotonic_seconds, 117.0)
-            self.assertFalse(deadline.expired(116.0))
-            self.assertTrue(deadline.expired(117.0))
-
-        self.assertEqual(read_snapshot.call_count, 2)
-        self.assertEqual(
-            deadline.detail(),
-            "10.000 active seconds, 7.000 verified pause seconds, "
-            "17.000 wall seconds",
-        )
-
-    def test_external_wsl2_active_deadline_rejects_invalid_evidence(self) -> None:
-        deadline = bench.WslActiveDeadline(
-            started_monotonic_seconds=100.0,
-            timeout_seconds=10.0,
-            policy_sha256="sha256:" + "a" * 64,
-            source={},
-            next_evidence_check_monotonic_seconds=110.0,
-        )
-        with (
-            mock.patch.object(
-                bench.pacing,
-                "read_pacing_snapshot",
-                side_effect=bench.pacing.WslPacingEvidenceError("injected"),
-            ),
-            self.assertRaisesRegex(
-                bench.BenchmarkError,
-                "cannot account external WSL2 active time",
-            ),
-        ):
-            deadline.expired(110.0)
-
-    def test_owned_server_readiness_retries_without_an_inner_guard(self) -> None:
+    def test_owned_server_readiness_retries_transient_probe_failures(self) -> None:
         class Process:
             @staticmethod
             def poll() -> None:
@@ -2906,7 +2213,6 @@ class ServingBenchmarkTests(unittest.TestCase):
             ) as probe:
                 models = bench.wait_for_owned_server_models(
                     server,
-                    None,
                     "http://127.0.0.1:8420",
                     {},
                 )
@@ -2943,17 +2249,14 @@ class ServingBenchmarkTests(unittest.TestCase):
             mock.patch.object(
                 bench,
                 "_wait_for_owned_process",
-                side_effect=bench.BenchmarkError("invalid pacing stream"),
+                side_effect=bench.BenchmarkError("invalid timeout accounting"),
             ),
             self.assertRaisesRegex(
                 bench.OwnedServerShutdownError,
-                "invalid pacing stream",
+                "invalid timeout accounting",
             ) as raised,
         ):
-            bench.shutdown_owned_server(
-                server,
-                external_wsl2_policy_sha256="sha256:" + "a" * 64,
-            )
+            bench.shutdown_owned_server(server)
 
         self.assertIsNotNone(process.poll())
         self.assertFalse(bench.process_group_alive(process.pid))
@@ -3105,11 +2408,8 @@ class ServingBenchmarkTests(unittest.TestCase):
                 ),
             ),
         ):
-            observed_shutdown, observed_log, failures = (
-                bench.finalize_owned_server(
-                    mock.Mock(),
-                    external_wsl2_policy_sha256="sha256:" + "b" * 64,
-                )
+            observed_shutdown, observed_log, failures = bench.finalize_owned_server(
+                mock.Mock()
             )
 
         self.assertEqual(observed_shutdown, shutdown)
@@ -3117,139 +2417,6 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertEqual(
             [type(failure) for failure in failures],
             [bench.OwnedServerShutdownError, bench.OwnedServerLogError],
-        )
-
-    def test_host_thermal_hard_limit_only_policy_never_arms_process_stop(self) -> None:
-        value = valid_host_thermal_policy()
-        value["id"] = "test-hard-limit-only-v1"
-        value["pacing"] = {"mode": "hard_limit_only"}
-
-        record, policy, settlement_timeout = (
-            bench.validate_host_thermal_policy_value(value, "fixture")
-        )
-
-        self.assertEqual(record["pacing"], {"mode": "hard_limit_only"})
-        self.assertEqual(settlement_timeout, 30.0)
-        self.assertIsNone(policy.pacing_start_millicelsius)
-        self.assertIsNone(policy.pacing_resume_millicelsius)
-        self.assertIsNone(policy.pacing_timeout_seconds)
-        self.assertNotIn("thermal_pacing", policy.effective_config())
-        self.assertIsNone(policy.guard_kwargs()["pacing_start_millicelsius"])
-        self.assertIsNone(policy.guard_kwargs()["pacing_resume_millicelsius"])
-        self.assertIsNone(policy.guard_kwargs()["pacing_timeout_seconds"])
-
-        invalid = json.loads(json.dumps(value))
-        invalid["pacing"]["start_millicelsius"] = 78_000
-        with self.assertRaisesRegex(bench.BenchmarkError, "unknown keys"):
-            bench.validate_host_thermal_policy_value(invalid, "fixture")
-
-        invalid = json.loads(json.dumps(value))
-        invalid["pacing"]["mode"] = "cooperative"
-        with self.assertRaisesRegex(bench.BenchmarkError, "must be"):
-            bench.validate_host_thermal_policy_value(invalid, "fixture")
-
-    def test_tracked_strix_halo_serving_policy_is_hard_limit_only(self) -> None:
-        path = (
-            ROOT
-            / "qualification"
-            / "host-policies"
-            / "strix-halo-serving-benchmark-hard-limit-v1.json"
-        )
-
-        record, policy, settlement_timeout = bench.load_host_thermal_policy(path)
-
-        self.assertEqual(record["id"], "strix-halo-serving-benchmark-hard-limit-v1")
-        self.assertEqual(record["pacing"], {"mode": "hard_limit_only"})
-        self.assertEqual(record["limit_millicelsius"], 93_000)
-        self.assertEqual(
-            record["content_sha256"],
-            "sha256:1c8f1fea09898beede339d5b559a1dcd1351e1530ff4fd2f60350684a14f54e1",
-        )
-        self.assertEqual(settlement_timeout, 300.0)
-        self.assertIsNone(policy.pacing_start_millicelsius)
-        self.assertIsNone(policy.pacing_resume_millicelsius)
-        self.assertIsNone(policy.pacing_timeout_seconds)
-
-    def test_prelaunch_cooldown_requires_consecutive_post_provenance_samples(self) -> None:
-        policy_record, policy, _timeout = bench.validate_host_thermal_policy_value(
-            valid_host_thermal_policy(), "fixture"
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            hwmon = Path(directory) / "hwmon0"
-            hwmon.mkdir()
-            (hwmon / "name").write_text("fixture\n")
-            (hwmon / "temp1_label").write_text("package\n")
-            (hwmon / "temp1_input").write_text("50000\n")
-            events: list[str] = []
-
-            def trace(event: str, **_fields: object) -> None:
-                events.append(event)
-
-            with mock.patch.object(bench.time, "sleep"):
-                evidence = bench.wait_for_prelaunch_cooldown(
-                    policy,
-                    hwmon_root=Path(directory),
-                    trace_callback=trace,
-                )
-
-        self.assertEqual(evidence["sample_count"], 2)
-        self.assertEqual(evidence["stable_samples_observed"], 2)
-        self.assertEqual(evidence["temperature_end_millicelsius"], 50_000)
-        self.assertEqual(
-            events,
-            [
-                "host_thermal_prelaunch_cooldown_started",
-                "host_thermal_prelaunch_cooldown_completed",
-            ],
-        )
-        self.assertTrue(
-            bench.validate_prelaunch_cooldown(evidence, policy_record)
-        )
-
-    def test_prelaunch_cooldown_times_out_before_process_creation(self) -> None:
-        _record, policy, _timeout = bench.validate_host_thermal_policy_value(
-            valid_host_thermal_policy(), "fixture"
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            hwmon = Path(directory) / "hwmon0"
-            hwmon.mkdir()
-            (hwmon / "name").write_text("fixture\n")
-            (hwmon / "temp1_label").write_text("package\n")
-            (hwmon / "temp1_input").write_text("70000\n")
-            with mock.patch.object(
-                bench.time, "monotonic", side_effect=[0.0, 1.0, 31.0]
-            ):
-                with self.assertRaisesRegex(
-                    bench.BenchmarkError, "pre-launch cooldown did not reach"
-                ):
-                    bench.wait_for_prelaunch_cooldown(
-                        policy,
-                        hwmon_root=Path(directory),
-                    )
-
-    def test_prelaunch_cooldown_rejects_the_hard_limit_immediately(self) -> None:
-        _record, policy, _timeout = bench.validate_host_thermal_policy_value(
-            valid_host_thermal_policy(), "fixture"
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            hwmon = Path(directory) / "hwmon0"
-            hwmon.mkdir()
-            (hwmon / "name").write_text("fixture\n")
-            (hwmon / "temp1_label").write_text("package\n")
-            (hwmon / "temp1_input").write_text("90000\n")
-            events: list[str] = []
-            with self.assertRaisesRegex(bench.BenchmarkError, "hard limit is 90000"):
-                bench.wait_for_prelaunch_cooldown(
-                    policy,
-                    hwmon_root=Path(directory),
-                    trace_callback=lambda event, **_fields: events.append(event),
-                )
-        self.assertEqual(
-            events,
-            [
-                "host_thermal_prelaunch_cooldown_started",
-                "host_thermal_prelaunch_cooldown_hard_limit_reached",
-            ],
         )
 
     def test_attached_process_group_binds_proc_identity_and_detects_reuse(self) -> None:
@@ -3279,31 +2446,6 @@ class ServingBenchmarkTests(unittest.TestCase):
             write_stat(4000, 123456)
             with self.assertRaisesRegex(bench.BenchmarkError, "lead its process group"):
                 bench.AttachedProcessGroup.attach(4321, proc_root=root)
-
-    def test_host_guard_starts_before_the_first_server_probe(self) -> None:
-        events: list[str] = []
-
-        class OrderedGuard(FakeThermalGuard):
-            def start(self) -> None:
-                events.append("guard_started")
-
-        original_fetch_json = bench.fetch_json
-
-        def ordered_fetch_json(*args: object, **kwargs: object) -> dict:
-            events.append("server_probe")
-            return original_fetch_json(*args, **kwargs)
-
-        with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
-            return_code, _output = self._run_cli_fixture(
-                fake,
-                directory,
-                fetch_json=ordered_fetch_json,
-                thermal_guard_factory=OrderedGuard,
-            )
-
-        self.assertEqual(return_code, 0)
-        self.assertEqual(events[0], "guard_started")
-        self.assertIn("server_probe", events[1:])
 
     def test_owned_server_launch_binds_group_shutdown_and_log_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3385,39 +2527,12 @@ class ServingBenchmarkTests(unittest.TestCase):
             lifecycle = {
                 "mode": "owned_process_group",
                 "launch_config": config.record,
-                "prelaunch_cooldown": valid_prelaunch_cooldown(),
                 "log": log,
                 "shutdown": shutdown,
             }
-            thermal_record = bench.validate_host_thermal_policy_value(
-                valid_host_thermal_policy(), "fixture"
-            )[0]
-            mode, passed = bench.validate_server_lifecycle(
-                lifecycle,
-                host_thermal_policy=thermal_record,
-            )
+            mode, passed = bench.validate_server_lifecycle(lifecycle)
             self.assertEqual(mode, "owned_process_group")
             self.assertTrue(passed)
-            unpaced_lifecycle = json.loads(json.dumps(lifecycle))
-            unpaced_lifecycle["prelaunch_cooldown"] = None
-            self.assertEqual(
-                bench.validate_server_lifecycle(
-                    unpaced_lifecycle,
-                    host_thermal_policy=None,
-                ),
-                ("owned_process_group", True),
-            )
-            invalid_lifecycle = json.loads(json.dumps(lifecycle))
-            invalid_lifecycle["prelaunch_cooldown"][
-                "temperature_end_millicelsius"
-            ] = 70_000
-            with self.assertRaisesRegex(
-                bench.BenchmarkError, "does not prove stable cooldown"
-            ):
-                bench.validate_server_lifecycle(
-                    invalid_lifecycle,
-                    host_thermal_policy=thermal_record,
-                )
 
     def test_unpaced_owned_server_exit_retains_complete_failed_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3492,11 +2607,8 @@ class ServingBenchmarkTests(unittest.TestCase):
                 ),
                 mock.patch.object(
                     bench,
-                    "fingerprint_model_with_thermal_containment",
-                    return_value=(
-                        model_fingerprint,
-                        None,
-                    ),
+                    "fingerprint_model",
+                    return_value=model_fingerprint,
                 ),
                 mock.patch.object(
                     bench,
@@ -3545,18 +2657,6 @@ class ServingBenchmarkTests(unittest.TestCase):
             self.assertFalse(lifecycle["shutdown"]["forced"])
             self.assertFalse(lifecycle["shutdown"]["process_group_alive_end"])
             self.assertGreater(lifecycle["log"]["bytes"], 0)
-            self.assertIsNone(lifecycle["prelaunch_cooldown"])
-            self.assertEqual(
-                receipt["host_thermal"],
-                {
-                    "mode": "not_requested",
-                    "unsafe_no_guard_acknowledged": False,
-                    "policy": None,
-                    "process_group": None,
-                    "model_fingerprint": None,
-                    "evidence": None,
-                },
-            )
 
     def test_cli_writes_a_self_hashing_passed_receipt(self) -> None:
         with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
@@ -3596,17 +2696,6 @@ class ServingBenchmarkTests(unittest.TestCase):
                     if gate["name"] == "request_performance_accounted"
                 )["passed"]
             )
-            self.assertEqual(
-                receipt["host_thermal"]["model_fingerprint"]["schema"],
-                bench.MODEL_FINGERPRINT_THERMAL_SCHEMA,
-            )
-            self.assertEqual(
-                receipt["host_thermal"]["model_fingerprint"][
-                    "read_mib_per_second"
-                ],
-                0,
-            )
-
             missing_discriminator = json.loads(json.dumps(receipt))
             missing_discriminator["reference_role"] = (
                 "same_artifact_graph_eager_discriminator"
@@ -3692,49 +2781,6 @@ class ServingBenchmarkTests(unittest.TestCase):
             with self.assertRaisesRegex(bench.BenchmarkError, "uuid is invalid"):
                 bench.validate_benchmark_receipt(invalid_nvml)
 
-            driver_v15 = json.loads(json.dumps(receipt))
-            driver_v15["driver_version"] = "15"
-            driver_v15.pop("reference_role")
-            driver_v15["workload"].pop("prompt_set_id")
-            driver_v15["workload"][
-                "prompt_template_version"
-            ] = bench.FIXED_PROMPT_TEMPLATE_VERSION_V1
-            driver_v15["host_thermal"]["model_fingerprint"][
-                "read_mib_per_second"
-            ] = 256
-            driver_v15["memory_sampler"].pop("device")
-            for row in [driver_v15["warmup"], *driver_v15["runs"]]:
-                if row is None or row.get("server") is None:
-                    continue
-                row["server"] = as_v5_server_diagnostics(row["server"])
-                row["gates"] = [
-                    gate
-                    for gate in row["gates"]
-                    if gate["name"] != "rocm_graph_capture_parity_accounted"
-                ]
-            driver_v15["workload_fingerprint"] = bench.canonical_sha256(
-                driver_v15["workload"]
-            )
-            driver_v15.pop("receipt_sha256")
-            driver_v15["receipt_sha256"] = bench.canonical_sha256(driver_v15)
-            bench.validate_benchmark_receipt(driver_v15)
-
-            driver_v14 = json.loads(json.dumps(driver_v15))
-            driver_v14["driver_version"] = "14"
-            for row in [driver_v14["warmup"], *driver_v14["runs"]]:
-                if row is None:
-                    continue
-                row.pop("request_performance")
-                row.pop("request_phase_summary")
-                row["gates"] = [
-                    gate
-                    for gate in row["gates"]
-                    if gate["name"] != "request_performance_accounted"
-                ]
-            driver_v14.pop("receipt_sha256")
-            driver_v14["receipt_sha256"] = bench.canonical_sha256(driver_v14)
-            bench.validate_benchmark_receipt(driver_v14)
-
             tampered_summary = json.loads(json.dumps(receipt))
             tampered_distribution = tampered_summary["runs"][0][
                 "request_phase_summary"
@@ -3761,67 +2807,6 @@ class ServingBenchmarkTests(unittest.TestCase):
             ):
                 bench.validate_benchmark_receipt(tampered_request)
 
-            driver_v13 = json.loads(json.dumps(driver_v14))
-            driver_v13["driver_version"] = "13"
-            for row in [driver_v13["warmup"], *driver_v13["runs"]]:
-                if row is None:
-                    continue
-                server = row.get("server")
-                if server is None:
-                    continue
-                server["schema"] = bench.SERVER_DIAGNOSTICS_SCHEMA_V4
-                fallbacks = server["rocm_graphs"].get("fallbacks")
-                if fallbacks is not None:
-                    multi_row_count = fallbacks.pop(
-                        "multi_row_batch_unsupported"
-                    )
-                    fallbacks["total"] -= multi_row_count
-            driver_v13.pop("receipt_sha256")
-            driver_v13["receipt_sha256"] = bench.canonical_sha256(driver_v13)
-            bench.validate_benchmark_receipt(driver_v13)
-
-            legacy = json.loads(json.dumps(driver_v14))
-            legacy["driver_version"] = "11"
-            legacy_fingerprint = legacy["host_thermal"]["model_fingerprint"]
-            legacy_fingerprint["schema"] = bench.MODEL_FINGERPRINT_THERMAL_SCHEMA_V1
-            legacy_fingerprint.pop("read_mib_per_second")
-            for row in [legacy["warmup"], *legacy["runs"]]:
-                if row is None:
-                    continue
-                server = row.get("server")
-                if server is None:
-                    continue
-                server["schema"] = bench.SERVER_DIAGNOSTICS_SCHEMA_V3
-                fallbacks = server["rocm_graphs"].get("fallbacks")
-                if fallbacks is not None:
-                    multi_row_count = fallbacks.pop(
-                        "multi_row_batch_unsupported"
-                    )
-                    fallbacks["total"] -= multi_row_count
-                batching = server.get("batching_engine")
-                if batching is not None:
-                    for field in (
-                        "actor_cycle_idle_ms",
-                        "actor_cycle_idle_source",
-                        "actor_cycle_idle_active_end",
-                        "actor_cycle_idle_count",
-                        "actor_cycle_idle_seconds",
-                        "process_max_actor_cycle_idle_ms",
-                    ):
-                        batching.pop(field)
-            legacy.pop("receipt_sha256")
-            legacy["receipt_sha256"] = bench.canonical_sha256(legacy)
-            bench.validate_benchmark_receipt(legacy)
-
-            tampered = json.loads(json.dumps(receipt))
-            tampered["host_thermal"]["model_fingerprint"][
-                "read_mib_per_second"
-            ] = 63
-            tampered.pop("receipt_sha256")
-            tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
-            with self.assertRaisesRegex(bench.BenchmarkError, "zero or in 64"):
-                bench.validate_benchmark_receipt(tampered)
-
             tampered = json.loads(json.dumps(receipt))
             tampered["unexpected"] = True
             tampered.pop("receipt_sha256")
@@ -3843,31 +2828,6 @@ class ServingBenchmarkTests(unittest.TestCase):
             tampered.pop("receipt_sha256")
             tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
             with self.assertRaisesRegex(bench.BenchmarkError, "absent"):
-                bench.validate_benchmark_receipt(tampered)
-
-            tampered = json.loads(json.dumps(receipt))
-            tampered["host_thermal"].pop("model_fingerprint")
-            tampered.pop("receipt_sha256")
-            tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
-            with self.assertRaisesRegex(bench.BenchmarkError, "missing keys"):
-                bench.validate_benchmark_receipt(tampered)
-
-            tampered = json.loads(json.dumps(receipt))
-            tampered["host_thermal"]["model_fingerprint"]["final"] = None
-            tampered.pop("receipt_sha256")
-            tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
-            with self.assertRaisesRegex(
-                bench.BenchmarkError, "disagrees with its finalization check"
-            ):
-                bench.validate_benchmark_receipt(tampered)
-
-            tampered = json.loads(json.dumps(receipt))
-            tampered["host_thermal"]["model_fingerprint"]["initial"]["runtime"][
-                "host_temperature_peak_millicelsius"
-            ] = 90_000
-            tampered.pop("receipt_sha256")
-            tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
-            with self.assertRaisesRegex(bench.BenchmarkError, "did not close safely"):
                 bench.validate_benchmark_receipt(tampered)
 
             vllm_receipt = json.loads(json.dumps(receipt))
@@ -3903,72 +2863,6 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertEqual(receipt["runs"][0]["success_count"], 1)
         recorded_hash = receipt.pop("receipt_sha256")
         self.assertEqual(recorded_hash, bench.canonical_sha256(receipt))
-
-    def test_hard_limit_only_receipt_binds_idle_boundary_cooldowns(self) -> None:
-        with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
-            return_code, output = self._run_cli_fixture(
-                fake,
-                directory,
-                hard_limit_only=True,
-            )
-            receipt = bench.strict_json_loads(output.read_bytes())
-
-        self.assertEqual(return_code, 0)
-        bench.validate_benchmark_receipt(receipt)
-        cooldowns = receipt["runs"][0]["host_thermal"][
-            "idle_boundary_cooldowns"
-        ]
-        self.assertEqual(
-            [cooldown["position"] for cooldown in cooldowns],
-            ["pre_run", "post_run"],
-        )
-        self.assertGreaterEqual(
-            receipt["runs"][0]["host_thermal"]["phase_wall_seconds"],
-            sum(cooldown["elapsed_seconds"] for cooldown in cooldowns),
-        )
-
-        tampered = json.loads(json.dumps(receipt))
-        tampered["runs"][0]["host_thermal"]["idle_boundary_cooldowns"][0][
-            "target_millicelsius"
-        ] += 1
-        tampered.pop("receipt_sha256")
-        tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
-        with self.assertRaisesRegex(bench.BenchmarkError, "disagrees"):
-            bench.validate_benchmark_receipt(tampered)
-
-        tampered = json.loads(json.dumps(receipt))
-        tampered["runs"][0]["host_thermal"]["idle_boundary_cooldowns"].pop()
-        tampered.pop("receipt_sha256")
-        tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
-        with self.assertRaisesRegex(bench.BenchmarkError, "positions"):
-            bench.validate_benchmark_receipt(tampered)
-
-        tampered = json.loads(json.dumps(receipt))
-        tampered["runs"][0]["host_thermal"]["host_thermal_pacing_event_count"] = 1
-        tampered.pop("receipt_sha256")
-        tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
-        with self.assertRaisesRegex(bench.BenchmarkError, "recorded pacing"):
-            bench.validate_benchmark_receipt(tampered)
-
-        tampered = json.loads(json.dumps(receipt))
-        tampered["runs"][0]["host_thermal"]["idle_boundary_cooldowns"][0][
-            "sample_count"
-        ] = True
-        tampered.pop("receipt_sha256")
-        tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
-        with self.assertRaisesRegex(bench.BenchmarkError, "positive integer"):
-            bench.validate_benchmark_receipt(tampered)
-
-        tampered = json.loads(json.dumps(receipt))
-        wall_seconds = tampered["runs"][0]["host_thermal"]["phase_wall_seconds"]
-        for cooldown in tampered["runs"][0]["host_thermal"][
-            "idle_boundary_cooldowns"
-        ]:
-            cooldown["elapsed_seconds"] = wall_seconds
-        tampered.pop("receipt_sha256")
-        tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
-        with self.assertRaisesRegex(bench.BenchmarkError, "exceeds phase wall"):
-            bench.validate_benchmark_receipt(tampered)
 
     def test_cli_preserves_completed_rows_when_final_health_probe_fails(self) -> None:
         with (
@@ -4025,56 +2919,6 @@ class ServingBenchmarkTests(unittest.TestCase):
                     "detail": "BenchmarkError: injected final health failure",
                 }
             ],
-        )
-
-    def test_unowned_unguarded_cli_is_rejected(self) -> None:
-        with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
-            stderr = io.StringIO()
-            with redirect_stderr(stderr):
-                return_code, output = self._run_cli_fixture(
-                    fake, directory, guarded=False
-                )
-        self.assertEqual(return_code, 2)
-        self.assertFalse(output.exists())
-        self.assertIn("is obsolete", stderr.getvalue())
-
-    def test_startup_thermal_trip_writes_a_valid_failed_receipt(self) -> None:
-        with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
-            return_code, output = self._run_cli_fixture(
-                fake,
-                directory,
-                thermal_guard_factory=FakeStartupTrippedThermalGuard,
-            )
-            receipt = bench.strict_json_loads(output.read_bytes())
-            bench.validate_benchmark_receipt(receipt)
-
-        self.assertEqual(return_code, 2)
-        self.assertEqual(receipt["verdict"], "failed")
-        self.assertIsNone(receipt["warmup"])
-        self.assertEqual(receipt["runs"], [])
-        self.assertEqual(
-            receipt["completion"]["failures"],
-            [
-                {
-                    "phase": "host_thermal_startup",
-                    "detail": "BenchmarkError: injected startup thermal trip",
-                },
-                {
-                    "phase": "execution_identity_unchanged",
-                    "detail": (
-                        "BenchmarkError: Kiln execution identity is unavailable "
-                        "because startup did not complete"
-                    ),
-                },
-                {
-                    "phase": "host_thermal_handoff",
-                    "detail": "BenchmarkError: injected startup thermal trip",
-                },
-            ],
-        )
-        self.assertEqual(
-            receipt["completion"]["finalization_checks"]["host_thermal_handoff"],
-            "failed",
         )
 
     def test_server_startup_failure_writes_a_valid_failed_receipt(self) -> None:

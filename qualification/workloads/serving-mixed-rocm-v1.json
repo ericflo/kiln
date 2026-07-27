@@ -23,15 +23,10 @@
         "build": {
           "binary": "kiln",
           "cargo_jobs": 1,
-          "cargo_cpu_quota_percent": 50,
           "cargo_execution_mode": "transient-service",
           "cargo_environment_policy": "closed-source-build-v1",
-          "cargo_host_thermal_limit_millicelsius": 90000,
-          "cargo_host_thermal_poll_milliseconds": 250,
-          "cargo_host_thermal_sensor_label": "Tctl",
-          "cargo_host_thermal_sensor_name": "k10temp",
           "cargo_memory_scope": "systemd_user_transient_service_memory_max_no_swap",
-          "cargo_min_available_gib": 15,
+          "cargo_min_available_gib": 1,
           "cargo_private_network": true,
           "cargo_service_runtime_max_seconds": 840,
           "cargo_wrapper": "scripts/cargo-bounded.sh",
@@ -42,7 +37,6 @@
           "package": "kiln-server",
           "profile": "release",
           "timeout_seconds": 900,
-          "rocm_archs": "gfx1151",
           "rocm_path": "/opt/rocm"
         },
         "model": {
@@ -60,24 +54,6 @@
           "prefix_cache_effective_enabled": true,
           "prefix_cache_effective_reason": "active",
           "prefix_cache_requested_enabled": true
-        },
-        "host_safety": {
-          "thermal_guard": {
-            "limit_millicelsius": 97000,
-            "poll_interval_ms": 250,
-            "sensor": {
-              "hwmon_name": "k10temp",
-              "label": "Tctl"
-            }
-          },
-          "thermal_cooldown": {
-            "mode": "post_process_exit_consecutive_samples",
-            "poll_interval_ms": 250,
-            "scope": "host_package",
-            "stable_samples": 8,
-            "target_millicelsius": 75000,
-            "timeout_seconds": 180.0
-          }
         },
         "server": {
           "chat_performance_metadata_enabled": true,
@@ -262,25 +238,6 @@
               "graph_rejected_candidate_cleanup_duration_ms_total",
               "graph_rejected_candidate_cleanup_slow_count",
               "graph_transient_candidate_bytes_peak_end",
-              "host_temperature_end_millicelsius",
-              "host_temperature_peak_millicelsius",
-              "host_temperature_start_millicelsius",
-              "host_thermal_cooldown_active_end",
-              "host_thermal_cooldown_completed_count",
-              "host_thermal_cooldown_peak_millicelsius",
-              "host_thermal_cooldown_sample_count",
-              "host_thermal_cooldown_seconds",
-              "host_thermal_cooldown_stable_sample_count",
-              "host_thermal_cooldown_timeout_count",
-              "host_thermal_guard_error_count",
-              "host_thermal_guard_trip_count",
-              "host_thermal_pacing_active_end",
-              "host_thermal_pacing_completed_event_count",
-              "host_thermal_pacing_event_count",
-              "host_thermal_pacing_itl_outlier_count",
-              "host_thermal_pacing_max_seconds",
-              "host_thermal_pacing_max_start_millicelsius",
-              "host_thermal_pacing_seconds",
               "itl_ms_p50",
               "itl_ms_p99",
               "itl_ms_p999",
@@ -332,7 +289,6 @@
               "long_prefill_prompt_tokens",
               "measurement_duration_seconds",
               "memory_reclaim_event_count",
-              "non_thermal_attributed_itl_outlier_count",
               "observed_completion_token_count",
               "observed_output_token_throughput_per_second",
               "output_token_throughput_per_second",
@@ -370,6 +326,7 @@
               "rocm_w8_lm_head_dispatch_failure_count",
               "rocm_w8_lm_head_sample_dispatch_count",
               "rocm_w8_lm_head_sample_row_count",
+              "runtime_attributed_itl_outlier_count",
               "sampled_profile_batching_batched_decode_forward_count",
               "sampled_profile_batching_decode_forward_count",
               "sampled_profile_batching_decode_row_count",
@@ -437,15 +394,10 @@
         "build": {
           "binary": "kiln",
           "cargo_jobs": 1,
-          "cargo_cpu_quota_percent": 50,
           "cargo_execution_mode": "transient-service",
           "cargo_environment_policy": "closed-source-build-v1",
-          "cargo_host_thermal_limit_millicelsius": 90000,
-          "cargo_host_thermal_poll_milliseconds": 250,
-          "cargo_host_thermal_sensor_label": "Tctl",
-          "cargo_host_thermal_sensor_name": "k10temp",
           "cargo_memory_scope": "systemd_user_transient_service_memory_max_no_swap",
-          "cargo_min_available_gib": 15,
+          "cargo_min_available_gib": 1,
           "cargo_private_network": true,
           "cargo_service_runtime_max_seconds": 840,
           "cargo_wrapper": "scripts/cargo-bounded.sh",
@@ -456,7 +408,6 @@
           "package": "kiln-server",
           "profile": "release",
           "timeout_seconds": 900,
-          "rocm_archs": "gfx1151",
           "rocm_path": "/opt/rocm"
         },
         "model": {
@@ -474,24 +425,6 @@
           "prefix_cache_effective_enabled": true,
           "prefix_cache_effective_reason": "active",
           "prefix_cache_requested_enabled": true
-        },
-        "host_safety": {
-          "thermal_guard": {
-            "limit_millicelsius": 97000,
-            "poll_interval_ms": 250,
-            "sensor": {
-              "hwmon_name": "k10temp",
-              "label": "Tctl"
-            }
-          },
-          "thermal_cooldown": {
-            "mode": "post_process_exit_consecutive_samples",
-            "poll_interval_ms": 250,
-            "scope": "host_package",
-            "stable_samples": 8,
-            "target_millicelsius": 75000,
-            "timeout_seconds": 180.0
-          }
         },
         "server": {
           "chat_performance_metadata_enabled": true,
@@ -676,25 +609,6 @@
               "graph_rejected_candidate_cleanup_duration_ms_total",
               "graph_rejected_candidate_cleanup_slow_count",
               "graph_transient_candidate_bytes_peak_end",
-              "host_temperature_end_millicelsius",
-              "host_temperature_peak_millicelsius",
-              "host_temperature_start_millicelsius",
-              "host_thermal_cooldown_active_end",
-              "host_thermal_cooldown_completed_count",
-              "host_thermal_cooldown_peak_millicelsius",
-              "host_thermal_cooldown_sample_count",
-              "host_thermal_cooldown_seconds",
-              "host_thermal_cooldown_stable_sample_count",
-              "host_thermal_cooldown_timeout_count",
-              "host_thermal_guard_error_count",
-              "host_thermal_guard_trip_count",
-              "host_thermal_pacing_active_end",
-              "host_thermal_pacing_completed_event_count",
-              "host_thermal_pacing_event_count",
-              "host_thermal_pacing_itl_outlier_count",
-              "host_thermal_pacing_max_seconds",
-              "host_thermal_pacing_max_start_millicelsius",
-              "host_thermal_pacing_seconds",
               "itl_ms_p50",
               "itl_ms_p99",
               "itl_ms_p999",
@@ -746,7 +660,6 @@
               "long_prefill_prompt_tokens",
               "measurement_duration_seconds",
               "memory_reclaim_event_count",
-              "non_thermal_attributed_itl_outlier_count",
               "observed_completion_token_count",
               "observed_output_token_throughput_per_second",
               "output_token_throughput_per_second",
@@ -784,6 +697,7 @@
               "rocm_w8_lm_head_dispatch_failure_count",
               "rocm_w8_lm_head_sample_dispatch_count",
               "rocm_w8_lm_head_sample_row_count",
+              "runtime_attributed_itl_outlier_count",
               "sampled_profile_batching_batched_decode_forward_count",
               "sampled_profile_batching_decode_forward_count",
               "sampled_profile_batching_decode_row_count",
@@ -851,15 +765,10 @@
         "build": {
           "binary": "kiln",
           "cargo_jobs": 1,
-          "cargo_cpu_quota_percent": 50,
           "cargo_execution_mode": "transient-service",
           "cargo_environment_policy": "closed-source-build-v1",
-          "cargo_host_thermal_limit_millicelsius": 90000,
-          "cargo_host_thermal_poll_milliseconds": 250,
-          "cargo_host_thermal_sensor_label": "Tctl",
-          "cargo_host_thermal_sensor_name": "k10temp",
           "cargo_memory_scope": "systemd_user_transient_service_memory_max_no_swap",
-          "cargo_min_available_gib": 15,
+          "cargo_min_available_gib": 1,
           "cargo_private_network": true,
           "cargo_service_runtime_max_seconds": 840,
           "cargo_wrapper": "scripts/cargo-bounded.sh",
@@ -870,7 +779,6 @@
           "package": "kiln-server",
           "profile": "release",
           "timeout_seconds": 900,
-          "rocm_archs": "gfx1151",
           "rocm_path": "/opt/rocm"
         },
         "model": {
@@ -888,24 +796,6 @@
           "prefix_cache_effective_enabled": false,
           "prefix_cache_effective_reason": "configuration",
           "prefix_cache_requested_enabled": false
-        },
-        "host_safety": {
-          "thermal_guard": {
-            "limit_millicelsius": 97000,
-            "poll_interval_ms": 250,
-            "sensor": {
-              "hwmon_name": "k10temp",
-              "label": "Tctl"
-            }
-          },
-          "thermal_cooldown": {
-            "mode": "post_process_exit_consecutive_samples",
-            "poll_interval_ms": 250,
-            "scope": "host_package",
-            "stable_samples": 8,
-            "target_millicelsius": 75000,
-            "timeout_seconds": 180.0
-          }
         },
         "server": {
           "chat_performance_metadata_enabled": true,
@@ -1090,25 +980,6 @@
               "graph_rejected_candidate_cleanup_duration_ms_total",
               "graph_rejected_candidate_cleanup_slow_count",
               "graph_transient_candidate_bytes_peak_end",
-              "host_temperature_end_millicelsius",
-              "host_temperature_peak_millicelsius",
-              "host_temperature_start_millicelsius",
-              "host_thermal_cooldown_active_end",
-              "host_thermal_cooldown_completed_count",
-              "host_thermal_cooldown_peak_millicelsius",
-              "host_thermal_cooldown_sample_count",
-              "host_thermal_cooldown_seconds",
-              "host_thermal_cooldown_stable_sample_count",
-              "host_thermal_cooldown_timeout_count",
-              "host_thermal_guard_error_count",
-              "host_thermal_guard_trip_count",
-              "host_thermal_pacing_active_end",
-              "host_thermal_pacing_completed_event_count",
-              "host_thermal_pacing_event_count",
-              "host_thermal_pacing_itl_outlier_count",
-              "host_thermal_pacing_max_seconds",
-              "host_thermal_pacing_max_start_millicelsius",
-              "host_thermal_pacing_seconds",
               "itl_ms_p50",
               "itl_ms_p99",
               "itl_ms_p999",
@@ -1160,7 +1031,6 @@
               "long_prefill_prompt_tokens",
               "measurement_duration_seconds",
               "memory_reclaim_event_count",
-              "non_thermal_attributed_itl_outlier_count",
               "observed_completion_token_count",
               "observed_output_token_throughput_per_second",
               "output_token_throughput_per_second",
@@ -1198,6 +1068,7 @@
               "rocm_w8_lm_head_dispatch_failure_count",
               "rocm_w8_lm_head_sample_dispatch_count",
               "rocm_w8_lm_head_sample_row_count",
+              "runtime_attributed_itl_outlier_count",
               "sampled_profile_batching_batched_decode_forward_count",
               "sampled_profile_batching_decode_forward_count",
               "sampled_profile_batching_decode_row_count",
@@ -1265,15 +1136,10 @@
         "build": {
           "binary": "kiln",
           "cargo_jobs": 1,
-          "cargo_cpu_quota_percent": 50,
           "cargo_execution_mode": "transient-service",
           "cargo_environment_policy": "closed-source-build-v1",
-          "cargo_host_thermal_limit_millicelsius": 90000,
-          "cargo_host_thermal_poll_milliseconds": 250,
-          "cargo_host_thermal_sensor_label": "Tctl",
-          "cargo_host_thermal_sensor_name": "k10temp",
           "cargo_memory_scope": "systemd_user_transient_service_memory_max_no_swap",
-          "cargo_min_available_gib": 15,
+          "cargo_min_available_gib": 1,
           "cargo_private_network": true,
           "cargo_service_runtime_max_seconds": 840,
           "cargo_wrapper": "scripts/cargo-bounded.sh",
@@ -1284,7 +1150,6 @@
           "package": "kiln-server",
           "profile": "release",
           "timeout_seconds": 900,
-          "rocm_archs": "gfx1151",
           "rocm_path": "/opt/rocm"
         },
         "model": {
@@ -1302,24 +1167,6 @@
           "prefix_cache_effective_enabled": true,
           "prefix_cache_effective_reason": "active",
           "prefix_cache_requested_enabled": true
-        },
-        "host_safety": {
-          "thermal_guard": {
-            "limit_millicelsius": 97000,
-            "poll_interval_ms": 250,
-            "sensor": {
-              "hwmon_name": "k10temp",
-              "label": "Tctl"
-            }
-          },
-          "thermal_cooldown": {
-            "mode": "post_process_exit_consecutive_samples",
-            "poll_interval_ms": 250,
-            "scope": "host_package",
-            "stable_samples": 8,
-            "target_millicelsius": 75000,
-            "timeout_seconds": 180.0
-          }
         },
         "server": {
           "chat_performance_metadata_enabled": true,
@@ -1504,25 +1351,6 @@
               "graph_rejected_candidate_cleanup_duration_ms_total",
               "graph_rejected_candidate_cleanup_slow_count",
               "graph_transient_candidate_bytes_peak_end",
-              "host_temperature_end_millicelsius",
-              "host_temperature_peak_millicelsius",
-              "host_temperature_start_millicelsius",
-              "host_thermal_cooldown_active_end",
-              "host_thermal_cooldown_completed_count",
-              "host_thermal_cooldown_peak_millicelsius",
-              "host_thermal_cooldown_sample_count",
-              "host_thermal_cooldown_seconds",
-              "host_thermal_cooldown_stable_sample_count",
-              "host_thermal_cooldown_timeout_count",
-              "host_thermal_guard_error_count",
-              "host_thermal_guard_trip_count",
-              "host_thermal_pacing_active_end",
-              "host_thermal_pacing_completed_event_count",
-              "host_thermal_pacing_event_count",
-              "host_thermal_pacing_itl_outlier_count",
-              "host_thermal_pacing_max_seconds",
-              "host_thermal_pacing_max_start_millicelsius",
-              "host_thermal_pacing_seconds",
               "itl_ms_p50",
               "itl_ms_p99",
               "itl_ms_p999",
@@ -1574,7 +1402,6 @@
               "long_prefill_prompt_tokens",
               "measurement_duration_seconds",
               "memory_reclaim_event_count",
-              "non_thermal_attributed_itl_outlier_count",
               "observed_completion_token_count",
               "observed_output_token_throughput_per_second",
               "output_token_throughput_per_second",
@@ -1612,6 +1439,7 @@
               "rocm_w8_lm_head_dispatch_failure_count",
               "rocm_w8_lm_head_sample_dispatch_count",
               "rocm_w8_lm_head_sample_row_count",
+              "runtime_attributed_itl_outlier_count",
               "sampled_profile_batching_batched_decode_forward_count",
               "sampled_profile_batching_decode_forward_count",
               "sampled_profile_batching_decode_row_count",
@@ -1679,15 +1507,10 @@
         "build": {
           "binary": "kiln",
           "cargo_jobs": 1,
-          "cargo_cpu_quota_percent": 50,
           "cargo_execution_mode": "transient-service",
           "cargo_environment_policy": "closed-source-build-v1",
-          "cargo_host_thermal_limit_millicelsius": 90000,
-          "cargo_host_thermal_poll_milliseconds": 250,
-          "cargo_host_thermal_sensor_label": "Tctl",
-          "cargo_host_thermal_sensor_name": "k10temp",
           "cargo_memory_scope": "systemd_user_transient_service_memory_max_no_swap",
-          "cargo_min_available_gib": 15,
+          "cargo_min_available_gib": 1,
           "cargo_private_network": true,
           "cargo_service_runtime_max_seconds": 840,
           "cargo_wrapper": "scripts/cargo-bounded.sh",
@@ -1698,7 +1521,6 @@
           "package": "kiln-server",
           "profile": "release",
           "timeout_seconds": 900,
-          "rocm_archs": "gfx1151",
           "rocm_path": "/opt/rocm"
         },
         "model": {
@@ -1716,24 +1538,6 @@
           "prefix_cache_effective_enabled": true,
           "prefix_cache_effective_reason": "active",
           "prefix_cache_requested_enabled": true
-        },
-        "host_safety": {
-          "thermal_guard": {
-            "limit_millicelsius": 97000,
-            "poll_interval_ms": 250,
-            "sensor": {
-              "hwmon_name": "k10temp",
-              "label": "Tctl"
-            }
-          },
-          "thermal_cooldown": {
-            "mode": "post_process_exit_consecutive_samples",
-            "poll_interval_ms": 250,
-            "scope": "host_package",
-            "stable_samples": 8,
-            "target_millicelsius": 75000,
-            "timeout_seconds": 180.0
-          }
         },
         "server": {
           "chat_performance_metadata_enabled": true,
@@ -1918,25 +1722,6 @@
               "graph_rejected_candidate_cleanup_duration_ms_total",
               "graph_rejected_candidate_cleanup_slow_count",
               "graph_transient_candidate_bytes_peak_end",
-              "host_temperature_end_millicelsius",
-              "host_temperature_peak_millicelsius",
-              "host_temperature_start_millicelsius",
-              "host_thermal_cooldown_active_end",
-              "host_thermal_cooldown_completed_count",
-              "host_thermal_cooldown_peak_millicelsius",
-              "host_thermal_cooldown_sample_count",
-              "host_thermal_cooldown_seconds",
-              "host_thermal_cooldown_stable_sample_count",
-              "host_thermal_cooldown_timeout_count",
-              "host_thermal_guard_error_count",
-              "host_thermal_guard_trip_count",
-              "host_thermal_pacing_active_end",
-              "host_thermal_pacing_completed_event_count",
-              "host_thermal_pacing_event_count",
-              "host_thermal_pacing_itl_outlier_count",
-              "host_thermal_pacing_max_seconds",
-              "host_thermal_pacing_max_start_millicelsius",
-              "host_thermal_pacing_seconds",
               "itl_ms_p50",
               "itl_ms_p99",
               "itl_ms_p999",
@@ -1988,7 +1773,6 @@
               "long_prefill_prompt_tokens",
               "measurement_duration_seconds",
               "memory_reclaim_event_count",
-              "non_thermal_attributed_itl_outlier_count",
               "observed_completion_token_count",
               "observed_output_token_throughput_per_second",
               "output_token_throughput_per_second",
@@ -2026,6 +1810,7 @@
               "rocm_w8_lm_head_dispatch_failure_count",
               "rocm_w8_lm_head_sample_dispatch_count",
               "rocm_w8_lm_head_sample_row_count",
+              "runtime_attributed_itl_outlier_count",
               "sampled_profile_batching_batched_decode_forward_count",
               "sampled_profile_batching_decode_forward_count",
               "sampled_profile_batching_decode_row_count",
@@ -2093,15 +1878,10 @@
         "build": {
           "binary": "kiln",
           "cargo_jobs": 1,
-          "cargo_cpu_quota_percent": 50,
           "cargo_execution_mode": "transient-service",
           "cargo_environment_policy": "closed-source-build-v1",
-          "cargo_host_thermal_limit_millicelsius": 90000,
-          "cargo_host_thermal_poll_milliseconds": 250,
-          "cargo_host_thermal_sensor_label": "Tctl",
-          "cargo_host_thermal_sensor_name": "k10temp",
           "cargo_memory_scope": "systemd_user_transient_service_memory_max_no_swap",
-          "cargo_min_available_gib": 15,
+          "cargo_min_available_gib": 1,
           "cargo_private_network": true,
           "cargo_service_runtime_max_seconds": 840,
           "cargo_wrapper": "scripts/cargo-bounded.sh",
@@ -2112,7 +1892,6 @@
           "package": "kiln-server",
           "profile": "release",
           "timeout_seconds": 900,
-          "rocm_archs": "gfx1151",
           "rocm_path": "/opt/rocm"
         },
         "model": {
@@ -2130,24 +1909,6 @@
           "prefix_cache_effective_enabled": true,
           "prefix_cache_effective_reason": "active",
           "prefix_cache_requested_enabled": true
-        },
-        "host_safety": {
-          "thermal_guard": {
-            "limit_millicelsius": 97000,
-            "poll_interval_ms": 250,
-            "sensor": {
-              "hwmon_name": "k10temp",
-              "label": "Tctl"
-            }
-          },
-          "thermal_cooldown": {
-            "mode": "post_process_exit_consecutive_samples",
-            "poll_interval_ms": 250,
-            "scope": "host_package",
-            "stable_samples": 8,
-            "target_millicelsius": 75000,
-            "timeout_seconds": 180.0
-          }
         },
         "server": {
           "chat_performance_metadata_enabled": true,
@@ -2332,25 +2093,6 @@
               "graph_rejected_candidate_cleanup_duration_ms_total",
               "graph_rejected_candidate_cleanup_slow_count",
               "graph_transient_candidate_bytes_peak_end",
-              "host_temperature_end_millicelsius",
-              "host_temperature_peak_millicelsius",
-              "host_temperature_start_millicelsius",
-              "host_thermal_cooldown_active_end",
-              "host_thermal_cooldown_completed_count",
-              "host_thermal_cooldown_peak_millicelsius",
-              "host_thermal_cooldown_sample_count",
-              "host_thermal_cooldown_seconds",
-              "host_thermal_cooldown_stable_sample_count",
-              "host_thermal_cooldown_timeout_count",
-              "host_thermal_guard_error_count",
-              "host_thermal_guard_trip_count",
-              "host_thermal_pacing_active_end",
-              "host_thermal_pacing_completed_event_count",
-              "host_thermal_pacing_event_count",
-              "host_thermal_pacing_itl_outlier_count",
-              "host_thermal_pacing_max_seconds",
-              "host_thermal_pacing_max_start_millicelsius",
-              "host_thermal_pacing_seconds",
               "itl_ms_p50",
               "itl_ms_p99",
               "itl_ms_p999",
@@ -2402,7 +2144,6 @@
               "long_prefill_prompt_tokens",
               "measurement_duration_seconds",
               "memory_reclaim_event_count",
-              "non_thermal_attributed_itl_outlier_count",
               "observed_completion_token_count",
               "observed_output_token_throughput_per_second",
               "output_token_throughput_per_second",
@@ -2440,6 +2181,7 @@
               "rocm_w8_lm_head_dispatch_failure_count",
               "rocm_w8_lm_head_sample_dispatch_count",
               "rocm_w8_lm_head_sample_row_count",
+              "runtime_attributed_itl_outlier_count",
               "sampled_profile_batching_batched_decode_forward_count",
               "sampled_profile_batching_decode_forward_count",
               "sampled_profile_batching_decode_row_count",

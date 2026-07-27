@@ -36,22 +36,14 @@
       "effective_config": {
         "hf_attention": "eager",
         "hf_linear_attention": "torch_fallback",
-        "hf_memory_max_gib": 16,
-        "hf_host_thermal_limit_millicelsius": 93000,
-        "hf_host_thermal_policy": "strix-halo-hf-oracle-v1",
-        "hf_host_thermal_policy_sha256": "sha256:3c175cfbf85da62e63ff4c8f01facdcd679c066d85c0a9595451aa26260f87c3",
-        "hf_host_thermal_poll_interval_ms": 50,
-        "hf_host_thermal_resume_millicelsius": 50000,
-        "hf_host_thermal_start_millicelsius": 58000,
         "input_token_count": 9,
         "kiln_backend": "vulkan",
-        "kiln_memory_max_gib": 17,
         "network": "forbidden"
       },
       "cases": [
         {
           "id": "hf-full-model-logit-parity",
-          "description": "Run the pinned HF torch-fallback forward behind a gated process-group thermal supervisor in a private 16 GiB zero-swap service, require a stable post-exit cooldown and 24 GiB host headroom, then compare all 248,320 logits, argmax, and top-10 ranking in a 17 GiB zero-swap Vulkan service.",
+          "description": "Run the pinned HF torch-fallback forward in a private-network process boundary, then compare all 248,320 logits, argmax, and top-10 ranking through Vulkan.",
           "required": true,
           "command": [
             "python3",
@@ -59,9 +51,7 @@
             "--model",
             "${model_path}",
             "--trainer-python",
-            "${trainer_python}",
-            "--host-thermal-policy",
-            "qualification/host-policies/strix-halo-hf-oracle-v1.json"
+            "${trainer_python}"
           ],
           "working_directory": ".",
           "environment": {},
@@ -91,11 +81,8 @@
             "declared_metrics": [
               "argmax_equal",
               "cosine_similarity",
-              "hf_host_temperature_peak_millicelsius",
               "hf_peak_memory_bytes",
               "hf_swap_bytes",
-              "hf_thermal_pacing_event_count",
-              "hf_thermal_pacing_seconds",
               "max_abs_error",
               "mean_abs_error",
               "top10_overlap",

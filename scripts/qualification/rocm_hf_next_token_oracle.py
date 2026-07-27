@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a source-bound, memory- and thermal-contained ROCm HF next-token oracle."""
+"""Run a source-bound, process-contained ROCm HF next-token oracle."""
 
 from __future__ import annotations
 
@@ -19,23 +19,17 @@ from pathlib import Path
 from typing import Any
 
 import hf_next_token_contract as contract
-import hf_thermal_supervisor as supervisor
+import hf_process_runner as process_runner
 from strict_json import loads as strict_json_loads
 
 
 ROOT = Path(__file__).resolve().parents[2]
 HF_SCRIPT = ROOT / "scripts/qualification/qwen35_hf_logits.py"
-SUPERVISOR_SCRIPT = ROOT / "scripts/qualification/hf_thermal_supervisor.py"
+PROCESS_RUNNER_SCRIPT = ROOT / "scripts/qualification/hf_process_runner.py"
 MODEL_FINGERPRINT_SCRIPT = ROOT / "scripts/qualification/model_fingerprint.py"
-SCHEMA = "kiln.rocm-hf-next-token-oracle.v1"
+SCHEMA = "kiln.rocm-hf-next-token-oracle.v2"
 PASS_PREFIX = "KILN_ROCM_HF_NEXT_TOKEN_ORACLE_PASS "
-MEMORY_MAX_GIB = 16
-HOST_RESERVE_GIB = 7
-MIN_AVAILABLE_GIB = MEMORY_MAX_GIB + HOST_RESERVE_GIB
 RUNTIME_MAX_SECONDS = 600
-LEGACY_UNGUARDED_FINGERPRINT_RESULTS = {
-    "sha256:f65f3a40c1ed2a41c675991a4a7345109efeb8ffb4ef976d2920a735e408751b",
-}
 
 
 class OracleRunError(RuntimeError):
@@ -124,13 +118,13 @@ def _fingerprint_environment(workspace: Path) -> dict[str, str]:
     }
 
 
-def _parse_guarded_fingerprint_output(output: str) -> dict[str, Any]:
+def _parse_fingerprint_output(output: str) -> dict[str, Any]:
     try:
         identity = strict_json_loads(output)
     except Exception as exc:
-        raise OracleRunError(f"guarded model fingerprint output is invalid JSON: {exc}") from exc
+        raise OracleRunError(f"model fingerprint output is invalid JSON: {exc}") from exc
     if not isinstance(identity, dict):
-        raise OracleRunError("guarded model fingerprint output must be an object")
+        raise OracleRunError("model fingerprint output must be an object")
     return identity
 
 
@@ -138,7 +132,6 @@ def _validate_model(
     model: Path,
     expected: dict[str, Any],
     *,
-    policy: Path,
     python: Path,
 ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     model = model.absolute()
@@ -156,43 +149,34 @@ def _validate_model(
             expected["id"],
             "--json",
         ]
-        returncode, stdout, stderr, thermal = supervisor.supervise(
-            policy_path=policy,
+        returncode, stdout, stderr, containment = process_runner.run_contained(
             workspace=workspace,
             worker_command=command,
             worker_environment=_fingerprint_environment(workspace),
-            worker_phase="model-fingerprint",
         )
     sys.stderr.write(stderr)
     if returncode != 0:
         raise OracleRunError(
-            f"thermally guarded model fingerprint exited {returncode}: {stderr[-3000:]}"
+            f"contained model fingerprint exited {returncode}: {stderr[-3000:]}"
         )
-    actual_raw = _parse_guarded_fingerprint_output(stdout)
+    actual_raw = _parse_fingerprint_output(stdout)
     actual = _bind_model_identity(actual_raw)
     if actual != expected:
         raise OracleRunError("model fingerprint does not match the source-paired request")
     return model, actual, {
         "implementation_sha256": _file_sha256(MODEL_FINGERPRINT_SCRIPT),
         "python_sha256": _file_sha256(python),
-        "thermal": thermal,
+        "process": containment,
     }
 
 
 def validate_model_fingerprint_evidence(
     value: Any,
-    *,
-    result_sha256: str,
-    legacy_result_sha256s: set[str],
-) -> dict[str, Any] | None:
-    if value is None:
-        if result_sha256 not in legacy_result_sha256s:
-            raise OracleRunError("model fingerprint thermal evidence is required")
-        return None
+) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {
         "implementation_sha256",
         "python_sha256",
-        "thermal",
+        "process",
     }:
         raise OracleRunError("model fingerprint evidence fields are not closed")
     if any(
@@ -202,11 +186,11 @@ def validate_model_fingerprint_evidence(
     ):
         raise OracleRunError("model fingerprint implementation hashes are not canonical")
     try:
-        thermal = supervisor.validate_evidence(value["thermal"])
-    except supervisor.SupervisorError as exc:
+        process = process_runner.validate_evidence(value["process"])
+    except process_runner.RunnerError as exc:
         raise OracleRunError(str(exc)) from exc
-    if thermal != value["thermal"]:
-        raise OracleRunError("model fingerprint thermal evidence is inconsistent")
+    if process != value["process"]:
+        raise OracleRunError("model fingerprint process evidence is inconsistent")
     return value
 
 
@@ -217,9 +201,7 @@ def _bounded_command(
     model: Path,
     request: Path,
     output: Path,
-    policy: Path,
     workspace: Path,
-    memory_max_gib: int = MEMORY_MAX_GIB,
 ) -> list[str]:
     temporary = workspace / "tmp"
     temporary.mkdir(mode=0o700)
@@ -235,12 +217,6 @@ def _bounded_command(
         unit,
         "-p",
         "Type=exec",
-        "-p",
-        f"MemoryMax={memory_max_gib}G",
-        "-p",
-        "MemorySwapMax=0",
-        "-p",
-        "OOMPolicy=kill",
         "-p",
         "KillMode=control-group",
         "-p",
@@ -264,9 +240,7 @@ def _bounded_command(
         "TOKENIZERS_PARALLELISM=false",
         "TRANSFORMERS_OFFLINE=1",
         str(python),
-        str(SUPERVISOR_SCRIPT),
-        "--host-thermal-policy",
-        str(policy),
+        str(PROCESS_RUNNER_SCRIPT),
         "--workspace",
         str(workspace),
         "--",
@@ -317,6 +291,7 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         "created_at_utc",
         "duration_seconds",
         "implementation",
+        "model_fingerprint",
         "model_identity",
         "oracle",
         "reference_artifact",
@@ -326,8 +301,7 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         "source",
         "verdict",
     }
-    allowed_fields = (fields, fields | {"model_fingerprint"})
-    if not isinstance(value, dict) or set(value) not in allowed_fields:
+    if not isinstance(value, dict) or set(value) != fields:
         raise OracleRunError("oracle result fields are not closed")
     recorded_hash = value["result_sha256"]
     unsigned = dict(value)
@@ -336,11 +310,7 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         raise OracleRunError("oracle result_sha256 does not match its content")
     if value["schema"] != SCHEMA:
         raise OracleRunError(f"oracle result schema must equal {SCHEMA}")
-    validate_model_fingerprint_evidence(
-        value.get("model_fingerprint"),
-        result_sha256=recorded_hash,
-        legacy_result_sha256s=LEGACY_UNGUARDED_FINGERPRINT_RESULTS,
-    )
+    validate_model_fingerprint_evidence(value["model_fingerprint"])
     request_ref = value["request"]
     if not isinstance(request_ref, dict) or set(request_ref) != {
         "contract_path",
@@ -361,31 +331,22 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
     containment = value["containment"]
     if not isinstance(containment, dict) or set(containment) != {
         "host_available_before_gib",
-        "memory_max_gib",
         "network",
         "service",
-        "swap_max_bytes",
     }:
         raise OracleRunError("oracle result containment fields are not closed")
     try:
         oracle = contract.validate_evidence(value["oracle"])
-        thermal = supervisor.validate_evidence(containment["service"])
-    except (contract.ContractError, supervisor.SupervisorError) as exc:
+        service = process_runner.validate_evidence(containment["service"])
+    except (contract.ContractError, process_runner.RunnerError) as exc:
         raise OracleRunError(str(exc)) from exc
     if (
-        containment["memory_max_gib"] != MEMORY_MAX_GIB
-        or containment["swap_max_bytes"] != 0
-        or containment["network"] != "forbidden"
-        or containment["host_available_before_gib"] < MIN_AVAILABLE_GIB
-        or thermal["worker_exit_code"] != 0
+        containment["network"] != "forbidden"
+        or containment["host_available_before_gib"] < 1
+        or service["worker_exit_code"] != 0
     ):
         raise OracleRunError("oracle result containment evidence is inconsistent")
-    model_fingerprint = value.get("model_fingerprint")
-    if (
-        model_fingerprint is not None
-        and model_fingerprint["thermal"]["policy"] != thermal["policy"]
-    ):
-        raise OracleRunError("model fingerprint and oracle thermal policies differ")
+    model_fingerprint = value["model_fingerprint"]
     if oracle["request_id"] != request["id"] or oracle["request_sha256"] != request_sha256:
         raise OracleRunError("oracle result HF evidence does not bind its request")
     if oracle["input_token_ids_sha256"] != request["input_token_ids_sha256"]:
@@ -425,15 +386,14 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
     if not isinstance(implementation, dict) or set(implementation) != {
         "hf_worker_sha256",
         "python_sha256",
-        "supervisor_sha256",
+        "process_runner_sha256",
     } or any(
         not isinstance(item, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", item) is None
         for item in implementation.values()
     ):
         raise OracleRunError("oracle result implementation hashes are not closed and canonical")
     if (
-        model_fingerprint is not None
-        and model_fingerprint["python_sha256"] != implementation["python_sha256"]
+        model_fingerprint["python_sha256"] != implementation["python_sha256"]
     ):
         raise OracleRunError("model fingerprint and oracle interpreter hashes differ")
     if require_current_source:
@@ -442,7 +402,7 @@ def validate_result(path: Path, *, require_current_source: bool = False) -> dict
         expected_implementation = {
             "hf_worker_sha256": _file_sha256(HF_SCRIPT),
             "python_sha256": implementation.get("python_sha256"),
-            "supervisor_sha256": _file_sha256(SUPERVISOR_SCRIPT),
+            "process_runner_sha256": _file_sha256(PROCESS_RUNNER_SCRIPT),
         }
         if implementation != expected_implementation:
             raise OracleRunError("oracle implementation hashes do not match current source")
@@ -458,36 +418,28 @@ def execute(
     model_path: Path,
     python_path: Path,
     request_path: Path,
-    policy_path: Path,
     result_path: Path,
 ) -> dict[str, Any]:
     started = time.monotonic()
     result_path = result_path.absolute()
     if result_path.exists() or result_path.is_symlink():
         raise OracleRunError(f"refusing to replace result {result_path}")
-    for path, label in ((request_path, "request"), (policy_path, "policy")):
-        if not path.is_absolute():
-            raise OracleRunError(f"--{label} must be absolute")
+    if not request_path.is_absolute():
+        raise OracleRunError("--request must be absolute")
     request, request_sha256 = contract.load_request(request_path)
     contract.validate_source_receipts(request, ROOT)
     source = _repository_identity()
     python = _validate_executable(python_path)
-    policy = policy_path.resolve(strict=True)
     model, model_identity, model_fingerprint = _validate_model(
         model_path,
         request["model_identity"],
-        policy=policy,
         python=python,
     )
     if _repository_identity() != source:
         raise OracleRunError("repository identity changed during model fingerprinting")
     available = _available_gib()
-    if available < MIN_AVAILABLE_GIB:
-        raise OracleRunError(
-            f"refusing HF oracle with {available} GiB available; require at least "
-            f"{MIN_AVAILABLE_GIB} GiB for {MEMORY_MAX_GIB} GiB service plus "
-            f"{HOST_RESERVE_GIB} GiB host reserve"
-        )
+    if available < 1:
+        raise OracleRunError("host reports less than 1 GiB available memory")
     workspace = result_path.parent / f".{result_path.stem}.artifacts"
     workspace.mkdir(mode=0o700, parents=True)
     reference = workspace / "hf-reference.safetensors"
@@ -497,7 +449,6 @@ def execute(
         model=model,
         request=request_path,
         output=reference,
-        policy=policy,
         workspace=workspace,
     )
     completed = subprocess.run(
@@ -517,8 +468,8 @@ def execute(
         )
     try:
         oracle = contract.parse_pass_marker(completed.stdout)
-        containment = supervisor.parse_pass_marker(completed.stdout)
-    except (contract.ContractError, supervisor.SupervisorError) as exc:
+        containment = process_runner.parse_pass_marker(completed.stdout)
+    except (contract.ContractError, process_runner.RunnerError) as exc:
         raise OracleRunError(str(exc)) from exc
     if oracle["request_id"] != request["id"] or oracle["request_sha256"] != request_sha256:
         raise OracleRunError("HF evidence does not bind the requested input")
@@ -553,17 +504,15 @@ def execute(
     result = {
         "containment": {
             "host_available_before_gib": available,
-            "memory_max_gib": MEMORY_MAX_GIB,
             "network": "forbidden",
             "service": containment,
-            "swap_max_bytes": 0,
         },
         "created_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "duration_seconds": time.monotonic() - started,
         "implementation": {
             "hf_worker_sha256": _file_sha256(HF_SCRIPT),
             "python_sha256": _file_sha256(python),
-            "supervisor_sha256": _file_sha256(SUPERVISOR_SCRIPT),
+            "process_runner_sha256": _file_sha256(PROCESS_RUNNER_SCRIPT),
         },
         "model_fingerprint": model_fingerprint,
         "model_identity": model_identity,
@@ -599,7 +548,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     run.add_argument("--model", required=True, type=Path)
     run.add_argument("--trainer-python", required=True, type=Path)
     run.add_argument("--request", required=True, type=Path)
-    run.add_argument("--host-thermal-policy", required=True, type=Path)
     run.add_argument("--out", required=True, type=Path)
     check = commands.add_parser("check", help="strictly validate a retained result")
     check.add_argument("result", nargs="+", type=Path)
@@ -630,7 +578,6 @@ def main(argv: list[str] | None = None) -> int:
             model_path=args.model,
             python_path=args.trainer_python,
             request_path=args.request,
-            policy_path=args.host_thermal_policy,
             result_path=args.out,
         )
     except BaseException as exc:

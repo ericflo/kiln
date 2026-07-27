@@ -225,8 +225,8 @@ fingerprints are rejected.
 `--max-provenance-read-mib-per-second` applies one cumulative schedule to the
 launcher-owned snapshot, model, adapter, and installed-runtime content reads.
 The fresh child runtime recheck receives the same ceiling. Omit it only when
-the host has an independently reviewed unlimited-I/O policy; tracked thermal
-qualification inputs should select it explicitly.
+the host has an independently reviewed unlimited-I/O policy; qualification
+inputs should select it explicitly when bounded provenance reads are required.
 
 ```bash
 python3 scripts/vllm_teacher.py \
@@ -794,8 +794,8 @@ backend, ends before readiness, and is reported with per-phase logical bytes,
 physically rate-limited bytes, elapsed time, and pacing time under
 `GET /v1/config.model_startup.checkpoint_read`.
 
-On hosts where eager accelerator materialization creates unacceptable thermal
-or memory pressure, set `model.accelerator_weight_upload_mib_per_second` to a
+On hosts where eager accelerator materialization creates unacceptable memory or
+I/O pressure, set `model.accelerator_weight_upload_mib_per_second` to a
 rate in `1..=16384`. Kiln reserves the cumulative source-byte budget before the
 base group and before each transformer layer, then verifies it again after the
 unit. Within the base group it checks shutdown after the embedding upload,
@@ -1285,15 +1285,11 @@ fixed-seed sampled profile before the greedy measurement window. Its dedicated
 metrics retain aggregate and median per-request throughput, sampled-tail versus
 broad decode cost, nullable readback population, and multi-row batching proof;
 the driver drains and resets its health baseline before the ordinary workload.
-That gate also owns a typed Strix Halo thermal policy from server launch through
-teardown: a 250 ms `k10temp/Tctl` controller pauses the server process group at
-88 C, resumes it at 80 C, and fails closed at 97 C. Receipt metrics retain
-start/peak/end temperature, guard errors/trips, and every pacing interval; a
-pass requires all pauses to complete and includes their wall time in throughput
-and ITL attribution. The local qualification runner gives an interrupted driver
-65 seconds to clean its separate server group and private model snapshot before
-hard containment, removes incomplete run evidence transactionally, and exits
-130 without a traceback.
+The local qualification runner gives an interrupted driver 65 seconds to clean
+its separate server group and private model snapshot before hard containment,
+removes incomplete run evidence transactionally, and exits 130 without a
+traceback. Qualification timing is ordinary wall-clock time and does not apply
+a machine-specific temperature controller.
 The same values appear in health and debug snapshots. A phase crossing 100 ms
 emits one structured `slow_batching_actor_phase` event with the bounded phase
 name and work size, which lets qualification correlate a token gap without

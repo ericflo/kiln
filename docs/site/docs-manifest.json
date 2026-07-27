@@ -123,14 +123,6 @@
       "description": "Current ROCm and Vulkan receipts, the measured Kiln service envelope, explicit vLLM high-concurrency guidance, and the serving acceptance methodology."
     },
     {
-      "source": "qualification/schema/host-thermal-policy-v1.schema.json",
-      "kind": "json_schema",
-      "slug": "host-thermal-policy-schema",
-      "title": "Host Thermal Policy Schema",
-      "section": "serving",
-      "description": "Typed host sensor, explicit hard-limit-only or process-stop protection, per-phase settlement, and safe live-process handoff contract for local serving benchmarks."
-    },
-    {
       "source": "qualification/schema/hf-next-token-request-v1.schema.json",
       "kind": "json_schema",
       "slug": "hf-next-token-request-schema",
@@ -139,28 +131,28 @@
       "description": "Source-paired prompt, tokenizer, model, continuation-prefix, and disputed-candidate contract for an independent eager Hugging Face attribution."
     },
     {
-      "source": "qualification/schema/rocm-hf-next-token-oracle-v1.schema.json",
+      "source": "qualification/schema/rocm-hf-next-token-oracle-v2.schema.json",
       "kind": "json_schema",
       "slug": "rocm-hf-next-token-result-schema",
       "title": "ROCm HF Next-Token Result Schema",
       "section": "serving",
-      "description": "Compact source, implementation, full-vocabulary logit, cgroup-memory, thermal-lifecycle, artifact, and candidate-attribution evidence."
+      "description": "Compact source, implementation, full-vocabulary logit, process, artifact, and candidate-attribution evidence."
     },
     {
-      "source": "qualification/schema/rocm-hf-path-attribution-v1.schema.json",
+      "source": "qualification/schema/rocm-hf-path-attribution-v2.schema.json",
       "kind": "json_schema",
       "slug": "rocm-hf-path-attribution-result-schema",
       "title": "ROCm/HF Path Attribution Result Schema",
       "section": "serving",
-      "description": "Source-bound eager, greedy-selection, retained-HIP-graph, full-logit, cgroup, thermal, request, oracle, and implementation evidence for one localized ROCm numerical defect."
+      "description": "Source-bound eager, greedy-selection, retained-HIP-graph, full-logit, process, request, oracle, and implementation evidence for one localized ROCm numerical defect."
     },
     {
-      "source": "qualification/schema/rocm-hf-layer-attribution-v1.schema.json",
+      "source": "qualification/schema/rocm-hf-layer-attribution-v2.schema.json",
       "kind": "json_schema",
       "slug": "rocm-hf-layer-attribution-result-schema",
       "title": "ROCm/HF Layer Attribution Result Schema",
       "section": "serving",
-      "description": "Sequential source-bound HF and Kiln embedding, per-transformer-layer, final-norm, error-growth, cgroup, thermal, model, request, binary, and implementation evidence."
+      "description": "Sequential source-bound HF and Kiln embedding, per-transformer-layer, final-norm, error-growth, process, model, request, binary, and implementation evidence."
     },
     {
       "source": "qualification/schema/serving-benchmark-server-launch-v1.schema.json",

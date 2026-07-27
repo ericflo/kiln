@@ -10,7 +10,7 @@ are replaced by checked-in `kiln.serving-benchmark.v1` receipts.
 As of 2026-07-20, Kiln makes **no high-concurrency performance-parity claim**
 against vLLM on any backend. The promotion threshold is at least `0.90x` vLLM
 SLO-goodput on the same current driver, model, prompt set, request policy,
-hardware, thermal policy, and source revision, with no correctness or tail-
+hardware, and source revision, with no correctness or tail-
 latency regression. No retained comparison satisfies that threshold today.
 
 Kiln is intentionally positioned for correctness-first local Qwen3.5-4B
@@ -47,13 +47,12 @@ The latest retained same-machine Kiln/vLLM pair used one Qwen3.5-4B
 0.465x and 0.138x vLLM request-window throughput. This is enough to reject a
 high-concurrency competitive claim and recommend vLLM for that use case.
 
-It is **not** an accepted performance comparison. The old process-stop thermal
-policy forced both engines to zero SLO-goodput, and exact greedy outputs diverged
+It is **not** an accepted performance comparison. Exact greedy outputs diverged
 at every concurrency. Driver v7 localized the c1 divergence to generated token
 index three, after three identical tokens, but did not establish an independent
-winner. Retain both facts: the throughput counterexample guides the conservative
-backend recommendation, while the failed SLO and output gates prohibit quoting
-the ratios as parity evidence.
+winner. The throughput counterexample guides the conservative backend
+recommendation, while the failed output gate prohibits quoting the ratios as
+parity evidence.
 
 - [Kiln diagnostic receipt](benchmarks/receipts/rocm/strix-halo/20260718t223203-rocm-strix-halo-greedy-short-c1-32-sourcepair-v1.kiln.json)
 - [vLLM failed-comparison receipt](benchmarks/receipts/rocm/strix-halo/20260718t223203-rocm-strix-halo-greedy-short-c1-32-sourcepair-v1.vllm.json)
@@ -102,17 +101,12 @@ New measurements use driver version 16. The driver:
   forward, phase time, and error deltas when its diagnostics are enabled;
 - samples one explicit DRM memory counter, fails any row above the declared
   absolute byte limit, and records both absolute peak and baseline delta;
-- owns a typed argv-only server launch by default, waits for stable host cooling
-  after provenance hashing and before process creation, arms one hashed
-  host-thermal policy before the first readiness request, and binds the new
-  process group;
-- under `hard_limit_only`, requires stable cooling at an idle live-server
-  boundary before and after every warmup or measured row, never suspends active
-  accelerator work, and charges both waits to the row's separate thermally
-  sustainable throughput rate;
-- fails closed on sensor/process identity drift, an idle-boundary timeout, or a
-  hard trip, requires a clean process-group shutdown, and completes stable
-  post-exit cooldown;
+- owns a typed argv-only server launch by default and binds the new process
+  group before readiness;
+- uses ordinary monotonic wall-clock time without a host-specific temperature
+  controller or CPU quota;
+- requires a clean process-group shutdown and rejects listener or process
+  residue;
 - writes an atomic, self-hashing receipt on success or on any recoverable
   post-preflight failure, preserving the exact ordered prefix of completed rows;
 - records structured warmup, measurement, sampler-stop, comparison, and
@@ -121,7 +115,7 @@ New measurements use driver version 16. The driver:
 - hashes the exclusive server log and retains typed launch, readiness,
   shutdown-status, forced-shutdown, and final process-liveness evidence;
 - requires a comparison-compatible v7 through v16 reference receipt with
-  identical workload, model, policy, prompts, and outputs for exact-output
+  identical workload, model, prompts, and outputs for exact-output
   cross-engine runs.
 
 A partial v16 receipt is diagnostic counterevidence, never performance
@@ -168,39 +162,26 @@ An engine may coalesce multiple tokenizer tokens into one visible event. The
 driver does not request Kiln-only token-timing events because that would make
 the two measured request bodies different.
 
-Run Kiln first from a clean checkout. Use an explicit DRM path on machines with
-more than one GPU. Choose the absolute memory limit before either engine starts
-and use the same value for both engines; do not derive it from an observed peak.
+Run Kiln first from a clean checkout. Use an explicit device-memory telemetry
+path on machines with more than one GPU. If the workload declares an absolute
+memory limit, choose it before either engine starts and use the same value for
+both engines; do not derive it from an observed peak.
 
 Prefer `--server-launch-config`: the driver creates a fresh session-led process
-group and arms containment before readiness, then owns graceful shutdown and
-cooldown. The loopback port must be unbound before launch, and after readiness
+group and arms containment before readiness, then owns graceful shutdown. The
+loopback port must be unbound before launch, and after readiness
 its listening socket inode must belong to the launched process group. The
 closed launch document contains argv, working/log directories,
 readiness cadence and deadline, shutdown deadline, and accepted exit codes; it
 has no shell string or environment map. `--server-pid` remains available for an
 external supervisor. That PID must lead its group, and containment before the
 driver attaches is then the supervisor's responsibility. Both modes bind PID,
-PGID, Linux boot ID, process start ticks, executable path, and command-line hash.
+PGID, Linux boot ID, process start ticks, executable path, and command-line
+hash. Machine-specific temperature policies are not part of the current launch
+contract.
 
-On this Strix Halo, use
-`qualification/host-policies/strix-halo-serving-benchmark-hard-limit-v1.json`.
-It samples Tctl every 250 ms, terminates the process group at 93 C, never sends
-`SIGSTOP` during active accelerator work, and requires eight consecutive
-samples at or below 45 C before launch and after exit. The earlier 68/55 C,
-58/50 C, and 60/45 C process-stop policies are retained only inside immutable
-receipts. Two active ROCm serving rows left the device at 100-percent busy while
-the stopped host process could not reach its resume gate, so those standalone
-policy files have been removed and must not be reconstructed for serving.
-`--unsafe-no-host-thermal-guard` exists only to retain diagnostic
-counterevidence: it forces the top-level receipt verdict to `failed` even when
-all request rows pass.
-
-`output_token_throughput_per_s` remains the engine-neutral request-window rate,
-including pacing that overlaps live requests. Each guarded row also records
-`host_thermal.thermally_sustainable_output_token_throughput_per_s`, whose
-denominator includes boundary sampling and any required pre/post-row cooling.
-Use the latter for sustained-capacity claims on a thermally constrained host.
+`output_token_throughput_per_s` is the engine-neutral request-window rate using
+ordinary wall-clock time.
 
 Use a checked-in or receipt-bound TOML policy for serving. For CUDA, ROCm, and
 Vulkan throughput qualification, start with true batched decode and preserve
@@ -270,14 +251,13 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --max-tokens 64 \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
   --memory-limit-bytes 30000000000 \
-  --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-hard-limit-v1.json \
   --server-launch-config .qualification/serving/rocm-kiln-launch.json \
   --out-dir /tmp/kiln-serving-campaign
 ```
 
 `--continue-after-failure` is an explicit diagnostic override for a known
-non-safety failure. Never use it after a thermal trip, guard failure, forced
-shutdown, process residue, OOM, or device error.
+isolated failure. Never use it after forced shutdown, process residue, OOM, or
+device error.
 
 Both direct and campaign runs accept
 `--model-fingerprint-read-mib-per-second` in `64..=16384`; the measured default
@@ -326,7 +306,6 @@ python3 scripts/run-serving-benchmark-campaign.py \
   --max-tokens 64 \
   --memory-path /sys/class/drm/card1/device/mem_info_vram_used \
   --memory-limit-bytes 30000000000 \
-  --host-thermal-policy qualification/host-policies/strix-halo-serving-benchmark-hard-limit-v1.json \
   --server-launch-config .qualification/serving/rocm-vllm-launch.json \
   --reference-dir /tmp/kiln-serving-campaign \
   --out-dir /tmp/vllm-serving-campaign

@@ -22,8 +22,6 @@ SPEC.loader.exec_module(campaign)
 
 
 def required_args(directory: Path, engine: str = "kiln") -> list[str]:
-    thermal_policy = directory / "host-thermal-policy.json"
-    thermal_policy.write_text('{"fixture":true}\n')
     args = [
         "--engine",
         engine,
@@ -45,8 +43,6 @@ def required_args(directory: Path, engine: str = "kiln") -> list[str]:
         str(directory / "memory"),
         "--memory-limit-bytes",
         "4096",
-        "--host-thermal-policy",
-        str(thermal_policy),
         "--server-pid",
         "4321",
     ]
@@ -57,8 +53,6 @@ def required_args(directory: Path, engine: str = "kiln") -> list[str]:
 
 def unpaced_owned_args(directory: Path, engine: str = "kiln") -> list[str]:
     args = required_args(directory, engine)
-    thermal_index = args.index("--host-thermal-policy")
-    del args[thermal_index : thermal_index + 2]
     server_index = args.index("--server-pid")
     launch = directory / "server-launch.json"
     launch.write_text('{"fixture":true}\n')
@@ -140,10 +134,6 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
         self.assertEqual(
             command[command.index("--reference-receipt") + 1],
             str(root / "kiln" / "mixed.kiln.json"),
-        )
-        self.assertEqual(
-            command[command.index("--host-thermal-policy") + 1],
-            str(root / "host-thermal-policy.json"),
         )
         self.assertEqual(command[command.index("--server-pid") + 1], "4321")
         self.assertEqual(command[command.index("--memory-source") + 1], "drm")
@@ -300,70 +290,13 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
             self.assertEqual(
                 summary["server_owner"]["mode"], "attached_process_group"
             )
-            self.assertTrue(
-                summary["thermal_policy"]["sha256"].startswith("sha256:")
-            )
-            self.assertEqual(summary["thermal_policy"]["mode"], "native_hwmon")
             self.assertEqual(len(invoked_outputs), len(campaign.PROFILES))
             for row in summary["profiles"]:
                 self.assertEqual(row["status"], "completed")
                 self.assertIsNone(row["blocked_by_profile"])
                 self.assertTrue(Path(row["receipt"]).is_file())
 
-    def test_external_wsl2_policy_requires_owned_launch_and_is_forwarded(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            arguments = required_args(root)
-            thermal_index = arguments.index("--host-thermal-policy")
-            thermal_path = Path(arguments[thermal_index + 1])
-            arguments[thermal_index] = "--external-wsl2-thermal-policy"
-            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-                campaign.parse_args(arguments)
-
-            server_index = arguments.index("--server-pid")
-            launch = root / "launch.json"
-            launch.write_text('{"fixture":true}\n')
-            arguments[server_index : server_index + 2] = [
-                "--server-launch-config",
-                str(launch),
-            ]
-            args = campaign.parse_args(arguments)
-            command = campaign.benchmark_command(
-                args, "mixed", root / "mixed.kiln.json"
-            )
-            summary = campaign.build_summary(
-                args,
-                [
-                    {
-                        "profile": "mixed",
-                        "status": "completed",
-                        "exit_code": 0,
-                        "receipt": str(root / "mixed.kiln.json"),
-                        "receipt_sha256": "sha256:" + "a" * 64,
-                        "blocked_by_profile": None,
-                    }
-                ],
-            )
-            thermal_sha256 = campaign.file_sha256(thermal_path)
-
-        self.assertNotIn("--host-thermal-policy", command)
-        self.assertEqual(
-            command[command.index("--external-wsl2-thermal-policy") + 1],
-            str(thermal_path),
-        )
-        self.assertEqual(
-            command[command.index("--server-launch-config") + 1], str(launch)
-        )
-        self.assertEqual(
-            summary["thermal_policy"],
-            {
-                "mode": "external_wsl2_boundary",
-                "path": str(thermal_path.resolve()),
-                "sha256": thermal_sha256,
-            },
-        )
-
-    def test_campaign_accepts_owned_server_without_thermal_policy(self) -> None:
+    def test_campaign_accepts_owned_server_launch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             args = campaign.parse_args(unpaced_owned_args(root))
@@ -384,13 +317,8 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
                 ],
             )
 
-        self.assertNotIn("--host-thermal-policy", command)
-        self.assertNotIn("--external-wsl2-thermal-policy", command)
         self.assertIn("--server-launch-config", command)
-        self.assertEqual(
-            summary["thermal_policy"],
-            {"mode": "not_requested", "path": None, "sha256": None},
-        )
+        self.assertNotIn("thermal_policy", summary)
 
     def test_campaign_stops_after_first_failed_profile_and_publishes_evidence(
         self,

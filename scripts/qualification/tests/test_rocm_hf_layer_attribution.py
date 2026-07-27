@@ -20,7 +20,6 @@ if str(SCRIPTS_DIR) not in sys.path:
 import hf_next_token_contract as contract
 import json_schema_subset as schema_subset
 import rocm_hf_layer_attribution as attribution
-import rocm_hf_next_token_oracle as hf_oracle
 
 
 REQUEST_PATH = (
@@ -35,7 +34,8 @@ ORACLE_RESULT_PATH = (
 
 
 def hf_evidence() -> dict[str, object]:
-    evidence = copy.deepcopy(hf_oracle.validate_result(ORACLE_RESULT_PATH)["oracle"])
+    oracle = json.loads(ORACLE_RESULT_PATH.read_text(encoding="utf-8"))
+    evidence = copy.deepcopy(oracle["oracle"])
     evidence.update(
         {
             "boundary_count": 34,
@@ -46,6 +46,15 @@ def hf_evidence() -> dict[str, object]:
     )
     evidence["output_bytes"] += 34 * 2560 * 4
     return evidence
+
+
+def process_evidence() -> dict[str, object]:
+    return {
+        "elapsed_seconds": 1.0,
+        "schema": "kiln.hf-process-containment.v1",
+        "timeout_seconds": 570.0,
+        "worker_exit_code": 0,
+    }
 
 
 def worker_marker() -> dict[str, object]:
@@ -69,17 +78,6 @@ def worker_marker() -> dict[str, object]:
         )
     return {
         "boundaries": boundaries,
-        "containment": {
-            "memory_current_bytes": 9_000_000_000,
-            "memory_high_events": 0,
-            "memory_max_bytes": 48 * 1024**3,
-            "memory_max_events": 0,
-            "memory_oom_events": 0,
-            "memory_oom_kill_events": 0,
-            "memory_peak_bytes": 14_000_000_000,
-            "memory_swap_bytes": 0,
-            "memory_swap_max_bytes": 0,
-        },
         "final_logits_sha256": "sha256:" + "7" * 64,
         "hf_layer_last_rows_sha256": "sha256:" + "8" * 64,
         "input_token_count": 166,
@@ -168,7 +166,7 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
         with self.assertRaisesRegex(attribution.LayerAttributionError, "growth"):
             attribution.validate_worker_marker(changed)
 
-    def test_both_services_are_private_zero_swap_and_layer_mode_is_exact(self) -> None:
+    def test_both_services_are_private_and_layer_mode_is_exact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             hf_workspace = workspace / "hf"
@@ -179,12 +177,12 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
                 model=Path("/model"),
                 request=Path("/request.json"),
                 output=Path("/output.safetensors"),
-                policy=Path("/policy.json"),
                 workspace=hf_workspace,
             )
-            self.assertIn("MemoryMax=20G", hf_command)
-            self.assertIn("MemorySwapMax=0", hf_command)
             self.assertIn("PrivateNetwork=yes", hf_command)
+            self.assertIn(str(attribution.path_attribution.PROCESS_RUNNER), hf_command)
+            self.assertFalse(any(item.startswith("MemoryMax=") for item in hf_command))
+            self.assertNotIn("MemorySwapMax=0", hf_command)
             self.assertEqual(hf_command[-1], "--capture-layer-last-rows")
 
             binary = workspace / "worker"
@@ -254,28 +252,24 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
 
     def test_result_schema_and_checker_bind_request_reference_and_growth(self) -> None:
         request, request_sha256 = contract.load_request(REQUEST_PATH)
-        oracle = hf_oracle.validate_result(ORACLE_RESULT_PATH)
         evidence = hf_evidence()
         result = {
             "binary": {
                 "build_duration_seconds": 1.0,
                 "build_environment_policy": "closed-source-build-v1",
                 "path": "target/release/examples/rocm_hf_path_attribution",
-                "rocm_archs": ["gfx1151"],
                 "sha256": "sha256:" + "1" * 64,
             },
             "containment": {
                 "hf": {
-                    "host_available_before_gib": 25,
-                    "memory_max_gib": 20,
+                    "host_available_before_gib": 1,
                     "network": "forbidden",
-                    "thermal": oracle["containment"]["service"],
+                    "process": process_evidence(),
                 },
                 "kiln": {
-                    "host_available_before_gib": 25,
-                    "memory_max_gib": 48,
+                    "host_available_before_gib": 1,
                     "network": "forbidden",
-                    "thermal": oracle["containment"]["service"],
+                    "process": process_evidence(),
                 },
             },
             "created_at_utc": "2026-07-19T02:00:00Z",
@@ -283,14 +277,14 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
             "implementation": {
                 "guarded_exec_sha256": "sha256:" + "2" * 64,
                 "hf_worker_sha256": "sha256:" + "3" * 64,
+                "process_runner_sha256": "sha256:" + "6" * 64,
                 "python_sha256": "sha256:" + "4" * 64,
                 "runner_sha256": "sha256:" + "5" * 64,
-                "supervisor_sha256": "sha256:" + "6" * 64,
             },
             "model_fingerprint": {
                 "implementation_sha256": "sha256:" + "7" * 64,
                 "python_sha256": "sha256:" + "4" * 64,
-                "thermal": oracle["containment"]["service"],
+                "process": process_evidence(),
             },
             "model_identity": request["model_identity"],
             "reference": {
@@ -309,17 +303,17 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
         }
         result["result_sha256"] = contract.canonical_sha256(result)
         schema = json.loads(
-            (ROOT / "qualification/schema/rocm-hf-layer-attribution-v1.schema.json").read_text()
+            (ROOT / "qualification/schema/rocm-hf-layer-attribution-v2.schema.json").read_text()
         )
         oracle_schema = json.loads(
-            (ROOT / "qualification/schema/rocm-hf-next-token-oracle-v1.schema.json").read_text()
+            (ROOT / "qualification/schema/rocm-hf-next-token-oracle-v2.schema.json").read_text()
         )
         self.assertEqual(
             schema_subset.validate_instance(
                 result,
                 schema,
                 schema,
-                registry={"rocm-hf-next-token-oracle-v1.schema.json": oracle_schema},
+                registry={"rocm-hf-next-token-oracle-v2.schema.json": oracle_schema},
             ),
             [],
         )
@@ -333,7 +327,7 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
                 fallback,
                 schema,
                 schema,
-                registry={"rocm-hf-next-token-oracle-v1.schema.json": oracle_schema},
+                registry={"rocm-hf-next-token-oracle-v2.schema.json": oracle_schema},
             ),
             [],
         )
@@ -362,13 +356,6 @@ class RocmHfLayerAttributionTests(unittest.TestCase):
             path = Path(directory) / "result.json"
             path.write_text(json.dumps(result), encoding="ascii")
             self.assertEqual(attribution.validate_result(path), result)
-            historical = copy.deepcopy(result)
-            historical["containment"]["hf"]["memory_max_gib"] = 16
-            historical["result_sha256"] = contract.canonical_sha256(
-                {name: value for name, value in historical.items() if name != "result_sha256"}
-            )
-            path.write_text(json.dumps(historical), encoding="ascii")
-            self.assertEqual(attribution.validate_result(path), historical)
             result["worker"]["largest_relative_error_growth"]["index"] = 4
             path.write_text(json.dumps(result), encoding="ascii")
             with self.assertRaisesRegex(attribution.LayerAttributionError, "result_sha256"):

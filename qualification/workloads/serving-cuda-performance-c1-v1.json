@@ -28,7 +28,7 @@
           "cargo_memory_policy": "adaptive-host-availability",
           "cargo_memory_scope": "outer-wsl2-accounting-scope",
           "cargo_private_network": true,
-          "cargo_runtime_authority": "contained-parent-pause-aware-process-group-v1",
+          "cargo_runtime_authority": "contained-parent-process-group-v1",
           "cargo_termination": "new-session-term-then-kill-process-group-v1",
           "cargo_wrapper": "scripts/cargo-bounded.sh",
           "duration_metric_accounting": "wall_seconds",

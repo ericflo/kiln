@@ -23,42 +23,18 @@ SPEC.loader.exec_module(oracle)
 
 def hf_fixture(**updates):
     value = {
-        "memory_limit_gib": 16,
+        "available_after_gib": 1,
+        "available_before_gib": 1,
         "logits_sha256": "sha256:" + "c" * 64,
         "memory_high_events": 0,
         "memory_max_events": 0,
         "memory_peak_bytes": 10_000_000_000,
         "reference_sha256": "sha256:" + "a" * 64,
         "swap_bytes": 0,
-        "thermal": {
-            "phase_settlement_timeout_seconds": 300.0,
-            "policy": {
-                "content_sha256": "sha256:3c175cfbf85da62e63ff4c8f01facdcd679c066d85c0a9595451aa26260f87c3",
-                "id": "strix-halo-hf-oracle-v1",
-                "limit_millicelsius": 93000,
-                "pacing": {
-                    "mode": "process_group_stop",
-                    "resume_millicelsius": 50000,
-                    "resume_stable_samples": 20,
-                    "start_millicelsius": 58000,
-                },
-                "phase_settlement_timeout_seconds": 300.0,
-                "poll_interval_ms": 50,
-                "safe_handoff": {
-                    "stable_samples": 20,
-                    "target_millicelsius": 45000,
-                    "timeout_seconds": 300.0,
-                },
-                "schema": "kiln.host-thermal-policy.v1",
-                "sensor": {"hwmon_name": "k10temp", "label": "Tctl"},
-            },
-            "prelaunch_cooldown": {"completed": True},
-            "runtime": {
-                "host_temperature_peak_millicelsius": 70000,
-                "host_thermal_pacing_event_count": 2,
-                "host_thermal_pacing_seconds": 3.5,
-            },
-            "schema": "kiln.hf-thermal-containment.v1",
+        "process": {
+            "elapsed_seconds": 5.0,
+            "schema": "kiln.hf-process-containment.v1",
+            "timeout_seconds": 570.0,
             "worker_exit_code": 0,
         },
     }
@@ -88,18 +64,11 @@ class VulkanHfModelOracleTests(unittest.TestCase):
                 model=Path("model"),
                 output=Path("reference.safetensors"),
                 workspace=Path("workspace"),
-                policy=Path("policy.json"),
             )
         with self.assertRaisesRegex(oracle.QualificationError, "paths must be absolute"):
             oracle._run_vulkan_comparison(
                 model=Path("model"), reference=Path("reference.safetensors")
             )
-
-    def test_memory_limit_matches_manifest_and_refuses_reduced_ceiling(self) -> None:
-        self.assertEqual(oracle._bounded_memory_limit_gib(24), 16)
-        self.assertEqual(oracle._bounded_memory_limit_gib(23), 16)
-        with self.assertRaisesRegex(oracle.QualificationError, "require at least 23 GiB"):
-            oracle._bounded_memory_limit_gib(22)
 
     def test_model_input_rejects_a_final_symlink_before_resolution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -109,25 +78,21 @@ class VulkanHfModelOracleTests(unittest.TestCase):
             link = root / "model-link"
             link.symlink_to(model, target_is_directory=True)
             with self.assertRaisesRegex(oracle.QualificationError, "non-symlink"):
-                oracle._validate_inputs(link, Path(sys.executable), root / "policy.json")
+                oracle._validate_inputs(link, Path(sys.executable))
 
-    def test_hf_service_is_private_bounded_zero_swap_and_environment_empty(self) -> None:
+    def test_hf_service_is_private_and_environment_empty(self) -> None:
         command = oracle._bounded_hf_command(
             unit="kiln-hf-oracle-bounded-test.service",
             python=Path("/venv/bin/python"),
             model=Path("/models/qwen"),
             output=Path("/run/hf.safetensors"),
-            policy=Path("/repo/qualification/host-policies/oracle.json"),
             workspace=Path("/run"),
             temporary_directory=Path("/run/tmp"),
-            memory_limit_gib=16,
         )
         for expected in (
             "--wait",
             "--collect",
             "--pipe",
-            "MemoryMax=16G",
-            "MemorySwapMax=0",
             "KillMode=control-group",
             "RuntimeMaxSec=600s",
             "PrivateNetwork=yes",
@@ -136,12 +101,13 @@ class VulkanHfModelOracleTests(unittest.TestCase):
             "HF_HUB_OFFLINE=1",
             "TRANSFORMERS_OFFLINE=1",
             "/venv/bin/python",
-            str(oracle.HF_SUPERVISOR),
-            "/repo/qualification/host-policies/oracle.json",
+            str(oracle.HF_PROCESS_RUNNER),
             "/models/qwen",
             "/run/hf.safetensors",
         ):
             self.assertIn(expected, command)
+        self.assertFalse(any(item.startswith("MemoryMax=") for item in command))
+        self.assertNotIn("MemorySwapMax=0", command)
         joined = "\0".join(command)
         self.assertNotIn("GITHUB_TOKEN", joined)
         self.assertNotIn("HF_TOKEN", joined)
@@ -213,11 +179,8 @@ class VulkanHfModelOracleTests(unittest.TestCase):
             [
                 "argmax_equal",
                 "cosine_similarity",
-                "hf_host_temperature_peak_millicelsius",
                 "hf_peak_memory_bytes",
                 "hf_swap_bytes",
-                "hf_thermal_pacing_event_count",
-                "hf_thermal_pacing_seconds",
                 "max_abs_error",
                 "mean_abs_error",
                 "top10_overlap",
@@ -227,8 +190,8 @@ class VulkanHfModelOracleTests(unittest.TestCase):
         tolerances = {item["metric"]: item for item in result["tolerances"]}
         self.assertEqual(tolerances["max_abs_error"]["absolute_tolerance"], 0.5)
         self.assertEqual(tolerances["mean_abs_error"]["absolute_tolerance"], 0.05)
-        self.assertEqual(result["effective_config"]["hf_memory_max_gib"], 16)
-        self.assertEqual(result["effective_config"]["kiln_memory_max_gib"], 17)
+        self.assertNotIn("hf_memory_max_gib", result["effective_config"])
+        self.assertNotIn("kiln_memory_max_gib", result["effective_config"])
         self.assertIn("hf_reference_sha256", result["details"])
 
     def test_declared_workload_config_matches_command_result(self) -> None:

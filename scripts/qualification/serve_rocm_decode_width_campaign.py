@@ -67,14 +67,10 @@ SOURCE_METRICS: tuple[tuple[str, str], ...] = (
         "sampled_profile_rocm_w8_lm_head_dispatch_failure_count",
     ),
     ("peak_gpu_memory_used_bytes", "peak_gpu_memory_used_bytes"),
-    ("host_temperature_peak_millicelsius", "host_temperature_peak_millicelsius"),
-    ("host_thermal_guard_error_count", "host_thermal_guard_error_count"),
-    ("host_thermal_guard_trip_count", "host_thermal_guard_trip_count"),
-    ("host_thermal_pacing_event_count", "host_thermal_pacing_event_count"),
     ("request_failure_count", "request_failure_count"),
     (
-        "non_thermal_itl_outlier_count",
-        "non_thermal_attributed_itl_outlier_count",
+        "runtime_attributed_itl_outlier_count",
+        "runtime_attributed_itl_outlier_count",
     ),
     ("unexplained_itl_outlier_count", "unexplained_itl_outlier_count"),
     ("external_yield_sync_failure_count", "external_yield_sync_failure_count"),
@@ -156,7 +152,7 @@ def candidate_config(width: int) -> dict[str, Any]:
             "prefix_cache_requested_enabled": True,
         }
     )
-    return mixed._mixed_load_host_safety(config)
+    return config
 
 
 def effective_config() -> dict[str, Any]:
@@ -248,10 +244,7 @@ def correctness_reasons(
         "graph_measured_capture_failure_count",
         "graph_measured_replay_failure_count",
         "graph_pre_measurement_failure_count",
-        "host_thermal_guard_error_count",
-        "host_thermal_guard_trip_count",
-        "host_thermal_pacing_event_count",
-        "non_thermal_attributed_itl_outlier_count",
+        "runtime_attributed_itl_outlier_count",
         "request_failure_count",
         "sampled_profile_request_failure_count",
         "sampled_profile_rocm_w8_lm_head_dispatch_failure_count",

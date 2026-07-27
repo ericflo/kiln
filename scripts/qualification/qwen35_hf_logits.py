@@ -219,7 +219,7 @@ def generate(
     if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
         raise OracleError("the bounded HF oracle requires exactly one Torch accelerator")
     if torch.version.hip is None:
-        raise OracleError("the Strix Halo HF oracle requires the pinned ROCm Torch build")
+        raise OracleError("the HF oracle requires the pinned ROCm Torch build")
 
     torch.manual_seed(20260715)
     torch.use_deterministic_algorithms(True)

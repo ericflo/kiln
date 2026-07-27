@@ -52,9 +52,9 @@ class CheckOracleResultsTests(unittest.TestCase):
             with self.assertRaisesRegex(checker.OracleResultError, "unsupported"):
                 checker.validate(path)
 
-    def test_dispatcher_validates_current_retained_result(self) -> None:
-        result = checker.validate(RETAINED_HF_RESULT)
-        self.assertEqual(result["schema"], hf_next_token.SCHEMA)
+    def test_dispatcher_rejects_obsolete_machine_policy_result(self) -> None:
+        with self.assertRaisesRegex(checker.OracleResultError, "unsupported"):
+            checker.validate(RETAINED_HF_RESULT)
 
 
 if __name__ == "__main__":

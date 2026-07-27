@@ -97,11 +97,11 @@ class ReceiptTests(unittest.TestCase):
         }
         self.assertEqual(receipt_module.validate_receipt(value), [])
         value["environment"]["platform"]["capabilities"][
-            "host_thermal_guard"
+            "nvml"
         ] = "skipped"
         value["environment"]["platform"]["capabilities"]["surprise"] = "available"
         errors = receipt_module.validate_receipt(value)
-        self.assertTrue(any("host_thermal_guard" in error for error in errors))
+        self.assertTrue(any("nvml" in error for error in errors))
         self.assertTrue(any("unknown keys: surprise" in error for error in errors))
 
     def test_optional_device_capability_fields_are_typed_and_bounded(self) -> None:

@@ -821,14 +821,13 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 startup-only and requires restart.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>actor_cycle_idle</code> is an explicit fixed duty-cycle policy, not a hidden
-                thermal controller. Zero preserves the unpaced actor. A configured value from 1 through
+                <code>actor_cycle_idle</code> is an explicit fixed duty-cycle policy. Zero preserves the
+                ordinary actor. A configured value from 1 through
                 60,000 milliseconds waits only after an actor cycle advanced prefill or decode and
                 synchronous accelerator work returned. During the wait the actor polls control commands
                 at intervals no longer than 5 ms; shutdown remains responsive, and the HTTP process and
                 response-delivery worker remain live. Nonzero values deliberately trade throughput and
-                ITL for lower sustained accelerator duty cycle, require restart, and do not replace an
-                external hardware guard.
+                ITL for lower sustained accelerator duty cycle and require restart.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 <code>GET /health</code> repeats the same immutable object at
@@ -1146,29 +1145,10 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 <code>live</code> fields.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                This reconciliation has passed the bounded WSL2 RTX 4090 Laptop low-memory gate on
-                exact clean source <code>385bcf20874ff93ebbd91b4099935c554d03ad15</code>. With a
-                17,171,480,576-byte physical device and 14,975,762,432 bytes resident after model
-                load, an independent peer allocated 260,046,848 bytes, reached 1,007,681,536 bytes
-                reported free, and observed a 940,572,672-byte minimum while a 32-token request
-                completed. Server sampling corroborated the unchanged 1,024/768 MiB target/floor
-                envelope; after clean peer release it recovered within the declared bound and an
-                exact deterministic 32-token replay passed. The 10 GiB zero-swap scope recorded no
-                OOM or residue and thermal handoff passed. Receipt
-                <code>20260725t155941791666z-cuda-rtx4090-laptop-serving-cuda-low-memory--647fb2a614-v1</code>
-                closes only that bounded admission and recovery gate. It is not performance, soak,
-                native-Linux, or desktop-4090 evidence.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                WSL2 serving performance uses benchmark driver v20 under the same outer boundary.
-                Its <code>external_wsl2_boundary</code> record is accepted only for an owned launch
-                after live revalidation of the policy hash, private network and Landlock mechanism,
-                exact host-UID systemd <code>.scope</code>, 10 GiB memory maximum, zero swap,
-                512-PID maximum, group OOM handling, and the 50-percent usage-feedback CPU
-                controller. The nested benchmark record explicitly requires the enclosing
-                qualification receipt. Only that parent can prove final Windows/NVML thermal
-                samples, scope accounting and removal, process cleanup, and stable handoff; the
-                nested record is not standalone performance evidence.
+                Hardware qualification receipts describe only the machine and boundary that produced
+                them. Current WSL2 execution uses generic scope accounting, a bounded PID count, and
+                process cleanup without a default CPU quota, fixed host-memory ceiling, or
+                machine-specific temperature policy.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 Both laptop performance arms use a separate closed base-model view at

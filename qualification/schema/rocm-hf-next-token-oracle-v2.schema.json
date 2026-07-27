@@ -1,0 +1,579 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ericflo.github.io/kiln/schemas/rocm-hf-next-token-oracle-v2.schema.json",
+  "title": "Kiln ROCm Hugging Face Next-Token Oracle Result v2",
+  "description": "Compact source-, input-, process-, and network-bound evidence for one eager Hugging Face next-token attribution.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "result_sha256",
+    "created_at_utc",
+    "duration_seconds",
+    "source",
+    "implementation",
+    "request",
+    "model_identity",
+    "model_fingerprint",
+    "containment",
+    "oracle",
+    "reference_artifact",
+    "verdict"
+  ],
+  "properties": {
+    "schema": {
+      "const": "kiln.rocm-hf-next-token-oracle.v2"
+    },
+    "result_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "created_at_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "duration_seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commit",
+        "origin_main",
+        "tree"
+      ],
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/gitObject"
+        },
+        "origin_main": {
+          "$ref": "#/$defs/gitObject"
+        },
+        "tree": {
+          "$ref": "#/$defs/gitObject"
+        }
+      }
+    },
+    "implementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hf_worker_sha256",
+        "python_sha256",
+        "process_runner_sha256"
+      ],
+      "properties": {
+        "hf_worker_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "python_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "process_runner_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_path",
+        "id",
+        "sha256",
+        "source"
+      ],
+      "properties": {
+        "contract_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source": {
+          "$ref": "#/$defs/sourcePair"
+        }
+      }
+    },
+    "model_identity": {
+      "$ref": "#/$defs/modelIdentity"
+    },
+    "model_fingerprint": {
+      "$ref": "#/$defs/modelFingerprintEvidence"
+    },
+    "containment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host_available_before_gib",
+        "network",
+        "service"
+      ],
+      "properties": {
+        "host_available_before_gib": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "network": {
+          "const": "forbidden"
+        },
+        "service": {
+          "$ref": "#/$defs/processEvidence"
+        }
+      }
+    },
+    "oracle": {
+      "$ref": "#/$defs/oracleEvidence"
+    },
+    "reference_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bytes",
+        "location",
+        "sha256"
+      ],
+      "properties": {
+        "bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "location": {
+          "const": "local_ignored"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "verdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "argmax_candidate",
+        "argmax_token_id",
+        "candidate_attribution_complete"
+      ],
+      "properties": {
+        "argmax_candidate": {
+          "enum": [
+            "kiln",
+            "vllm",
+            "neither"
+          ]
+        },
+        "argmax_token_id": {
+          "$ref": "#/$defs/tokenId"
+        },
+        "candidate_attribution_complete": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "gitObject": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "tokenId": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 248319
+    },
+    "receiptReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "file_sha256",
+        "content_sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "file_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "content_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "sourcePair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_commit",
+        "kiln_receipt",
+        "vllm_receipt"
+      ],
+      "properties": {
+        "source_commit": {
+          "$ref": "#/$defs/gitObject"
+        },
+        "kiln_receipt": {
+          "$ref": "#/$defs/receiptReference"
+        },
+        "vllm_receipt": {
+          "$ref": "#/$defs/receiptReference"
+        }
+      }
+    },
+    "weightFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "bytes",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "modelIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "content_sha256",
+        "config_hash",
+        "tokenizer_hash",
+        "chat_template_hash",
+        "weight_files"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "content_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "config_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "tokenizer_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "chat_template_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "weight_files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/weightFile"
+          }
+        }
+      }
+    },
+    "modelFingerprintEvidence": {
+      "description": "Source identity and bounded process evidence for the separate model-provenance hashing process.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "implementation_sha256",
+        "python_sha256",
+        "process"
+      ],
+      "properties": {
+        "implementation_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "python_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "process": {
+          "$ref": "#/$defs/processEvidence"
+        }
+      }
+    },
+    "topToken": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "token_id",
+        "text",
+        "logit"
+      ],
+      "properties": {
+        "token_id": {
+          "$ref": "#/$defs/tokenId"
+        },
+        "text": {
+          "type": "string"
+        },
+        "logit": {
+          "type": "number"
+        }
+      }
+    },
+    "candidateToken": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "engine",
+        "token_id",
+        "text",
+        "logit",
+        "rank"
+      ],
+      "properties": {
+        "engine": {
+          "enum": [
+            "kiln",
+            "vllm"
+          ]
+        },
+        "token_id": {
+          "$ref": "#/$defs/tokenId"
+        },
+        "text": {
+          "type": "string"
+        },
+        "logit": {
+          "type": "number"
+        },
+        "rank": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 248320
+        }
+      }
+    },
+    "oracleEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attention_implementation",
+        "argmax",
+        "argmax_text",
+        "candidate_tokens",
+        "configuration_sha256",
+        "deterministic_algorithms",
+        "device",
+        "dtype",
+        "duration_seconds",
+        "input_token_count",
+        "input_token_ids_sha256",
+        "linear_attention_implementation",
+        "logits_sha256",
+        "memory_high_events",
+        "memory_max_events",
+        "memory_oom_events",
+        "memory_oom_kill_events",
+        "memory_peak_bytes",
+        "memory_swap_bytes",
+        "modeling_sha256",
+        "output_bytes",
+        "request_id",
+        "request_sha256",
+        "tf32_allowed",
+        "top_logit_margin",
+        "top_tokens",
+        "torch_commit",
+        "torch_hip_version",
+        "torch_version",
+        "transformers_version",
+        "vocab"
+      ],
+      "properties": {
+        "attention_implementation": {
+          "const": "eager"
+        },
+        "argmax": {
+          "$ref": "#/$defs/tokenId"
+        },
+        "argmax_text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "candidate_tokens": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/candidateToken"
+                },
+                {
+                  "properties": {
+                    "engine": {
+                      "const": "kiln"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/candidateToken"
+                },
+                {
+                  "properties": {
+                    "engine": {
+                      "const": "vllm"
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "items": false
+        },
+        "configuration_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "deterministic_algorithms": {
+          "const": true
+        },
+        "device": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dtype": {
+          "const": "bfloat16"
+        },
+        "duration_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "input_token_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "input_token_ids_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "linear_attention_implementation": {
+          "const": "transformers_torch_fallback"
+        },
+        "logits_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "memory_high_events": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "memory_max_events": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "memory_oom_events": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "memory_oom_kill_events": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "memory_peak_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "memory_swap_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "modeling_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "output_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "request_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "tf32_allowed": {
+          "const": false
+        },
+        "top_logit_margin": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "top_tokens": {
+          "type": "array",
+          "minItems": 10,
+          "maxItems": 10,
+          "items": {
+            "$ref": "#/$defs/topToken"
+          }
+        },
+        "torch_commit": {
+          "$ref": "#/$defs/gitObject"
+        },
+        "torch_hip_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "torch_version": {
+          "const": "2.13.0+rocm7.2"
+        },
+        "transformers_version": {
+          "const": "5.13.1"
+        },
+        "vocab": {
+          "const": 248320
+        }
+      }
+    },
+    "processEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "elapsed_seconds",
+        "schema",
+        "timeout_seconds",
+        "worker_exit_code"
+      ],
+      "properties": {
+        "elapsed_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "schema": {
+          "const": "kiln.hf-process-containment.v1"
+        },
+        "timeout_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "worker_exit_code": {
+          "const": 0
+        }
+      }
+    }
+  }
+}

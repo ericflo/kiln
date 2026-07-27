@@ -75,7 +75,6 @@ def _effective_config() -> dict[str, Any]:
             "prefix_cache_effective_reason": "vulkan_correctness_quarantine",
         }
     )
-    value["host_safety"] = soak.HOST_THERMAL_POLICY.effective_config()
     value["vulkan_buffer_pool_gb"] = 3.0
     value["workload"] = {
         "cohort_max_tokens": {
@@ -142,28 +141,6 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "host_swap_used_end_bytes": ("bytes", "exact", True),
     "host_swap_used_peak_bytes": ("bytes", "max", True),
     "host_swap_used_start_bytes": ("bytes", "exact", True),
-    "host_temperature_end_millicelsius": ("millicelsius", "exact", True),
-    "host_temperature_peak_millicelsius": ("millicelsius", "max", True),
-    "host_temperature_start_millicelsius": ("millicelsius", "exact", True),
-    "host_thermal_cooldown_active_end": ("bool", "exact", True),
-    "host_thermal_cooldown_completed_count": ("count", "sum", False),
-    "host_thermal_cooldown_peak_millicelsius": ("millicelsius", "max", True),
-    "host_thermal_cooldown_sample_count": ("count", "sum", False),
-    "host_thermal_cooldown_seconds": ("s", "sum", True),
-    "host_thermal_cooldown_stable_sample_count": ("count", "exact", False),
-    "host_thermal_cooldown_timeout_count": ("count", "sum", True),
-    "host_thermal_guard_error_count": ("count", "sum", True),
-    "host_thermal_guard_trip_count": ("count", "sum", True),
-    "host_thermal_pacing_active_end": ("bool", "exact", True),
-    "host_thermal_pacing_completed_event_count": ("count", "sum", False),
-    "host_thermal_pacing_event_count": ("count", "sum", True),
-    "host_thermal_pacing_max_seconds": ("s", "max", True),
-    "host_thermal_pacing_max_start_millicelsius": (
-        "millicelsius",
-        "max",
-        True,
-    ),
-    "host_thermal_pacing_seconds": ("s", "sum", True),
     "kv_blocks_used_end": ("blocks", "exact", True),
     "kv_unaccounted_blocks_end": ("blocks", "exact", True),
     "length_terminated_request_count": ("count", "sum", False),
@@ -436,7 +413,6 @@ def execute(model_path: Path, seed: int, evidence: Evidence) -> None:
     server_log: mixed.ServerLog | None = None
     gpu_sampler: soak.GpuMemorySampler | None = None
     host_guard: soak.HostMemoryGuard | None = None
-    thermal_guard: soak.HostThermalGuard | None = None
     shutdown: mixed.ShutdownOutcome | None = None
     residue: list[str] = []
     failures: list[str] = []
@@ -457,11 +433,6 @@ def execute(model_path: Path, seed: int, evidence: Evidence) -> None:
             binary, config_path, VARIANT_ID, mixed.VULKAN_BUILD_SPEC
         )
         host_guard = soak.HostMemoryGuard(process, HOST_MEMORY_FLOOR_BYTES)
-        thermal_guard = soak.HostThermalGuard(
-            process,
-            **soak.HOST_THERMAL_POLICY.guard_kwargs(),
-        )
-        thermal_guard.start()
         host_guard.start()
         startup_health = mixed.wait_ready(port, process, server_log, deadline)
         startup_debug = mixed.json_request(port, "GET", "/v1/debug/model-state")
@@ -764,19 +735,7 @@ def execute(model_path: Path, seed: int, evidence: Evidence) -> None:
             host_guard.close()
             evidence.values.update(host_guard.metric_values())
         if process is not None:
-            if thermal_guard is not None:
-                thermal_guard.prepare_for_process_exit()
-            try:
-                shutdown = mixed.terminate_process(process)
-            finally:
-                if thermal_guard is not None:
-                    thermal_guard.close()
-        if thermal_guard is not None:
-            evidence.values.update(thermal_guard.metric_values())
-            evidence.values.update(thermal_guard.pacing_metric_values())
-            evidence.values["host_thermal_guard_error_count"] = len(
-                thermal_guard.errors
-            )
+            shutdown = mixed.terminate_process(process)
         if server_log is not None:
             server_log.join()
         residue = mixed.snapshot_payload_residue(snapshot_dir)
@@ -792,23 +751,6 @@ def execute(model_path: Path, seed: int, evidence: Evidence) -> None:
         failures.extend(f"host memory guard: {error}" for error in host_guard.errors)
         if evidence.values["host_swap_growth_bytes"] > HOST_SWAP_GROWTH_LIMIT_BYTES:
             failures.append("host swap growth exceeded the configured limit")
-    if thermal_guard is not None:
-        if thermal_guard.trip_reason is not None:
-            failures.append(thermal_guard.trip_reason)
-        failures.extend(f"host thermal guard: {error}" for error in thermal_guard.errors)
-        if evidence.values["host_thermal_cooldown_active_end"] != 0:
-            failures.append("host thermal cooldown remained active after teardown")
-        if evidence.values["host_thermal_cooldown_completed_count"] != 1:
-            failures.append("host thermal cooldown did not complete after teardown")
-        if evidence.values["host_thermal_cooldown_timeout_count"] != 0:
-            failures.append("host thermal cooldown timed out after teardown")
-        if evidence.values["host_thermal_pacing_active_end"] != 0:
-            failures.append("host thermal pacing remained active after teardown")
-        if (
-            evidence.values["host_thermal_pacing_completed_event_count"]
-            != evidence.values["host_thermal_pacing_event_count"]
-        ):
-            failures.append("host thermal pacing events did not all complete")
     if shutdown is None:
         failures.append("server shutdown evidence is missing")
     else:

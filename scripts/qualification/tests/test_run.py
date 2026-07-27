@@ -364,67 +364,22 @@ class RunnerTests(unittest.TestCase):
             ):
                 run_module.establish_network_isolation(Path("/tmp"))
 
-    def test_wsl_supervision_keeps_scope_independent_from_optional_pacing(
-        self,
-    ) -> None:
-        policy_path = (
-            QUALIFICATION_DIR.parents[1]
-            / "qualification/host-policies/"
-            "rtx4090-laptop-wsl2-cgroup-pacing-v2.json"
-        )
-        policy = run_module.wsl_thermal_exec.load_policy(policy_path)
+    def test_wsl_supervision_uses_portable_scope_limits(self) -> None:
         command = run_module._wsl_supervised_argv(
             ["/usr/bin/unshare", "--", "/bin/true"],
-            policy_path,
-            policy,
             30.0,
         )
-        self.assertEqual(command[1], str(run_module.WSL_THERMAL_EXEC))
+        self.assertEqual(command[1], str(run_module.WSL_SCOPE_EXEC))
         memory_index = command.index("--memory-max-bytes")
         self.assertEqual(
             command[memory_index + 1],
-            str(run_module.WSL_SCOPE_PACED_MEMORY_MAX_BYTES),
+            str(run_module.WSL_SCOPE_MEMORY_MAX_BYTES),
         )
-        pacing_index = command.index("--thermal-pacing-policy")
-        self.assertEqual(command[pacing_index + 1], str(policy_path))
-        self.assertEqual(command.count(str(policy_path)), 2)
-
-        v1_path = (
-            QUALIFICATION_DIR.parents[1]
-            / "qualification/host-policies/"
-            "rtx4090-laptop-wsl2-boundary-v1.json"
-        )
-        hard_limit_command = run_module._wsl_supervised_argv(
-            ["/bin/true"],
-            v1_path,
-            run_module.wsl_thermal_exec.load_policy(v1_path),
-            30.0,
-        )
-        self.assertNotIn("--thermal-pacing-policy", hard_limit_command)
-        self.assertEqual(hard_limit_command.count(str(v1_path)), 1)
-
-        unpaced_command = run_module._wsl_supervised_argv(
-            ["/bin/true"],
-            None,
-            None,
-            30.0,
-        )
-        self.assertEqual(unpaced_command[1], str(run_module.WSL_SCOPE_EXEC))
-        memory_index = unpaced_command.index("--memory-max-bytes")
-        self.assertEqual(
-            unpaced_command[memory_index + 1],
-            str(run_module.WSL_SCOPE_UNPACED_MEMORY_MAX_BYTES),
-        )
-        self.assertNotIn(str(run_module.WSL_THERMAL_EXEC), unpaced_command)
-        self.assertNotIn("--thermal-pacing-policy", unpaced_command)
+        quota_index = command.index("--cpu-quota-percent")
+        self.assertEqual(command[quota_index + 1], "0")
+        self.assertEqual(command[-3:], ["/usr/bin/unshare", "--", "/bin/true"])
 
     def test_wsl_model_fingerprint_is_scoped_and_unlimited_by_default(self) -> None:
-        policy_path = (
-            QUALIFICATION_DIR.parents[1]
-            / "qualification/host-policies/"
-            "rtx4090-laptop-wsl2-cgroup-pacing-v2.json"
-        )
-        policy = run_module.wsl_thermal_exec.load_policy(policy_path)
         isolation = run_module.NetworkIsolation(
             mechanism="util-linux-unshare-user-net-pid-landlock-v1",
             argv_prefix=("/usr/bin/unshare", "--"),
@@ -465,8 +420,6 @@ class RunnerTests(unittest.TestCase):
                     Path("/tmp/model"),
                     "fixture",
                     network_isolation=isolation,
-                    policy_path=policy_path,
-                    policy=policy,
                     stdout_path=stdout_path,
                     stderr_path=stderr_path,
                     environment=environment,
@@ -483,18 +436,12 @@ class RunnerTests(unittest.TestCase):
             )
 
     def test_wsl_model_fingerprint_nonzero_exit_fails_after_capture(self) -> None:
-        policy_path = (
-            QUALIFICATION_DIR.parents[1]
-            / "qualification/host-policies/"
-            "rtx4090-laptop-wsl2-cgroup-pacing-v2.json"
-        )
-        policy = run_module.wsl_thermal_exec.load_policy(policy_path)
         isolation = run_module.NetworkIsolation("test", ("/bin/true", "--"))
         completed = subprocess.CompletedProcess(
             args=["wrapped"],
             returncode=3,
             stdout=b"",
-            stderr=b"thermal trip with stable handoff\n",
+            stderr=b"scope child failed\n",
         )
         with tempfile.TemporaryDirectory() as temporary:
             stdout_path = Path(temporary) / "fingerprint.json"
@@ -521,8 +468,6 @@ class RunnerTests(unittest.TestCase):
                         Path("/tmp/model"),
                         "fixture",
                         network_isolation=isolation,
-                        policy_path=policy_path,
-                        policy=policy,
                         stdout_path=stdout_path,
                         stderr_path=stderr_path,
                         environment=environment,
@@ -1392,26 +1337,6 @@ class RunnerTests(unittest.TestCase):
             variant["backend"] = "cuda"
         repository = Repository(workload)
         self.addCleanup(repository.close)
-        policy_relative = Path(
-            "qualification/host-policies/"
-            "rtx4090-laptop-wsl2-cgroup-pacing-v2.json"
-        )
-        policy_path = repository.root / policy_relative
-        policy_path.parent.mkdir(parents=True)
-        shutil.copyfile(
-            QUALIFICATION_DIR.parents[1] / policy_relative,
-            policy_path,
-        )
-        subprocess.run(
-            ["git", "add", policy_relative.as_posix()],
-            cwd=repository.root,
-            check=True,
-        )
-        subprocess.run(
-            ["git", "commit", "-qm", "add thermal policy"],
-            cwd=repository.root,
-            check=True,
-        )
         model_path = repository.root / ".qualification/model"
         model_path.mkdir(parents=True)
         isolation = run_module.NetworkIsolation(
@@ -1432,10 +1357,9 @@ class RunnerTests(unittest.TestCase):
             kwargs["stdout_path"].write_bytes(b"")
             kwargs["stderr_path"].write_bytes(
                 b'wsl2-scope: {"event":"failed","scope_removed":true}\n'
-                b'wsl2-thermal: {"event":"complete","child_returncode":2}\n'
             )
             raise run_module.QualificationRunError(
-                "thermal pacing pause exceeded 300 seconds"
+                "scope child failed before model fingerprint completed"
             )
 
         with mock.patch.object(
@@ -1454,7 +1378,6 @@ class RunnerTests(unittest.TestCase):
                 model_path=model_path,
                 model_id="fixture-model",
                 receipt_id="runner-supervised-model-failure-v1",
-                wsl2_thermal_policy=policy_relative,
                 root=repository.root,
                 invocation=["qualification-runner-test", "supervised-failure"],
                 hooks=hooks,
@@ -1470,11 +1393,10 @@ class RunnerTests(unittest.TestCase):
                 "environment_probes",
                 "model_fingerprint_initial",
                 "model_fingerprint_initial_wsl2_supervision",
-                "wsl2_thermal_policy",
             },
         )
         self.assertIn(
-            "thermal pacing pause exceeded 300 seconds",
+            "scope child failed before model fingerprint completed",
             outcome.receipt["results"][0]["details"],
         )
         self.assert_valid(outcome, repository.root)

@@ -1158,15 +1158,10 @@ class ServeMixedLoadTests(unittest.TestCase):
         expected_build = {
             "binary": "kiln",
             "cargo_jobs": 1,
-            "cargo_cpu_quota_percent": 50,
             "cargo_execution_mode": "transient-service",
             "cargo_environment_policy": "closed-source-build-v1",
-            "cargo_host_thermal_limit_millicelsius": 90_000,
-            "cargo_host_thermal_poll_milliseconds": 250,
-            "cargo_host_thermal_sensor_label": "Tctl",
-            "cargo_host_thermal_sensor_name": "k10temp",
             "cargo_memory_scope": "systemd_user_transient_service_memory_max_no_swap",
-            "cargo_min_available_gib": 15,
+            "cargo_min_available_gib": 1,
             "cargo_private_network": True,
             "cargo_service_runtime_max_seconds": 840,
             "cargo_wrapper": "scripts/cargo-bounded.sh",
@@ -1177,7 +1172,6 @@ class ServeMixedLoadTests(unittest.TestCase):
             "package": "kiln-server",
             "profile": "release",
             "timeout_seconds": 900,
-            "rocm_archs": "gfx1151",
             "rocm_path": "/opt/rocm",
         }
         expected_schedule = {
@@ -1234,21 +1228,6 @@ class ServeMixedLoadTests(unittest.TestCase):
             "startup_timeout_seconds": int(serve.STARTUP_TIMEOUT_SECONDS),
             "warmup_max_tokens": serve.WARMUP_MAX_TOKENS,
         }
-        expected_host_safety = {
-            "thermal_guard": {
-                "limit_millicelsius": 97_000,
-                "poll_interval_ms": 250,
-                "sensor": {"hwmon_name": "k10temp", "label": "Tctl"},
-            },
-            "thermal_cooldown": {
-                "mode": "post_process_exit_consecutive_samples",
-                "poll_interval_ms": 250,
-                "scope": "host_package",
-                "stable_samples": 8,
-                "target_millicelsius": 75_000,
-                "timeout_seconds": 180.0,
-            },
-        }
         expected_metrics = sorted(serve.METRIC_DEFINITIONS)
 
         def canonical_json(value: object) -> str:
@@ -1264,9 +1243,6 @@ class ServeMixedLoadTests(unittest.TestCase):
                     canonical_json(driver_config),
                 )
                 self.assertEqual(declared["effective_config"]["build"], expected_build)
-                self.assertEqual(
-                    declared["effective_config"]["host_safety"], expected_host_safety
-                )
                 self.assertEqual(declared["effective_config"]["workload"], expected_schedule)
                 self.assertEqual(len(declared["cases"]), 1)
                 case = declared["cases"][0]
@@ -1369,98 +1345,6 @@ class ServeMixedLoadTests(unittest.TestCase):
                 serve.ACTOR_CYCLE_IDLE_MS,
             )
 
-    def test_startup_failure_retains_final_thermal_guard_evidence(self) -> None:
-        process = mock.Mock(pid=4321)
-        server_log = mock.Mock()
-        guard = mock.Mock()
-        lifecycle: list[str] = []
-        guard.prepare_for_process_exit.side_effect = lambda: lifecycle.append(
-            "guard.prepare_for_process_exit"
-        )
-        guard.close.side_effect = lambda: lifecycle.append("guard.close")
-        guard.trip_reason = "host k10temp/Tctl reached the safety limit"
-        guard.errors = ["sensor read failed"]
-        guard.metric_values.return_value = {
-            "host_temperature_end_millicelsius": 97_000,
-            "host_temperature_peak_millicelsius": 97_000,
-            "host_temperature_start_millicelsius": 86_000,
-            "host_thermal_cooldown_active_end": 0,
-            "host_thermal_cooldown_completed_count": 1,
-            "host_thermal_cooldown_peak_millicelsius": 90_000,
-            "host_thermal_cooldown_sample_count": 8,
-            "host_thermal_cooldown_seconds": 2.0,
-            "host_thermal_cooldown_stable_sample_count": 8,
-            "host_thermal_cooldown_timeout_count": 0,
-            "host_thermal_guard_trip_count": 1,
-        }
-        guard.pacing_metric_values.return_value = {
-            "host_thermal_pacing_active_end": 0,
-            "host_thermal_pacing_completed_event_count": 1,
-            "host_thermal_pacing_event_count": 1,
-            "host_thermal_pacing_max_seconds": 2.5,
-            "host_thermal_pacing_max_start_millicelsius": 89_000,
-            "host_thermal_pacing_seconds": 2.5,
-        }
-        with tempfile.TemporaryDirectory() as raw:
-            run_dir = Path(raw) / "serving"
-            run_dir.mkdir()
-            with (
-                mock.patch.object(
-                    serve,
-                    "build_binary",
-                    return_value=(
-                        ROOT / "target/release/kiln",
-                        "sha256:" + "a" * 64,
-                        0.5,
-                    ),
-                ),
-                mock.patch.object(serve, "free_loopback_port", return_value=8420),
-                mock.patch.object(
-                    serve, "create_serving_run_dir", return_value=run_dir
-                ),
-                mock.patch.object(serve, "write_server_config"),
-                mock.patch.object(
-                    serve, "start_server", return_value=(process, server_log)
-                ),
-                mock.patch.object(
-                    serve.thermal, "HostThermalGuard", return_value=guard
-                ),
-                mock.patch.object(
-                    serve,
-                    "wait_ready",
-                    side_effect=serve.QualificationError("startup failed closed"),
-                ),
-                mock.patch.object(
-                    serve,
-                    "terminate_process",
-                    side_effect=lambda _process: (
-                        lifecycle.append("terminate_process")
-                        or serve.ShutdownOutcome(0, False, 10.0)
-                    ),
-                ),
-                mock.patch.object(
-                    serve, "snapshot_payload_residue", return_value=[]
-                ),
-            ):
-                metrics, details = serve.execute(Path(raw), 7, "autoscale-off")
-
-        values = {metric["name"]: metric["value"] for metric in metrics}
-        self.assertEqual(values["request_failure_count"], 1)
-        self.assertEqual(values["host_temperature_start_millicelsius"], 86_000)
-        self.assertEqual(values["host_temperature_peak_millicelsius"], 97_000)
-        self.assertEqual(values["host_thermal_guard_error_count"], 1)
-        self.assertEqual(values["host_thermal_guard_trip_count"], 1)
-        self.assertEqual(values["host_thermal_pacing_event_count"], 1)
-        self.assertIn("startup failed closed", details or "")
-        self.assertIn("sensor read failed", details or "")
-        self.assertEqual(
-            lifecycle,
-            [
-                "guard.prepare_for_process_exit",
-                "terminate_process",
-                "guard.close",
-            ],
-        )
 
     def test_cargo_resolution_uses_rustup_home_when_path_omits_cargo(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1504,21 +1388,11 @@ class ServeMixedLoadTests(unittest.TestCase):
         )
         self.assertEqual(environment["KILN_CARGO_EXECUTION_MODE"], "transient-service")
         self.assertEqual(environment["KILN_CARGO_JOBS"], "1")
-        self.assertEqual(environment["KILN_CARGO_CPU_QUOTA_PERCENT"], "50")
-        self.assertEqual(environment["KILN_CARGO_MIN_AVAILABLE_GIB"], "15")
+        self.assertNotIn("KILN_CARGO_CPU_QUOTA_PERCENT", environment)
+        self.assertEqual(environment["KILN_CARGO_MIN_AVAILABLE_GIB"], "1")
         self.assertEqual(environment["KILN_CARGO_PRIVATE_NETWORK"], "1")
         self.assertEqual(environment["KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS"], "840")
-        self.assertEqual(
-            environment["KILN_CARGO_HOST_THERMAL_SENSOR_NAME"], "k10temp"
-        )
-        self.assertEqual(environment["KILN_CARGO_HOST_THERMAL_SENSOR_LABEL"], "Tctl")
-        self.assertEqual(
-            environment["KILN_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS"], "90000"
-        )
-        self.assertEqual(
-            environment["KILN_CARGO_HOST_THERMAL_POLL_MILLISECONDS"], "250"
-        )
-        self.assertEqual(environment["KILN_ROCM_ARCHS"], serve.BUILD_ROCM_ARCHS)
+        self.assertNotIn("KILN_ROCM_ARCHS", environment)
 
     def test_vulkan_source_build_is_bounded_without_rocm_environment(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1539,19 +1413,9 @@ class ServeMixedLoadTests(unittest.TestCase):
         self.assertEqual(environment["CARGO"], str(cargo))
         self.assertEqual(environment["CARGO_NET_OFFLINE"], "true")
         self.assertEqual(environment["KILN_CARGO_JOBS"], "1")
-        self.assertEqual(environment["KILN_CARGO_CPU_QUOTA_PERCENT"], "50")
-        self.assertEqual(environment["KILN_CARGO_MIN_AVAILABLE_GIB"], "15")
+        self.assertNotIn("KILN_CARGO_CPU_QUOTA_PERCENT", environment)
+        self.assertEqual(environment["KILN_CARGO_MIN_AVAILABLE_GIB"], "1")
         self.assertEqual(environment["KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS"], "840")
-        self.assertEqual(
-            environment["KILN_CARGO_HOST_THERMAL_SENSOR_NAME"], "k10temp"
-        )
-        self.assertEqual(environment["KILN_CARGO_HOST_THERMAL_SENSOR_LABEL"], "Tctl")
-        self.assertEqual(
-            environment["KILN_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS"], "90000"
-        )
-        self.assertEqual(
-            environment["KILN_CARGO_HOST_THERMAL_POLL_MILLISECONDS"], "250"
-        )
         self.assertNotIn("ROCM_PATH", environment)
         self.assertNotIn("KILN_ROCM_ARCHS", environment)
         self.assertEqual(
@@ -1559,15 +1423,10 @@ class ServeMixedLoadTests(unittest.TestCase):
             {
                 "binary": "kiln",
                 "cargo_jobs": 1,
-                "cargo_cpu_quota_percent": 50,
                 "cargo_execution_mode": "transient-service",
                 "cargo_environment_policy": "closed-source-build-v1",
-                "cargo_host_thermal_limit_millicelsius": 90_000,
-                "cargo_host_thermal_poll_milliseconds": 250,
-                "cargo_host_thermal_sensor_label": "Tctl",
-                "cargo_host_thermal_sensor_name": "k10temp",
                 "cargo_memory_scope": "systemd_user_transient_service_memory_max_no_swap",
-                "cargo_min_available_gib": 15,
+                "cargo_min_available_gib": 1,
                 "cargo_private_network": True,
                 "cargo_service_runtime_max_seconds": 840,
                 "cargo_wrapper": "scripts/cargo-bounded.sh",
@@ -1591,22 +1450,6 @@ class ServeMixedLoadTests(unittest.TestCase):
         with self.assertRaisesRegex(serve.QualificationError, "at least 60 seconds"):
             serve.build_binary(1.0e18, spec)
 
-    def test_source_build_thermal_fields_are_one_typed_unit(self) -> None:
-        with self.assertRaisesRegex(ValueError, "configured together"):
-            serve.SourceBuildSpec(
-                backend="test",
-                features="test",
-                cargo_host_thermal_sensor_name="k10temp",
-            )
-        with self.assertRaisesRegex(ValueError, "poll interval"):
-            serve.SourceBuildSpec(
-                backend="test",
-                features="test",
-                cargo_host_thermal_sensor_name="k10temp",
-                cargo_host_thermal_sensor_label="Tctl",
-                cargo_host_thermal_limit_millicelsius=97_000,
-                cargo_host_thermal_poll_milliseconds=0,
-            )
 
     def test_source_build_cpu_quota_is_typed_and_optional(self) -> None:
         self.assertNotIn(
@@ -3168,55 +3011,25 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         )
         self.assertEqual(
             counts,
-            serve.ItlOutlierCounts(1, 0, 1, 0),
+            serve.ItlOutlierCounts(1, 1, 0),
         )
         counts = serve.classify_itl_outliers(
             [100.0, 100.0], [result], [outside]
         )
-        self.assertEqual(counts, serve.ItlOutlierCounts(0, 0, 0, 1))
+        self.assertEqual(counts, serve.ItlOutlierCounts(0, 0, 1))
         synchronization = serve.ObservedEvent(
             0.5, "external_yield_sync", "slow attributed synchronization"
         )
         counts = serve.classify_itl_outliers(
             [100.0, 100.0], [result], [synchronization]
         )
-        self.assertEqual(counts, serve.ItlOutlierCounts(1, 0, 1, 0))
-        thermal_pacing = serve.ObservedEvent(
-            0.5, "host_thermal_pacing", "qualification pause"
-        )
+        self.assertEqual(counts, serve.ItlOutlierCounts(1, 1, 0))
         prefill = serve.ObservedEvent(0.7, "actor_prefill", "slow prefill")
-        counts = serve.classify_itl_outliers(
-            [100.0, 100.0], [result], [prefill, thermal_pacing]
-        )
-        self.assertEqual(counts, serve.ItlOutlierCounts(1, 1, 0, 0))
         counts = serve.classify_itl_outliers(
             [100.0, 100.0], [result], [prefill]
         )
-        self.assertEqual(counts, serve.ItlOutlierCounts(1, 0, 1, 0))
+        self.assertEqual(counts, serve.ItlOutlierCounts(1, 1, 0))
 
-    def test_itl_gate_rejects_active_work_thermal_attribution(self) -> None:
-        values = {
-            "attributed_itl_outlier_count": 95,
-            "host_thermal_pacing_itl_outlier_count": 95,
-            "non_thermal_attributed_itl_outlier_count": 0,
-            "unexplained_itl_outlier_count": 0,
-        }
-        failures = serve.itl_outlier_gate_failures(values)
-        self.assertTrue(any("prohibited active-work" in failure for failure in failures))
-
-        values["non_thermal_attributed_itl_outlier_count"] = 1
-        failures = serve.itl_outlier_gate_failures(values)
-        self.assertTrue(any("did not reconcile" in failure for failure in failures))
-        self.assertTrue(any("non-thermal runtime" in failure for failure in failures))
-        self.assertTrue(any("prohibited active-work" in failure for failure in failures))
-
-        values.update(
-            attributed_itl_outlier_count=96,
-            unexplained_itl_outlier_count=1,
-        )
-        failures = serve.itl_outlier_gate_failures(values)
-        self.assertFalse(any("did not reconcile" in failure for failure in failures))
-        self.assertTrue(any("unexplained" in failure for failure in failures))
 
     def test_metric_values_use_runtime_counter_deltas(self) -> None:
         result = serve.StreamResult(
@@ -3518,13 +3331,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertEqual(values["external_yield_sync_total_ms"], 75.0)
         self.assertEqual(values["external_yield_sync_max_ms"], 25.0)
         missing = set(serve.METRIC_DEFINITIONS) - set(values)
-        self.assertTrue(missing)
-        self.assertTrue(
-            all(
-                name.startswith(("host_temperature_", "host_thermal_"))
-                for name in missing
-            )
-        )
+        self.assertEqual(missing, set())
         values.update({name: 0 for name in missing})
         self.assertEqual(
             len(serve.metrics_from_values(values)), len(serve.METRIC_DEFINITIONS)
@@ -3549,7 +3356,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             finish_reason=None,
             done=False,
             cancelled=False,
-            error="ConnectionRefusedError: server stopped by thermal guard",
+            error="ConnectionRefusedError: server stopped",
             semantic_deltas=[
                 {"choices": [{"index": 0, "delta": {"content": "000000"}}]}
             ],

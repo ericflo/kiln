@@ -2,7 +2,7 @@
   "schema_version": 1,
   "workload_id": "prefill-scheduling-v1",
   "kind": "correctness",
-  "description": "Prove bounded mixed-prompt actor scheduling and resumable hybrid-model prefill parity on required Strix Halo ROCm and Vulkan devices.",
+  "description": "Prove bounded mixed-prompt actor scheduling and resumable hybrid-model prefill parity on ROCm and Vulkan devices.",
   "determinism": {
     "seed": 20260710,
     "seed_delivery": "fixed_fixture",
@@ -15,7 +15,7 @@
   "variants": [
     {
       "id": "rocm",
-      "description": "ROCm actor-fairness and real-device resumable-prefill correctness on gfx1151.",
+      "description": "ROCm actor-fairness and real-device resumable-prefill correctness.",
       "backend": "rocm",
       "device_requirement": "required",
       "skip_policy": "fail",
@@ -23,7 +23,7 @@
       "cases": [
         {
           "id": "device-probe",
-          "description": "Require rocminfo to identify the target gfx1151 ROCm device.",
+          "description": "Require rocminfo to identify a usable ROCm device.",
           "required": true,
           "command": ["rocminfo"],
           "working_directory": ".",
@@ -34,7 +34,7 @@
             {
               "stream": "combined",
               "match": "required",
-              "pattern": "gfx1151"
+              "pattern": "(?i)(Name:\\s+gfx[0-9a-z]+|Marketing Name:)"
             },
             {
               "stream": "combined",
@@ -72,7 +72,6 @@
           "working_directory": ".",
           "environment": {
             "CARGO_NET_OFFLINE": "true",
-            "KILN_ROCM_ARCHS": "gfx1151",
             "ROCM_PATH": "/opt/rocm"
           },
           "timeout_seconds": 1800,
@@ -121,7 +120,6 @@
           "environment": {
             "CARGO_NET_OFFLINE": "true",
             "KILN_QUALIFICATION": "1",
-            "KILN_ROCM_ARCHS": "gfx1151",
             "ROCM_PATH": "/opt/rocm"
           },
           "timeout_seconds": 1800,
@@ -149,7 +147,7 @@
     },
     {
       "id": "vulkan",
-      "description": "Vulkan actor-fairness and real-device resumable-prefill correctness on RADV Strix Halo.",
+      "description": "Vulkan actor-fairness and real-device resumable-prefill correctness.",
       "backend": "vulkan",
       "device_requirement": "required",
       "skip_policy": "fail",

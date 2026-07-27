@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ericflo.github.io/kiln/schemas/rocm-hf-path-attribution-v1.schema.json",
-  "title": "Kiln ROCm/HF Numerical Path Attribution Result v1",
+  "$id": "https://ericflo.github.io/kiln/schemas/rocm-hf-path-attribution-v2.schema.json",
+  "title": "Kiln ROCm/HF Numerical Path Attribution Result v2",
   "description": "Source-bound evidence comparing Kiln eager-full, eager-greedy, retained-HIP-graph-full, and retained-HIP-graph-greedy paths with one retained eager Hugging Face full-vocabulary reference.",
   "type": "object",
   "additionalProperties": false,
@@ -11,6 +11,7 @@
     "created_at_utc",
     "duration_seconds",
     "implementation",
+    "model_fingerprint",
     "model_identity",
     "oracle_reference",
     "request",
@@ -20,7 +21,7 @@
     "worker"
   ],
   "properties": {
-    "schema": { "const": "kiln.rocm-hf-path-attribution-result.v1" },
+    "schema": { "const": "kiln.rocm-hf-path-attribution-result.v2" },
     "result_sha256": { "$ref": "#/$defs/sha256" },
     "created_at_utc": { "type": "string", "format": "date-time" },
     "duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
@@ -43,32 +44,24 @@
         "build_duration_seconds",
         "build_environment_policy",
         "path",
-        "rocm_archs",
         "sha256"
       ],
       "properties": {
         "build_duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
         "build_environment_policy": { "const": "closed-source-build-v1" },
         "path": { "const": "target/release/examples/rocm_hf_path_attribution" },
-        "rocm_archs": {
-          "type": "array",
-          "prefixItems": [{ "const": "gfx1151" }],
-          "items": false,
-          "minItems": 1,
-          "maxItems": 1
-        },
         "sha256": { "$ref": "#/$defs/sha256" }
       }
     },
     "implementation": {
-      "description": "Content identities for the source-bound runner, exact-argv gate, and thermal supervisor.",
+      "description": "Content identities for the source-bound runner, exact-argv gate, and process runner.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["guarded_exec_sha256", "runner_sha256", "supervisor_sha256"],
+      "required": ["guarded_exec_sha256", "process_runner_sha256", "runner_sha256"],
       "properties": {
         "guarded_exec_sha256": { "$ref": "#/$defs/sha256" },
-        "runner_sha256": { "$ref": "#/$defs/sha256" },
-        "supervisor_sha256": { "$ref": "#/$defs/sha256" }
+        "process_runner_sha256": { "$ref": "#/$defs/sha256" },
+        "runner_sha256": { "$ref": "#/$defs/sha256" }
       }
     },
     "request": {
@@ -82,10 +75,10 @@
       }
     },
     "model_identity": {
-      "$ref": "rocm-hf-next-token-oracle-v1.schema.json#/$defs/modelIdentity"
+      "$ref": "rocm-hf-next-token-oracle-v2.schema.json#/$defs/modelIdentity"
     },
     "model_fingerprint": {
-      "$ref": "rocm-hf-next-token-oracle-v1.schema.json#/$defs/modelFingerprintEvidence"
+      "$ref": "rocm-hf-next-token-oracle-v2.schema.json#/$defs/modelFingerprintEvidence"
     },
     "oracle_reference": {
       "description": "The retained HF oracle result and ignored raw safetensors reference consumed by the Kiln worker.",
@@ -107,16 +100,15 @@
       }
     },
     "containment": {
-      "description": "Host admission, systemd cgroup/network policy, and complete thermal lifecycle.",
+      "description": "Host admission, private-network policy, and process cleanup evidence.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["host_available_before_gib", "memory_max_gib", "network", "thermal"],
+      "required": ["host_available_before_gib", "network", "process"],
       "properties": {
-        "host_available_before_gib": { "type": "integer", "minimum": 23 },
-        "memory_max_gib": { "const": 48 },
+        "host_available_before_gib": { "type": "integer", "minimum": 1 },
         "network": { "const": "forbidden" },
-        "thermal": {
-          "$ref": "rocm-hf-next-token-oracle-v1.schema.json#/$defs/thermalEvidence"
+        "process": {
+          "$ref": "rocm-hf-next-token-oracle-v2.schema.json#/$defs/processEvidence"
         }
       }
     },
@@ -228,40 +220,12 @@
         "replay_successes": { "type": "integer", "minimum": 7 }
       }
     },
-    "cgroup": {
-      "description": "Worker-observed cgroup v2 memory accounting at successful exit.",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "memory_current_bytes",
-        "memory_high_events",
-        "memory_max_bytes",
-        "memory_max_events",
-        "memory_oom_events",
-        "memory_oom_kill_events",
-        "memory_peak_bytes",
-        "memory_swap_bytes",
-        "memory_swap_max_bytes"
-      ],
-      "properties": {
-        "memory_current_bytes": { "type": "integer", "minimum": 0 },
-        "memory_high_events": { "const": 0 },
-        "memory_max_bytes": { "const": 51539607552 },
-        "memory_max_events": { "const": 0 },
-        "memory_oom_events": { "const": 0 },
-        "memory_oom_kill_events": { "const": 0 },
-        "memory_peak_bytes": { "type": "integer", "minimum": 0 },
-        "memory_swap_bytes": { "const": 0 },
-        "memory_swap_max_bytes": { "const": 0 }
-      }
-    },
     "worker": {
       "description": "One-model-load comparison across the four production-relevant numerical and selection paths.",
       "type": "object",
       "additionalProperties": false,
       "required": [
         "attribution",
-        "containment",
         "eager_full",
         "eager_greedy",
         "graph",
@@ -275,7 +239,7 @@
         "schema"
       ],
       "properties": {
-        "schema": { "const": "kiln.rocm-hf-path-attribution.v1" },
+        "schema": { "const": "kiln.rocm-hf-path-attribution.v2" },
         "attribution": {
           "enum": [
             "eager_full_logits",
@@ -285,7 +249,6 @@
             "serving_only_or_not_reproduced"
           ]
         },
-        "containment": { "$ref": "#/$defs/cgroup" },
         "eager_full": { "$ref": "#/$defs/fullPath" },
         "eager_greedy": { "$ref": "#/$defs/greedyPath" },
         "graph": { "$ref": "#/$defs/graph" },

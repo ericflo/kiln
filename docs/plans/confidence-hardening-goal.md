@@ -1,8 +1,15 @@
 # Kiln Confidence Hardening Goal
 
-**Status:** Temporary working document. Keep it current while executing the
-goal, then replace it with a short permanent support/qualification document
-when every required item is complete.
+**Status:** Superseded working ledger. Retained for audit history only.
+
+**Direction change (2026-07-27):** Do not resume the machine-specific thermal
+control, pacing, memory-cap, CPU-quota, or accelerator-default work recorded
+below. Those controls were not a product requirement and have been removed from
+current code, schemas, workloads, and documentation. Hardware receipts may
+describe the machine that produced them, but ordinary product behavior and
+qualification tooling must remain portable. The next active correctness issue
+is the retained CUDA Kiln/vLLM exact-output mismatch; investigate that numerical
+divergence without adding host-specific policy.
 
 **Created:** 2026-07-09
 

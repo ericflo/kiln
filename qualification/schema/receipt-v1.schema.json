@@ -169,9 +169,7 @@
                 "systemd_system",
                 "systemd_user_transient",
                 "cgroup_memory_delegation",
-                "memory_accounting",
-                "host_thermal_guard",
-                "gpu_temperature"
+                "memory_accounting"
               ],
               "properties": {
                 "wsl_identity": { "$ref": "#/$defs/capabilityStatus" },
@@ -187,9 +185,7 @@
                 "systemd_system": { "$ref": "#/$defs/capabilityStatus" },
                 "systemd_user_transient": { "$ref": "#/$defs/capabilityStatus" },
                 "cgroup_memory_delegation": { "$ref": "#/$defs/capabilityStatus" },
-                "memory_accounting": { "$ref": "#/$defs/capabilityStatus" },
-                "host_thermal_guard": { "$ref": "#/$defs/capabilityStatus" },
-                "gpu_temperature": { "$ref": "#/$defs/capabilityStatus" }
+                "memory_accounting": { "$ref": "#/$defs/capabilityStatus" }
               }
             },
             "details": { "$ref": "#/$defs/nonemptyStringMap" }

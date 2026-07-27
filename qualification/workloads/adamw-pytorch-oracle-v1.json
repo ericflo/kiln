@@ -120,7 +120,6 @@
           "environment": {
             "CARGO_NET_OFFLINE": "true",
             "KILN_QUALIFICATION": "1",
-            "KILN_ROCM_ARCHS": "gfx1151",
             "ROCM_PATH": "/opt/rocm"
           },
           "timeout_seconds": 1800,

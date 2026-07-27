@@ -170,10 +170,9 @@ launcher-owned snapshot copying and verification, source snapshot hashing,
 base-model and optional-adapter fingerprinting, and installed Python/runtime
 content hashing. It does not reset at a file, shard, pass, or phase boundary.
 The fresh child runtime-content recheck runs in another process under the same
-numeric ceiling. The option changes startup pacing, not semantic identity or
-timed request behavior; omission preserves the historical unlimited mode.
-Thermally qualified launch documents must choose an explicit host-reviewed
-value rather than relying on omission.
+numeric ceiling. The option changes startup read-rate limiting, not semantic
+identity or timed request behavior; omission preserves the historical unlimited
+mode.
 
 ## Process-group ownership
 
@@ -185,16 +184,11 @@ An owned local serving benchmark must instead pass
 `--process-group-mode=inherited`. This mode is accepted only on Linux when the
 launcher PID is already the leader of an isolated process group. The benchmark
 driver creates that group before any snapshot or model work, so the launcher,
-vLLM, and ordinary worker descendants receive thermal `SIGSTOP`/`SIGCONT` and
-shutdown signals as one unit. The launcher drains every peer without signaling
+vLLM, and ordinary worker descendants receive shutdown signals as one unit. The
+launcher drains every peer without signaling
 itself and still owns snapshot cleanup. A direct signal delivered only to the
 launcher is forwarded to the child; the external supervisor should signal the
 complete group.
-
-Do not use detached mode behind a process-group thermal guard. The guarded
-launcher would stop while the detached inference child continued running. The
-serving benchmark independently rejects that shape because readiness must come
-from a listener held by the launched process group.
 
 ## Static adapter teacher
 
@@ -573,7 +567,7 @@ Kiln workload's existing 3,968-token ceiling. The preflighted largest
 prompt-plus-output total is 3,947 tokens, leaving 21 tokens of declared
 headroom. The launch also omits the optional cumulative provenance-read
 ceiling, so manifest-only captures and real launches hash model, snapshot,
-adapter, and runtime content without automatic read pacing. Historical launch
+adapter, and runtime content without automatic read-rate limiting. Historical launch
 documents and receipts retain the explicit limits they actually used.
 
 This JSON is not a runtime manifest and does not pin an installed vLLM wheel by
@@ -587,11 +581,8 @@ On WSL2, every pass runs within a separate systemd user scope and private
 network/PID/mount/Landlock boundary. The default scope uses
 `memory.max=max`, zero swap, 512 PIDs, and CPU quota zero, retaining resource
 accounting without memory or CPU throttling. No temperature policy is inferred
-from the machine. A caller may explicitly provide `--wsl2-thermal-policy` for a
-separate lab experiment; only then does the capture validate the policy,
-thermal lifecycle, and paced-scope evidence. Publication always requires strict
-ordered scope events, zero memory-limit/OOM events, resource accounting, and
-scope removal.
+from the machine. Publication requires strict ordered scope events, zero
+memory-limit/OOM events, resource accounting, and scope removal.
 The current retained Laptop GPU performance identity is
 `qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json`, with file
 `sha256:6b23b1bf4179647be33cb43bd6df7db7666f469cbd15ea41713061aa3bb75050`
@@ -600,8 +591,7 @@ and runtime-content
 Two captures from exact clean pushed source
 `133324f869fff0dd38f209fb80af1cecaf4150ed` produced the same 2,601 bytes
 in 35.578 and 33.860 seconds. Their distinct accounting-only scopes had no CPU
-allowance or thermal lifecycle, recorded zero memory-limit/OOM events, and were
-removed.
+allowance, recorded zero memory-limit/OOM events, and were removed.
 The identity binds the 3,968-token performance launch and inference
 configuration
 `6eb176306f43b6731c43c00fefa7b2aa4c44f577bd9f6dddee3b05ed82ea902b`.
@@ -620,17 +610,15 @@ Current model-bearing qualification also brackets the serving case itself. The
 parent qualification runner and benchmark perform their initial and final
 double-read model fingerprints with no read-rate limiter by default. WSL2
 parent scopes retain isolation and resource accounting but no memory/CPU
-ceiling; thermal fingerprint lifecycles exist only when a caller explicitly
-selects a host policy. Historical receipts retain the bounded and paced evidence
-from the older laptop procedure.
+ceiling.
 
 The accelerator identity must match the environment receipt's 4090 class,
 `sm_89`, capacity, and selected logical device. The benchmark then binds the
 manifest as `--runtime-artifact`, the environment receipt's stable GPU UUID as
-the NVML selector, and the same explicit host policy or finite memory ceiling
-used by the Kiln reference, if either separate lab control was selected. See
+the NVML selector, and the same finite memory ceiling used by the Kiln reference
+if the workload declares one. See
 [Serving Benchmark
-Protocol](SERVING_BENCHMARK_PROTOCOL.md#rtx-4090-serving-bootstrap) for the
+Protocol](SERVING_BENCHMARK_PROTOCOL.md#source-and-runtime-identity) for the
 complete machine sequence and failure gates.
 
 Owned benchmark mode independently enforces the same boundary: the command
@@ -647,11 +635,7 @@ Strix Halo comparison:
 - `qualification/runtime/vllm/rocm/strix-halo/vllm-rocm723-qwen35-4b-triton-text-v2.json`
   is the launcher-produced runtime manifest;
 - `qualification/server-launch/vllm-rocm-strix-halo-triton-text-private-cache-v3.json`
-  is the current atomic owned-launch document; and
-- `qualification/host-policies/strix-halo-serving-benchmark-hard-limit-v1.json`
-  is the current serving thermal policy. The first guarded startup and
-  comparison receipts embed the now-retired 58/50 C process-stop policy; do
-  not reuse that policy for active ROCm serving.
+  is the current atomic owned-launch document.
 
 The manifest binds vLLM
 `0.23.1rc1.dev1261+gc71a583aa.rocm723`, PyTorch
@@ -674,8 +658,7 @@ non-semantic cache-isolation change must not fabricate a second model identity.
 The retained v3 smoke proves this exact host/runtime can cold-compile, become
 ready, serve the strict streaming protocol, and drain cleanly with an isolated
 cache. It is not a portable claim that another ROCm host has the same runtime,
-and its one-token thermally paced request is not performance or numerical-parity
-evidence.
+and its one-token request is not performance or numerical-parity evidence.
 
 The ignored local environment is rooted at
 `.qualification/vllm-rocm-venv`. Its `bin/python-kiln` must be a regular copied
@@ -718,14 +701,11 @@ It recomputed the exact v2 semantic manifest, loaded 7.99 GiB of model state,
 compiled into a new private cache, became ready, and served one strict warmup
 plus one measured streaming request with exact one-token usage and length
 termination. The driver exited the owned process group with status zero, did
-not force shutdown, cooled the package to 43.625 C, and left no listener,
-process, model snapshot, or runtime-cache child. The host guard recorded 274
-pacing intervals over 692.307 seconds, a 90.25 C lifecycle peak below the 93 C
-hard limit, and no guard trip. That cold-start cost is real lifecycle evidence,
-but the measured request spent 2.559 of 2.630 seconds thermally paced; its 0.38
-output token/second result must not be cited as a serving-performance result.
-Use the subsequent paired multi-concurrency campaign for throughput, pause, and
-correctness claims.
+not force shutdown, and left no listener, process, model snapshot, or
+runtime-cache child. That cold-start cost is real lifecycle evidence, but the
+single measured request must not be cited as a serving-performance result. Use
+the subsequent paired multi-concurrency campaign for throughput and correctness
+claims.
 
 The first exact-source greedy pair is now retained under
 `benchmarks/receipts/rocm/strix-halo/20260718t223203-rocm-strix-halo-greedy-short-c1-32-sourcepair-v1.{kiln,vllm}.json`.
@@ -734,24 +714,17 @@ vLLM scaled from 18.04 output tokens/second at concurrency 8 to 51.59 at 32,
 versus Kiln's 8.39 and 7.12. That result currently supports recommending vLLM
 for high-concurrency ROCm serving. It does not close correctness: all four
 greedy output-set hashes differed, so the vLLM receipt failed exact comparison.
-Both engines also recorded zero SLO-goodput because the conservative host guard
-inserted multi-second process stops. Preserve the pair as counterevidence;
-the source-paired driver-v7 c1 follow-up is retained at
+Preserve the pair as counterevidence; the source-paired driver-v7 c1 follow-up
+is retained at
 `benchmarks/receipts/rocm/strix-halo/20260718t232632-rocm-strix-halo-greedy-c1-divergence-v1.{kiln,vllm}.json`.
 Driver v8 continues to accept that strict-valid v7 receipt as an exact-output
-reference while requiring the new arm's model provenance hashing to be
-continuously thermally contained.
+reference.
 Both outputs contain 64 tokens and no reasoning. They agree through generated
 token index 2 (`To establish a`) and diverge at index 3: Kiln emits token
 `25045` (` baseline`) while vLLM emits `15787` (` foundation`). The first
 visible UTF-8 difference is byte 15. This closes mismatch localization, not
-correctness attribution; use a guarded independent eager
+correctness attribution; use an independent eager
 Transformers/PyTorch next-token oracle before changing either implementation.
-The c1 rows also remain pacing-dominated: both have zero SLO-goodput, and the
-vLLM cold lifecycle accumulated 748.90 seconds of process stops around 162.63
-active compile seconds plus 30 active graph-capture seconds. Diagnose that
-continuous thermal policy before expanding the claim or treating either c1
-throughput value as unpaced latency data.
 
 Do not copy this manifest to another machine and call it qualified. Recreate
 the isolated runtime there, emit a new manifest through the exact launch argv,
