@@ -414,17 +414,18 @@ qualification fingerprint both omit their optional read ceilings.
 The retained Laptop GPU manifest at
 `qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json` was
 captured twice from exact clean pushed source
-`a7313f3d25c76b30c9747ddcecefef1a067496d1`. Both captures produced the same
+`133324f869fff0dd38f209fb80af1cecaf4150ed`. Both captures produced the same
 2,601-byte file with
-`sha256:3e40ed7368af99b8b75eaaa2910bab3ba323df8b58b53895beab6a4a6248472c`;
+`sha256:6b23b1bf4179647be33cb43bd6df7db7666f469cbd15ea41713061aa3bb75050`;
 the bound installed-runtime content hash is
-`6bf6259d333d08bcf010eaac2511cd9ca9280fcf7e3cb32346b3fe1a5bcdbf55`.
-The separate scopes completed in 32.152 and 32.137 seconds with
-783,310,848- and 783,699,968-byte memory peaks, 27-PID peaks, zero
-memory-limit/OOM events, and clean removal. They used 34.026 and 33.883 CPU
+`7254712bdd0c5bd11c03f90d3e7907963a6f135f5c3cdbc25349ad3430503b29`.
+Runtime-content v2 ignores generated `__pycache__` directories but retains the
+interpreter, source modules, native libraries, distribution files, and metadata.
+The separate scopes completed in 35.578 and 33.860 seconds with
+4,416,770,048- and 1,554,837,504-byte memory peaks, 27-PID peaks, zero
+memory-limit/OOM events, and clean removal. They used 36.359 and 35.397 CPU
 seconds with no CPU allowance, thermal process, or pacing lifecycle. The
-manifest now matches the preceding real-launch inference configuration exactly
-and is a valid immutable input for the next exact-source run. It does not
+manifest is a valid immutable input for the next exact-source run. It does not
 establish server startup, request correctness, throughput, or endurance.
 
 Before a model-bearing current case starts, the benchmark driver performs the

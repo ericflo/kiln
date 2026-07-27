@@ -1049,18 +1049,20 @@ separately requested lab controls.
 The current retained laptop performance runtime manifest is
 `qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json`, captured
 twice from exact clean pushed source
-`a7313f3d25c76b30c9747ddcecefef1a067496d1`. Its file hash is
-`sha256:3e40ed7368af99b8b75eaaa2910bab3ba323df8b58b53895beab6a4a6248472c`
+`133324f869fff0dd38f209fb80af1cecaf4150ed`. Its file hash is
+`sha256:6b23b1bf4179647be33cb43bd6df7db7666f469cbd15ea41713061aa3bb75050`
 and its installed-runtime content hash is
-`6bf6259d333d08bcf010eaac2511cd9ca9280fcf7e3cb32346b3fe1a5bcdbf55`.
+`7254712bdd0c5bd11c03f90d3e7907963a6f135f5c3cdbc25349ad3430503b29`.
 Both strict-valid captures produced the same 2,601 bytes and bind vLLM 0.23.0,
 the closed Qwen3.5-4B content, top-K 20, BF16, and both model-length and
 batched-token bounds at the paired Kiln workload's 3,968-token context ceiling.
 Its largest preflighted prompt-plus-output total is 3,947 tokens, leaving 21
-tokens of declared headroom.
+tokens of declared headroom. Runtime-content v2 excludes generated
+`__pycache__` directories while continuing to bind installed code and native
+libraries.
 
-The two scopes completed in 32.152 and 32.137 seconds. They used 34,026,363 and
-33,883,389 CPU microseconds, peaked at 783,310,848 and 783,699,968 bytes
+The two scopes completed in 35.578 and 33.860 seconds. They used 36,359,104 and
+35,397,232 CPU microseconds, peaked at 4,416,770,048 and 1,554,837,504 bytes
 with 27 PIDs each, recorded zero memory-limit/OOM events, and were both removed.
 Neither scope had a CPU allowance, temperature process, or pacing lifecycle.
 The manifest now binds inference configuration

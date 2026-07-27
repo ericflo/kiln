@@ -85,7 +85,7 @@
           "launch_sha256": "sha256:83a10e3f39b27ba015af2cb2a1ac8aca011223c3f0422e259bcf88754bb15bf8",
           "max_model_len": 3968,
           "max_num_batched_tokens": 3968,
-          "runtime_manifest_sha256": "sha256:3e40ed7368af99b8b75eaaa2910bab3ba323df8b58b53895beab6a4a6248472c"
+          "runtime_manifest_sha256": "sha256:6b23b1bf4179647be33cb43bd6df7db7666f469cbd15ea41713061aa3bb75050"
         }
       },
       "cases": [

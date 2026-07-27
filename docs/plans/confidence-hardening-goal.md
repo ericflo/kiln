@@ -2632,11 +2632,15 @@ without waiting for the remaining repository-wide cleanup phases.
   the qualification runner's closed environment correctly removed it. The
   launcher now strips model-registry credentials and excludes them from
   inference identity; the benchmark rejects a missing or conflicting response
-  fingerprint during warmup. Two byte-identical captures from clean pushed
-  source `a7313f3d25c76b30c9747ddcecefef1a067496d1` now bind the real-launch
-  `1114206b201c82cb07efff67b863413964a6d3064b9ab0e445b9527e3e1bc19b`
-  configuration at manifest file
-  `sha256:3e40ed7368af99b8b75eaaa2910bab3ba323df8b58b53895beab6a4a6248472c`.
+  fingerprint during warmup. A later exact-output diagnostic generated
+  `__pycache__` files that the old runtime-content definition incorrectly
+  treated as installed code, so all five vLLM warmups in the next c1 failed
+  closed on manifest drift. Runtime-content v2 ignores only those generated
+  caches. Two byte-identical captures from clean pushed source
+  `133324f869fff0dd38f209fb80af1cecaf4150ed` bind configuration
+  `6eb176306f43b6731c43c00fefa7b2aa4c44f577bd9f6dddee3b05ed82ea902b`
+  at manifest file
+  `sha256:6b23b1bf4179647be33cb43bd6df7db7666f469cbd15ea41713061aa3bb75050`.
   Runtime identity is closed before another c1.
   A bounded full-output replay localized the greedy-short divergence to
   completion token 56. The first 55 completion tokens matched. Independent

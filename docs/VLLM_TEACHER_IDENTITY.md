@@ -594,20 +594,21 @@ ordered scope events, zero memory-limit/OOM events, resource accounting, and
 scope removal.
 The current retained Laptop GPU performance identity is
 `qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json`, with file
-`sha256:3e40ed7368af99b8b75eaaa2910bab3ba323df8b58b53895beab6a4a6248472c`
+`sha256:6b23b1bf4179647be33cb43bd6df7db7666f469cbd15ea41713061aa3bb75050`
 and runtime-content
-`6bf6259d333d08bcf010eaac2511cd9ca9280fcf7e3cb32346b3fe1a5bcdbf55`.
+`7254712bdd0c5bd11c03f90d3e7907963a6f135f5c3cdbc25349ad3430503b29`.
 Two captures from exact clean pushed source
-`a7313f3d25c76b30c9747ddcecefef1a067496d1` produced the same 2,601 bytes
-in 32.152 and 32.137 seconds. Their distinct accounting-only scopes had no CPU
+`133324f869fff0dd38f209fb80af1cecaf4150ed` produced the same 2,601 bytes
+in 35.578 and 33.860 seconds. Their distinct accounting-only scopes had no CPU
 allowance or thermal lifecycle, recorded zero memory-limit/OOM events, and were
 removed.
 The identity binds the 3,968-token performance launch and inference
 configuration
-`1114206b201c82cb07efff67b863413964a6d3064b9ab0e445b9527e3e1bc19b`,
-exactly matching all five real launches from the preceding failed c1. The old
-manifest had instead included an ambient `HF_TOKEN` because the launcher had
-classified every `HF_*` name as an inference input, while the qualification
+`6eb176306f43b6731c43c00fefa7b2aa4c44f577bd9f6dddee3b05ed82ea902b`.
+Runtime-content v2 excludes generated `__pycache__` directories while still
+binding source modules, native libraries, the interpreter, and distribution
+metadata. The older manifest had included an ambient `HF_TOKEN` because the
+launcher had classified every `HF_*` name as an inference input, while the qualification
 runner's closed environment correctly omitted credentials. The launcher now
 removes known Hugging Face credential variables before child creation and
 excludes them from inference identity. The owned benchmark also requires each
