@@ -187,14 +187,8 @@ jobs:
           if [ "${#receipts[@]}" -gt 0 ]; then
             python3 scripts/qualification/receipt.py "${receipts[@]}"
           fi
-          mapfile -d '' benchmark_receipts < <(find benchmarks/receipts -type f -name '*.json' -print0 | sort -z)
-          if [ "${#benchmark_receipts[@]}" -gt 0 ]; then
-            python3 scripts/bench-concurrent-batch.py --validate-receipt "${benchmark_receipts[@]}"
-          fi
-          mapfile -d '' oracle_results < <(find qualification/oracle-results -type f -name '*.json' -print0 | sort -z)
-          if [ "${#oracle_results[@]}" -gt 0 ]; then
-            python3 scripts/qualification/check_oracle_results.py "${oracle_results[@]}"
-          fi
+          git fetch --no-tags --depth=1 origin 9371035bfeb3908ebf47bd107eb53f98c529be3e
+          scripts/qualification/validate_retained_evidence.sh
 
   linux-vulkan:
     name: Linux / Vulkan

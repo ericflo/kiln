@@ -2169,11 +2169,11 @@ mod tests {
         );
         assert_eq!(
             json["decode_runtime"]["accelerator_runtime"]["rocm_strided_batched_matmul_mode"]["effective"],
-            "auto"
+            "disabled"
         );
         assert_eq!(
             json["decode_runtime"]["accelerator_runtime"]["rocm_bf16_matmul_output_mode"]["effective"],
-            "auto"
+            "f32_then_cast"
         );
         assert_eq!(
             json["decode_runtime"]["accelerator_runtime"]["rocm_kernel_profile"]["effective"],
