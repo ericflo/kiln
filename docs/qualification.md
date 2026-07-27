@@ -1049,16 +1049,16 @@ separately requested lab controls.
 The current retained laptop performance runtime manifest is
 `qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json`, captured
 twice from exact clean pushed source
-`ba42165b6af707bddc1789044183c871a969f4d6`. Its file hash is
-`sha256:0cd295ac5f4f9b7afdbee69af2925078325524186e12e9b7d2b280c5c9ea9442`
+`76dc8f830a88dcd0f2321cd2737d1b43b4851311`. Its file hash is
+`sha256:1419a2d481c2439b334c8f67c71fe3f291150616b8f44b6249274e5546cb04bd`
 and its installed-runtime content hash is
 `6bf6259d333d08bcf010eaac2511cd9ca9280fcf7e3cb32346b3fe1a5bcdbf55`.
 Both strict-valid captures produced the same 2,608 bytes and bind vLLM 0.23.0,
 the closed Qwen3.5-4B content, 32,768-token context, top-K 20, BF16, and the
 reviewed performance launch.
 
-The two scopes completed in 44.630 and 36.292 seconds. They used 42,631,432 and
-36,549,602 CPU microseconds, peaked at 13,470,638,080 and 2,028,535,808 bytes
+The two scopes completed in 44.713 and 34.835 seconds. They used 42,590,540 and
+36,833,050 CPU microseconds, peaked at 13,627,305,984 and 783,560,704 bytes
 with 27 PIDs each, recorded zero memory-limit/OOM events, and were both removed.
 Neither scope had a CPU allowance, temperature process, or pacing lifecycle.
 This closes the runtime-manifest prerequisite only. It is not a server startup,

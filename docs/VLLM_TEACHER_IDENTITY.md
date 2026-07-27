@@ -589,11 +589,11 @@ ordered scope events, zero memory-limit/OOM events, resource accounting, and
 scope removal.
 The current retained Laptop GPU performance identity is
 `qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json`, with file
-`sha256:0cd295ac5f4f9b7afdbee69af2925078325524186e12e9b7d2b280c5c9ea9442`
+`sha256:1419a2d481c2439b334c8f67c71fe3f291150616b8f44b6249274e5546cb04bd`
 and runtime-content
 `6bf6259d333d08bcf010eaac2511cd9ca9280fcf7e3cb32346b3fe1a5bcdbf55`.
-Two exact clean-source captures produced the same 2,608 bytes in 44.630 and
-36.292 seconds. Their distinct accounting-only scopes had no CPU allowance or
+Two exact clean-source captures produced the same 2,608 bytes in 44.713 and
+34.835 seconds. Their distinct accounting-only scopes had no CPU allowance or
 thermal lifecycle, recorded zero memory-limit/OOM events, and were removed.
 This establishes the immutable runtime identity used by later serving evidence,
 not serving correctness or performance by itself.

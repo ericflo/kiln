@@ -368,9 +368,8 @@ child `PATH`, so console tools installed with the reviewed runtime, including
 remain inference-identity inputs. Changing this derived launch environment
 requires a new two-pass runtime-manifest capture before c1.
 
-The checked-in laptop runtime manifest is the immutable c1 input only when it
-matches the current derived launch environment. The interpreter-path correction
-therefore requires a replacement capture before the next c1 attempt. Its older
+The checked-in laptop runtime manifest is the immutable c1 input and matches
+the current derived launch environment. Its older
 `scripts/qualification/capture_vllm_runtime_manifest.py` procedure coupled
 artifact identity to the now-rejected thermal/CPU pacing wrapper.
 Preserve that capture as historical artifact evidence, but do not rerun the
@@ -387,14 +386,14 @@ qualification fingerprint both omit their optional read ceilings.
 The retained Laptop GPU manifest at
 `qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json` was
 captured twice from exact clean pushed source
-`ba42165b6af707bddc1789044183c871a969f4d6`. Both captures produced the same
+`76dc8f830a88dcd0f2321cd2737d1b43b4851311`. Both captures produced the same
 2,608-byte file with
-`sha256:0cd295ac5f4f9b7afdbee69af2925078325524186e12e9b7d2b280c5c9ea9442`;
+`sha256:1419a2d481c2439b334c8f67c71fe3f291150616b8f44b6249274e5546cb04bd`;
 the bound installed-runtime content hash is
 `6bf6259d333d08bcf010eaac2511cd9ca9280fcf7e3cb32346b3fe1a5bcdbf55`.
-The separate scopes completed in 44.630 and 36.292 seconds with
-13,470,638,080- and 2,028,535,808-byte memory peaks, 27-PID peaks, zero
-memory-limit/OOM events, and clean removal. They used 42.631 and 36.550 CPU
+The separate scopes completed in 44.713 and 34.835 seconds with
+13,627,305,984- and 783,560,704-byte memory peaks, 27-PID peaks, zero
+memory-limit/OOM events, and clean removal. They used 42.591 and 36.833 CPU
 seconds with no CPU allowance, thermal process, or pacing lifecycle. This
 artifact is the immutable vLLM input for the next exact-source performance run;
 it does not itself establish server startup, request correctness, throughput,

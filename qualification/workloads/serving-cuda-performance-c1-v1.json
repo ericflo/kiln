@@ -83,7 +83,7 @@
         "vllm": {
           "base_url": "http://127.0.0.1:8421",
           "launch_sha256": "sha256:bbf2bddc67a1a796afd86f6d622fd3e025f40741a1805432c17dd3bdb1ce5b81",
-          "runtime_manifest_sha256": "sha256:0cd295ac5f4f9b7afdbee69af2925078325524186e12e9b7d2b280c5c9ea9442"
+          "runtime_manifest_sha256": "sha256:1419a2d481c2439b334c8f67c71fe3f291150616b8f44b6249274e5546cb04bd"
         }
       },
       "cases": [
