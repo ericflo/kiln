@@ -369,7 +369,7 @@ jobs:
       # against (cargo-deny ≤ 0.17 still parses that field as a deprecated
       # LintLevel and will reject "workspace"). Bump this pin deliberately when
       # we want a newer cargo-deny — see the README for the action.
-      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.17 (cargo-deny 0.19.2)
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.0.17 (cargo-deny 0.19.2)
         with:
           command: check
           # Run all checks: licenses, sources, bans, advisories
