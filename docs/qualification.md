@@ -1063,7 +1063,15 @@ The two scopes completed in 44.730 and 35.016 seconds. They used 42,771,188 and
 36,852,899 CPU microseconds, peaked at 13,625,831,424 and 783,572,992 bytes
 with 27 PIDs each, recorded zero memory-limit/OOM events, and were both removed.
 Neither scope had a CPU allowance, temperature process, or pacing lifecycle.
-This closes the runtime-manifest prerequisite only. It is not a server startup,
+The later exact c1 launch reported inference configuration
+`1114206b201c82cb07efff67b863413964a6d3064b9ab0e445b9527e3e1bc19b`
+on all five vLLM lifecycles instead of the manifest's
+`17c0a38180758283005aeb4c6ab82954eb225ca7535e01a9a29058c7bcdaaeee`.
+Source and immutable-snapshot content independently matched at
+`9e153346518cd043a237cbcab7a561f6fdf6924e6320fdbe2197a5456e0b3dd3`,
+so snapshot construction is not the cause. The manifest prerequisite is open
+until capture and real-launch provenance agree and the benchmark rejects a
+reported mismatch before measurement. This is not a server-startup,
 request, performance-matrix, soak, native-Linux, or desktop-4090 claim.
 
 The owned teacher does not require venv activation. It prepends the directory

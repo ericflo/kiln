@@ -3729,11 +3729,9 @@ def run_vllm_child(
             pending_signals.append(signum)
             return
         if process_group_mode == PROCESS_GROUP_MODE_INHERITED:
-            if child.poll() is None:
-                try:
-                    child.send_signal(signum)
-                except ProcessLookupError:
-                    pass
+            # The external supervisor signals the complete inherited group, so
+            # the child has already received this signal.
+            return
         elif hasattr(os, "killpg"):
             _signal_process_group(child.pid, signum)
         elif child.poll() is None:
@@ -3771,7 +3769,14 @@ def run_vllm_child(
         except OSError as exc:
             raise TeacherLaunchError(f"failed to start vLLM: {exc}") from exc
         for signum in pending_signals:
-            forward_signal(signum, None)
+            if process_group_mode == PROCESS_GROUP_MODE_INHERITED:
+                if child.poll() is None:
+                    try:
+                        child.send_signal(signum)
+                    except ProcessLookupError:
+                        pass
+            else:
+                forward_signal(signum, None)
         return_code = child.wait()
         if inherited_process_group is not None:
             _drain_inherited_process_group(inherited_process_group)

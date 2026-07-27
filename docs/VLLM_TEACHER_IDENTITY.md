@@ -601,8 +601,16 @@ in 44.730 and 35.016 seconds. Their distinct accounting-only scopes had no CPU
 allowance or thermal lifecycle, recorded zero memory-limit/OOM events, and were
 removed.
 The identity binds the 3,968-token performance launch and closes the manifest
-prerequisite for another exact-source c1 attempt. It establishes no serving
-correctness or performance claim.
+capture checkpoint. The first real c1 launches later reported inference
+configuration
+`1114206b201c82cb07efff67b863413964a6d3064b9ab0e445b9527e3e1bc19b`,
+not the manifest's
+`17c0a38180758283005aeb4c6ab82954eb225ca7535e01a9a29058c7bcdaaeee`.
+The source and immutable-snapshot content hashes matched exactly, so snapshot
+construction is not the cause. Until the remaining environment/provenance
+difference is removed and the owned benchmark rejects any reported fingerprint
+drift before measurement, this manifest does not close the c1 prerequisite. It
+establishes no serving correctness or performance claim.
 
 Current model-bearing qualification also brackets the serving case itself. The
 parent qualification runner and benchmark perform their initial and final

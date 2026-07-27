@@ -1760,7 +1760,7 @@ class ProcessSupervisionTests(unittest.TestCase):
                 )
         popen.assert_not_called()
 
-    def test_inherited_signal_reaches_child_without_group_signal(self) -> None:
+    def test_inherited_group_signal_is_not_duplicated_to_child(self) -> None:
         handlers: dict[int, object] = {}
         child = mock.Mock(pid=4243)
 
@@ -1795,8 +1795,43 @@ class ProcessSupervisionTests(unittest.TestCase):
                 ),
                 0,
             )
-        child.send_signal.assert_called_once_with(signal.SIGINT)
+        child.send_signal.assert_not_called()
         killpg.assert_not_called()
+
+    def test_inherited_signal_pending_before_spawn_reaches_child(self) -> None:
+        handlers: dict[int, object] = {}
+        child = mock.Mock(pid=4243)
+        child.wait.return_value = 0
+        child.poll.return_value = None
+
+        def install(signum: int, handler: object) -> None:
+            if callable(handler):
+                handlers[signum] = handler
+
+        def spawn(*_args: object, **_kwargs: object) -> mock.Mock:
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+            return child
+
+        with mock.patch.object(
+            vllm_teacher, "_require_isolated_inherited_process_group", return_value=4242
+        ), mock.patch.object(
+            vllm_teacher.subprocess, "Popen", side_effect=spawn
+        ), mock.patch.object(
+            vllm_teacher.signal, "getsignal", return_value="previous"
+        ), mock.patch.object(
+            vllm_teacher.signal, "signal", side_effect=install
+        ), mock.patch.object(
+            vllm_teacher, "_drain_inherited_process_group"
+        ):
+            self.assertEqual(
+                vllm_teacher.run_vllm_child(
+                    ["vllm"],
+                    {},
+                    process_group_mode=vllm_teacher.PROCESS_GROUP_MODE_INHERITED,
+                ),
+                0,
+            )
+        child.send_signal.assert_called_once_with(signal.SIGTERM)
 
     def test_inherited_drain_signals_only_identity_revalidated_peers(self) -> None:
         group_states = iter(({4243: 99}, {4243: 99}, {}))

@@ -375,7 +375,17 @@ remain inference-identity inputs. Changing this derived launch environment
 requires a new two-pass runtime-manifest capture before c1.
 
 The checked-in laptop runtime manifest matches the current 3,968-token
-performance envelope and derived launch environment. An older revision of
+performance envelope, but the first real c1 launch exposed a remaining
+derived-environment mismatch. All five real launches reported inference
+configuration
+`1114206b201c82cb07efff67b863413964a6d3064b9ab0e445b9527e3e1bc19b`
+instead of the manifest's
+`17c0a38180758283005aeb4c6ab82954eb225ca7535e01a9a29058c7bcdaaeee`.
+An independent source-versus-snapshot reconstruction produced the same
+`9e153346518cd043a237cbcab7a561f6fdf6924e6320fdbe2197a5456e0b3dd3`
+content hash on both sides, ruling out snapshot drift. The next source
+checkpoint must make capture and real-launch provenance identical and reject a
+reported fingerprint mismatch before measurement. An older revision of
 `scripts/qualification/capture_vllm_runtime_manifest.py` coupled artifact
 identity to the now-rejected thermal/CPU pacing wrapper. The resulting retired
 manifests remain historical artifact evidence, but do not rerun the paced
@@ -401,9 +411,10 @@ The separate scopes completed in 44.730 and 35.016 seconds with
 13,625,831,424- and 783,572,992-byte memory peaks, 27-PID peaks, zero
 memory-limit/OOM events, and clean removal. They used 42.771 and 36.853 CPU
 seconds with no CPU allowance, thermal process, or pacing lifecycle. This
-artifact is the immutable vLLM input for the next exact-source performance run.
-It does not establish server startup, request correctness, throughput, or
-endurance.
+artifact records the intended vLLM input, but the later real-launch mismatch
+means it is not yet a valid immutable input for another exact-source
+performance run. It does not establish server startup, request correctness,
+throughput, or endurance.
 
 Before a model-bearing current case starts, the benchmark driver performs the
 initial double-read model fingerprint without a read-rate limiter. It repeats
