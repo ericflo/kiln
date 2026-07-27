@@ -1069,10 +1069,16 @@ on all five vLLM lifecycles instead of the manifest's
 `17c0a38180758283005aeb4c6ab82954eb225ca7535e01a9a29058c7bcdaaeee`.
 Source and immutable-snapshot content independently matched at
 `9e153346518cd043a237cbcab7a561f6fdf6924e6320fdbe2197a5456e0b3dd3`,
-so snapshot construction is not the cause. The manifest prerequisite is open
-until capture and real-launch provenance agree and the benchmark rejects a
-reported mismatch before measurement. This is not a server-startup,
-request, performance-matrix, soak, native-Linux, or desktop-4090 claim.
+so snapshot construction is not the cause. The manifest capture had inherited
+an ambient `HF_TOKEN` because all `HF_*` variables were treated as inference
+inputs; the qualification runner's closed environment correctly removed that
+credential. The launcher now removes known Hugging Face credentials before
+child creation and excludes them from inference identity. The benchmark now
+requires every vLLM stream to report the manifest fingerprint, rejecting a
+missing or conflicting value during warmup before measurement. The manifest
+prerequisite remains open until a clean two-pass replacement is published.
+This is not a server-startup, request, performance-matrix, soak, native-Linux,
+or desktop-4090 claim.
 
 The owned teacher does not require venv activation. It prepends the directory
 of its executing interpreter to the child `PATH`, making runtime-installed

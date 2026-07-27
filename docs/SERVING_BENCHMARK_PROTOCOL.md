@@ -161,6 +161,10 @@ occur at most once. Manifest, dry-run, and precomputed-identity modes are
 forbidden. The parsed served ID, top-K bound, and model-length bound must match
 the immutable runtime manifest. An arbitrary server command cannot satisfy an
 owned vLLM run merely by returning a syntactically valid system fingerprint.
+Every vLLM request stream must report the exact fingerprint from the runtime
+manifest. A missing, malformed, or conflicting value fails the request; because
+the same gate applies to warmup, measurement cannot begin under a different
+runtime identity.
 
 The vLLM wrapper owns its runtime cache through the typed `--cache-root` option.
 Each real launch derives a unique empty `VLLM_CACHE_ROOT`, and removes it after
@@ -383,9 +387,13 @@ instead of the manifest's
 `17c0a38180758283005aeb4c6ab82954eb225ca7535e01a9a29058c7bcdaaeee`.
 An independent source-versus-snapshot reconstruction produced the same
 `9e153346518cd043a237cbcab7a561f6fdf6924e6320fdbe2197a5456e0b3dd3`
-content hash on both sides, ruling out snapshot drift. The next source
-checkpoint must make capture and real-launch provenance identical and reject a
-reported fingerprint mismatch before measurement. An older revision of
+content hash on both sides, ruling out snapshot drift. The mismatch came from
+an ambient `HF_TOKEN` included by manifest capture but correctly removed by the
+qualification runner's closed environment. Registry credentials are now
+removed before child launch and excluded from inference identity, and the
+benchmark now rejects missing or conflicting response fingerprints during
+warmup. The checked-in manifest remains stale until its clean two-pass
+replacement. An older revision of
 `scripts/qualification/capture_vllm_runtime_manifest.py` coupled artifact
 identity to the now-rejected thermal/CPU pacing wrapper. The resulting retired
 manifests remain historical artifact evidence, but do not rerun the paced

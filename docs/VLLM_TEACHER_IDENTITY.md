@@ -547,6 +547,8 @@ Then qualify each ROCm, CUDA, and other intended machine locally:
    revalidation refuses to spawn vLLM.
 5. Confirm runtime LoRA endpoints, resolver plugins, unknown vLLM options,
    unbound file options, and shadow-code environment variables fail closed.
+   Confirm model-registry credentials are absent from the child environment and
+   cannot change the inference fingerprint.
 6. Interrupt the launcher and confirm the process group exits and its snapshot
    disappears. Exercise a child-start failure and stale-snapshot recovery.
 7. Measure numerical parity, latency pauses, VRAM behavior, and throughput at
@@ -607,10 +609,16 @@ configuration
 not the manifest's
 `17c0a38180758283005aeb4c6ab82954eb225ca7535e01a9a29058c7bcdaaeee`.
 The source and immutable-snapshot content hashes matched exactly, so snapshot
-construction is not the cause. Until the remaining environment/provenance
-difference is removed and the owned benchmark rejects any reported fingerprint
-drift before measurement, this manifest does not close the c1 prerequisite. It
-establishes no serving correctness or performance claim.
+construction is not the cause. The difference was an ambient `HF_TOKEN`:
+manifest capture inherited it because the launcher had classified every
+`HF_*` name as an inference input, while the qualification runner's closed
+environment correctly omitted credentials. The launcher now removes known
+Hugging Face credential variables before child creation and excludes them from
+inference identity. The owned benchmark also requires each vLLM response
+stream to report the manifest fingerprint and rejects a missing or conflicting
+value during warmup. This old manifest remains stale until a clean two-pass
+replacement is published, and it establishes no serving correctness or
+performance claim.
 
 Current model-bearing qualification also brackets the serving case itself. The
 parent qualification runner and benchmark perform their initial and final

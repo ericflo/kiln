@@ -5523,6 +5523,7 @@ def stream_request(
     headers: dict[str, str],
     timeout_secs: float,
     barrier: threading.Barrier,
+    expected_system_fingerprint: str | None = None,
 ) -> RequestResult:
     prompt = body["messages"][0]["content"]
     prompt_sha256 = text_sha256(prompt)
@@ -5542,6 +5543,7 @@ def stream_request(
         reasons: list[str] = []
         usage_records = 0
         performance_records = 0
+        system_fingerprint_records = 0
         server_performance: dict[str, Any] | None = None
         prompt_tokens = completion_tokens = total_tokens = 0
         done = False
@@ -5559,6 +5561,21 @@ def stream_request(
                     value = strict_json_loads(data)
                     if not isinstance(value, dict):
                         raise BenchmarkError("SSE data payload must be an object")
+                    system_fingerprint = value.get("system_fingerprint")
+                    if system_fingerprint is not None:
+                        if not isinstance(system_fingerprint, str):
+                            raise BenchmarkError(
+                                "stream system_fingerprint must be a string or null"
+                            )
+                        system_fingerprint_records += 1
+                        if (
+                            expected_system_fingerprint is not None
+                            and system_fingerprint != expected_system_fingerprint
+                        ):
+                            raise BenchmarkError(
+                                "stream system_fingerprint disagrees with the "
+                                "vLLM runtime manifest"
+                            )
                     content, reasoning = response_semantic_parts(value)
                     if content or reasoning:
                         semantic_times.append(observed)
@@ -5591,6 +5608,13 @@ def stream_request(
             raise BenchmarkError("stream ended without [DONE]")
         if usage_records != 1:
             raise BenchmarkError("stream did not emit exactly one usage record")
+        if (
+            expected_system_fingerprint is not None
+            and system_fingerprint_records == 0
+        ):
+            raise BenchmarkError(
+                "stream did not report the vLLM runtime manifest system_fingerprint"
+            )
         if prompt_tokens <= 0 or completion_tokens <= 0:
             raise BenchmarkError("stream reported zero prompt or completion tokens")
         if len(reasons) != 1:
@@ -6374,6 +6398,7 @@ def run_once(
     headers: dict[str, str],
     sampler: MemorySampler,
     diagnostics_url: str | None,
+    expected_system_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     bodies: list[dict[str, Any]] = []
     prompts: set[str] = set()
@@ -6421,6 +6446,7 @@ def run_once(
             headers=headers,
             timeout_secs=args.timeout_secs,
             barrier=barrier,
+            expected_system_fingerprint=expected_system_fingerprint,
         )
 
     threads = [
@@ -7643,6 +7669,11 @@ def main(argv: list[str] | None = None) -> int:
                             headers=headers,
                             sampler=sampler,
                             diagnostics_url=diagnostics_url,
+                            expected_system_fingerprint=(
+                                None
+                                if runtime_manifest is None
+                                else runtime_manifest["system_fingerprint"]
+                            ),
                         )
                         print(
                             f"[warmup] {warmup['verdict']} "
@@ -7663,6 +7694,11 @@ def main(argv: list[str] | None = None) -> int:
                                     headers=headers,
                                     sampler=sampler,
                                     diagnostics_url=diagnostics_url,
+                                    expected_system_fingerprint=(
+                                        None
+                                        if runtime_manifest is None
+                                        else runtime_manifest["system_fingerprint"]
+                                    ),
                                 )
                                 runs.append(row)
                                 print_run(row)

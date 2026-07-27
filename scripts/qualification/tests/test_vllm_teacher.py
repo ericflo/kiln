@@ -1507,6 +1507,15 @@ class ArgumentAndCommandTests(unittest.TestCase):
             },
         )
         self.assertEqual(first, derived_cache)
+        credential_environment = vllm_teacher.inference_config_fingerprint(
+            **kwargs,
+            extra_args=["--dtype=bfloat16", "--tensor-parallel-size=2"],
+            environment={
+                "CUDA_VISIBLE_DEVICES": "0,1",
+                "HF_TOKEN": "must-not-affect-inference-identity",
+            },
+        )
+        self.assertEqual(first, credential_environment)
         changed_dtype = vllm_teacher.inference_config_fingerprint(
             **kwargs,
             extra_args=["--dtype=float16", "--tensor-parallel-size=2"],
@@ -1651,6 +1660,9 @@ class ArgumentAndCommandTests(unittest.TestCase):
                 "PYTHONPATH": "/tmp/shadow",
                 "LD_PRELOAD": "/tmp/inject.so",
                 "LD_LIBRARY_PATH": "/tmp/ambient-loader",
+                "HF_TOKEN": "secret",
+                "HUGGING_FACE_HUB_TOKEN": "secret",
+                "HUGGINGFACEHUB_API_TOKEN": "secret",
             },
             clear=True,
         ), mock.patch.object(
@@ -1671,6 +1683,8 @@ class ArgumentAndCommandTests(unittest.TestCase):
         self.assertNotIn("PYTHONPATH", environment)
         self.assertNotIn("LD_PRELOAD", environment)
         self.assertNotIn("VLLM_CACHE_ROOT", environment)
+        for key in vllm_teacher.MODEL_REGISTRY_CREDENTIAL_ENV_KEYS:
+            self.assertNotIn(key, environment)
         self.assertEqual(
             environment["LD_LIBRARY_PATH"],
             "/content-bound/cuda/lib",

@@ -286,6 +286,11 @@ DERIVED_RUNTIME_ENV_KEYS = {
     "VLLM_ALLOW_RUNTIME_LORA_UPDATING",
     "VLLM_CACHE_ROOT",
 }
+MODEL_REGISTRY_CREDENTIAL_ENV_KEYS = {
+    "HF_TOKEN",
+    "HUGGING_FACE_HUB_TOKEN",
+    "HUGGINGFACEHUB_API_TOKEN",
+}
 FORBIDDEN_FILE_ENV_KEYS = {
     "CC",
     "CPATH",
@@ -2996,6 +3001,13 @@ def _unbound_environment_key(key: str) -> bool:
     return bool(set(key.split("_")) & UNBOUND_ENV_NAME_PARTS)
 
 
+def _inference_environment_key(key: str) -> bool:
+    return (
+        key not in MODEL_REGISTRY_CREDENTIAL_ENV_KEYS
+        and (key.startswith(INFERENCE_ENV_PREFIXES) or key in INFERENCE_ENV_KEYS)
+    )
+
+
 def validate_extra_vllm_args(args: Sequence[str]) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
@@ -3097,7 +3109,7 @@ def inference_config_fingerprint(
     inference_environment = {
         key: value
         for key, value in sorted(environment.items())
-        if (key.startswith(INFERENCE_ENV_PREFIXES) or key in INFERENCE_ENV_KEYS)
+        if _inference_environment_key(key)
         and key not in DERIVED_RUNTIME_ENV_KEYS
     }
     runtime_value = _validate_runtime_versions(runtime_versions)
@@ -3505,6 +3517,8 @@ def launch_environment(runtime_cache: Path | None = None) -> dict[str, str]:
     else:
         environment.pop("VLLM_CACHE_ROOT", None)
     environment.pop("VLLM_LORA_RESOLVER_CACHE_DIR", None)
+    for key in MODEL_REGISTRY_CREDENTIAL_ENV_KEYS:
+        environment.pop(key, None)
     for key in FORBIDDEN_FILE_ENV_KEYS:
         environment.pop(key, None)
     library_binding = _installed_cuda_runtime_library_binding()

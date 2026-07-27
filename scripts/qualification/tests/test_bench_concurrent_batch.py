@@ -400,6 +400,7 @@ class FakeState:
         self.lock = threading.Lock()
         self.active = 0
         self.max_active = 0
+        self.system_fingerprint: str | None = "fixture-system-fingerprint"
         self.bodies: list[dict] = []
         self.counters = {field: 0 for field in bench.COUNTER_FIELDS}
         self.request_counters = {
@@ -521,12 +522,13 @@ class FakeHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         try:
-            self._event(
-                {
-                    "model": "test-model",
-                    "choices": [{"delta": {"role": "assistant"}, "finish_reason": None}],
-                }
-            )
+            first_event = {
+                "model": "test-model",
+                "choices": [{"delta": {"role": "assistant"}, "finish_reason": None}],
+            }
+            if self.state.system_fingerprint is not None:
+                first_event["system_fingerprint"] = self.state.system_fingerprint
+            self._event(first_event)
             for token in range(max_tokens):
                 time.sleep(0.004)
                 event = {
@@ -559,6 +561,8 @@ class FakeHandler(BaseHTTPRequestHandler):
             )
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         finally:
             with self.state.lock:
                 self.state.active -= 1
@@ -1669,6 +1673,87 @@ class ServingBenchmarkTests(unittest.TestCase):
             self.assertEqual(body["presence_penalty"], 0.0)
             self.assertEqual(body["frequency_penalty"], 0.0)
             self.assertEqual(body["repetition_penalty"], 1.0)
+
+    def test_vllm_stream_requires_matching_runtime_manifest_fingerprint(self) -> None:
+        with FakeServer() as fake:
+            args = bench.parse_args(
+                [
+                    "--base-url",
+                    fake.base_url,
+                    "--engine",
+                    "vllm",
+                    "--model",
+                    "test-model",
+                    "--runtime-identity",
+                    "test-runtime",
+                    "--run-id",
+                    "fixture-vllm-identity-v1",
+                    "--prompt-set-id",
+                    "fixture-vllm-identity-prompts-v1",
+                    "--sizes",
+                    "1",
+                    "--max-tokens",
+                    "1",
+                    "--warmup-requests",
+                    "0",
+                ]
+            )
+            sampler = bench.MemorySampler(None, 50)
+            matching = bench.run_once(
+                args=args,
+                concurrency=1,
+                repeat=0,
+                max_tokens=1,
+                phase="warmup-c001",
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
+                sampler=sampler,
+                diagnostics_url=None,
+                expected_system_fingerprint="fixture-system-fingerprint",
+            )
+            mismatching = bench.run_once(
+                args=args,
+                concurrency=1,
+                repeat=0,
+                max_tokens=1,
+                phase="warmup-c001",
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
+                sampler=sampler,
+                diagnostics_url=None,
+                expected_system_fingerprint="different-system-fingerprint",
+            )
+            fake.state.system_fingerprint = None
+            missing = bench.run_once(
+                args=args,
+                concurrency=1,
+                repeat=0,
+                max_tokens=1,
+                phase="warmup-c001",
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
+                sampler=sampler,
+                diagnostics_url=None,
+                expected_system_fingerprint="fixture-system-fingerprint",
+            )
+
+        self.assertEqual(matching["verdict"], "passed")
+        self.assertEqual(mismatching["verdict"], "failed")
+        self.assertIn(
+            "system_fingerprint disagrees",
+            mismatching["errors"][0]["error"],
+        )
+        self.assertEqual(missing["verdict"], "failed")
+        self.assertIn(
+            "did not report the vLLM runtime manifest system_fingerprint",
+            missing["errors"][0]["error"],
+        )
 
     def test_actor_only_diagnostics_require_the_engine_snapshot(self) -> None:
         health = FakeState().health()
