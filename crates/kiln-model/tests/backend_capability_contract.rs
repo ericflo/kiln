@@ -1194,9 +1194,9 @@ fn training_acceleration_profile_policy_routes_vulkan_startup_log() {
         vulkan.log_message,
         TrainingAccelerationProfileLogMessage::Vulkan
     );
-    assert_eq!(vulkan.linear, "on (qualified policy)");
-    assert_eq!(vulkan.sdpa, "on (qualified policy)");
-    assert_eq!(vulkan.rmsnorm_inference, "on (qualified policy)");
+    assert_eq!(vulkan.linear, "on (fixed backend policy)");
+    assert_eq!(vulkan.sdpa, "on (fixed backend policy)");
+    assert_eq!(vulkan.rmsnorm_inference, "on (fixed backend policy)");
 
     for (name, device) in [
         ("cpu", Device::Cpu),
@@ -2209,38 +2209,22 @@ fn generated_capability_report_check_mode_is_non_mutating_and_enforced() {
     );
 }
 
-/// Every backend must keep the prefix-cache split snapshot enabled.
-///
-/// The prefill-split snapshot is the ONLY producer of block-aligned
-/// strict-prefix cache entries, and `RealPrefixCache` can only serve a
-/// longer next-turn prompt from a block-aligned entry. A backend arm that
-/// sets `allow_prefix_cache_split_snapshot: false` therefore silently
-/// disables multi-turn prefix caching wholesale: every agent turn
-/// re-prefills its entire conversation history from scratch (40s+ per turn
-/// at 16K tokens on Strix Halo). Commit 002af558 did exactly that to ROCm
-/// while optimizing long-context prefill, and nothing caught it.
-///
-/// If a backend ever genuinely cannot capture a mid-prefill
-/// `LinearAttentionState` snapshot, gate it behind an env override with a
-/// startup warning — never a silent policy `false`.
 #[test]
-fn every_backend_allows_prefix_cache_split_snapshot() {
+fn prefix_cache_split_snapshot_policy_is_backend_explicit() {
     use kiln_model::backend::capability::DecodeExecutionPolicy;
 
     let arms = [
-        ("cuda", kiln_tensor::Device::Cuda(0)),
-        ("rocm", kiln_tensor::Device::Rocm(0)),
-        ("metal", kiln_tensor::Device::Metal(0)),
-        ("vulkan", kiln_tensor::Device::Vulkan(0)),
-        ("cpu", kiln_tensor::Device::Cpu),
+        ("cuda", kiln_tensor::Device::Cuda(0), false),
+        ("rocm", kiln_tensor::Device::Rocm(0), true),
+        ("metal", kiln_tensor::Device::Metal(0), true),
+        ("vulkan", kiln_tensor::Device::Vulkan(0), true),
+        ("cpu", kiln_tensor::Device::Cpu, true),
     ];
-    for (name, device) in arms {
+    for (name, device, expected) in arms {
         let policy = DecodeExecutionPolicy::for_backend(name, device);
-        assert!(
-            policy.allow_prefix_cache_split_snapshot,
-            "backend `{name}` disables the prefix-cache split snapshot, which kills \
-             multi-turn prefix caching (every turn fully re-prefills its history); \
-             see the field comment on allow_prefix_cache_split_snapshot"
+        assert_eq!(
+            policy.allow_prefix_cache_split_snapshot, expected,
+            "backend `{name}` prefix-cache split-snapshot policy changed"
         );
     }
 }

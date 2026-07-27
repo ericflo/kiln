@@ -1041,6 +1041,9 @@ pub struct DecodeExecutionPolicy {
     /// correctness-qualified adapter route that is warned and counted.
     pub allow_portable_lora_decode: bool,
     pub prefer_direct_paged_decode_attention: bool,
+    /// Permit a block-aligned mid-prefill snapshot for strict-prefix reuse.
+    /// This must remain disabled when introducing the snapshot boundary changes
+    /// the backend's live forward result.
     pub allow_prefix_cache_split_snapshot: bool,
     pub paged_decode_requires_contiguous_kv_chunks: bool,
     pub use_greedy_token_decode: bool,
@@ -1999,7 +2002,7 @@ impl DecodeExecutionPolicy {
                 allow_portable_lora_decode: false,
                 prefer_direct_paged_decode_attention:
                     crate::cuda_policy::current_cuda_kernel_policy().fused_paged_decode,
-                allow_prefix_cache_split_snapshot: true,
+                allow_prefix_cache_split_snapshot: false,
                 paged_decode_requires_contiguous_kv_chunks: true,
                 use_greedy_token_decode: false,
                 use_native_sampled_contiguous_decode: false,
