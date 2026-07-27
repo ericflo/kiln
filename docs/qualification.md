@@ -1043,27 +1043,23 @@ accelerator-upload limits. Driver v25 and campaign v11 record model-fingerprint
 rate `0`, meaning no limiter. Explicit nonzero caps remain available only as
 separately requested lab controls.
 
-The first retained laptop performance runtime manifest is
+The current retained laptop performance runtime manifest is
 `qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json`, captured
 twice from exact clean pushed source
-`2eb37adb9cd7279cc1472f5763ed939fbbe55add`. Its file hash is
-`sha256:50d46bd54df16f1ea9095dace7656708b7347db3591ad8ebc74d1238d284d125`
+`ba42165b6af707bddc1789044183c871a969f4d6`. Its file hash is
+`sha256:0cd295ac5f4f9b7afdbee69af2925078325524186e12e9b7d2b280c5c9ea9442`
 and its installed-runtime content hash is
-`8b3b7273f3e031c427591a4c4447e7541e85023edb92bdf5da51a1882e5e5abb`.
+`6bf6259d333d08bcf010eaac2511cd9ca9280fcf7e3cb32346b3fe1a5bcdbf55`.
 Both strict-valid captures produced the same 2,608 bytes and bind vLLM 0.23.0,
 the closed Qwen3.5-4B content, 32,768-token context, top-K 20, BF16, and the
 reviewed performance launch.
 
-The two scopes completed in 1,279.766 and 1,075.023 seconds. They used
-42,063,074/639,883,214 and 43,962,310/537,511,551 CPU microseconds, peaked at
-10,106,621,952 and 10,551,422,976 bytes with 27 PIDs each, recorded zero
-memory-limit/OOM events, and were both removed. Thermal pacing completed all
-39 and 41 pauses, totaling 958.839 and 466.370 seconds; the longest pauses were
-149.116 and 42.091 seconds. Host/GPU lifecycle peaks were 94.05/66 C and
-93.05/64 C, below the 95/85 C hard limits, and both outer supervisors completed
-stable handoff. This closes the runtime-manifest prerequisite only. It is not a
-server startup, request, performance-matrix, soak, native-Linux, or desktop-4090
-claim.
+The two scopes completed in 44.630 and 36.292 seconds. They used 42,631,432 and
+36,549,602 CPU microseconds, peaked at 13,470,638,080 and 2,028,535,808 bytes
+with 27 PIDs each, recorded zero memory-limit/OOM events, and were both removed.
+Neither scope had a CPU allowance, temperature process, or pacing lifecycle.
+This closes the runtime-manifest prerequisite only. It is not a server startup,
+request, performance-matrix, soak, native-Linux, or desktop-4090 claim.
 
 Every current model-bearing CUDA run brackets its case with initial and final
 double-read model fingerprints. Both the qualification parent and driver v25

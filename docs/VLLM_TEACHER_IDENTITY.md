@@ -587,17 +587,16 @@ separate lab experiment; only then does the capture validate the policy,
 thermal lifecycle, and paced-scope evidence. Publication always requires strict
 ordered scope events, zero memory-limit/OOM events, resource accounting, and
 scope removal.
-The first retained Laptop GPU performance identity is
+The current retained Laptop GPU performance identity is
 `qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json`, with file
-`sha256:50d46bd54df16f1ea9095dace7656708b7347db3591ad8ebc74d1238d284d125`
+`sha256:0cd295ac5f4f9b7afdbee69af2925078325524186e12e9b7d2b280c5c9ea9442`
 and runtime-content
-`8b3b7273f3e031c427591a4c4447e7541e85023edb92bdf5da51a1882e5e5abb`.
-Two exact clean-source captures produced the same 2,608 bytes. Their distinct
-scopes completed all 39 and 41 thermal pauses, stayed below the 95/85 C hard
-limits at 94.05/66 C and 93.05/64 C peaks, recorded zero memory-limit/OOM
-events, and were removed before stable outer handoff. This establishes the
-immutable runtime identity used by later serving evidence, not serving
-correctness or performance by itself.
+`6bf6259d333d08bcf010eaac2511cd9ca9280fcf7e3cb32346b3fe1a5bcdbf55`.
+Two exact clean-source captures produced the same 2,608 bytes in 44.630 and
+36.292 seconds. Their distinct accounting-only scopes had no CPU allowance or
+thermal lifecycle, recorded zero memory-limit/OOM events, and were removed.
+This establishes the immutable runtime identity used by later serving evidence,
+not serving correctness or performance by itself.
 
 Current model-bearing qualification also brackets the serving case itself. The
 parent qualification runner and benchmark perform their initial and final

@@ -374,19 +374,18 @@ qualification fingerprint both omit their optional read ceilings.
 The retained Laptop GPU manifest at
 `qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json` was
 captured twice from exact clean pushed source
-`2eb37adb9cd7279cc1472f5763ed939fbbe55add`. Both captures produced the same
+`ba42165b6af707bddc1789044183c871a969f4d6`. Both captures produced the same
 2,608-byte file with
-`sha256:50d46bd54df16f1ea9095dace7656708b7347db3591ad8ebc74d1238d284d125`;
+`sha256:0cd295ac5f4f9b7afdbee69af2925078325524186e12e9b7d2b280c5c9ea9442`;
 the bound installed-runtime content hash is
-`8b3b7273f3e031c427591a4c4447e7541e85023edb92bdf5da51a1882e5e5abb`.
-The separate scopes completed in 1,279.766 and 1,075.023 seconds with
-10,106,621,952- and 10,551,422,976-byte memory peaks, 27-PID peaks, zero
-memory-limit/OOM events, and clean removal. They completed 39 and 41 thermal
-pauses totaling 958.839 and 466.370 seconds. Outer host/GPU peaks were
-94.05/66 C and 93.05/64 C, both below the unchanged hard limits, and both
-lifecycles completed stable handoff. This artifact is the immutable vLLM input
-for the next exact-source performance run; it does not itself establish server
-startup, request correctness, throughput, or endurance.
+`6bf6259d333d08bcf010eaac2511cd9ca9280fcf7e3cb32346b3fe1a5bcdbf55`.
+The separate scopes completed in 44.630 and 36.292 seconds with
+13,470,638,080- and 2,028,535,808-byte memory peaks, 27-PID peaks, zero
+memory-limit/OOM events, and clean removal. They used 42.631 and 36.550 CPU
+seconds with no CPU allowance, thermal process, or pacing lifecycle. This
+artifact is the immutable vLLM input for the next exact-source performance run;
+it does not itself establish server startup, request correctness, throughput,
+or endurance.
 
 Before a model-bearing current case starts, the benchmark driver performs the
 initial double-read model fingerprint without a read-rate limiter. It repeats
