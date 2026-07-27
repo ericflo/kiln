@@ -109,13 +109,13 @@
             "source": "default"
           },
           "rocm_strided_batched_matmul_mode": {
-            "configured": "auto",
-            "effective": "auto",
+            "configured": "disabled",
+            "effective": "disabled",
             "source": "default"
           },
           "rocm_bf16_matmul_output_mode": {
-            "configured": "auto",
-            "effective": "auto",
+            "configured": "f32_then_cast",
+            "effective": "f32_then_cast",
             "source": "default"
           },
           "rocm_kernel_profile": {
@@ -960,13 +960,13 @@
               "source": "default"
             },
             "rocm_strided_batched_matmul_mode": {
-              "configured": "auto",
-              "effective": "auto",
+              "configured": "disabled",
+              "effective": "disabled",
               "source": "default"
             },
             "rocm_bf16_matmul_output_mode": {
-              "configured": "auto",
-              "effective": "auto",
+              "configured": "f32_then_cast",
+              "effective": "f32_then_cast",
               "source": "default"
             },
             "rocm_kernel_profile": {
@@ -1568,13 +1568,13 @@
             "source": "default"
           },
           "rocm_strided_batched_matmul_mode": {
-            "configured": "auto",
-            "effective": "auto",
+            "configured": "disabled",
+            "effective": "disabled",
             "source": "default"
           },
           "rocm_bf16_matmul_output_mode": {
-            "configured": "auto",
-            "effective": "auto",
+            "configured": "f32_then_cast",
+            "effective": "f32_then_cast",
             "source": "default"
           },
           "rocm_kernel_profile": {
@@ -7769,9 +7769,8 @@
     "RocmBf16MatmulOutputMode": {
       "type": "string",
       "enum": [
-        "auto",
-        "native_bf16",
-        "f32_then_cast"
+        "f32_then_cast",
+        "native_bf16"
       ],
       "description": "The process-lifetime ROCm BF16-output matmul route.",
       "x-kiln-rust-type": "RocmBf16MatmulOutputMode",
@@ -8907,9 +8906,7 @@
     "RocmKernelProfile": {
       "type": "string",
       "enum": [
-        "portable_fallback",
-        "qualified",
-        "experimental_multiblock"
+        "portable_fallback"
       ],
       "description": "The complete process-lifetime ROCm model-kernel route set.",
       "x-kiln-rust-type": "RocmKernelProfile",
@@ -8918,9 +8915,8 @@
     "RocmStridedBatchedMatmulMode": {
       "type": "string",
       "enum": [
-        "auto",
-        "enabled",
-        "disabled"
+        "disabled",
+        "enabled"
       ],
       "description": "The process-lifetime ROCm strided-batched matmul route.",
       "x-kiln-rust-type": "RocmStridedBatchedMatmulMode",

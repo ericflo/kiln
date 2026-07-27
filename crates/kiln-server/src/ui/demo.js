@@ -151,8 +151,8 @@
     '/v1/config': () => ({
       serving_profile: { profile: 'stable', source: 'default' },
       accelerator_runtime: {
-        schema_id: 'kiln.accelerator-runtime-policy.v15',
-        version: 15,
+        schema_id: 'kiln.accelerator-runtime-policy.v16',
+        version: 16,
         vulkan_kernel_policy_schema_id: 'kiln.vulkan-kernel-policy.v4',
         vulkan_device_policy_schema_id: 'kiln.vulkan-device-policy.v1',
         serving_profile: 'stable',
@@ -166,8 +166,8 @@
         cuda_flash_backward_mode: { configured: 'fast', effective: 'fast', source: 'default' },
         metal_kernel_profile: { configured: 'native_default', effective: 'native_default', source: 'default' },
         rocm_synchronization_mode: { configured: 'legacy_host_barriers', effective: 'legacy_host_barriers', source: 'default' },
-        rocm_strided_batched_matmul_mode: { configured: 'auto', effective: 'auto', source: 'default' },
-        rocm_bf16_matmul_output_mode: { configured: 'auto', effective: 'auto', source: 'default' },
+        rocm_strided_batched_matmul_mode: { configured: 'disabled', effective: 'disabled', source: 'default' },
+        rocm_bf16_matmul_output_mode: { configured: 'f32_then_cast', effective: 'f32_then_cast', source: 'default' },
         rocm_kernel_profile: { configured: 'portable_fallback', effective: 'portable_fallback', source: 'default' },
         rocm_graph_mode: { configured: 'profile', effective: 'disabled', source: 'default' },
         rocm_graph_cache_entries: { configured: 8, effective: 8, source: 'default' },

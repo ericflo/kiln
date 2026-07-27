@@ -56,15 +56,11 @@ PROFILE_GATES = {
     },
     "accelerator.rocm_strided_batched_matmul_mode": {
         "profile": "experimental",
-        "when": {"enum": ["enabled", "disabled"]},
+        "when": {"const": "enabled"},
     },
     "accelerator.rocm_bf16_matmul_output_mode": {
         "profile": "experimental",
-        "when": {"enum": ["native_bf16", "f32_then_cast"]},
-    },
-    "accelerator.rocm_kernel_profile": {
-        "profile": "experimental",
-        "when": {"const": "experimental_multiblock"},
+        "when": {"const": "native_bf16"},
     },
     "accelerator.rocm_graph_mode": {
         "profile": "experimental",
@@ -544,19 +540,6 @@ def run_self_tests(schema: dict[str, Any]) -> list[str]:
             {"accelerator": {"vulkan_validation": True}},
             False,
             "Vulkan validation default profile rejection",
-        ),
-        (
-            {
-                "server": {"serving_profile": "experimental"},
-                "accelerator": {"rocm_kernel_profile": "experimental_multiblock"},
-            },
-            True,
-            "experimental ROCm kernel profile",
-        ),
-        (
-            {"accelerator": {"rocm_kernel_profile": "experimental_multiblock"}},
-            False,
-            "experimental ROCm kernel default profile rejection",
         ),
         (
             {"accelerator": {"rocm_kernel_profile": "portable_fallback"}},

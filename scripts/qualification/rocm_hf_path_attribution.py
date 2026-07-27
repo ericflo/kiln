@@ -120,7 +120,7 @@ def _build_binary() -> tuple[Path, str, float]:
             "kiln-model",
             "--no-default-features",
             "--features",
-            "rocm",
+            "rocm,hardware-qualification",
             "--example",
             EXAMPLE,
         ],

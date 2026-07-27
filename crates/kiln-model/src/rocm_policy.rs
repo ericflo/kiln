@@ -1,13 +1,15 @@
+#[cfg(feature = "hardware-qualification")]
 use anyhow::Result;
+#[cfg(feature = "hardware-qualification")]
 use std::sync::OnceLock;
 
+#[cfg(feature = "hardware-qualification")]
 static ROCM_KERNEL_POLICY: OnceLock<RocmKernelPolicy> = OnceLock::new();
 
 /// Complete process-lifetime ROCm model-kernel policy.
 ///
-/// The server maps its closed profile vocabulary to one of these policies
-/// before device creation. Embedders that do not install a policy receive the
-/// portable fallback on first ROCm use.
+/// Normal product builds use the portable fallback. Historical machine
+/// profiles are available only to the explicit hardware-qualification build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RocmKernelPolicy {
     pub(crate) full_attn_qkv_in_proj: bool,
@@ -49,7 +51,8 @@ pub struct RocmKernelPolicy {
 
 #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
 impl RocmKernelPolicy {
-    /// Explicit Strix Halo qualification policy.
+    /// Historical Strix Halo qualification fixture.
+    #[cfg(any(test, feature = "hardware-qualification"))]
     pub const fn qualified() -> Self {
         Self {
             full_attn_qkv_in_proj: true,
@@ -134,6 +137,7 @@ impl RocmKernelPolicy {
 
     /// Diagnostic policy that declines the complete GDN/recurrent model-route
     /// family while preserving every other qualified model route.
+    #[cfg(any(test, feature = "hardware-qualification"))]
     pub const fn gdn_fallback() -> Self {
         Self {
             gdn_ab_in_proj: false,
@@ -155,6 +159,7 @@ impl RocmKernelPolicy {
     /// Diagnostic inverse of [`Self::gdn_fallback`]: retain only the
     /// qualified GDN/recurrent model-route family and decline every other
     /// accelerated model route.
+    #[cfg(any(test, feature = "hardware-qualification"))]
     pub const fn non_gdn_fallback() -> Self {
         Self {
             gdn_ab_in_proj: true,
@@ -175,6 +180,7 @@ impl RocmKernelPolicy {
 
     /// Diagnostic policy that declines fused RMSNorm and fused MLP dispatch
     /// while preserving every other qualified model route.
+    #[cfg(any(test, feature = "hardware-qualification"))]
     pub const fn fused_norm_mlp_fallback() -> Self {
         Self {
             fused_mlp_silu_mul: false,
@@ -186,6 +192,7 @@ impl RocmKernelPolicy {
 
     /// Diagnostic inverse of [`Self::fused_norm_mlp_fallback`]: enable only
     /// fused RMSNorm and fused MLP dispatch on the portable model policy.
+    #[cfg(any(test, feature = "hardware-qualification"))]
     pub const fn fused_norm_mlp_only() -> Self {
         Self {
             fused_mlp_silu_mul: true,
@@ -198,6 +205,7 @@ impl RocmKernelPolicy {
     /// Historical diagnostic policy that explicitly declines fused RMSNorm.
     /// It is identical to the repaired qualified policy and remains available
     /// only so source-bound evidence can be reproduced.
+    #[cfg(any(test, feature = "hardware-qualification"))]
     pub const fn fused_rmsnorm_fallback() -> Self {
         Self {
             fused_rmsnorm: false,
@@ -207,6 +215,7 @@ impl RocmKernelPolicy {
 
     /// Diagnostic policy that changes only fused SiLU-multiply MLP dispatch
     /// from the qualified model policy.
+    #[cfg(any(test, feature = "hardware-qualification"))]
     pub const fn fused_mlp_silu_mul_fallback() -> Self {
         Self {
             fused_mlp_silu_mul: false,
@@ -216,6 +225,7 @@ impl RocmKernelPolicy {
 
     /// Diagnostic policy that changes only fused gate/up prefill MLP dispatch
     /// from the qualified model policy.
+    #[cfg(any(test, feature = "hardware-qualification"))]
     pub const fn fused_mlp_gate_up_prefill_fallback() -> Self {
         Self {
             fused_mlp_gate_up_prefill: false,
@@ -225,6 +235,7 @@ impl RocmKernelPolicy {
 
     /// Diagnostic policy that changes only the split q/gate F32-output
     /// projection route from the qualified model policy.
+    #[cfg(any(test, feature = "hardware-qualification"))]
     pub const fn split_q_gate_fallback() -> Self {
         Self {
             split_q_gate_f32_output: false,
@@ -234,6 +245,7 @@ impl RocmKernelPolicy {
 
     /// Diagnostic inverse of [`Self::split_q_gate_fallback`]: enable only the
     /// split q/gate F32-output projection route on the portable model policy.
+    #[cfg(any(test, feature = "hardware-qualification"))]
     pub const fn split_q_gate_only() -> Self {
         Self {
             split_q_gate_f32_output: true,
@@ -242,6 +254,7 @@ impl RocmKernelPolicy {
     }
 
     /// Qualified policy plus the unqualified multi-block GDN prefill route.
+    #[cfg(any(test, feature = "hardware-qualification"))]
     pub const fn experimental_multiblock() -> Self {
         Self {
             gdn_full_chunk_forward_multiblock: true,
@@ -292,9 +305,11 @@ impl Default for RocmKernelPolicy {
     }
 }
 
+pub const PORTABLE_ROCM_KERNEL_POLICY: RocmKernelPolicy = RocmKernelPolicy::portable_fallback();
+
 /// Install process-lifetime ROCm kernel policy. Reinstalling the same value is
 /// idempotent; conflicting values fail instead of changing live dispatch.
-#[cfg_attr(not(feature = "rocm"), allow(dead_code))]
+#[cfg(feature = "hardware-qualification")]
 pub fn install_rocm_kernel_policy(policy: RocmKernelPolicy) -> Result<()> {
     match ROCM_KERNEL_POLICY.set(policy) {
         Ok(()) => Ok(()),
@@ -304,7 +319,13 @@ pub fn install_rocm_kernel_policy(policy: RocmKernelPolicy) -> Result<()> {
 }
 
 pub(crate) fn current_rocm_kernel_policy() -> RocmKernelPolicy {
-    *ROCM_KERNEL_POLICY.get_or_init(RocmKernelPolicy::default)
+    #[cfg(feature = "hardware-qualification")]
+    {
+        return *ROCM_KERNEL_POLICY.get_or_init(RocmKernelPolicy::default);
+    }
+
+    #[cfg(not(feature = "hardware-qualification"))]
+    PORTABLE_ROCM_KERNEL_POLICY
 }
 
 #[cfg(test)]

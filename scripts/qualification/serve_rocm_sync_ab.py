@@ -279,18 +279,18 @@ def expected_policy(mode: str) -> dict[str, Any]:
             "source": "config_file",
         },
         "rocm_strided_batched_matmul_mode": {
-            "configured": "auto",
-            "effective": "auto",
+            "configured": "disabled",
+            "effective": "disabled",
             "source": "config_file",
         },
         "rocm_bf16_matmul_output_mode": {
-            "configured": "auto",
-            "effective": "auto",
+            "configured": "f32_then_cast",
+            "effective": "f32_then_cast",
             "source": "config_file",
         },
         "rocm_kernel_profile": {
-            "configured": "qualified",
-            "effective": "qualified",
+            "configured": "portable_fallback",
+            "effective": "portable_fallback",
             "source": "config_file",
         },
         "rocm_graph_mode": {

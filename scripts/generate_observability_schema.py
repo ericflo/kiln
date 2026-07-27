@@ -216,19 +216,19 @@ def build_definitions() -> None:
     add_enum(
         "RocmStridedBatchedMatmulMode",
         "RocmStridedBatchedMatmulMode",
-        ["auto", "enabled", "disabled"],
+        ["disabled", "enabled"],
         "The process-lifetime ROCm strided-batched matmul route.",
     )
     add_enum(
         "RocmBf16MatmulOutputMode",
         "RocmBf16MatmulOutputMode",
-        ["auto", "native_bf16", "f32_then_cast"],
+        ["f32_then_cast", "native_bf16"],
         "The process-lifetime ROCm BF16-output matmul route.",
     )
     add_enum(
         "RocmKernelProfile",
         "RocmKernelProfile",
-        ["portable_fallback", "qualified", "experimental_multiblock"],
+        ["portable_fallback"],
         "The complete process-lifetime ROCm model-kernel route set.",
     )
     add_enum(

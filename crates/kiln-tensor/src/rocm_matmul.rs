@@ -179,45 +179,48 @@ fn should_sync_rocm_matmul_output(m: usize, n: usize, k: usize, batch: usize) ->
 }
 
 fn should_skip_rocm_strided_batched_matmul(
-    m: usize,
-    n: usize,
-    k: usize,
+    _m: usize,
+    _n: usize,
+    _k: usize,
     batch: usize,
-    dtype: DType,
-    out_dtype: DType,
+    _dtype: DType,
+    _out_dtype: DType,
     mode: crate::RocmStridedBatchedMatmulMode,
 ) -> bool {
-    if batch <= 1 || mode == crate::RocmStridedBatchedMatmulMode::Enabled {
-        return false;
+    match mode {
+        crate::RocmStridedBatchedMatmulMode::Enabled => return false,
+        crate::RocmStridedBatchedMatmulMode::Disabled => return batch > 1,
+        #[cfg(any(test, feature = "hardware-qualification"))]
+        crate::RocmStridedBatchedMatmulMode::Auto => {}
     }
-    if mode == crate::RocmStridedBatchedMatmulMode::Disabled {
-        return true;
+
+    #[cfg(any(test, feature = "hardware-qualification"))]
+    {
+        let batch_u = batch as u128;
+        let m_u = _m as u128;
+        let n_u = _n as u128;
+        let k_u = _k as u128;
+        let output_elems = batch_u.saturating_mul(m_u).saturating_mul(n_u);
+        let work = output_elems.saturating_mul(k_u);
+
+        // ROCm 7.2 hipBLASLt strided-batched GEMM can silently return bad values
+        // on large attention-shaped batches on gfx115x. The fallback below already
+        // issues the same GEMM one batch at a time, which preserves exact math and
+        // avoids the unstable batched path without pushing this policy into every
+        // attention caller.
+        let large_attention_like = batch >= 8
+            && _m >= 128
+            && _n >= 128
+            && _k >= 128
+            && output_elems >= 1_048_576
+            && work >= (1u128 << 31)
+            && matches!(
+                (_dtype, _out_dtype),
+                (DType::BF16, DType::F32) | (DType::F32, DType::F32)
+            );
+
+        large_attention_like
     }
-
-    let batch_u = batch as u128;
-    let m_u = m as u128;
-    let n_u = n as u128;
-    let k_u = k as u128;
-    let output_elems = batch_u.saturating_mul(m_u).saturating_mul(n_u);
-    let work = output_elems.saturating_mul(k_u);
-
-    // ROCm 7.2 hipBLASLt strided-batched GEMM can silently return bad values
-    // on large attention-shaped batches on gfx115x. The fallback below already
-    // issues the same GEMM one batch at a time, which preserves exact math and
-    // avoids the unstable batched path without pushing this policy into every
-    // attention caller.
-    let large_attention_like = batch >= 8
-        && m >= 128
-        && n >= 128
-        && k >= 128
-        && output_elems >= 1_048_576
-        && work >= (1u128 << 31)
-        && matches!(
-            (dtype, out_dtype),
-            (DType::BF16, DType::F32) | (DType::F32, DType::F32)
-        );
-
-    large_attention_like
 }
 
 fn sync_after_rocm_matmul_if_needed(
@@ -293,10 +296,10 @@ fn sync_rocm_device_for_matmul_boundary(
 }
 
 fn rocm_bf16_output_matmul_via_f32(
-    m: usize,
-    n: usize,
-    k: usize,
-    batch: usize,
+    _m: usize,
+    _n: usize,
+    _k: usize,
+    _batch: usize,
     dtype: DType,
     out_dtype: DType,
     mode: crate::RocmBf16MatmulOutputMode,
@@ -305,27 +308,19 @@ fn rocm_bf16_output_matmul_via_f32(
         return false;
     }
     match mode {
-        crate::RocmBf16MatmulOutputMode::NativeBf16 => return false,
-        crate::RocmBf16MatmulOutputMode::F32ThenCast => return true,
-        crate::RocmBf16MatmulOutputMode::Auto => {}
+        crate::RocmBf16MatmulOutputMode::NativeBf16 => false,
+        crate::RocmBf16MatmulOutputMode::F32ThenCast => true,
+        #[cfg(any(test, feature = "hardware-qualification"))]
+        crate::RocmBf16MatmulOutputMode::Auto => {
+            // Historical ROCm 7.2/gfx115x qualification heuristic.
+            let work = (_batch as u128) * (_m as u128) * (_n as u128) * (_k as u128);
+            let output_elems = (_batch as u128) * (_m as u128) * (_n as u128);
+            let large_projection = _m >= 1024 && _n >= 512 && _k >= 512 && work >= (1u128 << 31);
+            let large_output = _m >= 512 && _n >= 512 && output_elems >= 1_048_576;
+            let tall_skinny_lora_compression = _m >= 1024 && _n <= 64 && _k >= 512;
+            large_projection || large_output || tall_skinny_lora_compression
+        }
     }
-
-    // ROCm 7.2 hipBLASLt on gfx115x can return non-finite BF16 output for
-    // large BF16 projection GEMMs. The same failure also shows up on both
-    // halves of low-rank LoRA delta shapes:
-    //
-    // - compression: [large M, large K] @ [small rank, large K]^T -> [large M, rank]
-    // - expansion:   [large M, rank] @ [large N, rank]^T -> [large M, large N]
-    //
-    // FP32 accumulation/output followed by a device-side BF16 cast preserves
-    // the requested result dtype while avoiding that unstable BF16-output
-    // epilogue.
-    let work = (batch as u128) * (m as u128) * (n as u128) * (k as u128);
-    let output_elems = (batch as u128) * (m as u128) * (n as u128);
-    let large_projection = m >= 1024 && n >= 512 && k >= 512 && work >= (1u128 << 31);
-    let large_output = m >= 512 && n >= 512 && output_elems >= 1_048_576;
-    let tall_skinny_lora_compression = m >= 1024 && n <= 64 && k >= 512;
-    large_projection || large_output || tall_skinny_lora_compression
 }
 
 // ----------------------------------------------------------------------

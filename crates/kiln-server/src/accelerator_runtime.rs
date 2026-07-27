@@ -5,11 +5,11 @@ use serde::Serialize;
 
 #[cfg(feature = "metal")]
 use crate::config::MetalKernelProfile;
+#[cfg(feature = "rocm")]
+use crate::config::RocmSynchronizationMode;
 #[cfg(feature = "cuda")]
 use crate::config::{CudaFlashBackwardMode, CudaKernelProfile, CudaMarlinProfile};
 use crate::config::{KtApiMode, ResolvedAcceleratorRuntimePolicy, RocmGraphMode};
-#[cfg(feature = "rocm")]
-use crate::config::{RocmKernelProfile, RocmSynchronizationMode};
 
 /// Stable backend-health detail used when ROCm cannot prove safe cleanup.
 pub const ROCM_CLEANUP_QUARANTINE_REASON: &str =
@@ -233,31 +233,10 @@ fn model_metal_kernel_policy(
 }
 
 #[cfg(feature = "rocm")]
-fn model_rocm_kernel_policy(
-    policy: ResolvedAcceleratorRuntimePolicy,
-) -> kiln_model::RocmKernelPolicy {
-    match policy.rocm_kernel_profile.effective {
-        RocmKernelProfile::Qualified => kiln_model::RocmKernelPolicy::qualified(),
-        RocmKernelProfile::PortableFallback => kiln_model::RocmKernelPolicy::portable_fallback(),
-        RocmKernelProfile::ExperimentalMultiblock => {
-            kiln_model::RocmKernelPolicy::experimental_multiblock()
-        }
-    }
-}
-
-#[cfg(feature = "rocm")]
 fn tensor_rocm_kernel_policy(
-    policy: ResolvedAcceleratorRuntimePolicy,
+    _policy: ResolvedAcceleratorRuntimePolicy,
 ) -> kiln_tensor::RocmTensorKernelPolicy {
-    match policy.rocm_kernel_profile.effective {
-        RocmKernelProfile::Qualified => kiln_tensor::RocmTensorKernelPolicy::qualified(),
-        RocmKernelProfile::PortableFallback => {
-            kiln_tensor::RocmTensorKernelPolicy::portable_fallback()
-        }
-        RocmKernelProfile::ExperimentalMultiblock => {
-            kiln_tensor::RocmTensorKernelPolicy::experimental_multiblock()
-        }
-    }
+    kiln_tensor::RocmTensorKernelPolicy::portable_fallback()
 }
 
 /// Install accelerator policy needed to select or create a primary device.
@@ -333,8 +312,6 @@ pub fn install_startup_policy(
 
     #[cfg(feature = "rocm")]
     {
-        kiln_model::install_rocm_kernel_policy(model_rocm_kernel_policy(policy))
-            .context("failed to install immutable ROCm kernel-route policy")?;
         let synchronization_mode = match policy.rocm_synchronization_mode.effective {
             RocmSynchronizationMode::LegacyHostBarriers => {
                 kiln_tensor::RocmSynchronizationMode::LegacyHostBarriers
@@ -344,9 +321,6 @@ pub fn install_startup_policy(
             }
         };
         let strided_batched_mode = match policy.rocm_strided_batched_matmul_mode.effective {
-            crate::config::RocmStridedBatchedMatmulMode::Auto => {
-                kiln_tensor::RocmStridedBatchedMatmulMode::Auto
-            }
             crate::config::RocmStridedBatchedMatmulMode::Enabled => {
                 kiln_tensor::RocmStridedBatchedMatmulMode::Enabled
             }
@@ -355,9 +329,6 @@ pub fn install_startup_policy(
             }
         };
         let bf16_output_mode = match policy.rocm_bf16_matmul_output_mode.effective {
-            crate::config::RocmBf16MatmulOutputMode::Auto => {
-                kiln_tensor::RocmBf16MatmulOutputMode::Auto
-            }
             crate::config::RocmBf16MatmulOutputMode::NativeBf16 => {
                 kiln_tensor::RocmBf16MatmulOutputMode::NativeBf16
             }
@@ -503,9 +474,6 @@ mod tests {
     };
     #[cfg(feature = "metal")]
     use crate::config::{MetalKernelProfile, MetalKernelProfileSetting};
-    #[cfg(feature = "rocm")]
-    use crate::config::{RocmKernelProfile, RocmKernelProfileSetting};
-
     #[test]
     fn kt_api_modes_map_exactly_to_the_model_authority() {
         for (configured, expected) in [
@@ -625,36 +593,20 @@ mod tests {
 
     #[cfg(feature = "rocm")]
     #[test]
-    fn rocm_kernel_profiles_map_exactly_to_complete_model_and_tensor_policies() {
-        for configured in [
-            RocmKernelProfile::Qualified,
-            RocmKernelProfile::PortableFallback,
-            RocmKernelProfile::ExperimentalMultiblock,
-        ] {
-            let mut config = AcceleratorRuntimeConfig::default();
-            config.rocm_kernel_profile =
-                RocmKernelProfileSetting::new(configured, ConfigValueSource::ConfigFile);
-            let policy = config.resolved_policy(ServingProfileSetting::new(
-                ServingProfile::Experimental,
-                ConfigValueSource::ConfigFile,
-            ));
-            let (expected_model, expected_tensor) = match configured {
-                RocmKernelProfile::Qualified => (
-                    kiln_model::RocmKernelPolicy::qualified(),
-                    kiln_tensor::RocmTensorKernelPolicy::qualified(),
-                ),
-                RocmKernelProfile::PortableFallback => (
-                    kiln_model::RocmKernelPolicy::portable_fallback(),
-                    kiln_tensor::RocmTensorKernelPolicy::portable_fallback(),
-                ),
-                RocmKernelProfile::ExperimentalMultiblock => (
-                    kiln_model::RocmKernelPolicy::experimental_multiblock(),
-                    kiln_tensor::RocmTensorKernelPolicy::experimental_multiblock(),
-                ),
-            };
-            assert_eq!(model_rocm_kernel_policy(policy), expected_model);
-            assert_eq!(tensor_rocm_kernel_policy(policy), expected_tensor);
-        }
+    fn rocm_product_policy_is_portable() {
+        let config = AcceleratorRuntimeConfig::default();
+        let policy = config.resolved_policy(ServingProfileSetting::new(
+            ServingProfile::Stable,
+            ConfigValueSource::Default,
+        ));
+        assert_eq!(
+            tensor_rocm_kernel_policy(policy),
+            kiln_tensor::RocmTensorKernelPolicy::portable_fallback()
+        );
+        assert_eq!(
+            kiln_model::PORTABLE_ROCM_KERNEL_POLICY,
+            kiln_model::RocmKernelPolicy::portable_fallback()
+        );
     }
 
     #[test]

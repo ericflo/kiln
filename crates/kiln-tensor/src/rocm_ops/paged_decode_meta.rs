@@ -167,7 +167,8 @@ fn paged_attn_split_count(max_seqlen_k: usize, policy: crate::RocmTensorKernelPo
     if !policy.split_paged_attention || max_seqlen_k < policy.split_paged_attention_min_sequence {
         return 1;
     }
-    // Qwen3.5-4B on gfx1151 benchmarks best at 16k with 128-token chunks.
+    // The split geometry is explicit policy; portable execution leaves this
+    // route disabled.
     let target_tokens_per_split = policy.paged_attention_split_tokens.max(1);
     let max_splits = policy.paged_attention_max_splits.max(2);
     max_seqlen_k

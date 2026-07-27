@@ -383,14 +383,14 @@ training request
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           ROCm execution is process-lifetime policy, resolved once before the primary HIP context or model
           runner exists. Typed <code>[accelerator]</code> intent combines with the immutable serving profile
-          to produce <code>kiln.accelerator-runtime-policy.v15</code>. The same resolved object is installed in
+          to produce <code>kiln.accelerator-runtime-policy.v16</code>. The same resolved object is installed in
           the tensor context, projected into the model graph runner, stored in server state, and returned by
           product diagnostics. Tensor, model, and kernel code do not re-read the public graph,
           synchronization, or matmul-route environment names during inference.
         </p>
         <pre class="mt-5"><code>typed [server] + [accelerator] configuration
   -> strict parse, source attribution, and serving-profile gate
-  -> immutable accelerator runtime policy v15
+  -> immutable accelerator runtime policy v16
   -> Vulkan physical-device/validation policy installed before logical-device creation
   -> kiln-tensor adapter route set installed before model execution
   -> exact full-attention score geometry installed in model and ROCm flash planners
@@ -401,7 +401,7 @@ training request
         <div class="grid md:grid-cols-3 gap-5 check-list mt-5" style="color: var(--fg-dim);">
           <div>
             <h3 class="font-semibold mb-2" style="color: var(--fg);"><code>legacy_host_barriers</code></h3>
-            <p>The qualified default preserves historical device and active-stream waits, including the device-wide external-yield drain and established large hipBLASLt and cast boundaries. The reasoned telemetry is new; the ordering behavior is intentionally retained.</p>
+            <p>The portable default preserves conservative device and active-stream waits, including the device-wide external-yield drain and established large hipBLASLt and cast boundaries.</p>
           </div>
           <div>
             <h3 class="font-semibold mb-2" style="color: var(--fg);"><code>stream_ordered</code></h3>
@@ -445,30 +445,11 @@ training request
           submissions, parallel recurrence, and resident decode are declined by default; established generic
           fallbacks remain authoritative. Machine-specific receipts do not alter product dispatch. A source
           change must version the policy and establish cross-device correctness before enabling a route.
-          Accelerator policy v15 reports this identity as <code>vulkan_kernel_policy_schema_id</code> in config,
+          Accelerator policy v16 reports this identity as <code>vulkan_kernel_policy_schema_id</code> in config,
           health, trusted debug state, the CLI config check, and the dashboard.
         </p>
-        <div class="overflow-x-auto mt-4">
-          <table class="w-full text-sm" style="color: var(--fg-dim);">
-            <thead><tr><th class="text-left p-2">Family</th><th class="text-left p-2">Qualified selection</th></tr></thead>
-            <tbody>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Model routes</td><td class="p-2">GDN and its qualified prefill/gate/norm/chunkwise routes, fused conv1d prefill, recurrent unexpanded Q/K and norm, fused batch GDN state, linear decode/argmax, full-attention QKV, SDPA prefill, paged decode with GPU gather, fused MLP decode, resident decode, and final GDN state-readback elision are enabled. Every resident-decode entry point uses the same policy leaf.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Packed weights</td><td class="p-2">BF16-packed linear, GDN input projection, full-attention QKV, and MLP decode weights are enabled; the MLP BF16 gate/up with F32 down route is enabled.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Quarantined/slower routes</td><td class="p-2">Full-chunk GDN, single-token fused conv1d update, GDN forward substitution, batch-one fused GDN decode, standalone MLP gate/up, both recurrent-state residency routes, GDN chunkwise fallback, and the CPU-bridged/generic-tensor native Vulkan RMSNorm experiment are disabled. Device-resident model RMSNorm remains enabled.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Dispatch safety</td><td class="p-2">Linear submissions have a fixed 20,000,000,000-FLOP ceiling; oversized work is sub-chunked and no environment value can disable the guard.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Bounded tiling</td><td class="p-2">Flash attention uses 2048-row tiles with a 10,000,000-element row-work budget; frozen-BF16-weight matmul uses 128-row tiles; elementwise and exponentiation dispatches use 1,048,576 and 65,536 elements respectively.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">MLP</td><td class="p-2">BF16 four-row gate/up at batch 8, four-row down at 16, F32 down at 8, and eight-row at 256; enabled.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Linear</td><td class="p-2">BF16 four-row at batch 16 and eight-row at 64; enabled.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Full-attention QKV</td><td class="p-2">BF16 four-row at batch 2 and eight-row at 64; enabled.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">GDN</td><td class="p-2">Pair QKV/Z, two/four-row grouping, single-submit, parallel reduction, and Q/K-norm recurrence fusion enabled; eight-row grouping and input-projection/conv-split fusion disabled.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Paged attention</td><td class="p-2">Split-K chunks are 32 at batch one, 4 at batch 16+, and otherwise 2 for 64+ blocks or 4 for shorter sequences; maximum 256.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Submission/profile</td><td class="p-2">Qualified single-submit, chained-dispatch, and batched-transfer routes are enabled. Pair-row prefill starts at batch 8. Product kernel profiling is disabled.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">CPU references</td><td class="p-2">Backward GDN chunk stages, triangular solves, and gated RMSNorm expose explicit CPU-reference calls for parity and offline diagnosis. Production entry points always execute the GPU route; tests do not mutate process-global route variables.</td></tr>
-            </tbody>
-          </table>
-        </div>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          The former controls represented by this table, including the applicable
+          Former Vulkan route controls, including the applicable
           <code>KILN_DISABLE_VULKAN_*</code>, <code>KILN_ENABLE_VULKAN_*</code>, threshold, split-K,
           stage-profile, packed-weight, recurrence, and resident-decode variables, have no aliases or
           replacement fields. They silently composed unreportable routes and accepted malformed values.
@@ -489,13 +470,13 @@ training request
           <code>accelerator.full_attention_score_budget_mib</code> is a 64&ndash;2048 MiB process-lifetime
           ceiling, defaulting to 2048 MiB. The model planner uses it for materialized exact-attention score
           and scratch tiling on every backend. ROCm flash attention derives a fixed
-          <code>min(value, 1024)</code> MiB online-score ceiling and retains its qualified 2048-query and
+          <code>min(value, 1024)</code> MiB online-score ceiling and retains fixed 2048-query and
           4096-key tile maxima. Memory-governor observations still protect allocations: an operation whose
           exact working set is unavailable is rejected before publication. They no longer choose a different
           tile size or route between layers or requests.
         </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Policy v15 retains the deletion of eight permissive materialized-score, online-score, and tile environment controls
+          Policy v16 retains the deletion of eight permissive materialized-score, online-score, and tile environment controls
           rather than retaining aliases. The former planners could independently parse different values during
           execution and derive a materialized ceiling as high as 32 GiB from changing free memory. Real-device
           parity tests now force small multi-tile geometry with a scoped programmatic hook, so test coverage no
@@ -621,12 +602,12 @@ training request
           <table class="w-full text-sm" style="color: var(--fg-dim);">
             <thead style="color: var(--fg);"><tr><th class="text-left p-2">Policy family</th><th class="text-left p-2">Retired names</th><th class="text-left p-2">Product behavior</th></tr></thead>
             <tbody>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Decode fallback</td><td class="p-2"><code>KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE</code>, <code>KILN_ROCM_PAGED_DECODE</code>, <code>KILN_DECODE_HOT_PATH_DEBUG_FALLBACK</code>, <code>KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK</code>, <code>KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK</code>, <code>KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK</code>, and <code>KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY</code></td><td class="p-2">CUDA and ROCm follow their installed profiles; Vulkan keeps its qualified native and LoRA-specific counted routes; unsupported fallbacks fail closed.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Decode fallback</td><td class="p-2"><code>KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE</code>, <code>KILN_ROCM_PAGED_DECODE</code>, <code>KILN_DECODE_HOT_PATH_DEBUG_FALLBACK</code>, <code>KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK</code>, <code>KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK</code>, <code>KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK</code>, and <code>KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY</code></td><td class="p-2">CUDA follows its installed profile. ROCm and Vulkan use their portable fallback policies; unsupported routes fail closed.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">CUDA model routes</td><td class="p-2"><code>KILN_DISABLE_FUSED_PAGED_DECODE</code>, <code>KILN_DISABLE_FUSED_CUDA_ROTARY_QK</code>, <code>KILN_DISABLE_CUDA_ATTN_DECODE_QKV_PREP</code>, fused MLP/attention/RMSNorm/L2-QK switches, dynamic-length paged-decode force/disable switches, and <code>KILN_DISABLE_GDN_CHUNK_PRE_PERMUTE</code></td><td class="p-2">All twenty-five decisions come from <code>accelerator.cuda_kernel_profile</code>.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Training geometry</td><td class="p-2"><code>KILN_DISABLE_GPU_TRAINING_MLP_CHUNKING</code>, CUDA variants and token counts, split-Q/gate disable variants, and <code>KILN_SPLIT_Q_GATE_OUTPUT_CHUNK_FEATURES</code></td><td class="p-2">ROCm follows its typed profile; CUDA uses 1,024-token MLP chunks; Vulkan uses at most 1,024 output features per split slice.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Training geometry</td><td class="p-2"><code>KILN_DISABLE_GPU_TRAINING_MLP_CHUNKING</code>, CUDA variants and token counts, split-Q/gate disable variants, and <code>KILN_SPLIT_Q_GATE_OUTPUT_CHUNK_FEATURES</code></td><td class="p-2">ROCm uses portable fixed geometry; CUDA uses 1,024-token MLP chunks; Vulkan uses at most 1,024 output features per split slice.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Projection loading</td><td class="p-2"><code>KILN_KEEP_PROJECTION_ORIGINALS</code>, <code>KILN_DROP_PROJECTION_ORIGINALS</code>, <code>KILN_KEEP_PROJECTION_TRANSPOSES</code>, parallel-load disable switches, and <code>KILN_VK_NATIVE_TRAINING</code></td><td class="p-2">CUDA/Metal drop redundant originals; CPU/ROCm/Vulkan retain them; every backend retains cached transposes; Metal parallel uploads remain enabled.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">State and precision</td><td class="p-2"><code>KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER</code>, backend BF16-state disable switches, and <code>KILN_ALLOW_FP8_ON_METAL</code></td><td class="p-2">Qualified state scatter and native-with-constraints BF16/F16 state remain enabled. Metal FP8 KV remains declined.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Optimized paths</td><td class="p-2"><code>KILN_DISABLE_WEIGHTED_LM_HEAD_PREP</code>, <code>KILN_DISABLE_MARLIN_BF16_DROP</code>, CUDA GDN row-loop switches, and <code>KILN_ENABLE_METAL_GDN_STREAMING_FASTPATHS</code></td><td class="p-2">Qualified preparation and redundant transpose release stay on; CUDA rows loop only when noncontiguous; the unqualified Metal experiment stays off.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">State and precision</td><td class="p-2"><code>KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER</code>, backend BF16-state disable switches, and <code>KILN_ALLOW_FP8_ON_METAL</code></td><td class="p-2">State scatter and native-with-constraints BF16/F16 state follow fixed backend policy. Metal FP8 KV remains declined.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Optimized paths</td><td class="p-2"><code>KILN_DISABLE_WEIGHTED_LM_HEAD_PREP</code>, <code>KILN_DISABLE_MARLIN_BF16_DROP</code>, CUDA GDN row-loop switches, and <code>KILN_ENABLE_METAL_GDN_STREAMING_FASTPATHS</code></td><td class="p-2">Backend policy owns preparation and redundant transpose release; CUDA rows loop only when noncontiguous; the unqualified Metal experiment stays off.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Diagnostics/training</td><td class="p-2"><code>KILN_ARENA_FORCE_ZERO</code> and <code>KILN_CUDA_NATIVE_TRAINING</code></td><td class="p-2">Only contractually zeroed arena buffers are cleared. Server training uses the authoritative shared tensor tape.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Metal graph execution</td><td class="p-2"><code>KILN_METAL_GRAPHS</code>, <code>KILN_FORCE_EAGER_DECODE</code>, and <code>KILN_METAL_GRAPH_STABLE_PAGED_METADATA</code></td><td class="p-2">Runtime options fix graph eligibility before runner construction; eligible runners use stable paged metadata.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Tape residency</td><td class="p-2"><code>KILN_TAPE_GDN_OFFLOAD_SAVED_TENSORS</code>, <code>KILN_TAPE_OFFLOAD_MATMUL_A</code>, and <code>KILN_TAPE_OFFLOAD_MIN_BYTES</code></td><td class="p-2">Saved tensors remain device-resident; the unqualified host-offload experiment is unavailable.</td></tr>
@@ -641,137 +622,28 @@ training request
           unless its owning application installs the process-lifetime policy.
         </p>
 
-        <h3 class="font-semibold mt-6 mb-3">ROCm kernels use one complete route profile</h3>
+        <h3 class="font-semibold mt-6 mb-3">ROCm product execution is portable-only</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
-          <code>accelerator.rocm_kernel_profile</code> replaces independent model and tensor-kernel environment gates with
-          one complete 75-leaf policy.
-          <code>qualified</code> is the stable production profile: it enables the qualified full-attention QKV,
-          GDN projection/gates/recurrent/normalization/decode, head-major prefill, fused convolution, and LoRA
-          decode routes, exact long-attention routes, W8 decode projections, bounded training routes, all
-          four qualified tensor-level paged-attention accelerations, and eleven qualified native
-          flash-attention route decisions while keeping the slower gfx1151
-          multi-block GDN prefill experiment and the correctness-disabled fused RMSNorm route off.
-          This installs forty-three of forty-five accelerated routes. <code>portable_fallback</code>
-          declines all forty-five accelerated ROCm model/tensor routes and delegates to supported portable
-          implementations, making reference comparison intentional and reproducible. It deliberately retains
-          thirty correctness and bounded-work leaves across training, paged attention, concat, finite checks,
-          RMSNorm, and flash-attention tiling and fallback geometry.
-          <code>experimental_multiblock</code> is the qualified set plus that unqualified multi-block prefill
-          kernel, retains fused RMSNorm off, and therefore installs forty-four of forty-five accelerated routes
-          while failing startup outside the experimental serving profile.
+          <code>accelerator.rocm_kernel_profile</code> accepts only <code>portable_fallback</code>.
+          Product builds decline machine-qualified model and tensor routes and retain bounded generic
+          fallbacks. Historical route attribution is isolated behind the
+          <code>hardware-qualification</code> feature on the dedicated example; those values are not server
+          configuration and cannot be installed by an ordinary ROCm build.
         </p>
-        <div class="overflow-x-auto mt-4">
-          <table class="w-full text-sm" style="color: var(--fg-dim);">
-            <thead style="color: var(--fg);"><tr><th class="text-left p-2">Policy route</th><th class="text-left p-2"><code>qualified</code></th><th class="text-left p-2"><code>portable_fallback</code></th><th class="text-left p-2"><code>experimental_multiblock</code></th></tr></thead>
-            <tbody>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>full_attn_qkv_in_proj</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_ab_in_proj</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_prefill_ab_in_proj</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_prefill_gates</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>head_major_prefill</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_gates</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_gated_rms_norm</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_decode_fused</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_decode_unexpanded_qk</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_decode_qk_norm_recurrent</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_decode_qk_norm_recurrent_rmsnorm</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_conv1d</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>lora_decode_add</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_full_chunk_forward_multiblock</code></td><td class="p-2">off</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>attn_decode_qkv_prep</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_paged_decode</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>paged_decode_dyn_seqlen_batch</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_mlp_silu_mul</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_mlp_gate_up_prefill</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_rmsnorm</code></td><td class="p-2">off (correctness)</td><td class="p-2">off</td><td class="p-2">off (correctness)</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>long_flash_attn</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>native_rectangular_causal_flash</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>w8_projection</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>w8a8_projection</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>w8_swiglu</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>w8_sampled_lm_head</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>w8a8_sampled_lm_head</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gqa_sdpa_f32_materialized</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>split_q_gate_f32_output</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>training_mlp_chunking</code></td><td class="p-2">on</td><td class="p-2">on</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>training_mlp_chunk_tokens</code></td><td class="p-2">512</td><td class="p-2">512</td><td class="p-2">512</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>split_q_gate_training</code></td><td class="p-2">on</td><td class="p-2">on</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>split_q_gate_output_chunk_features</code></td><td class="p-2">1024</td><td class="p-2">1024</td><td class="p-2">1024</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>split_q_gate_row_tile_tokens</code></td><td class="p-2">512</td><td class="p-2">512</td><td class="p-2">512</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>split_paged_attention</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>split_paged_attention_min_sequence</code></td><td class="p-2">2048</td><td class="p-2">2048</td><td class="p-2">2048</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>paged_attention_split_tokens</code></td><td class="p-2">128</td><td class="p-2">128</td><td class="p-2">128</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>paged_attention_max_splits</code></td><td class="p-2">256</td><td class="p-2">256</td><td class="p-2">256</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gqa_paged_attention</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gqa_d128_parallel</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gqa_d256_parallel</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>concat_safe_row_assembly</code></td><td class="p-2">on</td><td class="p-2">on</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>concat_safe_row_assembly_min_elements</code></td><td class="p-2">1,000,000</td><td class="p-2">1,000,000</td><td class="p-2">1,000,000</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>is_finite_host_scan_min_elements</code></td><td class="p-2">16,777,216</td><td class="p-2">16,777,216</td><td class="p-2">16,777,216</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rmsnorm_row_tile_rows</code></td><td class="p-2">4096</td><td class="p-2">4096</td><td class="p-2">4096</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.f32_matmul_inner_tile</code></td><td class="p-2">4096</td><td class="p-2">4096</td><td class="p-2">4096</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.online_matmul_batch_group</code></td><td class="p-2">4</td><td class="p-2">4</td><td class="p-2">4</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.native_scalar_forward</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.native_scalar_forward_max_sequence</code></td><td class="p-2">4096</td><td class="p-2">4096</td><td class="p-2">4096</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.native_single_forward_max_sequence</code></td><td class="p-2">32,768</td><td class="p-2">32,768</td><td class="p-2">32,768</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.native_tiled_forward</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.native_forward_query_tile</code></td><td class="p-2">4096</td><td class="p-2">4096</td><td class="p-2">4096</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.native_streaming_forward</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.native_streaming_forward_min_sequence</code></td><td class="p-2">8192</td><td class="p-2">8192</td><td class="p-2">8192</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.native_streaming_forward_key_tile</code></td><td class="p-2">4096</td><td class="p-2">4096</td><td class="p-2">4096</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.native_rectangular_causal_forward</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.online_forward</code></td><td class="p-2">on</td><td class="p-2">on</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.online_backward</code></td><td class="p-2">on</td><td class="p-2">on</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.materialized_backward_mode</code></td><td class="p-2"><code>auto</code></td><td class="p-2"><code>auto</code></td><td class="p-2"><code>auto</code></td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.native_backward_preference</code></td><td class="p-2"><code>auto</code></td><td class="p-2"><code>disabled</code></td><td class="p-2"><code>auto</code></td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.native_backward_d128_max_sequence</code></td><td class="p-2">1024</td><td class="p-2">1024</td><td class="p-2">1024</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.native_backward_d256_max_sequence</code></td><td class="p-2">512</td><td class="p-2">512</td><td class="p-2">512</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.native_backward_long_min_sequence</code></td><td class="p-2">4096</td><td class="p-2">4096</td><td class="p-2">4096</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.collapsed_gqa_backward</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.native_direct_collapsed_gqa_backward</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.native_gqa_qblock_forward</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.native_gqa_qblock_forward_min_sequence</code></td><td class="p-2">256</td><td class="p-2">256</td><td class="p-2">256</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.wmma_gqa_qblock_forward</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.wmma_gqa_r64k32_forward</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.wmma_gqa_r64k32_forward_min_sequence</code></td><td class="p-2">256</td><td class="p-2">256</td><td class="p-2">256</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.wmma_gqa_r64k32_log2_forward</code></td><td class="p-2">on</td><td class="p-2">off</td><td class="p-2">on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.wmma_gqa_r64k32_log2_forward_min_sequence</code></td><td class="p-2">256</td><td class="p-2">256</td><td class="p-2">256</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.backward_precompute_delta_max_sequence</code></td><td class="p-2">1024</td><td class="p-2">1024</td><td class="p-2">1024</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>flash_attention.native_direct_collapsed_gqa_query_parallelism</code></td><td class="p-2">1</td><td class="p-2">1</td><td class="p-2">1</td></tr>
-            </tbody>
-          </table>
-        </div>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          The server maps the typed profile to model policy and context-owned tensor policy before device
-          creation. Backend dispatch, model loading, forward/tape execution, Rust tensor operations, RMSNorm,
-          and C++ paged-attention launchers all read explicit immutable values. Dispatch does not consult
-          process environment in hot paths. A same-value process install is idempotent, a conflicting install
-          fails, and invalid zero or inconsistent tensor geometry fails before device probing. The retired
-          per-kernel ROCm spellings and CUDA-spelled fallbacks are deliberately
-          unsupported as aliases, so an operator cannot create an unqualified mixture or change a route during
-          inference. The default-off ROCm streaming-GDN and materialized tape-flash investigation switches were
+          Historical qualification route matrices are retained only with their source receipts, not as product architecture.
+          Ordinary backend dispatch, model loading, forward/tape execution, Rust tensor operations, RMSNorm,
+          and C++ paged-attention launchers read the portable policy. Dispatch does not consult device identity
+          or process environment in hot paths. The retired per-kernel ROCm spellings and CUDA-spelled fallbacks
+          are unsupported as aliases. The default-off ROCm streaming-GDN and materialized tape-flash investigation switches were
           removed rather than promoted. The unused opt-in axis-zero concat kernel was deleted. Generic GPU MLP and split-projection environment controls remain live
           for CUDA/Vulkan until those hardware-host migrations, but ROCm no longer consumes them.
         </p>
-        <div class="mt-4 p-4" style="border:1px solid var(--line); border-radius:6px; background:var(--surface);">
-          <h3 class="font-semibold" style="color:var(--fg);">ROCm token-only LM head</h3>
-          <p class="mt-2 text-sm leading-relaxed" style="color:var(--fg-dim);">
-            Qualified greedy batches run the packed W8A16 tied LM head and stable argmax on-device. Sampled batches
-            use W8A8 activation arithmetic, accept mixed greedy and stochastic rows, and apply repetition,
-            presence, frequency, temperature, top-k, min-p, top-p, and categorical selection in the public order.
-            Stochastic rows are bounded to <code>top_k=1..64</code>; unsupported settings decline to the full-logit
-            path. Control uploads remain ordered on the active HIP stream, vocabulary scores remain device-local,
-            and one <code>[batch]</code> token tensor is read back.
-          </p>
-          <p class="mt-2 text-sm leading-relaxed" style="color:var(--fg-dim);">
-            The seeded device draw is SplitMix64 and replays exactly only inside the same binary/device/kernel
-            envelope; it is not a cross-backend <code>StdRng</code> promise. Health publishes dispatches, rows,
-            activation arithmetic, sparse-history entries, failures, maximum batch rows, and maximum top-k at
-            <code>decode_runtime.rocm_w8_lm_head</code>. Prometheus mirrors these as fixed-cardinality
-            <code>kiln_rocm_w8_lm_head_*</code> counters and gauges without synchronizing the device.
-          </p>
-        </div>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          Portable ROCm execution declines the packed W8/W8A8 token-only LM-head routes and uses the ordinary
+          BF16 LM head. Historical route mechanics and attribution remain in source-bound qualification artifacts,
+          not product configuration.
+        </p>
         <details class="mt-4" open>
           <summary class="font-medium">Retired model and tensor-layer ROCm variables</summary>
           <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
@@ -856,9 +728,9 @@ training request
         <h3 class="font-semibold mt-6 mb-3">Matmul route choice is fixed before inference</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           The primary context also owns <code>rocm_strided_batched_matmul_mode</code> and
-          <code>rocm_bf16_matmul_output_mode</code>. Their stable <code>auto</code> defaults preserve the
-          qualified gfx115x large-attention per-row fallback and the ROCm 7.2 F32-output-then-BF16-cast
-          workaround. Explicit comparison routes require the experimental serving profile. A later owner
+          <code>rocm_bf16_matmul_output_mode</code>. Portable defaults select per-row GEMMs and
+          F32 output followed by an on-device BF16 cast. Strided batching and native BF16 output require the
+          experimental serving profile; retired machine-shaped <code>auto</code> values are rejected. A later owner
           cannot install different synchronization or matmul policy on the same device, and a GEMM cannot
           observe a shell mutation between layers or requests. Route decisions use only immutable policy,
           shape, and dtype; they do not read live memory. The obsolete matmul trace variables were deleted.
@@ -965,39 +837,6 @@ training request
           guarantees one retained graph per active owner after the incoming candidate. The selected owner may
           differ from the candidate owner when it holds a larger surplus; no unused global headroom is converted
           into an artificial per-owner ceiling.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          The current Strix Halo mixed-load and development-soak candidate uses eight entries for eight declared
-          active owners and pre-reserves zero transition entries. The same typed launch contract binds four
-          ordinary decode rows, four staged-prefill slots, a 256-token/8-layer prefill quantum, and a 50 ms
-          cooperative actor-cycle idle. Fair active relief creates transition room at actual saturation instead
-          of holding another opaque native graph population continuously. In an earlier same-binary 120-second
-          A/B, a 12-entry arm completed the identical first seven-wave sequence 25.3 percent faster than 24
-          entries while safely settling seven measured capacity transactions with zero fallback or live-slot
-          loss; its active p50 SCLK was lower. That result motivates bounded graph residency but does not qualify
-          eight entries or the new duty cycle. A later 32-layer mixed-load row remained thermally contained but
-          produced fourteen nonthermal ITL outliers, so the current eight-layer quantum restores three
-          inter-layer scheduling opportunities instead of accepting explained inference pauses. Its source-bound
-          <code>autoscale-off</code> discriminator then eliminated all fourteen classified ITL outliers, reduced
-          p99.9 ITL from 1,849.384 to 961.994 ms, and peaked at 88.75 C without a trip. Aggregate output fell from
-          13.885 to 12.748 tokens/second and p99 TTFT rose to 88.748 seconds, so that tradeoff remains explicit.
-          The remaining policy arms and 30-minute soak are still required, and the profile is not a universal
-          optimum or a reason to silently clamp an operator&rsquo;s
-          explicit configuration on another device.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Sampled fused-LM-head counters intentionally cover decode-continuation rows. Prefill owns each
-          request&rsquo;s first token, so an eight-request, 32-token qualification wave requires exactly 248 fused
-          sample rows and independently requires all 256 response tokens through usage and semantic-oracle gates.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          The first source-bound eight-layer graph-off arm outperformed its graph-on <code>default</code> peer for
-          this short dynamic-shape workload: deterministic output rose from 12.935 to 13.710 tokens/second,
-          sampled output rose from 8.319 to 14.247 tokens/second, and p99.9 ITL fell from 1,037.370 to 508.025 ms.
-          The graph-on arm spent 3.698 seconds warming 21 candidates plus 1.532 seconds in native capture, while
-          its maximum decode forward reached 681.762 ms versus 151.756 ms eager. That result rejects an assumption
-          that live capture is automatically faster here; it does not replace graph correctness/resilience gates
-          or establish a universal graph-off policy on another device or workload.
         </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
           Capture and cache admission are deliberately separate outcomes. <code>capture_successes</code> means

@@ -110,8 +110,8 @@ pub const DEFAULT_ROCM_GRAPH_CACHE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 pub const ROCM_GRAPH_CACHE_MAX_BYTES_MIN: u64 = 64 * 1024 * 1024;
 pub const ROCM_GRAPH_CACHE_MAX_BYTES_MAX: u64 = 16 * 1024 * 1024 * 1024;
 /// Versioned schema identity shared by config, health, and debug diagnostics.
-pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v15";
-pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 15;
+pub const ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID: &str = "kiln.accelerator-runtime-policy.v16";
+pub const ACCELERATOR_RUNTIME_POLICY_VERSION: u32 = 16;
 
 /// Stable operator-facing default for sparse SFT checkpoint-boundary anchors.
 pub const DEFAULT_CHECKPOINT_BOUNDARY_CACHE_GB: f64 = 6.0;
@@ -1181,30 +1181,25 @@ impl<'de> Deserialize<'de> for RocmSynchronizationModeSetting {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RocmStridedBatchedMatmulMode {
-    /// Apply the qualified gfx115x shape and dtype guard.
-    #[default]
-    Auto,
     /// Always use the strided-batched hipBLASLt route when batch is greater
     /// than one. This requires the experimental serving profile.
     Enabled,
-    /// Always issue one hipBLASLt operation per logical batch row. This
-    /// requires the experimental serving profile.
+    /// Always issue one hipBLASLt operation per logical batch row.
+    #[default]
     Disabled,
 }
 
 impl RocmStridedBatchedMatmulMode {
     fn parse(raw: &str, label: &str) -> Result<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
-            "auto" => Ok(Self::Auto),
             "enabled" => Ok(Self::Enabled),
             "disabled" => Ok(Self::Disabled),
-            _ => anyhow::bail!("{label} must be one of auto, enabled, or disabled; got {raw:?}"),
+            _ => anyhow::bail!("{label} must be one of enabled or disabled; got {raw:?}"),
         }
     }
 
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Auto => "auto",
             Self::Enabled => "enabled",
             Self::Disabled => "disabled",
         }
@@ -1246,7 +1241,7 @@ impl RocmStridedBatchedMatmulModeSetting {
 impl Default for RocmStridedBatchedMatmulModeSetting {
     fn default() -> Self {
         Self::new(
-            RocmStridedBatchedMatmulMode::Auto,
+            RocmStridedBatchedMatmulMode::Disabled,
             ConfigValueSource::Default,
         )
     }
@@ -1280,32 +1275,25 @@ impl<'de> Deserialize<'de> for RocmStridedBatchedMatmulModeSetting {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RocmBf16MatmulOutputMode {
-    /// Apply the qualified ROCm 7.2 shape guard.
-    #[default]
-    Auto,
     /// Always request native BF16 output from hipBLASLt. This requires the
     /// experimental serving profile.
     NativeBf16,
-    /// Always request F32 output and cast it to BF16 on-device. This requires
-    /// the experimental serving profile.
+    /// Always request F32 output and cast it to BF16 on-device.
+    #[default]
     F32ThenCast,
 }
 
 impl RocmBf16MatmulOutputMode {
     fn parse(raw: &str, label: &str) -> Result<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
-            "auto" => Ok(Self::Auto),
             "native_bf16" => Ok(Self::NativeBf16),
             "f32_then_cast" => Ok(Self::F32ThenCast),
-            _ => anyhow::bail!(
-                "{label} must be one of auto, native_bf16, or f32_then_cast; got {raw:?}"
-            ),
+            _ => anyhow::bail!("{label} must be one of native_bf16 or f32_then_cast; got {raw:?}"),
         }
     }
 
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Auto => "auto",
             Self::NativeBf16 => "native_bf16",
             Self::F32ThenCast => "f32_then_cast",
         }
@@ -1346,7 +1334,10 @@ impl RocmBf16MatmulOutputModeSetting {
 
 impl Default for RocmBf16MatmulOutputModeSetting {
     fn default() -> Self {
-        Self::new(RocmBf16MatmulOutputMode::Auto, ConfigValueSource::Default)
+        Self::new(
+            RocmBf16MatmulOutputMode::F32ThenCast,
+            ConfigValueSource::Default,
+        )
     }
 }
 
@@ -1745,34 +1736,24 @@ impl<'de> Deserialize<'de> for MetalKernelProfileSetting {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RocmKernelProfile {
-    /// Strix Halo-qualified native route set with correctness-disabled fused
-    /// RMSNorm. Deployments must select this profile explicitly.
-    Qualified,
     /// Decline all profile-governed routes and use portable model fallbacks.
     #[default]
     PortableFallback,
-    /// Qualified routes plus the unqualified multi-block GDN prefill kernel;
-    /// fused RMSNorm remains correctness-disabled.
-    ExperimentalMultiblock,
 }
 
 impl RocmKernelProfile {
     fn parse(raw: &str, label: &str) -> Result<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
-            "qualified" => Ok(Self::Qualified),
             "portable_fallback" => Ok(Self::PortableFallback),
-            "experimental_multiblock" => Ok(Self::ExperimentalMultiblock),
             _ => anyhow::bail!(
-                "{label} must be one of qualified, portable_fallback, or experimental_multiblock; got {raw:?}"
+                "{label} must be portable_fallback; machine-qualified profiles are not product configuration; got {raw:?}"
             ),
         }
     }
 
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Qualified => "qualified",
             Self::PortableFallback => "portable_fallback",
-            Self::ExperimentalMultiblock => "experimental_multiblock",
         }
     }
 }
@@ -2425,7 +2406,7 @@ impl AcceleratorRuntimeConfig {
                 "accelerator.rocm_synchronization_mode=stream_ordered requires server.serving_profile=experimental; got {profile}"
             );
         }
-        if self.rocm_strided_batched_matmul_mode.mode() != RocmStridedBatchedMatmulMode::Auto
+        if self.rocm_strided_batched_matmul_mode.mode() == RocmStridedBatchedMatmulMode::Enabled
             && profile != ServingProfile::Experimental
         {
             anyhow::bail!(
@@ -2433,19 +2414,12 @@ impl AcceleratorRuntimeConfig {
                 self.rocm_strided_batched_matmul_mode.mode()
             );
         }
-        if self.rocm_bf16_matmul_output_mode.mode() != RocmBf16MatmulOutputMode::Auto
+        if self.rocm_bf16_matmul_output_mode.mode() == RocmBf16MatmulOutputMode::NativeBf16
             && profile != ServingProfile::Experimental
         {
             anyhow::bail!(
                 "accelerator.rocm_bf16_matmul_output_mode={} requires server.serving_profile=experimental; got {profile}",
                 self.rocm_bf16_matmul_output_mode.mode()
-            );
-        }
-        if self.rocm_kernel_profile.profile() == RocmKernelProfile::ExperimentalMultiblock
-            && profile != ServingProfile::Experimental
-        {
-            anyhow::bail!(
-                "accelerator.rocm_kernel_profile=experimental_multiblock requires server.serving_profile=experimental; got {profile}"
             );
         }
         if matches!(
@@ -6923,11 +6897,11 @@ mod tests {
         );
         assert_eq!(
             config.accelerator.rocm_strided_batched_matmul_mode.mode(),
-            RocmStridedBatchedMatmulMode::Auto
+            RocmStridedBatchedMatmulMode::Disabled
         );
         assert_eq!(
             config.accelerator.rocm_bf16_matmul_output_mode.mode(),
-            RocmBf16MatmulOutputMode::Auto
+            RocmBf16MatmulOutputMode::F32ThenCast
         );
         assert_eq!(
             config.accelerator.rocm_kernel_profile.profile(),
@@ -7219,16 +7193,16 @@ mod tests {
             assert_eq!(
                 resolved.rocm_strided_batched_matmul_mode,
                 ResolvedAcceleratorValue {
-                    configured: RocmStridedBatchedMatmulMode::Auto,
-                    effective: RocmStridedBatchedMatmulMode::Auto,
+                    configured: RocmStridedBatchedMatmulMode::Disabled,
+                    effective: RocmStridedBatchedMatmulMode::Disabled,
                     source: ConfigValueSource::Default,
                 }
             );
             assert_eq!(
                 resolved.rocm_bf16_matmul_output_mode,
                 ResolvedAcceleratorValue {
-                    configured: RocmBf16MatmulOutputMode::Auto,
-                    effective: RocmBf16MatmulOutputMode::Auto,
+                    configured: RocmBf16MatmulOutputMode::F32ThenCast,
+                    effective: RocmBf16MatmulOutputMode::F32ThenCast,
                     source: ConfigValueSource::Default,
                 }
             );
@@ -7271,8 +7245,8 @@ mod tests {
             ConfigValueSource::Environment,
         )))
         .unwrap();
-        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v15");
-        assert_eq!(json["version"], 15);
+        assert_eq!(json["schema_id"], "kiln.accelerator-runtime-policy.v16");
+        assert_eq!(json["version"], 16);
         assert_eq!(
             json["vulkan_kernel_policy_schema_id"],
             "kiln.vulkan-kernel-policy.v4"
@@ -7334,7 +7308,7 @@ metal_kernel_profile = "portable_fallback"
 rocm_synchronization_mode = "stream_ordered"
 rocm_strided_batched_matmul_mode = "disabled"
 rocm_bf16_matmul_output_mode = "f32_then_cast"
-rocm_kernel_profile = "experimental_multiblock"
+rocm_kernel_profile = "portable_fallback"
 rocm_graph_mode = "warmup_then_eager"
 rocm_graph_cache_entries = 64
 rocm_graph_cache_max_bytes = 17179869184
@@ -7380,7 +7354,7 @@ rocm_graph_cache_max_bytes = 17179869184
         );
         assert_eq!(
             config.accelerator.rocm_kernel_profile.profile(),
-            RocmKernelProfile::ExperimentalMultiblock
+            RocmKernelProfile::PortableFallback
         );
         assert_eq!(
             config.accelerator.rocm_graph_mode.mode(),
@@ -7543,20 +7517,6 @@ rocm_graph_cache_max_bytes = 17179869184
             let mut gated = KilnConfig::default();
             gated.server.serving_profile =
                 ServingProfileSetting::new(profile, ConfigValueSource::ConfigFile);
-            gated.accelerator.rocm_kernel_profile = RocmKernelProfileSetting::new(
-                RocmKernelProfile::ExperimentalMultiblock,
-                ConfigValueSource::ConfigFile,
-            );
-            let detail = gated.validate().unwrap_err().to_string();
-            assert!(
-                detail.contains("accelerator.rocm_kernel_profile"),
-                "{detail}"
-            );
-            assert!(detail.contains("experimental"), "{detail}");
-
-            let mut gated = KilnConfig::default();
-            gated.server.serving_profile =
-                ServingProfileSetting::new(profile, ConfigValueSource::ConfigFile);
             gated.accelerator.rocm_synchronization_mode = RocmSynchronizationModeSetting::new(
                 RocmSynchronizationMode::StreamOrdered,
                 ConfigValueSource::ConfigFile,
@@ -7580,11 +7540,11 @@ rocm_graph_cache_max_bytes = 17179869184
             for (strided_mode, output_mode, expected_field) in [
                 (
                     RocmStridedBatchedMatmulMode::Enabled,
-                    RocmBf16MatmulOutputMode::Auto,
+                    RocmBf16MatmulOutputMode::F32ThenCast,
                     "accelerator.rocm_strided_batched_matmul_mode",
                 ),
                 (
-                    RocmStridedBatchedMatmulMode::Auto,
+                    RocmStridedBatchedMatmulMode::Disabled,
                     RocmBf16MatmulOutputMode::NativeBf16,
                     "accelerator.rocm_bf16_matmul_output_mode",
                 ),
@@ -7762,35 +7722,31 @@ rocm_graph_cache_max_bytes = 17179869184
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let environment = ScopedConfigEnvironment::isolated();
 
-        for (raw, expected) in [
-            ("qualified", RocmKernelProfile::Qualified),
-            ("portable_fallback", RocmKernelProfile::PortableFallback),
-            (
-                "experimental_multiblock",
-                RocmKernelProfile::ExperimentalMultiblock,
-            ),
-        ] {
-            environment.set("KILN_ACCELERATOR_ROCM_KERNEL_PROFILE", raw);
-            let mut config = KilnConfig::default();
-            config.apply_env_overrides().unwrap();
-            assert_eq!(config.accelerator.rocm_kernel_profile.profile(), expected);
-            assert_eq!(
-                config.accelerator.rocm_kernel_profile.source(),
-                ConfigValueSource::Environment
-            );
-            environment.remove("KILN_ACCELERATOR_ROCM_KERNEL_PROFILE");
-        }
-
-        environment.set("KILN_ACCELERATOR_ROCM_KERNEL_PROFILE", "custom");
-        let detail = KilnConfig::default()
-            .apply_env_overrides()
-            .unwrap_err()
-            .to_string();
-        assert!(
-            detail.contains("KILN_ACCELERATOR_ROCM_KERNEL_PROFILE"),
-            "{detail}"
+        environment.set("KILN_ACCELERATOR_ROCM_KERNEL_PROFILE", "portable_fallback");
+        let mut config = KilnConfig::default();
+        config.apply_env_overrides().unwrap();
+        assert_eq!(
+            config.accelerator.rocm_kernel_profile.profile(),
+            RocmKernelProfile::PortableFallback
         );
-        assert!(detail.contains("qualified"), "{detail}");
+        assert_eq!(
+            config.accelerator.rocm_kernel_profile.source(),
+            ConfigValueSource::Environment
+        );
+        environment.remove("KILN_ACCELERATOR_ROCM_KERNEL_PROFILE");
+
+        for retired in ["qualified", "experimental_multiblock", "custom"] {
+            environment.set("KILN_ACCELERATOR_ROCM_KERNEL_PROFILE", retired);
+            let detail = KilnConfig::default()
+                .apply_env_overrides()
+                .unwrap_err()
+                .to_string();
+            assert!(
+                detail.contains("KILN_ACCELERATOR_ROCM_KERNEL_PROFILE"),
+                "{detail}"
+            );
+            assert!(detail.contains("portable_fallback"), "{detail}");
+        }
     }
 
     #[test]
@@ -8151,10 +8107,7 @@ api_key_env = "{SECRET_ENV}"
                 "KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE",
                 "stream_ordered",
             ),
-            (
-                "KILN_ACCELERATOR_ROCM_KERNEL_PROFILE",
-                "experimental_multiblock",
-            ),
+            ("KILN_ACCELERATOR_ROCM_KERNEL_PROFILE", "portable_fallback"),
             ("KILN_ACCELERATOR_ROCM_GRAPH_MODE", "lazy_capture_replay"),
             ("KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES", "13"),
             ("KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES", "536870912"),
@@ -8276,7 +8229,7 @@ api_key_env = "{SECRET_ENV}"
         );
         assert_eq!(
             config.accelerator.rocm_kernel_profile.profile(),
-            RocmKernelProfile::ExperimentalMultiblock
+            RocmKernelProfile::PortableFallback
         );
         assert_eq!(
             config.accelerator.rocm_graph_mode.mode(),

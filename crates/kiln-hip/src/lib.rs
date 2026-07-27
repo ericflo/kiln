@@ -539,25 +539,27 @@ pub enum RocmSynchronizationMode {
 /// Route policy for hipBLASLt strided-batched matmul.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum RocmStridedBatchedMatmulMode {
-    /// Use the qualified shape and dtype guard for known-unsafe gfx115x cases.
-    #[default]
+    /// Historical qualification-only shape and dtype guard.
+    #[cfg(any(test, feature = "hardware-qualification"))]
     Auto,
     /// Always use hipBLASLt strided batching when the logical batch is larger
     /// than one. This is an experimental correctness-comparison route.
     Enabled,
     /// Always issue one hipBLASLt operation per logical batch row.
+    #[default]
     Disabled,
 }
 
 /// Output route for BF16-input, BF16-output hipBLASLt matmul.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum RocmBf16MatmulOutputMode {
-    /// Use the qualified size guard for ROCm 7.2's unstable BF16 epilogue.
-    #[default]
+    /// Historical qualification-only size guard.
+    #[cfg(any(test, feature = "hardware-qualification"))]
     Auto,
     /// Always request native BF16 output from hipBLASLt.
     NativeBf16,
     /// Always request F32 output and cast it to BF16 on the device.
+    #[default]
     F32ThenCast,
 }
 
@@ -583,7 +585,7 @@ impl RocmMatmulPolicy {
 /// Selection discipline for a ROCm flash-attention route.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum RocmFlashAttentionRouteMode {
-    /// Use the qualified shape and memory-admission heuristic.
+    /// Apply the route's device-neutral shape and memory-admission guards.
     #[default]
     Auto,
     /// Prefer the route whenever its hard correctness and memory guards pass.
@@ -631,7 +633,8 @@ pub struct RocmFlashAttentionPolicy {
 }
 
 impl RocmFlashAttentionPolicy {
-    /// Explicit Strix Halo flash-attention qualification policy.
+    /// Historical Strix Halo flash-attention qualification fixture.
+    #[cfg(any(test, feature = "hardware-qualification"))]
     pub const fn qualified() -> Self {
         Self {
             f32_matmul_inner_tile: 4096,
@@ -669,22 +672,40 @@ impl RocmFlashAttentionPolicy {
     /// Reference-oriented policy retaining exact, bounded composite routes.
     pub const fn portable_fallback() -> Self {
         Self {
+            f32_matmul_inner_tile: 4096,
+            online_matmul_batch_group: 4,
             native_scalar_forward: false,
+            native_scalar_forward_max_sequence: 4096,
+            native_single_forward_max_sequence: 32768,
             native_tiled_forward: false,
+            native_forward_query_tile: 4096,
             native_streaming_forward: false,
+            native_streaming_forward_min_sequence: 8192,
+            native_streaming_forward_key_tile: 4096,
             native_rectangular_causal_forward: false,
+            online_forward: true,
+            online_backward: true,
+            materialized_backward_mode: RocmFlashAttentionRouteMode::Auto,
             native_backward_preference: RocmFlashAttentionRouteMode::Disabled,
+            native_backward_d128_max_sequence: 1024,
+            native_backward_d256_max_sequence: 512,
+            native_backward_long_min_sequence: 4096,
             collapsed_gqa_backward: false,
             native_direct_collapsed_gqa_backward: false,
             native_gqa_qblock_forward: false,
+            native_gqa_qblock_forward_min_sequence: 256,
             wmma_gqa_qblock_forward: false,
             wmma_gqa_r64k32_forward: false,
+            wmma_gqa_r64k32_forward_min_sequence: 256,
             wmma_gqa_r64k32_log2_forward: false,
-            ..Self::qualified()
+            wmma_gqa_r64k32_log2_forward_min_sequence: 256,
+            backward_precompute_delta_max_sequence: 1024,
+            native_direct_collapsed_gqa_query_parallelism: 1,
         }
     }
 
     /// The multiblock experiment changes no flash-attention route.
+    #[cfg(any(test, feature = "hardware-qualification"))]
     pub const fn experimental_multiblock() -> Self {
         Self::qualified()
     }
@@ -795,7 +816,8 @@ pub struct RocmTensorKernelPolicy {
 }
 
 impl RocmTensorKernelPolicy {
-    /// Explicit Strix Halo tensor-kernel qualification policy.
+    /// Historical Strix Halo tensor-kernel qualification fixture.
+    #[cfg(any(test, feature = "hardware-qualification"))]
     pub const fn qualified() -> Self {
         Self {
             split_paged_attention: true,
@@ -814,19 +836,26 @@ impl RocmTensorKernelPolicy {
     }
 
     /// Reference-oriented policy that declines accelerated tensor routes while
-    /// retaining the qualified correctness and bounded-work geometries.
+    /// retaining fixed correctness and bounded-work geometries.
     pub const fn portable_fallback() -> Self {
         Self {
             split_paged_attention: false,
+            split_paged_attention_min_sequence: 2048,
+            paged_attention_split_tokens: 128,
+            paged_attention_max_splits: 256,
             gqa_paged_attention: false,
             gqa_d128_parallel: false,
             gqa_d256_parallel: false,
+            concat_safe_row_assembly: true,
+            concat_safe_row_assembly_min_elements: 1_000_000,
+            is_finite_host_scan_min_elements: Some(16 * 1024 * 1024),
+            rmsnorm_row_tile_rows: 4096,
             flash_attention: RocmFlashAttentionPolicy::portable_fallback(),
-            ..Self::qualified()
         }
     }
 
     /// The experimental model profile changes no low-level tensor route.
+    #[cfg(any(test, feature = "hardware-qualification"))]
     pub const fn experimental_multiblock() -> Self {
         Self {
             flash_attention: RocmFlashAttentionPolicy::experimental_multiblock(),
@@ -889,8 +918,8 @@ impl RocmExecutionPolicy {
         Self {
             synchronization_mode,
             matmul: RocmMatmulPolicy::new(
-                RocmStridedBatchedMatmulMode::Auto,
-                RocmBf16MatmulOutputMode::Auto,
+                RocmStridedBatchedMatmulMode::Disabled,
+                RocmBf16MatmulOutputMode::F32ThenCast,
             ),
             tensor_kernels: RocmTensorKernelPolicy::portable_fallback(),
         }

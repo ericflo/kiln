@@ -153,9 +153,9 @@ replacement fields are documented below.
 | `server.http_send_buffer_bytes` | optional unsigned integer; omitted (`None`) | `KILN_SERVER_HTTP_SEND_BUFFER_BYTES` (implemented) | none | When set, `1024..=16777216`. Applied to accepted sockets. Startup preflights the listener and rejects an OS read-back smaller than requested. |
 | `server.stream_stall_grace_ms` | unsigned integer; `2000` | `KILN_SERVER_STREAM_STALL_GRACE_MS` (implemented) | none | `10..=2000`. A request retaining KV state with no streaming delivery progress is selected for cancellation after this grace. |
 | `server.max_batch_tokens` | unsigned integer; `512` | `KILN_SERVER_MAX_BATCH_TOKENS` (implemented) | none | `2..=65536`. Combined decode-plus-prefill token budget for one batching-actor cycle. |
-| `server.max_prefill_tokens_per_cycle` | unsigned integer; `256` | `KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE` (implemented) | none | `1..=65536`. Independent new-prompt-token ceiling within the combined actor budget. ROCm actor serving requires equality with the effective streaming tile, tiled streaming-prefill dispatch no later than that boundary, and `server.max_batch_tokens >= tile + effective max_decode_batch`; unsafe combinations fail startup. The checked Strix Halo Vulkan development profile pins `128`; concurrent Vulkan serving at `256` is not qualified. |
+| `server.max_prefill_tokens_per_cycle` | unsigned integer; `256` | `KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE` (implemented) | none | `1..=65536`. Independent new-prompt-token ceiling within the combined actor budget. ROCm actor serving requires equality with the effective streaming tile, tiled streaming-prefill dispatch no later than that boundary, and `server.max_batch_tokens >= tile + effective max_decode_batch`; unsafe combinations fail startup. |
 | `server.max_prefill_layers_per_cycle` | unsigned integer; `4` | `KILN_SERVER_MAX_PREFILL_LAYERS_PER_CYCLE` (implemented) | none | `1..=1024`. Number of transformer layers an in-flight prefill chunk may execute before yielding to decode. |
-| `server.max_decode_batch` | `"auto"` or unsigned integer; `"auto"` | `KILN_SERVER_MAX_DECODE_BATCH` (implemented) | none | `auto`, `backend`, and `backend_policy` all delegate to backend policy; an integer must be `1..=65536`. Deterministic mode and `max_batch_tokens` may lower the final width. Do not raise this from a single throughput sample: the machine-local ROCm selector documented in the Qualification guide requires exact-width deterministic and fused-sampled execution, graph correctness, bounded tail/memory regression, restart/cooldown between arms, and follow-up soak/benchmark evidence. It emits a selection receipt but never mutates this field. The Strix Halo Vulkan development-soak candidate sets `2`; together with a prefill admission quantum of two, this yields four total active requests and admits an equal pair together. |
+| `server.max_decode_batch` | `"auto"` or unsigned integer; `"auto"` | `KILN_SERVER_MAX_DECODE_BATCH` (implemented) | none | `auto`, `backend`, and `backend_policy` all delegate to backend policy; an integer must be `1..=65536`. Deterministic mode and `max_batch_tokens` may lower the final width. Explicit values require backend-specific correctness, memory, and latency qualification; qualification receipts never mutate this field. |
 | `server.eval_mode` | boolean; `false` | `KILN_SERVER_EVAL_MODE` (implemented) | none | Enables deterministic eval-serving defaults, headers, adapter warnings, and transient-cache cleanup behavior. `serve --eval-mode` applies a typed override after environment resolution and wins without mutating process environment. |
 | `server.debug_model_state` | boolean; `false` | `KILN_SERVER_DEBUG_MODEL_STATE` (implemented) | none | Enables trusted `GET /v1/debug/model-state` diagnostics without changing inference, cache, or eval semantics. `server.eval_mode=true` also enables the endpoint. The response contains model/configuration/runtime state but no prompt or user-message contents. |
 | `server.default_thinking_enabled` | optional boolean; omitted (`None`) | `KILN_SERVER_DEFAULT_THINKING_ENABLED` (implemented) | none | `None` preserves the model template default. Requests may override with `chat_template_kwargs.enable_thinking`. The canonical environment override accepts strict booleans; there is no environment value that restores `None`. |
@@ -197,9 +197,8 @@ there is no parallel `[experimental]` namespace with duplicate controls.
 | **`accelerator.vulkan_validation`** | `true` | `experimental` |
 | **`accelerator.cuda_marlin_profile`** | `attention_mlp`, `attention_mlp_gdn` | `experimental` |
 | **`accelerator.rocm_synchronization_mode`** | `stream_ordered` | `experimental` |
-| **`accelerator.rocm_strided_batched_matmul_mode`** | `enabled`, `disabled` | `experimental` |
-| **`accelerator.rocm_bf16_matmul_output_mode`** | `native_bf16`, `f32_then_cast` | `experimental` |
-| **`accelerator.rocm_kernel_profile`** | `experimental_multiblock` | `experimental` |
+| **`accelerator.rocm_strided_batched_matmul_mode`** | `enabled` | `experimental` |
+| **`accelerator.rocm_bf16_matmul_output_mode`** | `native_bf16` | `experimental` |
 | **`accelerator.rocm_graph_mode`** | `warmup_then_eager`, `lazy_capture_replay` | `experimental` |
 | **`memory.kv_force_blocks`** | every positive integer | `maintenance` plus `memory.kv_autoscale = true` |
 
@@ -213,7 +212,7 @@ execution selector.
 
 This section owns process-lifetime accelerator execution behavior that must be
 fixed before the primary device context or model runner is created. The
-resolved object uses schema `kiln.accelerator-runtime-policy.v15`. Startup,
+resolved object uses schema `kiln.accelerator-runtime-policy.v16`. Startup,
 `kiln config`, `GET /v1/config`, `/health`, trusted debug state, and the
 dashboard all report the same configured/effective/source values, plus the
 compiled Vulkan kernel-policy schema ID; lower model, tensor, and kernel paths
@@ -230,9 +229,9 @@ do not re-read these public environment names.
 | `accelerator.cuda_flash_backward_mode` | string enum; `"fast"` | `KILN_ACCELERATOR_CUDA_FLASH_BACKWARD_MODE` (implemented) | none | `fast` or `deterministic`, case-insensitive. `fast` preserves the established CUDA FlashAttention backward accumulation. `deterministic` selects split accumulation for exact replay and diagnosis. The mode is installed before model construction and cannot change between training jobs. Restart required. |
 | `accelerator.metal_kernel_profile` | string enum; `"native_default"` | `KILN_ACCELERATOR_METAL_KERNEL_PROFILE` (implemented) | none | `native_default` or `portable_fallback`, case-insensitive. `native_default` preserves forty-five of the forty-six Metal backend routes active before consolidation; custom LM-head argmax remains disabled by default. `portable_fallback` declines every owned route. The complete route set is installed before Metal backend construction, immutable for the process lifetime, and reported with source attribution. Restart required. |
 | `accelerator.rocm_synchronization_mode` | string enum; `"legacy_host_barriers"` | `KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE` (implemented) | none | `legacy_host_barriers` or `stream_ordered`, case-insensitive. `stream_ordered` requires `server.serving_profile = "experimental"`; other profiles fail startup rather than silently weakening the request. Restart required. |
-| `accelerator.rocm_strided_batched_matmul_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE` (implemented) | none | `auto`, `enabled`, or `disabled`, case-insensitive. `auto` applies the qualified gfx115x large-attention guard; `enabled` always permits the strided-batched route and `disabled` always uses per-row GEMMs. Either explicit route requires the experimental profile. Malformed values fail startup. Restart required. |
-| `accelerator.rocm_bf16_matmul_output_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE` (implemented) | none | `auto`, `native_bf16`, or `f32_then_cast`, case-insensitive. `auto` applies the qualified ROCm 7.2 shape guard; the explicit routes require the experimental profile. Malformed values fail startup. Restart required. |
-| `accelerator.rocm_kernel_profile` | string enum; `"portable_fallback"` | `KILN_ACCELERATOR_ROCM_KERNEL_PROFILE` (implemented) | none | `portable_fallback`, `qualified`, or `experimental_multiblock`, case-insensitive. The default `portable_fallback` declines all forty-five accelerated routes while retaining fixed correctness and bounded-work safeguards. `qualified` explicitly selects the Strix Halo-qualified profile, which installs forty-three accelerated routes while leaving multi-block GDN prefill and fused RMSNorm off. `experimental_multiblock` adds the multi-block GDN prefill experiment, retains fused RMSNorm off, and requires `server.serving_profile = "experimental"`. The complete 75-leaf policy is immutable after startup and governs backend/model dispatch, loading, forward/tape execution, W8 decode, training geometry, paged-attention specialization and splitting, concat assembly, finite checks, RMSNorm row tiling, and flash-attention forward/backward route selection and fixed tiling through Rust and C++ kernel boundaries. Retired per-kernel variables are not aliases. Restart required. |
+| `accelerator.rocm_strided_batched_matmul_mode` | string enum; `"disabled"` | `KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE` (implemented) | none | `disabled` uses one hipBLASLt operation per logical batch row and is the portable default. `enabled` selects strided batching and requires the experimental profile. The retired machine-shaped `auto` value is rejected. Restart required. |
+| `accelerator.rocm_bf16_matmul_output_mode` | string enum; `"f32_then_cast"` | `KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE` (implemented) | none | `f32_then_cast` is the portable default. `native_bf16` requires the experimental profile. The retired ROCm-version-shaped `auto` value is rejected. Restart required. |
+| `accelerator.rocm_kernel_profile` | string enum; `"portable_fallback"` | `KILN_ACCELERATOR_ROCM_KERNEL_PROFILE` (implemented) | none | `portable_fallback` is the only product value and declines all machine-qualified accelerated routes while retaining fixed correctness and bounded-work safeguards. The retired `qualified` and `experimental_multiblock` values fail startup. Historical route attribution is compiled only by the dedicated `hardware-qualification` example feature and is not server configuration. Restart required. |
 | `accelerator.rocm_graph_mode` | string enum; `"profile"` | `KILN_ACCELERATOR_ROCM_GRAPH_MODE` (implemented) | none | `profile`, `disabled`, `warmup_then_eager`, or `lazy_capture_replay`, case-insensitive. `profile` resolves to `disabled` under stable/maintenance and `lazy_capture_replay` under experimental. The two explicit non-disabled modes require the experimental profile. Restart required. |
 | `accelerator.rocm_graph_cache_entries` | unsigned integer; `8` | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES` (implemented) | none | `1..=64`. Bounds retained native graph entries in every product and embedding constructor. At saturation, admission reclaims idle owners first and then the minimum fair-LRU active entries while preserving one graph per active owner after the incoming candidate. Zero or unbounded capacities are rejected. Restart required. |
 | `accelerator.rocm_graph_cache_max_bytes` | unsigned integer bytes; `1073741824` (1 GiB) | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES` (implemented) | none | `67108864..=17179869184` (64 MiB through 16 GiB). Independently bounds requested physical bytes retained by graph-owned stable tensors, capture arenas, private-stream hipBLASLt workspaces, and owner slot state. Opaque HIP graph/exec/stream/event overhead is counted as objects and remains subject to live driver-pressure policy. Restart required. |
@@ -537,7 +536,7 @@ decisions remain leaves of the complete typed policy.
 aliases. Previously, model and ROCm flash paths parsed different permissive
 values during execution and recomputed score budgets from changing free-memory
 snapshots, permitting route geometry to change between layers or requests.
-Policy v15 fixes one bounded ceiling before execution; the ROCm allocator
+Policy v16 fixes one bounded ceiling before execution; the ROCm allocator
 governor may still reject a planned operation when its exact working set is no
 longer admissible, but it cannot silently shrink or expand that plan.
 
@@ -677,12 +676,11 @@ they never modify product policy:
 
 ### ROCm synchronization semantics
 
-`legacy_host_barriers` is the qualified default. It preserves the historical
+`legacy_host_barriers` is the portable default. It preserves the conservative
 device-wide barriers around large hipBLASLt results and BF16/F32 cast
 boundaries, the historical active-stream waits after eager tensor operations,
 and a device-wide external-yield drain before generated progress is published.
-Choosing it is intended to produce the same ordering as the pre-policy runtime,
-with the new reasoned counters added.
+Choosing it retains ordering safety without relying on device identity.
 
 `stream_ordered` is an explicit local-qualification mode. It omits only
 barriers whose call site asserts that producer and consumer are FIFO-ordered on
@@ -695,29 +693,23 @@ external-yield stream wait, so replay work is included.
 
 ### ROCm matmul route semantics
 
-Both matmul fields default to `auto`, preserving the routes used by the accepted
-Strix Halo ROCm receipts. The strided-batched guard uses per-row GEMMs for
-large attention-shaped BF16/F32 batches where ROCm 7.2 hipBLASLt has returned
-incorrect values. The BF16-output guard requests F32 output followed by an
-on-device BF16 cast for large projections, large outputs, and tall low-rank
-compression shapes where the native BF16 epilogue has returned non-finite
-values. These are deterministic shape and dtype decisions; they do not inspect
-live memory and cannot change after the primary ROCm context is created.
+The portable defaults are `disabled` strided batching and `f32_then_cast`
+output. They select per-row GEMMs and F32 output followed by an on-device BF16
+cast without inspecting the device model or ROCm version. `enabled` and
+`native_bf16` are explicit experimental comparison routes and require
+`server.serving_profile = "experimental"`.
 
-The explicit routes exist for controlled A/B qualification, require
-`server.serving_profile = "experimental"`, and are reported with source
-attribution by `kiln config`, `/v1/config`, health, and trusted debug state. The
-former force/disable variables are retired and ignored; use the two canonical
-enum-valued overrides above. The two ad hoc trace variables were deleted; they
-are not configuration and no matmul path reads the process environment.
+The retired machine-shaped `auto` values fail parsing. The effective values
+are reported with source attribution by `kiln config`, `/v1/config`, health,
+and trusted debug state. Former force/disable and trace variables are ignored;
+no matmul path reads process environment during execution.
 
-### ROCm token-only LM-head contract
+### ROCm token-only LM-head qualification fixture
 
-The `qualified` and `experimental_multiblock` ROCm kernel profiles pack the tied
-BF16 embedding/LM-head rows once during model load and own both
-`w8_sampled_lm_head` and `w8a8_sampled_lm_head`. These are immutable leaves of
-`accelerator.rocm_kernel_profile`, not additional user settings. The
-`portable_fallback` profile disables them and retains the ordinary BF16 LM head.
+Product execution uses `portable_fallback`, disables the W8 token-only LM-head
+routes, and retains the ordinary BF16 LM head. Historical W8/W8A8 route
+attribution is available only in the explicit `hardware-qualification` example
+build; it is not a server profile or environment-selectable product path.
 
 Greedy contiguous decode batches use W8A16 projection into an internal F32
 score scratch, perform a stable lower-token-id argmax on the device, and copy
@@ -1045,7 +1037,7 @@ requires a process restart; none is a live tuning control.
 |---|---|---|---|---|
 | `batching.rowwise_decode` | boolean; `false` | `KILN_BATCHING_ROWWISE_DECODE` (implemented) | none | `false` sends each ready cohort through one true batched forward. `true` issues one forward per row while retaining actor ownership; it is an emergency correctness comparison, normally reduces throughput, and does not increase the effective decode width. Restart required. |
 | `batching.prefix_aware_admission` | boolean; `true` | `KILN_BATCHING_PREFIX_AWARE_ADMISSION` (implemented) | none | When true, a queued same-adapter strict descendant waits while its active shorter prefix can become reusable; independent rows may still be admitted. Disable only for a controlled admission A/B. Restart required. |
-| `batching.prefill_admission_quantum` | `"auto"` or unsigned integer; `"auto"` | `KILN_BATCHING_PREFILL_ADMISSION_QUANTUM` (implemented) | none | An integer must be `1..=65536` and caps how many queued prompts the actor admits in one cycle before returning to decode. `auto` is case-insensitive and uses the backend policy below. The selected value is then clamped to `1..=effective max_decode_batch`; the diagnostics name `effective_decode_width` as final authority when it performs that clamp. With non-burst admission, total active capacity is effective decode width plus this staging quantum, capped internally at four staging slots. The Strix Halo Vulkan development-soak candidate sets `2`, admitting an equal pair while retaining a four-request active ceiling. Restart required. |
+| `batching.prefill_admission_quantum` | `"auto"` or unsigned integer; `"auto"` | `KILN_BATCHING_PREFILL_ADMISSION_QUANTUM` (implemented) | none | An integer must be `1..=65536` and caps how many queued prompts the actor admits in one cycle before returning to decode. `auto` is case-insensitive and uses the backend policy below. The selected value is then clamped to `1..=effective max_decode_batch`; the diagnostics name `effective_decode_width` as final authority when it performs that clamp. With non-burst admission, total active capacity is effective decode width plus this staging quantum, capped internally at four staging slots. Restart required. |
 | `batching.actor_cycle_idle_ms` | unsigned integer milliseconds; `0` | `KILN_BATCHING_ACTOR_CYCLE_IDLE_MS` (implemented) | none | `0..=60000`. Zero preserves the unpaced actor. A nonzero value inserts one intentional cooperative wait after an actor cycle that advanced prefill or decode, only after synchronous accelerator work has returned. The actor polls control commands at intervals no longer than 5 ms, so shutdown remains responsive, and the independent response-delivery worker and HTTP process remain live. This deliberately trades request throughput and inter-token latency for a lower sustained accelerator duty cycle; it is not a temperature controller and never changes itself from a live sensor. Config, health, debug, Prometheus, and serving-benchmark receipts expose the policy and observed waits. Restart required. |
 
 Every real backend uses the batching actor. There is no activation switch and
@@ -1208,7 +1200,7 @@ and transposed model weights. `kiln config` prints the same resolved path.
 | `memory.gpu_memory_gb` | optional finite number; omitted (`None`) | `KILN_MEMORY_GPU_MEMORY_GB` (implemented) | none | Must be finite, greater than zero, and representable as bytes. Units are GiB. This is a capacity cap, not a hardware override: it may reduce the detected safe capacity but never expands physical VRAM, host-backed unified memory, or a cgroup-bounded capacity. A request above the safe detected capacity is clamped down. |
 | `memory.inference_memory_fraction` | finite number; `0.7` | `KILN_MEMORY_INFERENCE_MEMORY_FRACTION` (implemented) | none | Loader validation accepts `0.0..=1.0`; real-state construction clamps the configured value to `0.1..=1.0` before KV sizing. The remainder is available to the training budget. |
 | `memory.training_memory_gb` | optional finite number; omitted (`None`) | `KILN_MEMORY_TRAINING_MEMORY_GB` (implemented) | none | Must be finite, greater than zero, and representable as bytes when set. Optional training-budget cap in GiB; it can reduce but never expand the capacity remaining after resident model and KV allocations. |
-| `memory.vulkan_buffer_pool_gb` | finite number; `3.0` | `KILN_MEMORY_VULKAN_BUFFER_POOL_GB` (implemented) | none | Vulkan-only process-wide cap, in GiB, on idle scratch buffers retained for reuse. Must be finite, non-negative, and representable as bytes; `0` disables retention. Active operations may allocate beyond the cap, but overflow buffers are freed when their final caller drops. A new cache entry evicts the oldest idle buffers before admission, and pressure reclaim releases idle entries under exclusive GPU coordination. `/v1/config`, `/health`, and Prometheus expose the cap, retained/free/borrowed bytes, hits/misses by allocation route, evictions, and uncached overflow. Health also exposes one bounded last-miss record with requested and bucket bytes plus the source callsite. The default remains `3.0`; the Strix Halo Vulkan development-soak candidate explicitly sets `3.5` after the smaller cap showed deterministic eviction churn. |
+| `memory.vulkan_buffer_pool_gb` | finite number; `3.0` | `KILN_MEMORY_VULKAN_BUFFER_POOL_GB` (implemented) | none | Vulkan-only process-wide cap, in GiB, on idle scratch buffers retained for reuse. Must be finite, non-negative, and representable as bytes; `0` disables retention. Active operations may allocate beyond the cap, but overflow buffers are freed when their final caller drops. A new cache entry evicts the oldest idle buffers before admission, and pressure reclaim releases idle entries under exclusive GPU coordination. `/v1/config`, `/health`, and Prometheus expose the cap, retained/free/borrowed bytes, hits/misses by allocation route, evictions, and uncached overflow. Health also exposes one bounded last-miss record with requested and bucket bytes plus the source callsite. |
 | `memory.floor_gb` | finite number; `1.0` | `KILN_MEMORY_FLOOR_GB` (implemented) | none | Must be finite, non-negative, representable as bytes, and strictly smaller than the selected accelerator's effective capacity after `memory.gpu_memory_gb` is applied. Units are GiB. Accelerator startup rejects an equal or larger floor before model upload and reports both configured and effective byte values. The process-wide governor subtracts this additional floor, then outstanding soft reservations, from live free memory when computing allocation headroom. On unified-memory devices it is separate from the physical-memory reserve applied during safe-capacity detection. |
 | `memory.probe_ms` | unsigned integer; `500` | `KILN_MEMORY_PROBE_MS` (implemented) | none | Must be greater than zero. Sets the background memory-sampler cadence. Request, inference, health, and metrics paths read only the published sample and never run a driver/OS probe synchronously. Cached admission fails closed when the sample is older than `max(5000 ms, 4 * probe_ms)`, the latest probe failed, or a required sampler is not running. An explicit refresh after a material allocation or release bypasses the cadence. |
 | `memory.reclaim_mode` | string enum; `"off"` | `KILN_MEMORY_RECLAIM_MODE` (implemented) | none | Exactly `off`, `on-demand`, or `automatic`, case-insensitive with surrounding whitespace ignored. `off` prevents execution of registered allocator reclaim hooks; `on-demand` permits explicit pressure and allocation-retry reclaim calls; `automatic` also permits the background pressure monitor. The immutable serving profile remains authoritative: a profile with allocator reclaim disabled keeps the effective mode off and does not start the monitor. |
@@ -1222,9 +1214,7 @@ Capacity detection is device-scoped. Discrete accelerators use the selected
 device's driver-reported VRAM and never count GTT as device-local capacity.
 Linux DRM topology keeps the primary VRAM heap and a separately admissible
 host-backed GTT tier distinct. Any nonzero VRAM heap remains the primary pool,
-even when GTT is larger, because that is also a common discrete-AMD shape. This
-preserves large carved pools such as Strix Halo's 96 GiB VRAM rather than
-incorrectly capping it to Linux's smaller CPU-online pool.
+even when GTT is larger, because that is also a common discrete-AMD shape.
 
 The host-backed tier is independently bounded by GTT free bytes,
 `MemAvailable`, the most restrictive finite `memory.max` and `memory.high`

@@ -424,7 +424,7 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     // shader passes its narrow kernel parity test, but the kt wrapper path has
     // produced non-finite rows on real model tensors under lavapipe/RADV soak
     // setups. Keep correctness as the default by falling through to
-    // `rms_norm_fallback`; the qualified policy keeps the separate bridged
+    // `rms_norm_fallback`; the portable policy keeps the separate bridged
     // and generic-tensor leaf disabled while this resident route remains on.
     #[cfg(feature = "vulkan")]
     if crate::backend::vulkan_active()

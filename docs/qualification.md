@@ -2704,8 +2704,9 @@ python3 scripts/qualification/rocm_hf_layer_attribution.py run \
   --out "$(pwd)/.qualification/rocm-hf-layer-attribution-result.json"
 ```
 
-`--kernel-profile` is a closed typed choice. `qualified` is the production
-model/tensor policy and remains the default. Twelve layer-only diagnostic
+`--kernel-profile` is a closed typed choice in the example-only
+`hardware-qualification` build. `qualified` is a historical Strix Halo
+attribution fixture, not a product server profile. Twelve layer-only diagnostic
 profiles preserve the same ROCm device, BF16 weights, paged state, prompt, and
 layer capture:
 

@@ -42,6 +42,23 @@ fn no_rocm() -> bool {
     }
 }
 
+fn native_route_test_policy() -> RocmFlashAttentionPolicy {
+    RocmFlashAttentionPolicy {
+        native_scalar_forward: true,
+        native_tiled_forward: true,
+        native_streaming_forward: true,
+        native_rectangular_causal_forward: true,
+        native_backward_preference: RocmFlashAttentionRouteMode::Auto,
+        collapsed_gqa_backward: true,
+        native_direct_collapsed_gqa_backward: true,
+        native_gqa_qblock_forward: true,
+        wmma_gqa_qblock_forward: true,
+        wmma_gqa_r64k32_forward: true,
+        wmma_gqa_r64k32_log2_forward: true,
+        ..RocmFlashAttentionPolicy::portable_fallback()
+    }
+}
+
 /// Deterministic pseudo-random value in roughly [-0.5, 0.5].
 fn val(i: usize, seed: usize) -> f32 {
     let x = (i
@@ -300,7 +317,7 @@ fn rocm_policy_context(flash_attention: RocmFlashAttentionPolicy) -> Arc<RocmCon
     );
     let tensor_kernels = RocmTensorKernelPolicy {
         flash_attention,
-        ..RocmTensorKernelPolicy::qualified()
+        ..RocmTensorKernelPolicy::portable_fallback()
     };
     RocmContext::new_with_execution_policy(
         0,
@@ -403,7 +420,7 @@ fn flash_attn_fwd_native_gqa_qblock256_parity() {
         native_gqa_qblock_forward_min_sequence: 1,
         wmma_gqa_r64k32_forward_min_sequence: 1,
         wmma_gqa_r64k32_log2_forward_min_sequence: 1,
-        ..RocmFlashAttentionPolicy::qualified()
+        ..native_route_test_policy()
     };
     let ctx = rocm_policy_context(policy);
     let qd = fill_bf16(b * sq * h * d, 9301);
@@ -607,7 +624,7 @@ fn flash_attn_fwd_native_rectangular_query_tiled_parity() {
     let policy = RocmFlashAttentionPolicy {
         native_forward_query_tile: 64,
         native_streaming_forward: false,
-        ..RocmFlashAttentionPolicy::qualified()
+        ..native_route_test_policy()
     };
     let ctx = rocm_policy_context(policy);
     {
@@ -653,7 +670,7 @@ fn flash_attn_fwd_native_abs_query_tiled_gqa_parity() {
         native_gqa_qblock_forward_min_sequence: 1,
         wmma_gqa_r64k32_forward_min_sequence: 1,
         wmma_gqa_r64k32_log2_forward_min_sequence: 1,
-        ..RocmFlashAttentionPolicy::qualified()
+        ..native_route_test_policy()
     };
     let ctx = rocm_policy_context(policy);
     {
@@ -697,7 +714,7 @@ fn flash_attn_fwd_native_rectangular_streaming_parity() {
         native_forward_query_tile: 64,
         native_streaming_forward_min_sequence: 128,
         native_streaming_forward_key_tile: 64,
-        ..RocmFlashAttentionPolicy::qualified()
+        ..native_route_test_policy()
     };
     let ctx = rocm_policy_context(policy);
     {
@@ -897,7 +914,7 @@ fn flash_attn_bwd_collapsed_gqa_hd256_native_matches_materialized() {
             } else {
                 RocmFlashAttentionRouteMode::Enabled
             },
-            ..RocmFlashAttentionPolicy::qualified()
+            ..native_route_test_policy()
         };
         let ctx = rocm_policy_context(policy);
         let q = rocm_bf16_on(&ctx, &qd, vec![b, sq, h, d]);
@@ -957,7 +974,7 @@ fn flash_attn_bwd_online_tiled_parity() {
         native_backward_preference: RocmFlashAttentionRouteMode::Disabled,
         materialized_backward_mode: RocmFlashAttentionRouteMode::Disabled,
         online_backward: true,
-        ..RocmFlashAttentionPolicy::qualified()
+        ..native_route_test_policy()
     };
     let ctx = rocm_policy_context(policy);
     {
@@ -1032,7 +1049,7 @@ fn flash_attn_bwd_collapsed_gqa_parity() {
     let policy = RocmFlashAttentionPolicy {
         native_backward_preference: RocmFlashAttentionRouteMode::Disabled,
         materialized_backward_mode: RocmFlashAttentionRouteMode::Enabled,
-        ..RocmFlashAttentionPolicy::qualified()
+        ..native_route_test_policy()
     };
     let ctx = rocm_policy_context(policy);
     {

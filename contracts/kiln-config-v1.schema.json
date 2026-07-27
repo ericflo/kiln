@@ -175,12 +175,12 @@
           "minimum": 1,
           "maximum": 65536,
           "default": 256,
-          "description": "1..=65536. Independent new-prompt-token ceiling within the combined actor budget. ROCm actor serving requires equality with the effective streaming tile, tiled streaming-prefill dispatch no later than that boundary, and server.max_batch_tokens >= tile + effective max_decode_batch; unsafe combinations fail startup. The checked Strix Halo Vulkan development profile pins 128; concurrent Vulkan serving at 256 is not qualified.",
+          "description": "1..=65536. Independent new-prompt-token ceiling within the combined actor budget. ROCm actor serving requires equality with the effective streaming tile, tiled streaming-prefill dispatch no later than that boundary, and server.max_batch_tokens >= tile + effective max_decode_batch; unsafe combinations fail startup.",
           "x-kiln-path": "server.max_prefill_tokens_per_cycle",
           "x-kiln-type-and-default": "unsigned integer; 256",
           "x-kiln-canonical-env": "KILN_SERVER_MAX_PREFILL_TOKENS_PER_CYCLE (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-validation": "1..=65536. Independent new-prompt-token ceiling within the combined actor budget. ROCm actor serving requires equality with the effective streaming tile, tiled streaming-prefill dispatch no later than that boundary, and server.max_batch_tokens >= tile + effective max_decode_batch; unsafe combinations fail startup. The checked Strix Halo Vulkan development profile pins 128; concurrent Vulkan serving at 256 is not qualified."
+          "x-kiln-validation": "1..=65536. Independent new-prompt-token ceiling within the combined actor budget. ROCm actor serving requires equality with the effective streaming tile, tiled streaming-prefill dispatch no later than that boundary, and server.max_batch_tokens >= tile + effective max_decode_batch; unsafe combinations fail startup."
         },
         "max_prefill_layers_per_cycle": {
           "type": "integer",
@@ -206,12 +206,12 @@
             }
           ],
           "default": "auto",
-          "description": "auto, backend, and backend_policy all delegate to backend policy; an integer must be 1..=65536. Deterministic mode and max_batch_tokens may lower the final width. Do not raise this from a single throughput sample: the machine-local ROCm selector documented in the Qualification guide requires exact-width deterministic and fused-sampled execution, graph correctness, bounded tail/memory regression, restart/cooldown between arms, and follow-up soak/benchmark evidence. It emits a selection receipt but never mutates this field. The Strix Halo Vulkan development-soak candidate sets 2; together with a prefill admission quantum of two, this yields four total active requests and admits an equal pair together.",
+          "description": "auto, backend, and backend_policy all delegate to backend policy; an integer must be 1..=65536. Deterministic mode and max_batch_tokens may lower the final width. Explicit values require backend-specific correctness, memory, and latency qualification; qualification receipts never mutate this field.",
           "x-kiln-path": "server.max_decode_batch",
           "x-kiln-type-and-default": "\"auto\" or unsigned integer; \"auto\"",
           "x-kiln-canonical-env": "KILN_SERVER_MAX_DECODE_BATCH (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-validation": "auto, backend, and backend_policy all delegate to backend policy; an integer must be 1..=65536. Deterministic mode and max_batch_tokens may lower the final width. Do not raise this from a single throughput sample: the machine-local ROCm selector documented in the Qualification guide requires exact-width deterministic and fused-sampled execution, graph correctness, bounded tail/memory regression, restart/cooldown between arms, and follow-up soak/benchmark evidence. It emits a selection receipt but never mutates this field. The Strix Halo Vulkan development-soak candidate sets 2; together with a prefill admission quantum of two, this yields four total active requests and admits an equal pair together."
+          "x-kiln-validation": "auto, backend, and backend_policy all delegate to backend policy; an integer must be 1..=65536. Deterministic mode and max_batch_tokens may lower the final width. Explicit values require backend-specific correctness, memory, and latency qualification; qualification receipts never mutate this field."
         },
         "eval_mode": {
           "type": "boolean",
@@ -481,71 +481,55 @@
         "rocm_strided_batched_matmul_mode": {
           "type": "string",
           "enum": [
-            "auto",
-            "enabled",
-            "disabled"
+            "disabled",
+            "enabled"
           ],
-          "default": "auto",
-          "description": "auto, enabled, or disabled, case-insensitive. auto applies the qualified gfx115x large-attention guard; enabled always permits the strided-batched route and disabled always uses per-row GEMMs. Either explicit route requires the experimental profile. Malformed values fail startup. Restart required.",
+          "default": "disabled",
+          "description": "disabled uses one hipBLASLt operation per logical batch row and is the portable default. enabled selects strided batching and requires the experimental profile. The retired machine-shaped auto value is rejected. Restart required.",
           "x-kiln-path": "accelerator.rocm_strided_batched_matmul_mode",
-          "x-kiln-type-and-default": "string enum; \"auto\"",
+          "x-kiln-type-and-default": "string enum; \"disabled\"",
           "x-kiln-canonical-env": "KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE (implemented)",
           "x-kiln-environment": "none",
           "x-kiln-profile-gate": {
             "profile": "experimental",
             "when": {
-              "enum": [
-                "enabled",
-                "disabled"
-              ]
+              "const": "enabled"
             }
           },
-          "x-kiln-validation": "auto, enabled, or disabled, case-insensitive. auto applies the qualified gfx115x large-attention guard; enabled always permits the strided-batched route and disabled always uses per-row GEMMs. Either explicit route requires the experimental profile. Malformed values fail startup. Restart required."
+          "x-kiln-validation": "disabled uses one hipBLASLt operation per logical batch row and is the portable default. enabled selects strided batching and requires the experimental profile. The retired machine-shaped auto value is rejected. Restart required."
         },
         "rocm_bf16_matmul_output_mode": {
           "type": "string",
           "enum": [
-            "auto",
-            "native_bf16",
-            "f32_then_cast"
+            "f32_then_cast",
+            "native_bf16"
           ],
-          "default": "auto",
-          "description": "auto, native_bf16, or f32_then_cast, case-insensitive. auto applies the qualified ROCm 7.2 shape guard; the explicit routes require the experimental profile. Malformed values fail startup. Restart required.",
+          "default": "f32_then_cast",
+          "description": "f32_then_cast is the portable default. native_bf16 requires the experimental profile. The retired ROCm-version-shaped auto value is rejected. Restart required.",
           "x-kiln-path": "accelerator.rocm_bf16_matmul_output_mode",
-          "x-kiln-type-and-default": "string enum; \"auto\"",
+          "x-kiln-type-and-default": "string enum; \"f32_then_cast\"",
           "x-kiln-canonical-env": "KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE (implemented)",
           "x-kiln-environment": "none",
           "x-kiln-profile-gate": {
             "profile": "experimental",
             "when": {
-              "enum": [
-                "native_bf16",
-                "f32_then_cast"
-              ]
+              "const": "native_bf16"
             }
           },
-          "x-kiln-validation": "auto, native_bf16, or f32_then_cast, case-insensitive. auto applies the qualified ROCm 7.2 shape guard; the explicit routes require the experimental profile. Malformed values fail startup. Restart required."
+          "x-kiln-validation": "f32_then_cast is the portable default. native_bf16 requires the experimental profile. The retired ROCm-version-shaped auto value is rejected. Restart required."
         },
         "rocm_kernel_profile": {
           "type": "string",
           "enum": [
-            "portable_fallback",
-            "qualified",
-            "experimental_multiblock"
+            "portable_fallback"
           ],
           "default": "portable_fallback",
-          "description": "portable_fallback, qualified, or experimental_multiblock, case-insensitive. The default portable_fallback declines all forty-five accelerated routes while retaining fixed correctness and bounded-work safeguards. qualified explicitly selects the Strix Halo-qualified profile, which installs forty-three accelerated routes while leaving multi-block GDN prefill and fused RMSNorm off. experimental_multiblock adds the multi-block GDN prefill experiment, retains fused RMSNorm off, and requires server.serving_profile = \"experimental\". The complete 75-leaf policy is immutable after startup and governs backend/model dispatch, loading, forward/tape execution, W8 decode, training geometry, paged-attention specialization and splitting, concat assembly, finite checks, RMSNorm row tiling, and flash-attention forward/backward route selection and fixed tiling through Rust and C++ kernel boundaries. Retired per-kernel variables are not aliases. Restart required.",
+          "description": "portable_fallback is the only product value and declines all machine-qualified accelerated routes while retaining fixed correctness and bounded-work safeguards. The retired qualified and experimental_multiblock values fail startup. Historical route attribution is compiled only by the dedicated hardware-qualification example feature and is not server configuration. Restart required.",
           "x-kiln-path": "accelerator.rocm_kernel_profile",
           "x-kiln-type-and-default": "string enum; \"portable_fallback\"",
           "x-kiln-canonical-env": "KILN_ACCELERATOR_ROCM_KERNEL_PROFILE (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-profile-gate": {
-            "profile": "experimental",
-            "when": {
-              "const": "experimental_multiblock"
-            }
-          },
-          "x-kiln-validation": "portable_fallback, qualified, or experimental_multiblock, case-insensitive. The default portable_fallback declines all forty-five accelerated routes while retaining fixed correctness and bounded-work safeguards. qualified explicitly selects the Strix Halo-qualified profile, which installs forty-three accelerated routes while leaving multi-block GDN prefill and fused RMSNorm off. experimental_multiblock adds the multi-block GDN prefill experiment, retains fused RMSNorm off, and requires server.serving_profile = \"experimental\". The complete 75-leaf policy is immutable after startup and governs backend/model dispatch, loading, forward/tape execution, W8 decode, training geometry, paged-attention specialization and splitting, concat assembly, finite checks, RMSNorm row tiling, and flash-attention forward/backward route selection and fixed tiling through Rust and C++ kernel boundaries. Retired per-kernel variables are not aliases. Restart required."
+          "x-kiln-validation": "portable_fallback is the only product value and declines all machine-qualified accelerated routes while retaining fixed correctness and bounded-work safeguards. The retired qualified and experimental_multiblock values fail startup. Historical route attribution is compiled only by the dedicated hardware-qualification example feature and is not server configuration. Restart required."
         },
         "rocm_graph_mode": {
           "type": "string",
@@ -636,12 +620,12 @@
             }
           ],
           "default": "auto",
-          "description": "An integer must be 1..=65536 and caps how many queued prompts the actor admits in one cycle before returning to decode. auto is case-insensitive and uses the backend policy below. The selected value is then clamped to 1..=effective max_decode_batch; the diagnostics name effective_decode_width as final authority when it performs that clamp. With non-burst admission, total active capacity is effective decode width plus this staging quantum, capped internally at four staging slots. The Strix Halo Vulkan development-soak candidate sets 2, admitting an equal pair while retaining a four-request active ceiling. Restart required.",
+          "description": "An integer must be 1..=65536 and caps how many queued prompts the actor admits in one cycle before returning to decode. auto is case-insensitive and uses the backend policy below. The selected value is then clamped to 1..=effective max_decode_batch; the diagnostics name effective_decode_width as final authority when it performs that clamp. With non-burst admission, total active capacity is effective decode width plus this staging quantum, capped internally at four staging slots. Restart required.",
           "x-kiln-path": "batching.prefill_admission_quantum",
           "x-kiln-type-and-default": "\"auto\" or unsigned integer; \"auto\"",
           "x-kiln-canonical-env": "KILN_BATCHING_PREFILL_ADMISSION_QUANTUM (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-validation": "An integer must be 1..=65536 and caps how many queued prompts the actor admits in one cycle before returning to decode. auto is case-insensitive and uses the backend policy below. The selected value is then clamped to 1..=effective max_decode_batch; the diagnostics name effective_decode_width as final authority when it performs that clamp. With non-burst admission, total active capacity is effective decode width plus this staging quantum, capped internally at four staging slots. The Strix Halo Vulkan development-soak candidate sets 2, admitting an equal pair while retaining a four-request active ceiling. Restart required."
+          "x-kiln-validation": "An integer must be 1..=65536 and caps how many queued prompts the actor admits in one cycle before returning to decode. auto is case-insensitive and uses the backend policy below. The selected value is then clamped to 1..=effective max_decode_batch; the diagnostics name effective_decode_width as final authority when it performs that clamp. With non-burst admission, total active capacity is effective decode width plus this staging quantum, capped internally at four staging slots. Restart required."
         },
         "actor_cycle_idle_ms": {
           "type": "integer",
@@ -840,12 +824,12 @@
           "type": "number",
           "minimum": 0,
           "default": 3.0,
-          "description": "Vulkan-only process-wide cap, in GiB, on idle scratch buffers retained for reuse. Must be finite, non-negative, and representable as bytes; 0 disables retention. Active operations may allocate beyond the cap, but overflow buffers are freed when their final caller drops. A new cache entry evicts the oldest idle buffers before admission, and pressure reclaim releases idle entries under exclusive GPU coordination. /v1/config, /health, and Prometheus expose the cap, retained/free/borrowed bytes, hits/misses by allocation route, evictions, and uncached overflow. Health also exposes one bounded last-miss record with requested and bucket bytes plus the source callsite. The default remains 3.0; the Strix Halo Vulkan development-soak candidate explicitly sets 3.5 after the smaller cap showed deterministic eviction churn.",
+          "description": "Vulkan-only process-wide cap, in GiB, on idle scratch buffers retained for reuse. Must be finite, non-negative, and representable as bytes; 0 disables retention. Active operations may allocate beyond the cap, but overflow buffers are freed when their final caller drops. A new cache entry evicts the oldest idle buffers before admission, and pressure reclaim releases idle entries under exclusive GPU coordination. /v1/config, /health, and Prometheus expose the cap, retained/free/borrowed bytes, hits/misses by allocation route, evictions, and uncached overflow. Health also exposes one bounded last-miss record with requested and bucket bytes plus the source callsite.",
           "x-kiln-path": "memory.vulkan_buffer_pool_gb",
           "x-kiln-type-and-default": "finite number; 3.0",
           "x-kiln-canonical-env": "KILN_MEMORY_VULKAN_BUFFER_POOL_GB (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-validation": "Vulkan-only process-wide cap, in GiB, on idle scratch buffers retained for reuse. Must be finite, non-negative, and representable as bytes; 0 disables retention. Active operations may allocate beyond the cap, but overflow buffers are freed when their final caller drops. A new cache entry evicts the oldest idle buffers before admission, and pressure reclaim releases idle entries under exclusive GPU coordination. /v1/config, /health, and Prometheus expose the cap, retained/free/borrowed bytes, hits/misses by allocation route, evictions, and uncached overflow. Health also exposes one bounded last-miss record with requested and bucket bytes plus the source callsite. The default remains 3.0; the Strix Halo Vulkan development-soak candidate explicitly sets 3.5 after the smaller cap showed deterministic eviction churn."
+          "x-kiln-validation": "Vulkan-only process-wide cap, in GiB, on idle scratch buffers retained for reuse. Must be finite, non-negative, and representable as bytes; 0 disables retention. Active operations may allocate beyond the cap, but overflow buffers are freed when their final caller drops. A new cache entry evicts the oldest idle buffers before admission, and pressure reclaim releases idle entries under exclusive GPU coordination. /v1/config, /health, and Prometheus expose the cap, retained/free/borrowed bytes, hits/misses by allocation route, evictions, and uncached overflow. Health also exposes one bounded last-miss record with requested and bucket bytes plus the source callsite."
         },
         "floor_gb": {
           "type": "number",
@@ -1803,10 +1787,7 @@
           "accelerator": {
             "properties": {
               "rocm_strided_batched_matmul_mode": {
-                "enum": [
-                  "enabled",
-                  "disabled"
-                ]
+                "const": "enabled"
               }
             },
             "required": [
@@ -1842,50 +1823,11 @@
           "accelerator": {
             "properties": {
               "rocm_bf16_matmul_output_mode": {
-                "enum": [
-                  "native_bf16",
-                  "f32_then_cast"
-                ]
+                "const": "native_bf16"
               }
             },
             "required": [
               "rocm_bf16_matmul_output_mode"
-            ]
-          }
-        },
-        "required": [
-          "accelerator"
-        ]
-      },
-      "then": {
-        "properties": {
-          "server": {
-            "properties": {
-              "serving_profile": {
-                "const": "experimental"
-              }
-            },
-            "required": [
-              "serving_profile"
-            ]
-          }
-        },
-        "required": [
-          "server"
-        ]
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "accelerator": {
-            "properties": {
-              "rocm_kernel_profile": {
-                "const": "experimental_multiblock"
-              }
-            },
-            "required": [
-              "rocm_kernel_profile"
             ]
           }
         },

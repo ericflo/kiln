@@ -149,7 +149,7 @@ RESPONSE_ORACLE_TARGET_INTEGER_COUNT = 64
 SLOW_RESPONSE_TARGET_INTEGER_COUNT = 1_024
 RESPONSE_DIAGNOSTIC_MAX_CHARACTERS = 256
 TOKEN_ID_DIAGNOSTIC_MAX_COUNT = 256
-ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID = "kiln.accelerator-runtime-policy.v15"
+ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID = "kiln.accelerator-runtime-policy.v16"
 ACCELERATOR_RUNTIME_POLICY_VERSION = int(
     ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID.rsplit(".v", 1)[1]
 )
@@ -2957,13 +2957,13 @@ def write_server_config(
     *,
     deterministic: bool | None = None,
     rocm_synchronization_mode: str | None = None,
-    rocm_strided_batched_matmul_mode: str = "auto",
-    rocm_bf16_matmul_output_mode: str = "auto",
+    rocm_strided_batched_matmul_mode: str = "disabled",
+    rocm_bf16_matmul_output_mode: str = "f32_then_cast",
     cuda_kernel_profile: str = "native_default",
     cuda_marlin_profile: str = "disabled",
     cuda_flash_backward_mode: str = "fast",
     metal_kernel_profile: str = "native_default",
-    rocm_kernel_profile: str = "qualified",
+    rocm_kernel_profile: str = "portable_fallback",
     rocm_graph_mode: str | None = None,
     rocm_graph_cache_entries: int = 8,
     rocm_graph_cache_max_bytes: int = 1 << 30,
@@ -3425,18 +3425,18 @@ def accelerator_policy_attestation_failures(
             "source": "config_file",
         },
         "rocm_strided_batched_matmul_mode": {
-            "configured": "auto",
-            "effective": "auto",
+            "configured": "disabled",
+            "effective": "disabled",
             "source": "config_file",
         },
         "rocm_bf16_matmul_output_mode": {
-            "configured": "auto",
-            "effective": "auto",
+            "configured": "f32_then_cast",
+            "effective": "f32_then_cast",
             "source": "config_file",
         },
         "rocm_kernel_profile": {
-            "configured": "qualified",
-            "effective": "qualified",
+            "configured": "portable_fallback",
+            "effective": "portable_fallback",
             "source": "config_file",
         },
         "rocm_graph_mode": {

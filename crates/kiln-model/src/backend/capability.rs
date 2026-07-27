@@ -1943,9 +1943,9 @@ impl TrainingAccelerationProfilePolicy {
 
     pub const VULKAN: Self = Self {
         log_message: TrainingAccelerationProfileLogMessage::Vulkan,
-        linear: "on (qualified policy)",
-        sdpa: "on (qualified policy)",
-        rmsnorm_inference: "on (qualified policy)",
+        linear: "on (fixed backend policy)",
+        sdpa: "on (fixed backend policy)",
+        rmsnorm_inference: "on (fixed backend policy)",
         rmsnorm_training: "auto (row_count >= 1024)",
         flce_provider: "auto (active_count >= 16)",
         resident_activation: "always (Phase 3.1 hooks)",

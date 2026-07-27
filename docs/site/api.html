@@ -372,8 +372,8 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
               <h4 class="font-semibold mb-2"><code>accelerator_runtime</code>: immutable accelerator execution policy</h4>
               <pre class="overflow-x-auto text-xs leading-relaxed"><code>{
   "accelerator_runtime": {
-    "schema_id": "kiln.accelerator-runtime-policy.v15",
-    "version": 15,
+    "schema_id": "kiln.accelerator-runtime-policy.v16",
+    "version": 16,
     "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v4",
     "vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1",
     "serving_profile": "stable",
@@ -424,18 +424,18 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
       "source": "default"
     },
     "rocm_strided_batched_matmul_mode": {
-      "configured": "auto",
-      "effective": "auto",
+      "configured": "disabled",
+      "effective": "disabled",
       "source": "default"
     },
     "rocm_bf16_matmul_output_mode": {
-      "configured": "auto",
-      "effective": "auto",
+      "configured": "f32_then_cast",
+      "effective": "f32_then_cast",
       "source": "default"
     },
     "rocm_kernel_profile": {
-      "configured": "qualified",
-      "effective": "qualified",
+      "configured": "portable_fallback",
+      "effective": "portable_fallback",
       "source": "default"
     },
     "rocm_graph_mode": {
@@ -487,9 +487,9 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                     <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>cuda_flash_backward_mode</code></td><td class="p-2"><code>fast</code> preserves established CUDA FlashAttention backward accumulation; <code>deterministic</code> selects split accumulation for exact replay and diagnosis.</td><td class="p-2"><code>KILN_ACCELERATOR_CUDA_FLASH_BACKWARD_MODE</code></td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>metal_kernel_profile</code></td><td class="p-2"><code>native_default</code> preserves forty-five of forty-six established Metal backend routes, with custom LM-head argmax still off; <code>portable_fallback</code> declines every owned route. The architecture reference enumerates every route and retired variable.</td><td class="p-2"><code>KILN_ACCELERATOR_METAL_KERNEL_PROFILE</code></td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_synchronization_mode</code></td><td class="p-2"><code>legacy_host_barriers</code>; also accepts experimental-only <code>stream_ordered</code>.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE</code></td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_strided_batched_matmul_mode</code></td><td class="p-2"><code>auto</code>; explicit <code>enabled</code> or <code>disabled</code> routes require the experimental profile.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE</code></td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_bf16_matmul_output_mode</code></td><td class="p-2"><code>auto</code>; explicit <code>native_bf16</code> or <code>f32_then_cast</code> routes require the experimental profile.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE</code></td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_kernel_profile</code></td><td class="p-2"><code>qualified</code> installs 43 of 45 accelerated routes and keeps multi-block GDN prefill plus correctness-disabled fused RMSNorm off; <code>portable_fallback</code> declines all forty-five accelerated ROCm routes while retaining thirty correctness and bounded-work leaves; <code>experimental_multiblock</code> adds only the multi-block GDN prefill route, retains fused RMSNorm off, and requires the experimental profile. The architecture reference lists all 75 leaves.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_KERNEL_PROFILE</code></td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_strided_batched_matmul_mode</code></td><td class="p-2"><code>disabled</code> is the portable default; <code>enabled</code> requires the experimental profile. Retired <code>auto</code> is rejected.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE</code></td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_bf16_matmul_output_mode</code></td><td class="p-2"><code>f32_then_cast</code> is the portable default; <code>native_bf16</code> requires the experimental profile. Retired <code>auto</code> is rejected.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE</code></td></tr>
+                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_kernel_profile</code></td><td class="p-2"><code>portable_fallback</code> is the only product value. Retired machine-qualified values fail startup; historical attribution requires the example-only <code>hardware-qualification</code> build feature.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_KERNEL_PROFILE</code></td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_graph_mode</code></td><td class="p-2"><code>profile</code>; accepts <code>disabled</code>, <code>warmup_then_eager</code>, or <code>lazy_capture_replay</code>.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_GRAPH_MODE</code></td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_graph_cache_entries</code></td><td class="p-2"><code>8</code>; unsigned integer in <code>1..=64</code>. This is the process-wide ceiling. Saturated admission reclaims idle owners first, then minimum fair-LRU active entries while retaining one projected graph per active owner.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES</code></td></tr>
                     <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_graph_cache_max_bytes</code></td><td class="p-2"><code>1073741824</code> (1 GiB); unsigned integer bytes in <code>67108864..=17179869184</code> (64 MiB&ndash;16 GiB).</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES</code></td></tr>
@@ -525,19 +525,11 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 fixed at 4,096 instead of reading <code>KILN_FLCE_ACTIVE_ROW_TILE</code> during training.
               </p>
               <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>rocm_kernel_profile</code> is one complete model/tensor policy installed before device creation.
-                Its 45 accelerated decisions cover backend dispatch, exact long attention, QKV preparation,
-                W8/W8A8 decode, sampled LM-head execution, split Q/gate F32 output, and multi-block GDN
-                prefill plus split and GQA paged-attention specialization and native flash-attention forward/backward
-                execution. Its other thirty leaves keep training MLP and split Q/gate projection, paged-attention
-                splitting, safe concat, finite checks, RMSNorm, and flash tiling bounded at exact documented
-                geometries. <code>qualified</code> enables 43 of 45 accelerated routes, keeping the
-                slower gfx1151 multi-block experiment and correctness-disabled fused RMSNorm off;
-                <code>portable_fallback</code> declines all 45 accelerated routes but keeps the thirty safety
-                leaves; <code>experimental_multiblock</code> is the qualified set plus that experiment and
-                still keeps fused RMSNorm off.
-                Retired per-kernel enable/disable variables are not aliases. A process cannot combine individual routes or
-                change loading, forward, tape-forward, backend, Rust tensor, or C++ launcher dispatch between operations.
+                <code>rocm_kernel_profile</code> accepts only <code>portable_fallback</code> in product builds.
+                It declines machine-qualified model and tensor accelerations while retaining bounded training,
+                concat, finite-check, RMSNorm, and flash-attention fallback geometry. Retired profile and
+                per-kernel values fail startup rather than aliasing to a different route set. Historical route
+                attribution is isolated behind the example-only <code>hardware-qualification</code> feature.
               </p>
               <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 Vulkan device policy has schema <code>kiln.vulkan-device-policy.v1</code>. The typed startup
@@ -551,18 +543,15 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 ROCm online-score, and tile-size environment controls. Those controls are not aliases. They
                 previously let the model and ROCm flash planners parse different permissive values during
                 execution and derive geometry from changing free-memory snapshots, including a materialized
-                ceiling as high as 32 GiB. Policy v15 installs one bounded ceiling before execution. The memory
+                ceiling as high as 32 GiB. Policy v16 installs one bounded ceiling before execution. The memory
                 governor can reject a plan whose exact working set is no longer available, but it cannot
                 silently shrink, expand, or retile that plan between layers or requests.
               </p>
               <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Both matmul fields default to <code>auto</code>. The strided-batched selector applies the
-                qualified gfx115x large-attention correctness guard, while the BF16-output selector applies
-                the ROCm 7.2 large-projection and low-rank workaround. These are immutable shape/dtype
-                decisions stored in the primary context; they do not consult live memory or process
-                environment during inference. Four former force/disable variables are strict warning
-                aliases resolved only at startup. Conflicting aliases fail startup. The two former ad hoc
-                trace variables were removed rather than promoted to configuration.
+                Portable matmul policy uses per-row GEMMs and F32 output followed by an on-device BF16 cast.
+                Strided batching and native BF16 output are explicit experimental choices. The retired
+                machine-shaped <code>auto</code> values fail startup, and execution does not inspect device
+                identity, live memory, or process environment to recreate them.
               </p>
               <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 The byte limit counts requested physical bytes held by graph-stable direct I/O tensors,
@@ -1095,10 +1084,9 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 <code>physical_capacity_source</code> report the device-scoped detected capacity. On a
                 unified-memory device this is the host- and cgroup-bounded safe capacity, not the
                 driver&rsquo;s potentially much larger address space. Linux DRM never promotes GTT into
-                primary device-local capacity when the driver reports nonzero VRAM. A large carved
-                pool such as Strix Halo&rsquo;s 96 GiB VRAM therefore remains the primary pool, while GTT
-                and Linux host headroom are governed as a separate host-backed tier for allocations
-                that actually use it.
+                primary device-local capacity when the driver reports nonzero VRAM. GTT and Linux
+                host headroom are governed as a separate host-backed tier for allocations that
+                actually use it.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 <code>configured_capacity_bytes</code>/<code>configured_capacity_gib</code> contain the
@@ -1878,35 +1866,6 @@ kiln serve --config kiln.toml</code></pre>
           <code>pressure_peer_dispatch = "before_slow_start_after_first_token"</code>, proving
           continuity of an already-decoding request instead of comparing a queued peer with a
           pressure interval that began first.
-        </p>
-        <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
-          The same ROCm gate records a typed Strix Halo thermal policy across server startup,
-          warmup, both workload windows, drain, and teardown. A 250 ms
-          <code>k10temp/Tctl</code> hard-limit-only controller never suspends active accelerator work
-          and fails closed at 97 C. Temperature and guard errors/trips are receipt metrics; any
-          nonzero <code>host_thermal_pacing_event_count</code> fails the current source-bound serving
-          policy. The mixed-load client and server share a 180-second request bound. Receipts still
-          partition attributed ITL gaps into thermal-paced and non-thermal counts, but both counts
-          and unexplained gaps must be zero. Driver v11 also requires typed pre-run and post-run
-          cooldown evidence at a live-server idle boundary for every hard-limit-only row. Those
-          waits cannot send <code>SIGSTOP</code>, and both remain inside thermally sustainable phase
-          time. Teardown keeps the hard limit active. After
-          process exit, the runner requires eight consecutive 250 ms readings at or below 75 C,
-          bounded to 180 seconds. Cooldown active/completed/timeout counts, duration, sample count,
-          stable count, and post-exit peak are receipt metrics; a timeout or missing completion fails
-          qualification. The local runner gives an interrupted
-          driver a bounded cleanup window before hard containment and removes incomplete run evidence
-          rather than leaving copied model shards behind.
-        </p>
-        <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
-          Serving benchmark driver v25 exposes
-          <code>--model-fingerprint-read-mib-per-second</code> as an optional provenance-read control. Its default
-          is zero (unlimited); explicit lab limits accept 64 through 16,384 MiB/s, and campaign v11 records and forwards the value.
-          When a caller explicitly selects a host policy, receipt schema
-          <code>kiln.serving-model-fingerprint-thermal.v2</code> stores the value at
-          <code>host_thermal.model_fingerprint.read_mib_per_second</code>; unguarded current receipts have no
-          thermal fingerprint record. A nonzero value applies one monotonic cumulative schedule across both
-          content-integrity passes without changing request timing, server startup pacing, or inference.
         </p>
         <h3 id="prompt-logprobs" class="text-xl font-semibold mt-6 mb-3">Score prompt tokens</h3>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">

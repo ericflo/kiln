@@ -285,10 +285,8 @@ pub(super) fn long_prefill_leaf_flash_allowed_for_device(
         streaming_prefill_device_kind(device),
         StreamingPrefillDeviceKind::Rocm
     ) {
-        // ROCm's long flash/online SDPA route is exact and is the only
-        // practical path for large prefix-causal training rows on gfx115x.
-        // The immutable qualified profile keeps this route enabled so long
-        // rows fit without a per-request or hot-path policy lookup.
+        // Portable policy declines this optimized route. Explicit
+        // qualification builds may enable it without hot-path configuration.
         rocm_long_flash_attn_enabled()
     } else {
         true

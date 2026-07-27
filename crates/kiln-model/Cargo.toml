@@ -83,6 +83,7 @@ objc2-metal = { version = "0.3", optional = true }
 
 
 [features]
+hardware-qualification = ["kiln-hip/hardware-qualification", "kiln-tensor/hardware-qualification"]
 cuda = ["dep:cudarc", "kiln-conv1d-kernel/cuda", "kiln-flash-attn/cuda", "kiln-gdn-kernel/cuda", "kiln-marlin-gemm/cuda", "kiln-rmsnorm-kernel/cuda", "dep:kiln-tensor-id", "kiln-kt-bridge/cuda", "kiln-tensor/cuda", "dep:half", "dep:bytemuck", "dep:kiln-autograd"]
 # ROCm backend (R.4) — mirrors `cuda`, swapping cudarc->kiln-hip and each kernel
 # crate's `/cuda` feature for `/rocm`. The kernel _kt entry points are
@@ -107,3 +108,8 @@ nvtx = ["kiln-nvtx/nvtx"]
 # device, so the Vulkan backend manages its own vk::Device and copies tensor
 # data through the CPU path at kernel boundaries.
 vulkan = ["dep:kiln-vulkan-kernel", "dep:kiln-tensor-id", "kiln-core/vulkan", "dep:half", "dep:bytemuck", "dep:kiln-autograd", "kiln-tensor/vulkan", "kiln-kt-bridge/vulkan"]
+
+[[example]]
+name = "rocm_hf_path_attribution"
+path = "examples/rocm_hf_path_attribution.rs"
+required-features = ["rocm", "hardware-qualification"]

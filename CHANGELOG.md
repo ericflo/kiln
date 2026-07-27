@@ -91,17 +91,16 @@
   and website. `native_default` preserves existing accelerated dispatch
   without making a hardware-qualification claim; `portable_fallback` declines
   every owned route. Retired per-kernel spellings are not aliases.
-- ROCm kernel policy consolidation: replaced the independent production
-  model-kernel environment gates with the immutable typed
-  `accelerator.rocm_kernel_profile`. `qualified` installs the complete
-  Strix Halo-qualified route set, `portable_fallback` declines all fifteen
-  profile-governed routes for reference comparison, and experimental-only
-  `experimental_multiblock` adds the unqualified multi-block GDN prefill
-  route. The server installs one complete policy before backend construction,
-  backend hot paths no longer read these environment variables, and the
-  resolved v9 policy is reported by CLI, API, health, trusted debug, dashboard,
-  qualification attestations, schemas, and the website. Retired per-kernel
-  names are not compatibility aliases.
+- Portable ROCm defaults: `accelerator.rocm_kernel_profile` accepts only
+  `portable_fallback`; retired `qualified` and `experimental_multiblock` values
+  fail startup. Ordinary builds use a compile-time portable model/tensor policy
+  and cannot install a machine route set. Strided batching defaults to
+  per-row GEMMs and BF16 matmul defaults to F32 output plus an on-device cast;
+  the machine-shaped `auto` values are retired. Historical route attribution
+  is available only to the dedicated example under the explicit
+  `hardware-qualification` feature. Accelerator runtime policy v16, CLI, API,
+  health, trusted debug, schemas, examples, qualification fixtures, and the
+  website expose the same boundary.
 - training configuration boundary: removed the remaining process-global ECHO,
   adapter-smoke, GRPO shared-reference, and OPD sampler/rendering controls from
   `kiln-train`. Their typed request-local replacements are carried through API

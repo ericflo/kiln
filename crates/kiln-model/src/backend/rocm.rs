@@ -129,8 +129,9 @@ pub struct RocmBackend {
     fused_conv1d_enabled: bool,
     // Phase 7 (#1082): the operation-level kt/candle switches were removed
     // once every convolution, GDN, and flash-attention wire became kt-only.
-    // The closed startup profile now selects complete native or portable
-    // route sets without process-environment reads inside the backend.
+    // Product builds use the portable route set without process-environment
+    // reads inside the backend. Qualification builds can install a historical
+    // route fixture before backend construction.
     // Phase 7 (#1082): all 4 flash-attn dispatch sites in this
     // backend are now kt-only after `aab07fa7` landed the
     // `flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs`
@@ -144,8 +145,8 @@ pub struct RocmBackend {
     /// tracked LoRA tensors need autograd.
     lora_decode_add_enabled: bool,
     /// Multi-block dv-tiled `gdn_full_chunk_forward`. The CUDA/HIP-oriented
-    /// variant is bit-exact, but slower on gfx1151 long-context prefill, so
-    /// only the typed experimental profile enables it.
+    /// variant is bit-exact. Product policy declines it; only the explicit
+    /// hardware-qualification fixture can enable it.
     gdn_full_chunk_forward_multiblock_enabled: bool,
     /// Packed W8 LM-head projection and token-only greedy selection.
     w8_lm_head_enabled: bool,

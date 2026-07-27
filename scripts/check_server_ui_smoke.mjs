@@ -1575,8 +1575,8 @@ async function startServer({
           },
         },
         accelerator_runtime: {
-          schema_id: 'kiln.accelerator-runtime-policy.v15',
-          version: 15,
+          schema_id: 'kiln.accelerator-runtime-policy.v16',
+          version: 16,
           vulkan_kernel_policy_schema_id: 'kiln.vulkan-kernel-policy.v4',
           vulkan_device_policy_schema_id: 'kiln.vulkan-device-policy.v1',
           serving_profile: 'stable',
@@ -1619,13 +1619,13 @@ async function startServer({
             source: 'default',
           },
           rocm_strided_batched_matmul_mode: {
-            configured: 'auto',
-            effective: 'auto',
+            configured: 'disabled',
+            effective: 'disabled',
             source: 'default',
           },
           rocm_bf16_matmul_output_mode: {
-            configured: 'auto',
-            effective: 'auto',
+            configured: 'f32_then_cast',
+            effective: 'f32_then_cast',
             source: 'default',
           },
           rocm_kernel_profile: {
@@ -2696,7 +2696,7 @@ async function evalDrillTabbableState(page, focusTarget = null) {
 async function expectRocmMatmulRuntimeConfig(page, scenarioLabel) {
   const prefix = `${scenarioLabel} ROCm matmul runtime config`;
   const selector = '#runtime-config-body';
-  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Policy schema[\s\S]*kiln\.accelerator-runtime-policy\.v15[\s\S]*v15/, `${prefix} should render policy schema v15`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Policy schema[\s\S]*kiln\.accelerator-runtime-policy\.v16[\s\S]*v16/, `${prefix} should render policy schema v16`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Vulkan kernel policy[\s\S]*kiln\.vulkan-kernel-policy\.v4/, `${prefix} should render the portable Vulkan kernel policy schema`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Vulkan device policy[\s\S]*kiln\.vulkan-device-policy\.v1/, `${prefix} should render the immutable Vulkan device policy schema`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Vulkan physical device[\s\S]*automatic[\s\S]*config_file/, `${prefix} should render automatic Vulkan physical-device selection and source`);
@@ -2708,9 +2708,9 @@ async function expectRocmMatmulRuntimeConfig(page, scenarioLabel) {
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*CUDA graph policy[\s\S]*disabled[\s\S]*profile blocked/, `${prefix} should render the profile-resolved CUDA graph request`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*CUDA graph cache[\s\S]*8/, `${prefix} should render the typed CUDA graph cache bound`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*CUDA graph contract[\s\S]*stable metadata[\s\S]*single-row only/, `${prefix} should render fixed CUDA graph safety invariants`);
-  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Strided batched matmul[\s\S]*auto[\s\S]*default/, `${prefix} should render the immutable strided-batched route and source`);
-  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*BF16 matmul output[\s\S]*auto[\s\S]*default/, `${prefix} should render the immutable BF16-output route and source`);
-  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*ROCm kernel profile[\s\S]*qualified[\s\S]*config_file/, `${prefix} should render the complete immutable ROCm kernel route set and source`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Strided batched matmul[\s\S]*disabled[\s\S]*default/, `${prefix} should render the portable strided-batched route and source`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*BF16 matmul output[\s\S]*f32_then_cast[\s\S]*default/, `${prefix} should render the portable BF16-output route and source`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*ROCm kernel profile[\s\S]*portable_fallback[\s\S]*config_file/, `${prefix} should render the portable ROCm kernel route set and source`);
 }
 
 async function expectStreamingPrefillRuntimeConfig(page, scenarioLabel) {

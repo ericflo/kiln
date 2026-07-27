@@ -428,8 +428,9 @@ pub struct GpuFullAttentionWeights {
     pub o_proj_t: Tensor,
     /// Optional ROCm-only row-wise W8A16 full-attention decode projections.
     /// `qkv_proj_w8` stores `[q_raw | k | v]` rows; `o_proj_w8` stores
-    /// `[hidden, num_heads * head_dim]`. Populated only when
-    /// Enabled by the qualified immutable ROCm kernel profile for decode.
+    /// `[hidden, num_heads * head_dim]`. Populated only by an explicit
+    /// hardware-qualification policy; portable product execution leaves both
+    /// fields empty.
     pub qkv_proj_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
     pub o_proj_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
     /// Optional Marlin W4A16-packed q_proj. Populated when the installed CUDA

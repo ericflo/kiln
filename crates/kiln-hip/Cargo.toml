@@ -12,3 +12,6 @@ description = "Bounded Rust bindings to the AMD ROCm/HIP runtime — the cudarc 
 
 [lib]
 doctest = false
+
+[features]
+hardware-qualification = []

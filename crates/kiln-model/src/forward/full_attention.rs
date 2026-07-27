@@ -105,10 +105,7 @@ pub(super) fn split_q_gate_output_chunk_features_for_device(
             .max(1);
     }
     match device {
-        // gfx115x hipBLASLt can return non-finite BF16 output for the giant
-        // [8192 x 2560] @ [2560 x 8192] fused q+gate projection. Column
-        // slicing is algebraically identical and keeps each GEMM on stable
-        // shapes; the final concat preserves the original q/gate layout.
+        // ROCm policy is handled above.
         Device::Rocm(_) => unreachable!("ROCm policy returned above"),
         // Vulkan's linear offset path already has submit-size ceilings. Use
         // the same split contract when BF16 projection slices are available.

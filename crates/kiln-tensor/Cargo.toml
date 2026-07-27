@@ -121,6 +121,7 @@ vulkan = ["dep:kiln-vulkan-kernel"]
 # `csrc/*.cu` by hipcc in build.rs::build_rocm() behind the CUDA->HIP compat
 # shim (`csrc/hip_compat`). `kiln-rocblas` (dense GEMM) joins this list in R.6.
 rocm = ["dep:kiln-hip", "dep:kiln-rocblas"]
+hardware-qualification = ["kiln-hip/hardware-qualification"]
 
 [dev-dependencies]
 # Phase 1.131's `training_full_block` integration test threads

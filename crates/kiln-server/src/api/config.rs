@@ -1156,9 +1156,9 @@ mod tests {
         assert_eq!(json["cuda_graphs"]["restart_required_to_change"], true);
         assert_eq!(
             json["accelerator_runtime"]["schema_id"],
-            "kiln.accelerator-runtime-policy.v15"
+            "kiln.accelerator-runtime-policy.v16"
         );
-        assert_eq!(json["accelerator_runtime"]["version"], 15);
+        assert_eq!(json["accelerator_runtime"]["version"], 16);
         assert_eq!(
             json["accelerator_runtime"]["vulkan_kernel_policy_schema_id"],
             "kiln.vulkan-kernel-policy.v4"
@@ -1216,11 +1216,11 @@ mod tests {
         );
         assert_eq!(
             json["accelerator_runtime"]["rocm_strided_batched_matmul_mode"]["effective"],
-            "auto"
+            "disabled"
         );
         assert_eq!(
             json["accelerator_runtime"]["rocm_bf16_matmul_output_mode"]["effective"],
-            "auto"
+            "f32_then_cast"
         );
         assert_eq!(
             json["accelerator_runtime"]["rocm_kernel_profile"]["effective"],
