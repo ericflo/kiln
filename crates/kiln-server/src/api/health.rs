@@ -2177,7 +2177,7 @@ mod tests {
         );
         assert_eq!(
             json["decode_runtime"]["accelerator_runtime"]["rocm_kernel_profile"]["effective"],
-            "qualified"
+            "portable_fallback"
         );
         assert_eq!(
             json["decode_runtime"]["rocm_synchronization"]["active"],

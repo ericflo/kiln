@@ -631,7 +631,7 @@ pub struct RocmFlashAttentionPolicy {
 }
 
 impl RocmFlashAttentionPolicy {
-    /// Qualified Strix Halo flash-attention policy.
+    /// Explicit Strix Halo flash-attention qualification policy.
     pub const fn qualified() -> Self {
         Self {
             f32_matmul_inner_tile: 4096,
@@ -769,7 +769,7 @@ impl RocmFlashAttentionPolicy {
 
 impl Default for RocmFlashAttentionPolicy {
     fn default() -> Self {
-        Self::qualified()
+        Self::portable_fallback()
     }
 }
 
@@ -795,7 +795,7 @@ pub struct RocmTensorKernelPolicy {
 }
 
 impl RocmTensorKernelPolicy {
-    /// Qualified Strix Halo tensor-kernel policy.
+    /// Explicit Strix Halo tensor-kernel qualification policy.
     pub const fn qualified() -> Self {
         Self {
             split_paged_attention: true,
@@ -868,7 +868,7 @@ impl RocmTensorKernelPolicy {
 
 impl Default for RocmTensorKernelPolicy {
     fn default() -> Self {
-        Self::qualified()
+        Self::portable_fallback()
     }
 }
 
@@ -892,7 +892,7 @@ impl RocmExecutionPolicy {
                 RocmStridedBatchedMatmulMode::Auto,
                 RocmBf16MatmulOutputMode::Auto,
             ),
-            tensor_kernels: RocmTensorKernelPolicy::qualified(),
+            tensor_kernels: RocmTensorKernelPolicy::portable_fallback(),
         }
     }
 
@@ -3001,13 +3001,16 @@ mod tests {
     }
 
     #[test]
-    fn execution_policy_defaults_to_legacy_host_barriers() {
+    fn execution_policy_defaults_to_portable_kernels_and_legacy_host_barriers() {
         let policy = RocmExecutionPolicy::default();
         assert_eq!(
             policy.synchronization_mode,
             RocmSynchronizationMode::LegacyHostBarriers
         );
-        assert_eq!(policy.tensor_kernels, RocmTensorKernelPolicy::qualified());
+        assert_eq!(
+            policy.tensor_kernels,
+            RocmTensorKernelPolicy::portable_fallback()
+        );
     }
 
     #[test]

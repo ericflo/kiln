@@ -1224,7 +1224,7 @@ mod tests {
         );
         assert_eq!(
             json["accelerator_runtime"]["rocm_kernel_profile"]["effective"],
-            "qualified"
+            "portable_fallback"
         );
         assert_eq!(
             json["accelerator_runtime"]["rocm_graph_mode"]["effective"],

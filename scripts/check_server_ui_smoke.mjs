@@ -1629,8 +1629,8 @@ async function startServer({
             source: 'default',
           },
           rocm_kernel_profile: {
-            configured: 'qualified',
-            effective: 'qualified',
+            configured: 'portable_fallback',
+            effective: 'portable_fallback',
             source: 'config_file',
           },
           rocm_graph_mode: { configured: 'profile', effective: 'disabled', source: 'default' },

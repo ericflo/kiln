@@ -7,7 +7,7 @@ static ROCM_KERNEL_POLICY: OnceLock<RocmKernelPolicy> = OnceLock::new();
 ///
 /// The server maps its closed profile vocabulary to one of these policies
 /// before device creation. Embedders that do not install a policy receive the
-/// qualified production defaults on first ROCm use.
+/// portable fallback on first ROCm use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RocmKernelPolicy {
     pub(crate) full_attn_qkv_in_proj: bool,
@@ -49,7 +49,7 @@ pub struct RocmKernelPolicy {
 
 #[cfg_attr(not(feature = "rocm"), allow(dead_code))]
 impl RocmKernelPolicy {
-    /// Qualified Strix Halo production policy.
+    /// Explicit Strix Halo qualification policy.
     pub const fn qualified() -> Self {
         Self {
             full_attn_qkv_in_proj: true,
@@ -288,7 +288,7 @@ impl RocmKernelPolicy {
 
 impl Default for RocmKernelPolicy {
     fn default() -> Self {
-        Self::qualified()
+        Self::portable_fallback()
     }
 }
 
@@ -327,6 +327,7 @@ mod tests {
         let split_q_gate_only = RocmKernelPolicy::split_q_gate_only();
         let experimental = RocmKernelPolicy::experimental_multiblock();
 
+        assert_eq!(RocmKernelPolicy::default(), fallback);
         assert_eq!(
             qualified.accelerated_routes(),
             [

@@ -399,12 +399,12 @@
             "portable_fallback"
           ],
           "default": "native_default",
-          "description": "native_default or portable_fallback, case-insensitive. native_default preserves the twenty-five CUDA model/backend routes that were enabled by default before consolidation; this name deliberately makes no current-hardware qualification claim. portable_fallback declines every owned route. The complete route set is installed before CUDA backend construction, immutable for the process lifetime, and reported with source attribution. Restart required.",
+          "description": "native_default enables the device-neutral subset of twenty-four CUDA model/backend routes and declines the GDN full-chunk multiblock route whose performance evidence covers only one GPU configuration. portable_fallback declines every owned route. The complete twenty-five-route set is installed before CUDA backend construction, immutable for the process lifetime, and reported with source attribution. Restart required.",
           "x-kiln-path": "accelerator.cuda_kernel_profile",
           "x-kiln-type-and-default": "string enum; \"native_default\"",
           "x-kiln-canonical-env": "KILN_ACCELERATOR_CUDA_KERNEL_PROFILE (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-validation": "native_default or portable_fallback, case-insensitive. native_default preserves the twenty-five CUDA model/backend routes that were enabled by default before consolidation; this name deliberately makes no current-hardware qualification claim. portable_fallback declines every owned route. The complete route set is installed before CUDA backend construction, immutable for the process lifetime, and reported with source attribution. Restart required."
+          "x-kiln-validation": "native_default enables the device-neutral subset of twenty-four CUDA model/backend routes and declines the GDN full-chunk multiblock route whose performance evidence covers only one GPU configuration. portable_fallback declines every owned route. The complete twenty-five-route set is installed before CUDA backend construction, immutable for the process lifetime, and reported with source attribution. Restart required."
         },
         "cuda_marlin_profile": {
           "type": "string",
@@ -529,14 +529,14 @@
         "rocm_kernel_profile": {
           "type": "string",
           "enum": [
-            "qualified",
             "portable_fallback",
+            "qualified",
             "experimental_multiblock"
           ],
-          "default": "qualified",
-          "description": "qualified, portable_fallback, or experimental_multiblock, case-insensitive. qualified installs forty-three of forty-five accelerated model/tensor routes, leaving multi-block GDN prefill and the correctness-disabled fused RMSNorm route off, and retains thirty fixed correctness/bounded-work leaves. portable_fallback declines all forty-five accelerated routes while retaining the same safety behavior. experimental_multiblock enables the multi-block GDN prefill experiment but retains fused RMSNorm off, installing forty-four of forty-five accelerated routes, and requires server.serving_profile = \"experimental\". The complete 75-leaf policy is immutable after startup and governs backend/model dispatch, loading, forward/tape execution, W8 decode, training geometry, paged-attention specialization and splitting, concat assembly, finite checks, RMSNorm row tiling, and flash-attention forward/backward route selection and fixed tiling through Rust and C++ kernel boundaries. Retired per-kernel variables are not aliases. Restart required.",
+          "default": "portable_fallback",
+          "description": "portable_fallback, qualified, or experimental_multiblock, case-insensitive. The default portable_fallback declines all forty-five accelerated routes while retaining fixed correctness and bounded-work safeguards. qualified explicitly selects the Strix Halo-qualified profile, which installs forty-three accelerated routes while leaving multi-block GDN prefill and fused RMSNorm off. experimental_multiblock adds the multi-block GDN prefill experiment, retains fused RMSNorm off, and requires server.serving_profile = \"experimental\". The complete 75-leaf policy is immutable after startup and governs backend/model dispatch, loading, forward/tape execution, W8 decode, training geometry, paged-attention specialization and splitting, concat assembly, finite checks, RMSNorm row tiling, and flash-attention forward/backward route selection and fixed tiling through Rust and C++ kernel boundaries. Retired per-kernel variables are not aliases. Restart required.",
           "x-kiln-path": "accelerator.rocm_kernel_profile",
-          "x-kiln-type-and-default": "string enum; \"qualified\"",
+          "x-kiln-type-and-default": "string enum; \"portable_fallback\"",
           "x-kiln-canonical-env": "KILN_ACCELERATOR_ROCM_KERNEL_PROFILE (implemented)",
           "x-kiln-environment": "none",
           "x-kiln-profile-gate": {
@@ -545,7 +545,7 @@
               "const": "experimental_multiblock"
             }
           },
-          "x-kiln-validation": "qualified, portable_fallback, or experimental_multiblock, case-insensitive. qualified installs forty-three of forty-five accelerated model/tensor routes, leaving multi-block GDN prefill and the correctness-disabled fused RMSNorm route off, and retains thirty fixed correctness/bounded-work leaves. portable_fallback declines all forty-five accelerated routes while retaining the same safety behavior. experimental_multiblock enables the multi-block GDN prefill experiment but retains fused RMSNorm off, installing forty-four of forty-five accelerated routes, and requires server.serving_profile = \"experimental\". The complete 75-leaf policy is immutable after startup and governs backend/model dispatch, loading, forward/tape execution, W8 decode, training geometry, paged-attention specialization and splitting, concat assembly, finite checks, RMSNorm row tiling, and flash-attention forward/backward route selection and fixed tiling through Rust and C++ kernel boundaries. Retired per-kernel variables are not aliases. Restart required."
+          "x-kiln-validation": "portable_fallback, qualified, or experimental_multiblock, case-insensitive. The default portable_fallback declines all forty-five accelerated routes while retaining fixed correctness and bounded-work safeguards. qualified explicitly selects the Strix Halo-qualified profile, which installs forty-three accelerated routes while leaving multi-block GDN prefill and fused RMSNorm off. experimental_multiblock adds the multi-block GDN prefill experiment, retains fused RMSNorm off, and requires server.serving_profile = \"experimental\". The complete 75-leaf policy is immutable after startup and governs backend/model dispatch, loading, forward/tape execution, W8 decode, training geometry, paged-attention specialization and splitting, concat assembly, finite checks, RMSNorm row tiling, and flash-attention forward/backward route selection and fixed tiling through Rust and C++ kernel boundaries. Retired per-kernel variables are not aliases. Restart required."
         },
         "rocm_graph_mode": {
           "type": "string",

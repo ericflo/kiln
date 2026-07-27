@@ -1746,10 +1746,10 @@ impl<'de> Deserialize<'de> for MetalKernelProfileSetting {
 #[serde(rename_all = "snake_case")]
 pub enum RocmKernelProfile {
     /// Strix Halo-qualified native route set with correctness-disabled fused
-    /// RMSNorm. This is the production default.
-    #[default]
+    /// RMSNorm. Deployments must select this profile explicitly.
     Qualified,
     /// Decline all profile-governed routes and use portable model fallbacks.
+    #[default]
     PortableFallback,
     /// Qualified routes plus the unqualified multi-block GDN prefill kernel;
     /// fused RMSNorm remains correctness-disabled.
@@ -1811,7 +1811,10 @@ impl RocmKernelProfileSetting {
 
 impl Default for RocmKernelProfileSetting {
     fn default() -> Self {
-        Self::new(RocmKernelProfile::Qualified, ConfigValueSource::Default)
+        Self::new(
+            RocmKernelProfile::PortableFallback,
+            ConfigValueSource::Default,
+        )
     }
 }
 
@@ -6928,7 +6931,7 @@ mod tests {
         );
         assert_eq!(
             config.accelerator.rocm_kernel_profile.profile(),
-            RocmKernelProfile::Qualified
+            RocmKernelProfile::PortableFallback
         );
         assert_eq!(
             config.accelerator.rocm_graph_mode.mode(),
@@ -7232,8 +7235,8 @@ mod tests {
             assert_eq!(
                 resolved.rocm_kernel_profile,
                 ResolvedAcceleratorValue {
-                    configured: RocmKernelProfile::Qualified,
-                    effective: RocmKernelProfile::Qualified,
+                    configured: RocmKernelProfile::PortableFallback,
+                    effective: RocmKernelProfile::PortableFallback,
                     source: ConfigValueSource::Default,
                 }
             );
@@ -7298,8 +7301,14 @@ mod tests {
         assert_eq!(json["metal_kernel_profile"]["configured"], "native_default");
         assert_eq!(json["metal_kernel_profile"]["effective"], "native_default");
         assert_eq!(json["metal_kernel_profile"]["source"], "default");
-        assert_eq!(json["rocm_kernel_profile"]["configured"], "qualified");
-        assert_eq!(json["rocm_kernel_profile"]["effective"], "qualified");
+        assert_eq!(
+            json["rocm_kernel_profile"]["configured"],
+            "portable_fallback"
+        );
+        assert_eq!(
+            json["rocm_kernel_profile"]["effective"],
+            "portable_fallback"
+        );
         assert_eq!(json["rocm_kernel_profile"]["source"], "default");
         assert_eq!(json["rocm_graph_mode"]["configured"], "profile");
         assert_eq!(json["rocm_graph_mode"]["effective"], "lazy_capture_replay");

@@ -982,7 +982,7 @@ prefix_aware_admission = true         # retain strict-prefix reuse opportunity
 prefill_admission_quantum = "auto"    # backend-owned prompt-admission cadence
 
 [accelerator]
-rocm_kernel_profile = "qualified"     # complete immutable ROCm model-kernel route set
+rocm_kernel_profile = "portable_fallback" # portable default; explicitly select qualified per deployment
 
 [model]
 path = "/models/Qwen3.5-4B"        # omit for mock mode

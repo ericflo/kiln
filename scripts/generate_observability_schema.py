@@ -228,7 +228,7 @@ def build_definitions() -> None:
     add_enum(
         "RocmKernelProfile",
         "RocmKernelProfile",
-        ["qualified", "portable_fallback", "experimental_multiblock"],
+        ["portable_fallback", "qualified", "experimental_multiblock"],
         "The complete process-lifetime ROCm model-kernel route set.",
     )
     add_enum(

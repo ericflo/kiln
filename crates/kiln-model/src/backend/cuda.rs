@@ -155,12 +155,9 @@ pub struct CudaBackend {
     /// Forward-only CUDA LoRA delta/add for decode. Training declines because
     /// tracked LoRA tensors need autograd.
     lora_decode_add_enabled: bool,
-    /// Multi-block dv-tiled `gdn_full_chunk_forward`. The native default keeps
-    /// it on because the
-    /// single-block kernel only launches `B*H = 32` blocks for Qwen3.5-4B at
-    /// batch=1, leaving ~58% of a 76-SM RTX 4090 Laptop idle. The multi-block
-    /// path is bit-exact with the legacy kernel (same per-output-cell FMA
-    /// chain, same bf16 rounding). Portable fallback declines it.
+    /// Multi-block dv-tiled `gdn_full_chunk_forward`. The generic profiles
+    /// decline this route because its performance evidence covers only one
+    /// GPU configuration.
     gdn_full_chunk_forward_multiblock_enabled: bool,
 }
 
@@ -2277,7 +2274,13 @@ mod tests {
             kiln_tensor::Device::Cuda(0),
             CudaKernelPolicy::native_default(),
         );
-        assert_eq!(routes(&native_default), [true; 14]);
+        assert_eq!(
+            routes(&native_default),
+            [
+                true, true, true, true, true, true, true, true, true, true, true, true, true,
+                false,
+            ]
+        );
 
         let fallback = CudaBackend::new_with_kernel_policy(
             kiln_tensor::Device::Cuda(0),

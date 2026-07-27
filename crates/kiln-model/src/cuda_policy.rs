@@ -39,7 +39,8 @@ pub struct CudaKernelPolicy {
 
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 impl CudaKernelPolicy {
-    /// CUDA routes that were enabled by default before policy consolidation.
+    /// Device-neutral subset of the CUDA routes enabled before policy
+    /// consolidation.
     pub const fn native_default() -> Self {
         Self {
             full_attn_qkv_in_proj: true,
@@ -55,7 +56,9 @@ impl CudaKernelPolicy {
             gdn_decode_qk_norm_recurrent_rmsnorm: true,
             fused_conv1d: true,
             lora_decode_add: true,
-            gdn_full_chunk_forward_multiblock: true,
+            // This route is correct but has only been performance-qualified on
+            // one 76-SM laptop GPU. Keep the generic default device-neutral.
+            gdn_full_chunk_forward_multiblock: false,
             fused_paged_decode: true,
             fused_rotary_qk: true,
             attn_decode_qkv_prep: true,
@@ -161,7 +164,9 @@ mod tests {
 
     #[test]
     fn profiles_cover_every_backend_route() {
-        assert_eq!(CudaKernelPolicy::native_default().routes(), [true; 25]);
+        let mut native_routes = [true; 25];
+        native_routes[13] = false;
+        assert_eq!(CudaKernelPolicy::native_default().routes(), native_routes);
         assert_eq!(CudaKernelPolicy::portable_fallback().routes(), [false; 25]);
     }
 }

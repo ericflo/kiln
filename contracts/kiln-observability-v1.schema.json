@@ -119,8 +119,8 @@
             "source": "default"
           },
           "rocm_kernel_profile": {
-            "configured": "qualified",
-            "effective": "qualified",
+            "configured": "portable_fallback",
+            "effective": "portable_fallback",
             "source": "default"
           },
           "rocm_graph_mode": {
@@ -970,8 +970,8 @@
               "source": "default"
             },
             "rocm_kernel_profile": {
-              "configured": "qualified",
-              "effective": "qualified",
+              "configured": "portable_fallback",
+              "effective": "portable_fallback",
               "source": "default"
             },
             "rocm_graph_mode": {
@@ -1578,8 +1578,8 @@
             "source": "default"
           },
           "rocm_kernel_profile": {
-            "configured": "qualified",
-            "effective": "qualified",
+            "configured": "portable_fallback",
+            "effective": "portable_fallback",
             "source": "default"
           },
           "rocm_graph_mode": {
@@ -8907,8 +8907,8 @@
     "RocmKernelProfile": {
       "type": "string",
       "enum": [
-        "qualified",
         "portable_fallback",
+        "qualified",
         "experimental_multiblock"
       ],
       "description": "The complete process-lifetime ROCm model-kernel route set.",
