@@ -86,24 +86,20 @@ measured process.
 
 ## Running A Campaign
 
-Use the current workload and runtime manifests:
+Select a checked-in workload and a variant supported by the current host:
 
 ```bash
 python3 scripts/qualification/run.py \
-  qualification/workloads/serving-cuda-performance-c1-v1.json \
-  --variant cuda-rtx4090-laptop-c1 \
+  qualification/workloads/<workload>.json \
+  --variant <variant> \
   --host-id <host-id> \
   --model /absolute/path/to/model \
-  --model-id Qwen/Qwen3.5-4B \
-  --output .qualification/receipts/cuda-c1.json
+  --model-id <model-id> \
+  --output .qualification/receipts/result.json
 ```
 
 Run `--help` for the exact arguments supported by the current driver. Do not
 reuse arguments from historical receipts or older documentation.
-
-The CUDA c1 comparison is a source-pinned diagnostic. A numerical mismatch is
-a correctness failure even when both servers complete and the reference server
-is faster. Performance conclusions require accepted correctness first.
 
 ## ROCm And Vulkan Diagnostics
 

@@ -9,7 +9,7 @@ port = 8420
 request_timeout_secs = 600
 terminal_access = "disabled"
 shutdown_timeout_secs = 5
-http_send_buffer_bytes = 212992
+http_send_buffer_bytes = 1048576
 stream_stall_grace_ms = 2000
 max_batch_tokens = 4096
 max_prefill_tokens_per_cycle = 512
@@ -55,10 +55,10 @@ vulkan_decode_weight_prewarm = false
 vulkan_decode_weight_prewarm_mib_per_second = 512
 
 [memory]
-num_blocks = 62
-inference_memory_fraction = 0.1
+gpu_memory_gb = 15.0
+inference_memory_fraction = 0.7
 vulkan_buffer_pool_gb = 0.0
-floor_gb = 1.0
+floor_gb = 1.5
 probe_ms = 500
 reclaim_mode = "off"
 kv_autoscale = false

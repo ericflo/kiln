@@ -549,10 +549,10 @@ Then qualify each ROCm, CUDA, and other intended machine locally:
    intended batch sizes. Identity qualification proves provenance and limits;
    it does not prove numerical parity or performance.
 
-### RTX 4090 bootstrap launch
+### CUDA bootstrap fixture
 
 `qualification/server-launch/vllm-cuda-rtx4090-serving-bootstrap-v1.json` is
-the source-bound first-launch contract for both named 4090 machines. It uses a
+an explicit historical hardware-qualification fixture. It uses a
 regular copied `.qualification/vllm-cuda-venv/bin/python-kiln` interpreter,
 private snapshot and per-launch cache roots, inherited benchmark process-group
 ownership, BF16, a 32,768-token context/batch-token bound, 64 sequence slots,
@@ -561,62 +561,20 @@ text-only model surface. It deliberately omits the ROCm-only `TRITON_ATTN`
 choice; the captured CUDA runtime must report its actual supported attention
 route.
 
-The current laptop performance launch is separate from the shared 32,768-token
-bootstrap. It sets both the model-length and batched-token bounds to the paired
-Kiln workload's existing 3,968-token ceiling. The preflighted largest
-prompt-plus-output total is 3,947 tokens, leaving 21 tokens of declared
-headroom. The launch also omits the optional cumulative provenance-read
-ceiling, so manifest-only captures and real launches hash model, snapshot,
-adapter, and runtime content without automatic read-rate limiting. Historical launch
-documents and receipts retain the explicit limits they actually used.
-
 This JSON is not a runtime manifest and does not pin an installed vLLM wheel by
-itself. On each NVIDIA machine, install an explicit reviewed CUDA-compatible
+itself. For a CUDA qualification run, install an explicit reviewed compatible
 version in the ignored venv, then run
 `scripts/qualification/capture_vllm_runtime_manifest.py` against this launch
 JSON. The tool inserts only `--manifest-only`, requires two byte-identical
 strict-valid results, and publishes without overwrite. Commit that machine's
 manifest under `qualification/runtime/vllm/cuda/<machine>/` before startup.
-On WSL2, every pass runs within a separate systemd user scope and private
-network/PID/mount/Landlock boundary. The default scope uses
-`memory.max=max`, zero swap, 512 PIDs, and CPU quota zero, retaining resource
-accounting without memory or CPU throttling. No temperature policy is inferred
-from the machine. Publication requires strict ordered scope events, zero
-memory-limit/OOM events, resource accounting, and scope removal.
-The current retained Laptop GPU performance identity is
-`qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json`, with file
-`sha256:6b23b1bf4179647be33cb43bd6df7db7666f469cbd15ea41713061aa3bb75050`
-and runtime-content
-`7254712bdd0c5bd11c03f90d3e7907963a6f135f5c3cdbc25349ad3430503b29`.
-Two captures from exact clean pushed source
-`133324f869fff0dd38f209fb80af1cecaf4150ed` produced the same 2,601 bytes
-in 35.578 and 33.860 seconds. Their distinct accounting-only scopes had no CPU
-allowance, recorded zero memory-limit/OOM events, and were removed.
-The identity binds the 3,968-token performance launch and inference
-configuration
-`6eb176306f43b6731c43c00fefa7b2aa4c44f577bd9f6dddee3b05ed82ea902b`.
 Runtime-content v2 excludes generated `__pycache__` directories while still
 binding source modules, native libraries, the interpreter, and distribution
-metadata. The older manifest had included an ambient `HF_TOKEN` because the
-launcher had classified every `HF_*` name as an inference input, while the qualification
-runner's closed environment correctly omitted credentials. The launcher now
-removes known Hugging Face credential variables before child creation and
-excludes them from inference identity. The owned benchmark also requires each
-vLLM response stream to report this manifest fingerprint and rejects a missing
-or conflicting value during warmup. This closes the runtime-identity
-prerequisite, but establishes no serving-correctness or performance claim.
-
-Current model-bearing qualification also brackets the serving case itself. The
-parent qualification runner and benchmark perform their initial and final
-double-read model fingerprints with no read-rate limiter by default. WSL2
-parent scopes retain isolation and resource accounting but no memory/CPU
-ceiling.
-
-The accelerator identity must match the environment receipt's 4090 class,
-`sm_89`, capacity, and selected logical device. The benchmark then binds the
-manifest as `--runtime-artifact`, the environment receipt's stable GPU UUID as
-the NVML selector, and the same finite memory ceiling used by the Kiln reference
-if the workload declares one. See
+metadata. The launcher removes known Hugging Face credential variables before
+child creation and excludes them from inference identity. The benchmark
+brackets the run with model fingerprints, binds the manifest as
+`--runtime-artifact`, and verifies the selected accelerator when a workload
+declares one. See
 [Serving Benchmark
 Protocol](SERVING_BENCHMARK_PROTOCOL.md#source-and-runtime-identity) for the
 complete machine sequence and failure gates.

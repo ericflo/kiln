@@ -6,13 +6,11 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import dataclasses
-import json
 import math
 import os
 import re
 import signal
 import shutil
-import stat
 import subprocess
 import sys
 import threading
@@ -20,7 +18,6 @@ import time
 from pathlib import Path
 from typing import Any, Literal
 
-import device_memory_sampler as device_memory
 import serve_mixed_load as mixed
 
 
@@ -32,18 +29,6 @@ RUNTIME_VARIANT = "autoscale-off"
 ROCM_ENDURANCE_VARIANT = "rocm-endurance"
 VULKAN_RUNTIME_VARIANT = "vulkan-development-soak"
 VULKAN_ENDURANCE_VARIANT = "vulkan-endurance"
-CUDA_ENDURANCE_VARIANT = "cuda-rtx4090-laptop-endurance"
-CUDA_GPU_UUID = "GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd"
-CUDA_GPU_NAME = "NVIDIA GeForce RTX 4090 Laptop GPU"
-CUDA_GPU_TOTAL_BYTES = 17_171_480_576
-CUDA_WSL2_MEMORY_MAX_BYTES = 0
-CUDA_WSL2_PIDS_MAX = 512
-CUDA_WSL2_CPU_QUOTA_PERCENT = 0
-CUDA_KV_BLOCKS = 62
-CUDA_INFERENCE_MEMORY_FRACTION = 0.1
-CUDA_MEMORY_FLOOR_GB = 1.0
-CUDA_QUALIFIED_WAVE_CONCURRENCY = (1,)
-CUDA_QUALIFIED_PROMPT_WORDS = (16, 64, 256, 1024)
 VULKAN_MAX_PREFILL_TOKENS_PER_CYCLE = 128
 VULKAN_QUALIFIED_ACTIVE_REQUESTS = 4
 VULKAN_QUALIFIED_DECODE_BATCH = 2
@@ -66,7 +51,6 @@ ROCM_REQUEST_TIMEOUT_SECONDS = 120.0
 QUALIFICATION_DURATION_SECONDS = 1800.0
 ROCM_ENDURANCE_DURATION_SECONDS = 24 * 60 * 60.0
 VULKAN_ENDURANCE_DURATION_SECONDS = 8 * 60 * 60.0
-CUDA_ENDURANCE_DURATION_SECONDS = 8 * 60 * 60.0
 CASE_TEARDOWN_GRACE_SECONDS = 180.0
 REQUEST_WORKER_CLEANUP_TIMEOUT_SECONDS = 10.0
 MAX_STEADY_STATE_WARMUP_WAVES = 16
@@ -113,67 +97,6 @@ SMAPS_HEADER = re.compile(
     r"[r-][w-][x-][ps]\s+[0-9A-Fa-f]+\s+"
     r"[0-9A-Fa-f]+:[0-9A-Fa-f]+\s+\d+(?:\s+(?P<pathname>.*))?$"
 )
-
-CUDA_BUILD_SPEC = mixed.SourceBuildSpec(
-    backend="CUDA",
-    features="cuda",
-    cargo_min_available_gib=13,
-    cargo_memory_scope="outer-wsl2-qualification-scope",
-    cargo_execution_mode="delegated-cgroup",
-    cargo_private_network=True,
-    cargo_environment_policy="closed-qualification-test-v1",
-    cargo_service_runtime_max_seconds=1740,
-    cargo_host_reserve_gib=3,
-    cargo_max_memory_gib=10,
-    timeout_seconds=1800.0,
-    cudarc_cuda_version="12080",
-    cuda_archs="89",
-    qualification_device_required=True,
-)
-
-
-def _cuda_variant_config() -> dict[str, Any]:
-    config = mixed._variant_config(
-        serving_profile="stable",
-        kv_autoscale_requested=False,
-        kv_autoscale_enabled=False,
-        memory_reclaim_requested_mode="off",
-        memory_reclaim_mode="off",
-        rocm_graphs_requested=False,
-        rocm_graphs_enabled=False,
-        request_timeout_seconds=900,
-        max_decode_batch=1,
-        max_prefill_layers_per_cycle=8,
-    )
-    config["build"] = CUDA_BUILD_SPEC.effective_config()
-    config["server"].update(
-        {
-            "http_send_buffer_bytes": 212_992,
-            "max_batch_tokens": 4096,
-            "max_prefill_tokens_per_cycle": 512,
-            "max_prefill_layers_per_cycle": 8,
-            "max_decode_batch": 1,
-            "max_prefill_staging_slots": 0,
-            "max_active_requests": 1,
-            "max_prefill_staging_priority_burst": 0,
-        }
-    )
-    config["runtime"].update(
-        {
-            "prefix_cache_requested_enabled": True,
-            "prefix_cache_effective_enabled": True,
-            "prefix_cache_effective_reason": "active",
-            "vulkan_buffer_pool_gb": 0.0,
-        }
-    )
-    config["model"] = {
-        "checkpoint_read_mib_per_second": 256,
-        "accelerator_weight_upload_mib_per_second": 256,
-        "vulkan_decode_weight_prewarm": False,
-        "vulkan_decode_weight_prewarm_mib_per_second": 512,
-    }
-    return config
-
 
 def _vulkan_variant_config() -> dict[str, Any]:
     config = mixed._variant_config(
@@ -230,7 +153,6 @@ def _vulkan_variant_config() -> dict[str, Any]:
 mixed.VARIANT_CONFIGS[ROCM_ENDURANCE_VARIANT] = mixed.VARIANT_CONFIGS[RUNTIME_VARIANT]
 mixed.VARIANT_CONFIGS[VULKAN_RUNTIME_VARIANT] = _vulkan_variant_config()
 mixed.VARIANT_CONFIGS[VULKAN_ENDURANCE_VARIANT] = _vulkan_variant_config()
-mixed.VARIANT_CONFIGS[CUDA_ENDURANCE_VARIANT] = _cuda_variant_config()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -263,12 +185,6 @@ class SoakRuntime:
     host_mem_available_floor_bytes: int | None = None
     host_swap_growth_limit_bytes: int | None = None
     accelerator_telemetry_required: bool = False
-    gpu_memory_device_uuid: str | None = None
-    gpu_memory_device_name: str | None = None
-    gpu_memory_total_bytes: int | None = None
-    kv_num_blocks: int | None = None
-    inference_memory_fraction: float | None = None
-    memory_floor_gb: float | None = None
 
 
 ROCM_RUNTIME = SoakRuntime(
@@ -338,39 +254,6 @@ VULKAN_ENDURANCE_RUNTIME = dataclasses.replace(
     VULKAN_RUNTIME,
     variant_id=VULKAN_ENDURANCE_VARIANT,
 )
-CUDA_ENDURANCE_RUNTIME = SoakRuntime(
-    variant_id=CUDA_ENDURANCE_VARIANT,
-    backend="cuda",
-    build_spec=CUDA_BUILD_SPEC,
-    gpu_memory_scope="device_global",
-    gpu_memory_source="nvml_used",
-    graph_execution_required=False,
-    wave_concurrency=CUDA_QUALIFIED_WAVE_CONCURRENCY,
-    prompt_words=CUDA_QUALIFIED_PROMPT_WORDS,
-    prompt_assignment=COHORT_BY_CYCLE,
-    max_tokens=32,
-    cancel_every_waves=4,
-    cancellation_max_tokens=256,
-    cancellation_prompt_words=48,
-    request_timeout_seconds=900.0,
-    max_steady_state_warmup_waves=16,
-    graph_cache_max=8,
-    min_stabilization_cycles=4,
-    max_stabilization_cycles=8,
-    required_stable_cycles=2,
-    stabilization_gpu_delta_limit_bytes=64 * 1024 * 1024,
-    stabilization_rss_delta_limit_bytes=16 * 1024 * 1024,
-    active_gpu_peak_growth_limit_bytes=512 * 1024 * 1024,
-    vulkan_allocation_growth_limit_count=None,
-    vulkan_buffer_pool_gb=0.0,
-    setup_deadline_seconds=1800.0,
-    gpu_memory_device_uuid=CUDA_GPU_UUID,
-    gpu_memory_device_name=CUDA_GPU_NAME,
-    gpu_memory_total_bytes=CUDA_GPU_TOTAL_BYTES,
-    kv_num_blocks=CUDA_KV_BLOCKS,
-    inference_memory_fraction=CUDA_INFERENCE_MEMORY_FRACTION,
-    memory_floor_gb=CUDA_MEMORY_FLOOR_GB,
-)
 RUNTIMES = {
     runtime.variant_id: runtime
     for runtime in (
@@ -378,7 +261,6 @@ RUNTIMES = {
         ROCM_ENDURANCE_RUNTIME,
         VULKAN_RUNTIME,
         VULKAN_ENDURANCE_RUNTIME,
-        CUDA_ENDURANCE_RUNTIME,
     )
 }
 
@@ -392,51 +274,6 @@ def runtime_for_variant(variant: str) -> SoakRuntime:
         ) from exc
 
 
-def validate_cuda_wsl2_runner_environment(source: dict[str, str]) -> None:
-    allowed = (
-        mixed.RUNNER_OWNED_KILN_ENVIRONMENT
-        | mixed.WSL2_RUNNER_OWNED_KILN_ENVIRONMENT
-    )
-    unexpected = sorted(
-        key for key in source if key.startswith("KILN_") and key not in allowed
-    )
-    if unexpected:
-        raise SoakError(
-            "CUDA endurance rejects ambient Kiln controls: "
-            + ", ".join(unexpected)
-        )
-    expected = {
-        mixed.VARIANT_ENV: CUDA_ENDURANCE_VARIANT,
-        "KILN_QUALIFICATION_NETWORK_ISOLATION": (
-            "util-linux-unshare-user-net-pid-landlock-v1"
-        ),
-        "KILN_WSL2_SCOPE_BOUNDARY": "systemd-user-scope-feedback-v1",
-        "KILN_WSL2_SCOPE_CPU_QUOTA_PERCENT": str(
-            CUDA_WSL2_CPU_QUOTA_PERCENT
-        ),
-        "KILN_WSL2_SCOPE_MEMORY_MAX_BYTES": str(
-            CUDA_WSL2_MEMORY_MAX_BYTES
-        ),
-        "KILN_WSL2_SCOPE_PIDS_MAX": str(CUDA_WSL2_PIDS_MAX),
-    }
-    for name, expected_value in expected.items():
-        if source.get(name) != expected_value:
-            raise SoakError(
-                f"CUDA endurance requires {name}={expected_value!r}, "
-                f"got {source.get(name)!r}"
-            )
-    if not source.get(mixed.RESULT_ENV):
-        raise SoakError(f"CUDA endurance requires {mixed.RESULT_ENV}")
-    if re.fullmatch(
-        r"kiln-wsl-scope-[0-9a-f]{32}",
-        source.get("KILN_WSL2_SCOPE_UNIT", ""),
-    ) is None:
-        raise SoakError("CUDA endurance scope unit is invalid")
-    if re.fullmatch(
-        r"[1-9][0-9]*",
-        source.get("KILN_WSL2_SCOPE_HOST_UID", ""),
-    ) is None:
-        raise SoakError("CUDA endurance scope host UID is invalid")
 def build_phase_deadline(started: float, runtime: SoakRuntime) -> float:
     return started + runtime.build_spec.timeout_seconds
 
@@ -617,9 +454,6 @@ ROCM_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     **METRIC_DEFINITIONS,
     **HOST_SAFETY_METRIC_DEFINITIONS,
     **ACCELERATOR_TELEMETRY_METRIC_DEFINITIONS,
-}
-CUDA_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
-    **METRIC_DEFINITIONS,
 }
 VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     **METRIC_DEFINITIONS,
@@ -832,11 +666,7 @@ def effective_config(
             "stabilization_memory_boundary": (
                 "process_drm_and_owned_buffers"
                 if runtime.backend == "vulkan"
-                else (
-                    "nvml_device_and_rss"
-                    if runtime.backend == "cuda"
-                    else "gpu_and_rss"
-                )
+                else "gpu_and_rss"
             ),
             "stabilization_max_cycles": runtime.max_stabilization_cycles,
             "stabilization_min_cycles": runtime.min_stabilization_cycles,
@@ -861,45 +691,25 @@ def effective_config(
         effective["batching"] = base["batching"]
     if "model" in base:
         effective["model"] = base["model"]
-    if runtime.backend in {"rocm", "vulkan"}:
-        effective["soak"]["accelerator_telemetry"] = {
-            "active_busy_floor_percent": (
-                ACCELERATOR_TELEMETRY_ACTIVE_BUSY_FLOOR_PERCENT
-            ),
-            "amd_gpu_vendor_id": AMD_GPU_VENDOR_ID,
-            "device_selector": "exactly_one_amd_drm_device",
-            "mode": (
-                "required"
-                if runtime.accelerator_telemetry_required
-                else "if_available"
-            ),
-            "poll_interval_ms": int(HOST_GUARD_POLL_INTERVAL_SECONDS * 1000),
-            "sources": {
-                "busy": "drm_device/gpu_busy_percent",
-                "power": "amdgpu_hwmon/power_PPT_average",
-                "sclk": "amdgpu_hwmon/freq_sclk_input",
-                "sclk_advertised_max": "drm_device/pp_dpm_sclk",
-            },
-        }
-    if runtime.backend == "cuda":
-        effective["soak"]["gpu_memory_device"] = {
-            "name": runtime.gpu_memory_device_name,
-            "total_bytes": runtime.gpu_memory_total_bytes,
-            "uuid": runtime.gpu_memory_device_uuid,
-        }
-        effective["soak"]["external_wsl2_boundary"] = {
-            "containment": "util-linux-unshare-user-net-pid-landlock-v1",
-            "cpu_quota_percent": CUDA_WSL2_CPU_QUOTA_PERCENT,
-            "memory_max_bytes": CUDA_WSL2_MEMORY_MAX_BYTES,
-            "duration_accounting": "measurement_wall_seconds",
-            "pids_max": CUDA_WSL2_PIDS_MAX,
-            "scope": "systemd-user-scope-v1",
-        }
-        effective["soak"]["server_memory"] = {
-            "inference_memory_fraction": runtime.inference_memory_fraction,
-            "kv_num_blocks": runtime.kv_num_blocks,
-            "memory_floor_gb": runtime.memory_floor_gb,
-        }
+    effective["soak"]["accelerator_telemetry"] = {
+        "active_busy_floor_percent": (
+            ACCELERATOR_TELEMETRY_ACTIVE_BUSY_FLOOR_PERCENT
+        ),
+        "amd_gpu_vendor_id": AMD_GPU_VENDOR_ID,
+        "device_selector": "exactly_one_amd_drm_device",
+        "mode": (
+            "required"
+            if runtime.accelerator_telemetry_required
+            else "if_available"
+        ),
+        "poll_interval_ms": int(HOST_GUARD_POLL_INTERVAL_SECONDS * 1000),
+        "sources": {
+            "busy": "drm_device/gpu_busy_percent",
+            "power": "amdgpu_hwmon/power_PPT_average",
+            "sclk": "amdgpu_hwmon/freq_sclk_input",
+            "sclk_advertised_max": "drm_device/pp_dpm_sclk",
+        },
+    }
     if runtime.backend == "rocm":
         effective["soak"]["rocm_graph_admission_policy"] = (
             ROCM_GRAPH_ADMISSION_POLICY
@@ -1680,8 +1490,6 @@ def process_drm_memory_bytes(pid: int, proc_root: Path = Path("/proc")) -> int:
 
 
 def gpu_memory_bytes(port: int, pid: int, runtime: SoakRuntime) -> int:
-    if runtime.gpu_memory_source == "nvml_used":
-        raise SoakError("NVML device memory requires the persistent sampler")
     if runtime.gpu_memory_scope == "server_process":
         return process_drm_memory_bytes(pid)
     if runtime.gpu_memory_scope != "device_global":
@@ -1701,45 +1509,6 @@ class GpuMemorySampler:
         self.samples: list[int] = []
         self.errors: list[str] = []
         self._read_lock = threading.Lock()
-        self._nvml_counter: device_memory.NvmlMemoryCounter | None = None
-        self._counter_closed = False
-        if runtime.gpu_memory_source == "nvml_used":
-            if runtime.gpu_memory_device_uuid is None:
-                raise SoakError("NVML memory sampling requires an exact GPU UUID")
-            self._nvml_counter = device_memory.NvmlMemoryCounter(
-                None,
-                device_uuid=runtime.gpu_memory_device_uuid,
-            )
-            try:
-                identity = self._nvml_counter.receipt_identity().get("device")
-            except Exception as exc:
-                try:
-                    self._nvml_counter.close()
-                except Exception as close_exc:
-                    raise SoakError(
-                        "cannot bind NVML device identity and cannot close its "
-                        f"counter: {exc}; {close_exc}"
-                    ) from exc
-                finally:
-                    self._counter_closed = True
-                raise SoakError(
-                    f"cannot bind NVML device identity: {exc}"
-                ) from exc
-            expected_identity = {
-                "uuid": runtime.gpu_memory_device_uuid,
-                "name": runtime.gpu_memory_device_name,
-                "total_bytes": runtime.gpu_memory_total_bytes,
-            }
-            if not isinstance(identity, dict) or any(
-                identity.get(name) != value
-                for name, value in expected_identity.items()
-            ):
-                self._nvml_counter.close()
-                self._counter_closed = True
-                raise SoakError(
-                    f"NVML device identity {identity!r} does not match "
-                    f"{expected_identity!r}"
-                )
         self.thread = threading.Thread(
             target=self._run, name="qualification-gpu-memory-sampler"
         )
@@ -1761,15 +1530,6 @@ class GpuMemorySampler:
 
     def close(self) -> None:
         self.stop_sampling()
-        if self._nvml_counter is not None and not self._counter_closed:
-            try:
-                with self._read_lock:
-                    self._nvml_counter.close()
-            except Exception as exc:
-                if len(self.errors) < 8:
-                    self.errors.append(f"{type(exc).__name__}: {exc}")
-            finally:
-                self._counter_closed = True
 
     def read_bytes(self) -> int:
         with self._read_lock:
@@ -1777,13 +1537,6 @@ class GpuMemorySampler:
                 raise SoakError(
                     "GPU memory sampler previously failed: " + ", ".join(self.errors)
                 )
-            if self._nvml_counter is not None:
-                if self._counter_closed:
-                    raise SoakError("NVML memory counter is already closed")
-                try:
-                    return self._nvml_counter.read_bytes()
-                except Exception as exc:
-                    raise SoakError(f"NVML memory sampling failed: {exc}") from exc
             return gpu_memory_bytes(self.port, self.pid, self.runtime)
 
     def _sample(self) -> None:
@@ -2733,8 +2486,6 @@ def metric_definitions(
         return ROCM_METRIC_DEFINITIONS
     if runtime.backend == "vulkan":
         return VULKAN_METRIC_DEFINITIONS
-    if runtime.backend == "cuda":
-        return CUDA_METRIC_DEFINITIONS
     raise SoakError(f"unsupported soak metric backend {runtime.backend!r}")
 
 
@@ -2890,8 +2641,6 @@ def execute(
     memory_growth_limit_bytes: int,
     runtime: SoakRuntime = ROCM_RUNTIME,
 ) -> tuple[list[dict[str, Any]], str | None]:
-    if runtime.backend == "cuda":
-        validate_cuda_wsl2_runner_environment(dict(os.environ))
     binary, binary_hash, build_seconds, runtime_started, setup_deadline = (
         build_binary_for_soak(runtime)
     )
@@ -2915,10 +2664,6 @@ def execute(
         adapter_dir,
         snapshot_dir,
         rocm_graph_cache_entries=runtime.graph_cache_max,
-        cuda_graphs=False,
-        kv_num_blocks=runtime.kv_num_blocks,
-        inference_memory_fraction=runtime.inference_memory_fraction,
-        memory_floor_gb=runtime.memory_floor_gb,
     )
     process, server_log = mixed.start_server(
         binary, config_path, runtime.variant_id, runtime.build_spec
@@ -2942,8 +2687,7 @@ def execute(
     )
     if host_guard is not None:
         host_guard.start()
-    if runtime.backend in {"rocm", "vulkan"}:
-        accelerator_sampler.start()
+    accelerator_sampler.start()
     shutdown: mixed.ShutdownOutcome | None = None
     snapshot_residue: list[str] = []
     values: dict[str, float | int] | None = None
@@ -3872,11 +3616,7 @@ def execute(
         zero_tokens = int(result_evidence.values["zero_token_response_count"])
         values = {
             **result_evidence.values,
-            **(
-                accelerator_sampler.metric_values_since(measurement_started)
-                if runtime.backend in {"rocm", "vulkan"}
-                else {}
-            ),
+            **accelerator_sampler.metric_values_since(measurement_started),
             "batching_error_count": mixed.counter_delta(
                 batching_start, batching_end, "total_errors"
             ),
@@ -4473,27 +4213,26 @@ def execute(
                 values.update(
                     resident_recurrent_state_metric_values(resident_state_end)
                 )
-    if runtime.backend in {"rocm", "vulkan"}:
-        accelerator_values = accelerator_sampler.metric_values_since(
-            measurement_started if measurement_started is not None else math.inf
+    accelerator_values = accelerator_sampler.metric_values_since(
+        measurement_started if measurement_started is not None else math.inf
+    )
+    values.update(accelerator_values)
+    if accelerator_sampler.errors:
+        failures.append(
+            "accelerator telemetry errors: "
+            + ", ".join(accelerator_sampler.errors)
         )
-        values.update(accelerator_values)
-        if accelerator_sampler.errors:
+    if runtime.accelerator_telemetry_required:
+        if accelerator_values["accelerator_telemetry_available"] != 1:
+            failures.append("required accelerator telemetry was unavailable")
+        if accelerator_values["accelerator_telemetry_sample_count"] < 1:
             failures.append(
-                "accelerator telemetry errors: "
-                + ", ".join(accelerator_sampler.errors)
+                "required accelerator telemetry recorded no measurement samples"
             )
-        if runtime.accelerator_telemetry_required:
-            if accelerator_values["accelerator_telemetry_available"] != 1:
-                failures.append("required accelerator telemetry was unavailable")
-            if accelerator_values["accelerator_telemetry_sample_count"] < 1:
-                failures.append(
-                    "required accelerator telemetry recorded no measurement samples"
-                )
-            if accelerator_values["accelerator_telemetry_active_sample_count"] < 1:
-                failures.append(
-                    "required accelerator telemetry recorded no active GPU samples"
-                )
+        if accelerator_values["accelerator_telemetry_active_sample_count"] < 1:
+            failures.append(
+                "required accelerator telemetry recorded no active GPU samples"
+            )
     assert shutdown is not None
     values["shutdown_forced_count"] = int(shutdown.forced)
     values["shutdown_nonzero_count"] = int(shutdown.returncode != 0)
