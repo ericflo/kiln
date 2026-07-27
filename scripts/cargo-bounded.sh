@@ -32,11 +32,10 @@ Overrides:
   KILN_CARGO_HOST_THERMAL_SENSOR_LABEL
   KILN_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS
   KILN_CARGO_HOST_THERMAL_POLL_MILLISECONDS
-                                  Package-temperature guard for scopes and services. All four
-                                  fields must be set together. If omitted, a unique
-                                  k10temp/Tctl sensor enables a 97000 mC, 250 ms guard.
+                                  Optional package-temperature guard for scopes and services.
+                                  All four fields must be set together.
   KILN_WSL2_THERMAL_POLICY_SHA256
-                                  Required outer thermal supervisor binding in
+                                  Optional outer thermal supervisor binding in
                                   delegated-cgroup mode.
 EOF
 }
@@ -243,11 +242,16 @@ if [[ "$execution_mode" == "delegated-cgroup" ]]; then
         echo "error: delegated-cgroup mode requires the outer WSL2 thermal supervisor, not a Linux hwmon policy" >&2
         exit 2
     fi
-    if [[ ! "$external_thermal_policy_sha256" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-        echo "error: delegated-cgroup mode requires a valid KILN_WSL2_THERMAL_POLICY_SHA256 binding" >&2
+    if [[ -n "$external_thermal_policy_sha256" ]] \
+        && [[ ! "$external_thermal_policy_sha256" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+        echo "error: KILN_WSL2_THERMAL_POLICY_SHA256 must be a valid SHA-256 binding" >&2
         exit 2
     fi
-    thermal_config_source="external-wsl2-policy:$external_thermal_policy_sha256"
+    if [[ -n "$external_thermal_policy_sha256" ]]; then
+        thermal_config_source="external-wsl2-policy:$external_thermal_policy_sha256"
+    else
+        thermal_config_source="disabled"
+    fi
 elif [[ -n "$host_thermal_policy" ]]; then
     if (( thermal_fields_set != 0 )); then
         echo "error: --host-thermal-policy conflicts with KILN_CARGO_HOST_THERMAL_* fields" >&2
@@ -285,14 +289,7 @@ elif [[ -n "$host_thermal_policy" ]]; then
 fi
 thermal_sensor_path=""
 thermal_poll_seconds=""
-if (( thermal_fields_set == 0 )) && [[ "$execution_mode" != "delegated-cgroup" ]]; then
-    thermal_sensor_name="k10temp"
-    thermal_sensor_label="Tctl"
-    thermal_limit_millicelsius="97000"
-    thermal_poll_milliseconds="250"
-    thermal_config_source="automatic"
-fi
-if (( thermal_fields_set == 4 )) || [[ "$thermal_config_source" == "automatic" ]]; then
+if (( thermal_fields_set == 4 )); then
     if [[ ! "$thermal_limit_millicelsius" =~ ^[1-9][0-9]*$ ]] \
         || (( thermal_limit_millicelsius > 200000 )); then
         echo "error: KILN_CARGO_HOST_THERMAL_LIMIT_MILLICELSIUS must be in 1..=200000, got '$thermal_limit_millicelsius'" >&2
@@ -317,16 +314,7 @@ if (( thermal_fields_set == 4 )) || [[ "$thermal_config_source" == "automatic" ]
             thermal_matches+=("$input_path")
         done
     done
-    if (( ${#thermal_matches[@]} == 0 )) && [[ "$thermal_config_source" == "automatic" ]]; then
-        if [[ "$(cat /proc/sys/kernel/osrelease 2>/dev/null || true)" == *microsoft-standard-WSL2* ]]; then
-            echo "error: WSL2 exposes no Linux package-temperature sensor; use delegated-cgroup mode under the required outer thermal supervisor" >&2
-            exit 2
-        fi
-        thermal_sensor_name=""
-        thermal_sensor_label=""
-        thermal_limit_millicelsius=""
-        thermal_poll_milliseconds=""
-    elif (( ${#thermal_matches[@]} != 1 )); then
+    if (( ${#thermal_matches[@]} != 1 )); then
         echo "error: Cargo host thermal selector name='$thermal_sensor_name' label='$thermal_sensor_label' matched ${#thermal_matches[@]} readable sensors under '$hwmon_root'" >&2
         exit 2
     else
@@ -368,11 +356,7 @@ else
 fi
 
 if [[ "$execution_mode" == "delegated-cgroup" ]]; then
-    if [[ -z "$cpu_quota_percent" ]]; then
-        echo "error: delegated-cgroup mode requires KILN_CARGO_CPU_QUOTA_PERCENT" >&2
-        exit 2
-    fi
-    if (( cpu_quota_percent > 100 )); then
+    if [[ -n "$cpu_quota_percent" ]] && (( cpu_quota_percent > 100 )); then
         echo "error: delegated-cgroup CPU quota must be in 1..=100 percent" >&2
         exit 2
     fi
@@ -396,9 +380,17 @@ if [[ "$execution_mode" == "delegated-cgroup" ]]; then
     scope_host_uid="${KILN_WSL2_SCOPE_HOST_UID:-}"
     if [[ ! "$scope_memory_max" =~ ^[1-9][0-9]*$ ]] \
         || [[ ! "$scope_pids_max" =~ ^[1-9][0-9]*$ ]] \
-        || [[ ! "$scope_host_uid" =~ ^[1-9][0-9]*$ ]] \
-        || [[ "$scope_cpu_quota" != "$cpu_quota_percent" ]]; then
+        || [[ ! "$scope_host_uid" =~ ^[1-9][0-9]*$ ]]; then
         echo "error: malformed WSL2 scope resource binding" >&2
+        exit 2
+    fi
+    if [[ -n "$cpu_quota_percent" ]]; then
+        if [[ "$scope_cpu_quota" != "$cpu_quota_percent" ]]; then
+            echo "error: WSL2 scope CPU binding disagrees with Cargo" >&2
+            exit 2
+        fi
+    elif [[ "$scope_cpu_quota" != "0" ]]; then
+        echo "error: WSL2 scope applies an undeclared CPU quota" >&2
         exit 2
     fi
     current_cgroup="$(awk -F: '$1 == "0" { print $3 }' /proc/self/cgroup)"

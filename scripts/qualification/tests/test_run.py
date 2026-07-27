@@ -364,7 +364,7 @@ class RunnerTests(unittest.TestCase):
             ):
                 run_module.establish_network_isolation(Path("/tmp"))
 
-    def test_wsl_supervision_forwards_the_same_v2_policy_to_scope_pacing(
+    def test_wsl_supervision_keeps_scope_independent_from_optional_pacing(
         self,
     ) -> None:
         policy_path = (
@@ -389,16 +389,24 @@ class RunnerTests(unittest.TestCase):
             / "qualification/host-policies/"
             "rtx4090-laptop-wsl2-boundary-v1.json"
         )
-        with self.assertRaisesRegex(
-            run_module.QualificationRunError,
-            "requires a v2",
-        ):
-            run_module._wsl_supervised_argv(
-                ["/bin/true"],
-                v1_path,
-                run_module.wsl_thermal_exec.load_policy(v1_path),
-                30.0,
-            )
+        hard_limit_command = run_module._wsl_supervised_argv(
+            ["/bin/true"],
+            v1_path,
+            run_module.wsl_thermal_exec.load_policy(v1_path),
+            30.0,
+        )
+        self.assertNotIn("--thermal-pacing-policy", hard_limit_command)
+        self.assertEqual(hard_limit_command.count(str(v1_path)), 1)
+
+        unpaced_command = run_module._wsl_supervised_argv(
+            ["/bin/true"],
+            None,
+            None,
+            30.0,
+        )
+        self.assertEqual(unpaced_command[1], str(run_module.WSL_SCOPE_EXEC))
+        self.assertNotIn(str(run_module.WSL_THERMAL_EXEC), unpaced_command)
+        self.assertNotIn("--thermal-pacing-policy", unpaced_command)
 
     def test_wsl_model_fingerprint_is_paced_scoped_and_bounded(self) -> None:
         policy_path = (
@@ -502,7 +510,7 @@ class RunnerTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     run_module.QualificationRunError,
-                    "failed under thermal/scope supervision",
+                    "failed under scope supervision",
                 ):
                     run_module._supervised_wsl_model_fingerprint(
                         Path("/tmp/model"),

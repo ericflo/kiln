@@ -28,7 +28,6 @@
         "build": {
           "binary": "kiln",
           "cargo_environment_policy": "closed-qualification-test-v1",
-          "cargo_cpu_quota_percent": 50,
           "cargo_execution_mode": "delegated-cgroup",
           "cargo_host_reserve_gib": 3,
           "cargo_jobs": 1,

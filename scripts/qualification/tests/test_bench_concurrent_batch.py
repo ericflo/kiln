@@ -1499,13 +1499,13 @@ class ServingBenchmarkTests(unittest.TestCase):
         )
         self.assertTrue(all(prompt.startswith(shared_prefix) for prompt in prefix_prompts))
         self.assertEqual(len(mixed_lengths), 4)
-        self.assertEqual(bench.DRIVER_VERSION, "23")
+        self.assertEqual(bench.DRIVER_VERSION, "24")
         self.assertEqual(
             bench.PROMPT_TEMPLATE_VERSION, "fixed-serving-profiles-v2"
         )
         self.assertEqual(
             bench.FIXED_PROMPT_TEMPLATE_V2_DRIVER_VERSIONS,
-            {"22", "23"},
+            {"22", "23", "24"},
         )
         self.assertEqual(bench.LONG_PROMPT_REPETITIONS, 61)
         self.assertEqual(bench.LONG_PROMPT_REPETITIONS_V1, 64)
@@ -2560,6 +2560,25 @@ class ServingBenchmarkTests(unittest.TestCase):
                         mutated, driver_version=bench.DRIVER_VERSION
                     )
 
+    def test_current_receipt_can_explicitly_omit_thermal_policy(self) -> None:
+        receipt = {
+            "mode": "not_requested",
+            "unsafe_no_guard_acknowledged": False,
+            "policy": None,
+            "process_group": None,
+            "model_fingerprint": None,
+            "evidence": None,
+        }
+        self.assertEqual(
+            bench.validate_host_thermal_receipt(
+                receipt, driver_version=bench.DRIVER_VERSION
+            ),
+            ("not_requested", True, None),
+        )
+        legacy = json.loads(json.dumps(receipt))
+        with self.assertRaisesRegex(bench.BenchmarkError, "unsupported"):
+            bench.validate_host_thermal_receipt(legacy, driver_version="23")
+
     def test_external_wsl2_scope_requires_exact_cgroup_controls(self) -> None:
         unit = "kiln-wsl-scope-" + "b" * 32
         host_uid = 1000
@@ -3252,6 +3271,15 @@ class ServingBenchmarkTests(unittest.TestCase):
             )
             self.assertEqual(mode, "owned_process_group")
             self.assertTrue(passed)
+            unpaced_lifecycle = json.loads(json.dumps(lifecycle))
+            unpaced_lifecycle["prelaunch_cooldown"] = None
+            self.assertEqual(
+                bench.validate_server_lifecycle(
+                    unpaced_lifecycle,
+                    host_thermal_policy=None,
+                ),
+                ("owned_process_group", True),
+            )
             invalid_lifecycle = json.loads(json.dumps(lifecycle))
             invalid_lifecycle["prelaunch_cooldown"][
                 "temperature_end_millicelsius"
@@ -3264,7 +3292,7 @@ class ServingBenchmarkTests(unittest.TestCase):
                     host_thermal_policy=thermal_record,
                 )
 
-    def test_owned_server_readiness_exit_retains_complete_failed_receipt(self) -> None:
+    def test_unpaced_owned_server_exit_retains_complete_failed_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             executable = root / "failing-server.py"
@@ -3311,8 +3339,6 @@ class ServingBenchmarkTests(unittest.TestCase):
             runtime_artifact.write_text(json.dumps(valid_vllm_manifest()))
             memory_counter = root / "vram-used"
             memory_counter.write_text("1024")
-            thermal_policy = root / "thermal.json"
-            thermal_policy.write_text(json.dumps(valid_host_thermal_policy()))
             output = root / "receipt.json"
             model_fingerprint = {
                 "id": "test-model",
@@ -3342,18 +3368,8 @@ class ServingBenchmarkTests(unittest.TestCase):
                     "fingerprint_model_with_thermal_containment",
                     return_value=(
                         model_fingerprint,
-                        valid_fingerprint_thermal_evidence(),
+                        None,
                     ),
-                ),
-                mock.patch.object(
-                    bench,
-                    "wait_for_prelaunch_cooldown",
-                    return_value=valid_prelaunch_cooldown(),
-                ),
-                mock.patch.object(
-                    bench.thermal,
-                    "HostThermalGuard",
-                    side_effect=FakeThermalGuard,
                 ),
                 mock.patch.object(
                     bench,
@@ -3379,7 +3395,6 @@ class ServingBenchmarkTests(unittest.TestCase):
                         "--warmup-requests=0",
                         f"--memory-path={memory_counter}",
                         "--memory-limit-bytes=2048",
-                        f"--host-thermal-policy={thermal_policy}",
                         f"--server-launch-config={launch_path}",
                         f"--out={output}",
                     ]
@@ -3403,7 +3418,18 @@ class ServingBenchmarkTests(unittest.TestCase):
             self.assertFalse(lifecycle["shutdown"]["forced"])
             self.assertFalse(lifecycle["shutdown"]["process_group_alive_end"])
             self.assertGreater(lifecycle["log"]["bytes"], 0)
-            self.assertIsNone(receipt["host_thermal"]["evidence"]["trip_reason"])
+            self.assertIsNone(lifecycle["prelaunch_cooldown"])
+            self.assertEqual(
+                receipt["host_thermal"],
+                {
+                    "mode": "not_requested",
+                    "unsafe_no_guard_acknowledged": False,
+                    "policy": None,
+                    "process_group": None,
+                    "model_fingerprint": None,
+                    "evidence": None,
+                },
+            )
 
     def test_cli_writes_a_self_hashing_passed_receipt(self) -> None:
         with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
@@ -3871,28 +3897,16 @@ class ServingBenchmarkTests(unittest.TestCase):
             ],
         )
 
-    def test_unsafe_cli_writes_a_valid_failed_diagnostic_receipt(self) -> None:
+    def test_unowned_unguarded_cli_is_rejected(self) -> None:
         with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:
-            return_code, output = self._run_cli_fixture(
-                fake, directory, guarded=False
-            )
-            receipt = bench.strict_json_loads(output.read_bytes())
-            bench.validate_benchmark_receipt(receipt)
-
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                return_code, output = self._run_cli_fixture(
+                    fake, directory, guarded=False
+                )
         self.assertEqual(return_code, 2)
-        self.assertEqual(receipt["verdict"], "failed")
-        self.assertEqual(receipt["runs"][0]["verdict"], "passed")
-        self.assertEqual(
-            receipt["host_thermal"],
-            {
-                "mode": "not_configured",
-                "unsafe_no_guard_acknowledged": True,
-                "policy": None,
-                "process_group": None,
-                "model_fingerprint": None,
-                "evidence": None,
-            },
-        )
+        self.assertFalse(output.exists())
+        self.assertIn("is obsolete", stderr.getvalue())
 
     def test_startup_thermal_trip_writes_a_valid_failed_receipt(self) -> None:
         with FakeServer() as fake, tempfile.TemporaryDirectory() as directory:

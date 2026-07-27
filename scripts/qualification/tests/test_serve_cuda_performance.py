@@ -84,7 +84,7 @@ class CudaPerformanceTests(unittest.TestCase):
         )
         self.assertIn("1", kiln)
         self.assertIn(performance.GPU_UUID, kiln)
-        self.assertIn(str(performance.THERMAL_POLICY), kiln)
+        self.assertNotIn("--external-wsl2-thermal-policy", kiln)
         self.assertIn(str(performance.KILN_LAUNCH), kiln)
         self.assertNotIn("--reference-dir", kiln)
         self.assertIn(str(performance.VLLM_RUNTIME_MANIFEST), vllm)
@@ -153,7 +153,7 @@ class CudaPerformanceTests(unittest.TestCase):
         ) as popen, mock.patch.object(
             performance,
             "_build_elapsed_seconds",
-            return_value=(1.0, 0.0, 1.0),
+            return_value=1.0,
         ), mock.patch.object(
             performance.os,
             "access",
@@ -171,11 +171,11 @@ class CudaPerformanceTests(unittest.TestCase):
             "sha256_file",
             return_value="sha256:" + "a" * 64,
         ):
-            observed_binary, _, active, wall, paused = performance.build_binary(
+            observed_binary, _, wall = performance.build_binary(
                 performance.time.monotonic() + 60.0
             )
         self.assertEqual(observed_binary, binary)
-        self.assertEqual((active, wall, paused), (1.0, 1.0, 0.0))
+        self.assertEqual(wall, 1.0)
         self.assertEqual(
             popen.call_args.args[0],
             [
@@ -199,7 +199,7 @@ class CudaPerformanceTests(unittest.TestCase):
             environment["KILN_CARGO_EXECUTION_MODE"], "delegated-cgroup"
         )
         self.assertEqual(environment["KILN_CARGO_MAX_MEMORY_GIB"], "10")
-        self.assertEqual(environment["KILN_CARGO_CPU_QUOTA_PERCENT"], "50")
+        self.assertNotIn("KILN_CARGO_CPU_QUOTA_PERCENT", environment)
         self.assertNotIn("KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS", environment)
         self.assertNotEqual(environment, os.environ)
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
@@ -214,21 +214,22 @@ class CudaPerformanceTests(unittest.TestCase):
         ), mock.patch.object(
             performance,
             "_build_elapsed_seconds",
-            return_value=(1800.1, 0.0, 1800.1),
+            return_value=1800.1,
         ), mock.patch.object(
             performance,
             "_terminate_build_process",
         ) as terminate:
             with self.assertRaisesRegex(
                 performance.mixed.QualificationError,
-                "1800.000 active seconds",
+                "1800.000 wall seconds",
             ):
                 performance.build_binary(performance.time.monotonic() + 2000.0)
         terminate.assert_called_once_with(process)
 
-    def test_build_rejects_excess_verified_thermal_pacing(self) -> None:
+    def test_build_clock_failure_terminates_group(self) -> None:
         process = mock.Mock()
         process.poll.return_value = None
+        clock_error = performance.mixed.QualificationError("synthetic clock failure")
         with mock.patch.object(
             performance.subprocess,
             "Popen",
@@ -236,61 +237,20 @@ class CudaPerformanceTests(unittest.TestCase):
         ), mock.patch.object(
             performance,
             "_build_elapsed_seconds",
-            return_value=(14401.0, 14400.1, 0.9),
+            side_effect=clock_error,
         ), mock.patch.object(
             performance,
             "_terminate_build_process",
         ) as terminate:
             with self.assertRaisesRegex(
                 performance.mixed.QualificationError,
-                "verified thermal pacing",
-            ):
-                performance.build_binary(performance.time.monotonic() + 16000.0)
-        terminate.assert_called_once_with(process)
-
-    def test_build_evidence_failure_terminates_group(self) -> None:
-        process = mock.Mock()
-        process.poll.return_value = None
-        evidence_error = performance.pacing.WslPacingEvidenceError(
-            "synthetic malformed stream"
-        )
-        with mock.patch.object(
-            performance.subprocess,
-            "Popen",
-            return_value=process,
-        ), mock.patch.object(
-            performance,
-            "_build_elapsed_seconds",
-            side_effect=evidence_error,
-        ), mock.patch.object(
-            performance,
-            "_terminate_build_process",
-        ) as terminate:
-            with self.assertRaisesRegex(
-                performance.pacing.WslPacingEvidenceError,
-                "synthetic malformed stream",
+                "synthetic clock failure",
             ):
                 performance.build_binary(performance.time.monotonic() + 60.0)
         terminate.assert_called_once_with(process)
 
-    def test_build_elapsed_subtracts_only_verified_overlap(self) -> None:
-        snapshot = mock.Mock()
-        snapshot.overlap_seconds.return_value = 500.0
-        with mock.patch.object(
-            performance.pacing,
-            "read_pacing_snapshot",
-            return_value=snapshot,
-        ) as read:
-            observed = performance._build_elapsed_seconds(
-                100.0,
-                700.0,
-                {"fixture": "environment"},
-            )
-        self.assertEqual(observed, (600.0, 500.0, 100.0))
-        read.assert_called_once_with(
-            {"fixture": "environment"},
-            expected_policy_sha256=performance.THERMAL_POLICY_CONTENT_SHA256,
-        )
+    def test_build_elapsed_uses_wall_time(self) -> None:
+        self.assertEqual(performance._build_elapsed_seconds(100.0, 700.0), 600.0)
 
     def test_build_termination_escalates_to_process_group_kill(self) -> None:
         process = mock.Mock()
@@ -348,7 +308,7 @@ class CudaPerformanceTests(unittest.TestCase):
                     ],
                 }
             summary = {
-                "schema": "kiln.serving-benchmark-campaign.v9",
+                "schema": "kiln.serving-benchmark-campaign.v10",
                 "created_at": "2026-07-25T00:00:00+00:00",
                 "campaign_id": "fixture-campaign",
                 "prompt_set_id": performance.PROMPT_SET_ID,

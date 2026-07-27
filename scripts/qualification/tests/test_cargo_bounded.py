@@ -43,12 +43,12 @@ class BoundedCargoTests(unittest.TestCase):
             "KILN_CARGO_ENVIRONMENT_POLICY=closed-qualification-test-v1",
             "KILN_CARGO_EXECUTION_MODE=delegated-cgroup",
             "KILN_CARGO_JOBS=1",
-            "KILN_CARGO_CPU_QUOTA_PERCENT=50",
             "KILN_CARGO_MIN_AVAILABLE_GIB=14",
             "KILN_CARGO_PRIVATE_NETWORK=1",
             "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS=1740",
         ):
             self.assertIn(f"export {assignment}", source)
+        self.assertNotIn("export KILN_CARGO_CPU_QUOTA_PERCENT=", source)
         self.assertIn('exec scripts/cargo-bounded.sh "$@"', source)
 
     def test_memory_preflight_refuses_before_launching_cargo(self) -> None:

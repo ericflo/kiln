@@ -41,7 +41,7 @@ from typing import Any, Callable, Iterable
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "23"
+DRIVER_VERSION = "24"
 SUPPORTED_DRIVER_VERSIONS = {
     "2",
     "3",
@@ -64,50 +64,52 @@ SUPPORTED_DRIVER_VERSIONS = {
     "20",
     "21",
     "22",
+    "23",
     DRIVER_VERSION,
 }
 THERMAL_DRIVER_VERSIONS = {
     "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION,
+    "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION,
 }
 LIFECYCLE_DRIVER_VERSIONS = {
     "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION,
+    "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION,
 }
 PRELAUNCH_DRIVER_VERSIONS = {
     "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION,
+    "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION,
 }
 OUTPUT_EVIDENCE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION,
+    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION,
 }
 MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {
-    "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION,
+    "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION,
 }
 RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS = {
-    "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION,
+    "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION,
 }
 ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION,
+    "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION,
 }
 ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION,
+    "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION,
 }
 REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION,
+    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION,
 }
 IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS = {
-    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION,
+    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION,
 }
-COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", "15", "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION}
-MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", "15", "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION}
-REQUEST_PERFORMANCE_DRIVER_VERSIONS = {"15", "16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION}
-PROMPT_SET_IDENTITY_DRIVER_VERSIONS = {"16", "17", "18", "19", "20", "21", "22", DRIVER_VERSION}
-GRAPH_PARITY_DRIVER_VERSIONS = {"17", "18", "19", "20", "21", "22", DRIVER_VERSION}
-REFERENCE_ROLE_DRIVER_VERSIONS = {"17", "18", "19", "20", "21", "22", DRIVER_VERSION}
-ACTOR_ONLY_DIAGNOSTICS_DRIVER_VERSIONS = {"18", "19", "20", "21", "22", DRIVER_VERSION}
-TYPED_MEMORY_SOURCE_DRIVER_VERSIONS = {"19", "20", "21", "22", DRIVER_VERSION}
-EXTERNAL_WSL2_THERMAL_DRIVER_VERSIONS = {"20", "21", "22", DRIVER_VERSION}
+COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION}
+MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", "15", "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION}
+REQUEST_PERFORMANCE_DRIVER_VERSIONS = {"15", "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION}
+PROMPT_SET_IDENTITY_DRIVER_VERSIONS = {"16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION}
+GRAPH_PARITY_DRIVER_VERSIONS = {"17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION}
+REFERENCE_ROLE_DRIVER_VERSIONS = {"17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION}
+ACTOR_ONLY_DIAGNOSTICS_DRIVER_VERSIONS = {"18", "19", "20", "21", "22", "23", DRIVER_VERSION}
+TYPED_MEMORY_SOURCE_DRIVER_VERSIONS = {"19", "20", "21", "22", "23", DRIVER_VERSION}
+EXTERNAL_WSL2_THERMAL_DRIVER_VERSIONS = {"20", "21", "22", "23", DRIVER_VERSION}
+OPTIONAL_THERMAL_DRIVER_VERSIONS = {DRIVER_VERSION}
 REFERENCE_ROLES = {
     "qualification_gate",
     "same_artifact_graph_eager_discriminator",
@@ -116,7 +118,7 @@ OUTPUT_EVIDENCE_MAX_UTF8_BYTES_PER_REQUEST = 1024 * 1024
 LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
 FIXED_PROMPT_TEMPLATE_VERSION_V1 = "fixed-serving-profiles-v1"
 PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v2"
-FIXED_PROMPT_TEMPLATE_V2_DRIVER_VERSIONS = {"22", DRIVER_VERSION}
+FIXED_PROMPT_TEMPLATE_V2_DRIVER_VERSIONS = {"22", "23", DRIVER_VERSION}
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -3772,6 +3774,18 @@ def validate_host_thermal_receipt(
             "receipt.host_thermal.unsafe_no_guard_acknowledged must be boolean"
         )
     mode = host_thermal["mode"]
+    if (
+        driver_version in OPTIONAL_THERMAL_DRIVER_VERSIONS
+        and mode == "not_requested"
+    ):
+        if host_thermal["unsafe_no_guard_acknowledged"] is not False or any(
+            host_thermal[name] is not None
+            for name in ("policy", "process_group", "evidence", "model_fingerprint")
+        ):
+            raise BenchmarkError(
+                "unrequested host thermal evidence must contain only null payloads"
+            )
+        return mode, True, None
     if mode == "not_configured":
         if host_thermal["unsafe_no_guard_acknowledged"] is not True or any(
             host_thermal[name] is not None
@@ -4069,10 +4083,14 @@ def validate_server_lifecycle(
     prelaunch_passed = True
     if driver_version in PRELAUNCH_DRIVER_VERSIONS:
         if host_thermal_policy is None:
-            raise BenchmarkError(
-                "owned server pre-launch cooldown requires a host thermal policy"
-            )
-        if (
+            if (
+                driver_version not in OPTIONAL_THERMAL_DRIVER_VERSIONS
+                or lifecycle["prelaunch_cooldown"] is not None
+            ):
+                raise BenchmarkError(
+                    "owned server pre-launch cooldown requires a host thermal policy"
+                )
+        elif (
             driver_version in EXTERNAL_WSL2_THERMAL_DRIVER_VERSIONS
             and host_thermal_policy.get("schema") in WSL2_THERMAL_POLICY_SCHEMAS
         ):
@@ -4720,7 +4738,19 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
             and host_thermal_mode == "external_wsl2_boundary"
             and server_lifecycle_mode == "owned_process_group"
         )
-        if server_lifecycle_mode != host_thermal_mode and not external_wsl2_owned:
+        thermal_not_requested = (
+            driver_version in OPTIONAL_THERMAL_DRIVER_VERSIONS
+            and host_thermal_mode == "not_requested"
+        )
+        if thermal_not_requested and server_lifecycle_mode != "owned_process_group":
+            raise BenchmarkError(
+                "unrequested thermal policy requires an owned server lifecycle"
+            )
+        if (
+            server_lifecycle_mode != host_thermal_mode
+            and not external_wsl2_owned
+            and not thermal_not_requested
+        ):
             raise BenchmarkError(
                 "receipt server lifecycle and host thermal ownership modes disagree"
             )
@@ -4728,6 +4758,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
             driver_version in PRELAUNCH_DRIVER_VERSIONS
             and server_lifecycle_mode == "owned_process_group"
             and not external_wsl2_owned
+            and not thermal_not_requested
             and receipt["server_lifecycle"]["prelaunch_cooldown"]["sensor_path"]
             != receipt["host_thermal"]["evidence"]["sensor_path"]
         ):
@@ -5143,6 +5174,7 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
             "attached_process_group",
             "owned_process_group",
             "external_wsl2_boundary",
+            "not_requested",
         }
         and host_thermal_passed
         and server_lifecycle_passed
@@ -6514,8 +6546,8 @@ def compare_reference(receipt: dict[str, Any], reference_path: Path) -> dict[str
     reference_model = reference.get("engine", {}).get("model_identity", {})
     if current_model.get("content_sha256") != reference_model.get("content_sha256"):
         raise BenchmarkError("reference receipt has different model content")
-    current_thermal = receipt.get("host_thermal", {}).get("policy", {})
-    reference_thermal = reference.get("host_thermal", {}).get("policy", {})
+    current_thermal = receipt.get("host_thermal", {}).get("policy") or {}
+    reference_thermal = reference.get("host_thermal", {}).get("policy") or {}
     if current_thermal.get("content_sha256") != reference_thermal.get(
         "content_sha256"
     ):
@@ -7012,7 +7044,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     host_safety.add_argument(
         "--unsafe-no-host-thermal-guard",
         action="store_true",
-        help="run without host thermal containment and force a diagnostic-only verdict",
+        help="legacy diagnostic marker; thermal policy is optional in current receipts",
     )
     server_ownership = parser.add_mutually_exclusive_group()
     server_ownership.add_argument(
@@ -7202,33 +7234,32 @@ def main(argv: list[str] | None = None) -> int:
                 validate_benchmark_receipt_path(path)
                 print(f"OK {path}")
             return 0
-        if (
-            args.host_thermal_policy is None
-            and args.external_wsl2_thermal_policy is None
-            and not args.unsafe_no_host_thermal_guard
-        ):
-            raise BenchmarkError(
-                "measured runs require --host-thermal-policy or "
-                "--external-wsl2-thermal-policy plus server ownership; "
-                "use --unsafe-no-host-thermal-guard only for diagnostic counterevidence"
-            )
         if args.run_id is None or args.prompt_set_id is None:
             raise BenchmarkError(
                 "measured runs require explicit --run-id and --prompt-set-id values"
             )
         if args.run_id == args.prompt_set_id:
             raise BenchmarkError("--run-id and --prompt-set-id must be distinct")
-        has_server_owner = (
-            args.server_pid is not None or args.server_launch_config is not None
-        )
-        has_thermal_boundary = (
-            args.host_thermal_policy is not None
-            or args.external_wsl2_thermal_policy is not None
-        )
-        if has_thermal_boundary != has_server_owner:
+        if args.unsafe_no_host_thermal_guard:
             raise BenchmarkError(
-                "a thermal boundary and exactly one server owner must be provided together"
+                "--unsafe-no-host-thermal-guard is obsolete; use an owned "
+                "--server-launch-config without a thermal policy"
             )
+        if args.server_pid is None and args.server_launch_config is None:
+            raise BenchmarkError(
+                "measured runs require exactly one server owner"
+            )
+        if args.server_pid is not None and args.host_thermal_policy is None:
+            raise BenchmarkError(
+                "--server-pid is only supported with --host-thermal-policy; "
+                "use --server-launch-config for an owned unguarded server"
+            )
+        if (
+            args.host_thermal_policy is not None
+            and args.server_pid is None
+            and args.server_launch_config is None
+        ):
+            raise BenchmarkError("--host-thermal-policy requires a server owner")
         if (
             args.external_wsl2_thermal_policy is not None
             and args.server_launch_config is None
@@ -7382,7 +7413,7 @@ def main(argv: list[str] | None = None) -> int:
                     thermal_guard.trip_reason
                     or "host thermal pacing failed to settle before server probes"
                 )
-        elif args.external_wsl2_thermal_policy is not None:
+        elif args.server_launch_config is not None:
             assert launch_config is not None
             owned_server = launch_owned_server(launch_config, args.run_id)
 
@@ -7767,8 +7798,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             finalization_checks["host_thermal_handoff"] = "not_applicable"
             host_thermal_record = {
-                "mode": "not_configured",
-                "unsafe_no_guard_acknowledged": True,
+                "mode": "not_requested",
+                "unsafe_no_guard_acknowledged": False,
                 "policy": None,
                 "process_group": None,
                 "model_fingerprint": None,
@@ -7909,6 +7940,7 @@ def main(argv: list[str] | None = None) -> int:
                 "attached_process_group",
                 "owned_process_group",
                 "external_wsl2_boundary",
+                "not_requested",
             }
             and len(runs) == len(sizes) * args.repeats
         ):
@@ -7926,6 +7958,7 @@ def main(argv: list[str] | None = None) -> int:
                 "attached_process_group",
                 "owned_process_group",
                 "external_wsl2_boundary",
+                "not_requested",
             }
             and all(
                 status in {"passed", "not_applicable"}

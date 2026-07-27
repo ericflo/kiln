@@ -4,54 +4,37 @@ Kiln and vLLM serving comparisons use one fail-closed OpenAI-compatible driver:
 `scripts/bench-concurrent-batch.py`. The driver sends only streaming
 `POST /v1/chat/completions` requests on the measured path. Kiln health requests
 are untimed side evidence. A passing receipt binds the source tree, runtime,
-model content, workload, memory source, process group, host thermal policy, and
-complete lifecycle.
+model content, workload, memory source, owned process group, and complete
+lifecycle. A host thermal policy is an optional, separately requested lab
+control.
 
 ## Server Ownership
 
-Every potentially passing measured run requires one thermal boundary and
-exactly one server ownership mode. Native Linux uses `--host-thermal-policy`.
-WSL2 may instead use `--external-wsl2-thermal-policy` only from inside the
-qualification runner's already active Windows/NVML supervisor, private
-namespace, and exact user scope:
+Every potentially passing measured run requires exactly one server ownership
+mode. Driver v24 does not require a temperature policy. Native Linux may add
+`--host-thermal-policy`; a legacy supervised WSL2 run may add
+`--external-wsl2-thermal-policy` only from inside the qualification runner's
+already active Windows/NVML supervisor, private namespace, and exact user
+scope:
 
 - `--server-launch-config PATH` is the default for local qualification. The
-  driver fingerprints the model in its own guarded child lifecycle, fingerprints
-  source and runtime, then requires stable host cooldown before server process
-  creation. It launches a new process group, arms thermal containment before the
-  first readiness request, requires the loopback port to be unbound before
-  launch, waits for `/v1/models`, proves the listening socket belongs to that
-  process group, runs the workload, verifies the live runtime, sends `SIGTERM`,
-  requires the whole process group to disappear, monitors the hard limit through
-  exit, completes host cooldown, repeats the model fingerprint in a second
-  guarded lifecycle, and hashes the server log.
+  driver fingerprints the model and source/runtime, launches a new process
+  group, requires the loopback port to be unbound before launch, waits for
+  `/v1/models`, proves the listening socket belongs to that process group, runs
+  the workload, verifies the live runtime, sends `SIGTERM`, requires the whole
+  process group to disappear, repeats the model fingerprint, and hashes the
+  server log. When an optional policy is selected, its prelaunch, runtime, and
+  handoff checks wrap those same owned phases.
 - `--server-pid PID` attaches to an already running process-group leader. The
   guard is armed before `/v1/models` or `/health`. The driver leaves the process
   alive only after the configured safe-handoff temperature is stable.
-- `--unsafe-no-host-thermal-guard` exists only to retain diagnostic
-  counterevidence. It can never produce a passing receipt.
+- `--unsafe-no-host-thermal-guard` is an obsolete legacy diagnostic marker and
+  is rejected by current measured runs.
 
-Driver v21 requires an owned `--server-launch-config` with the external WSL2
-mode. It revalidates the WSL2 kernel, policy hash, network/Landlock boundary,
-host UID, exact `.scope` cgroup path, 10 GiB memory maximum, zero swap, 512 PID
-maximum, group OOM handling, absence of delegated `cpu.max`, and the outer
-50-percent usage-feedback controller before model hashing or launch. Each
-measured row records wall time and sustainable throughput under that boundary.
-The child receipt deliberately marks the enclosing qualification receipt as
-required: only the parent owns final thermal samples, scope accounting, cleanup,
-and stable handoff, so a child v20 or v21 WSL2 receipt is never sufficient by
-itself.
-
-External WSL2 owned launch uses the same retrying `/v1/models` readiness loop
-as native owned launch. Its startup and shutdown grace periods count wall time
-minus only complete, exact-policy intervals from the controller-authenticated
-thermal-pacing stream. The driver rereads that stream only when the projected
-active deadline is reached. Missing, unsafe, partial, unpaired, policy-drifted,
-or arithmetically invalid evidence rejects the run. A pacing-accounting failure
-during shutdown still sends `SIGKILL` and drains the process group under an
-independent emergency wall bound before surfacing the failure. No controller
-freeze can by itself force shutdown escalation or consume the readiness
-allowance; ordinary delay and CPU-feedback freezes still consume it.
+Current WSL2 performance runs retain network/Landlock, UID-qualified systemd
+scope, memory, zero-swap, PID, group-OOM, process, and cleanup checks. They do
+not require a thermal policy and do not apply a CPU or thermal freeze. Startup,
+shutdown, request, and build deadlines are ordinary wall time.
 
 Linux `killpg(pgid, 0)` also succeeds when every remaining member is a zombie.
 After the owned leader has been reaped, the driver therefore enumerates
@@ -65,15 +48,11 @@ reaped an orphan while preserving fail-closed handling for executable
 descendants, uninterruptible processes, and uncertain membership.
 
 Owned launch eliminates the manual gap in which model loading or inference
-prewarm could run before the guard attached. Driver v8 also removes the
-model-provenance gap: both full model fingerprints run as start-gated child
-process groups under the selected thermal policy and complete their own stable
-post-exit cooldown. The server pre-launch cooldown then clears heat from source
-and runtime hashing plus launch validation before server creation. PID attachment
-remains useful for remote orchestration that already owns process creation, but
-that orchestrator is responsible for containment and its starting host state
-before the benchmark starts. Its server is returned after safe handoff before
-the final guarded fingerprint; it must remain quiescent during that recheck.
+prewarm could run outside the benchmark's process ownership. Legacy guarded
+driver versions also wrapped both fingerprints and the server lifecycle in a
+temperature policy; retained receipts preserve that evidence, but it is not a
+current performance requirement. PID attachment remains available only with an
+explicit host policy; an unguarded current run must use owned launch.
 
 ### Model-fingerprint read pacing
 
@@ -91,7 +70,7 @@ argv field in its closed environment. Receipt schema
 `kiln.serving-model-fingerprint-thermal.v2` records it as
 `host_thermal.model_fingerprint.read_mib_per_second` beside the exact worker
 implementation and Python hashes plus initial/final thermal lifecycles.
-Campaign v7 records and forwards the same value to every profile. The setting
+Campaign v10 records and forwards the same value to every profile. The setting
 applies only to provenance reads; it cannot pace server startup or inference
 and is outside every request-timing window. Standalone `model_fingerprint.py`
 remains unlimited when its optional `--max-read-mib-per-second` is omitted.
@@ -115,8 +94,7 @@ checks shutdown again after embedding upload, transpose, W8 packing, final norm,
 and rotary initialization, and after every layer. The current backend operation
 remains non-interruptible. API evidence binds reserved and completed bytes and
 layers; the exclusive content-hashed log binds intermediate stages. Neither
-policy is active after readiness or permits weakening the external thermal
-guard.
+policy is active after readiness.
 
 Owned mode accepts only an origin-only loopback HTTP base URL. On Linux it
 matches the listening TCP/TCP6 socket inode with descriptors held by the leader
@@ -287,34 +265,12 @@ place after it has a retained receipt.
 On the NVIDIA machine, begin from a clean fast-forward of `origin/main` and run
 the matching environment, correctness, and lifecycle variants in [Local
 Hardware Qualification](qualification.md#cuda-and-metal-core-handoff).
-Commit and push each passing receipt before proceeding. Then inventory the
-actual host-package sensors:
+Commit and push each passing receipt before proceeding. Host-specific thermal
+policies are optional lab controls, not portable serving requirements. They
+must not pace measured work or be used to explain away wall-clock latency.
 
-```bash
-python3 scripts/qualification/prepare_host_thermal_policy.py inventory
-```
-
-That inventory/policy path applies to native Linux. The current WSL2 laptop has
-no readable Linux package sensor and must not convert that absence into a
-disabled guard. Its committed
-`qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json` instead
-binds the exact Windows `\_TZ.THRM` formatted thermal zone and exact NVML GPU
-UUID. Pass it as `--wsl2-thermal-policy` to every CUDA qualification command.
-The runner supervises Windows/NVML outside Landlock and places the full private
-namespace in the repaired user scope. A WSL run without that policy is rejected
-before artifacts are created. The v2 policy adds cgroup pacing at 80/75 C
-host/GPU with 75.05/70 C three-sample resume targets and a 300-second pause
-deadline; its outer 95/85 C hard-trip boundary remains independent. The host
-value is the exact nearest reading exposed by the Windows counter's
-tenth-Kelvin representation; it does not alter either hard limit.
-
-After a hard trip, `wsl_thermal_exec.py` terminates the complete supervised
-child, continues sampling with no workload alive until the configured stable
-handoff target is reached, emits the final safe temperatures, and only then
-returns failure. A trip can never be reclassified as success; telemetry loss or
-handoff timeout remains a failure and no receipt may claim completed handoff.
-
-Choose a uniquely resolving CPU/package sensor, a hard limit supported by the
+Only when a separate lab control has been explicitly requested, choose a
+uniquely resolving CPU/package sensor, a hard limit supported by the
 machine or CPU vendor, and a conservative idle handoff target observed to be
 reachable on that host. A GPU-edge sensor alone is insufficient because source
 builds, model hashing, tokenization, and server supervision also heat the host.
@@ -340,15 +296,12 @@ non-unique by the inventory. Review and commit this machine input before a long
 build or accelerator run. The desktop uses its own ID and output file because
 its CPU, chassis, cooling, and safe threshold may differ.
 
-Build the exact CUDA server through the same policy. The wrapper derives its
-selector, hard limit, cadence, and stable prelaunch handoff from the
-content-hashed document; the
-remaining bounds are build-resource policy rather than product configuration:
+An explicitly guarded native-Linux build can reuse that policy. The remaining
+bounds are build-resource policy rather than product configuration:
 
 ```bash
 PATH="$HOME/.cargo/bin:$PATH" \
 CUDARC_CUDA_VERSION=12080 \
-KILN_CARGO_CPU_QUOTA_PERCENT=50 \
 KILN_CARGO_MIN_AVAILABLE_GIB=12 \
 scripts/cargo-bounded.sh \
   --host-thermal-policy qualification/host-policies/rtx4090-laptop-serving-hard-limit-v1.json \
@@ -366,10 +319,10 @@ silently choosing one authority.
 
 Do not use the Linux `--host-thermal-policy` build example on WSL2.
 `cargo-test-bounded.sh` accepts the WSL boundary only after the qualification
-runner has established and bound the outer thermal supervisor and user scope.
-A standalone WSL `cargo-bounded.sh` invocation therefore fails closed. Use a
-committed qualification workload for any source build whose output will support
-WSL evidence.
+runner has established the user scope and private namespace. A standalone WSL
+`cargo-bounded.sh` invocation therefore fails closed. Use a committed
+qualification workload for any source build whose output will support WSL
+evidence.
 
 Validate the typed server input before loading the model:
 
@@ -400,77 +353,14 @@ cp --reflink=auto "$base/lib/libpython3.12.so.1.0" \
 chmod 0755 .qualification/vllm-cuda-venv/bin/python-kiln
 ```
 
-From the resulting clean source tree, prepare the closed model view above,
-create the empty machine directory, and capture through the performance launch
-JSON:
-
-```bash
-mkdir -p qualification/runtime/vllm/cuda/rtx4090-laptop
-python3 scripts/qualification/capture_vllm_runtime_manifest.py \
-  --server-launch-config qualification/server-launch/vllm-cuda-rtx4090-laptop-serving-performance-v1.json \
-  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json \
-  --output qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json
-```
-
-The capture tool validates the owned-launch contract, inserts only
-`--manifest-only` before the existing vLLM argument boundary, and executes it
-twice with bounded output and a per-capture deadline. It requires two
-byte-identical strict-valid results under the benchmark driver's manifest plus
-launch-binding validators. It publishes the exact repeated bytes
-with fsync and no overwrite, and reports the source commit, manifest hash,
-runtime-content hash, system fingerprint, both stderr hashes, both thermal
-lifecycles, and both scope lifecycles. The launch JSON must be a tracked regular
-file whose bytes match `HEAD`. On WSL2, omitting the policy is rejected
-automatically. The explicit
-content-hashed repository policy and supervisor have the same file and commit
-binding. Each pass is nested inside the existing root-owned util-linux private
-network/PID/mount/Landlock boundary and a distinct verified systemd user scope
-with a 10 GiB memory maximum, zero swap, 512-PID maximum, group OOM handling,
-and the 50-percent usage-feedback CPU controller. The same scope controller
-adds policy-bound thermal pacing: it freezes the complete cgroup at 80 C host
-or 75 C GPU, and resumes only after three consecutive samples at or below
-75.05/70 C. A pause that reaches 300 seconds, telemetry loss, a hard-limit sample,
-or failure to leave the scope unfrozen fails closed. The independent outer
-supervisor keeps the unchanged 95/85 C hard limits and safe handoff. It is the
-sole Windows/NVML probe owner and sends strict sequenced samples over an
-inherited pipe that the scope controller consumes and does not pass to the
-contained payload. The supervisor holds one exact-instance Windows
-`Thermal Zone Information` performance-counter process and one exact-UUID NVML
-handle for the complete lifecycle. The Windows startup handshake reads the
-exact CPU name from the local-machine processor registry key; no CIM/WMI query
-is required. It does not launch a new PowerShell or `nvidia-smi` process at the
-one-second cadence. Before a child exists, a v2 policy requires three
-consecutive readings at or below its 75.05/70 C resume boundary. The Windows
-request/response channel binds a monotonically increasing sequence and exact
-four-counter schema; missing identity, malformed or reordered data, timeout,
-unexpected output, nonzero exit, or cleanup failure is fatal. Freeze and
-resume each require both the requested
-`cgroup.freeze` value and the kernel's `cgroup.events` state to agree. The tool
-requires exactly one successful
-`preflight`/`complete` pair per pass, peaks below both hard limits, and the
-configured stable handoff before starting the next pass. It also requires
-ordered scope start/completion evidence, the exact policy and cgroup controls,
-CPU usage within allowance, a matching v2 pacing record with complete pause
-counts/durations and sub-limit peaks, no memory-limit/OOM events, successful
-child exit, and scope removal. The earlier v1 policy remains valid historical
-input but cannot start a new WSL2 qualification or manifest capture. A dirty
-tree, existing output, source or commit change during capture, nonzero/timeout
-child, missing or malformed thermal/scope evidence, scope residue, oversized
-output, invalid manifest, or repeat mismatch fails without publication. A
-timeout or interruption terminates the complete capture session, kills the
-cgroup through its controller, and waits for the wrapper's handoff before
-escalation.
-
-A pacing-timeout failure first unfreezes the scope and sends `SIGINT` through
-membership-rechecked pidfds to current leaf processes. It walks upward only as
-each leaf exits, giving owned signal handlers and `finally` blocks at most 75
-wall seconds to drain process groups and remove private snapshots. Scope
-disappearance during that walk is successful cleanup only when the cgroup no
-longer exists. Any surviving process still reaches unconditional
-`cgroup.kill`. Telemetry, hard-limit, runtime, and accounting failures retain
-immediate kill behavior.
-
-Commit the manifest before startup.
+The checked-in laptop runtime manifest is already the immutable input for c1.
+Its older `scripts/qualification/capture_vllm_runtime_manifest.py` procedure
+coupled artifact identity to the now-rejected thermal/CPU pacing wrapper.
+Preserve that capture as historical artifact evidence, but do not rerun the
+paced command or treat its wall time as performance. A future recapture must
+first decouple the capture tool from that legacy policy while retaining its
+clean-source requirement, two byte-identical strict-valid results,
+owned-process lifecycle, bounded output, scope cleanup, and no-overwrite checks.
 The tracked laptop launch makes both captures use the explicit 32 MiB/s
 cumulative provenance-read ceiling; do not remove or override it to accelerate
 capture.
@@ -492,14 +382,11 @@ lifecycles completed stable handoff. This artifact is the immutable vLLM input
 for the next exact-source performance run; it does not itself establish server
 startup, request correctness, throughput, or endurance.
 
-Before a model-bearing WSL2 case starts, the qualification runner now performs
-the initial model fingerprint in an independent private namespace, 10 GiB
-scope, v2 thermal-pacing controller, and outer Windows/NVML lifecycle at a
-fixed 32 MiB/s. It repeats the same independently supervised fingerprint after
-the case. Each scope must be removed and complete stable handoff; the parent
-receipt retains both bounded JSON and supervision streams. The campaign case is
-a third lifecycle. This prevents the long before/after provenance reads from
-escaping the boundary that protects server work.
+Before a model-bearing WSL2 case starts, the qualification runner performs the
+initial model fingerprint in an independent private namespace and 10 GiB scope
+at a fixed 32 MiB/s. It repeats the same scoped fingerprint after the case.
+Each scope must be removed; the parent receipt retains both bounded JSON and
+scope streams. The campaign case is a third lifecycle.
 The runner passes the same closed base environment and exact private-network
 containment marker to these scopes as it passes to ordinary cases. The scope
 controller revalidates that marker before any fingerprint read.
@@ -518,7 +405,6 @@ python3 scripts/qualification/run.py \
   --host-id rtx4090-laptop \
   --model .qualification/cuda-rtx4090-laptop/performance-model-v1 \
   --model-id Qwen/Qwen3.5-4B \
-  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json \
   qualification/workloads/serving-cuda-performance-c1-v1.json
 ```
 
@@ -533,20 +419,15 @@ result. Widening concurrency is a later committed workload and must preserve
 the same model, prompts, sampling, fixed output length, memory ceiling, launch
 inputs, and reference role.
 
-Under WSL2, the c1 source build has three independent bounds. It may use at
-most 1,800 active seconds after subtracting only controller-authenticated
-thermal-pause overlap, at most 14,400 seconds of that verified overlap, and at
-most 16,200 wall seconds. The contained parent reads the outer controller's
-private mode-0400 transition stream and validates its exact policy hash,
-schema, sequence, pause pairing, monotonic interval, ownership, and size before
-crediting any pause. CPU-quota freezes, scheduling, and ordinary idle time are
-not thermal credit. Missing, unsafe, partial, active-ended, reordered, or
-policy-drifted evidence fails the build and terminates its new-session Cargo
-process group. `build_duration_ms` records wall time minus verified thermal
-overlap; the trace also retains wall and pause seconds.
+Under WSL2, the c1 source build has a 1,800-second wall-clock bound.
+`build_duration_ms` is ordinary wall time. The enclosing scope retains memory,
+swap, PID, OOM, network, and teardown containment but does not impose a CPU or
+thermal freeze on measured work.
 
-After the accepted performance matrix is retained, run the independent laptop
-endurance workload:
+The declared endurance workload below still encodes the legacy 80/75 C freeze
+controller and 50-percent CPU policy. It is retained as historical handoff
+material and must not be run as the current Phase 7.1 endurance gate. Revise it
+to ordinary wall-clock accounting after c1 is accepted:
 
 ```bash
 python3 scripts/qualification/run.py \
@@ -559,7 +440,7 @@ python3 scripts/qualification/run.py \
 ```
 
 `serving-cuda-endurance-v1` is source-bound and has file
-`sha256:2f34ab2dc62641d247306c9ce29d62c68e5c12b16cd326e2860ce00061a345ac`.
+`sha256:2e81344e95637821046fd0dee2ff61495af6b91a5e728214975eeb7785507d63`.
 It keeps one stable eager CUDA server alive for at least eight active measured
 hours, subtracting only verified thermal-pacing overlap, with fixed 62-block KV
 capacity, graphs/reclaim/autoscaling disabled, one active request, varied

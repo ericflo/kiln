@@ -28,27 +28,23 @@ VARIANT_ID = "cuda-rtx4090-laptop-16gb"
 RESULT_ENV = mixed.RESULT_ENV
 VARIANT_ENV = mixed.VARIANT_ENV
 NETWORK_ENV = "KILN_QUALIFICATION_NETWORK_ISOLATION"
-THERMAL_POLICY_ENV = "KILN_WSL2_THERMAL_POLICY_SHA256"
 SCOPE_BOUNDARY_ENV = "KILN_WSL2_SCOPE_BOUNDARY"
 SCOPE_MEMORY_MAX_ENV = "KILN_WSL2_SCOPE_MEMORY_MAX_BYTES"
 SCOPE_PIDS_MAX_ENV = "KILN_WSL2_SCOPE_PIDS_MAX"
 SCOPE_CPU_QUOTA_ENV = "KILN_WSL2_SCOPE_CPU_QUOTA_PERCENT"
 SCOPE_UNIT_ENV = "KILN_WSL2_SCOPE_UNIT"
 SCOPE_HOST_UID_ENV = "KILN_WSL2_SCOPE_HOST_UID"
-PACING_EVENTS_PATH_ENV = "KILN_WSL2_THERMAL_PACING_EVENTS_PATH"
 ALLOWED_RUNNER_KILN_ENV = frozenset(
     {
         RESULT_ENV,
         VARIANT_ENV,
         NETWORK_ENV,
-        THERMAL_POLICY_ENV,
         SCOPE_BOUNDARY_ENV,
         SCOPE_MEMORY_MAX_ENV,
         SCOPE_PIDS_MAX_ENV,
         SCOPE_CPU_QUOTA_ENV,
         SCOPE_UNIT_ENV,
         SCOPE_HOST_UID_ENV,
-        PACING_EVENTS_PATH_ENV,
     }
 )
 MIB = 1024 * 1024
@@ -140,7 +136,6 @@ EFFECTIVE_CONFIG: dict[str, Any] = {
     "build": {
         "binary": "kiln",
         "cargo_environment_policy": "closed-qualification-test-v1",
-        "cargo_cpu_quota_percent": 50,
         "cargo_execution_mode": "delegated-cgroup",
         "cargo_host_reserve_gib": BUILD_HOST_RESERVE_GIB,
         "cargo_jobs": 1,
@@ -492,18 +487,11 @@ def validate_runner_environment(source: dict[str, str]) -> None:
             "CUDA low-memory qualification requires the WSL2 private-network "
             "and Landlock boundary"
         )
-    thermal_hash = source.get(THERMAL_POLICY_ENV)
-    if not isinstance(thermal_hash, str) or re.fullmatch(
-        r"sha256:[0-9a-f]{64}", thermal_hash
-    ) is None:
-        raise mixed.QualificationError(
-            "CUDA low-memory qualification requires the bound WSL2 thermal policy"
-        )
     expected_scope = {
         SCOPE_BOUNDARY_ENV: "systemd-user-scope-feedback-v1",
         SCOPE_MEMORY_MAX_ENV: str(10 * GIB),
         SCOPE_PIDS_MAX_ENV: "512",
-        SCOPE_CPU_QUOTA_ENV: "50",
+        SCOPE_CPU_QUOTA_ENV: "0",
     }
     for field, expected in expected_scope.items():
         if source.get(field) != expected:
@@ -539,7 +527,6 @@ def build_environment(source: dict[str, str]) -> dict[str, str]:
         {
             "CARGO_NET_OFFLINE": "true",
             "CUDARC_CUDA_VERSION": "12080",
-            "KILN_CARGO_CPU_QUOTA_PERCENT": "50",
             "KILN_CARGO_ENVIRONMENT_POLICY": "closed-qualification-test-v1",
             "KILN_CARGO_EXECUTION_MODE": "delegated-cgroup",
             "KILN_CARGO_HOST_RESERVE_GIB": str(BUILD_HOST_RESERVE_GIB),

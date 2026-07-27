@@ -144,6 +144,21 @@ class WslScopeExecTests(unittest.TestCase):
             ]
         )
         self.assertEqual(parsed.cpu_quota_percent, 50)
+        unthrottled = scope.parse_args(
+            [
+                "--memory-max-bytes",
+                str(10 * 1024 * 1024 * 1024),
+                "--pids-max",
+                "512",
+                "--cpu-quota-percent",
+                "0",
+                "--runtime-max-seconds",
+                "30",
+                "--",
+                "/bin/true",
+            ]
+        )
+        self.assertEqual(unthrottled.cpu_quota_percent, 0)
 
     def test_empty_host_build_inventory_is_accepted(self) -> None:
         with mock.patch.object(scope.Path, "iterdir", return_value=[]):

@@ -91,7 +91,6 @@ PATH="$HOME/.cargo/bin:$PATH" python3 scripts/qualification/run.py \
 PATH="$HOME/.cargo/bin:$PATH" python3 scripts/qualification/run.py \
   --variant cuda-rtx4090-laptop-16gb \
   --host-id rtx4090-laptop \
-  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json \
   --var output_path=.qualification/environment/rtx4090-laptop-cuda.json \
   qualification/workloads/environment-v1.json
 ```
@@ -159,52 +158,18 @@ Windows-interop checks. A caller-provided environment variable alone cannot
 attest containment.
 
 Capability values are exactly `available` or `unavailable`; an unavailable
-safeguard is also named in `unsupported` and is never converted into a passing
-probe. The current WSL2 boundary creates exact runtime `dbus.socket` and
-`dbus.service` units when the distribution omitted the user bus, then proves an
-owned user transient unit. A fresh WSL user manager can also omit
-`/run/user/<uid>/systemd/user`; the launcher creates that directory with mode
-0700 only after the runtime and `systemd` parents prove they are real
-directories owned by the current user and not group/world-writable. A symlink,
-wrong owner, writable parent, publication conflict, missing bus socket, or
-failed transient-unit proof aborts the case. Continuous supervision opens one
-persistent Windows process. Its startup handshake reads the exact CPU name from
-`HKEY_LOCAL_MACHINE\HARDWARE\DESCRIPTION\System\CentralProcessor\0`,
-resolves exactly one `\_TZ.THRM` instance and all four expected
-`Thermal Zone Information` performance counters, and exchanges bounded,
-strictly sequenced request/response records over pipes. No CIM/WMI query is
-used during admission or continuous sampling. Each sample
-cross-checks whole- and tenth-Kelvin fields and converts the high-precision
-field to millicelsius. The GPU side holds one initialized NVML handle selected
-by exact UUID and reads temperature in process. It does not launch PowerShell,
-WMI, or `nvidia-smi` for every sample. Before launching a v2-policy child, the
-outer supervisor requires the configured three consecutive readings at or
-below the current 75.05/70 C host/GPU pacing-resume thresholds. The host value
-is the exact nearest reading in the Windows counter's tenth-Kelvin
-representation. Pre-admission
-samples remain included in the outer sample count and peaks but are not sent
-to a scope that does not yet exist. Timeout or a hard-limit reading fails
-without launching the child. The checked
-`rtx4090-laptop-wsl2-boundary-v1` policy binds that source to the exact
-`Intel(R) Core(TM) Ultra 9 185H`, uses a 95 C hard limit below Intel's 110 C
-Tjunction, and independently binds the exact GPU UUID/name to an 85 C limit.
-The outer supervisor treats either telemetry read failure or either inclusive
-limit as a trip, terminates the complete inner scope, and requires three
-post-exit samples at or below 85 C host and 75 C GPU. It injects only the
-content hash into the child. Missing counter identity, malformed or reordered
-records, a ten-second sensor response timeout, NVML failure, nonzero sensor
-exit, stderr, trailing output, or cleanup failure is fatal. Closing the
-supervisor closes the counter's sole stdin writer, and the Windows process must
-exit cleanly before evidence can complete.
+capability is also named in `unsupported` and is never converted into a passing
+probe. WSL2 host and GPU temperatures are captured as platform telemetry when
+their sources are available. They do not select product behavior, pace a
+workload, or determine whether a portable qualification may run. The optional
+`--wsl2-thermal-policy` switch is reserved for explicitly requested lab
+supervision and is not part of the current performance procedure.
 
 Every WSL2 CUDA case is also placed in a user scope before `unshare`. The scope
 round-trips a 10 GiB aggregate `memory.max`, zero `memory.swap.max`, group OOM
-kill, and 512-PID limit. This WSL systemd delegation exposes no CPU controller,
-so the trusted outer controller reads aggregate `cpu.stat`, freezes/unfreezes
-the complete scope against a 50% budget, and retains a sentinel until final CPU
-use is no greater than the elapsed allowance. Missing bus units, an inert
-limit, malformed telemetry, absent containment, accounting failure, timeout,
-or scope residue fails the case. The outer process inventory also rejects an
+kill, and 512-PID limit. It records aggregate CPU use but does not throttle or
+freeze measured work. Missing bus units, an inert limit, absent containment,
+timeout, or scope residue fails the case. The outer process inventory also rejects an
 already-running host Cargo/rustc process before the private PID namespace can
 hide it. User-manager launch is deliberately not attempted inside Landlock
 because the manager would execute the requested process outside the private
@@ -241,11 +206,10 @@ correctness, the cudarc 12.8 workload contract, model loading, low-memory
 recovery, serving performance, or endurance.
 
 Those two unavailable values remain truthful for the historical `c55bff4a7`
-receipt. Later source repairs do not rewrite it: current-source runs require
-the content-hashed Windows/NVML thermal supervisor and the repaired user-scope
-boundary described above. A new run must retain its own raw preflight,
-continuous samples, final CPU/memory/PID counters, cooldown, and scope-removal
-evidence.
+receipt. Later source repairs do not rewrite it. Current-source runs require
+the repaired user-scope boundary; temperature supervision is optional lab
+policy. A new run must retain its own scope memory/PID counters and
+scope-removal evidence.
 
 The post-repair environment run passed from clean pushed commit
 `b77f10c9aa07befd6c7a5c47b3dbec1468f1aec3` and tree hash
@@ -320,12 +284,11 @@ source-bound evidence.
 
 No checked-in qualification case may invoke Cargo directly. Workload validation
 rejects `cargo` by basename, including an absolute path. Standalone Rust test
-cases use `scripts/qualification/cargo-test-bounded.sh`, which pins one job, a
-50% aggregate CPU quota (at most half of one logical CPU on average), the
+cases use `scripts/qualification/cargo-test-bounded.sh`, which pins one job, the
 platform floor (14 GiB on the 15.3 GiB WSL VM, 15 GiB on the existing native
 Linux hosts), offline Cargo, zero scope/service swap, private networking, and
 a 1,740-second cap. WSL2 re-verifies its current scope, exact memory/swap/PID/OOM
-files, CPU-policy marker, thermal-policy hash, live loopback-only namespace,
+files, CPU-policy marker, live loopback-only namespace,
 private user map, and denied Windows execution before Cargo starts. Native
 Linux continues to use the transient-service path.
 Its
@@ -378,14 +341,10 @@ commit.
 Outside a source-bound workload, `scripts/cargo-bounded.sh` also names every
 ordinary systemd scope and stops that complete unit from its `EXIT` trap, so a
 cancelled terminal or tool client cannot leave Cargo, rustc, or the linker
-running in an orphaned scope. When exactly one `k10temp/Tctl` input exists, the
-wrapper automatically applies the same 90,000-millicelsius, 250 ms guard to
-ordinary commands and reports `thermal=automatic:...` in its preamble. A host
-without that exact sensor runs with `thermal=disabled`; qualification source
-builds do not accept that fallback because their four explicit typed fields make
-missing or ambiguous telemetry a preflight failure. Operators may explicitly
-configure a different stable selector only by setting all four documented
-`KILN_CARGO_HOST_THERMAL_*` wrapper controls together.
+running in an orphaned scope. It never guesses a sensor name, label, or
+temperature threshold. Thermal supervision is disabled unless the caller
+supplies an explicit typed policy or all four documented
+`KILN_CARGO_HOST_THERMAL_*` controls.
 
 For non-qualification use, `KILN_CARGO_CPU_QUOTA_PERCENT` optionally applies
 the same aggregate systemd CPU limit in either execution mode; `100` represents
@@ -530,7 +489,6 @@ PATH="$HOME/.cargo/bin:$PATH" \
 python3 scripts/qualification/run.py \
   --variant cuda-rtx4090-laptop-16gb \
   --host-id rtx4090-laptop \
-  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json \
   qualification/workloads/cuda-metal-core-correctness-v1.json
 ```
 
@@ -657,7 +615,6 @@ PATH="$HOME/.cargo/bin:$PATH" \
 python3 scripts/qualification/run.py \
   --variant cuda-rtx4090-laptop-16gb \
   --host-id rtx4090-laptop \
-  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json \
   qualification/workloads/cuda-memory-lifecycle-v1.json
 ```
 
@@ -731,14 +688,13 @@ python3 scripts/qualification/run.py \
   --host-id rtx4090-laptop \
   --model "$(pwd)/Qwen3.5-4B" \
   --model-id Qwen/Qwen3.5-4B \
-  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json \
   qualification/workloads/serving-cuda-low-memory-v1.json
 ```
 
 The single case first verifies by hash that the earlier lifecycle receipt
 passed the production non-allocating admission rejection. It then builds the
-current CUDA release server through the delegated 10 GiB, zero-swap, 50-percent
-CPU WSL scope and starts the immutable stable-profile laptop launch. The build
+current CUDA release server through the delegated 10 GiB, zero-swap WSL scope
+and starts the immutable stable-profile laptop launch. The build
 requires 13 GiB live host availability and preserves 3 GiB outside its 10 GiB
 aggregate ceiling. Readiness must expose the exact public model, two weight
 shards, positive post-load CUDA residency, healthy `nvidia-smi` sampling,
@@ -1050,8 +1006,7 @@ qualify the performance matrix, eight-hour soak, native Linux, or desktop RTX
 ### CUDA Serving Bootstrap Handoff
 
 After the environment, core-correctness, and memory-lifecycle receipts pass and
-are pushed, materialize that machine's host thermal policy and build the CUDA
-server. Do not reuse Strix Halo sensor names or thresholds. The checked-in Kiln
+are pushed, build the CUDA server from the same source. The checked-in Kiln
 bootstrap inputs are:
 
 - `kiln-cuda-rtx4090-laptop-serving-bootstrap-v1` for the 16 GiB Laptop GPU;
@@ -1059,63 +1014,24 @@ bootstrap inputs are:
   and
 - `vllm-cuda-rtx4090-serving-bootstrap-v1` for the common bounded vLLM arm.
 
-Run the labeled-sensor inventory first. Create a content-hashed
-`hard_limit_only` policy from the unique host-package selector and reviewed
-machine limits, then commit it. Pass that same policy to
-`scripts/cargo-bounded.sh --host-thermal-policy` so source compilation also
-waits for the policy's stable handoff target and remains thermally contained.
-The wrapper rejects a conflicting set of legacy thermal
-environment fields. The complete policy-materialization, bounded CUDA build,
-typed-config preview, immutable vLLM runtime-manifest, NVML UUID selection,
-single-concurrency bootstrap, comparison, failure, and expansion procedure is
-in [Serving Benchmark Protocol](SERVING_BENCHMARK_PROTOCOL.md#rtx-4090-serving-bootstrap).
-
-The WSL2 laptop is the explicit exception to the Linux-hwmon preparation step:
-use the already reviewed
-`qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json` with the
-qualification runner. Its outer Windows/NVML supervisor also contains the
-source build. Do not pass this WSL policy to
-`cargo-bounded.sh --host-thermal-policy`, whose schema intentionally accepts
-only a Linux hwmon selector.
-Serving benchmark driver v21 and campaign schema v9 extend that same rule to
-owned benchmark launches. A committed WSL2 workload passes the policy as
-`--external-wsl2-thermal-policy`; the child driver revalidates the live private
-network, Landlock, exact UID-qualified systemd scope, memory/swap/PID/OOM
-controls, and usage-feedback CPU controller. The nested benchmark receipt
-requires its enclosing qualification receipt, which remains the sole authority
-for final Windows/NVML thermal evidence, cgroup accounting and removal, process
-cleanup, and safe handoff. Running the external mode directly or attaching to a
-pre-existing server is rejected.
+The complete bounded CUDA build, typed-config preview, immutable vLLM
+runtime-manifest, NVML UUID selection, single-concurrency bootstrap,
+comparison, failure, and expansion procedure is in
+[Serving Benchmark Protocol](SERVING_BENCHMARK_PROTOCOL.md#rtx-4090-serving-bootstrap).
+`scripts/cargo-bounded.sh` no longer auto-selects `k10temp/Tctl` or any
+temperature limit. A host thermal policy is applied only when a caller
+explicitly requests that separate lab control. The optional native-host form is
+a content-hashed hard_limit_only policy; it is not part of portable acceptance.
 Use `scripts/qualification/capture_vllm_runtime_manifest.py` with the tracked
 vLLM launch JSON; do not retype its inference arguments. The tool requires a
 clean commit, two byte-identical strict-valid captures, bounded child output,
 and a new destination before it publishes the exact runtime manifest. The
 launch JSON must be a tracked regular file with bytes identical to `HEAD`.
-On this WSL2 laptop, pass the committed boundary as
-`--wsl2-thermal-policy`. Each capture then runs in a separate
-Windows-thermal-zone/NVML wrapper lifecycle and must complete stable handoff
-before the next starts. The command reports both strict-valid thermal records;
-a trip, omitted policy, uncommitted policy or supervisor bytes, missing event,
-timeout, or incomplete cooldown prevents publication.
-Each pass also uses the same reviewed WSL2 private network/PID/mount namespace,
-Landlock interop denial, 10 GiB memory/zero-swap/512-PID user scope, group OOM
-handling, and 50-percent usage-feedback CPU controller as the qualification
-runner. The v2 policy makes that controller freeze the complete scope at
-80 C host or 75 C GPU and resume only after three consecutive samples at or
-below 75.05/70 C. Each pause has a 300-second deadline. The independent outer
-supervisor retains the unchanged 95/85 C hard limits and post-exit handoff,
-and streams its accepted samples over a one-way inherited pipe. The scope
-controller does not duplicate the expensive Windows/NVML probes, and the
-contained payload does not inherit the pipe descriptor. Every transition must
-round-trip both the requested `cgroup.freeze` value and the kernel-reported
-`cgroup.events` frozen state.
-The capture result retains both scope records, including pacing samples,
-pause counts and durations, peaks, and inactive completion. Missing or
-reordered scope events, a policy-binding or control mismatch, an incomplete
-or timed-out pause, excess CPU accounting, any memory-limit/OOM event,
-nonzero child, or scope residue prevents publication. The v1 hard-limit-only
-document remains parseable for historical receipts but is rejected for new
-WSL2 CUDA qualification and manifest capture.
+The retained laptop manifest was captured under an older paced lab wrapper.
+That history establishes artifact identity only and is not performance
+evidence. New performance qualification uses the WSL2
+network/PID/mount/Landlock boundary plus its memory, swap, PID, OOM, and cleanup
+checks without CPU or thermal pacing.
 The laptop performance launch pins
 `--max-provenance-read-mib-per-second=32`, cumulatively pacing all
 launcher-owned model/snapshot/adapter/runtime hashing and applying the same
@@ -1144,15 +1060,12 @@ stable handoff. This closes the runtime-manifest prerequisite only. It is not a
 server startup, request, performance-matrix, soak, native-Linux, or desktop-4090
 claim.
 
-Every model-bearing WSL2 CUDA run now brackets its case with two additional
+Every model-bearing WSL2 CUDA run brackets its case with two additional
 model-fingerprint lifecycles. The runner reads at a fixed 32 MiB/s and places
-each initial and final fingerprint inside its own private namespace, 10 GiB
-scope, v2 cgroup-pacing controller, outer Windows/NVML hard-limit supervisor,
-and stable handoff. Their bounded JSON and supervision streams are retained
-with the parent receipt. The case starts only after the initial scope is
-removed, and final source/commit validation occurs only after the final scope
-is removed. The case itself remains a separate lifecycle, so neither long
-preflight nor post-run hashing can execute outside the WSL2 safety boundary.
+each initial and final fingerprint inside its own private namespace and 10 GiB
+scope. Their bounded JSON and scope streams are retained with the parent
+receipt. The case starts only after the initial scope is removed, and final
+source/commit validation occurs only after the final scope is removed.
 Both fingerprint launches receive the same closed runner base environment plus
 the exact private-containment mechanism binding required by the scope
 controller; an omitted or different binding fails before model I/O.
@@ -1166,7 +1079,6 @@ python3 scripts/qualification/run.py \
   --host-id rtx4090-laptop \
   --model .qualification/cuda-rtx4090-laptop/performance-model-v1 \
   --model-id Qwen/Qwen3.5-4B \
-  --wsl2-thermal-policy qualification/host-policies/rtx4090-laptop-wsl2-cgroup-pacing-v2.json \
   qualification/workloads/serving-cuda-performance-c1-v1.json
 ```
 
@@ -1179,6 +1091,11 @@ campaign artifacts live under the commit-qualified ignored
 never reused. Retain the parent qualification receipt and all ten validated
 nested receipts before making a c1 request or performance claim. This
 preparatory workload does not itself close the open matrix or soak gates.
+
+All earlier c1 attempts that used cgroup thermal pacing or the 50-percent
+feedback CPU controller remain retained diagnostic history. Their request wall
+throughput and tail latency are not valid performance evidence and must not be
+used as the laptop baseline.
 
 The first corrected exact invocation from clean pushed source
 `c903f7dd97c7250c862db7a393a774e7ca48261e` is retained as failed receipt
@@ -2094,11 +2011,13 @@ and push the failed parent, allow a full authenticated cooldown, and retry the
 exact command so completed release objects can be reused. c1, wider
 concurrency, endurance, native Linux, and desktop RTX 4090 remain open.
 
-The source-bound laptop endurance gate is now declared separately as
+The source-bound laptop endurance declaration below still encodes the legacy
+thermal/CPU freeze controller. It is retained as historical handoff material,
+not as the current command to run. It must be revised to ordinary wall-clock
+accounting after c1 is accepted. The legacy declaration is
 `qualification/workloads/serving-cuda-endurance-v1.json` (file
 `sha256:2e81344e95637821046fd0dee2ff61495af6b91a5e728214975eeb7785507d63`).
-Run it only from clean pushed source after the final accepted performance
-checkpoint:
+Its former invocation was:
 
 ```bash
 python3 scripts/qualification/run.py \

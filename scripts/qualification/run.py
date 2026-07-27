@@ -110,7 +110,8 @@ DEFAULT_TERMINATION_GRACE_SECONDS = 65.0
 SUCCESS_DESCENDANT_SETTLEMENT_SECONDS = 1.0
 WSL_SCOPE_MEMORY_MAX_BYTES = 10 * 1024 * 1024 * 1024
 WSL_SCOPE_PIDS_MAX = 512
-WSL_SCOPE_CPU_QUOTA_PERCENT = 50
+WSL_SCOPE_CPU_QUOTA_PERCENT = 0
+WSL_PACED_SCOPE_CPU_QUOTA_PERCENT = 50
 WSL_SCOPE_CPU_POLL_INTERVAL_MS = 5
 WSL_MODEL_FINGERPRINT_READ_MIB_PER_SECOND = 32
 WSL_MODEL_FINGERPRINT_RUNTIME_MAX_SECONDS = 1_800.0
@@ -385,16 +386,27 @@ def _committed_wsl_thermal_policy(
     return resolved, parsed
 
 
+def _wsl_scope_cpu_quota_percent(
+    policy: wsl_thermal_exec.ThermalPolicy | None,
+) -> int:
+    return (
+        WSL_PACED_SCOPE_CPU_QUOTA_PERCENT
+        if policy is not None and policy.pacing is not None
+        else WSL_SCOPE_CPU_QUOTA_PERCENT
+    )
+
+
 def _wsl_supervised_argv(
     contained_argv: list[str],
-    policy_path: Path,
-    policy: wsl_thermal_exec.ThermalPolicy,
+    policy_path: Path | None,
+    policy: wsl_thermal_exec.ThermalPolicy | None,
     runtime_max_seconds: float,
 ) -> list[str]:
-    if policy.pacing is None:
+    if (policy_path is None) != (policy is None):
         raise QualificationRunError(
-            "WSL2 CUDA qualification requires a v2 cgroup thermal pacing policy"
+            "WSL2 thermal policy path and parsed policy must be supplied together"
         )
+    cpu_quota_percent = _wsl_scope_cpu_quota_percent(policy)
     scoped_argv = [
         sys.executable,
         str(WSL_SCOPE_EXEC),
@@ -403,16 +415,19 @@ def _wsl_supervised_argv(
         "--pids-max",
         str(WSL_SCOPE_PIDS_MAX),
         "--cpu-quota-percent",
-        str(WSL_SCOPE_CPU_QUOTA_PERCENT),
+        str(cpu_quota_percent),
         "--cpu-poll-interval-ms",
         str(WSL_SCOPE_CPU_POLL_INTERVAL_MS),
         "--runtime-max-seconds",
         str(runtime_max_seconds),
-        "--thermal-pacing-policy",
-        str(policy_path),
-        "--",
-        *contained_argv,
     ]
+    if policy is not None and policy.pacing is not None:
+        assert policy_path is not None
+        scoped_argv.extend(("--thermal-pacing-policy", str(policy_path)))
+    scoped_argv.extend(("--", *contained_argv))
+    if policy is None:
+        return scoped_argv
+    assert policy_path is not None
     return [
         sys.executable,
         str(WSL_THERMAL_EXEC),
@@ -438,8 +453,8 @@ def _supervised_wsl_model_fingerprint(
     model_id: str | None,
     *,
     network_isolation: NetworkIsolation,
-    policy_path: Path,
-    policy: wsl_thermal_exec.ThermalPolicy,
+    policy_path: Path | None,
+    policy: wsl_thermal_exec.ThermalPolicy | None,
     stdout_path: Path,
     stderr_path: Path,
     environment: dict[str, str],
@@ -488,7 +503,7 @@ def _supervised_wsl_model_fingerprint(
     if completed.returncode != 0:
         detail = completed.stderr.decode("utf-8", errors="replace").strip()
         raise QualificationRunError(
-            "WSL2 model fingerprint failed under thermal/scope supervision"
+            "WSL2 model fingerprint failed under scope supervision"
             + (f": {detail[-1000:]}" if detail else "")
         )
     try:
@@ -1679,7 +1694,9 @@ def _retain_initial_model_failure(
                         "memory_max_bytes": WSL_SCOPE_MEMORY_MAX_BYTES,
                         "memory_swap_max_bytes": 0,
                         "pids_max": WSL_SCOPE_PIDS_MAX,
-                        "cpu_quota_percent": WSL_SCOPE_CPU_QUOTA_PERCENT,
+                        "cpu_quota_percent": _wsl_scope_cpu_quota_percent(
+                            wsl_thermal_policy_value
+                        ),
                         "cpu_poll_interval_ms": WSL_SCOPE_CPU_POLL_INTERVAL_MS,
                     },
                 }
@@ -1700,7 +1717,9 @@ def _retain_initial_model_failure(
                         "memory_max_bytes": WSL_SCOPE_MEMORY_MAX_BYTES,
                         "memory_swap_max_bytes": 0,
                         "pids_max": WSL_SCOPE_PIDS_MAX,
-                        "cpu_quota_percent": WSL_SCOPE_CPU_QUOTA_PERCENT,
+                        "cpu_quota_percent": _wsl_scope_cpu_quota_percent(
+                            wsl_thermal_policy_value
+                        ),
                         "cpu_poll_interval_ms": WSL_SCOPE_CPU_POLL_INTERVAL_MS,
                     },
                 }
@@ -2038,27 +2057,18 @@ def _run_qualification_impl(
     network_isolation = hooks.network_isolation(root)
     wsl_thermal_policy_path: Path | None = None
     wsl_thermal_policy_value: wsl_thermal_exec.ThermalPolicy | None = None
-    wsl_thermal_required = (
+    contained_wsl_cuda = (
         variant["backend"] == "cuda"
         and network_isolation.mechanism in wsl_platform.WSL_CONTAINMENT_MECHANISMS
     )
-    if wsl_thermal_required and wsl2_thermal_policy is None:
-        raise QualificationRunError(
-            "WSL2 CUDA qualification requires --wsl2-thermal-policy; "
-            "the host thermal safeguard cannot be disabled"
-        )
     if wsl2_thermal_policy is not None:
-        if not wsl_thermal_required:
+        if not contained_wsl_cuda:
             raise QualificationRunError(
                 "--wsl2-thermal-policy is only valid for contained WSL2 CUDA qualification"
             )
         wsl_thermal_policy_path, wsl_thermal_policy_value = (
             _committed_wsl_thermal_policy(root, wsl2_thermal_policy)
         )
-        if wsl_thermal_policy_value.pacing is None:
-            raise QualificationRunError(
-                "WSL2 CUDA qualification requires a v2 cgroup thermal pacing policy"
-            )
 
     try:
         preflight_tree_hash, _ = source_tree_hash(root)
@@ -2115,8 +2125,7 @@ def _run_qualification_impl(
     active_run_directories.append(run_directory)
 
     supervised_wsl_model_fingerprint = (
-        wsl_thermal_policy_path is not None
-        and wsl_thermal_policy_value is not None
+        contained_wsl_cuda
         and hooks == DEFAULT_HOOKS
     )
     model_fingerprint_environment = dict(case_base_environment)
@@ -2128,8 +2137,6 @@ def _run_qualification_impl(
     if model_path is not None:
         try:
             if supervised_wsl_model_fingerprint:
-                assert wsl_thermal_policy_path is not None
-                assert wsl_thermal_policy_value is not None
                 initial_stdout = run_directory / "model-fingerprint-initial.json"
                 initial_stderr = run_directory / "model-fingerprint-initial.stderr"
                 model_fingerprint_artifacts.extend(
@@ -2270,13 +2277,9 @@ def _run_qualification_impl(
                 for item in case["command"]
             ]
             contained_argv = [*network_isolation.argv_prefix, *argv]
-            if wsl_thermal_policy_path is None:
+            if not contained_wsl_cuda:
                 executed_argv = contained_argv
             else:
-                if wsl_thermal_policy_value is None:
-                    raise QualificationRunError(
-                        "WSL2 thermal policy was not retained after validation"
-                    )
                 executed_argv = _wsl_supervised_argv(
                     contained_argv,
                     wsl_thermal_policy_path,
@@ -2337,7 +2340,9 @@ def _run_qualification_impl(
                                 "memory_swap_max_bytes": 0,
                                 "pids_max": WSL_SCOPE_PIDS_MAX,
                                 "cpu_quota_percent": (
-                                    WSL_SCOPE_CPU_QUOTA_PERCENT
+                                    _wsl_scope_cpu_quota_percent(
+                                        wsl_thermal_policy_value
+                                    )
                                 ),
                                 "cpu_poll_interval_ms": (
                                     WSL_SCOPE_CPU_POLL_INTERVAL_MS
@@ -2555,8 +2560,6 @@ def _run_qualification_impl(
         final_fingerprint_artifacts: list[tuple[Path, str]] = []
         try:
             if supervised_wsl_model_fingerprint:
-                assert wsl_thermal_policy_path is not None
-                assert wsl_thermal_policy_value is not None
                 final_stdout = run_directory / "model-fingerprint-final.json"
                 final_stderr = run_directory / "model-fingerprint-final.stderr"
                 final_fingerprint_artifacts.extend(
@@ -2656,7 +2659,9 @@ def _run_qualification_impl(
                         "memory_max_bytes": WSL_SCOPE_MEMORY_MAX_BYTES,
                         "memory_swap_max_bytes": 0,
                         "pids_max": WSL_SCOPE_PIDS_MAX,
-                        "cpu_quota_percent": WSL_SCOPE_CPU_QUOTA_PERCENT,
+                        "cpu_quota_percent": _wsl_scope_cpu_quota_percent(
+                            wsl_thermal_policy_value
+                        ),
                         "cpu_poll_interval_ms": WSL_SCOPE_CPU_POLL_INTERVAL_MS,
                     },
                 }
@@ -2677,7 +2682,9 @@ def _run_qualification_impl(
                         "memory_max_bytes": WSL_SCOPE_MEMORY_MAX_BYTES,
                         "memory_swap_max_bytes": 0,
                         "pids_max": WSL_SCOPE_PIDS_MAX,
-                        "cpu_quota_percent": WSL_SCOPE_CPU_QUOTA_PERCENT,
+                        "cpu_quota_percent": _wsl_scope_cpu_quota_percent(
+                            wsl_thermal_policy_value
+                        ),
                         "cpu_poll_interval_ms": WSL_SCOPE_CPU_POLL_INTERVAL_MS,
                     },
                 }
@@ -2877,8 +2884,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--wsl2-thermal-policy",
         type=Path,
         help=(
-            "committed WSL2 host/GPU hard-limit and cgroup-pacing policy; "
-            "required for contained WSL2 CUDA qualification"
+            "optional committed WSL2 host/GPU thermal supervision policy"
         ),
     )
     parser.add_argument(

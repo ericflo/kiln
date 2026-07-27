@@ -671,7 +671,7 @@ def _emit(
 
 def _load_thermal_pacing_policy(
     path: Path | None,
-    outer_policy_sha256: str,
+    outer_policy_sha256: str | None,
 ) -> wsl_thermal_exec.ThermalPolicy | None:
     pacing_sha256 = os.environ.get(PACING_POLICY_ENV)
     if path is None:
@@ -680,6 +680,10 @@ def _load_thermal_pacing_policy(
                 f"{PACING_POLICY_ENV} is set without --thermal-pacing-policy"
             )
         return None
+    if outer_policy_sha256 is None:
+        raise ScopeExecError(
+            "thermal pacing policy lacks the outer thermal-policy binding"
+        )
     if path.is_symlink() or not path.is_file():
         raise ScopeExecError(
             "thermal pacing policy must be a regular non-symlink file"
@@ -925,9 +929,9 @@ def execute(args: argparse.Namespace) -> int:
                 for value in active_builds
             )
         )
-    thermal_sha256 = os.environ.get(POLICY_ENV, "")
-    if not SHA256_RE.fullmatch(thermal_sha256):
-        raise ScopeExecError(f"{POLICY_ENV} does not bind the outer thermal policy")
+    thermal_sha256 = os.environ.get(POLICY_ENV)
+    if thermal_sha256 is not None and not SHA256_RE.fullmatch(thermal_sha256):
+        raise ScopeExecError(f"{POLICY_ENV} has an invalid thermal policy binding")
     thermal_policy = _load_thermal_pacing_policy(
         args.thermal_pacing_policy,
         thermal_sha256,
@@ -1045,7 +1049,7 @@ def execute(args: argparse.Namespace) -> int:
             raise ScopeExecError("memory.oom.group did not round-trip")
         if (cgroup / "cpu.max").exists():
             raise ScopeExecError(
-                "unexpected cpu.max appeared; feedback policy requires absent CPU delegation"
+                "unexpected cpu.max appeared in the WSL2 scope"
             )
         baseline_cpu = _cpu_usage(cgroup)
         controlled_started = time.monotonic()
@@ -1083,7 +1087,11 @@ def execute(args: argparse.Namespace) -> int:
             memory_swap_max_bytes=0,
             pids_max=args.pids_max,
             cpu_quota_percent=args.cpu_quota_percent,
-            cpu_controller="usage-feedback-cgroup-freeze-v1",
+            cpu_controller=(
+                "usage-feedback-cgroup-freeze-v1"
+                if args.cpu_quota_percent > 0
+                else "not_configured"
+            ),
             cpu_poll_interval_ms=args.cpu_poll_interval_ms,
             runtime_max_seconds=args.runtime_max_seconds,
             thermal_policy_sha256=thermal_sha256,
@@ -1099,9 +1107,18 @@ def execute(args: argparse.Namespace) -> int:
         )
 
         poll_seconds = args.cpu_poll_interval_ms / 1000.0
-        burst_usec = max(
-            1,
-            int(args.cpu_poll_interval_ms * 1000 * args.cpu_quota_percent / 100),
+        burst_usec = (
+            max(
+                1,
+                int(
+                    args.cpu_poll_interval_ms
+                    * 1000
+                    * args.cpu_quota_percent
+                    / 100
+                ),
+            )
+            if args.cpu_quota_percent > 0
+            else 0
         )
         while True:
             if process.poll() is not None:
@@ -1135,8 +1152,14 @@ def execute(args: argparse.Namespace) -> int:
                     )
                 thermal_telemetry.require_fresh(time.monotonic())
             usage = _cpu_usage(cgroup) - baseline_cpu
-            allowance = int(elapsed * 1_000_000 * args.cpu_quota_percent / 100)
-            cpu_should_freeze = usage > allowance + burst_usec
+            allowance = (
+                int(elapsed * 1_000_000 * args.cpu_quota_percent / 100)
+                if args.cpu_quota_percent > 0
+                else None
+            )
+            cpu_should_freeze = (
+                allowance is not None and usage > allowance + burst_usec
+            )
             should_freeze = cpu_should_freeze or (
                 thermal_pacing is not None and thermal_pacing.active
             )
@@ -1173,23 +1196,24 @@ def execute(args: argparse.Namespace) -> int:
             _set_frozen(cgroup, False)
             frozen = False
         if failure is None:
-            settlement_deadline = time.monotonic() + 5.0
-            while True:
-                elapsed = time.monotonic() - controlled_started
-                usage = _cpu_usage(cgroup) - baseline_cpu
-                allowance = int(
-                    elapsed * 1_000_000 * args.cpu_quota_percent / 100
-                )
-                peak_memory = max(peak_memory, _integer(cgroup / "memory.peak"))
-                peak_pids = max(peak_pids, _integer(cgroup / "pids.peak"))
-                last_memory_events = _events(cgroup / "memory.events")
-                if usage <= allowance:
-                    break
-                if time.monotonic() >= settlement_deadline:
-                    raise ScopeExecError(
-                        "CPU accounting did not settle below the aggregate quota"
+            if args.cpu_quota_percent > 0:
+                settlement_deadline = time.monotonic() + 5.0
+                while True:
+                    elapsed = time.monotonic() - controlled_started
+                    usage = _cpu_usage(cgroup) - baseline_cpu
+                    allowance = int(
+                        elapsed * 1_000_000 * args.cpu_quota_percent / 100
                     )
-                time.sleep(poll_seconds)
+                    peak_memory = max(peak_memory, _integer(cgroup / "memory.peak"))
+                    peak_pids = max(peak_pids, _integer(cgroup / "pids.peak"))
+                    last_memory_events = _events(cgroup / "memory.events")
+                    if usage <= allowance:
+                        break
+                    if time.monotonic() >= settlement_deadline:
+                        raise ScopeExecError(
+                            "CPU accounting did not settle below the aggregate quota"
+                        )
+                    time.sleep(poll_seconds)
             try:
                 descriptor = os.open(
                     release_path,
@@ -1250,7 +1274,9 @@ def execute(args: argparse.Namespace) -> int:
         cpu_usage_usec=usage,
         cpu_allowed_usec=int(
             duration * 1_000_000 * args.cpu_quota_percent / 100
-        ),
+        )
+        if args.cpu_quota_percent > 0
+        else None,
         cpu_quota_percent=args.cpu_quota_percent,
         memory_peak_bytes=peak_memory,
         memory_events=last_memory_events,
@@ -1295,8 +1321,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--memory-max-bytes must be at least 64 MiB")
     if not 1 <= args.pids_max <= 1_000_000:
         parser.error("--pids-max must be in 1..=1000000")
-    if not 1 <= args.cpu_quota_percent <= 100:
-        parser.error("--cpu-quota-percent must be in 1..=100")
+    if not 0 <= args.cpu_quota_percent <= 100:
+        parser.error("--cpu-quota-percent must be in 0..=100 (0 disables it)")
     if not 1 <= args.cpu_poll_interval_ms <= 1000:
         parser.error("--cpu-poll-interval-ms must be in 1..=1000")
     if (

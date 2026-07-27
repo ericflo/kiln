@@ -55,6 +55,20 @@ def required_args(directory: Path, engine: str = "kiln") -> list[str]:
     return args
 
 
+def unpaced_owned_args(directory: Path, engine: str = "kiln") -> list[str]:
+    args = required_args(directory, engine)
+    thermal_index = args.index("--host-thermal-policy")
+    del args[thermal_index : thermal_index + 2]
+    server_index = args.index("--server-pid")
+    launch = directory / "server-launch.json"
+    launch.write_text('{"fixture":true}\n')
+    args[server_index : server_index + 2] = [
+        "--server-launch-config",
+        str(launch),
+    ]
+    return args
+
+
 class ServingBenchmarkCampaignTests(unittest.TestCase):
     def test_vllm_campaign_requires_reference_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -347,6 +361,35 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
                 "path": str(thermal_path.resolve()),
                 "sha256": thermal_sha256,
             },
+        )
+
+    def test_campaign_accepts_owned_server_without_thermal_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = campaign.parse_args(unpaced_owned_args(root))
+            command = campaign.benchmark_command(
+                args, "mixed", root / "mixed.kiln.json"
+            )
+            summary = campaign.build_summary(
+                args,
+                [
+                    {
+                        "profile": "mixed",
+                        "status": "completed",
+                        "exit_code": 0,
+                        "receipt": str(root / "mixed.kiln.json"),
+                        "receipt_sha256": "sha256:" + "a" * 64,
+                        "blocked_by_profile": None,
+                    }
+                ],
+            )
+
+        self.assertNotIn("--host-thermal-policy", command)
+        self.assertNotIn("--external-wsl2-thermal-policy", command)
+        self.assertIn("--server-launch-config", command)
+        self.assertEqual(
+            summary["thermal_policy"],
+            {"mode": "not_requested", "path": None, "sha256": None},
         )
 
     def test_campaign_stops_after_first_failed_profile_and_publishes_evidence(

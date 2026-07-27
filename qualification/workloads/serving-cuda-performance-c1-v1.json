@@ -22,7 +22,6 @@
       "effective_config": {
         "build": {
           "binary": "kiln",
-          "cargo_cpu_quota_percent": 50,
           "cargo_environment_policy": "closed-qualification-test-v1",
           "cargo_execution_mode": "delegated-cgroup",
           "cargo_host_reserve_gib": 3,
@@ -34,17 +33,16 @@
           "cargo_runtime_authority": "contained-parent-pause-aware-process-group-v1",
           "cargo_termination": "new-session-term-then-kill-process-group-v1",
           "cargo_wrapper": "scripts/cargo-bounded.sh",
-          "duration_metric_accounting": "wall_seconds_minus_verified_wsl2_thermal_pause_overlap",
+          "duration_metric_accounting": "wall_seconds",
           "features": "cuda",
           "locked": true,
           "no_default_features": true,
           "offline": true,
           "package": "kiln-server",
           "profile": "release",
-          "thermal_pause_allowance_seconds": 14400,
-          "timeout_accounting": "wall_seconds_minus_verified_wsl2_thermal_pause_overlap",
+          "timeout_accounting": "wall_seconds",
           "timeout_seconds": 1800,
-          "wall_timeout_seconds": 16200
+          "wall_timeout_seconds": 1800
         },
         "campaign": {
           "continue_after_failure": true,
@@ -83,13 +81,6 @@
           "model_id": "Qwen/Qwen3.5-4B",
           "served_model_id": "Qwen3.5-4B",
           "shared_closed_model_view": ".qualification/cuda-rtx4090-laptop/performance-model-v1"
-        },
-        "thermal": {
-          "outer_hard_limit_gpu_millicelsius": 85000,
-          "outer_hard_limit_host_millicelsius": 95000,
-          "pacing_start_gpu_millicelsius": 75000,
-          "pacing_start_host_millicelsius": 80000,
-          "policy_content_sha256": "sha256:d389a7f632baab0448bd41efc205349dee4ff3944152b48cf17e52866322e3e9"
         },
         "vllm": {
           "base_url": "http://127.0.0.1:8421",

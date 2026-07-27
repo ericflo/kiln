@@ -214,11 +214,10 @@ class ServeCudaLowMemoryTests(unittest.TestCase):
             low_memory.RESULT_ENV: "/tmp/result.json",
             low_memory.VARIANT_ENV: low_memory.VARIANT_ID,
             low_memory.NETWORK_ENV: "util-linux-unshare-user-net-pid-landlock-v1",
-            low_memory.THERMAL_POLICY_ENV: "sha256:" + "a" * 64,
             low_memory.SCOPE_BOUNDARY_ENV: "systemd-user-scope-feedback-v1",
             low_memory.SCOPE_MEMORY_MAX_ENV: str(10 * low_memory.GIB),
             low_memory.SCOPE_PIDS_MAX_ENV: "512",
-            low_memory.SCOPE_CPU_QUOTA_ENV: "50",
+            low_memory.SCOPE_CPU_QUOTA_ENV: "0",
             low_memory.SCOPE_UNIT_ENV: "kiln-wsl-scope-" + "a" * 32,
             low_memory.SCOPE_HOST_UID_ENV: "1000",
         }
@@ -236,15 +235,15 @@ class ServeCudaLowMemoryTests(unittest.TestCase):
             low_memory.RESULT_ENV: "/tmp/result.json",
             low_memory.VARIANT_ENV: low_memory.VARIANT_ID,
             low_memory.NETWORK_ENV: "util-linux-unshare-user-net-pid-landlock-v1",
-            low_memory.THERMAL_POLICY_ENV: "sha256:" + "a" * 64,
             low_memory.SCOPE_BOUNDARY_ENV: "systemd-user-scope-feedback-v1",
             low_memory.SCOPE_MEMORY_MAX_ENV: str(10 * low_memory.GIB),
             low_memory.SCOPE_PIDS_MAX_ENV: "512",
-            low_memory.SCOPE_CPU_QUOTA_ENV: "50",
+            low_memory.SCOPE_CPU_QUOTA_ENV: "0",
             low_memory.SCOPE_UNIT_ENV: "kiln-wsl-scope-" + "a" * 32,
             low_memory.SCOPE_HOST_UID_ENV: "1000",
         }
         environment = low_memory.build_environment(source)
+        self.assertNotIn("KILN_CARGO_CPU_QUOTA_PERCENT", environment)
         self.assertEqual(
             {
                 key: environment[key]
