@@ -1,6 +1,5 @@
-# Strix Halo ROCm cooperative actor-duty-cycle discriminator. This differs
-# from the thermally rejected four-row decode profile only in its intentional
-# 100 ms safe-boundary idle after actor cycles that advance model work.
+# ROCm actor-cycle diagnostic. This differs from the four-row decode profile
+# only in its intentional 100 ms idle after actor cycles.
 
 [server]
 serving_profile = "experimental"
@@ -29,9 +28,9 @@ vulkan_device_index = "auto"
 vulkan_validation = false
 cuda_kernel_profile = "native_default"
 rocm_synchronization_mode = "legacy_host_barriers"
-rocm_strided_batched_matmul_mode = "auto"
-rocm_bf16_matmul_output_mode = "auto"
-rocm_kernel_profile = "qualified"
+rocm_strided_batched_matmul_mode = "disabled"
+rocm_bf16_matmul_output_mode = "f32_then_cast"
+rocm_kernel_profile = "portable_fallback"
 rocm_graph_mode = "profile"
 rocm_graph_cache_entries = 12
 rocm_graph_cache_max_bytes = 1073741824

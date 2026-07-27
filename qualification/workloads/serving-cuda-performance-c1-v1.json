@@ -72,7 +72,7 @@
         },
         "kiln": {
           "base_url": "http://127.0.0.1:8420",
-          "config_sha256": "sha256:fa362ece580f91b2752cd6d56984a186b699b83da99663ef015a79b2e2005428",
+          "config_sha256": "sha256:61ac04d55db28be48f3195c5c6890e8fc8f7b22ecd5b7153cc7f0c1c020ab0c7",
           "launch_sha256": "sha256:2d351c605bb0da71dde85521b6a0a4546fb9990a7f0c45f84f926dcb157f344d"
         },
         "model": {

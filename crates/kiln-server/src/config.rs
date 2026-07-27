@@ -6492,6 +6492,53 @@ mod tests {
     use crate::TEST_ENV_LOCK as ENV_LOCK;
     use std::ffi::{OsStr, OsString};
 
+    #[test]
+    fn checked_in_server_configs_parse_and_validate() {
+        let config_dir =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../qualification/server-config");
+        let mut config_paths = std::fs::read_dir(&config_dir)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "failed to read checked-in server config directory {}: {error}",
+                    config_dir.display()
+                )
+            })
+            .map(|entry| {
+                entry
+                    .expect("failed to read server config directory entry")
+                    .path()
+            })
+            .filter(|path| path.extension() == Some(OsStr::new("toml")))
+            .collect::<Vec<_>>();
+        config_paths.sort();
+        assert!(
+            !config_paths.is_empty(),
+            "no checked-in server configs found in {}",
+            config_dir.display()
+        );
+
+        for path in config_paths {
+            let contents = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+                panic!(
+                    "failed to read checked-in config {}: {error}",
+                    path.display()
+                )
+            });
+            let config = KilnConfig::from_toml_with_sources(&contents).unwrap_or_else(|error| {
+                panic!(
+                    "failed to parse checked-in config {}: {error}",
+                    path.display()
+                )
+            });
+            config.validate().unwrap_or_else(|error| {
+                panic!(
+                    "failed to validate checked-in config {}: {error}",
+                    path.display()
+                )
+            });
+        }
+    }
+
     const EXPECTED_PUBLIC_ENV_NAMES: &[&str] = &[
         "KILN_ACCELERATOR_FULL_ATTENTION_SCORE_BUDGET_MIB",
         "KILN_ACCELERATOR_KT_API_MODE",

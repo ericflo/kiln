@@ -1,6 +1,5 @@
-# Strix Halo ROCm prefill-amortization discriminator. This differs from the
-# thermally contained 100 ms actor-duty-cycle profile only by advancing up to
-# 32 prefill layers per cycle instead of four before the safe-boundary idle.
+# ROCm prefill-amortization diagnostic. This differs from the 100 ms
+# actor-cycle profile only by advancing up to 32 prefill layers per cycle.
 
 [server]
 serving_profile = "experimental"
@@ -29,9 +28,9 @@ vulkan_device_index = "auto"
 vulkan_validation = false
 cuda_kernel_profile = "native_default"
 rocm_synchronization_mode = "legacy_host_barriers"
-rocm_strided_batched_matmul_mode = "auto"
-rocm_bf16_matmul_output_mode = "auto"
-rocm_kernel_profile = "qualified"
+rocm_strided_batched_matmul_mode = "disabled"
+rocm_bf16_matmul_output_mode = "f32_then_cast"
+rocm_kernel_profile = "portable_fallback"
 rocm_graph_mode = "profile"
 rocm_graph_cache_entries = 12
 rocm_graph_cache_max_bytes = 1073741824
