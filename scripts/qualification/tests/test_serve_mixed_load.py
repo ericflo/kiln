@@ -202,7 +202,7 @@ def health_fixture(
     accelerator_runtime = {
         "schema_id": "kiln.accelerator-runtime-policy.v15",
         "version": 15,
-        "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v3",
+        "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v4",
         "vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1",
         "serving_profile": serving_profile,
         "serving_profile_source": "config_file",
@@ -478,7 +478,7 @@ def debug_fixture(
         "accelerator_runtime": {
             "schema_id": "kiln.accelerator-runtime-policy.v15",
             "version": 15,
-            "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v3",
+            "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v4",
             "vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1",
             "serving_profile": serving_profile,
             "serving_profile_source": "config_file",

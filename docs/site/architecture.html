@@ -436,14 +436,15 @@ training request
           accelerator-policy diagnostic. The nonstandard <code>GGML_VK_VISIBLE_DEVICES</code> behavior is removed.
         </p>
 
-        <h3 class="font-semibold mt-6 mb-3">Vulkan kernels use one qualified source policy</h3>
+        <h3 class="font-semibold mt-6 mb-3">Vulkan kernels use one portable source policy</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           Product Vulkan dispatch uses the typed, immutable
-          <code>kiln.vulkan-kernel-policy.v3</code> object. It is not a TOML, CLI, request, or environment
-          surface. The Vulkan backend, kernel crate, and resident model planner share this one object, so the
-          covered model-route and packed-weight selections, recurrence residency, batch thresholds, and
-          split-K geometry cannot diverge or change between requests. A source change
-          must version the policy and rerun Vulkan oracle, performance, development-soak, and endurance gates.
+          <code>kiln.vulkan-kernel-policy.v4</code> portable-fallback object. It is not a TOML, CLI, request,
+          environment, device-name, or PCI-ID surface. The Vulkan backend, kernel crate, and resident model
+          planner share this one object. Device-tuned model routes, packed weights, row grouping, fused
+          submissions, parallel recurrence, and resident decode are declined by default; established generic
+          fallbacks remain authoritative. Machine-specific receipts do not alter product dispatch. A source
+          change must version the policy and establish cross-device correctness before enabling a route.
           Accelerator policy v15 reports this identity as <code>vulkan_kernel_policy_schema_id</code> in config,
           health, trusted debug state, the CLI config check, and the dashboard.
         </p>

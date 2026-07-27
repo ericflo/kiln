@@ -6,10 +6,8 @@
 //! `max(hidden, intermediate) × max_batch × 4` bytes — ≈ 2.3 MiB per
 //! slot on Qwen3.5-4B at `max_batch = 64`, ≈ 10 MiB total. The pool
 //! autosizes from `VulkanDevice::device_local_heap_bytes()` and caps
-//! itself at 1 % of that. On a device that can't even fit the
-//! 3-slot minimum — Strix Halo iGPU with its 16 GiB unified-memory
-//! budget that the model already nearly fills, or any smaller
-//! integrated GPU — `try_new` returns `Ok(None)`, the dispatcher
+//! itself at 1 % of that. On a device that cannot fit the three-slot
+//! minimum after model allocation, `try_new` returns `Ok(None)`, the dispatcher
 //! emits `tracing::warn!` once, and the call site transparently
 //! falls back to the existing per-call `Tensor`-shaped path.
 //!

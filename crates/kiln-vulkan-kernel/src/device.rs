@@ -86,8 +86,8 @@ pub struct VulkanDevice {
     max_compute_shared_memory_size: vk::DeviceSize,
     /// Maximum dispatch grid extent on each axis (from
     /// VkPhysicalDeviceLimits::maxComputeWorkGroupCount[0..3]). Vulkan
-    /// only guarantees ≥ 65535 per axis, but real devices typically
-    /// support much more (AMD/Strix Halo ≈ 2^31 - 1). Used by
+    /// only guarantees >= 65535 per axis, but implementations may
+    /// support much more. Used by
     /// `dispatch_kernel` and `run_compute_pipeline` to gate oversized
     /// dispatches with a meaningful error rather than letting
     /// vkCmdDispatch fail opaquely.
@@ -562,9 +562,8 @@ impl VulkanDevice {
 
     /// Per-axis maximum compute dispatch grid extent (from
     /// `VkPhysicalDeviceLimits::maxComputeWorkGroupCount[axis]`).
-    /// `axis` is 0, 1, or 2. Vulkan only guarantees ≥ 65535 per axis,
-    /// but real devices typically support much more (AMD/Strix Halo
-    /// reports ≈ 2^31 - 1).
+    /// `axis` is 0, 1, or 2. Vulkan only guarantees >= 65535 per axis,
+    /// but implementations may report a larger limit.
     pub fn max_compute_work_group_count(&self, axis: usize) -> u32 {
         debug_assert!(axis < 3, "max_compute_work_group_count axis must be 0..3");
         self.max_compute_work_group_count[axis.min(2)]

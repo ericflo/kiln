@@ -17,8 +17,7 @@ impl VulkanBackend {
     /// Returns `Some(&pool)` when the ring fits within 1% of the
     /// device-local heap and every slot allocation succeeds.
     /// Returns `None` (after a one-time `tracing::warn!`) when the
-    /// device can't fit the minimum 3 slots, e.g. Strix Halo near
-    /// its 16 GiB UMA limit. The `None` outcome is cached so the
+    /// device cannot fit the minimum three slots. The outcome is cached so the
     /// per-call kt `kiln_tensor::Tensor` fallback does not re-probe on every
     /// decode step.
     pub fn decode_resident_pool(

@@ -73,6 +73,12 @@
   normalization, dynamic-length paged decode, and GDN pre-permute. Runtime
   policy schema v13 exposes the expanded authority everywhere the resolved
   policy is reported.
+- Portable Vulkan defaults: removed the global Strix-derived qualified policy.
+  Vulkan kernel, tensor, model, and resident dispatch now share process-lifetime
+  policy v4, whose product default declines device-tuned routes and uses
+  established fallbacks. The server installs that portable policy before
+  device creation; no device name or PCI identity selects a machine profile.
+  Earlier v3 machine receipts remain historical and do not qualify v4.
 - Metal graph, tape, and tensor runtime policy no longer reads late-bound
   debug environment variables. Runtime options own graph eligibility, stable
   paged metadata remains mandatory, saved training tensors remain resident,

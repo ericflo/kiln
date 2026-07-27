@@ -1,7 +1,6 @@
 // vk_solve_tri_v2 — forward-substitution triangular solve with bounded
-// shared memory. Replaces the EXPERIMENTAL solve_tri.comp (which
-// requested 192 KB of shared memory and SIGFPEs at pipeline creation
-// on Strix Halo).
+// shared memory. Replaces the EXPERIMENTAL solve_tri.comp, which
+// requested 192 KB of shared memory and exceeded common device limits.
 //
 // Computes W = (I + diag(β) · A_strict)^{-1} · diag(β) · V'
 //   A_strict: [B, H, C, C]   strict-lower triangular
@@ -24,7 +23,7 @@
 // For C = 64 and DV_PER_WG = 64:
 //   sW = 64 × 64 × 4 = 16 KB
 //   sA = 64 × 64 × 4 = 16 KB
-//   Total = 32 KB. Comfortably within Strix Halo's 32–48 KB cap.
+//   Total = 32 KB. Callers must require at least this much shared memory.
 //
 // Push constants: batch, heads, chunk (≤ 64), dv.
 

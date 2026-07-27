@@ -658,7 +658,7 @@ pub(crate) fn try_kt_matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>
 /// `broadcast_matmul_cpu_compatible` directly, bypassing the existing
 /// Vulkan routing in `linear_with_lora_t_backend_decode_if`. This
 /// helper threads them through `LinearBackend::runtime_linear_prefill_apply`
-/// (the autograd-safe `CustomOp1`) under the qualified Vulkan route policy.
+/// (the autograd-safe `CustomOp1`) under the Vulkan route policy.
 /// On Qwen3.5-4B that's 24 GDN layers × 4 in-proj matmuls per layer
 /// — the dominant CPU compute in training before this commit.
 pub(super) fn gdn_in_proj_matmul(

@@ -5724,7 +5724,7 @@ scoped to the stable request owner; clearing the whole registry would be an
 invalid implementation because it could corrupt concurrent rows.
 
 No environment variable can enable the quarantined prompt or decode scope;
-`kiln.vulkan-kernel-policy.v3` fixes both off. A fully materialized control
+`kiln.vulkan-kernel-policy.v4` fixes both off. A fully materialized control
 requires a reviewed source-policy change and separately attested binary. A
 control that merely reports `resident_prefill_used=false` is
 insufficient: that field describes the native multi-row prefill route, not this

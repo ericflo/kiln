@@ -709,7 +709,7 @@ pub(super) fn try_vulkan_resident_batched_decode_argmax(
         || start_positions.iter().any(|&p| p == 0)
         || lora.is_some()
         || !config.attn_output_gate
-        || !qualified_vulkan_resident_decode_enabled()
+        || !vulkan_resident_decode_enabled()
         || !ReplayBackend::runtime_supports_resident_decode(backend)
         || !resident_decode_pool_ready(backend, config)
         || crate::mtp_runtime::single_token_self_attention_active()
@@ -837,7 +837,7 @@ pub(super) fn try_vulkan_resident_batched_decode_hidden(
         || start_positions.iter().any(|&p| p == 0)
         || lora.is_some()
         || !config.attn_output_gate
-        || !qualified_vulkan_resident_decode_enabled()
+        || !vulkan_resident_decode_enabled()
         || !ReplayBackend::runtime_supports_resident_decode(backend)
         || !resident_decode_pool_ready(backend, config)
         || crate::mtp_runtime::single_token_self_attention_active()
@@ -983,7 +983,7 @@ pub(super) fn try_vulkan_resident_batched_decode_sample(
         || start_positions.iter().any(|&p| p == 0)
         || lora.is_some()
         || !config.attn_output_gate
-        || !qualified_vulkan_resident_decode_enabled()
+        || !vulkan_resident_decode_enabled()
         || !ReplayBackend::runtime_supports_resident_decode(backend)
         || !resident_decode_pool_ready(backend, config)
         || crate::mtp_runtime::single_token_self_attention_active()
@@ -1113,7 +1113,7 @@ pub(super) fn native_resident_decode_required(
         && start_positions.iter().all(|&pos| pos > 0)
         && lora.is_none()
         && config.attn_output_gate
-        && qualified_vulkan_resident_decode_enabled()
+        && vulkan_resident_decode_enabled()
         && ReplayBackend::runtime_supports_resident_decode(backend)
         && !crate::mtp_runtime::single_token_self_attention_active()
 }
@@ -1837,7 +1837,7 @@ pub fn model_forward_paged(
             && lora.is_none()
             && !crate::mtp_runtime::single_token_self_attention_active()
             && config.attn_output_gate
-            && qualified_vulkan_resident_decode_enabled()
+            && vulkan_resident_decode_enabled()
             && ReplayBackend::runtime_supports_resident_decode(backend)
             && resident_decode_pool_ready(backend, config)
         {
@@ -2081,7 +2081,7 @@ pub fn model_forward_paged_last_token(
             && lora.is_none()
             && !crate::mtp_runtime::single_token_self_attention_active()
             && config.attn_output_gate
-            && qualified_vulkan_resident_decode_enabled()
+            && vulkan_resident_decode_enabled()
             && ReplayBackend::runtime_supports_resident_decode(backend)
             && resident_decode_pool_ready(backend, config)
         {
@@ -2260,7 +2260,7 @@ pub fn model_forward_paged_last_token_resident(
 
     // Native single-submit orchestrator: chains all 32 layers' dispatches
     // into one `CommandBatch`, eliminating per-layer Tensor bridging and
-    // submit overhead. Enabled by the qualified Vulkan policy; falls back
+    // submit overhead. Governed by the Vulkan policy; falls back
     // transparently to the per-layer fast-path embedded
     // in `model_forward_paged_inner` on any decline.
     #[cfg(feature = "vulkan")]
@@ -2271,7 +2271,7 @@ pub fn model_forward_paged_last_token_resident(
             && lora.is_none()
             && !crate::mtp_runtime::single_token_self_attention_active()
             && config.attn_output_gate
-            && qualified_vulkan_resident_decode_enabled()
+            && vulkan_resident_decode_enabled()
         {
             if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
@@ -2331,7 +2331,7 @@ pub(super) fn model_forward_paged_last_token_resident_native_vk(
     use kiln_vulkan_kernel::CommandBatch;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     let timing_enabled =
-        kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY.profile_resident_decode_timing;
+        kiln_vulkan_kernel::kernels::vulkan_kernel_policy().profile_resident_decode_timing;
     static EMBED_NS: AtomicU64 = AtomicU64::new(0);
     static ROPE_NS: AtomicU64 = AtomicU64::new(0);
     static UPLOAD_NS: AtomicU64 = AtomicU64::new(0);
@@ -2742,7 +2742,7 @@ pub fn model_forward_paged_last_token_greedy(
             && lora.is_none()
             && !crate::mtp_runtime::single_token_self_attention_active()
             && config.attn_output_gate
-            && qualified_vulkan_resident_decode_enabled()
+            && vulkan_resident_decode_enabled()
             && ReplayBackend::runtime_supports_resident_decode(backend)
             && resident_decode_pool_ready(backend, config)
         {
@@ -4022,7 +4022,7 @@ pub(super) fn model_forward_paged_inner_bounded(
                         && start_pos > 0
                         && lora.is_none()
                         && !crate::mtp_runtime::single_token_self_attention_active()
-                        && qualified_vulkan_resident_decode_enabled()
+                        && vulkan_resident_decode_enabled()
                     {
                         if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                             .downcast_ref::<crate::backend::vulkan::VulkanBackend>(

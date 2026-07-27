@@ -125,7 +125,7 @@ Within the explicitly test-enabled route:
    freeing an in-flight buffer.
 
 A one-token final prompt chunk would use the same scoped recurrent kernel.
-Ordinary decode does not: immutable `kiln.vulkan-kernel-policy.v3` disables
+Ordinary decode does not: immutable `kiln.vulkan-kernel-policy.v4` disables
 both the separate decode-residency route and the typed prompt policy. Their
 former environment controls have no aliases. A fully materialized diagnostic
 arm now requires a reviewed source-policy change and a separate binary.

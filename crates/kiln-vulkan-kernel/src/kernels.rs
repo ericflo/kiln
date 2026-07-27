@@ -6,12 +6,11 @@ use half::bf16;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Immutable kernel selection used by production Vulkan execution.
+/// Immutable, device-neutral kernel selection used by Vulkan execution.
 ///
-/// These values are the exact defaults exercised by the Strix Halo
-/// qualification receipts. Kernel selection is an implementation contract,
-/// not a per-dispatch process-environment experiment: changing this policy
-/// requires source review and new correctness/performance receipts.
+/// Device-specific qualification belongs in receipts, not product defaults.
+/// The portable policy declines optimized routes whose correctness or
+/// scheduling has not been established across Vulkan implementations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VulkanKernelPolicy {
     pub flash_attention_row_tile: usize,
@@ -107,184 +106,203 @@ pub struct VulkanKernelPolicy {
     pub profile_resident_decode_timing: bool,
 }
 
-pub const VULKAN_KERNEL_POLICY_SCHEMA_ID: &str = "kiln.vulkan-kernel-policy.v3";
+pub const VULKAN_KERNEL_POLICY_SCHEMA_ID: &str = "kiln.vulkan-kernel-policy.v4";
 
-pub const QUALIFIED_VULKAN_KERNEL_POLICY: VulkanKernelPolicy = VulkanKernelPolicy {
-    flash_attention_row_tile: 2048,
-    flash_attention_row_work_budget: 10_000_000,
-    bf16_weight_row_tile: 128,
-    elementwise_tile_elements: 1 << 20,
-    exp_tile_elements: 65_536,
-    gdn_enabled: true,
-    gdn_prefill_in_proj_enabled: true,
-    gdn_gates_enabled: true,
-    gdn_gated_rms_norm_enabled: true,
-    gdn_full_chunk_forward_enabled: false,
-    fused_conv1d_update_enabled: false,
-    fused_conv1d_prefill_enabled: true,
-    conv1d_prefill_single_submit_enabled: true,
-    gdn_forward_sub_enabled: false,
-    gdn_decode_fused_enabled: false,
-    gdn_recurrent_unexpanded_qk_enabled: true,
-    gdn_recurrent_qk_norm_unexpanded_enabled: true,
-    linear_decode_enabled: true,
-    linear_argmax_batch_enabled: true,
-    full_attn_qkv_enabled: true,
-    paged_attn_decode_batch_enabled: true,
-    mlp_decode_enabled: true,
-    mlp_gate_up_enabled: false,
-    mlp_bf16_gate_up_f32_down_enabled: true,
-    bf16_packed_linear_weights_enabled: true,
-    bf16_packed_gdn_in_proj_weights_enabled: true,
-    bf16_packed_full_attn_qkv_weights_enabled: true,
-    bf16_packed_mlp_decode_weights_enabled: true,
-    recurrent_state_residency_enabled: false,
-    prefill_recurrent_state_residency_enabled: false,
-    resident_decode_enabled: true,
-    bridged_rmsnorm_forward_enabled: false,
-    skip_final_gdn_state_readback_enabled: true,
-    flash_attn_prefill_enabled: true,
-    paged_decode_gpu_gather_enabled: true,
-    gdn_chunkwise_forward_enabled: true,
-    gdn_chunkwise_single_submit_enabled: true,
-    gdn_chunkwise_fallback_enabled: false,
-    gdn_decode_fused_resident_state_enabled: true,
-    linear_max_flop_per_dispatch: 20_000_000_000,
-    mlp_bf16_gate_up_rows4: true,
-    mlp_f32_down_rows4: true,
-    mlp_bf16_down_rows4: true,
-    mlp_bf16_rows8: true,
-    mlp_bf16_rows8_min_batch: 256,
-    mlp_bf16_gate_up_rows4_min_batch: 8,
-    mlp_bf16_down_rows4_min_batch: 16,
-    mlp_f32_down_rows4_min_batch: 8,
-    linear_decode_bf16w_rows4: true,
-    linear_decode_bf16w_rows8: true,
-    linear_bf16_rows4_min_batch: 16,
-    linear_bf16_rows8_min_batch: 64,
-    gdn_in_proj_rows4_min_batch: 16,
-    gdn_in_proj_rows8_min_batch: 64,
-    full_attn_qkv_bf16w_rows4: true,
-    full_attn_qkv_bf16w_rows8: true,
-    full_attn_qkv_bf16_rows4_min_batch: 2,
-    full_attn_qkv_bf16_rows8_min_batch: 64,
-    paged_attn_single_submit: true,
-    qwen_rmsnorm_single_submit: true,
-    gdn_gates_single_submit: true,
-    gdn_gated_norm_single_submit: true,
-    mlp_gate_up_single_submit: true,
-    causal_conv1d_single_submit: true,
-    mlp_chained_dispatch: true,
-    mlp_chained_transfer_submit: true,
-    gdn_decode_host_visible_state: false,
-    gdn_decode_fused_single_submit: false,
-    gdn_recurrent_host_visible_state: true,
-    gdn_recurrent_host_visible_batch_state: false,
-    gdn_recurrent_single_submit: true,
-    gdn_recurrent_parallel_reduce: true,
-    linear_decode_single_submit: true,
-    linear_decode_argmax_single_submit: true,
-    full_attn_qkv_single_submit: true,
-    gdn_in_proj_single_submit: true,
-    gdn_in_proj_batch_pair_qkv_z: true,
-    gdn_in_proj_batch_row_pair: true,
-    gdn_in_proj_batch_row_quad: true,
-    gdn_in_proj_batch_row_octet: false,
-    gdn_gates_batched_transfers: true,
-    gdn_gated_norm_batched_uploads: true,
-    gdn_chunk_batched_transfers: true,
-    paged_attn_batched_uploads: true,
-    prefill_row_pair_matmul: true,
-    gdn_qk_norm_recurrent_fusion: true,
-    gdn_in_proj_conv_split_fusion: false,
-    profile_mlp_kernel_stages: false,
-    profile_gdn_in_proj_kernel_stages: false,
-    profile_gdn_recurrent_kernel_stages: false,
-    profile_resident_decode_timing: false,
-};
+impl VulkanKernelPolicy {
+    /// Decline device-tuned Vulkan routes while retaining bounded-work limits
+    /// and explicit fallbacks.
+    pub const fn portable_fallback() -> Self {
+        Self {
+            flash_attention_row_tile: 2048,
+            flash_attention_row_work_budget: 10_000_000,
+            bf16_weight_row_tile: 128,
+            elementwise_tile_elements: 1 << 20,
+            exp_tile_elements: 65_536,
+            gdn_enabled: false,
+            gdn_prefill_in_proj_enabled: false,
+            gdn_gates_enabled: false,
+            gdn_gated_rms_norm_enabled: false,
+            gdn_full_chunk_forward_enabled: false,
+            fused_conv1d_update_enabled: false,
+            fused_conv1d_prefill_enabled: false,
+            conv1d_prefill_single_submit_enabled: false,
+            gdn_forward_sub_enabled: false,
+            gdn_decode_fused_enabled: false,
+            gdn_recurrent_unexpanded_qk_enabled: false,
+            gdn_recurrent_qk_norm_unexpanded_enabled: false,
+            linear_decode_enabled: false,
+            linear_argmax_batch_enabled: false,
+            full_attn_qkv_enabled: false,
+            paged_attn_decode_batch_enabled: false,
+            mlp_decode_enabled: false,
+            mlp_gate_up_enabled: false,
+            mlp_bf16_gate_up_f32_down_enabled: false,
+            bf16_packed_linear_weights_enabled: false,
+            bf16_packed_gdn_in_proj_weights_enabled: false,
+            bf16_packed_full_attn_qkv_weights_enabled: false,
+            bf16_packed_mlp_decode_weights_enabled: false,
+            recurrent_state_residency_enabled: false,
+            prefill_recurrent_state_residency_enabled: false,
+            resident_decode_enabled: false,
+            bridged_rmsnorm_forward_enabled: false,
+            skip_final_gdn_state_readback_enabled: false,
+            flash_attn_prefill_enabled: false,
+            paged_decode_gpu_gather_enabled: false,
+            gdn_chunkwise_forward_enabled: false,
+            gdn_chunkwise_single_submit_enabled: false,
+            gdn_chunkwise_fallback_enabled: true,
+            gdn_decode_fused_resident_state_enabled: false,
+            linear_max_flop_per_dispatch: 20_000_000_000,
+            mlp_bf16_gate_up_rows4: false,
+            mlp_f32_down_rows4: false,
+            mlp_bf16_down_rows4: false,
+            mlp_bf16_rows8: false,
+            mlp_bf16_rows8_min_batch: 256,
+            mlp_bf16_gate_up_rows4_min_batch: 8,
+            mlp_bf16_down_rows4_min_batch: 16,
+            mlp_f32_down_rows4_min_batch: 8,
+            linear_decode_bf16w_rows4: false,
+            linear_decode_bf16w_rows8: false,
+            linear_bf16_rows4_min_batch: 16,
+            linear_bf16_rows8_min_batch: 64,
+            gdn_in_proj_rows4_min_batch: 16,
+            gdn_in_proj_rows8_min_batch: 64,
+            full_attn_qkv_bf16w_rows4: false,
+            full_attn_qkv_bf16w_rows8: false,
+            full_attn_qkv_bf16_rows4_min_batch: 2,
+            full_attn_qkv_bf16_rows8_min_batch: 64,
+            paged_attn_single_submit: false,
+            qwen_rmsnorm_single_submit: false,
+            gdn_gates_single_submit: false,
+            gdn_gated_norm_single_submit: false,
+            mlp_gate_up_single_submit: false,
+            causal_conv1d_single_submit: false,
+            mlp_chained_dispatch: false,
+            mlp_chained_transfer_submit: false,
+            gdn_decode_host_visible_state: false,
+            gdn_decode_fused_single_submit: false,
+            gdn_recurrent_host_visible_state: true,
+            gdn_recurrent_host_visible_batch_state: false,
+            gdn_recurrent_single_submit: false,
+            gdn_recurrent_parallel_reduce: false,
+            linear_decode_single_submit: false,
+            linear_decode_argmax_single_submit: false,
+            full_attn_qkv_single_submit: false,
+            gdn_in_proj_single_submit: false,
+            gdn_in_proj_batch_pair_qkv_z: false,
+            gdn_in_proj_batch_row_pair: false,
+            gdn_in_proj_batch_row_quad: false,
+            gdn_in_proj_batch_row_octet: false,
+            gdn_gates_batched_transfers: false,
+            gdn_gated_norm_batched_uploads: false,
+            gdn_chunk_batched_transfers: false,
+            paged_attn_batched_uploads: false,
+            prefill_row_pair_matmul: false,
+            gdn_qk_norm_recurrent_fusion: false,
+            gdn_in_proj_conv_split_fusion: false,
+            profile_mlp_kernel_stages: false,
+            profile_gdn_in_proj_kernel_stages: false,
+            profile_gdn_recurrent_kernel_stages: false,
+            profile_resident_decode_timing: false,
+        }
+    }
+}
+
+impl Default for VulkanKernelPolicy {
+    fn default() -> Self {
+        Self::portable_fallback()
+    }
+}
+
+pub const PORTABLE_VULKAN_KERNEL_POLICY: VulkanKernelPolicy =
+    VulkanKernelPolicy::portable_fallback();
+
+pub fn vulkan_kernel_policy() -> VulkanKernelPolicy {
+    PORTABLE_VULKAN_KERNEL_POLICY
+}
 
 fn profile_vulkan_mlp_kernel_stages_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.profile_mlp_kernel_stages
+    vulkan_kernel_policy().profile_mlp_kernel_stages
 }
 
 pub(crate) fn mlp_bf16_gate_up_rows4_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_gate_up_rows4
+    vulkan_kernel_policy().mlp_bf16_gate_up_rows4
 }
 
-pub(crate) const fn flash_attention_row_tile() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.flash_attention_row_tile
+pub(crate) fn flash_attention_row_tile() -> usize {
+    vulkan_kernel_policy().flash_attention_row_tile
 }
 
-pub(crate) const fn flash_attention_row_work_budget() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.flash_attention_row_work_budget
+pub(crate) fn flash_attention_row_work_budget() -> usize {
+    vulkan_kernel_policy().flash_attention_row_work_budget
 }
 
-pub(crate) const fn bf16_weight_row_tile() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.bf16_weight_row_tile
+pub(crate) fn bf16_weight_row_tile() -> usize {
+    vulkan_kernel_policy().bf16_weight_row_tile
 }
 
-pub(crate) const fn elementwise_tile_elements() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.elementwise_tile_elements
+pub(crate) fn elementwise_tile_elements() -> usize {
+    vulkan_kernel_policy().elementwise_tile_elements
 }
 
-pub(crate) const fn exp_tile_elements() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.exp_tile_elements
+pub(crate) fn exp_tile_elements() -> usize {
+    vulkan_kernel_policy().exp_tile_elements
 }
 
 pub(crate) fn mlp_f32_down_rows4_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_f32_down_rows4
+    vulkan_kernel_policy().mlp_f32_down_rows4
 }
 
 pub(crate) fn mlp_bf16_down_rows4_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_down_rows4
+    vulkan_kernel_policy().mlp_bf16_down_rows4
 }
 
 pub(crate) fn mlp_bf16_rows8_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_rows8
+    vulkan_kernel_policy().mlp_bf16_rows8
 }
 
 pub(crate) fn mlp_bf16_rows8_min_batch() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_rows8_min_batch
+    vulkan_kernel_policy().mlp_bf16_rows8_min_batch
 }
 
 pub(crate) fn mlp_bf16_gate_up_rows4_min_batch() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_gate_up_rows4_min_batch
+    vulkan_kernel_policy().mlp_bf16_gate_up_rows4_min_batch
 }
 
 pub(crate) fn mlp_bf16_down_rows4_min_batch() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_down_rows4_min_batch
+    vulkan_kernel_policy().mlp_bf16_down_rows4_min_batch
 }
 
 pub(crate) fn mlp_f32_down_rows4_min_batch() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_f32_down_rows4_min_batch
+    vulkan_kernel_policy().mlp_f32_down_rows4_min_batch
 }
 
 pub(crate) fn linear_decode_bf16w_rows4_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.linear_decode_bf16w_rows4
+    vulkan_kernel_policy().linear_decode_bf16w_rows4
 }
 
 pub(crate) fn linear_decode_bf16w_rows8_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.linear_decode_bf16w_rows8
+    vulkan_kernel_policy().linear_decode_bf16w_rows8
 }
 
 pub(crate) fn linear_decode_bf16w_rows8_min_batch() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.linear_bf16_rows8_min_batch
+    vulkan_kernel_policy().linear_bf16_rows8_min_batch
 }
 
 pub(crate) fn linear_decode_bf16w_rows4_min_batch() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.linear_bf16_rows4_min_batch
+    vulkan_kernel_policy().linear_bf16_rows4_min_batch
 }
 
 pub(crate) fn gdn_in_proj_rows4_min_batch() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_rows4_min_batch
+    vulkan_kernel_policy().gdn_in_proj_rows4_min_batch
 }
 
 pub(crate) fn gdn_in_proj_rows8_min_batch() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_rows8_min_batch
+    vulkan_kernel_policy().gdn_in_proj_rows8_min_batch
 }
 
 pub(crate) fn full_attn_qkv_bf16w_rows4_min_batch() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.full_attn_qkv_bf16_rows4_min_batch
+    vulkan_kernel_policy().full_attn_qkv_bf16_rows4_min_batch
 }
 
 const PAGED_ATTN_SPLITK_CHUNKS_B1: usize = 32;
@@ -307,47 +325,47 @@ pub fn paged_attn_decode_splitk_chunks(batch_size: usize, max_blocks_per_seq: us
 }
 
 fn paged_attn_single_submit_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.paged_attn_single_submit
+    vulkan_kernel_policy().paged_attn_single_submit
 }
 
 fn qwen_rmsnorm_single_submit_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.qwen_rmsnorm_single_submit
+    vulkan_kernel_policy().qwen_rmsnorm_single_submit
 }
 
 fn gdn_gates_single_submit_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_gates_single_submit
+    vulkan_kernel_policy().gdn_gates_single_submit
 }
 
 fn gdn_gated_norm_single_submit_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_gated_norm_single_submit
+    vulkan_kernel_policy().gdn_gated_norm_single_submit
 }
 
 fn mlp_gate_up_single_submit_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_gate_up_single_submit
+    vulkan_kernel_policy().mlp_gate_up_single_submit
 }
 
 fn causal_conv1d_single_submit_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.causal_conv1d_single_submit
+    vulkan_kernel_policy().causal_conv1d_single_submit
 }
 
 pub(crate) fn full_attn_qkv_bf16w_rows4_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.full_attn_qkv_bf16w_rows4
+    vulkan_kernel_policy().full_attn_qkv_bf16w_rows4
 }
 
 fn mlp_chained_dispatch_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_chained_dispatch
+    vulkan_kernel_policy().mlp_chained_dispatch
 }
 
 fn mlp_chained_transfer_submit_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_chained_transfer_submit
+    vulkan_kernel_policy().mlp_chained_transfer_submit
 }
 
 fn profile_vulkan_gdn_in_proj_kernel_stages_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.profile_gdn_in_proj_kernel_stages
+    vulkan_kernel_policy().profile_gdn_in_proj_kernel_stages
 }
 
 fn profile_vulkan_gdn_recurrent_kernel_stages_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.profile_gdn_recurrent_kernel_stages
+    vulkan_kernel_policy().profile_gdn_recurrent_kernel_stages
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -420,19 +438,19 @@ fn finish_vulkan_gdn_recurrent_kernel_stage_profile(
 }
 
 fn gdn_decode_host_visible_state_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_decode_host_visible_state
+    vulkan_kernel_policy().gdn_decode_host_visible_state
 }
 
 fn gdn_decode_fused_single_submit_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_decode_fused_single_submit
+    vulkan_kernel_policy().gdn_decode_fused_single_submit
 }
 
 fn gdn_recurrent_host_visible_state_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_recurrent_host_visible_state
+    vulkan_kernel_policy().gdn_recurrent_host_visible_state
 }
 
 fn gdn_recurrent_host_visible_batch_state_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_recurrent_host_visible_batch_state
+    vulkan_kernel_policy().gdn_recurrent_host_visible_batch_state
 }
 
 fn gdn_recurrent_use_host_visible_state(batch: usize) -> bool {
@@ -441,11 +459,11 @@ fn gdn_recurrent_use_host_visible_state(batch: usize) -> bool {
 }
 
 fn gdn_recurrent_single_submit_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_recurrent_single_submit
+    vulkan_kernel_policy().gdn_recurrent_single_submit
 }
 
 fn gdn_recurrent_parallel_reduce_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_recurrent_parallel_reduce
+    vulkan_kernel_policy().gdn_recurrent_parallel_reduce
 }
 
 pub(crate) fn use_gdn_recurrent_parallel_reduce(dk: usize, dv: usize) -> bool {
@@ -453,55 +471,55 @@ pub(crate) fn use_gdn_recurrent_parallel_reduce(dk: usize, dv: usize) -> bool {
 }
 
 fn linear_decode_single_submit_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.linear_decode_single_submit
+    vulkan_kernel_policy().linear_decode_single_submit
 }
 
 fn linear_decode_argmax_single_submit_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.linear_decode_argmax_single_submit
+    vulkan_kernel_policy().linear_decode_argmax_single_submit
 }
 
 fn full_attn_qkv_single_submit_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.full_attn_qkv_single_submit
+    vulkan_kernel_policy().full_attn_qkv_single_submit
 }
 
 fn gdn_in_proj_single_submit_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_single_submit
+    vulkan_kernel_policy().gdn_in_proj_single_submit
 }
 
 pub(crate) fn gdn_in_proj_batch_pair_qkv_z_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_batch_pair_qkv_z
+    vulkan_kernel_policy().gdn_in_proj_batch_pair_qkv_z
 }
 
 pub(crate) fn gdn_in_proj_batch_row_pair_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_batch_row_pair
+    vulkan_kernel_policy().gdn_in_proj_batch_row_pair
 }
 
 pub(crate) fn gdn_in_proj_batch_row_quad_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_batch_row_quad
+    vulkan_kernel_policy().gdn_in_proj_batch_row_quad
 }
 
 pub(crate) fn gdn_in_proj_batch_row_octet_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_batch_row_octet
+    vulkan_kernel_policy().gdn_in_proj_batch_row_octet
 }
 
 fn gdn_gates_batched_transfers_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_gates_batched_transfers
+    vulkan_kernel_policy().gdn_gates_batched_transfers
 }
 
 fn gdn_gated_norm_batched_uploads_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_gated_norm_batched_uploads
+    vulkan_kernel_policy().gdn_gated_norm_batched_uploads
 }
 
 fn gdn_chunk_batched_transfers_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_chunk_batched_transfers
+    vulkan_kernel_policy().gdn_chunk_batched_transfers
 }
 
 fn paged_attn_batched_uploads_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.paged_attn_batched_uploads
+    vulkan_kernel_policy().paged_attn_batched_uploads
 }
 
 fn prefill_row_pair_matmul_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.prefill_row_pair_matmul
+    vulkan_kernel_policy().prefill_row_pair_matmul
 }
 
 pub(crate) fn use_prefill_row_pair_matmul(batch: usize) -> bool {
@@ -509,72 +527,38 @@ pub(crate) fn use_prefill_row_pair_matmul(batch: usize) -> bool {
 }
 
 #[cfg(test)]
-mod qualified_policy_tests {
+mod portable_policy_tests {
     use super::*;
 
     #[test]
-    fn qualified_policy_matches_product_kernel_selection() {
+    fn portable_policy_declines_device_tuned_routes() {
+        let policy = VulkanKernelPolicy::portable_fallback();
+
         assert_eq!(
             VULKAN_KERNEL_POLICY_SCHEMA_ID,
-            "kiln.vulkan-kernel-policy.v3"
+            "kiln.vulkan-kernel-policy.v4"
         );
-        assert_eq!(flash_attention_row_tile(), 2048);
-        assert_eq!(flash_attention_row_work_budget(), 10_000_000);
-        assert_eq!(bf16_weight_row_tile(), 128);
-        assert_eq!(elementwise_tile_elements(), 1 << 20);
-        assert_eq!(exp_tile_elements(), 65_536);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_prefill_in_proj_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_gates_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_gated_rms_norm_enabled);
-        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.gdn_full_chunk_forward_enabled);
-        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.fused_conv1d_update_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.fused_conv1d_prefill_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.conv1d_prefill_single_submit_enabled);
-        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.gdn_forward_sub_enabled);
-        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.gdn_decode_fused_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_recurrent_unexpanded_qk_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_recurrent_qk_norm_unexpanded_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.linear_decode_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.linear_argmax_batch_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.full_attn_qkv_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.paged_attn_decode_batch_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.mlp_decode_enabled);
-        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.mlp_gate_up_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_gate_up_f32_down_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.bf16_packed_linear_weights_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.bf16_packed_gdn_in_proj_weights_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.bf16_packed_full_attn_qkv_weights_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.bf16_packed_mlp_decode_weights_enabled);
-        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.recurrent_state_residency_enabled);
-        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.prefill_recurrent_state_residency_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.resident_decode_enabled);
-        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.bridged_rmsnorm_forward_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.skip_final_gdn_state_readback_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.flash_attn_prefill_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.paged_decode_gpu_gather_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_chunkwise_forward_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_chunkwise_single_submit_enabled);
-        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.gdn_chunkwise_fallback_enabled);
-        assert!(QUALIFIED_VULKAN_KERNEL_POLICY.gdn_decode_fused_resident_state_enabled);
-        assert_eq!(
-            QUALIFIED_VULKAN_KERNEL_POLICY.linear_max_flop_per_dispatch,
-            20_000_000_000
-        );
-        assert!(linear_decode_bf16w_rows4_enabled());
-        assert!(linear_decode_bf16w_rows8_enabled());
-        assert_eq!(linear_decode_bf16w_rows4_min_batch(), 16);
-        assert_eq!(linear_decode_bf16w_rows8_min_batch(), 64);
-        assert!(gdn_in_proj_batch_pair_qkv_z_enabled());
-        assert!(gdn_in_proj_batch_row_pair_enabled());
-        assert!(gdn_in_proj_batch_row_quad_enabled());
-        assert!(!gdn_in_proj_batch_row_octet_enabled());
+        assert!(!policy.gdn_enabled);
+        assert!(!policy.linear_decode_enabled);
+        assert!(!policy.full_attn_qkv_enabled);
+        assert!(!policy.mlp_decode_enabled);
+        assert!(!policy.resident_decode_enabled);
+        assert!(!policy.flash_attn_prefill_enabled);
+        assert!(!policy.gdn_chunkwise_forward_enabled);
+        assert!(policy.gdn_chunkwise_fallback_enabled);
+        assert!(!policy.linear_decode_bf16w_rows4);
+        assert!(!policy.linear_decode_bf16w_rows8);
+        assert!(!policy.gdn_in_proj_batch_row_pair);
+        assert!(!policy.gdn_in_proj_batch_row_quad);
+        assert!(!policy.gdn_recurrent_parallel_reduce);
+        assert!(!policy.prefill_row_pair_matmul);
+        assert_eq!(policy.linear_max_flop_per_dispatch, 20_000_000_000);
         assert_eq!(paged_attn_decode_splitk_chunks(1, 4), 32);
         assert_eq!(paged_attn_decode_splitk_chunks(4, 32), 4);
         assert_eq!(paged_attn_decode_splitk_chunks(4, 64), 2);
         assert_eq!(paged_attn_decode_splitk_chunks(16, 64), 4);
-        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.profile_mlp_kernel_stages);
-        assert!(!QUALIFIED_VULKAN_KERNEL_POLICY.profile_resident_decode_timing);
+        assert!(!policy.profile_mlp_kernel_stages);
+        assert!(!policy.profile_resident_decode_timing);
     }
 }
 
@@ -926,9 +910,8 @@ pub fn dispatch_kernel_bytes(
     output_shape: &[usize],
     output_elem_size: usize,
 ) -> Result<Vec<u8>> {
-    // Per-axis dispatch grid limit. Use the actual device limit
-    // (typically ≈ 2^31 - 1 on AMD/Strix Halo) rather than the
-    // Vulkan spec minimum (65535), so we don't bail on legitimate
+    // Per-axis dispatch grid limit. Use the actual device limit rather than
+    // the Vulkan spec minimum (65535), so we don't bail on legitimate
     // dispatches that the hardware can handle.
     let limit_x = vk_device.max_compute_work_group_count(0);
     let limit_y = vk_device.max_compute_work_group_count(1);
@@ -5628,10 +5611,8 @@ fn dispatch_mlp_decode_cached_impl(
     let profile_stages = profile_vulkan_mlp_kernel_stages_enabled();
     let gate_up_rows2 = !gate_up_bf16_weights && use_prefill_row_pair_matmul(batch);
     // For the all-bf16 MLP, rows4 / rows8 amortization only wins once there
-    // are enough rows to keep the SMs full. The default rows8 crossover is
-    // runtime-tunable because standalone component timings and full mixed
-    // paged token timings can disagree across devices. The Strix Halo default
-    // keeps batch 64 on rows4 unless an override proves faster.
+    // are enough rows to keep the compute units full. The immutable policy
+    // controls the crossover because the portable profile declines this route.
     let rows8_path = gate_up_bf16_weights
         && down_bf16_weights
         && batch >= mlp_bf16_rows8_min_batch()
@@ -7414,8 +7395,7 @@ pub fn run_compute_pipeline(
     workgroup_count: u32,
 ) -> Result<()> {
     // Use the actual device per-axis limit rather than the Vulkan
-    // spec minimum (65535). Real devices typically support much
-    // more (AMD/Strix Halo ≈ 2^31 - 1).
+    // spec minimum (65535). Implementations may support much more.
     let limit_x = vk_device.max_compute_work_group_count(0);
     anyhow::ensure!(
         workgroup_count <= limit_x,
@@ -9327,9 +9307,8 @@ pub fn dispatch_gdn_recurrent_step_with_options_bytes(
     let v_buf = make_input_buf(v_data)?;
     let beta_buf = make_input_buf(beta_data)?;
     let g_buf = make_input_buf(g_data)?;
-    // State is mutable — upload, dispatch, read back. On Strix Halo, direct
-    // host-visible state is faster for batch 1, while batch >1 benefits from
-    // device-local state plus explicit staging copies.
+    // State is mutable: upload, dispatch, read back. The immutable policy
+    // chooses host-visible or device-local state without inspecting identity.
     let host_visible_state = gdn_recurrent_use_host_visible_state(batch);
     let state_buf = if host_visible_state {
         VulkanBuffer::create_host_visible(device, host_visible_mt, state_data.len() as u64)?
@@ -11047,8 +11026,7 @@ pub fn dispatch_sdpa_prefill_f32_bytes(
     // per axis. The dispatch grid is (seq_len, num_heads, batch); if any
     // axis would exceed that, surface a clear error rather than letting
     // vkCmdDispatch silently drop work or fail with an opaque
-    // VK_ERROR_OUT_OF_DEVICE_MEMORY. Use the actual device limit
-    // (typically much higher than the spec minimum on AMD/Strix Halo).
+    // VK_ERROR_OUT_OF_DEVICE_MEMORY. Use the actual device limit.
     let limit_x = vk_device.max_compute_work_group_count(0) as usize;
     let limit_y = vk_device.max_compute_work_group_count(1) as usize;
     let limit_z = vk_device.max_compute_work_group_count(2) as usize;

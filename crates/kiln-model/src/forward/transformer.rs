@@ -969,7 +969,7 @@ pub(super) fn transformer_block_paged_with_rope_tables(
             && lora.is_none()
             && !crate::mtp_runtime::single_token_self_attention_active()
             && config.attn_output_gate
-            && qualified_vulkan_resident_decode_enabled()
+            && vulkan_resident_decode_enabled()
         {
             if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()

@@ -64,7 +64,7 @@ pub struct VulkanBackend {
     /// Backend-owned recurrent state makes resumable prefill independent of
     /// which serving worker resumes or discards the request.
     pub(super) recurrent_state_resident_registry: RecurrentStateResidentRegistry,
-    /// Cached at construction from the immutable qualified Vulkan policy.
+    /// Cached at construction from the immutable Vulkan policy.
     pub(super) gdn_enabled: bool,
     pub(super) gdn_prefill_in_proj_enabled: bool,
     pub(super) gdn_gates_enabled: bool,
@@ -91,7 +91,7 @@ pub struct VulkanBackend {
     pub(super) recurrent_state_residency_enabled: bool,
     pub(super) prefill_recurrent_state_residency_enabled: bool,
     /// Cached `supports_resident_decode()` evaluation. The trait method is
-    /// called per-call on the hot path, so the qualified process-lifetime
+    /// called per-call on the hot path, so the process-lifetime
     /// policy is projected once at construction and never changes.
     resident_decode_enabled: bool,
     /// Lazily constructed fixed ring of 3-4 reusable intermediate
@@ -100,7 +100,7 @@ pub struct VulkanBackend {
     /// publishes the ring; subsequent calls reuse the same slots.
     ///
     /// `OnceLock<Option<...>>` so a backend that fails the pool
-    /// feasibility check (Strix Halo near the 16 GiB UMA limit) caches
+    /// feasibility check on a memory-constrained device caches
     /// the `None` and routes every subsequent call to the per-call
     /// kt `kiln_tensor::Tensor` path without re-checking.
     pub(super) decode_resident_pool: OnceLock<Option<Arc<kiln_vulkan_kernel::DecodeResidentPool>>>,
@@ -181,7 +181,7 @@ impl VulkanBackend {
     }
 
     pub fn new(device: kiln_tensor::Device) -> Self {
-        let config = VulkanRuntimeConfig::qualified();
+        let config = VulkanRuntimeConfig::current();
 
         let vulkan_device = vulkan_device::new_backend_device();
 
@@ -553,7 +553,7 @@ impl AttentionBackend for VulkanBackend {
         if !self.has_vulkan() {
             return false;
         }
-        kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY.flash_attn_prefill_enabled
+        kiln_vulkan_kernel::kernels::vulkan_kernel_policy().flash_attn_prefill_enabled
     }
 
     fn runtime_supports_flash_attn_prefill_head_major(&self) -> bool {

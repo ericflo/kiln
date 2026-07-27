@@ -288,7 +288,7 @@ fn record_vulkan_lora_paged_decode_fallback(full_attn_layer_idx: usize, total_se
             fallback_count = count,
             full_attn_layer = full_attn_layer_idx,
             total_seq_len,
-            "Vulkan LoRA decode is using the correctness-qualified portable paged-attention route"
+            "Vulkan LoRA decode is using the portable paged-attention route"
         );
     }
 }

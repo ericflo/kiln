@@ -2,9 +2,8 @@
 //!
 //! In the vk-native training step we issue ~5K dispatches per step,
 //! each typically allocating a fresh device-local buffer for its
-//! output. With ~10K total alloc/free per step, the kernel-level DRM
-//! allocator on Strix Halo dominates step time. This pool short-
-//! circuits that:
+//! output. At high allocation rates, driver allocation can dominate
+//! step time. This pool short-circuits that:
 //!
 //!   - `pool_alloc(device, bytes)` returns an `Arc<VulkanBuffer>`.
 //!     The pool holds an internal `Arc` on admitted buffers, so when the
@@ -854,7 +853,11 @@ mod tests {
 
     #[test]
     fn host_pool_reuses_larger_idle_buffer_for_prefill_tail_shape() -> Result<()> {
-        let device = Arc::new(VulkanDevice::new()?);
+        let Ok(device) = VulkanDevice::new() else {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        };
+        let device = Arc::new(device);
         let larger = pool_alloc_host_visible(
             device.device(),
             device.host_visible_mem_type(),
@@ -950,7 +953,11 @@ mod tests {
 
     #[test]
     fn bounded_retention_evicts_only_idle_buffers() -> Result<()> {
-        let device = Arc::new(VulkanDevice::new()?);
+        let Ok(device) = VulkanDevice::new() else {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        };
+        let device = Arc::new(device);
         let handle = device.device().handle();
         let mut inner = PoolInner::default();
 

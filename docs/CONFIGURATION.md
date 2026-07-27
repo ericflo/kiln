@@ -558,30 +558,26 @@ closed rather than claim the wrong physical device.
 
 Vulkan kernel selection is an immutable implementation contract, not a public
 configuration surface. Product execution uses
-`kiln.vulkan-kernel-policy.v3`, defined by the typed
-`QUALIFIED_VULKAN_KERNEL_POLICY` object before any dispatch. There is no TOML,
-CLI, request, or environment override for its leaves. Changing one requires a
-reviewed source change, a new policy version, backend/oracle parity, and new
-Vulkan performance and soak receipts.
+`kiln.vulkan-kernel-policy.v4`, defined by the typed
+`VulkanKernelPolicy::portable_fallback()` object before any dispatch. There is
+no TOML, CLI, request, environment, device-name, or PCI-ID override for its
+leaves. Machine qualification data does not alter product dispatch. Changing a
+leaf requires a reviewed source change, a new policy version, backend/oracle
+parity, and cross-device evidence.
 
-The qualified policy fixes these exact route decisions:
+The portable policy fixes these route decisions:
 
-| Family | Qualified selection |
+| Family | Portable selection |
 |---|---|
-| Model route availability | GDN, GDN prefill input projection, fused GDN gates/norm, single-submit GDN chunkwise prefill, fused conv1d prefill and its single-submit path, recurrent unexpanded Q/K plus Q/K norm, fused batch GDN state, linear decode and batched argmax, full-attention QKV, SDPA prefill, paged decode with GPU block-table gather, fused MLP decode, resident decode, and final GDN state-readback elision are enabled. Every resident-decode entry point uses the same policy leaf. |
-| Packed model weights | BF16-packed linear, GDN input-projection, full-attention QKV, and MLP decode weights are enabled. The MLP BF16 gate/up with F32 down route is enabled. |
-| Quarantined or slower model routes | Full-chunk GDN, single-token fused conv1d update, GDN forward substitution, batch-one fused GDN decode, the standalone MLP gate/up route, decode recurrent-state residency, resumable-prefill recurrent-state residency, fallback after a failed/disabled single-submit GDN chunkwise route, and the CPU-bridged/generic-tensor native Vulkan RMSNorm experiment are disabled. The device-resident model RMSNorm route remains enabled. |
+| Model route availability | Device-tuned GDN, conv1d, linear, attention, MLP, packed-weight, state-residency, resident-decode, GPU-gather, and state-readback-elision routes are declined. Callers use their established generic backend/tensor fallbacks. |
+| Kernel scheduling | Rows-four/rows-eight selection, paired/grouped rows, single-submit, chained dispatch/transfer, parallel reduction, fused recurrence, and batched transfer/upload choices are disabled. No device identity selects a different geometry. |
+| Explicit fallback | The non-single-submit GDN chunkwise fallback remains admitted. Host-visible batch-one recurrent state remains available to the fallback implementation; batched host-visible state remains off. |
 | Dispatch safety | Vulkan linear submissions are capped at exactly 20,000,000,000 estimated FLOP and oversized work is sub-chunked. The former floating-point environment parser and its zero-means-unbounded escape are removed. |
 | Bounded operator tiling | Flash attention uses a 2048-row tile and a 10,000,000-element row-work budget. Frozen-BF16-weight matmul uses 128-row tiles. Generic elementwise work uses 1,048,576 elements per dispatch and exponentiation uses 65,536. All are positive immutable policy leaves. |
-| BF16 MLP | Four-row gate/up at batch 8, four-row down at batch 16, four-row F32 down at batch 8, and eight-row kernels at batch 256; all are enabled. |
-| BF16 linear | Four-row kernels at batch 16 and eight-row kernels at batch 64; both are enabled. |
-| BF16 full-attention QKV | Four-row kernels at batch 2 and eight-row kernels at batch 64; both are enabled. |
-| GDN input projection | Pair QKV/Z, two-row grouping, and four-row grouping are enabled; eight-row grouping is disabled. Four-row selection starts at batch 16 and its eight-row threshold remains 64 for a future qualified policy. |
-| GDN recurrence | Single-submit and parallel reduction are enabled. Host-visible recurrence is enabled for batch one and disabled for batched state. Q/K-normalization recurrence fusion is enabled; input-projection/conv-split fusion is disabled. |
-| Submission and transfer fusion | Paged attention, Qwen RMSNorm, GDN gates/norm/input projection, MLP gate/up, causal conv1d, full-attention QKV, linear decode/argmax, chained MLP dispatch/transfer, and the applicable batched upload/transfer routes are enabled. |
-| Paged-attention split-K | Batch one uses 32 chunks. Batch 16 or wider uses 4. Smaller batches use 2 at 64 or more blocks per sequence and 4 otherwise, with an absolute 256-chunk bound. |
-| Prefill and profiling | Pair-row prefill matmul is enabled from batch 8. Kernel-stage and resident-decode profiling are disabled in product execution. |
-| CPU references | GDN chunk preparation/scan/state-exit backward, triangular solve/transpose, and gated RMSNorm backward expose explicit CPU-reference functions for parity tests and offline diagnosis. Production entry points always use the GPU implementations; no process environment value can switch a live request to CPU or race another test. |
+| Profiling and references | Kernel-stage and resident-decode profiling are disabled. GDN and normalization CPU-reference functions remain available for parity tests and offline diagnosis, but process environment cannot change live route selection. |
+
+Receipts for earlier `v3` Strix Halo execution describe that historical binary,
+not the current product policy, and cannot qualify `v4`.
 
 The former variables represented by this table, including the applicable
 `KILN_DISABLE_VULKAN_*`, `KILN_ENABLE_VULKAN_*`, kernel-threshold, split-K,
@@ -1944,8 +1940,8 @@ residency enabled and decode residency disabled, the cancellation/drain probe,
 and the checked soak. A micro-kernel or small-state parity result alone is not a
 release gate.
 
-The historical decode residency experiment is also disabled by immutable
-`kiln.vulkan-kernel-policy.v3`. Its former enable and disable variables were
+The historical decode residency experiment is also disabled by portable
+`kiln.vulkan-kernel-policy.v4`. Its former enable and disable variables were
 deleted without aliases; neither decode nor prompt residency can be activated
 by process environment. Re-enabling either route requires a reviewed source
 policy version and the full evidence sequence above.

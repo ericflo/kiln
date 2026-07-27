@@ -10,7 +10,6 @@ use super::vulkan::VulkanBackend;
 use super::vulkan_tensor_bridge::{kt_tensor_from_f32_bytes_on, kt_tensor_to_f32_bytes_with_shape};
 
 pub(super) fn supports_causal_conv1d_update(backend: &VulkanBackend) -> bool {
-    // Single-token update still regresses Strix Halo decode latency.
     backend.has_vulkan() && backend.fused_conv1d_update_enabled
 }
 

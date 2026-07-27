@@ -393,7 +393,7 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
             && seq_len == 1
             && lora.is_none()
             && gdn_forward_only_fastpaths
-            && qualified_vulkan_resident_decode_enabled()
+            && vulkan_resident_decode_enabled()
         {
             if let Some(vk_backend) = BackendIdentity::runtime_as_any(backend)
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()

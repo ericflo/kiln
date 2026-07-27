@@ -275,7 +275,7 @@ impl DeviceOp2 for RmsNormOp {
 
 #[cfg(feature = "vulkan")]
 fn native_vulkan_rmsnorm_enabled() -> bool {
-    kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY.bridged_rmsnorm_forward_enabled
+    kiln_vulkan_kernel::kernels::vulkan_kernel_policy().bridged_rmsnorm_forward_enabled
 }
 
 /// Convenience: dispatch `RmsNormOp` on `x` and `weight` with the op's eps.

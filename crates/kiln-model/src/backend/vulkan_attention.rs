@@ -13,7 +13,7 @@ use super::vulkan_tensor_bridge::{
 };
 
 fn paged_decode_gpu_gather_enabled() -> bool {
-    kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY.paged_decode_gpu_gather_enabled
+    kiln_vulkan_kernel::kernels::vulkan_kernel_policy().paged_decode_gpu_gather_enabled
 }
 
 fn generic_paged_decode_splitk_chunks(batch: usize, max_blocks_per_seq: usize) -> usize {

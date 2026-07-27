@@ -1,6 +1,6 @@
-//! Vulkan model-route projection of the qualified execution policy.
+//! Vulkan model-route projection of the process-lifetime execution policy.
 
-use kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY;
+use kiln_vulkan_kernel::kernels::vulkan_kernel_policy;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct VulkanRuntimeConfig {
@@ -33,8 +33,8 @@ pub(super) struct VulkanRuntimeConfig {
 }
 
 impl VulkanRuntimeConfig {
-    pub(super) fn qualified() -> Self {
-        let policy = QUALIFIED_VULKAN_KERNEL_POLICY;
+    pub(super) fn current() -> Self {
+        let policy = vulkan_kernel_policy();
 
         Self {
             gdn_enabled: policy.gdn_enabled,
@@ -75,9 +75,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn qualified_model_routes_match_the_shared_vulkan_policy() {
-        let config = VulkanRuntimeConfig::qualified();
-        let policy = QUALIFIED_VULKAN_KERNEL_POLICY;
+    fn model_routes_match_the_shared_vulkan_policy() {
+        let config = VulkanRuntimeConfig::current();
+        let policy = vulkan_kernel_policy();
 
         assert_eq!(config.gdn_enabled, policy.gdn_enabled);
         assert_eq!(config.mlp_decode_enabled, policy.mlp_decode_enabled);

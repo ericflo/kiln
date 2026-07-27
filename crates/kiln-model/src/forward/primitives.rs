@@ -485,15 +485,15 @@ pub(super) fn rocm_fused_rmsnorm_allowed_for_tensor(x: &Tensor) -> bool {
     crate::rocm_policy::current_rocm_kernel_policy().fused_rmsnorm
 }
 
-/// The unsafe CPU-bridged Vulkan RMSNorm leaf is disabled by qualified policy.
+/// The unsafe CPU-bridged Vulkan RMSNorm leaf is disabled by portable policy.
 #[cfg(feature = "vulkan")]
 pub(super) fn vulkan_rmsnorm_forward_inference_enabled() -> bool {
-    kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY.bridged_rmsnorm_forward_enabled
+    kiln_vulkan_kernel::kernels::vulkan_kernel_policy().bridged_rmsnorm_forward_enabled
 }
 
 #[cfg(feature = "vulkan")]
-pub(super) fn qualified_vulkan_resident_decode_enabled() -> bool {
-    kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY.resident_decode_enabled
+pub(super) fn vulkan_resident_decode_enabled() -> bool {
+    kiln_vulkan_kernel::kernels::vulkan_kernel_policy().resident_decode_enabled
 }
 
 /// File-private kt⇔bytes helpers — migrated inline from

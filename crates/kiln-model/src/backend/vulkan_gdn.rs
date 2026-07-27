@@ -18,14 +18,13 @@ use super::vulkan_tensor_bridge::{
 };
 
 fn fused_gdn_resident_state_enabled() -> bool {
-    kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY
-        .gdn_decode_fused_resident_state_enabled
+    kiln_vulkan_kernel::kernels::vulkan_kernel_policy().gdn_decode_fused_resident_state_enabled
 }
 
 pub(super) fn supports_gdn_forward_substitution(backend: &VulkanBackend) -> bool {
     // solve_tri is experimental: shared-memory layout not yet validated
     // against CPU parity, and may exceed maxComputeSharedMemorySize on many
-    // GPUs. Disabled by the qualified Vulkan policy.
+    // GPUs. Disabled by the portable Vulkan policy.
     backend.has_vulkan() && backend.gdn_forward_sub_enabled
 }
 
@@ -259,7 +258,7 @@ pub(super) fn gdn_chunkwise_forward(
     if q.dtype() != kiln_tensor::DType::F32 || state_kt.dtype() != kiln_tensor::DType::F32 {
         return Ok(None);
     }
-    let policy = kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY;
+    let policy = kiln_vulkan_kernel::kernels::vulkan_kernel_policy();
     if !policy.gdn_chunkwise_forward_enabled {
         return Ok(None);
     }

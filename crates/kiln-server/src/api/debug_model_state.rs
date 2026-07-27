@@ -895,7 +895,7 @@ mod tests {
         );
         assert_eq!(
             json["accelerator_runtime"]["vulkan_kernel_policy_schema_id"],
-            "kiln.vulkan-kernel-policy.v3"
+            "kiln.vulkan-kernel-policy.v4"
         );
         assert_eq!(
             json["accelerator_runtime"]["vulkan_device_policy_schema_id"],

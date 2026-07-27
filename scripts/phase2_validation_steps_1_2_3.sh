@@ -227,7 +227,7 @@ run_step() {
 }
 
 # -----------------------------------------------------------------------------
-# Qualified immutable Vulkan route. Environment A/B arms no longer exist.
+# Portable immutable Vulkan route. Environment A/B arms no longer exist.
 # -----------------------------------------------------------------------------
 if ! run_step "qualified-policy" 'RUST_LOG=info'; then
     echo ">>> Qualified-policy smoke FAILED. Logs in $LOG_DIR" >&2

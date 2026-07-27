@@ -139,8 +139,7 @@ fn paged_cache_device(
 fn skip_final_gdn_state_readback_enabled() -> bool {
     #[cfg(feature = "vulkan")]
     {
-        kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY
-            .skip_final_gdn_state_readback_enabled
+        kiln_vulkan_kernel::kernels::vulkan_kernel_policy().skip_final_gdn_state_readback_enabled
     }
     #[cfg(not(feature = "vulkan"))]
     {

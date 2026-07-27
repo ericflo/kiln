@@ -2,9 +2,9 @@
 //! W = (I + diag(β) · A_strict)^{-1} · diag(β) · V'.
 //!
 //! Uses `vk_solve_tri_v2.comp` — a fresh GLSL shader with bounded
-//! shared memory (32 KB total: 64×64 sA + 64×DV_PER_WG=64 sW). Replaces
+//! shared memory (32 KB total: 64x64 sA + 64xDV_PER_WG=64 sW). Replaces
 //! the inference codebase's `solve_tri.comp` which requested 192 KB
-//! of shared memory and SIGFPEd at pipeline creation on Strix Halo.
+//! of shared memory and failed pipeline creation on lower-limit devices.
 //!
 //! The dispatch is 2D: one workgroup per (B*H, dv-tile). For
 //! C ≤ 64 and dv ≤ 256 (the Qwen3.5-4B envelope) we tile dv in
@@ -62,8 +62,7 @@ pub fn vk_solve_tri_no_grad(
     let device = a_strict.device();
     let out = alloc_f32(device, batch * heads * chunk * dv)?;
 
-    // GPU path: vk_solve_tri_v2.comp (32 KB shared mem, well within
-    // Strix Halo's per-workgroup cap).
+    // GPU path: vk_solve_tri_v2.comp (32 KB shared memory).
     let dv_per_wg = 64u32;
     let dv_tiles = (dv as u32 + dv_per_wg - 1) / dv_per_wg;
     let push = [batch as u32, heads as u32, chunk as u32, dv as u32];

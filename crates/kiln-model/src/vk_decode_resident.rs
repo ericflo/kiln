@@ -38,7 +38,7 @@ use kiln_graph::{
 };
 use kiln_tensor::{Backend, DType};
 use kiln_vulkan_kernel::kernels::{
-    QUALIFIED_VULKAN_KERNEL_POLICY, paged_attn_decode_splitk_chunks as paged_attn_splitk_chunks,
+    paged_attn_decode_splitk_chunks as paged_attn_splitk_chunks, vulkan_kernel_policy,
 };
 use kiln_vulkan_kernel::shaders;
 use kiln_vulkan_kernel::{CommandBatch, VkPagedKvCache, VulkanBuffer, VulkanDevice, Workgroups};
@@ -76,7 +76,7 @@ static GDNFB_READBACK_NS: AtomicU64 = AtomicU64::new(0);
 static GDNFB_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 fn timing_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.profile_resident_decode_timing
+    vulkan_kernel_policy().profile_resident_decode_timing
 }
 
 struct VulkanCommandBatchReplayPlan<'a> {
@@ -345,55 +345,55 @@ fn append_sample_replay_resources(
 }
 
 fn linear_bf16w_rows4_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.linear_decode_bf16w_rows4
+    vulkan_kernel_policy().linear_decode_bf16w_rows4
 }
 
 fn linear_bf16w_rows8_enabled() -> bool {
-    QUALIFIED_VULKAN_KERNEL_POLICY.linear_decode_bf16w_rows8
+    vulkan_kernel_policy().linear_decode_bf16w_rows8
 }
 
 fn mlp_bf16_rows8_min_batch() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_rows8_min_batch
+    vulkan_kernel_policy().mlp_bf16_rows8_min_batch
 }
 
 fn mlp_bf16_gate_up_rows4_min_batch() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_gate_up_rows4_min_batch
+    vulkan_kernel_policy().mlp_bf16_gate_up_rows4_min_batch
 }
 
 fn mlp_bf16_down_rows4_min_batch() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_down_rows4_min_batch
+    vulkan_kernel_policy().mlp_bf16_down_rows4_min_batch
 }
 
 fn linear_bf16_rows8_min_batch() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.linear_bf16_rows8_min_batch
+    vulkan_kernel_policy().linear_bf16_rows8_min_batch
 }
 
 fn linear_bf16_rows4_min_batch() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.linear_bf16_rows4_min_batch
+    vulkan_kernel_policy().linear_bf16_rows4_min_batch
 }
 
 fn gdn_in_proj_rows4_min_batch() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_rows4_min_batch
+    vulkan_kernel_policy().gdn_in_proj_rows4_min_batch
 }
 
 fn gdn_in_proj_rows8_min_batch() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_rows8_min_batch
+    vulkan_kernel_policy().gdn_in_proj_rows8_min_batch
 }
 
 fn full_attn_qkv_bf16_rows8_min_batch() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.full_attn_qkv_bf16_rows8_min_batch
+    vulkan_kernel_policy().full_attn_qkv_bf16_rows8_min_batch
 }
 
 fn full_attn_qkv_bf16_rows4_min_batch() -> usize {
-    QUALIFIED_VULKAN_KERNEL_POLICY.full_attn_qkv_bf16_rows4_min_batch
+    vulkan_kernel_policy().full_attn_qkv_bf16_rows4_min_batch
 }
 
 fn full_attn_qkv_gate_split_bf16w_plan(batch: usize, total_out: usize) -> (&'static str, u32) {
     let rows8 = batch >= full_attn_qkv_bf16_rows8_min_batch()
-        && QUALIFIED_VULKAN_KERNEL_POLICY.full_attn_qkv_bf16w_rows8;
+        && vulkan_kernel_policy().full_attn_qkv_bf16w_rows8;
     let rows4 = batch >= full_attn_qkv_bf16_rows4_min_batch()
         && !rows8
-        && QUALIFIED_VULKAN_KERNEL_POLICY.full_attn_qkv_bf16w_rows4;
+        && vulkan_kernel_policy().full_attn_qkv_bf16w_rows4;
     let row_groups = if rows8 {
         batch.div_ceil(8)
     } else if rows4 {
@@ -432,11 +432,10 @@ fn linear_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32
 }
 
 fn mlp_gate_up_bf16w_batched_plan(batch: usize, intermediate: usize) -> (&'static str, u32) {
-    let rows8 =
-        batch >= mlp_bf16_rows8_min_batch() && QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_rows8;
+    let rows8 = batch >= mlp_bf16_rows8_min_batch() && vulkan_kernel_policy().mlp_bf16_rows8;
     let rows4 = batch >= mlp_bf16_gate_up_rows4_min_batch()
         && !rows8
-        && QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_gate_up_rows4;
+        && vulkan_kernel_policy().mlp_bf16_gate_up_rows4;
     if rows8 {
         (
             shaders::MLP_GATE_UP_DECODE_BATCHED_ROWS8_BF16W,
@@ -456,11 +455,10 @@ fn mlp_gate_up_bf16w_batched_plan(batch: usize, intermediate: usize) -> (&'stati
 }
 
 fn mlp_down_add_residual_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32) {
-    let rows8 =
-        batch >= mlp_bf16_rows8_min_batch() && QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_rows8;
+    let rows8 = batch >= mlp_bf16_rows8_min_batch() && vulkan_kernel_policy().mlp_bf16_rows8;
     let rows4 = batch >= mlp_bf16_down_rows4_min_batch()
         && !rows8
-        && QUALIFIED_VULKAN_KERNEL_POLICY.mlp_bf16_down_rows4;
+        && vulkan_kernel_policy().mlp_bf16_down_rows4;
     if rows8 {
         (
             shaders::LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL_ROWS8,
@@ -488,17 +486,17 @@ fn gdn_in_proj_bf16w_batched_plan(
     b_dim: usize,
     total_out: usize,
 ) -> (&'static str, u32) {
-    let pair_qkv_z = batch > 1 && QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_batch_pair_qkv_z;
+    let pair_qkv_z = batch > 1 && vulkan_kernel_policy().gdn_in_proj_batch_pair_qkv_z;
     let row_grouping =
-        pair_qkv_z && batch >= 3 && QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_batch_row_pair;
+        pair_qkv_z && batch >= 3 && vulkan_kernel_policy().gdn_in_proj_batch_row_pair;
     let row_group_size = if row_grouping
         && batch >= gdn_in_proj_rows8_min_batch()
-        && QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_batch_row_octet
+        && vulkan_kernel_policy().gdn_in_proj_batch_row_octet
     {
         8usize
     } else if row_grouping
         && batch >= gdn_in_proj_rows4_min_batch()
-        && QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_batch_row_quad
+        && vulkan_kernel_policy().gdn_in_proj_batch_row_quad
     {
         4usize
     } else if row_grouping {
@@ -536,7 +534,7 @@ fn gdn_qk_norm_recurrent_fusion_enabled(
         && gqa_ratio == 2
         && dk == dv
         && gqa_ratio * dv <= 256
-        && QUALIFIED_VULKAN_KERNEL_POLICY.gdn_qk_norm_recurrent_fusion
+        && vulkan_kernel_policy().gdn_qk_norm_recurrent_fusion
 }
 
 /// Print accumulated per-block timing to stderr and zero the counters.
@@ -2177,11 +2175,9 @@ pub fn record_full_attn_block_into(
     // Split-K paged attention: spread each (batch, q_head) pair's K/V
     // scan across `num_chunks` workgroups so we use more SMs.
     // Combined via a reduce pass that performs the online-softmax
-    // recurrence. Default 32 chunks on the batch-1 path; this keeps the
-    // long-context decode scan better occupied on the STRIX_HALO APU and
-    // remains tunable via
-    // The qualified split-K policy chooses this value. Anything >= seq_len degrades
-    // gracefully (chunks beyond `seq_len` write neutral identities).
+    // recurrence. The bounded heuristic selects the chunk count without
+    // consulting device identity. Anything >= seq_len degrades gracefully
+    // because chunks beyond `seq_len` write neutral identities.
     let num_chunks = paged_attn_splitk_chunks(1, max_blocks_per_seq);
     let partials_stride = 2 + head_dim;
     let partials_bytes = (1 * num_heads * num_chunks * partials_stride * 4) as u64;
@@ -2836,7 +2832,7 @@ pub fn record_gdn_block_batched_into(
         gdn_in_proj_bf16w_batched_plan(batch_size, qkv_dim, z_dim, a_dim, b_dim, in_proj_total);
     let fuse_gdn_in_proj_conv_split = gdn_in_proj_shader
         == shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W
-        && QUALIFIED_VULKAN_KERNEL_POLICY.gdn_in_proj_conv_split_fusion;
+        && vulkan_kernel_policy().gdn_in_proj_conv_split_fusion;
     let gqa_ratio = nv / nk;
     debug_assert!(gqa_ratio * nk == nv, "GDN nv must be a multiple of nk");
     let fuse_qk_norm_recurrent =

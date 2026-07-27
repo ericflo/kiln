@@ -17,10 +17,9 @@ use super::{BackendMatmulLayout, requested_matmul_layout};
 /// (its `candle_core::CustomOp1` training wrapper was removed when the kt
 /// autograd tape became the sole grad producer). The forward-only FLCE
 /// offset path in `linear_prefill_apply_offset` still needs the ceiling to
-/// sub-chunk oversized dispatches: the host hard-hung twice on Strix Halo
-/// when a single oversized submit (~4.36M workgroups) was queued, so the
-/// ceiling caps per-submit FLOP. The immutable qualified Vulkan policy owns
-/// the exact limit so malformed or late process state cannot disable it.
+/// sub-chunk oversized dispatches. Multi-million-workgroup submissions can
+/// hang Vulkan implementations, so the immutable policy owns the exact limit
+/// and malformed or late process state cannot disable it.
 
 /// FLOP estimate for `[batch, hidden] @ [hidden, out_dim]` (one mul + one
 /// add per inner term).
@@ -32,7 +31,7 @@ fn matmul_flop(batch: usize, hidden: usize, out_dim: usize) -> u64 {
 }
 
 fn max_flop_per_dispatch() -> u64 {
-    kiln_vulkan_kernel::kernels::QUALIFIED_VULKAN_KERNEL_POLICY.linear_max_flop_per_dispatch
+    kiln_vulkan_kernel::kernels::vulkan_kernel_policy().linear_max_flop_per_dispatch
 }
 
 /// True when the requested matmul shape would exceed the per-dispatch FLOP
