@@ -161,7 +161,7 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
             command[
                 command.index("--model-fingerprint-read-mib-per-second") + 1
             ],
-            "256",
+            "0",
         )
 
     def test_nvml_device_selection_is_typed_and_forwarded(self) -> None:
@@ -282,7 +282,7 @@ class ServingBenchmarkCampaignTests(unittest.TestCase):
             self.assertIsNone(summary["reference_dir"])
             self.assertEqual(summary["execution_policy"], "fail_fast")
             self.assertEqual(
-                summary["model_fingerprint_read_mib_per_second"], 256
+                summary["model_fingerprint_read_mib_per_second"], 0
             )
             self.assertEqual(summary["server_owner"]["server_pid"], 4321)
             self.assertEqual(summary["output_evidence"], "hashes")

@@ -41,7 +41,7 @@ from typing import Any, Callable, Iterable
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "24"
+DRIVER_VERSION = "25"
 SUPPORTED_DRIVER_VERSIONS = {
     "2",
     "3",
@@ -65,51 +65,53 @@ SUPPORTED_DRIVER_VERSIONS = {
     "21",
     "22",
     "23",
+    "24",
     DRIVER_VERSION,
 }
 THERMAL_DRIVER_VERSIONS = {
     "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION,
+    "16", "17", "18", "19", "20", "21", "22", "23", "24", DRIVER_VERSION,
 }
 LIFECYCLE_DRIVER_VERSIONS = {
     "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION,
+    "16", "17", "18", "19", "20", "21", "22", "23", "24", DRIVER_VERSION,
 }
 PRELAUNCH_DRIVER_VERSIONS = {
     "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION,
+    "16", "17", "18", "19", "20", "21", "22", "23", "24", DRIVER_VERSION,
 }
 OUTPUT_EVIDENCE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION,
+    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", DRIVER_VERSION,
 }
 MODEL_FINGERPRINT_THERMAL_DRIVER_VERSIONS = {
-    "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION,
+    "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", DRIVER_VERSION,
 }
 RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS = {
-    "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION,
+    "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", DRIVER_VERSION,
 }
+UNLIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS = {"25"}
 ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION,
+    "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", DRIVER_VERSION,
 }
 ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {
-    "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION,
+    "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", DRIVER_VERSION,
 }
 REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {
-    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION,
+    "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", DRIVER_VERSION,
 }
 IDLE_BOUNDARY_COOLDOWN_DRIVER_VERSIONS = {
-    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION,
+    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", DRIVER_VERSION,
 }
-COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION}
-MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", "15", "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION}
-REQUEST_PERFORMANCE_DRIVER_VERSIONS = {"15", "16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION}
-PROMPT_SET_IDENTITY_DRIVER_VERSIONS = {"16", "17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION}
-GRAPH_PARITY_DRIVER_VERSIONS = {"17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION}
-REFERENCE_ROLE_DRIVER_VERSIONS = {"17", "18", "19", "20", "21", "22", "23", DRIVER_VERSION}
-ACTOR_ONLY_DIAGNOSTICS_DRIVER_VERSIONS = {"18", "19", "20", "21", "22", "23", DRIVER_VERSION}
-TYPED_MEMORY_SOURCE_DRIVER_VERSIONS = {"19", "20", "21", "22", "23", DRIVER_VERSION}
-EXTERNAL_WSL2_THERMAL_DRIVER_VERSIONS = {"20", "21", "22", "23", DRIVER_VERSION}
-OPTIONAL_THERMAL_DRIVER_VERSIONS = {DRIVER_VERSION}
+COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {"13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", DRIVER_VERSION}
+MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {"14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", DRIVER_VERSION}
+REQUEST_PERFORMANCE_DRIVER_VERSIONS = {"15", "16", "17", "18", "19", "20", "21", "22", "23", "24", DRIVER_VERSION}
+PROMPT_SET_IDENTITY_DRIVER_VERSIONS = {"16", "17", "18", "19", "20", "21", "22", "23", "24", DRIVER_VERSION}
+GRAPH_PARITY_DRIVER_VERSIONS = {"17", "18", "19", "20", "21", "22", "23", "24", DRIVER_VERSION}
+REFERENCE_ROLE_DRIVER_VERSIONS = {"17", "18", "19", "20", "21", "22", "23", "24", DRIVER_VERSION}
+ACTOR_ONLY_DIAGNOSTICS_DRIVER_VERSIONS = {"18", "19", "20", "21", "22", "23", "24", DRIVER_VERSION}
+TYPED_MEMORY_SOURCE_DRIVER_VERSIONS = {"19", "20", "21", "22", "23", "24", DRIVER_VERSION}
+EXTERNAL_WSL2_THERMAL_DRIVER_VERSIONS = {"20", "21", "22", "23", "24", DRIVER_VERSION}
+OPTIONAL_THERMAL_DRIVER_VERSIONS = {"24", DRIVER_VERSION}
 REFERENCE_ROLES = {
     "qualification_gate",
     "same_artifact_graph_eager_discriminator",
@@ -118,7 +120,7 @@ OUTPUT_EVIDENCE_MAX_UTF8_BYTES_PER_REQUEST = 1024 * 1024
 LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
 FIXED_PROMPT_TEMPLATE_VERSION_V1 = "fixed-serving-profiles-v1"
 PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v2"
-FIXED_PROMPT_TEMPLATE_V2_DRIVER_VERSIONS = {"22", "23", DRIVER_VERSION}
+FIXED_PROMPT_TEMPLATE_V2_DRIVER_VERSIONS = {"22", "23", "24", DRIVER_VERSION}
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -167,7 +169,7 @@ WSL2_SCOPE_CPU_QUOTA_PERCENT = 50
 MODEL_FINGERPRINT_SCRIPT = QUALIFICATION_DIR / "model_fingerprint.py"
 MODEL_FINGERPRINT_THERMAL_SCHEMA_V1 = "kiln.serving-model-fingerprint-thermal.v1"
 MODEL_FINGERPRINT_THERMAL_SCHEMA = "kiln.serving-model-fingerprint-thermal.v2"
-DEFAULT_MODEL_FINGERPRINT_READ_MIB_PER_SECOND = 256
+DEFAULT_MODEL_FINGERPRINT_READ_MIB_PER_SECOND = 0
 MIN_MODEL_FINGERPRINT_READ_MIB_PER_SECOND = 64
 MAX_MODEL_FINGERPRINT_READ_MIB_PER_SECOND = 16_384
 
@@ -1773,12 +1775,13 @@ def fingerprint_model_with_thermal_containment(
     phase: str,
     read_mib_per_second: int = DEFAULT_MODEL_FINGERPRINT_READ_MIB_PER_SECOND,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    read_limit = read_mib_per_second if read_mib_per_second > 0 else None
     if policy_path is None:
         return (
             fingerprint_model(
                 model_path,
                 model_id,
-                max_read_mib_per_second=read_mib_per_second,
+                max_read_mib_per_second=read_limit,
             ),
             None,
         )
@@ -1799,20 +1802,26 @@ def fingerprint_model_with_thermal_containment(
         with tempfile.TemporaryDirectory(prefix="kiln-serving-model-fingerprint-") as raw:
             workspace = Path(raw).resolve(strict=True)
             environment["TMPDIR"] = str(workspace)
+            worker_command = [
+                str(python),
+                str(script),
+                "--model-path",
+                str(model_path),
+                "--model-id",
+                model_id,
+            ]
+            if read_limit is not None:
+                worker_command.extend(
+                    [
+                        "--max-read-mib-per-second",
+                        str(read_limit),
+                    ]
+                )
+            worker_command.append("--json")
             returncode, stdout, stderr, evidence = fingerprint_supervisor.supervise(
                 policy_path=resolved_policy,
                 workspace=workspace,
-                worker_command=[
-                    str(python),
-                    str(script),
-                    "--model-path",
-                    str(model_path),
-                    "--model-id",
-                    model_id,
-                    "--max-read-mib-per-second",
-                    str(read_mib_per_second),
-                    "--json",
-                ],
+                worker_command=worker_command,
                 worker_environment=environment,
                 worker_phase=phase,
             )
@@ -3709,17 +3718,23 @@ def validate_model_fingerprint_thermal_record(
     if record["schema"] != expected_schema:
         raise BenchmarkError(f"{label}.schema is unsupported for driver v{driver_version}")
     if driver_version in RATE_LIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS:
-        read_rate = _positive_int(
+        read_rate = _nonnegative_int(
             record["read_mib_per_second"],
             f"{label}.read_mib_per_second",
         )
         if not (
-            MIN_MODEL_FINGERPRINT_READ_MIB_PER_SECOND
-            <= read_rate
-            <= MAX_MODEL_FINGERPRINT_READ_MIB_PER_SECOND
+            (
+                driver_version in UNLIMITED_MODEL_FINGERPRINT_DRIVER_VERSIONS
+                and read_rate == 0
+            )
+            or (
+                MIN_MODEL_FINGERPRINT_READ_MIB_PER_SECOND
+                <= read_rate
+                <= MAX_MODEL_FINGERPRINT_READ_MIB_PER_SECOND
+            )
         ):
             raise BenchmarkError(
-                f"{label}.read_mib_per_second must be in "
+                f"{label}.read_mib_per_second must be zero or in "
                 f"{MIN_MODEL_FINGERPRINT_READ_MIB_PER_SECOND}..="
                 f"{MAX_MODEL_FINGERPRINT_READ_MIB_PER_SECOND}"
             )
@@ -7021,8 +7036,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=DEFAULT_MODEL_FINGERPRINT_READ_MIB_PER_SECOND,
         help=(
-            "cumulative read-rate limit across both model-integrity passes "
-            f"(default: {DEFAULT_MODEL_FINGERPRINT_READ_MIB_PER_SECOND} MiB/s)"
+            "optional cumulative read-rate limit across both model-integrity "
+            "passes; zero disables it (default: unlimited)"
         ),
     )
     parser.add_argument("--require-memory", action="store_true")
@@ -7167,13 +7182,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("NVML device selectors cannot be combined with memory-source drm")
     elif args.memory_source == "nvml" and args.memory_path != "auto":
         parser.error("memory-path cannot be combined with memory-source nvml")
-    if not (
+    if args.model_fingerprint_read_mib_per_second != 0 and not (
         MIN_MODEL_FINGERPRINT_READ_MIB_PER_SECOND
         <= args.model_fingerprint_read_mib_per_second
         <= MAX_MODEL_FINGERPRINT_READ_MIB_PER_SECOND
     ):
         parser.error(
-            "model-fingerprint-read-mib-per-second must be in "
+            "model-fingerprint-read-mib-per-second must be zero or in "
             f"{MIN_MODEL_FINGERPRINT_READ_MIB_PER_SECOND}..="
             f"{MAX_MODEL_FINGERPRINT_READ_MIB_PER_SECOND}"
         )

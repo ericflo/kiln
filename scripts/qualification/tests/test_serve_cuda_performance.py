@@ -308,7 +308,7 @@ class CudaPerformanceTests(unittest.TestCase):
                     ],
                 }
             summary = {
-                "schema": "kiln.serving-benchmark-campaign.v10",
+                "schema": "kiln.serving-benchmark-campaign.v11",
                 "created_at": "2026-07-25T00:00:00+00:00",
                 "campaign_id": "fixture-campaign",
                 "prompt_set_id": performance.PROMPT_SET_ID,
@@ -316,7 +316,7 @@ class CudaPerformanceTests(unittest.TestCase):
                 "reference_role": "qualification_gate",
                 "reference_dir": None,
                 "output_evidence": "hashes",
-                "model_fingerprint_read_mib_per_second": 64,
+                "model_fingerprint_read_mib_per_second": 0,
                 "execution_policy": "continue_after_failure",
                 "memory_sampler": {},
                 "thermal_policy": {},

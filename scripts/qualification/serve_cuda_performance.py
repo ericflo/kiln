@@ -38,7 +38,7 @@ SIZE_VALUES = (1,)
 REPEATS = 1
 MAX_TOKENS = 64
 WARMUP_REQUESTS = 1
-MODEL_FINGERPRINT_READ_MIB_PER_SECOND = 64
+MODEL_FINGERPRINT_READ_MIB_PER_SECOND = 0
 MEMORY_LIMIT_BYTES = 16_500_000_000
 MEMORY_SAMPLE_MS = 100
 REQUEST_TIMEOUT_SECONDS = 900
@@ -85,10 +85,10 @@ KILN_LAUNCH_SHA256 = (
     "sha256:2d351c605bb0da71dde85521b6a0a4546fb9990a7f0c45f84f926dcb157f344d"
 )
 VLLM_LAUNCH_SHA256 = (
-    "sha256:37b3ce1244241eb7e3cb5c8b30cbb853636a73bc16f270662dc947d32676a35e"
+    "sha256:bbf2bddc67a1a796afd86f6d622fd3e025f40741a1805432c17dd3bdb1ce5b81"
 )
 KILN_CONFIG_SHA256 = (
-    "sha256:21c068c0ec39b532c364e6bf9495d235ed5006e78140bb47f8548ca3269c8943"
+    "sha256:fa362ece580f91b2752cd6d56984a186b699b83da99663ef015a79b2e2005428"
 )
 VLLM_RUNTIME_MANIFEST_SHA256 = (
     "sha256:50d46bd54df16f1ea9095dace7656708b7347db3591ad8ebc74d1238d284d125"
@@ -637,7 +637,7 @@ def _load_campaign_summary(path: Path, engine: str) -> dict[str, Any]:
             f"{engine} campaign summary hash does not match"
         )
     if (
-        value["schema"] != "kiln.serving-benchmark-campaign.v10"
+        value["schema"] != "kiln.serving-benchmark-campaign.v11"
         or value["engine"] != engine
         or value["verdict"] != "passed"
         or value["execution_policy"] != "continue_after_failure"

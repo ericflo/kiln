@@ -1032,11 +1032,13 @@ That history establishes artifact identity only and is not performance
 evidence. New performance qualification uses the WSL2
 network/PID/mount/Landlock boundary plus its memory, swap, PID, OOM, and cleanup
 checks without CPU or thermal pacing.
-The laptop performance launch pins
-`--max-provenance-read-mib-per-second=32`, cumulatively pacing all
-launcher-owned model/snapshot/adapter/runtime hashing and applying the same
-ceiling to the fresh child runtime recheck. This is startup-only policy and
-does not enter timed request throughput.
+The current laptop performance launch omits
+`--max-provenance-read-mib-per-second`, so launcher-owned
+model/snapshot/adapter/runtime hashing and the fresh-child runtime recheck are
+unlimited. Its Kiln peer also omits the optional checkpoint-read and
+accelerator-upload limits. Driver v25 and campaign v11 record model-fingerprint
+rate `0`, meaning no limiter. Explicit nonzero caps remain available only as
+separately requested lab controls.
 
 The first retained laptop performance runtime manifest is
 `qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json`, captured
@@ -1060,15 +1062,13 @@ stable handoff. This closes the runtime-manifest prerequisite only. It is not a
 server startup, request, performance-matrix, soak, native-Linux, or desktop-4090
 claim.
 
-Every model-bearing WSL2 CUDA run brackets its case with two additional
-model-fingerprint lifecycles. The runner reads at a fixed 32 MiB/s and places
-each initial and final fingerprint inside its own private namespace and 10 GiB
-scope. Their bounded JSON and scope streams are retained with the parent
-receipt. The case starts only after the initial scope is removed, and final
-source/commit validation occurs only after the final scope is removed.
-Both fingerprint launches receive the same closed runner base environment plus
-the exact private-containment mechanism binding required by the scope
-controller; an omitted or different binding fails before model I/O.
+Every current model-bearing CUDA run brackets its case with initial and final
+double-read model fingerprints. Driver v25 performs them without a read-rate
+limiter by default and does not create independent thermal scopes unless a
+caller explicitly selects a separate host policy. They remain inside the owned
+qualification lifecycle: the case starts only after the initial fingerprint,
+and final source/commit validation occurs only after the final fingerprint.
+Historical receipts retain their older scoped, paced fingerprint evidence.
 
 The first source-bound performance checkpoint is the complete five-profile c1
 pair:

@@ -50,7 +50,7 @@
           "memory_device_uuid": "GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd",
           "memory_limit_bytes": 16500000000,
           "memory_sample_ms": 100,
-          "model_fingerprint_read_mib_per_second": 64,
+          "model_fingerprint_read_mib_per_second": 0,
           "output_evidence": "hashes",
           "prompt_context_ceiling_tokens": 3968,
           "prompt_context_max_prompt_tokens": 3883,
@@ -74,7 +74,7 @@
         },
         "kiln": {
           "base_url": "http://127.0.0.1:8420",
-          "config_sha256": "sha256:21c068c0ec39b532c364e6bf9495d235ed5006e78140bb47f8548ca3269c8943",
+          "config_sha256": "sha256:fa362ece580f91b2752cd6d56984a186b699b83da99663ef015a79b2e2005428",
           "launch_sha256": "sha256:2d351c605bb0da71dde85521b6a0a4546fb9990a7f0c45f84f926dcb157f344d"
         },
         "model": {
@@ -84,7 +84,7 @@
         },
         "vllm": {
           "base_url": "http://127.0.0.1:8421",
-          "launch_sha256": "sha256:37b3ce1244241eb7e3cb5c8b30cbb853636a73bc16f270662dc947d32676a35e",
+          "launch_sha256": "sha256:bbf2bddc67a1a796afd86f6d622fd3e025f40741a1805432c17dd3bdb1ce5b81",
           "runtime_manifest_sha256": "sha256:50d46bd54df16f1ea9095dace7656708b7347db3591ad8ebc74d1238d284d125"
         }
       },

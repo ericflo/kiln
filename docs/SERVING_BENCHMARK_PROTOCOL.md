@@ -11,7 +11,7 @@ control.
 ## Server Ownership
 
 Every potentially passing measured run requires exactly one server ownership
-mode. Driver v24 does not require a temperature policy. Native Linux may add
+mode. Driver v25 does not require a temperature policy. Native Linux may add
 `--host-thermal-policy`; a legacy supervised WSL2 run may add
 `--external-wsl2-thermal-policy` only from inside the qualification runner's
 already active Windows/NVML supervisor, private namespace, and exact user
@@ -54,31 +54,35 @@ temperature policy; retained receipts preserve that evidence, but it is not a
 current performance requirement. PID attachment remains available only with an
 explicit host policy; an unguarded current run must use owned launch.
 
-### Model-fingerprint read pacing
+### Model-fingerprint reads
 
-Driver v12 keeps the v8 double-read integrity contract but makes its I/O rate
-explicit and bounded. Each model input is opened without following symlinks,
+The driver keeps the v8 double-read integrity contract. Each model input is
+opened without following symlinks,
 hashed once for identity, rechecked by file and directory stat identity, and
 hashed a second time to detect a concurrent same-length rewrite even where
-filesystem timestamps are too coarse. One monotonic cumulative limiter covers
-every byte in both passes. It accounts after each read and sleeps in at most
-25 ms increments; it does not reset at a shard or pass boundary.
+filesystem timestamps are too coarse.
 
-`--model-fingerprint-read-mib-per-second` accepts `64..=16384` and defaults to
-256 for measured direct and campaign runs. The worker receives the value as an
-argv field in its closed environment. Receipt schema
-`kiln.serving-model-fingerprint-thermal.v2` records it as
+Driver v25 and campaign v11 default
+`--model-fingerprint-read-mib-per-second` to zero, which disables rate
+limiting. An explicit optional lab cap accepts `64..=16384`; one monotonic
+cumulative limiter then covers every byte in both passes, accounts after each
+read, sleeps in at most 25 ms increments, and does not reset at a shard or pass
+boundary. A guarded worker receives the option only when the cap is nonzero.
+When a caller explicitly selects a host policy, receipt schema
+`kiln.serving-model-fingerprint-thermal.v2` records the value as
 `host_thermal.model_fingerprint.read_mib_per_second` beside the exact worker
 implementation and Python hashes plus initial/final thermal lifecycles.
-Campaign v10 records and forwards the same value to every profile. The setting
-applies only to provenance reads; it cannot pace server startup or inference
-and is outside every request-timing window. Standalone `model_fingerprint.py`
-remains unlimited when its optional `--max-read-mib-per-second` is omitted.
+Unguarded current receipts have no thermal fingerprint record. Campaign v11
+records and forwards the value to every profile. A nonzero setting applies only
+to provenance reads; it cannot pace server startup or inference and is outside
+every request-timing window. Standalone
+`model_fingerprint.py` likewise remains unlimited when its optional
+`--max-read-mib-per-second` is omitted.
 
 ### Server checkpoint-read and upload pacing
 
-The driver's fingerprint policy does not govern the owned server. Named-host
-ROCm and Vulkan profiles separately set
+The driver's optional fingerprint policy does not govern the owned server.
+Some explicit historical ROCm and Vulkan qualification profiles separately set
 `model.checkpoint_read_mib_per_second = 256`. The server applies an independent
 cumulative schedule to each private snapshot copy, initial full loader-owned
 content verification, and post-upload full verification. Bounded chunks check
@@ -241,18 +245,17 @@ bytes and strict model fingerprints to agree. This avoids a persistent 9.3 GB
 duplicate on the laptop while preserving per-launch immutable snapshot copies,
 initial/final benchmark fingerprints, and source-change detection.
 
-The vLLM performance launch also pins
-`--max-provenance-read-mib-per-second=32`. One cumulative launcher schedule
-covers model/snapshot/adapter/runtime hashing, and the fresh child runtime
-recheck receives the same ceiling. This pacing is outside request timing. It
-does not rate-limit vLLM's later accelerator upload, which remains under the
-outer WSL2 thermal supervisor and must fail closed if unsafe.
-The readiness deadline is 3,600 seconds because a copy-fallback real launch
+The current vLLM performance launch omits
+`--max-provenance-read-mib-per-second`, so model, snapshot, adapter, and runtime
+hashing plus the fresh-child runtime recheck are not rate-limited. The current
+Kiln performance config likewise omits its optional checkpoint-read and
+accelerator-upload limits. WSL2 still supplies namespace, Landlock, memory,
+swap, PID, OOM, process-lifecycle, and network containment without thermal or
+CPU pacing.
+The readiness deadline remains 3,600 seconds because a copy-fallback real launch
 performs nine complete model reads across staging, verification, identity, and
-pre-spawn revalidation before vLLM loads weights. At 32 MiB/s, those reads
-consume about 42 minutes of the deadline before accelerator upload. The
-deadline is containment, not evidence that startup completed or was thermally
-safe.
+pre-spawn revalidation before vLLM loads weights. The deadline is containment,
+not a target startup duration.
 
 These are bootstrap baselines, not performance recommendations. First retain a
 passing environment receipt, core-correctness receipt, memory-lifecycle receipt,
@@ -357,13 +360,14 @@ The checked-in laptop runtime manifest is already the immutable input for c1.
 Its older `scripts/qualification/capture_vllm_runtime_manifest.py` procedure
 coupled artifact identity to the now-rejected thermal/CPU pacing wrapper.
 Preserve that capture as historical artifact evidence, but do not rerun the
-paced command or treat its wall time as performance. A future recapture must
-first decouple the capture tool from that legacy policy while retaining its
-clean-source requirement, two byte-identical strict-valid results,
-owned-process lifecycle, bounded output, scope cleanup, and no-overwrite checks.
-The tracked laptop launch makes both captures use the explicit 32 MiB/s
-cumulative provenance-read ceiling; do not remove or override it to accelerate
-capture.
+paced command or treat its wall time as performance. The capture tool now keeps
+the clean-source requirement, two byte-identical strict-valid results,
+owned-process lifecycle, bounded output, scope cleanup, and no-overwrite checks
+without requiring thermal or CPU pacing. On WSL2 each pass still uses the
+private network/PID/mount/Landlock boundary and a 10 GiB/zero-swap/512-PID
+systemd user scope. CPU quota is zero (unlimited), and thermal supervision is
+absent unless a caller explicitly supplies a separate lab policy. The current
+laptop launch also omits a provenance-read ceiling.
 
 The retained Laptop GPU manifest at
 `qualification/runtime/vllm/cuda/rtx4090-laptop/performance-v1.json` was
@@ -382,14 +386,13 @@ lifecycles completed stable handoff. This artifact is the immutable vLLM input
 for the next exact-source performance run; it does not itself establish server
 startup, request correctness, throughput, or endurance.
 
-Before a model-bearing WSL2 case starts, the qualification runner performs the
-initial model fingerprint in an independent private namespace and 10 GiB scope
-at a fixed 32 MiB/s. It repeats the same scoped fingerprint after the case.
-Each scope must be removed; the parent receipt retains both bounded JSON and
-scope streams. The campaign case is a third lifecycle.
-The runner passes the same closed base environment and exact private-network
-containment marker to these scopes as it passes to ordinary cases. The scope
-controller revalidates that marker before any fingerprint read.
+Before a model-bearing current case starts, the benchmark driver performs the
+initial double-read model fingerprint without a read-rate limiter. It repeats
+the same fingerprint after the case. Both reads remain inside the owned
+qualification lifecycle, but no independent thermal fingerprint scope is
+created unless a caller explicitly selects a separate host policy. Historical
+receipts that contain scoped and paced fingerprint evidence remain valid
+descriptions of those older runs.
 
 The manifest must identify the expected RTX 4090 class, `sm_89`, model and
 tokenizer content, interpreter, Python/native packages, CUDA runtime, and every

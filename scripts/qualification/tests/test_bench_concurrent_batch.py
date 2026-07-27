@@ -1037,6 +1037,12 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertEqual(performance["model"]["path"], serving_model)
         for field in ("path", "adapter_dir", "snapshot_dir"):
             performance["model"][field] = bootstrap["model"][field]
+        for field in (
+            "checkpoint_read_mib_per_second",
+            "accelerator_weight_upload_mib_per_second",
+        ):
+            self.assertNotIn(field, performance["model"])
+            bootstrap["model"].pop(field)
         self.assertEqual(performance, bootstrap)
 
         kiln_launch_path = launch_root / f"{performance_name}.json"
@@ -1066,14 +1072,19 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertIn("--max-num-seqs=64", command)
         self.assertIn("--max-num-batched-tokens=32768", command)
         self.assertIn("--language-model-only", command)
-        self.assertIn("--max-provenance-read-mib-per-second=32", command)
+        self.assertFalse(
+            any(
+                item.startswith("--max-provenance-read-mib-per-second")
+                for item in command
+            )
+        )
         args = bench.validate_vllm_owned_launch(
             vllm_launch,
             valid_vllm_manifest("Qwen3.5-4B"),
         )
         self.assertEqual(args.model_path, Path(serving_model))
         self.assertEqual(args.process_group_mode, "inherited")
-        self.assertEqual(args.max_provenance_read_mib_per_second, 32)
+        self.assertIsNone(args.max_provenance_read_mib_per_second)
         self.assertEqual(vllm_launch.startup_timeout_seconds, 3600.0)
 
     def test_vllm_owned_launch_rejects_provenance_and_argument_drift(self) -> None:
@@ -1116,7 +1127,11 @@ class ServingBenchmarkTests(unittest.TestCase):
             bench.validate_vllm_owned_launch(parsed(raw), manifest)
 
     def test_model_fingerprint_read_rate_is_bounded(self) -> None:
-        for value in (64, 256, 16_384):
+        self.assertEqual(
+            bench.parse_args([]).model_fingerprint_read_mib_per_second,
+            0,
+        )
+        for value in (0, 64, 256, 16_384):
             with self.subTest(value=value):
                 args = bench.parse_args(
                     [f"--model-fingerprint-read-mib-per-second={value}"]
@@ -1125,7 +1140,7 @@ class ServingBenchmarkTests(unittest.TestCase):
                     args.model_fingerprint_read_mib_per_second,
                     value,
                 )
-        for value in (63, 16_385):
+        for value in (-1, 63, 16_385):
             with self.subTest(value=value), redirect_stderr(
                 io.StringIO()
             ), self.assertRaises(SystemExit):
@@ -1216,7 +1231,7 @@ class ServingBenchmarkTests(unittest.TestCase):
             phase: str,
             read_mib_per_second: int,
         ) -> tuple[dict, dict | None]:
-            self.assertEqual(read_mib_per_second, 256)
+            self.assertEqual(read_mib_per_second, 0)
             self.assertIn(
                 phase,
                 {"model-fingerprint-initial", "model-fingerprint-final"},
@@ -1499,13 +1514,13 @@ class ServingBenchmarkTests(unittest.TestCase):
         )
         self.assertTrue(all(prompt.startswith(shared_prefix) for prompt in prefix_prompts))
         self.assertEqual(len(mixed_lengths), 4)
-        self.assertEqual(bench.DRIVER_VERSION, "24")
+        self.assertEqual(bench.DRIVER_VERSION, "25")
         self.assertEqual(
             bench.PROMPT_TEMPLATE_VERSION, "fixed-serving-profiles-v2"
         )
         self.assertEqual(
             bench.FIXED_PROMPT_TEMPLATE_V2_DRIVER_VERSIONS,
-            {"22", "23", "24"},
+            {"22", "23", "24", "25"},
         )
         self.assertEqual(bench.LONG_PROMPT_REPETITIONS, 61)
         self.assertEqual(bench.LONG_PROMPT_REPETITIONS_V1, 64)
@@ -2319,12 +2334,7 @@ class ServingBenchmarkTests(unittest.TestCase):
         call = supervise.call_args.kwargs
         self.assertEqual(call["worker_phase"], "model-fingerprint-initial")
         self.assertEqual(call["worker_command"][1], str(bench.MODEL_FINGERPRINT_SCRIPT))
-        self.assertEqual(
-            call["worker_command"][
-                call["worker_command"].index("--max-read-mib-per-second") + 1
-            ],
-            "256",
-        )
+        self.assertNotIn("--max-read-mib-per-second", call["worker_command"])
         self.assertNotIn("--start-gate", call["worker_command"])
         self.assertEqual(
             set(call["worker_environment"]),
@@ -2335,6 +2345,33 @@ class ServingBenchmarkTests(unittest.TestCase):
         )
         self.assertNotIn("HF_TOKEN", inherited)
         self.assertNotIn("KILN_", inherited)
+
+    def test_model_fingerprint_applies_only_an_explicit_read_limit(self) -> None:
+        with mock.patch.object(
+            bench,
+            "fingerprint_model",
+            return_value={"id": "fixture"},
+        ) as fingerprint:
+            bench.fingerprint_model_with_thermal_containment(
+                Path("/models/test-model"),
+                "test-model",
+                policy_path=None,
+                phase="model-fingerprint-initial",
+            )
+            bench.fingerprint_model_with_thermal_containment(
+                Path("/models/test-model"),
+                "test-model",
+                policy_path=None,
+                phase="model-fingerprint-final",
+                read_mib_per_second=256,
+            )
+        self.assertIsNone(
+            fingerprint.call_args_list[0].kwargs["max_read_mib_per_second"]
+        )
+        self.assertEqual(
+            fingerprint.call_args_list[1].kwargs["max_read_mib_per_second"],
+            256,
+        )
 
     def test_full_output_evidence_is_bounded_validated_and_locates_divergence(
         self,
@@ -3477,7 +3514,7 @@ class ServingBenchmarkTests(unittest.TestCase):
                 receipt["host_thermal"]["model_fingerprint"][
                     "read_mib_per_second"
                 ],
-                256,
+                0,
             )
 
             missing_discriminator = json.loads(json.dumps(receipt))
@@ -3572,6 +3609,9 @@ class ServingBenchmarkTests(unittest.TestCase):
             driver_v15["workload"][
                 "prompt_template_version"
             ] = bench.FIXED_PROMPT_TEMPLATE_VERSION_V1
+            driver_v15["host_thermal"]["model_fingerprint"][
+                "read_mib_per_second"
+            ] = 256
             driver_v15["memory_sampler"].pop("device")
             for row in [driver_v15["warmup"], *driver_v15["runs"]]:
                 if row is None or row.get("server") is None:
@@ -3689,7 +3729,7 @@ class ServingBenchmarkTests(unittest.TestCase):
             ] = 63
             tampered.pop("receipt_sha256")
             tampered["receipt_sha256"] = bench.canonical_sha256(tampered)
-            with self.assertRaisesRegex(bench.BenchmarkError, "must be in 64"):
+            with self.assertRaisesRegex(bench.BenchmarkError, "zero or in 64"):
                 bench.validate_benchmark_receipt(tampered)
 
             tampered = json.loads(json.dumps(receipt))

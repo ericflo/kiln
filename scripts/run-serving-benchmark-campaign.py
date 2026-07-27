@@ -19,8 +19,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DRIVER = ROOT / "scripts" / "bench-concurrent-batch.py"
-SCHEMA = "kiln.serving-benchmark-campaign.v10"
-DEFAULT_MODEL_FINGERPRINT_READ_MIB_PER_SECOND = 256
+SCHEMA = "kiln.serving-benchmark-campaign.v11"
+DEFAULT_MODEL_FINGERPRINT_READ_MIB_PER_SECOND = 0
 REFERENCE_ROLES = (
     "qualification_gate",
     "same_artifact_graph_eager_discriminator",
@@ -132,7 +132,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--model-fingerprint-read-mib-per-second",
         type=int,
         default=DEFAULT_MODEL_FINGERPRINT_READ_MIB_PER_SECOND,
-        help="cumulative read-rate limit across both model-integrity passes",
+        help="optional cumulative model read limit; zero disables it",
     )
     thermal = parser.add_mutually_exclusive_group()
     thermal.add_argument("--host-thermal-policy", type=Path)
@@ -210,8 +210,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     elif args.memory_source == "nvml" and args.memory_path != "auto":
         parser.error("--memory-path cannot be combined with --memory-source nvml")
-    if not 64 <= args.model_fingerprint_read_mib_per_second <= 16_384:
-        parser.error("--model-fingerprint-read-mib-per-second must be in 64..=16384")
+    if args.model_fingerprint_read_mib_per_second != 0 and not (
+        64 <= args.model_fingerprint_read_mib_per_second <= 16_384
+    ):
+        parser.error(
+            "--model-fingerprint-read-mib-per-second must be zero or in 64..=16384"
+        )
     thermal_path = (
         args.host_thermal_policy
         if args.host_thermal_policy is not None

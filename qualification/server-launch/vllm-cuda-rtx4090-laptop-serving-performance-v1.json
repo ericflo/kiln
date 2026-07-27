@@ -11,7 +11,6 @@
     "--process-group-mode=inherited",
     "--max-top-k=20",
     "--max-model-len=32768",
-    "--max-provenance-read-mib-per-second=32",
     "--",
     "--host=127.0.0.1",
     "--port=8421",
