@@ -140,10 +140,9 @@ fn build_rocm() {
     let kt_compat = kt_csrc.join("hip_compat");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    // gfx targets: CDNA (gfx90a/gfx942) + RDNA3 (gfx1100) + gfx1151 (Strix
-    // Halo, the dev box). Override with KILN_ROCM_ARCHS.
-    let archs =
-        env::var("KILN_ROCM_ARCHS").unwrap_or_else(|_| "gfx942;gfx90a;gfx1100;gfx1151".to_string());
+    // Local builds target the installed GPU. Release and cross builds can
+    // request a semicolon-separated fat binary through KILN_ROCM_ARCHS.
+    let archs = env::var("KILN_ROCM_ARCHS").unwrap_or_else(|_| "native".to_string());
 
     // The conv1d kernels are per-thread / shared-memory only (no cross-lane
     // reductions), so they hipify clean with no wave-size fix needed.

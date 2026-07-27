@@ -356,7 +356,7 @@ Start the source-built server (using the weights downloaded above):
 KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve
 ```
 
-Vulkan builds auto-select a Vulkan physical device at startup. Until backend selection and memory probes share a PCI-address or UUID identity, startup is deliberately restricted to logical device `0` with exactly one matching physical DRM device. Select it through `accelerator.vulkan_device_index` or `KILN_ACCELERATOR_VULKAN_DEVICE_INDEX`; retired `KILN_VULKAN_DEVICE` and `GGML_VK_VISIBLE_DEVICES` inputs are ignored. ROCm builds use the HIP backend compiled into the binary; set `KILN_ROCM_ARCHS` at build time to control emitted gfx targets.
+Vulkan builds auto-select a Vulkan physical device at startup. Until backend selection and memory probes share a PCI-address or UUID identity, startup is deliberately restricted to logical device `0` with exactly one matching physical DRM device. Select it through `accelerator.vulkan_device_index` or `KILN_ACCELERATOR_VULKAN_DEVICE_INDEX`; retired `KILN_VULKAN_DEVICE` and `GGML_VK_VISIBLE_DEVICES` inputs are ignored. ROCm builds use the HIP backend compiled into the binary. Local builds target the installed GPU; set `KILN_ROCM_ARCHS` at build time to emit an explicit semicolon-separated target set for release or cross-build artifacts.
 
 ```
   ┌─────────────────────────────────────┐

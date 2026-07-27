@@ -186,10 +186,9 @@ fn build_rocm() {
         .join("csrc");
     let kt_compat = kt_csrc.join("hip_compat");
 
-    // gfx targets: CDNA (gfx90a/gfx942) + RDNA3 (gfx1100) + gfx1151 (Strix
-    // Halo dev box). Override with KILN_ROCM_ARCHS.
-    let archs =
-        env::var("KILN_ROCM_ARCHS").unwrap_or_else(|_| "gfx942;gfx90a;gfx1100;gfx1151".to_string());
+    // Local builds target the installed GPU. Release and cross builds can
+    // request a semicolon-separated fat binary through KILN_ROCM_ARCHS.
+    let archs = env::var("KILN_ROCM_ARCHS").unwrap_or_else(|_| "native".to_string());
 
     // The fused OPD top-K reverse-KL backward kernel. Its two cross-lane
     // reductions were converted to wave-agnostic `kiln_block_reduce_*`

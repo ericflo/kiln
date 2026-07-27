@@ -125,7 +125,9 @@ ROCM_PATH=/opt/rocm KILN_ROCM_ARCHS='gfx90a;gfx942;gfx1100;gfx1151' \
   cargo build --release --no-default-features --features rocm
 ```
 
-Set `KILN_ROCM_ARCHS` to the semicolon-separated gfx targets you want to emit. The release build includes `gfx1151` for Strix Halo; local debug builds can use one target to shorten HIP compile time.
+Set `KILN_ROCM_ARCHS` to the semicolon-separated gfx targets you want to emit
+for a release or cross-build. When it is omitted, local builds use HIP's
+`--offload-arch=native` selection for the installed GPU.
 
 **macOS + Apple Silicon:**
 

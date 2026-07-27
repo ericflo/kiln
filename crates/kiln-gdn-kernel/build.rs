@@ -195,11 +195,9 @@ fn build_rocm() {
     let kt_csrc_dir = crates_dir.join("kiln-tensor").join("csrc");
     let kt_compat_dir = kt_csrc_dir.join("hip_compat");
 
-    // gfx targets: CDNA (gfx90a/gfx942) + RDNA3 (gfx1100), plus gfx1151
-    // (Strix Halo) so on-hardware parity testing runs on the dev box. Override
-    // with KILN_ROCM_ARCHS.
-    let archs =
-        env::var("KILN_ROCM_ARCHS").unwrap_or_else(|_| "gfx942;gfx90a;gfx1100;gfx1151".to_string());
+    // Local builds target the installed GPU. Release and cross builds can
+    // request a semicolon-separated fat binary through KILN_ROCM_ARCHS.
+    let archs = env::var("KILN_ROCM_ARCHS").unwrap_or_else(|_| "native".to_string());
 
     const ROCM_KERNELS: &[&str] = &[
         "gdn_fwd_sub.cu",

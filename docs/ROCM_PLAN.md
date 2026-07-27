@@ -276,7 +276,7 @@ Organized by subsystem. Every box must be checked for "as first-class as CUDA."
 - [ ] `kiln-rocblas`, `kiln-rmsnorm-kernel`, `kiln-conv1d-kernel`,
       `kiln-gdn-kernel`, `kiln-opd-loss-kernel`, `kiln-marlin-gemm`,
       `kiln-flash-attn` build.rs each gain a `CARGO_FEATURE_ROCM` hipcc arm.
-- [ ] `KILN_ROCM_ARCHS` (default `gfx90a;gfx942;gfx1100`) → `--offload-arch`;
+- [ ] `KILN_ROCM_ARCHS` (default `native`) → `--offload-arch`;
       `cargo:rerun-if-env-changed` for ROCM_PATH/HIP_PATH/HIPCC/KILN_ROCM_ARCHS.
 
 ### 11. Runtime selection (`kiln-server/src/device.rs`)

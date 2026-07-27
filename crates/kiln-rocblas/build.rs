@@ -44,8 +44,9 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let csrc_dir = manifest_dir.join("csrc");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let archs =
-        env::var("KILN_ROCM_ARCHS").unwrap_or_else(|_| "gfx942;gfx90a;gfx1100;gfx1151".to_string());
+    // Local builds target the installed GPU. Release and cross builds can
+    // request a semicolon-separated fat binary through KILN_ROCM_ARCHS.
+    let archs = env::var("KILN_ROCM_ARCHS").unwrap_or_else(|_| "native".to_string());
 
     let mut sources: Vec<&str> = Vec::new();
     if want_probe || want_primary_full {
