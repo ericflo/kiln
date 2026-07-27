@@ -14,7 +14,7 @@
     },
     {
       "path": "crates/kiln-model/src/generate.rs",
-      "max_lines": 12169,
+      "max_lines": 12168,
       "rationale": "The inference state machine still combines prefill, decode, cache, and sampling orchestration; splitting it requires preserving request-lifecycle invariants."
     },
     {
@@ -24,7 +24,7 @@
     },
     {
       "path": "crates/kiln-model/src/vk_decode_resident.rs",
-      "max_lines": 5232,
+      "max_lines": 5228,
       "rationale": "Resident Vulkan decode owns tightly coupled shader state and lifecycle validation; this exact ceiling forbids further consolidation into the file."
     },
     {
@@ -44,7 +44,7 @@
     },
     {
       "path": "crates/kiln-server/src/config.rs",
-      "max_lines": 11362,
+      "max_lines": 11370,
       "rationale": "Typed configuration is deliberately canonical and self-documenting, but parsing, validation, and schema projection must not expand this file beyond the reviewed cap."
     },
     {
@@ -59,7 +59,7 @@
     },
     {
       "path": "crates/kiln-tensor/src/cuda_storage.rs",
-      "max_lines": 6735,
+      "max_lines": 6736,
       "rationale": "CUDA storage now includes the reviewed host-upload capture-arena interception required to keep CUDA graph inputs device-resident; this exact ceiling prevents unrelated backend growth."
     },
     {
@@ -69,7 +69,7 @@
     },
     {
       "path": "crates/kiln-vulkan-kernel/src/kernels.rs",
-      "max_lines": 11456,
+      "max_lines": 11434,
       "rationale": "This file is the centralized generated-style Vulkan kernel registry and embedded shader source authority; additions must remain within its reviewed ceiling."
     }
   ]

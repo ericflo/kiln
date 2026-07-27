@@ -1170,6 +1170,19 @@ class RuntimeContractTests(unittest.TestCase):
                 package_names=("vllm",),
                 read_rate_limiter=limiter,
             )
+            cache = source_root / "__pycache__"
+            cache.mkdir()
+            (cache / "__init__.cpython-312.pyc").write_bytes(b"generated-cache-v1")
+            with_cache = vllm_teacher.capture_runtime_content(
+                python_executable=executable_link,
+                package_names=("vllm",),
+            )
+            (cache / "__init__.cpython-312.pyc").write_bytes(b"generated-cache-v2")
+            (cache / "new-module.cpython-312.pyc").write_bytes(b"generated-cache")
+            changed_cache = vllm_teacher.capture_runtime_content(
+                python_executable=executable_link,
+                package_names=("vllm",),
+            )
             source.write_text("VALUE = 'other'\n")
             changed_source = vllm_teacher.capture_runtime_content(
                 python_executable=executable_link,
@@ -1190,6 +1203,8 @@ class RuntimeContractTests(unittest.TestCase):
 
         self.assertEqual(first, repeated)
         self.assertEqual(first, bounded)
+        self.assertEqual(first, with_cache)
+        self.assertEqual(first, changed_cache)
         self.assertGreater(limiter.total_bytes, 0)
         self.assertEqual(first.python_executable, executable.resolve())
         self.assertNotEqual(first.sha256, changed_source.sha256)

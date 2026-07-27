@@ -79,8 +79,8 @@ PROCESS_GROUP_KILL_SECONDS = 2.0
 PROCESS_GROUP_MODE_DETACHED = "detached"
 PROCESS_GROUP_MODE_INHERITED = "inherited"
 PROCESS_GROUP_MODES = (PROCESS_GROUP_MODE_DETACHED, PROCESS_GROUP_MODE_INHERITED)
-RUNTIME_CONTENT_SCHEMA = "kiln.python-runtime-content.v1"
-RUNTIME_CONTENT_DOMAIN = b"kiln.python-runtime-content.v1\0"
+RUNTIME_CONTENT_SCHEMA = "kiln.python-runtime-content.v2"
+RUNTIME_CONTENT_DOMAIN = b"kiln.python-runtime-content.v2\0"
 RUNTIME_PACKAGES = ("vllm", "torch", "transformers", "tokenizers")
 MAX_RUNTIME_CONTENT_FILES = 250_000
 MAX_RUNTIME_CONTENT_DIRECTORIES = 100_000
@@ -1892,6 +1892,8 @@ def _scan_runtime_content_tree(
                 f"cannot enumerate Python runtime directory {label!r}: {exc}"
             ) from exc
         for entry in entries:
+            if entry.name == "__pycache__":
+                continue
             child_label = f"{label}/{entry.name}"
             child_path = Path(entry.path)
             try:
@@ -2119,6 +2121,8 @@ def _collect_runtime_content(
             distribution_files,
             key=lambda value: os.fsencode(os.fspath(value)),
         ):
+            if "__pycache__" in Path(os.fspath(item)).parts:
+                continue
             raw_label = os.fspath(item).replace(os.sep, "/")
             label = f"package/{package}/distribution/{raw_label}"
             try:
