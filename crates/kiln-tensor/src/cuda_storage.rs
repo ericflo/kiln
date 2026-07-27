@@ -3183,7 +3183,8 @@ pub fn cuda_sum_squared_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
 ///   1. Per-row sum-of-squares via `kiln_sum_squared_last_axis_async`
 ///      (F32 accumulator).
 ///   2. Per-element scale + cast back via `kiln_l2norm_apply_async`
-///      (rsqrt + multiply, no second pass over `sum_sq`).
+///      (sqrt + divide, matching the portable composite without a
+///      second pass over `sum_sq`).
 ///
 /// F32/BF16/F16 supported.
 #[cfg(feature = "cuda")]

@@ -154,12 +154,13 @@ __global__ void l2norm_apply_kernel(
     int tid = threadIdx.x;
     int blk = blockDim.x;
 
-    // Compute the per-row inverse-sqrt scalar once per block; broadcast
-    // via shared memory so every thread reads the same value.
-    __shared__ float inv_norm;
+    // Match the portable composite exactly: sqrt first, then divide each
+    // element. An rsqrt-plus-multiply recipe is mathematically equivalent
+    // but can differ in F32 rounding and change close greedy-token ties.
+    __shared__ float norm;
     if (tid == 0) {
         float s = sum_sq[row] + eps;
-        inv_norm = (s > 0.0f) ? rsqrtf(s) : 0.0f;
+        norm = sqrtf(s);
     }
     __syncthreads();
 
@@ -168,7 +169,7 @@ __global__ void l2norm_apply_kernel(
 
     for (int64_t c = tid; c < n_cols; c += blk) {
         float v = to_f32<T>(row_in[c]);
-        float scaled = v * inv_norm;
+        float scaled = v / norm;
         if constexpr (sizeof(T) == 4) {
             row_out[c] = static_cast<T>(scaled);
         } else if constexpr (sizeof(T) == 2) {

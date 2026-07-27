@@ -426,11 +426,9 @@ fn test_cuda_softmax_last_dim_kt_default_matches_host_formula() -> Result<()> {
 
 #[cfg(feature = "cuda")]
 #[test]
-fn test_cuda_l2_normalize_kt_default_matches_host_formula() -> Result<()> {
+fn test_cuda_l2_normalize_kt_exactly_matches_composite() -> Result<()> {
     let Ok(device) = new_cuda_device(0) else {
-        eprintln!(
-            "CUDA unavailable, skipping test_cuda_l2_normalize_kt_default_matches_host_formula"
-        );
+        eprintln!("CUDA unavailable, skipping test_cuda_l2_normalize_kt_exactly_matches_composite");
         return Ok(());
     };
     let data = [3.0_f32, 4.0, 0.0, -2.0, 1.0, 2.0];
@@ -440,18 +438,27 @@ fn test_cuda_l2_normalize_kt_default_matches_host_formula() -> Result<()> {
     let x_f32 = x.to_dtype(DType::F32)?;
     let direct = try_kt_l2_normalize(&x_f32, 1e-6)?
         .context("expected CUDA kt l2_normalize helper to accept contiguous F32 input")?;
+    let sq_sum = try_kt_sum_squared_last_dim_keepdim(&x_f32)?
+        .context("expected CUDA kt sum-squared helper to accept contiguous F32 input")?;
+    let sq_sum_eps = try_kt_add_scalar(&sq_sum, 1e-6)?
+        .context("expected CUDA kt scalar-add helper to accept contiguous F32 input")?;
+    let norm = try_kt_sqrt(&sq_sum_eps)?
+        .context("expected CUDA kt sqrt helper to accept contiguous F32 input")?;
+    let composite = x_f32.broadcast_div(&norm)?;
     let out = l2_normalize(&x)?;
     synchronize_for_profile(&device)?;
 
     let direct_vals = direct.flatten_all()?.to_vec1::<f32>()?;
+    let composite_vals = composite.flatten_all()?.to_vec1::<f32>()?;
     let got = out.flatten_all()?.to_vec1::<f32>()?;
-    for (idx, (&actual, &direct_actual)) in got.iter().zip(direct_vals.iter()).enumerate() {
-        assert!(
-            (actual - direct_actual).abs() < 1e-7,
-            "default l2_normalize path diverged from direct kt helper at {idx}: \
-                 actual={actual} direct={direct_actual}"
-        );
-    }
+    assert_eq!(
+        direct_vals, composite_vals,
+        "fused CUDA L2 normalization must exactly match the portable composite"
+    );
+    assert_eq!(
+        got, direct_vals,
+        "default L2 normalization path must use the parity-qualified fused route"
+    );
 
     for row_idx in 0..2 {
         let row = &data[row_idx * 3..(row_idx + 1) * 3];
