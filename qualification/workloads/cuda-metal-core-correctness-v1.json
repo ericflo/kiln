@@ -625,7 +625,7 @@
             "metal",
             "--test",
             "metal_ops_parity",
-            "matmul_matrix_core",
+        "matrix_core",
             "--",
             "--nocapture",
             "--test-threads=1"
@@ -638,14 +638,24 @@
           "timeout_seconds": 1800,
           "expected_exit_codes": [0],
           "output_assertions": [
-            {
-              "stream": "combined",
-              "match": "required",
-              "pattern": "matmul_matrix_core_f32_parity \\.\\.\\. ok"
-            },
-            {
-              "stream": "combined",
-              "match": "required",
+        {
+          "stream": "combined",
+          "match": "required",
+          "pattern": "matmul_matrix_core_f32_parity \\.\\.\\. ok"
+        },
+        {
+          "stream": "combined",
+          "match": "required",
+          "pattern": "matmul_matrix_core_batched_parity \\.\\.\\. ok"
+        },
+        {
+          "stream": "combined",
+          "match": "required",
+          "pattern": "matmul_lhs_transposed_matrix_core_parity \\.\\.\\. ok"
+        },
+        {
+          "stream": "combined",
+          "match": "required",
               "pattern": "matmul_rhs_transposed_matrix_core_parity \\.\\.\\. ok"
             },
             {

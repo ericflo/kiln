@@ -157,6 +157,23 @@ class WorkloadTests(unittest.TestCase):
         self.assertIn("RTX 4090 Laptop GPU", laptop_probe["output_assertions"][0]["pattern"])
         self.assertIn("Apple M1", metal_probe["output_assertions"][0]["pattern"])
         self.assertIn("8", metal_probe["output_assertions"][1]["pattern"])
+        metal_matmul = {
+            case["id"]: case
+            for case in variants["metal-m1-macbook-air"]["cases"]
+        }["matmul-parity"]
+        self.assertIn("matrix_core", metal_matmul["command"])
+        required_matmul = {
+            assertion["pattern"]
+            for assertion in metal_matmul["output_assertions"]
+            if assertion["match"] == "required"
+        }
+        for test_name in (
+            "matmul_matrix_core_f32_parity",
+            "matmul_matrix_core_batched_parity",
+            "matmul_lhs_transposed_matrix_core_parity",
+            "matmul_rhs_transposed_matrix_core_parity",
+        ):
+            self.assertTrue(any(test_name in pattern for pattern in required_matmul))
 
     def test_cuda_memory_lifecycle_is_bounded_and_fail_closed(self) -> None:
         path = ROOT / "qualification/workloads/cuda-memory-lifecycle-v1.json"
