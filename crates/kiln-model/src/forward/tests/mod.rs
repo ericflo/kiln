@@ -2529,6 +2529,7 @@ fn test_gqa_attention_paged_decode_contiguous_batch_matches_rowwise_metal() -> R
         None,
         None,
         None,
+        None,
         #[cfg(feature = "metal")]
         None,
         #[cfg(feature = "cuda")]
@@ -2685,7 +2686,6 @@ fn test_transformer_block_paged_decode_contiguous_batch_matches_rowwise_metal() 
         &mut batch_cache,
         &block_tables,
         0,
-        None,
         None,
         None,
         None,
