@@ -167,7 +167,7 @@ historical evidence and are not rerun or rewritten by this phase.
   `backend_build=all` and require its CUDA, Metal, ROCm, and Vulkan lanes to
   pass on their separate compatible hosted runners. This is compile and test
   evidence, not a requirement that one qualification host run every backend.
-- [ ] On Strix Halo, retain current-source ROCm and Vulkan core-correctness
+- [x] On Strix Halo, retain current-source ROCm and Vulkan core-correctness
   receipts.
 - [ ] Retain targeted ROCm and Vulkan serving receipts covering exact output,
   KV-growth pressure, prefix-cache reclamation, and bounded process and device
@@ -186,3 +186,17 @@ targeted check exposes a specific regression that requires diagnosis. Agents
 working concurrently must incorporate current `origin/main` before
 source-bound runs and pushes, must not force-push, and must not close this phase
 until Phase 7.2 is complete.
+
+Core-correctness evidence:
+`qualification/receipts/rocm/strix-halo/`
+`20260728t222535119053z-rocm-strix-halo-core-correctness-v1-9faecc7321-`
+`v1.json` and `qualification/receipts/vulkan/strix-halo/`
+`20260728t222644757744z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-`
+`v1.json` passed from the same clean pushed source `8e419e43051b`. ROCm
+selected the gfx1151 AMD Radeon 8060S through ROCm 7.2.4; Vulkan selected the
+same physical GPU through the RADV Strix Halo driver. Each receipt required
+its device probe, real-device tensor transfer/parity, and deterministic dense
+matmul parity against the CPU oracle. All six required cases exited zero with
+no output-assertion failure. This is the bounded core subset only; the
+separate targeted serving receipts must supply shared server, KV-pressure,
+prefix-cache, and cleanup evidence.

@@ -1220,6 +1220,18 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 measured laptop under WSL2, not native Linux, desktop RTX 4090, Metal, an SLO, or a
                 broader workload claim.
               </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Current Strix Halo core receipts
+                <code>20260728t222535119053z-rocm-strix-halo-core-correctness-v1-9faecc7321-v1</code>
+                and
+                <code>20260728t222644757744z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-v1</code>
+                passed from the same clean pushed source <code>8e419e43051b</code>. ROCm 7.2.4
+                selected the gfx1151 AMD Radeon 8060S, and Vulkan selected the same physical GPU
+                through RADV Strix Halo. Each backend passed its required device probe, real-device
+                tensor transfer/parity, and deterministic dense matmul parity against the CPU
+                oracle. These receipts establish only that bounded core subset on this host; targeted
+                serving, KV-pressure, prefix-cache, and cleanup evidence is retained separately.
+              </p>
             </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">
               <h4 class="font-semibold mb-2">Memory alerting contract</h4>

@@ -189,6 +189,23 @@ for the declared eight-hour mixed-load workload on the measured RTX 4090
 Laptop under WSL2. It is not native Linux, desktop RTX 4090, Metal, an SLO, or
 a broader workload claim.
 
+## Current Strix Halo Core Evidence
+
+The current ROCm and Vulkan core receipts are
+[`20260728t222535119053z-rocm-strix-halo-core-correctness-v1-9faecc7321-v1.json`](../qualification/receipts/rocm/strix-halo/20260728t222535119053z-rocm-strix-halo-core-correctness-v1-9faecc7321-v1.json)
+and
+[`20260728t222644757744z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-v1.json`](../qualification/receipts/vulkan/strix-halo/20260728t222644757744z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-v1.json).
+Both passed from the same clean pushed source `8e419e43051b`. ROCm selected
+the gfx1151 AMD Radeon 8060S through ROCm 7.2.4; Vulkan selected the same
+physical GPU through the RADV Strix Halo driver.
+
+Each backend required its device probe, real-device tensor transfer and
+parity, and deterministic dense matmul parity against the CPU oracle. All six
+required cases exited zero with no output-assertion failure. This is the
+bounded core-correctness subset on this Strix Halo host. It is not serving,
+KV-pressure, prefix-cache, endurance, capacity, performance, or evidence for
+another ROCm or Vulkan device.
+
 ## Build Boundary
 
 Bounded build wrappers provide deterministic environment filtering, offline
