@@ -160,3 +160,27 @@ Metal evidence applies only to the declared workloads on the measured MacBook
 Air. It must not be generalized to other Apple Silicon devices, configurations,
 or unmeasured endurance behavior. Completed CUDA/WSL2 receipts remain
 historical evidence and are not rerun or rewritten by this phase.
+
+## Phase 7.3: Final Cross-Backend Regression Closure
+
+- [ ] On current source, dispatch the complete backend build matrix and require
+  the CUDA, Metal, ROCm, and Vulkan feature lanes to pass on the same commit.
+- [ ] On Strix Halo, retain current-source ROCm and Vulkan core-correctness
+  receipts.
+- [ ] Retain targeted ROCm and Vulkan serving receipts covering exact output,
+  KV-growth pressure, prefix-cache reclamation, and bounded process and device
+  cleanup after the shared server changes made during Phase 7.1.
+- [ ] After Phase 7.2 lands, incorporate its final checkpoint and repeat only
+  the targeted checks affected by later shared runtime or qualification-tooling
+  changes. Documentation-only and backend-isolated changes do not require
+  unrelated hardware reruns.
+- [ ] Validate and check in the receipts, update this checklist and permanent
+  documentation, and require all exact-commit workflows to pass before changing
+  this plan's status to `Complete`.
+
+This closure is a bounded regression check, not a new qualification campaign.
+It does not repeat endurance, thermal, capacity, or performance tuning unless a
+targeted check exposes a specific regression that requires diagnosis. Agents
+working concurrently must incorporate current `origin/main` before
+source-bound runs and pushes, must not force-push, and must not close this phase
+until Phase 7.2 is complete.
