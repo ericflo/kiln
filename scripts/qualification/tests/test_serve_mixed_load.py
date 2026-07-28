@@ -1399,6 +1399,12 @@ class ServeMixedLoadTests(unittest.TestCase):
             cargo = Path(temp_dir) / "cargo"
             cargo.write_text("#!/bin/sh\n")
             cargo.chmod(0o755)
+            wsl2_runner_environment = {
+                key: f"runner-{index}"
+                for index, key in enumerate(
+                    sorted(serve.WSL2_RUNNER_OWNED_KILN_ENVIRONMENT)
+                )
+            }
             environment = serve.source_bound_build_environment(
                 {
                     "CARGO": str(cargo),
@@ -1407,6 +1413,7 @@ class ServeMixedLoadTests(unittest.TestCase):
                     "PATH": "/usr/bin",
                     serve.RESULT_ENV: "/tmp/result.json",
                     serve.VARIANT_ENV: "default",
+                    **wsl2_runner_environment,
                 }
             )
         self.assertEqual(environment["CARGO"], str(cargo))
@@ -1422,6 +1429,42 @@ class ServeMixedLoadTests(unittest.TestCase):
         self.assertEqual(environment["KILN_CARGO_PRIVATE_NETWORK"], "1")
         self.assertEqual(environment["KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS"], "840")
         self.assertNotIn("KILN_ROCM_ARCHS", environment)
+        self.assertTrue(
+            serve.WSL2_RUNNER_OWNED_KILN_ENVIRONMENT.isdisjoint(environment)
+        )
+
+    def test_delegated_build_retains_wsl2_runner_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cargo = Path(temp_dir) / "cargo"
+            cargo.write_text("#!/bin/sh\n")
+            cargo.chmod(0o755)
+            wsl2_runner_environment = {
+                key: f"runner-{index}"
+                for index, key in enumerate(
+                    sorted(serve.WSL2_RUNNER_OWNED_KILN_ENVIRONMENT)
+                )
+            }
+            environment = serve.source_bound_build_environment(
+                {
+                    "CARGO": str(cargo),
+                    "HOME": temp_dir,
+                    "PATH": "/usr/bin",
+                    serve.RESULT_ENV: "/tmp/result.json",
+                    serve.VARIANT_ENV: "default",
+                    **wsl2_runner_environment,
+                },
+                dataclasses.replace(
+                    serve.ROCM_BUILD_SPEC,
+                    cargo_execution_mode="delegated-cgroup",
+                ),
+            )
+        self.assertEqual(
+            {
+                key: environment[key]
+                for key in serve.WSL2_RUNNER_OWNED_KILN_ENVIRONMENT
+            },
+            wsl2_runner_environment,
+        )
 
     def test_vulkan_source_build_is_bounded_without_rocm_environment(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2299,9 +2342,39 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 serve.RESULT_ENV: "/tmp/result.json",
                 serve.VARIANT_ENV: "graphs-off",
                 "RUST_LOG": "trace",
-            }
+                **{
+                    key: f"runner-{index}"
+                    for index, key in enumerate(
+                        sorted(serve.WSL2_RUNNER_OWNED_KILN_ENVIRONMENT)
+                    )
+                },
+            },
+            additional_runner_owned_kiln_environment=(
+                serve.WSL2_RUNNER_OWNED_KILN_ENVIRONMENT
+            ),
         )
         self.assertEqual(sanitized, {"PATH": "/bin", "HOME": "/tmp"})
+
+    def test_server_environment_scrubs_wsl2_runner_controls(self) -> None:
+        with mock.patch.dict(
+            serve.os.environ,
+            {
+                "PATH": "/usr/bin",
+                serve.RESULT_ENV: "/tmp/result.json",
+                serve.VARIANT_ENV: "default",
+                **{
+                    key: f"runner-{index}"
+                    for index, key in enumerate(
+                        sorted(serve.WSL2_RUNNER_OWNED_KILN_ENVIRONMENT)
+                    )
+                },
+            },
+            clear=True,
+        ):
+            environment = serve.server_environment("default")
+        self.assertTrue(
+            serve.WSL2_RUNNER_OWNED_KILN_ENVIRONMENT.isdisjoint(environment)
+        )
 
     def test_environment_sanitizer_rejects_ambient_kiln_controls(self) -> None:
         with self.assertRaisesRegex(

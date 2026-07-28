@@ -2644,14 +2644,9 @@ def source_bound_build_environment(
     source: dict[str, str], spec: SourceBuildSpec = ROCM_BUILD_SPEC
 ) -> dict[str, str]:
     delegated_wsl2 = spec.cargo_execution_mode == "delegated-cgroup"
-    additional_runner_environment = (
-        WSL2_RUNNER_OWNED_KILN_ENVIRONMENT
-        if delegated_wsl2
-        else frozenset()
-    )
     sanitized = sanitized_environment(
         source,
-        additional_runner_owned_kiln_environment=additional_runner_environment,
+        additional_runner_owned_kiln_environment=WSL2_RUNNER_OWNED_KILN_ENVIRONMENT,
     )
     closed_source_build_environment = {
         "CARGO",
@@ -2786,11 +2781,7 @@ def server_environment(
     config = VARIANT_CONFIGS[variant]
     environment = sanitized_environment(
         dict(os.environ),
-        additional_runner_owned_kiln_environment=(
-            WSL2_RUNNER_OWNED_KILN_ENVIRONMENT
-            if spec.cargo_execution_mode == "delegated-cgroup"
-            else frozenset()
-        ),
+        additional_runner_owned_kiln_environment=WSL2_RUNNER_OWNED_KILN_ENVIRONMENT,
     )
     for key in ("ROCM_PATH", "HIP_PATH"):
         environment.pop(key, None)
