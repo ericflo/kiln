@@ -369,6 +369,20 @@ class WorkloadTests(unittest.TestCase):
         errors = workload_module.validate_workload(value)
         self.assertTrue(any("required device cannot allow" in error for error in errors))
 
+    def test_core_accelerator_compiles_use_a_workload_bound_memory_floor(self) -> None:
+        path = ROOT / "qualification/workloads/correctness-core-v1.json"
+        value = workload_module.load_workload(path)
+        for variant in value["variants"]:
+            for case in variant["cases"]:
+                if case["id"] == "device-probe":
+                    self.assertNotIn(
+                        "KILN_CARGO_MIN_AVAILABLE_GIB", case["environment"]
+                    )
+                    continue
+                self.assertEqual(
+                    case["environment"]["KILN_CARGO_MIN_AVAILABLE_GIB"], "8"
+                )
+
     def test_runner_protocol_has_closed_known_metrics(self) -> None:
         value = valid_performance_workload()
         protocol = value["variants"][0]["cases"][0]["result_protocol"]
