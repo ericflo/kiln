@@ -1174,8 +1174,22 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 session and process group, and exited cleanly. Unified-memory, compressor, paging,
                 swap, and memory-pressure observations were retained. Supported unprivileged host and
                 GPU temperature readings were explicitly unavailable; available thermal-pressure state
-                remained read-only. This is platform-boundary evidence only, not Metal correctness,
-                training, serving, capacity, performance, or endurance evidence.
+                remained read-only. This receipt is platform-boundary evidence only; separate receipts
+                supply each completed Phase 7.2 evidence class.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Retained Metal core receipt
+                <code>20260728t225405419496z-metal-macbook-air-m1-cuda-metal-core-correctn-d119e83143-v1</code>
+                passed from clean pushed source <code>94d03199f334</code>. Its five required cases
+                selected Apple M1; proved exact contiguous, strided-view, and BF16 tensor round trips;
+                compared F32, batched, left-transposed, and right-transposed matrix-core matmuls with
+                CPU oracles; and required single-row and two-row Metal ICB replay with exact token and
+                KV-cache parity against eager execution. The training case completed one Metal LoRA
+                SFT forward/backward/AdamW step and a twenty-step BF16 AdamW trajectory against the
+                pinned PyTorch oracle. Every case exited zero with no output-assertion failure, and
+                the receipt passed independent current-source and local-artifact validation. This is
+                bounded core-correctness evidence on the measured M1 MacBook Air, not memory,
+                serving, capacity, performance, endurance, or other-Apple-Silicon evidence.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 Retained CUDA core receipt

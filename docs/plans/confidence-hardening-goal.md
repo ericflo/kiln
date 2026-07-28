@@ -161,7 +161,7 @@ and did not control execution.
 
 ## Phase 7.2: MacBook Air M1
 
-- [ ] Retain the current-source Metal correctness and oracle subset, including
+- [x] Retain the current-source Metal correctness and oracle subset, including
   tensor transfer, matmul, graph replay, training, and optimizer coverage.
 - [ ] Retain controlled low-memory admission, allocation failure, reclaim, and
   process-cleanup evidence appropriate to unified memory.
@@ -176,6 +176,17 @@ Metal evidence applies only to the declared workloads on the measured MacBook
 Air. It must not be generalized to other Apple Silicon devices, configurations,
 or unmeasured endurance behavior. Completed CUDA/WSL2 receipts remain
 historical evidence and are not rerun or rewritten by this phase.
+
+Core-correctness evidence:
+`qualification/receipts/metal/macbook-air-m1/20260728t225405419496z-metal-macbook-air-m1-cuda-metal-core-correctn-d119e83143-v1.json`
+passed from clean pushed source `94d03199f334`. It required the selected Apple
+M1 device, exact contiguous, strided, and BF16 tensor round trips, four
+matrix-core matmul layouts against CPU oracles, single-row and batched ICB
+graph replay with token and KV-cache parity against eager execution, one
+complete Metal LoRA SFT step, and a twenty-step BF16 AdamW trajectory against
+the pinned PyTorch oracle. All five required cases passed and the receipt
+passed independent current-source and local-artifact validation. This does not
+claim memory lifecycle, serving, capacity, performance, or endurance evidence.
 
 ## Phase 7.3: Final Cross-Backend Regression Closure
 

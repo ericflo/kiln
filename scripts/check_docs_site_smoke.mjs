@@ -875,6 +875,9 @@ const generatedDocsPages = [
       'macos-sandbox-loopback-only-v1',
       '20260728t223911446266z-metal-macbook-air-m1-local-environment-v1',
       'explicitly unavailable',
+      'Current Metal Core Evidence',
+      '20260728t225405419496z-metal-macbook-air-m1-cuda-metal-core-correctn-d119e83143-v1',
+      'twenty-step BF16 AdamW trajectory',
       'does not select a single ROCm architecture',
       'Ordinary wall-clock timing',
       'small process runner',
@@ -1007,6 +1010,7 @@ const expectedAdapterListSemantics = [
 const expectedApiSections = [
   { label: 'server status', terms: ['server status'] },
   { label: 'Metal platform boundary evidence', terms: ['Retained Metal platform receipt', '20260728t223911446266z-metal-macbook-air-m1-local-environment-v1', 'clean pushed source c8d9f5856ce9', '17,179,869,184 unified-memory bytes', 'real shader compiled to AIR and linked to a metallib', 'permission denial for external networking', 'temperature readings were explicitly unavailable', 'platform-boundary evidence only'] },
+  { label: 'Metal core evidence', terms: ['Retained Metal core receipt', '20260728t225405419496z-metal-macbook-air-m1-cuda-metal-core-correctn-d119e83143-v1', 'clean pushed source 94d03199f334', 'strided-view', 'left-transposed', 'two-row Metal ICB replay', 'twenty-step BF16 AdamW trajectory', 'bounded core-correctness evidence'] },
   { label: 'complete effective configuration', terms: ['kiln.effective-configuration.v1', 'all 112 fixed typed startup leaves', 'two dynamic leaves for each teacher credential', 'post-precedence typed value', 'command_line', 'canonical environment spelling', 'explicitly empty compatibility-name list', 'redacted null entries', 'kiln config --json'] },
   { label: 'typed CUDA graph diagnostics', terms: ['top-level cuda_graphs configured/effective/cache/invariant state', 'decode_runtime.cuda_graphs', 'requested and profile-effective single-row CUDA graph policy', 'mandatory stable metadata', 'unavailable batched route', 'trusted debug response repeats that exact object', 'qualification receipt can bind the launch policy'] },
   { label: 'immutable operational runtime', terms: ['immutable operational snapshot', 'terminal/agent access', 'pi resolution', 'library URL', 'cache/session paths'] },

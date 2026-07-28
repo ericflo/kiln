@@ -139,8 +139,28 @@ typed observations are explicitly unavailable. These observations are
 read-only and do not pace execution, select routes, or set memory policy.
 
 This receipt proves only the platform boundary on the measured M1 MacBook Air.
-It is not Metal tensor, training, serving, capacity, performance, or endurance
-evidence; those Phase 7.2 receipts are retained separately when completed.
+By itself it is not Metal tensor, training, serving, capacity, performance, or
+endurance evidence; those Phase 7.2 receipts are retained separately.
+
+## Current Metal Core Evidence
+
+The current retained MacBook Air Metal core receipt is
+[`20260728t225405419496z-metal-macbook-air-m1-cuda-metal-core-correctn-d119e83143-v1.json`](../qualification/receipts/metal/macbook-air-m1/20260728t225405419496z-metal-macbook-air-m1-cuda-metal-core-correctn-d119e83143-v1.json).
+It passed from clean pushed source `94d03199f334`. The five required cases
+selected Apple M1, compared contiguous, strided-view, and BF16 tensor round
+trips with exact CPU values, and compared F32, batched, left-transposed, and
+right-transposed matrix-core matmuls with CPU oracles.
+
+The graph case required real single-row and two-row Metal ICB replay across two
+sequence buckets, with exact token and KV-cache parity against eager execution.
+The training case completed one Metal LoRA SFT forward/backward/AdamW step and
+a twenty-step BF16 AdamW trajectory against the pinned PyTorch oracle. Every
+case exited zero with no output-assertion failure, and the receipt passed
+independent current-source and local-artifact validation.
+
+This is bounded correctness evidence for the declared subset on the measured
+M1 MacBook Air. It is not memory-lifecycle, serving, capacity, performance,
+endurance, or other-Apple-Silicon evidence.
 
 ## Current CUDA Core Evidence
 
