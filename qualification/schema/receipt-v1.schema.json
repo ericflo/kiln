@@ -147,106 +147,337 @@
         "runtime": { "$ref": "#/$defs/nonemptyStringMap" },
         "compiler": { "$ref": "#/$defs/nonemptyStringMap" },
         "platform": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["kind", "capabilities", "details", "observations"],
-          "properties": {
-            "kind": { "const": "wsl2" },
-            "capabilities": {
+          "oneOf": [
+            {
               "type": "object",
               "additionalProperties": false,
-              "required": [
-                "wsl_identity",
-                "windows_identity",
-                "driver_identity",
-                "cuda_driver_bridge",
-                "cuda_toolkit",
-                "cuda_runtime",
-                "nvml",
-                "filesystem_semantics",
-                "network_containment",
-                "process_containment",
-                "systemd_system",
-                "systemd_user_transient",
-                "cgroup_memory_delegation",
-                "memory_accounting",
-                "host_temperature",
-                "gpu_temperature"
-              ],
+              "required": ["kind", "capabilities", "details", "observations"],
               "properties": {
-                "wsl_identity": { "$ref": "#/$defs/capabilityStatus" },
-                "windows_identity": { "$ref": "#/$defs/capabilityStatus" },
-                "driver_identity": { "$ref": "#/$defs/capabilityStatus" },
-                "cuda_driver_bridge": { "$ref": "#/$defs/capabilityStatus" },
-                "cuda_toolkit": { "$ref": "#/$defs/capabilityStatus" },
-                "cuda_runtime": { "$ref": "#/$defs/capabilityStatus" },
-                "nvml": { "$ref": "#/$defs/capabilityStatus" },
-                "filesystem_semantics": { "$ref": "#/$defs/capabilityStatus" },
-                "network_containment": { "$ref": "#/$defs/capabilityStatus" },
-                "process_containment": { "$ref": "#/$defs/capabilityStatus" },
-                "systemd_system": { "$ref": "#/$defs/capabilityStatus" },
-                "systemd_user_transient": { "$ref": "#/$defs/capabilityStatus" },
-                "cgroup_memory_delegation": { "$ref": "#/$defs/capabilityStatus" },
-                "memory_accounting": { "$ref": "#/$defs/capabilityStatus" },
-                "host_temperature": { "$ref": "#/$defs/capabilityStatus" },
-                "gpu_temperature": { "$ref": "#/$defs/capabilityStatus" }
-              }
-            },
-            "details": { "$ref": "#/$defs/nonemptyStringMap" },
-            "observations": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["host_temperatures", "gpu_temperature"],
-              "properties": {
-                "host_temperatures": {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["source", "name", "temperature_millicelsius"],
-                    "properties": {
-                      "source": {
-                        "enum": ["linux_hwmon", "windows_formatted_thermal_zone"]
-                      },
-                      "name": {
-                        "type": "string",
-                        "minLength": 1,
-                        "pattern": "\\S"
-                      },
-                      "temperature_millicelsius": {
-                        "type": "integer",
-                        "minimum": -50000,
-                        "maximum": 200000
-                      }
-                    }
+                "kind": { "const": "wsl2" },
+                "capabilities": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "wsl_identity",
+                    "windows_identity",
+                    "driver_identity",
+                    "cuda_driver_bridge",
+                    "cuda_toolkit",
+                    "cuda_runtime",
+                    "nvml",
+                    "filesystem_semantics",
+                    "network_containment",
+                    "process_containment",
+                    "systemd_system",
+                    "systemd_user_transient",
+                    "cgroup_memory_delegation",
+                    "memory_accounting",
+                    "host_temperature",
+                    "gpu_temperature"
+                  ],
+                  "properties": {
+                    "wsl_identity": { "$ref": "#/$defs/capabilityStatus" },
+                    "windows_identity": { "$ref": "#/$defs/capabilityStatus" },
+                    "driver_identity": { "$ref": "#/$defs/capabilityStatus" },
+                    "cuda_driver_bridge": { "$ref": "#/$defs/capabilityStatus" },
+                    "cuda_toolkit": { "$ref": "#/$defs/capabilityStatus" },
+                    "cuda_runtime": { "$ref": "#/$defs/capabilityStatus" },
+                    "nvml": { "$ref": "#/$defs/capabilityStatus" },
+                    "filesystem_semantics": { "$ref": "#/$defs/capabilityStatus" },
+                    "network_containment": { "$ref": "#/$defs/capabilityStatus" },
+                    "process_containment": { "$ref": "#/$defs/capabilityStatus" },
+                    "systemd_system": { "$ref": "#/$defs/capabilityStatus" },
+                    "systemd_user_transient": { "$ref": "#/$defs/capabilityStatus" },
+                    "cgroup_memory_delegation": { "$ref": "#/$defs/capabilityStatus" },
+                    "memory_accounting": { "$ref": "#/$defs/capabilityStatus" },
+                    "host_temperature": { "$ref": "#/$defs/capabilityStatus" },
+                    "gpu_temperature": { "$ref": "#/$defs/capabilityStatus" }
                   }
                 },
-                "gpu_temperature": {
-                  "oneOf": [
-                    { "type": "null" },
-                    {
-                      "type": "object",
-                      "additionalProperties": false,
-                      "required": [
-                        "source",
-                        "device_uuid",
-                        "temperature_millicelsius"
-                      ],
-                      "properties": {
-                        "source": { "const": "nvml" },
-                        "device_uuid": { "type": "string", "minLength": 1 },
-                        "temperature_millicelsius": {
-                          "type": "integer",
-                          "minimum": 1000,
-                          "maximum": 150000
+                "details": { "$ref": "#/$defs/nonemptyStringMap" },
+                "observations": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["host_temperatures", "gpu_temperature"],
+                  "properties": {
+                    "host_temperatures": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["source", "name", "temperature_millicelsius"],
+                        "properties": {
+                          "source": {
+                            "enum": ["linux_hwmon", "windows_formatted_thermal_zone"]
+                          },
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "pattern": "\\S"
+                          },
+                          "temperature_millicelsius": {
+                            "type": "integer",
+                            "minimum": -50000,
+                            "maximum": 200000
+                          }
                         }
                       }
+                    },
+                    "gpu_temperature": {
+                      "oneOf": [
+                        { "type": "null" },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "source",
+                            "device_uuid",
+                            "temperature_millicelsius"
+                          ],
+                          "properties": {
+                            "source": { "const": "nvml" },
+                            "device_uuid": { "type": "string", "minLength": 1 },
+                            "temperature_millicelsius": {
+                              "type": "integer",
+                              "minimum": 1000,
+                              "maximum": 150000
+                            }
+                          }
+                        }
+                      ]
                     }
-                  ]
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "capabilities", "details", "observations"],
+              "properties": {
+                "kind": { "const": "macos" },
+                "capabilities": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "apple_hardware_identity",
+                    "metal_runtime_identity",
+                    "toolchain_provenance",
+                    "metal_compiler",
+                    "filesystem_semantics",
+                    "network_containment",
+                    "process_containment",
+                    "unified_memory_accounting",
+                    "memory_pressure",
+                    "thermal_pressure",
+                    "host_temperature",
+                    "gpu_temperature"
+                  ],
+                  "properties": {
+                    "apple_hardware_identity": { "$ref": "#/$defs/capabilityStatus" },
+                    "metal_runtime_identity": { "$ref": "#/$defs/capabilityStatus" },
+                    "toolchain_provenance": { "$ref": "#/$defs/capabilityStatus" },
+                    "metal_compiler": { "$ref": "#/$defs/capabilityStatus" },
+                    "filesystem_semantics": { "$ref": "#/$defs/capabilityStatus" },
+                    "network_containment": { "$ref": "#/$defs/capabilityStatus" },
+                    "process_containment": { "$ref": "#/$defs/capabilityStatus" },
+                    "unified_memory_accounting": { "$ref": "#/$defs/capabilityStatus" },
+                    "memory_pressure": { "$ref": "#/$defs/capabilityStatus" },
+                    "thermal_pressure": { "$ref": "#/$defs/capabilityStatus" },
+                    "host_temperature": { "$ref": "#/$defs/capabilityStatus" },
+                    "gpu_temperature": { "$ref": "#/$defs/capabilityStatus" }
+                  }
+                },
+                "details": { "$ref": "#/$defs/nonemptyStringMap" },
+                "observations": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "hardware_identity",
+                    "metal_runtime",
+                    "filesystem",
+                    "unified_memory",
+                    "memory_pressure",
+                    "thermal_pressure",
+                    "host_temperature",
+                    "gpu_temperature"
+                  ],
+                  "properties": {
+                    "hardware_identity": {
+                      "oneOf": [
+                        { "type": "null" },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "machine_name",
+                            "machine_model",
+                            "chip_type",
+                            "cpu_brand",
+                            "gpu_core_count",
+                            "physical_memory_bytes",
+                            "kernel_build"
+                          ],
+                          "properties": {
+                            "machine_name": { "type": "string", "minLength": 1 },
+                            "machine_model": { "type": "string", "minLength": 1 },
+                            "chip_type": { "type": "string", "minLength": 1 },
+                            "cpu_brand": { "type": "string", "minLength": 1 },
+                            "gpu_core_count": { "type": "integer", "minimum": 1 },
+                            "physical_memory_bytes": { "type": "integer", "minimum": 1 },
+                            "kernel_build": { "type": "string", "minLength": 1 }
+                          }
+                        }
+                      ]
+                    },
+                    "metal_runtime": {
+                      "oneOf": [
+                        { "type": "null" },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "name",
+                            "has_unified_memory",
+                            "max_buffer_length_bytes",
+                            "recommended_max_working_set_bytes",
+                            "current_allocated_bytes"
+                          ],
+                          "properties": {
+                            "name": { "type": "string", "minLength": 1 },
+                            "has_unified_memory": { "const": true },
+                            "max_buffer_length_bytes": { "type": "integer", "minimum": 1 },
+                            "recommended_max_working_set_bytes": {
+                              "type": "integer",
+                              "minimum": 1
+                            },
+                            "current_allocated_bytes": { "type": "integer", "minimum": 0 }
+                          }
+                        }
+                      ]
+                    },
+                    "filesystem": {
+                      "oneOf": [
+                        { "type": "null" },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "root",
+                            "source",
+                            "fstype",
+                            "mount_point",
+                            "atomic_replace",
+                            "full_file_sync",
+                            "directory_fsync",
+                            "hardlink",
+                            "symlink",
+                            "case_sensitive"
+                          ],
+                          "properties": {
+                            "root": { "type": "string", "minLength": 1 },
+                            "source": { "type": "string", "minLength": 1 },
+                            "fstype": { "type": "string", "minLength": 1 },
+                            "mount_point": { "type": "string", "minLength": 1 },
+                            "atomic_replace": { "const": true },
+                            "full_file_sync": { "const": true },
+                            "directory_fsync": { "const": true },
+                            "hardlink": { "const": true },
+                            "symlink": { "const": true },
+                            "case_sensitive": { "type": "boolean" }
+                          }
+                        }
+                      ]
+                    },
+                    "unified_memory": {
+                      "oneOf": [
+                        { "type": "null" },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "total_bytes",
+                            "swap_total_bytes",
+                            "swap_used_bytes",
+                            "swap_encrypted"
+                          ],
+                          "properties": {
+                            "total_bytes": { "type": "integer", "minimum": 1 },
+                            "swap_total_bytes": { "type": "integer", "minimum": 0 },
+                            "swap_used_bytes": { "type": "integer", "minimum": 0 },
+                            "swap_encrypted": { "type": "boolean" }
+                          }
+                        }
+                      ]
+                    },
+                    "memory_pressure": {
+                      "oneOf": [
+                        { "type": "null" },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "free_percent",
+                            "page_size_bytes",
+                            "pages_free",
+                            "pages_active",
+                            "pages_inactive",
+                            "pages_wired_down",
+                            "pages_occupied_by_compressor",
+                            "pageins",
+                            "pageouts",
+                            "swapins",
+                            "swapouts"
+                          ],
+                          "properties": {
+                            "free_percent": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 100
+                            },
+                            "page_size_bytes": { "type": "integer", "minimum": 1 },
+                            "pages_free": { "type": "integer", "minimum": 0 },
+                            "pages_active": { "type": "integer", "minimum": 0 },
+                            "pages_inactive": { "type": "integer", "minimum": 0 },
+                            "pages_wired_down": { "type": "integer", "minimum": 0 },
+                            "pages_occupied_by_compressor": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "pageins": { "type": "integer", "minimum": 0 },
+                            "pageouts": { "type": "integer", "minimum": 0 },
+                            "swapins": { "type": "integer", "minimum": 0 },
+                            "swapouts": { "type": "integer", "minimum": 0 }
+                          }
+                        }
+                      ]
+                    },
+                    "thermal_pressure": {
+                      "oneOf": [
+                        { "type": "null" },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "thermal_warning",
+                            "performance_warning",
+                            "cpu_power_status"
+                          ],
+                          "properties": {
+                            "thermal_warning": { "type": "string", "minLength": 1 },
+                            "performance_warning": { "type": "string", "minLength": 1 },
+                            "cpu_power_status": { "type": "string", "minLength": 1 }
+                          }
+                        }
+                      ]
+                    },
+                    "host_temperature": { "type": "null" },
+                    "gpu_temperature": { "type": "null" }
+                  }
                 }
               }
             }
-          }
+          ]
         }
       }
     },

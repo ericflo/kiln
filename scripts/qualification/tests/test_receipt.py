@@ -153,6 +153,94 @@ class ReceiptTests(unittest.TestCase):
         errors = receipt_module.validate_receipt(value)
         self.assertTrue(any("requires NVML" in error for error in errors))
 
+    def test_macos_platform_capabilities_and_observations_are_closed(self) -> None:
+        value = valid_receipt()
+        value["qualification"]["backend"] = "metal"
+        value["environment"]["device"] = {
+            "name": "Apple M1",
+            "architecture": "apple_m1",
+            "memory_bytes": 16 * 1024**3,
+            "unified_memory": True,
+            "driver": "macOS 26.6 (25G72)",
+            "compute_units": 8,
+        }
+        capabilities = {
+            key: "available" for key in receipt_module.MACOS_CAPABILITY_KEYS
+        }
+        capabilities["host_temperature"] = "unavailable"
+        capabilities["gpu_temperature"] = "unavailable"
+        value["environment"]["platform"] = {
+            "kind": "macos",
+            "capabilities": capabilities,
+            "details": {"apple_hardware_identity": "MacBook Air M1"},
+            "observations": {
+                "hardware_identity": {
+                    "machine_name": "MacBook Air",
+                    "machine_model": "MacBookAir10,1",
+                    "chip_type": "Apple M1",
+                    "cpu_brand": "Apple M1",
+                    "gpu_core_count": 8,
+                    "physical_memory_bytes": 16 * 1024**3,
+                    "kernel_build": "25G72",
+                },
+                "metal_runtime": {
+                    "name": "Apple M1",
+                    "has_unified_memory": True,
+                    "max_buffer_length_bytes": 8 * 1024**3,
+                    "recommended_max_working_set_bytes": 11 * 1024**3,
+                    "current_allocated_bytes": 65536,
+                },
+                "filesystem": {
+                    "root": "/repo",
+                    "source": "/dev/disk3s5",
+                    "fstype": "apfs",
+                    "mount_point": "/System/Volumes/Data",
+                    "atomic_replace": True,
+                    "full_file_sync": True,
+                    "directory_fsync": True,
+                    "hardlink": True,
+                    "symlink": True,
+                    "case_sensitive": False,
+                },
+                "unified_memory": {
+                    "total_bytes": 16 * 1024**3,
+                    "swap_total_bytes": 0,
+                    "swap_used_bytes": 0,
+                    "swap_encrypted": True,
+                },
+                "memory_pressure": {
+                    "free_percent": 70,
+                    "page_size_bytes": 16384,
+                    "pages_free": 1,
+                    "pages_active": 2,
+                    "pages_inactive": 3,
+                    "pages_wired_down": 4,
+                    "pages_occupied_by_compressor": 5,
+                    "pageins": 6,
+                    "pageouts": 7,
+                    "swapins": 8,
+                    "swapouts": 9,
+                },
+                "thermal_pressure": {
+                    "thermal_warning": "not_recorded",
+                    "performance_warning": "not_recorded",
+                    "cpu_power_status": "not_recorded",
+                },
+                "host_temperature": None,
+                "gpu_temperature": None,
+            },
+        }
+        self.assertEqual(receipt_module.validate_receipt(value), [])
+        value["environment"]["platform"]["observations"]["hardware_identity"][
+            "gpu_core_count"
+        ] = 7
+        value["environment"]["platform"]["observations"]["gpu_temperature"] = {
+            "temperature_millicelsius": 60_000
+        }
+        errors = receipt_module.validate_receipt(value)
+        self.assertTrue(any("gpu_core_count must match" in error for error in errors))
+        self.assertTrue(any("gpu_temperature must be null" in error for error in errors))
+
     def test_optional_device_capability_fields_are_typed_and_bounded(self) -> None:
         value = valid_receipt()
         value["environment"]["device"].update(
@@ -434,25 +522,39 @@ class ReceiptTests(unittest.TestCase):
             receipt_module.ENVIRONMENT_KEYS,
         )
         platform_contract = environment_contract["properties"]["platform"]
-        self.assertFalse(platform_contract["additionalProperties"])
+        platform_alternatives = platform_contract["oneOf"]
+        expected_capabilities = {
+            "wsl2": receipt_module.WSL2_CAPABILITY_KEYS,
+            "macos": receipt_module.MACOS_CAPABILITY_KEYS,
+        }
         self.assertEqual(
-            set(platform_contract["required"]),
-            receipt_module.PLATFORM_KEYS,
+            {
+                alternative["properties"]["kind"]["const"]
+                for alternative in platform_alternatives
+            },
+            set(expected_capabilities),
         )
-        self.assertEqual(
-            set(platform_contract["properties"]),
-            receipt_module.PLATFORM_KEYS,
-        )
-        capability_contract = platform_contract["properties"]["capabilities"]
-        self.assertFalse(capability_contract["additionalProperties"])
-        self.assertEqual(
-            set(capability_contract["required"]),
-            receipt_module.WSL2_CAPABILITY_KEYS,
-        )
-        self.assertEqual(
-            set(capability_contract["properties"]),
-            receipt_module.WSL2_CAPABILITY_KEYS,
-        )
+        for alternative in platform_alternatives:
+            kind = alternative["properties"]["kind"]["const"]
+            self.assertFalse(alternative["additionalProperties"])
+            self.assertEqual(
+                set(alternative["required"]),
+                receipt_module.PLATFORM_KEYS,
+            )
+            self.assertEqual(
+                set(alternative["properties"]),
+                receipt_module.PLATFORM_KEYS,
+            )
+            capability_contract = alternative["properties"]["capabilities"]
+            self.assertFalse(capability_contract["additionalProperties"])
+            self.assertEqual(
+                set(capability_contract["required"]),
+                expected_capabilities[kind],
+            )
+            self.assertEqual(
+                set(capability_contract["properties"]),
+                expected_capabilities[kind],
+            )
         self.assertEqual(
             set(schema["$defs"]["capabilityStatus"]["enum"]),
             receipt_module.CAPABILITY_STATUSES,

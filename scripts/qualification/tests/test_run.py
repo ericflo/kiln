@@ -300,7 +300,8 @@ class RunnerTests(unittest.TestCase):
             isolation = run_module.establish_network_isolation(Path("/tmp"))
         self.assertEqual(isolation.mechanism, "macos-sandbox-loopback-only-v1")
         self.assertEqual(isolation.argv_prefix[0], "/usr/bin/sandbox-exec")
-        self.assertIn("(deny network*)", isolation.argv_prefix[2])
+        self.assertIn("(deny network-inbound)", isolation.argv_prefix[2])
+        self.assertIn("(deny network-outbound)", isolation.argv_prefix[2])
         command = invoked.call_args.args[0]
         self.assertIn("127.0.0.1", command[-1])
         self.assertIn("192.0.2.1", command[-1])

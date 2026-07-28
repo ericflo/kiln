@@ -20,6 +20,7 @@ from typing import Any
 
 from receipt import atomic_write_json, validate_receipt
 from source_tree_hash import HASH_FORMAT, SourceTreeHashError, source_tree_hash
+import macos_platform
 import wsl_platform
 
 
@@ -920,6 +921,12 @@ def main(argv: list[str] | None = None) -> int:
     unsupported: list[str] = []
     if args.backend == "cuda":
         platform_value, platform_results, unsupported = wsl_platform.collect(
+            device,
+            raw,
+        )
+        results.extend(platform_results)
+    elif args.backend == "metal":
+        platform_value, platform_results, unsupported = macos_platform.collect(
             device,
             raw,
         )

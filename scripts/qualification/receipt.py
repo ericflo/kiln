@@ -91,6 +91,82 @@ WSL2_CAPABILITY_KEYS = {
 }
 CAPABILITY_STATUSES = {"available", "unavailable"}
 WSL2_OBSERVATION_KEYS = {"host_temperatures", "gpu_temperature"}
+MACOS_CAPABILITY_KEYS = {
+    "apple_hardware_identity",
+    "metal_runtime_identity",
+    "toolchain_provenance",
+    "metal_compiler",
+    "filesystem_semantics",
+    "network_containment",
+    "process_containment",
+    "unified_memory_accounting",
+    "memory_pressure",
+    "thermal_pressure",
+    "host_temperature",
+    "gpu_temperature",
+}
+MACOS_OBSERVATION_KEYS = {
+    "hardware_identity",
+    "metal_runtime",
+    "filesystem",
+    "unified_memory",
+    "memory_pressure",
+    "thermal_pressure",
+    "host_temperature",
+    "gpu_temperature",
+}
+MACOS_HARDWARE_KEYS = {
+    "machine_name",
+    "machine_model",
+    "chip_type",
+    "cpu_brand",
+    "gpu_core_count",
+    "physical_memory_bytes",
+    "kernel_build",
+}
+MACOS_METAL_RUNTIME_KEYS = {
+    "name",
+    "has_unified_memory",
+    "max_buffer_length_bytes",
+    "recommended_max_working_set_bytes",
+    "current_allocated_bytes",
+}
+MACOS_FILESYSTEM_KEYS = {
+    "root",
+    "source",
+    "fstype",
+    "mount_point",
+    "atomic_replace",
+    "full_file_sync",
+    "directory_fsync",
+    "hardlink",
+    "symlink",
+    "case_sensitive",
+}
+MACOS_UNIFIED_MEMORY_KEYS = {
+    "total_bytes",
+    "swap_total_bytes",
+    "swap_used_bytes",
+    "swap_encrypted",
+}
+MACOS_MEMORY_PRESSURE_KEYS = {
+    "free_percent",
+    "page_size_bytes",
+    "pages_free",
+    "pages_active",
+    "pages_inactive",
+    "pages_wired_down",
+    "pages_occupied_by_compressor",
+    "pageins",
+    "pageouts",
+    "swapins",
+    "swapouts",
+}
+MACOS_THERMAL_PRESSURE_KEYS = {
+    "thermal_warning",
+    "performance_warning",
+    "cpu_power_status",
+}
 HOST_TEMPERATURE_KEYS = {"source", "name", "temperature_millicelsius"}
 GPU_TEMPERATURE_KEYS = {"source", "device_uuid", "temperature_millicelsius"}
 HOST_TEMPERATURE_SOURCES = {"linux_hwmon", "windows_formatted_thermal_zone"}
@@ -382,6 +458,235 @@ def _validate_wsl2_observations(
         )
 
 
+def _validate_macos_observations(
+    errors: list[str],
+    value: Any,
+    capabilities: dict[str, Any],
+    device: dict[str, Any],
+) -> None:
+    context = "receipt.environment.platform.observations"
+    observations = _check_exact_keys(
+        errors,
+        value,
+        MACOS_OBSERVATION_KEYS,
+        context,
+    )
+
+    hardware_value = observations.get("hardware_identity")
+    if hardware_value is not None:
+        hardware = _check_exact_keys(
+            errors,
+            hardware_value,
+            MACOS_HARDWARE_KEYS,
+            f"{context}.hardware_identity",
+        )
+        for key in (
+            "machine_name",
+            "machine_model",
+            "chip_type",
+            "cpu_brand",
+            "kernel_build",
+        ):
+            _check_string(
+                errors,
+                hardware.get(key),
+                f"{context}.hardware_identity.{key}",
+            )
+        _check_positive_int(
+            errors,
+            hardware.get("gpu_core_count"),
+            f"{context}.hardware_identity.gpu_core_count",
+        )
+        _check_positive_int(
+            errors,
+            hardware.get("physical_memory_bytes"),
+            f"{context}.hardware_identity.physical_memory_bytes",
+        )
+        if hardware.get("chip_type") != device.get("name"):
+            errors.append(
+                f"{context}.hardware_identity.chip_type must match the selected device"
+            )
+        if hardware.get("gpu_core_count") != device.get("compute_units"):
+            errors.append(
+                f"{context}.hardware_identity.gpu_core_count must match the selected device"
+            )
+        if hardware.get("physical_memory_bytes") != device.get("memory_bytes"):
+            errors.append(
+                f"{context}.hardware_identity.physical_memory_bytes must match "
+                "the selected device"
+            )
+
+    metal_value = observations.get("metal_runtime")
+    if metal_value is not None:
+        metal = _check_exact_keys(
+            errors,
+            metal_value,
+            MACOS_METAL_RUNTIME_KEYS,
+            f"{context}.metal_runtime",
+        )
+        _check_string(errors, metal.get("name"), f"{context}.metal_runtime.name")
+        unified = _check_bool(
+            errors,
+            metal.get("has_unified_memory"),
+            f"{context}.metal_runtime.has_unified_memory",
+        )
+        if unified is not True:
+            errors.append(f"{context}.metal_runtime.has_unified_memory must be true")
+        for key in (
+            "max_buffer_length_bytes",
+            "recommended_max_working_set_bytes",
+        ):
+            _check_positive_int(
+                errors,
+                metal.get(key),
+                f"{context}.metal_runtime.{key}",
+            )
+        _check_nonnegative_number(
+            errors,
+            metal.get("current_allocated_bytes"),
+            f"{context}.metal_runtime.current_allocated_bytes",
+        )
+        if metal.get("name") != device.get("name"):
+            errors.append(f"{context}.metal_runtime.name must match the selected device")
+
+    filesystem_value = observations.get("filesystem")
+    if filesystem_value is not None:
+        filesystem = _check_exact_keys(
+            errors,
+            filesystem_value,
+            MACOS_FILESYSTEM_KEYS,
+            f"{context}.filesystem",
+        )
+        for key in ("root", "source", "fstype", "mount_point"):
+            _check_string(
+                errors,
+                filesystem.get(key),
+                f"{context}.filesystem.{key}",
+            )
+        for key in (
+            "atomic_replace",
+            "full_file_sync",
+            "directory_fsync",
+            "hardlink",
+            "symlink",
+        ):
+            if _check_bool(
+                errors,
+                filesystem.get(key),
+                f"{context}.filesystem.{key}",
+            ) is not True:
+                errors.append(f"{context}.filesystem.{key} must be true")
+        _check_bool(
+            errors,
+            filesystem.get("case_sensitive"),
+            f"{context}.filesystem.case_sensitive",
+        )
+
+    unified_value = observations.get("unified_memory")
+    if unified_value is not None:
+        unified_memory = _check_exact_keys(
+            errors,
+            unified_value,
+            MACOS_UNIFIED_MEMORY_KEYS,
+            f"{context}.unified_memory",
+        )
+        _check_positive_int(
+            errors,
+            unified_memory.get("total_bytes"),
+            f"{context}.unified_memory.total_bytes",
+        )
+        for key in ("swap_total_bytes", "swap_used_bytes"):
+            value = unified_memory.get(key)
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+            ):
+                errors.append(
+                    f"{context}.unified_memory.{key} must be a non-negative integer"
+                )
+        _check_bool(
+            errors,
+            unified_memory.get("swap_encrypted"),
+            f"{context}.unified_memory.swap_encrypted",
+        )
+        if unified_memory.get("total_bytes") != device.get("memory_bytes"):
+            errors.append(
+                f"{context}.unified_memory.total_bytes must match the selected device"
+            )
+        if (
+            isinstance(unified_memory.get("swap_total_bytes"), int)
+            and isinstance(unified_memory.get("swap_used_bytes"), int)
+            and unified_memory["swap_used_bytes"] > unified_memory["swap_total_bytes"]
+        ):
+            errors.append(
+                f"{context}.unified_memory.swap_used_bytes exceeds swap_total_bytes"
+            )
+
+    pressure_value = observations.get("memory_pressure")
+    if pressure_value is not None:
+        pressure = _check_exact_keys(
+            errors,
+            pressure_value,
+            MACOS_MEMORY_PRESSURE_KEYS,
+            f"{context}.memory_pressure",
+        )
+        for key in MACOS_MEMORY_PRESSURE_KEYS:
+            value = pressure.get(key)
+            maximum = 100 if key == "free_percent" else None
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+                or (maximum is not None and value > maximum)
+                or (key == "page_size_bytes" and value == 0)
+            ):
+                bound = " from 0 through 100" if maximum is not None else ""
+                errors.append(
+                    f"{context}.memory_pressure.{key} must be an integer{bound}"
+                )
+
+    thermal_value = observations.get("thermal_pressure")
+    if thermal_value is not None:
+        thermal = _check_exact_keys(
+            errors,
+            thermal_value,
+            MACOS_THERMAL_PRESSURE_KEYS,
+            f"{context}.thermal_pressure",
+        )
+        for key in MACOS_THERMAL_PRESSURE_KEYS:
+            _check_string(
+                errors,
+                thermal.get(key),
+                f"{context}.thermal_pressure.{key}",
+            )
+
+    observation_pairs = {
+        "apple_hardware_identity": hardware_value,
+        "metal_runtime_identity": metal_value,
+        "filesystem_semantics": filesystem_value,
+        "unified_memory_accounting": unified_value,
+        "memory_pressure": pressure_value,
+        "thermal_pressure": thermal_value,
+    }
+    for capability, observation in observation_pairs.items():
+        if (capabilities.get(capability) == "available") != (
+            observation is not None
+        ):
+            errors.append(
+                f"receipt.environment.platform {capability} capability and "
+                "observations disagree"
+            )
+    for temperature in ("host_temperature", "gpu_temperature"):
+        if observations.get(temperature) is not None:
+            errors.append(f"{context}.{temperature} must be null on macOS")
+        if capabilities.get(temperature) != "unavailable":
+            errors.append(
+                f"receipt.environment.platform {temperature} must be unavailable "
+                "when its observation is null"
+            )
+
+
 def _validate_config(errors: list[str], value: Any, context: str) -> None:
     if not isinstance(value, dict):
         errors.append(f"{context} must be an object")
@@ -601,12 +906,20 @@ def validate_receipt(
             PLATFORM_KEYS,
             "receipt.environment.platform",
         )
-        if platform_object.get("kind") != "wsl2":
-            errors.append("receipt.environment.platform.kind must be 'wsl2'")
+        platform_kind = platform_object.get("kind")
+        if platform_kind not in {"wsl2", "macos"}:
+            errors.append(
+                "receipt.environment.platform.kind must be 'wsl2' or 'macos'"
+            )
+        capability_keys = (
+            MACOS_CAPABILITY_KEYS
+            if platform_kind == "macos"
+            else WSL2_CAPABILITY_KEYS
+        )
         capabilities = _check_exact_keys(
             errors,
             platform_object.get("capabilities"),
-            WSL2_CAPABILITY_KEYS,
+            capability_keys,
             "receipt.environment.platform.capabilities",
         )
         for key, status in capabilities.items():
@@ -620,12 +933,20 @@ def validate_receipt(
             platform_object.get("details"),
             "receipt.environment.platform.details",
         )
-        _validate_wsl2_observations(
-            errors,
-            platform_object.get("observations"),
-            capabilities,
-            device,
-        )
+        if platform_kind == "macos":
+            _validate_macos_observations(
+                errors,
+                platform_object.get("observations"),
+                capabilities,
+                device,
+            )
+        else:
+            _validate_wsl2_observations(
+                errors,
+                platform_object.get("observations"),
+                capabilities,
+                device,
+            )
 
     model = top.get("model")
     workload = top.get("workload")

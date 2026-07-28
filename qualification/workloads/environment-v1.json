@@ -149,9 +149,7 @@
             "--output",
             "${output_path}",
             "--expected-device-name-regex",
-            "^Apple M1$",
-            "--expected-compute-units",
-            "8"
+            "^Apple M1$"
           ],
           "working_directory": ".",
           "environment": {},

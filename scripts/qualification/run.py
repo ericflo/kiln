@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import environment as environment_module
+import macos_platform
 import wsl_platform
 from model_fingerprint import ModelFingerprintError, fingerprint_model
 from receipt import MAX_RESULT_DETAIL_CHARACTERS, validate_receipt
@@ -59,9 +60,10 @@ NETWORK_ISOLATION_ENVIRONMENT_VARIABLE = wsl_platform.NETWORK_ISOLATION_ENV
 CASE_ENVIRONMENT_POLICY = "closed-qualification-case-v1"
 MACOS_NETWORK_SANDBOX_PROFILE = """(version 1)
 (allow default)
-(deny network*)
-(allow network* (local ip \"localhost:*\"))
-(allow network* (remote ip \"localhost:*\"))
+(deny network-inbound)
+(deny network-outbound)
+(allow network-inbound (local ip \"localhost:*\"))
+(allow network-outbound (remote ip \"localhost:*\"))
 """
 # Host plumbing needed to locate tools and enter the bounded user service. Any
 # backend, compiler, device-selection, or product control belongs in the
@@ -231,7 +233,43 @@ def _prospective_repo_path(
     description: str,
 ) -> Path:
     candidate = path if path.is_absolute() else root / path
-    normalized = Path(os.path.abspath(candidate))
+    lexical = Path(os.path.abspath(candidate))
+    lexical_root: Path | None = None
+    for ancestor in (lexical, *lexical.parents):
+        try:
+            if ancestor.resolve(strict=True) == root:
+                lexical_root = ancestor
+                break
+        except OSError:
+            continue
+    if lexical_root is None:
+        raise QualificationRunError(
+            f"cannot identify repository boundary for {description}: {path}"
+        )
+
+    current = lexical_root
+    lexical_relative = lexical.relative_to(lexical_root)
+    for index, component in enumerate(lexical_relative.parts):
+        current /= component
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            break
+        except OSError as exc:
+            raise QualificationRunError(f"cannot inspect {description} path {current}: {exc}") from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise QualificationRunError(
+                f"{description} path cannot contain symlinks: {current}"
+            )
+        if (
+            index < len(lexical_relative.parts) - 1
+            and not stat.S_ISDIR(metadata.st_mode)
+        ):
+            raise QualificationRunError(
+                f"{description} parent is not a directory: {current}"
+            )
+
+    normalized = Path(os.path.realpath(lexical))
     try:
         relative = normalized.relative_to(root)
     except ValueError as exc:
@@ -244,24 +282,6 @@ def _prospective_repo_path(
     ):
         choices = " or ".join(str(item) for item in allowed_roots)
         raise QualificationRunError(f"{description} must be below {choices}")
-
-    current = root
-    for index, component in enumerate(relative.parts):
-        current /= component
-        try:
-            metadata = current.lstat()
-        except FileNotFoundError:
-            break
-        except OSError as exc:
-            raise QualificationRunError(f"cannot inspect {description} path {current}: {exc}") from exc
-        if stat.S_ISLNK(metadata.st_mode):
-            raise QualificationRunError(
-                f"{description} path cannot contain symlinks: {current}"
-            )
-        if index < len(relative.parts) - 1 and not stat.S_ISDIR(metadata.st_mode):
-            raise QualificationRunError(
-                f"{description} parent is not a directory: {current}"
-            )
     return normalized
 
 
@@ -722,6 +742,24 @@ def capture_backend_environment(backend: str, host_id: str, root: Path) -> Envir
                     "details": f"WSL2 platform collection failed: {exc}",
                 }
             )
+    elif backend == "metal":
+        try:
+            platform_value, platform_results, unsupported = macos_platform.collect(
+                device,
+                raw,
+            )
+            results.extend(platform_results)
+        except Exception as exc:
+            results.append(
+                {
+                    "id": "macos-platform-collector",
+                    "required": True,
+                    "status": "failed",
+                    "duration_seconds": 0.0,
+                    "metrics": [],
+                    "details": f"macOS platform collection failed: {exc}",
+                }
+            )
     return EnvironmentCapture(
         environment={
             "host_id": host_id,
@@ -1094,6 +1132,37 @@ def load_case_result(
 
 
 def _process_group_members(process_group: int) -> tuple[tuple[int, str, int], ...]:
+    if sys.platform == "darwin":
+        try:
+            completed = subprocess.run(
+                ["/bin/ps", "-axo", "pid=,ppid=,pgid=,state="],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+                timeout=2,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return ()
+        if completed.returncode != 0:
+            return ()
+        members: list[tuple[int, str, int]] = []
+        for line in completed.stdout.splitlines():
+            fields = line.split()
+            if len(fields) != 4:
+                continue
+            try:
+                pid, parent_pid, member_group = (
+                    int(fields[0]),
+                    int(fields[1]),
+                    int(fields[2]),
+                )
+            except ValueError:
+                continue
+            if member_group == process_group:
+                members.append((pid, fields[3], parent_pid))
+        return tuple(members)
     if sys.platform != "linux":
         return ()
     try:
@@ -1118,6 +1187,15 @@ def _process_group_members(process_group: int) -> tuple[tuple[int, str, int], ..
 
 
 def _group_exists(process_group: int) -> bool:
+    if sys.platform in {"darwin", "linux"}:
+        members = _process_group_members(process_group)
+        if any(
+            not state.startswith("Z")
+            for _pid, state, _parent_pid in members
+        ):
+            return True
+        if members:
+            return False
     try:
         os.killpg(process_group, 0)
     except ProcessLookupError:
@@ -1148,6 +1226,18 @@ def _wait_for_process_group_exit(process_group: int, grace_seconds: float) -> bo
 
 
 def _signal_process_member(pid: int, process_group: int, signal_number: int) -> None:
+    if sys.platform == "darwin":
+        members = {
+            member_pid: state
+            for member_pid, state, _parent_pid in _process_group_members(process_group)
+        }
+        if pid not in members or members[pid].startswith("Z"):
+            return
+        try:
+            os.kill(pid, signal_number)
+        except ProcessLookupError:
+            pass
+        return
     descriptor: int | None = None
     try:
         descriptor = os.pidfd_open(pid)
@@ -1155,7 +1245,7 @@ def _signal_process_member(pid: int, process_group: int, signal_number: int) -> 
             member_pid: state
             for member_pid, state, _parent_pid in _process_group_members(process_group)
         }
-        if pid not in members or members[pid] == "Z":
+        if pid not in members or members[pid].startswith("Z"):
             return
         signal.pidfd_send_signal(descriptor, signal_number)
     except ProcessLookupError:
@@ -1175,7 +1265,9 @@ def _terminate_process_group(process: subprocess.Popen[bytes], grace_seconds: fl
     descendants = [
         pid
         for pid, state, _parent_pid in members
-        if pid != process_group and state != "Z" and pid not in parent_pids
+        if pid != process_group
+        and not state.startswith("Z")
+        and pid not in parent_pids
     ]
     if descendants:
         for pid in descendants:
@@ -2089,11 +2181,18 @@ def _run_qualification_impl(
         )
     platform_value = capture.environment.get("platform")
     if isinstance(platform_value, dict):
-        wsl_platform.bind_containment(
-            platform_value,
-            capture.probe_results,
-            network_isolation.mechanism,
-        )
+        if platform_value.get("kind") == "wsl2":
+            wsl_platform.bind_containment(
+                platform_value,
+                capture.probe_results,
+                network_isolation.mechanism,
+            )
+        elif platform_value.get("kind") == "macos":
+            macos_platform.bind_containment(
+                platform_value,
+                capture.probe_results,
+                network_isolation.mechanism,
+            )
         capture.raw["runner_containment"] = network_isolation.mechanism
     infrastructure_failures.extend(_normalize_probe_failures(capture))
     runtime = capture.environment.get("runtime")
