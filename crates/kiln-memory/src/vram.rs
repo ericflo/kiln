@@ -602,9 +602,24 @@ fn is_host_shared_memory_drm(device: &LinuxDrmDeviceInfo, _mem_total_bytes: Opti
 }
 
 /// Reserve retained for the OS and CPU workloads in a shared physical pool.
-/// Matches the Apple Silicon policy: `max(6 GiB, physical capacity / 4)`.
+/// Linux UMA policy: `max(6 GiB, physical capacity / 4)`.
+#[cfg(target_os = "linux")]
 fn unified_memory_reserve_bytes(mem_total_bytes: u64) -> u64 {
     const MIN_RESERVE_BYTES: u64 = 6 * 1024 * 1024 * 1024;
+    let proportional = mem_total_bytes / 4;
+    proportional.max(MIN_RESERVE_BYTES)
+}
+
+/// Apple Silicon reserve for macOS and non-accelerator applications.
+///
+/// A quarter of physical memory already provides 4 GiB on the smallest
+/// supported 16 GiB serving host. Retaining the Linux UMA 6 GiB minimum here
+/// would leave only a 10 GiB accelerator pool, which cannot hold Qwen3.5-4B
+/// plus even the minimum paged KV cache despite 5+ GiB remaining available to
+/// the host after model load.
+#[cfg(any(target_os = "macos", test))]
+fn apple_unified_memory_reserve_bytes(mem_total_bytes: u64) -> u64 {
+    const MIN_RESERVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
     let proportional = mem_total_bytes / 4;
     proportional.max(MIN_RESERVE_BYTES)
 }
@@ -1151,7 +1166,7 @@ fn apple_memory_snapshot() -> Option<MemorySnapshot> {
     return None;
 
     #[cfg(target_os = "macos")]
-    let reserve = unified_memory_reserve_bytes(physical_total);
+    let reserve = apple_unified_memory_reserve_bytes(physical_total);
     #[cfg(target_os = "macos")]
     let total = physical_total.saturating_sub(reserve);
     #[cfg(target_os = "macos")]
@@ -1549,13 +1564,13 @@ fn read_u64_file(path: &std::path::Path) -> Option<u64> {
 ///
 /// On Apple Silicon, CPU and GPU share the same memory pool. Metal can
 /// address most of it; we subtract a conservative OS/app headroom
-/// (6 GB, or 25 % on chips > 24 GB — whichever is larger) so inference
+/// (4 GB, or 25 % — whichever is larger) so inference
 /// and training don't squeeze out Finder, the browser, or a dev server. The
 /// typed `memory.gpu_memory_gb` setting may reduce, but never expand, this cap.
 #[cfg(target_os = "macos")]
 fn query_apple_unified_memory() -> Option<u64> {
     let total = query_apple_physical_memory()?;
-    Some(total.saturating_sub(unified_memory_reserve_bytes(total)))
+    Some(total.saturating_sub(apple_unified_memory_reserve_bytes(total)))
 }
 
 #[cfg(target_os = "macos")]
@@ -2964,6 +2979,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn apple_unified_memory_reserve_preserves_a_quarter_with_a_four_gib_floor() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        assert_eq!(apple_unified_memory_reserve_bytes(16 * GIB), 4 * GIB);
+        assert_eq!(apple_unified_memory_reserve_bytes(24 * GIB), 6 * GIB);
+        assert_eq!(apple_unified_memory_reserve_bytes(32 * GIB), 8 * GIB);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn cgroup_headroom_further_bounds_unified_free() {
@@ -3084,8 +3107,8 @@ mod tests {
         assert_eq!(info.source, VramSource::AppleSilicon);
         assert!(info.unified);
         // Source is enough — `total_bytes > 0` doesn't survive on tiny CI
-        // runners (GitHub macos-14 ships with ~7 GB, leaving ≤ 1 GB after
-        // the 6 GB OS reserve, and `saturating_sub` can hit 0 on the smallest
+        // runners (GitHub macos-14 ships with ~7 GB, leaving about 3 GB after
+        // the 4 GB OS reserve, and `saturating_sub` can hit 0 on the smallest
         // runner SKUs). Production correctness is covered by the source
         // identification; the byte budget is exercised by the recommendation
         // tests above with synthetic VRAM values.
