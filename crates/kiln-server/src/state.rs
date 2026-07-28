@@ -8306,4 +8306,6 @@ mod tests {
     }
     #[cfg(feature = "cuda")]
     include!("state_cuda_admission_tests.rs");
+    #[cfg(feature = "metal")]
+    include!("state_metal_admission_tests.rs");
 }

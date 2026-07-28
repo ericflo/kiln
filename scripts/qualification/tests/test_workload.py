@@ -238,6 +238,55 @@ class WorkloadTests(unittest.TestCase):
         self.assertIn("RTX 4090\\s", desktop_probe["output_assertions"][0]["pattern"])
         self.assertIn("RTX 4090 Laptop GPU", laptop_probe["output_assertions"][0]["pattern"])
 
+    def test_metal_memory_lifecycle_is_bounded_and_fail_closed(self) -> None:
+        path = ROOT / "qualification/workloads/metal-memory-lifecycle-v1.json"
+        workload = workload_module.load_workload(path)
+        self.assertEqual(workload_module.validate_workload(workload), [])
+        self.assertEqual(len(workload["variants"]), 1)
+        variant = workload["variants"][0]
+        self.assertEqual(variant["id"], "metal-m1-macbook-air")
+        self.assertEqual(variant["backend"], "metal")
+        self.assertEqual(variant["device_requirement"], "required")
+        self.assertEqual(variant["skip_policy"], "fail")
+        cases = {case["id"]: case for case in variant["cases"]}
+        self.assertEqual(
+            sorted(cases),
+            [
+                "device-probe",
+                "ownership-release-reclaim",
+                "server-admission-rejection",
+                "server-allocation-failure-recovery",
+            ],
+        )
+        for case_id in (
+            "ownership-release-reclaim",
+            "server-admission-rejection",
+            "server-allocation-failure-recovery",
+        ):
+            case = cases[case_id]
+            self.assertEqual(case["environment"]["KILN_QUALIFICATION"], "1")
+            self.assertIn("--ignored", case["command"])
+            forbidden = [
+                assertion["pattern"]
+                for assertion in case["output_assertions"]
+                if assertion["match"] == "forbidden"
+            ]
+            self.assertTrue(any("skip" in pattern.lower() for pattern in forbidden))
+        self.assertTrue(
+            any(
+                "before allocation" in assertion["pattern"]
+                for assertion in cases["server-admission-rejection"]["output_assertions"]
+                if assertion["match"] == "required"
+            )
+        )
+        self.assertTrue(
+            any(
+                "currentAllocatedSize" in assertion["pattern"]
+                for assertion in cases["ownership-release-reclaim"]["output_assertions"]
+                if assertion["match"] == "required"
+            )
+        )
+
     def test_workload_cases_cannot_invoke_raw_cargo(self) -> None:
         value = valid_performance_workload()
         value["variants"][0]["cases"][0]["command"] = ["/usr/bin/cargo", "test"]

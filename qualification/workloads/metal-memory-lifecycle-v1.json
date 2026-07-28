@@ -1,0 +1,214 @@
+{
+  "schema_version": 1,
+  "workload_id": "metal-memory-lifecycle-v1",
+  "kind": "correctness",
+  "description": "Run fail-closed Apple unified-memory admission, controlled allocation-failure recovery, ownership-release reclaim, and runner-owned process cleanup gates on the named M1 MacBook Air.",
+  "determinism": {
+    "seed": 20260728,
+    "seed_delivery": "fixed_fixture",
+    "repetitions": 1,
+    "case_order": "declared",
+    "max_parallel_cases": 1,
+    "network_access": "forbidden"
+  },
+  "variables": [],
+  "variants": [
+    {
+      "id": "metal-m1-macbook-air",
+      "description": "Require the selected eight-core Apple M1 GPU and prove the server's bounded memory lifecycle against live unified-memory observations.",
+      "backend": "metal",
+      "device_requirement": "required",
+      "skip_policy": "fail",
+      "effective_config": {},
+      "cases": [
+        {
+          "id": "device-probe",
+          "description": "Require system_profiler to report the Apple M1 GPU and its eight GPU cores.",
+          "required": true,
+          "command": [
+            "system_profiler",
+            "SPDisplaysDataType",
+            "-json"
+          ],
+          "working_directory": ".",
+          "environment": {},
+          "timeout_seconds": 120,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\"(?:sppci_model|_name)\"\\s*:\\s*\"Apple M1\""
+            },
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\"(?:sppci_cores|spdisplays_gpu_cores)\"\\s*:\\s*\"?8(?: Cores)?\"?"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(no Metal device|skipp(?:ed|ing))"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "server-admission-rejection",
+          "description": "Use the live Apple unified-memory snapshot with a controlled low available-memory budget and require the server's exact paged-KV gate to reject before Metal allocation.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-server",
+            "--no-default-features",
+            "--features",
+            "metal",
+            "--lib",
+            "state::tests::metal_unified_memory_admission_rejects_before_allocation",
+            "--",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[metal-admission\\] OK: controlled UMA budget rejected num_blocks=[0-9]+ before allocation"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(skip.*metal|no Metal device|test result: FAILED|out of memory)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "server-allocation-failure-recovery",
+          "description": "Inject one allocator error into the server auto-sizer, require its lower-budget retry to allocate a real Metal KV cache, then release it and verify a new allocation.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-server",
+            "--no-default-features",
+            "--features",
+            "metal",
+            "--lib",
+            "state::tests::metal_allocator_failure_retries_on_real_device_and_cleans_up",
+            "--",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[metal-allocation-failure\\] OK: injected first allocator failure; fallback allocated real Metal cache and cleanup returned near baseline"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(skip.*metal|no Metal device|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "ownership-release-reclaim",
+          "description": "Allocate 256 MiB through the real Metal storage path, observe it in currentAllocatedSize, drop ownership, require the allocation to be reclaimed, and allocate again.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-tensor",
+            "--no-default-features",
+            "--features",
+            "metal",
+            "--test",
+            "metal_reclaim_smoke",
+            "--",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[metal-reclaim\\] OK: ownership release reclaimed [0-9]+ bytes from currentAllocatedSize after a 268435456-byte UMA allocation"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(skip.*metal|no Metal device|test result: FAILED)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        }
+      ]
+    }
+  ],
+  "comparison_policy": {
+    "mode": "self_contained_correctness",
+    "variant_pairs": [],
+    "backend_pairs": [],
+    "metric_rules": []
+  }
+}
