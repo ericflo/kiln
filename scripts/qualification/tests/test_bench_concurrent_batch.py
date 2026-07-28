@@ -665,7 +665,7 @@ class ServingBenchmarkTests(unittest.TestCase):
         desktop = self._parse_server_config(config_root / f"{desktop_name}.toml")
 
         for name, config, expected in (
-            (laptop_name, laptop, (15.0, 1.5, 4_096, 512, 16)),
+            (laptop_name, laptop, (16.0, 1.5, 4_096, 512, 16)),
             (desktop_name, desktop, (23.0, 2.0, 8_192, 1_024, 32)),
         ):
             gpu_gib, floor_gib, batch_tokens, prefill_tokens, decode_batch = expected

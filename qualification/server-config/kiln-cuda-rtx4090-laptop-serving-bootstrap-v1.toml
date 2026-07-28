@@ -55,7 +55,7 @@ vulkan_decode_weight_prewarm = false
 vulkan_decode_weight_prewarm_mib_per_second = 512
 
 [memory]
-gpu_memory_gb = 15.0
+gpu_memory_gb = 16.0
 inference_memory_fraction = 0.7
 vulkan_buffer_pool_gb = 0.0
 floor_gb = 1.5
