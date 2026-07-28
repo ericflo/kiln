@@ -9,7 +9,9 @@ export KILN_CARGO_JOBS=1
 export KILN_CARGO_PRIVATE_NETWORK=1
 export KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS=1740
 
-if [[ "${KILN_WSL2_SCOPE_BOUNDARY:-}" == "systemd-user-scope-feedback-v1" ]]; then
+if [[ "${KILN_QUALIFICATION_NETWORK_ISOLATION:-}" == "macos-sandbox-loopback-only-v1" ]]; then
+    export KILN_CARGO_EXECUTION_MODE=macos-contained
+elif [[ "${KILN_WSL2_SCOPE_BOUNDARY:-}" == "systemd-user-scope-feedback-v1" ]]; then
     export KILN_CARGO_EXECUTION_MODE=delegated-cgroup
 else
     export KILN_CARGO_EXECUTION_MODE=transient-service

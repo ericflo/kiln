@@ -44,6 +44,11 @@ class BoundedCargoTests(unittest.TestCase):
             'KILN_WSL2_SCOPE_BOUNDARY:-}" == "systemd-user-scope-feedback-v1"',
             source,
         )
+        self.assertIn(
+            'KILN_QUALIFICATION_NETWORK_ISOLATION:-}" == "macos-sandbox-loopback-only-v1"',
+            source,
+        )
+        self.assertIn("export KILN_CARGO_EXECUTION_MODE=macos-contained", source)
         self.assertIn("export KILN_CARGO_EXECUTION_MODE=delegated-cgroup", source)
         self.assertIn("export KILN_CARGO_EXECUTION_MODE=transient-service", source)
         self.assertNotIn("export KILN_CARGO_MIN_AVAILABLE_GIB=", source)
@@ -297,7 +302,45 @@ class BoundedCargoTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(completed.returncode, 2, completed.stderr)
-        self.assertIn("requires transient-service", completed.stderr)
+        self.assertIn("requires a contained execution mode", completed.stderr)
+
+    @unittest.skipUnless(os.uname().sysname == "Darwin", "requires macOS sandbox")
+    def test_macos_contained_mode_inherits_verified_boundary(self) -> None:
+        environment = dict(os.environ)
+        environment.update(
+            {
+                "CARGO": "/usr/bin/true",
+                "KILN_CARGO_ENVIRONMENT_POLICY": "closed-qualification-test-v1",
+                "KILN_CARGO_EXECUTION_MODE": "macos-contained",
+                "KILN_CARGO_MIN_AVAILABLE_GIB": "1",
+                "KILN_CARGO_PRIVATE_NETWORK": "1",
+                "KILN_QUALIFICATION": "1",
+                "KILN_QUALIFICATION_NETWORK_ISOLATION": (
+                    "macos-sandbox-loopback-only-v1"
+                ),
+            }
+        )
+        profile = """(version 1)
+(allow default)
+(deny network-inbound)
+(deny network-outbound)
+(allow network-inbound (local ip "localhost:*"))
+(allow network-outbound (remote ip "localhost:*"))
+"""
+        completed = subprocess.run(
+            ["sandbox-exec", "-p", profile, str(SCRIPT), "check"],
+            cwd=ROOT,
+            check=False,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("mode=macos-contained", completed.stderr)
+        self.assertIn("aggregate_limit=unavailable", completed.stderr)
+        self.assertIn("swap_limit=unavailable", completed.stderr)
 
     def test_cancelled_scope_stops_its_named_unit_and_runner(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
