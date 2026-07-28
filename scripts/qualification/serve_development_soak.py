@@ -778,6 +778,10 @@ def effective_config(
     }
     if "batching" in base:
         effective["batching"] = base["batching"]
+    if runtime.backend == "cuda":
+        effective["soak"]["gpu_memory_baseline_mode"] = (
+            "stabilization_envelope_high_water"
+        )
     if "model" in base:
         effective["model"] = base["model"]
     if runtime.inference_memory_fraction is not None:
@@ -2225,6 +2229,32 @@ def stabilization_cycle_is_stable(
     )
 
 
+def stabilization_gpu_growth_delta(
+    runtime: SoakRuntime,
+    *,
+    current_gpu: int,
+    previous_gpu: int,
+    stabilization_gpu_high_water: int,
+) -> int:
+    comparison = (
+        stabilization_gpu_high_water
+        if runtime.backend == "cuda"
+        else previous_gpu
+    )
+    return max(0, current_gpu - comparison)
+
+
+def measurement_gpu_baseline(
+    runtime: SoakRuntime,
+    *,
+    current_gpu: int,
+    stabilization_gpu_high_water: int,
+) -> int:
+    if runtime.backend == "cuda":
+        return max(current_gpu, stabilization_gpu_high_water)
+    return current_gpu
+
+
 def vulkan_buffer_pool_miss_trace_values(
     before: dict[str, Any], after: dict[str, Any]
 ) -> dict[str, Any]:
@@ -3005,6 +3035,7 @@ def execute(
             )
 
         previous_gpu = sampler.read_bytes()
+        stabilization_gpu_high_water = previous_gpu
         previous_memory = process_memory_snapshot(process.pid)
         stabilization_memory_baseline = previous_memory
         previous_process_mappings = (
@@ -3207,7 +3238,16 @@ def execute(
                 )
                 if accounting_failures:
                     raise SoakError("; ".join(accounting_failures))
-            gpu_delta = max(0, current_gpu - previous_gpu)
+            adjacent_gpu_delta = max(0, current_gpu - previous_gpu)
+            gpu_delta = stabilization_gpu_growth_delta(
+                runtime,
+                current_gpu=current_gpu,
+                previous_gpu=previous_gpu,
+                stabilization_gpu_high_water=stabilization_gpu_high_water,
+            )
+            stabilization_gpu_high_water = max(
+                stabilization_gpu_high_water, current_gpu
+            )
             rss_delta = max(0, current_memory.rss_bytes - previous_memory.rss_bytes)
             stabilization_final_gpu_delta = gpu_delta
             stabilization_final_rss_delta = rss_delta
@@ -3273,7 +3313,10 @@ def execute(
             stabilization_cycles += 1
             cycle_trace = {
                 "cycle": stabilization_cycles,
+                "adjacent_gpu_delta_bytes": adjacent_gpu_delta,
                 "gpu_delta_bytes": gpu_delta,
+                "gpu_memory_bytes": current_gpu,
+                "gpu_memory_high_water_bytes": stabilization_gpu_high_water,
                 "rss_anon_delta_bytes": max(
                     0, current_memory.rss_anon_bytes - previous_memory.rss_anon_bytes
                 ),
@@ -3426,7 +3469,11 @@ def execute(
         )
         if baseline_resident_failures:
             raise SoakError("; ".join(baseline_resident_failures))
-        gpu_start = sampler.read_bytes()
+        gpu_start = measurement_gpu_baseline(
+            runtime,
+            current_gpu=sampler.read_bytes(),
+            stabilization_gpu_high_water=stabilization_gpu_high_water,
+        )
         gpu_end = gpu_start
         rss_start = process_memory_snapshot(process.pid).rss_bytes
         rss_end = rss_start

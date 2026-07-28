@@ -15,7 +15,7 @@
   "variants": [
     {
       "id": "cuda-endurance",
-      "description": "Architecture-agnostic CUDA endurance gate over the measured c1/c4 serving envelope, with two complete prompt-envelope rotations required before baseline eligibility and one complete stable rotation required before the memory baseline, fixed KV capacity, prefix cache, allocator reclaim, and CUDA graphs disabled, periodic cancellation, and fail-closed device and host memory accounting.",
+      "description": "Architecture-agnostic CUDA endurance gate over the measured c1/c4 serving envelope, with two complete prompt-envelope rotations required before baseline eligibility and one complete rotation stable against the envelope high-water memory baseline, fixed KV capacity, prefix cache, allocator reclaim, and CUDA graphs disabled, periodic cancellation, and fail-closed device and host memory accounting.",
       "backend": "cuda",
       "device_requirement": "required",
       "skip_policy": "fail",
@@ -75,6 +75,7 @@
           "cancel_every_waves": 4,
           "gpu_memory_scope": "device_global",
           "gpu_memory_source": "server_metrics:kiln_gpu_memory_bytes{kind=\"used\"}",
+          "gpu_memory_baseline_mode": "stabilization_envelope_high_water",
           "active_gpu_peak_growth_limit_bytes": 536870912,
           "max_tokens": 32,
           "rocm_graph_cache_entries": 8,

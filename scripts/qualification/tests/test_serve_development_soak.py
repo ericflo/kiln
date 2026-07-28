@@ -433,6 +433,10 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(cuda["soak"]["stabilization_min_cycles"], 8)
         self.assertEqual(cuda["soak"]["stabilization_max_cycles"], 16)
         self.assertEqual(cuda["soak"]["stabilization_required_stable_cycles"], 4)
+        self.assertEqual(
+            cuda["soak"]["gpu_memory_baseline_mode"],
+            "stabilization_envelope_high_water",
+        )
         self.assertEqual(cuda["soak"]["accelerator_telemetry"], {"mode": "disabled"})
         self.assertEqual(
             cuda["soak"]["gpu_memory_source"],
@@ -801,6 +805,43 @@ class ServeRocmSoakTests(unittest.TestCase):
                     ),
                 },
             )
+        )
+
+    def test_cuda_stabilization_compares_against_envelope_high_water(self) -> None:
+        self.assertEqual(
+            soak.stabilization_gpu_growth_delta(
+                soak.CUDA_ENDURANCE_RUNTIME,
+                current_gpu=250,
+                previous_gpu=200,
+                stabilization_gpu_high_water=300,
+            ),
+            0,
+        )
+        self.assertEqual(
+            soak.stabilization_gpu_growth_delta(
+                soak.CUDA_ENDURANCE_RUNTIME,
+                current_gpu=350,
+                previous_gpu=200,
+                stabilization_gpu_high_water=300,
+            ),
+            50,
+        )
+        self.assertEqual(
+            soak.measurement_gpu_baseline(
+                soak.CUDA_ENDURANCE_RUNTIME,
+                current_gpu=250,
+                stabilization_gpu_high_water=300,
+            ),
+            300,
+        )
+        self.assertEqual(
+            soak.stabilization_gpu_growth_delta(
+                soak.VULKAN_RUNTIME,
+                current_gpu=250,
+                previous_gpu=200,
+                stabilization_gpu_high_water=300,
+            ),
+            50,
         )
 
     def test_process_drm_memory_deduplicates_client_ids_and_regions(self) -> None:
