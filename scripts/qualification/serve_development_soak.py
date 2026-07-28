@@ -172,6 +172,13 @@ def _cuda_variant_config() -> dict[str, Any]:
         max_decode_batch=4,
     )
     config["build"] = CUDA_BUILD_SPEC.effective_config()
+    config["server"].update(
+        {
+            "max_prefill_staging_slots": 0,
+            "max_active_requests": config["server"]["max_decode_batch"],
+            "max_prefill_staging_priority_burst": 0,
+        }
+    )
     config["runtime"].update(
         {
             "prefix_cache_requested_enabled": True,

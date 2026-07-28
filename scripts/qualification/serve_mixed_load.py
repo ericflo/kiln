@@ -3588,9 +3588,16 @@ def attest_runtime(
     if not isinstance(autoscaler, dict):
         failures.append("KV autoscaler runtime state is missing")
     else:
-        if expected_profile == "stable":
+        if not expected["kv_autoscale_requested"]:
             expected_autoscaler_fields = {
-                "requested": expected["kv_autoscale_requested"],
+                "requested": False,
+                "enabled": False,
+                "state": "disabled",
+                "reason": "configuration",
+            }
+        elif expected_profile == "stable":
+            expected_autoscaler_fields = {
+                "requested": True,
                 "enabled": False,
                 "state": "unavailable",
                 "reason": "serving_profile_stable",
@@ -3605,7 +3612,7 @@ def attest_runtime(
                 "state": "enabled" if expected_autoscaler else "disabled",
                 "reason": "active" if expected_autoscaler else "configuration",
             }
-        if expected_profile == "stable":
+        if expected_profile == "stable" or not expected["kv_autoscale_requested"]:
             expected_autoscaler_fields.update(
                 {
                     "requested_source": "config_file",

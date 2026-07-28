@@ -418,6 +418,9 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertNotIn("cudarc_cuda_version", cuda["build"])
         self.assertEqual(cuda["runtime"]["serving_profile"], "stable")
         self.assertEqual(cuda["server"]["max_decode_batch"], 4)
+        self.assertEqual(cuda["server"]["max_prefill_staging_slots"], 0)
+        self.assertEqual(cuda["server"]["max_active_requests"], 4)
+        self.assertEqual(cuda["server"]["max_prefill_staging_priority_burst"], 0)
         self.assertEqual(
             cuda["soak"]["wave_concurrency"], {"wave_0": 1, "wave_1": 4}
         )

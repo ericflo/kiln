@@ -350,12 +350,16 @@ def health_fixture(
                 "force_blocks_source": "config_file",
                 "enabled": kv_autoscale,
                 "state": (
-                    "unavailable"
+                    "disabled"
+                    if not kv_autoscale_requested
+                    else "unavailable"
                     if serving_profile == "stable"
                     else "enabled" if kv_autoscale else "disabled"
                 ),
                 "reason": (
-                    "serving_profile_stable"
+                    "configuration"
+                    if not kv_autoscale_requested
+                    else "serving_profile_stable"
                     if serving_profile == "stable"
                     else "active" if kv_autoscale else "configuration"
                 ),
@@ -2759,6 +2763,45 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                     kv_autoscale=False,
                     rocm_graphs=False,
                     memory_reclaim_requested_mode="automatic",
+                ),
+            )
+        finally:
+            del serve.VARIANT_CONFIGS[variant]
+        self.assertEqual(failures, [])
+
+    def test_runtime_attestation_accepts_stable_profile_with_autoscale_disabled(
+        self,
+    ) -> None:
+        variant = "test-stable-autoscale-disabled"
+        serve.VARIANT_CONFIGS[variant] = serve._mixed_variant_config(
+            serving_profile="stable",
+            kv_autoscale_requested=False,
+            kv_autoscale_enabled=False,
+            memory_reclaim_requested_mode="off",
+            memory_reclaim_mode="off",
+            rocm_graphs_requested=False,
+            rocm_graphs_enabled=False,
+        )
+        serve.VARIANT_CONFIGS[variant]["runtime"].update(
+            {
+                "prefix_cache_effective_enabled": True,
+                "prefix_cache_effective_reason": "active",
+                "prefix_cache_requested_enabled": True,
+            }
+        )
+        try:
+            failures = serve.attest_runtime(
+                variant,
+                health_fixture(
+                    kv_autoscale=False,
+                    rocm_graphs=False,
+                    serving_profile="stable",
+                    kv_autoscale_requested=False,
+                ),
+                debug_fixture(
+                    kv_autoscale=False,
+                    rocm_graphs=False,
+                    serving_profile="stable",
                 ),
             )
         finally:
