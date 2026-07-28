@@ -1160,6 +1160,24 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 a machine-sized minimum; one build job and aggregate cgroup accounting remain enforced.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Retained Metal platform receipt
+                <code>20260728t223911446266z-metal-macbook-air-m1-local-environment-v1-99474c38c1-v1</code>
+                passed from clean pushed source <code>c8d9f5856ce9</code>. The selected Metal device,
+                Apple hardware view, <code>sysctl</code> chip identity, and live Metal runtime agreed
+                on Apple M1; the measured MacBook Air reported eight GPU cores and 17,179,869,184
+                unified-memory bytes without making either value a product default. The receipt binds
+                macOS 26.6 build 25G72, Xcode 26.6 build 17F113, the macOS 26.5 SDK, Command Line
+                Tools, and the installed Metal toolchain. A real shader compiled to AIR and linked to
+                a metallib. Writable APFS passed full file sync, directory sync, atomic replacement,
+                hardlink, relative-symlink, and case-insensitive lookup probes. The contained case
+                preserved loopback, received a permission denial for external networking, owned its
+                session and process group, and exited cleanly. Unified-memory, compressor, paging,
+                swap, and memory-pressure observations were retained. Supported unprivileged host and
+                GPU temperature readings were explicitly unavailable; available thermal-pressure state
+                remained read-only. This is platform-boundary evidence only, not Metal correctness,
+                training, serving, capacity, performance, or endurance evidence.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 Retained CUDA core receipt
                 <code>20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1</code>
                 passed from clean source <code>b81c6787d0a4</code>. It required the selected device,

@@ -60,6 +60,13 @@ Native Linux runs use the local process boundary selected by the runner. WSL2
 runs may use a systemd user scope through
 `scripts/qualification/wsl_scope_exec.py`.
 
+On macOS, workloads that forbid network access run under a fail-closed
+`sandbox-exec` profile that permits loopback and denies external inbound and
+outbound traffic. Each case owns a new session and process group; the runner
+requires descendant settlement and applies bounded termination and kill
+cleanup. The contained environment case independently verifies the network
+denial, loopback path, session, and process-group identity.
+
 The default WSL2 scope has:
 
 - no CPU quota;
@@ -101,6 +108,39 @@ The current retained laptop boundary evidence is
 It passed from clean pushed source `6699d9775e3a`, recorded all declared outer
 WSL2 capabilities as available, and passed the contained environment case. It
 is evidence for that laptop under WSL2 only.
+
+## Current Metal Platform Evidence
+
+The current retained MacBook Air boundary receipt is
+[`20260728t223911446266z-metal-macbook-air-m1-local-environment-v1-99474c38c1-v1.json`](../qualification/receipts/metal/macbook-air-m1/20260728t223911446266z-metal-macbook-air-m1-local-environment-v1-99474c38c1-v1.json).
+It passed from clean pushed source `c8d9f5856ce9`. The selected Metal device,
+`system_profiler` hardware view, `sysctl` chip identity, and Metal runtime
+agreed on Apple M1. The measured host reported a MacBook Air model, eight GPU
+cores, and 17,179,869,184 unified-memory bytes; the workload does not use the
+core count or memory total as a product default or assume them for another
+MacBook Air configuration.
+
+The receipt binds macOS 26.6 build 25G72, Xcode 26.6 build 17F113, the macOS
+26.5 SDK build 25F70, Command Line Tools, the installed Metal toolchain, and
+the live Metal runtime. Its compiler probe produced nonempty AIR and metallib
+artifacts. The workspace probe identified writable APFS and passed full file
+sync, directory sync, atomic replacement, hardlink, relative-symlink, and
+case-insensitive lookup checks.
+
+The outer runner and contained case both required
+`macos-sandbox-loopback-only-v1`. The contained case connected over loopback,
+received a permission denial for external networking, proved that its PID,
+session, and process-group IDs matched, and exited without descendant residue.
+At capture, `memory_pressure` reported 71% free memory, swap total and use were
+zero, and the receipt retained page, compressor, and paging counters. `pmset`
+reported no recorded thermal, performance, or CPU-power warning. macOS exposed
+no supported unprivileged host or selected-GPU temperature reading, so both
+typed observations are explicitly unavailable. These observations are
+read-only and do not pace execution, select routes, or set memory policy.
+
+This receipt proves only the platform boundary on the measured M1 MacBook Air.
+It is not Metal tensor, training, serving, capacity, performance, or endurance
+evidence; those Phase 7.2 receipts are retained separately when completed.
 
 ## Current CUDA Core Evidence
 

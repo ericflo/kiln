@@ -128,20 +128,36 @@ Metal, or broader workload evidence.
 
 ## macOS/Metal Platform Boundary
 
-- [ ] Discover the selected Metal device and cross-check Apple hardware
+- [x] Discover the selected Metal device and cross-check Apple hardware
   identity, GPU-core count, and unified-memory capacity without assuming a
   particular MacBook Air configuration.
-- [ ] Bind the macOS build, Xcode or Command Line Tools, Metal compiler, SDK,
+- [x] Bind the macOS build, Xcode or Command Line Tools, Metal compiler, SDK,
   and runtime provenance.
-- [ ] Probe workspace filesystem identity, durable and atomic operations, case
+- [x] Probe workspace filesystem identity, durable and atomic operations, case
   behavior, and link semantics.
-- [ ] Require runner-owned loopback-only networking, private process lifetime,
+- [x] Require runner-owned loopback-only networking, private process lifetime,
   and bounded cleanup using supported macOS safeguards. Missing required
   containment must fail closed rather than silently weakening the workload.
-- [ ] Record unified-memory accounting, memory-pressure visibility, and
+- [x] Record unified-memory accounting, memory-pressure visibility, and
   available host and GPU observations without adding device-specific policy.
-- [ ] Retain a passing environment receipt from clean pushed source proving the
+- [x] Retain a passing environment receipt from clean pushed source proving the
   complete boundary on this macOS host.
+
+Boundary evidence: `qualification/receipts/metal/macbook-air-m1/`
+`20260728t223911446266z-metal-macbook-air-m1-local-environment-v1-`
+`99474c38c1-v1.json` passed from clean pushed source `c8d9f5856ce9`. The
+selected Apple M1 identity cross-checked the MacBook Air model, eight GPU
+cores, and 17,179,869,184-byte unified-memory total without committing those
+measurements as runtime defaults. Xcode 26.6 build 17F113, the macOS 26.5 SDK,
+the installed Metal toolchain, and the live Metal runtime were bound; a real
+Metal source compiled to AIR and linked to a metallib. The APFS probe passed
+full file sync, directory sync, atomic replacement, hardlink, symlink, and
+case-insensitive behavior. The contained case preserved loopback, denied an
+external connection, owned its session and process group, and exited cleanly.
+Unified-memory, compression, swap, paging, and memory-pressure observations
+were retained. Supported unprivileged host and GPU temperature readings were
+explicitly unavailable; `pmset` thermal-pressure observations were available
+and did not control execution.
 
 ## Phase 7.2: MacBook Air M1
 

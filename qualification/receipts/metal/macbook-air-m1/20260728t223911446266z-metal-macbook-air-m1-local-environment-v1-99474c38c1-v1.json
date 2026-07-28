@@ -1,0 +1,238 @@
+{
+  "artifacts": [
+    {
+      "bytes": 25146,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t223911446266z-metal-macbook-air-m1-local-environment-v1-99474c38c1-v1/environment.json",
+      "sha256": "sha256:e749c082d930ce328d428a873ee423d6877c6c766b937235644778976999929b"
+    },
+    {
+      "bytes": 44,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t223911446266z-metal-macbook-air-m1-local-environment-v1-99474c38c1-v1/cases/001-environment-capture-r001/stdout.log",
+      "sha256": "sha256:10df221d58ecc86272fa36dde2df623c38ba56dcf21cdad7a63ef24489a6250f"
+    },
+    {
+      "bytes": 0,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t223911446266z-metal-macbook-air-m1-local-environment-v1-99474c38c1-v1/cases/001-environment-capture-r001/stderr.log",
+      "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 647,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t223911446266z-metal-macbook-air-m1-local-environment-v1-99474c38c1-v1/cases/001-environment-capture-r001/case-result.json",
+      "sha256": "sha256:c1a6b6c499ea82f643339e9fb9770c45ceea78c532b87e0a98e501e3c6795c71"
+    },
+    {
+      "bytes": 5271,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t223911446266z-metal-macbook-air-m1-local-environment-v1-99474c38c1-v1/run-config.json",
+      "sha256": "sha256:4c42cdff3601482c9c6cde8e9fa2680d5d16e616676ce30c108a13258932b6b6"
+    }
+  ],
+  "created_at_utc": "2026-07-28T22:39:15.909Z",
+  "effective_config": {},
+  "environment": {
+    "compiler": {
+      "apple_clang": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
+      "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+      "metal": "/var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.109.0.EbInAh/Metal.xctoolchain/usr/bin/metal",
+      "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)"
+    },
+    "device": {
+      "architecture": "apple_m1",
+      "compute_capability": null,
+      "compute_units": 8,
+      "device_uuid": null,
+      "driver": "macOS 26.6 (25G72)",
+      "logical_index": 0,
+      "memory_available_bytes": null,
+      "memory_bytes": 17179869184,
+      "name": "Apple M1",
+      "pci_bus_id": null,
+      "unified_memory": true
+    },
+    "host_id": "macbook-air-m1",
+    "os": {
+      "architecture": "arm64",
+      "kernel": "25.6.0",
+      "name": "macOS",
+      "version": "26.6"
+    },
+    "platform": {
+      "capabilities": {
+        "apple_hardware_identity": "available",
+        "filesystem_semantics": "available",
+        "gpu_temperature": "unavailable",
+        "host_temperature": "unavailable",
+        "memory_pressure": "available",
+        "metal_compiler": "available",
+        "metal_runtime_identity": "available",
+        "network_containment": "available",
+        "process_containment": "available",
+        "thermal_pressure": "available",
+        "toolchain_provenance": "available",
+        "unified_memory_accounting": "available"
+      },
+      "details": {
+        "apple_hardware_identity": "MacBook Air MacBookAir10,1; Apple M1; 8 GPU cores; 17179869184 unified bytes",
+        "filesystem_semantics": "/dev/disk3s5 apfs at /System/Volumes/Data; atomic+durable+link probes passed; case_sensitive=False",
+        "gpu_temperature": "macOS exposes thermal-pressure state here but no supported unprivileged host or GPU temperature API",
+        "host_temperature": "macOS exposes thermal-pressure state here but no supported unprivileged host or GPU temperature API",
+        "memory_pressure": "memory_pressure free=71%; pageouts=19479; swapouts=0",
+        "metal_compiler": "compiled 3536-byte AIR and linked 3529-byte metallib",
+        "metal_runtime_identity": "Apple M1; unified=True; recommended working set=12713115648",
+        "thermal_pressure": "cpu_power_status=not_recorded; performance_warning=not_recorded; thermal_warning=not_recorded",
+        "toolchain_provenance": "Xcode 26.6; Build version 17F113; SDK 26.5 (25F70)",
+        "unified_memory_accounting": "total=17179869184; swap_total=0; compressed_pages=167060",
+        "workload_containment": "macos-sandbox-loopback-only-v1; sandbox-inherited loopback-only networking, a private session/process group, bounded descendant settlement, and TERM/KILL cleanup"
+      },
+      "kind": "macos",
+      "observations": {
+        "filesystem": {
+          "atomic_replace": true,
+          "case_sensitive": false,
+          "directory_fsync": true,
+          "fstype": "apfs",
+          "full_file_sync": true,
+          "hardlink": true,
+          "mount_point": "/System/Volumes/Data",
+          "root": "/Users/ericflo/Development/kiln",
+          "source": "/dev/disk3s5",
+          "symlink": true
+        },
+        "gpu_temperature": null,
+        "hardware_identity": {
+          "chip_type": "Apple M1",
+          "cpu_brand": "Apple M1",
+          "gpu_core_count": 8,
+          "kernel_build": "25G72",
+          "machine_model": "MacBookAir10,1",
+          "machine_name": "MacBook Air",
+          "physical_memory_bytes": 17179869184
+        },
+        "host_temperature": null,
+        "memory_pressure": {
+          "free_percent": 71,
+          "page_size_bytes": 16384,
+          "pageins": 2821898,
+          "pageouts": 19479,
+          "pages_active": 355441,
+          "pages_free": 3798,
+          "pages_inactive": 349046,
+          "pages_occupied_by_compressor": 167060,
+          "pages_wired_down": 125638,
+          "swapins": 0,
+          "swapouts": 0
+        },
+        "metal_runtime": {
+          "current_allocated_bytes": 65536,
+          "has_unified_memory": true,
+          "max_buffer_length_bytes": 9534832640,
+          "name": "Apple M1",
+          "recommended_max_working_set_bytes": 12713115648
+        },
+        "thermal_pressure": {
+          "cpu_power_status": "not_recorded",
+          "performance_warning": "not_recorded",
+          "thermal_warning": "not_recorded"
+        },
+        "unified_memory": {
+          "swap_encrypted": true,
+          "swap_total_bytes": 0,
+          "swap_used_bytes": 0,
+          "total_bytes": 17179869184
+        }
+      }
+    },
+    "runtime": {
+      "execution_environment_sha256": "sha256:91c9323072794190482826549a5d1d8238d92cec54c92197643eceaacdf50ea3",
+      "macos": "26.6",
+      "macos_build": "25G72",
+      "macos_sdk": "26.5",
+      "metal": "spdisplays_metal4"
+    }
+  },
+  "metrics": [],
+  "model": null,
+  "notes": [],
+  "qualification": {
+    "backend": "metal",
+    "command": [
+      "/opt/homebrew/opt/python@3.13/bin/python3.13",
+      "scripts/qualification/run.py",
+      "qualification/workloads/environment-v1.json",
+      "--variant",
+      "metal-m1-macbook-air",
+      "--host-id",
+      "macbook-air-m1",
+      "--var",
+      "output_path=.qualification/metal/environment-inner.json"
+    ],
+    "duration_seconds": 4.463360333999844,
+    "finished_at_utc": "2026-07-28T22:39:15.909Z",
+    "kind": "environment",
+    "profile": "local-environment-v1",
+    "started_at_utc": "2026-07-28T22:39:11.446Z",
+    "verdict": "passed"
+  },
+  "receipt_id": "20260728t223911446266z-metal-macbook-air-m1-local-environment-v1-99474c38c1-v1",
+  "results": [
+    {
+      "details": null,
+      "duration_seconds": 1.5015636249991076,
+      "id": "environment-capture",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "c8d9f5856ce9f7087bd29d13deeb3c6d484da79c",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:cdcdd5455eada822e152bd571e6561a0b167a036a4adaa6c5d4dae3f3146bcac",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [
+    "macos_host_temperature: macOS exposes thermal-pressure state here but no supported unprivileged host or GPU temperature API",
+    "macos_gpu_temperature: macOS exposes thermal-pressure state here but no supported unprivileged host or GPU temperature API"
+  ],
+  "workload": {
+    "id": "local-environment-v1",
+    "parameters": {
+      "output_path": ".qualification/metal/environment-inner.json",
+      "variant_id": "metal-m1-macbook-air"
+    },
+    "seed": null,
+    "sha256": "sha256:dbcd4f1be89645f135adbb09128a37905bfba0aad00ba2c91386f0899c8af365"
+  }
+}
