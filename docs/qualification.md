@@ -115,8 +115,9 @@ memory event.
 
 This is evidence for the declared core subset on the measured RTX 4090 Laptop
 under WSL2. The separate memory-lifecycle receipt below supplies memory
-evidence; this core receipt is not serving, concurrency, soak, native Linux,
-desktop RTX 4090, or Metal evidence.
+evidence, and the separate serving-capacity receipts supply serving and
+concurrency evidence. This core receipt is not soak, native Linux, desktop RTX
+4090, or Metal evidence.
 
 ## Current CUDA Memory Lifecycle Evidence
 
@@ -133,8 +134,31 @@ events, was removed, and left no CUDA or qualification process.
 
 The controlled error proves the server allocation-retry path and its real CUDA
 fallback allocation. It does not claim a physical device OOM, full-model
-memory pressure, serving, concurrency, soak, native Linux, desktop RTX 4090,
-or Metal evidence.
+memory pressure, soak, native Linux, desktop RTX 4090, or Metal evidence. The
+serving and concurrency evidence is retained separately below.
+
+## Current CUDA Serving Capacity Evidence
+
+The passing laptop CUDA serving receipt is
+[`20260728t090043z-cuda-wsl2-qwen35-4b-greedy-short-c1-4-qualified-v1.kiln.json`](../benchmarks/receipts/cuda/rtx4090-laptop-wsl2/20260728t090043z-cuda-wsl2-qwen35-4b-greedy-short-c1-4-qualified-v1.kiln.json).
+It ran from clean pushed source `a7156931b130` with a source-built CUDA binary,
+fixed model and server configuration, temperature zero, seed 17, and exact
+64-token outputs. Under the independent 15 GiB whole-device limit, c1 through
+c4 passed at 22.92, 22.98, 26.82, and 27.39 aggregate output tokens per second.
+
+The companion
+[`20260728t084724z-cuda-wsl2-qwen35-4b-greedy-short-c1-16-capacity-v1.kiln.json`](../benchmarks/receipts/cuda/rtx4090-laptop-wsl2/20260728t084724z-cuda-wsl2-qwen35-4b-greedy-short-c1-16-capacity-v1.kiln.json)
+is retained capacity counterevidence rather than a passing receipt. It repeated
+the c1-through-c4 passes and found c5 to be the first non-fitting concurrency:
+peak device memory was 16,303,263,744 bytes against the 16,106,127,360-byte
+limit. All 136 measured requests still succeeded with the exact required
+64-token output; only the absolute-memory gate failed from c5 onward. Both
+runs preserved their source, artifact, configuration, model, and runtime
+identities and passed final process, port, and GPU cleanup.
+
+The c4 ceiling is specific to this fixed workload, configuration, memory gate,
+and measured RTX 4090 Laptop under WSL2. These receipts are not an SLO claim
+and provide no endurance, native Linux, desktop RTX 4090, or Metal evidence.
 
 ## Build Boundary
 

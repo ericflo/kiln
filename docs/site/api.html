@@ -1168,8 +1168,9 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 oracle. All five cases exited zero, reported no cgroup memory event, and removed their
                 owned WSL2 scopes. This result applies only to that declared core subset on the
                 measured laptop under WSL2; the separate memory-lifecycle receipt supplies the memory
-                evidence, while serving, concurrency, endurance, native Linux, desktop RTX 4090, and
-                Metal evidence remain outside this core result.
+                evidence, and separate serving-capacity receipts supply serving and concurrency
+                evidence. Endurance, native Linux, desktop RTX 4090, and Metal evidence remain
+                outside this core result.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 Retained CUDA memory-lifecycle receipt
@@ -1181,8 +1182,26 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 preserved data through a 4,000-to-500-to-4,000 block physical KV resize. Every case
                 exited zero; every owned scope reported zero cgroup memory events, was removed, and
                 left no CUDA or qualification process. The controlled error proves the retry path,
-                not a physical device OOM or full-model memory-pressure run. It is not serving,
-                concurrency, endurance, native Linux, desktop RTX 4090, or Metal evidence.
+                not a physical device OOM or full-model memory-pressure run. Serving and concurrency
+                evidence is retained separately; this is not endurance, native Linux, desktop RTX
+                4090, or Metal evidence.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Retained CUDA serving receipt
+                <code>20260728t090043z-cuda-wsl2-qwen35-4b-greedy-short-c1-4-qualified-v1</code>
+                passed from clean pushed source <code>a7156931b130</code>. Its fixed greedy-short
+                workload produced exact 64-token outputs at c1 through c4 under an independent 15 GiB
+                whole-device limit, at 22.92, 22.98, 26.82, and 27.39 aggregate output tokens per
+                second. The companion
+                <code>20260728t084724z-cuda-wsl2-qwen35-4b-greedy-short-c1-16-capacity-v1</code>
+                capacity receipt repeated those passes and established c5 as the first non-fitting
+                level: peak device memory was 16,303,263,744 bytes against a 16,106,127,360-byte
+                limit. All 136 boundary-sweep requests still returned the exact required output; the
+                receipt&rsquo;s failed verdict is retained memory-limit counterevidence. Both runs
+                preserved their bound source, binary, configuration, model, and runtime identities
+                and completed process, port, and GPU cleanup. This c4 ceiling applies only to the
+                fixed workload and measured laptop under WSL2. It is not an SLO, endurance, native
+                Linux, desktop RTX 4090, or Metal claim.
               </p>
             </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">

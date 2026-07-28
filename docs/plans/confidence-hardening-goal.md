@@ -52,7 +52,7 @@ passed, its owned scope was removed, and no CUDA process remained.
   boundary.
 - [x] Retain low-memory admission, allocation failure, reclaim, and process
   cleanup evidence.
-- [ ] Run serving performance at every concurrency that fits without changing
+- [x] Run serving performance at every concurrency that fits without changing
   workload semantics.
 - [ ] Run an eight-hour mixed-load soak using ordinary monotonic elapsed time.
 - [ ] Validate and check in receipts, update this checklist and permanent
@@ -66,7 +66,8 @@ PyTorch AdamW oracle cases all passed. All five owned scopes exited zero,
 reported no cgroup memory events, were removed, and left no CUDA process.
 This receipt establishes only the declared substrate, graph, and training
 subset; the separate memory-lifecycle receipt below supplies the memory
-evidence. Serving, concurrency, and endurance evidence remain open.
+evidence. The separate serving-capacity receipts below supply serving and
+concurrency evidence; endurance evidence remains open.
 
 Memory-lifecycle evidence: `qualification/receipts/cuda/`
 `rtx4090-laptop-wsl2/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-`
@@ -79,8 +80,26 @@ through a 4,000-to-500-to-4,000 block physical KV resize. Every owned scope
 exited zero, reported no cgroup memory event, was removed, and left no CUDA or
 qualification process. The injected error proves the server retry path; it is
 not a claim that a physical device OOM or full-model memory-pressure run
-occurred. Serving, concurrency, endurance, native Linux, desktop RTX 4090, and
-Metal evidence remain open.
+occurred. The separate serving-capacity receipts below supply serving and
+concurrency evidence; endurance, native Linux, desktop RTX 4090, and Metal
+evidence remain open.
+
+Serving-capacity evidence: `benchmarks/receipts/cuda/`
+`rtx4090-laptop-wsl2/20260728t090043z-cuda-wsl2-qwen35-4b-greedy-short-`
+`c1-4-qualified-v1.kiln.json` passed from clean pushed source `a7156931b130`.
+The fixed greedy-short workload produced exact 64-token outputs at c1 through
+c4 under the independent 15 GiB device-memory limit, with aggregate throughput
+of 22.92, 22.98, 26.82, and 27.39 output tokens per second. The companion
+capacity-boundary receipt `20260728t084724z-cuda-wsl2-qwen35-4b-greedy-short-`
+`c1-16-capacity-v1.kiln.json` repeated the c1-through-c4 passes and established
+c5 as the first non-fitting level: its 16,303,263,744-byte peak exceeded the
+16,106,127,360-byte limit. All 136 requests in that boundary sweep still
+completed with the exact required output; its overall failed verdict is the
+retained memory-limit counterevidence. Both runs preserved their bound source,
+binary, configuration, model, and runtime identities and completed process,
+port, and GPU cleanup. These receipts apply only to this workload and measured
+laptop under WSL2; they are not endurance, native Linux, desktop RTX 4090, or
+Metal evidence.
 
 ## Next Backend
 
