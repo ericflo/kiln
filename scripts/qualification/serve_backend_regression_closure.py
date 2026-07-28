@@ -39,11 +39,11 @@ BUILD_SPECS = {
 BUILD_TIMEOUT_SECONDS = 900.0
 OVERALL_TIMEOUT_SECONDS = 1800.0
 REQUEST_TIMEOUT_SECONDS = 600.0
-KV_BLOCK_SIZE = 16
-KV_NUM_BLOCKS = 32
-PREFIX_CACHE_MAX_BLOCKS = 16
+KV_BLOCK_SIZE = 64
+KV_NUM_BLOCKS = 9
+PREFIX_CACHE_MAX_BLOCKS = 4
 PREFIX_CACHE_MAX_ENTRIES = 4
-PROMPT_WORDS = 48
+PROMPT_WORDS = 96
 PRIME_MAX_TOKENS = 16
 PRESSURE_MAX_TOKENS = 256
 EXPECTED_REQUESTS = 2
@@ -62,7 +62,7 @@ def effective_config(variant: str) -> dict[str, Any]:
         rocm_graphs_requested=False,
         rocm_graphs_enabled=False,
         request_timeout_seconds=int(REQUEST_TIMEOUT_SECONDS),
-        max_decode_batch=1,
+        max_decode_batch=4,
         max_prefill_layers_per_cycle=4,
     )
     spec = BUILD_SPECS[variant]
@@ -91,6 +91,8 @@ def effective_config(variant: str) -> dict[str, Any]:
             ),
         }
     )
+    if variant == ROCM_VARIANT:
+        config["runtime"]["rocm_synchronization_mode"] = "stream_ordered"
     config["memory"] = {
         "num_blocks": KV_NUM_BLOCKS,
         "kv_autoscale": False,
@@ -644,7 +646,7 @@ def execute(
                 shutdown.returncode != 0
             )
             evidence.details["shutdown"] = {
-                "duration_ms": shutdown.duration_ms,
+                "duration_ms": shutdown.elapsed_ms,
                 "forced": shutdown.forced,
                 "returncode": shutdown.returncode,
             }

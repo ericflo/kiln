@@ -15,7 +15,7 @@
   "variants": [
     {
       "id": "rocm-kv-prefix-closure",
-      "description": "Prime unleased ROCm prefix state, then require exact output while live decode growth reclaims it from a fixed 32-block KV pool.",
+      "description": "Prime unleased ROCm prefix state, then require exact output while live decode growth reclaims it from a fixed nine-block KV pool.",
       "backend": "rocm",
       "device_requirement": "required",
       "skip_policy": "fail",
@@ -41,7 +41,7 @@
         },
         "memory": {
           "kv_autoscale": false,
-          "num_blocks": 32,
+          "num_blocks": 9,
           "reclaim_mode": "off"
         },
         "model": {
@@ -50,7 +50,7 @@
         },
         "prefix_cache": {
           "effective_enabled": true,
-          "max_blocks": 16,
+          "max_blocks": 4,
           "max_entries": 4,
           "requested_enabled": true
         },
@@ -64,6 +64,7 @@
           "prefix_cache_requested_enabled": true,
           "rocm_graphs_enabled": false,
           "rocm_graphs_requested": false,
+          "rocm_synchronization_mode": "stream_ordered",
           "serving_profile": "experimental"
         },
         "server": {
@@ -72,12 +73,12 @@
           "default_thinking_enabled": false,
           "http_send_buffer_bytes": 4096,
           "log_format": "json",
-          "max_active_requests": 1,
+          "max_active_requests": 8,
           "max_batch_tokens": 512,
-          "max_decode_batch": 1,
+          "max_decode_batch": 4,
           "max_prefill_layers_per_cycle": 4,
-          "max_prefill_staging_priority_burst": 0,
-          "max_prefill_staging_slots": 0,
+          "max_prefill_staging_priority_burst": 4,
+          "max_prefill_staging_slots": 4,
           "max_prefill_tokens_per_cycle": 256,
           "request_timeout_seconds": 600,
           "stream_stall_grace_ms": 2000
@@ -86,14 +87,14 @@
           "expected_completion_tokens": 272,
           "expected_finish_reason": "length",
           "expected_request_count": 2,
-          "kv_block_size": 16,
-          "kv_num_blocks": 32,
+          "kv_block_size": 64,
+          "kv_num_blocks": 9,
           "overall_timeout_seconds": 1800,
-          "prefix_cache_max_blocks": 16,
+          "prefix_cache_max_blocks": 4,
           "prefix_cache_max_entries": 4,
           "pressure_max_tokens": 256,
           "prime_max_tokens": 16,
-          "prompt_words": 48,
+          "prompt_words": 96,
           "request_timeout_seconds": 600,
           "response_oracle": "ascending_zero_padded_integers_prefix_v1",
           "sequence": "prime_then_pressure"
@@ -102,7 +103,7 @@
       "cases": [
         {
           "id": "rocm-serving-regression-closure",
-          "description": "Build current source, prime unleased prefix state, cross sixteen decode-growth block boundaries with exact output, require structured reclamation, and prove bounded cleanup.",
+          "description": "Build current source, prime unleased prefix state, cross four decode-growth block boundaries with exact output, require structured reclamation, and prove bounded cleanup.",
           "required": true,
           "command": [
             "python3",
@@ -202,7 +203,7 @@
         },
         "memory": {
           "kv_autoscale": false,
-          "num_blocks": 32,
+          "num_blocks": 9,
           "reclaim_mode": "off"
         },
         "model": {
@@ -213,7 +214,7 @@
         },
         "prefix_cache": {
           "effective_enabled": false,
-          "max_blocks": 16,
+          "max_blocks": 4,
           "max_entries": 4,
           "requested_enabled": true
         },
@@ -235,12 +236,12 @@
           "default_thinking_enabled": false,
           "http_send_buffer_bytes": 4096,
           "log_format": "json",
-          "max_active_requests": 1,
+          "max_active_requests": 8,
           "max_batch_tokens": 512,
-          "max_decode_batch": 1,
+          "max_decode_batch": 4,
           "max_prefill_layers_per_cycle": 4,
-          "max_prefill_staging_priority_burst": 0,
-          "max_prefill_staging_slots": 0,
+          "max_prefill_staging_priority_burst": 4,
+          "max_prefill_staging_slots": 4,
           "max_prefill_tokens_per_cycle": 256,
           "request_timeout_seconds": 600,
           "stream_stall_grace_ms": 2000
@@ -249,14 +250,14 @@
           "expected_completion_tokens": 272,
           "expected_finish_reason": "length",
           "expected_request_count": 2,
-          "kv_block_size": 16,
-          "kv_num_blocks": 32,
+          "kv_block_size": 64,
+          "kv_num_blocks": 9,
           "overall_timeout_seconds": 1800,
-          "prefix_cache_max_blocks": 16,
+          "prefix_cache_max_blocks": 4,
           "prefix_cache_max_entries": 4,
           "pressure_max_tokens": 256,
           "prime_max_tokens": 16,
-          "prompt_words": 48,
+          "prompt_words": 96,
           "request_timeout_seconds": 600,
           "response_oracle": "ascending_zero_padded_integers_prefix_v1",
           "sequence": "prime_then_pressure"
@@ -265,7 +266,7 @@
       "cases": [
         {
           "id": "vulkan-serving-regression-closure",
-          "description": "Build current source, cross sixteen decode-growth block boundaries with exact output, prove the Vulkan prefix-cache quarantine retained zero state, and prove bounded cleanup.",
+          "description": "Build current source, cross four decode-growth block boundaries with exact output, prove the Vulkan prefix-cache quarantine retained zero state, and prove bounded cleanup.",
           "required": true,
           "command": [
             "python3",

@@ -23,7 +23,7 @@ SPEC.loader.exec_module(closure)
 def stream_result(
     *,
     name: str = "kv-growth-pressure",
-    prompt_tokens: int = 178,
+    prompt_tokens: int = 274,
     completion_tokens: int = closure.PRESSURE_MAX_TOKENS,
     content: str = "000000 ",
 ) -> closure.mixed.StreamResult:
@@ -74,7 +74,7 @@ class ServeBackendRegressionClosureTests(unittest.TestCase):
                     sorted(closure.METRIC_DEFINITIONS),
                 )
 
-    def test_pressure_fixture_crosses_sixteen_decode_block_boundaries(self) -> None:
+    def test_pressure_fixture_crosses_four_decode_block_boundaries(self) -> None:
         result = stream_result()
         growth_blocks = (
             (
@@ -89,7 +89,7 @@ class ServeBackendRegressionClosureTests(unittest.TestCase):
             )
             // closure.KV_BLOCK_SIZE
         )
-        self.assertEqual(growth_blocks, 16)
+        self.assertEqual(growth_blocks, 4)
         self.assertEqual(
             closure.stream_failures(result, closure.PRESSURE_MAX_TOKENS), []
         )

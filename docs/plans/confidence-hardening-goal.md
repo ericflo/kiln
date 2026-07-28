@@ -231,7 +231,7 @@ prefix-cache, and cleanup evidence.
 Targeted-serving contract:
 `qualification/workloads/serving-backend-regression-closure-v1.json` defines
 the pending correctness-only hardware closure. Each backend builds current
-source, starts one source-bound server with a fixed 32-block KV pool, and runs
+source, starts one source-bound server with a fixed nine-block KV pool, and runs
 one 16-token cache-prime request followed by one exact 256-token pressure
 request. ROCm must reclaim unleased prefix-cache blocks through the structured
 live-decode-growth path. Vulkan must cross the same decode-growth boundaries
