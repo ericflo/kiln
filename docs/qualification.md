@@ -162,6 +162,29 @@ This is bounded correctness evidence for the declared subset on the measured
 M1 MacBook Air. It is not memory-lifecycle, serving, capacity, performance,
 endurance, or other-Apple-Silicon evidence.
 
+## Current Metal Unified-Memory Lifecycle Evidence
+
+The retained MacBook Air Metal memory-lifecycle receipt is
+[`20260728t230542216939z-metal-macbook-air-m1-metal-memory-lifecycle-v-dfc8d17c13-v1.json`](../qualification/receipts/metal/macbook-air-m1/20260728t230542216939z-metal-macbook-air-m1-metal-memory-lifecycle-v-dfc8d17c13-v1.json).
+It passed from clean pushed source `ee39b573566d`. The admission case used the
+live Apple unified-memory snapshot and a controlled floor that left a 64 MiB
+budget. The exact server paged-KV gate rejected a 10,241-block request before
+Metal `currentAllocatedSize` changed.
+
+The allocation-failure case injected the first server auto-sizer allocation
+error, retried at the declared lower fraction, allocated a real Metal paged-KV
+cache, released it near the pre-test baseline, and successfully allocated
+again. The reclaim case made a separate 268,435,456-byte Metal allocation,
+observed it through `currentAllocatedSize`, dropped its sole storage owner,
+observed all 268,435,456 bytes reclaimed, and successfully allocated again.
+
+All four required cases passed in runner-owned macOS sessions/process groups
+with bounded descendant settlement and cleanup. The receipt passed independent
+current-source and local-artifact validation. This is controlled UMA
+admission, injected-failure recovery, ownership-release reclaim, and process
+cleanup evidence. It is not a physical host OOM, full-model pressure,
+serving-capacity, performance, endurance, or other-Apple-Silicon claim.
+
 ## Current CUDA Core Evidence
 
 The current retained laptop CUDA core receipt is

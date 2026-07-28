@@ -1192,6 +1192,21 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 serving, capacity, performance, endurance, or other-Apple-Silicon evidence.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Retained Metal unified-memory lifecycle receipt
+                <code>20260728t230542216939z-metal-macbook-air-m1-metal-memory-lifecycle-v-dfc8d17c13-v1</code>
+                passed from clean pushed source <code>ee39b573566d</code>. Using the live Apple
+                unified-memory snapshot, a controlled floor left a 64 MiB budget and the exact
+                server paged-KV gate rejected 10,241 blocks before <code>currentAllocatedSize</code>
+                changed. An injected first allocator failure retried at the declared lower fraction,
+                allocated and released a real Metal paged-KV cache near baseline, then allocated
+                again. A separate 268,435,456-byte Metal allocation appeared in
+                <code>currentAllocatedSize</code>; dropping its sole owner reclaimed all
+                268,435,456 bytes before another allocation succeeded. All cases completed the
+                runner-owned macOS session/process-group settlement path. This is controlled UMA
+                lifecycle evidence, not a physical host OOM, serving-capacity, performance,
+                endurance, or other-Apple-Silicon claim.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 Retained CUDA core receipt
                 <code>20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1</code>
                 passed from clean source <code>b81c6787d0a4</code>. It required the selected device,

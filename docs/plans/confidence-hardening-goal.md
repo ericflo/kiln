@@ -163,7 +163,7 @@ and did not control execution.
 
 - [x] Retain the current-source Metal correctness and oracle subset, including
   tensor transfer, matmul, graph replay, training, and optimizer coverage.
-- [ ] Retain controlled low-memory admission, allocation failure, reclaim, and
+- [x] Retain controlled low-memory admission, allocation failure, reclaim, and
   process-cleanup evidence appropriate to unified memory.
 - [ ] Run serving correctness and performance at every concurrency that fits
   without changing workload semantics, and retain the first non-fitting
@@ -187,6 +187,19 @@ complete Metal LoRA SFT step, and a twenty-step BF16 AdamW trajectory against
 the pinned PyTorch oracle. All five required cases passed and the receipt
 passed independent current-source and local-artifact validation. This does not
 claim memory lifecycle, serving, capacity, performance, or endurance evidence.
+
+Unified-memory lifecycle evidence:
+`qualification/receipts/metal/macbook-air-m1/20260728t230542216939z-metal-macbook-air-m1-metal-memory-lifecycle-v-dfc8d17c13-v1.json`
+passed from clean pushed source `ee39b573566d`. A controlled 64 MiB live UMA
+budget rejected a 10,241-block request before `currentAllocatedSize` changed.
+An injected first allocator failure retried at the declared lower fraction,
+allocated a real Metal paged-KV cache, released it near baseline, and then
+allocated again. A separate 256 MiB Metal storage allocation appeared in
+`currentAllocatedSize`; dropping its sole owner reclaimed exactly 268,435,456
+bytes before another allocation succeeded. Every case ran in the runner-owned
+macOS session/process group and completed its bounded descendant-settlement
+path. This is controlled admission/failure/release evidence, not a physical
+host-OOM or serving-capacity claim.
 
 ## Phase 7.3: Final Cross-Backend Regression Closure
 
