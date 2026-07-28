@@ -2519,6 +2519,8 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 cuda_graphs=True,
                 cuda_graph_cache_entries=16,
                 kv_force_blocks=7,
+                prefix_cache_max_blocks=16,
+                prefix_cache_max_entries=4,
             )
             parsed = parse_generated_toml(path.read_text(encoding="utf-8"))
 
@@ -2548,6 +2550,8 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
         self.assertTrue(parsed["memory"]["cuda_graphs"])
         self.assertEqual(parsed["memory"]["cuda_graph_cache_entries"], 16)
         self.assertEqual(parsed["memory"]["kv_force_blocks"], 7)
+        self.assertEqual(parsed["prefix_cache"]["max_blocks"], 16)
+        self.assertEqual(parsed["prefix_cache"]["max_entries"], 4)
         self.assertEqual(parsed["model"]["path"], str(root / 'model "quoted"'))
 
     def test_server_config_rejects_invalid_explicit_memory_bounds(self) -> None:
@@ -2566,6 +2570,8 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 ("inference_memory_fraction", math.nan, "finite"),
                 ("inference_memory_fraction", 1.1, "finite"),
                 ("memory_floor_gb", -1.0, "nonnegative"),
+                ("prefix_cache_max_blocks", 0, "positive integer"),
+                ("prefix_cache_max_entries", False, "positive integer"),
             ):
                 with self.subTest(keyword=keyword), self.assertRaisesRegex(
                     serve.QualificationError,

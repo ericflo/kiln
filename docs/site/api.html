@@ -1248,7 +1248,17 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 through RADV Strix Halo. Each backend passed its required device probe, real-device
                 tensor transfer/parity, and deterministic dense matmul parity against the CPU
                 oracle. These receipts establish only that bounded core subset on this host; targeted
-                serving, KV-pressure, prefix-cache, and cleanup evidence is retained separately.
+                serving, KV-pressure, prefix-cache, and cleanup evidence remains separate.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                The bounded ROCm/Vulkan serving-closure contract builds one current-source server
+                per backend with a fixed 32-block KV pool, runs one 16-token cache-prime request,
+                then requires exact output from one 256-token request crossing sixteen live-decode
+                growth boundaries. ROCm must emit structured reclamation of unleased prefix-cache
+                blocks. Vulkan must complete the same growth with its correctness quarantine
+                effective and zero prefix-cache ownership. Both variants require drained KV
+                accounting, non-forced zero shutdown, and no snapshot residue. This two-request
+                correctness check does not measure performance or search for a capacity limit.
               </p>
             </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">

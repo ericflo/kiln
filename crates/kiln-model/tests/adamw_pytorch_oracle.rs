@@ -379,7 +379,11 @@ fn cuda_adamw_matches_pytorch_native_bf16_contract() -> Result<()> {
 #[test]
 fn metal_adamw_matches_pytorch_native_bf16_contract() -> Result<()> {
     use kiln_model::backend::metal::MetalBackend;
-    if !kiln_tensor::metal_is_available() {
+    // Some GitHub-hosted Apple Silicon runners report platform-level Metal
+    // availability while exposing no enumerable MTL device. Use the same
+    // concrete device probe as tensor construction so ordinary CI skips
+    // coherently; KILN_QUALIFICATION=1 still fails closed on hardware runs.
+    if kiln_tensor::primary_metal_companion(0).is_err() {
         unavailable("metal", "no Metal device");
         return Ok(());
     }

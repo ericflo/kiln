@@ -216,3 +216,15 @@ matmul parity against the CPU oracle. All six required cases exited zero with
 no output-assertion failure. This is the bounded core subset only; the
 separate targeted serving receipts must supply shared server, KV-pressure,
 prefix-cache, and cleanup evidence.
+
+Targeted-serving contract:
+`qualification/workloads/serving-backend-regression-closure-v1.json` defines
+the pending correctness-only hardware closure. Each backend builds current
+source, starts one source-bound server with a fixed 32-block KV pool, and runs
+one 16-token cache-prime request followed by one exact 256-token pressure
+request. ROCm must reclaim unleased prefix-cache blocks through the structured
+live-decode-growth path. Vulkan must cross the same decode-growth boundaries
+with its correctness quarantine effective and zero prefix-cache ownership.
+Both variants require drained KV accounting, clean process shutdown, and no
+snapshot residue. This two-request contract does not measure performance or
+search for a capacity limit.

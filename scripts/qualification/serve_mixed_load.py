@@ -2358,6 +2358,8 @@ def classify_server_event(
         "rocm pool reclaim completed",
     }:
         return "memory_reclaim"
+    if lowered == "reclaimed unleased prefix-cache blocks for live decode growth":
+        return "prefix_cache_reclaim"
     if lowered.startswith("rocm graph capture failed:") or lowered.startswith(
         "rocm graph replay failed:"
     ):
@@ -2825,6 +2827,8 @@ def write_server_config(
     inference_memory_fraction: float | None = None,
     memory_floor_gb: float | None = None,
     kv_force_blocks: int = 0,
+    prefix_cache_max_blocks: int | None = None,
+    prefix_cache_max_entries: int | None = None,
 ) -> None:
     """Write the complete public qualification launch policy as typed TOML."""
     config = VARIANT_CONFIGS[variant]
@@ -2865,6 +2869,14 @@ def write_server_config(
         or memory_floor_gb < 0.0
     ):
         raise QualificationError("memory floor must be finite and nonnegative")
+    for label, value in (
+        ("prefix-cache block limit", prefix_cache_max_blocks),
+        ("prefix-cache entry limit", prefix_cache_max_entries),
+    ):
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value < 1
+        ):
+            raise QualificationError(f"{label} must be a positive integer")
 
     lines = [
         "[server]",
@@ -2965,6 +2977,16 @@ def write_server_config(
             "true"
             if runtime.get("prefix_cache_requested_enabled", True)
             else "false"
+        ),
+        *(
+            [f"max_blocks = {prefix_cache_max_blocks}"]
+            if prefix_cache_max_blocks is not None
+            else []
+        ),
+        *(
+            [f"max_entries = {prefix_cache_max_entries}"]
+            if prefix_cache_max_entries is not None
+            else []
         ),
         "",
         "[logging]",

@@ -246,6 +246,25 @@ bounded core-correctness subset on this Strix Halo host. It is not serving,
 KV-pressure, prefix-cache, endurance, capacity, performance, or evidence for
 another ROCm or Vulkan device.
 
+## Targeted ROCm/Vulkan Serving Closure
+
+The correctness-only
+[`serving-backend-regression-closure-v1.json`](../qualification/workloads/serving-backend-regression-closure-v1.json)
+contract is the bounded current-source serving check for the final
+cross-backend closure. It builds one source-bound server per backend with a
+fixed 32-block KV pool, then runs one 16-token cache-prime request and one
+exact 256-token pressure request. The pressure request crosses sixteen decode
+growth block boundaries without changing workload semantics.
+
+On ROCm, a pass requires structured evidence that live decode growth reclaimed
+unleased prefix-cache blocks. On Vulkan, where cross-request prefix reuse
+remains correctness-quarantined, a pass requires the same exact output and KV
+growth with zero prefix-cache activity or retained state. Both variants require
+zero request, device-fault, resize, synchronization-failure, and unaccounted-KV
+evidence; drained leases and pending releases; non-forced zero shutdown; and no
+private snapshot residue. This is a two-request correctness check, not an
+endurance, thermal, capacity, or performance campaign.
+
 ## Build Boundary
 
 Bounded build wrappers provide deterministic environment filtering, offline
