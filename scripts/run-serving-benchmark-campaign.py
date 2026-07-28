@@ -121,7 +121,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--warmup-requests", type=int, default=1)
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument(
-        "--memory-source", choices=("auto", "drm", "nvml"), default="auto"
+        "--memory-source", choices=("auto", "drm", "macos", "nvml"), default="auto"
     )
     parser.add_argument("--memory-path", default="auto")
     parser.add_argument("--memory-device-index", type=int)
@@ -207,6 +207,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     elif args.memory_source == "nvml" and args.memory_path != "auto":
         parser.error("--memory-path cannot be combined with --memory-source nvml")
+    elif args.memory_source == "macos" and (
+        args.memory_path != "auto"
+        or args.memory_device_index is not None
+        or args.memory_device_uuid is not None
+    ):
+        parser.error(
+            "--memory-source macos cannot be combined with DRM or NVML selectors"
+        )
     if args.model_fingerprint_read_mib_per_second != 0 and not (
         64 <= args.model_fingerprint_read_mib_per_second <= 16_384
     ):

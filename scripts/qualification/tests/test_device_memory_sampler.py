@@ -115,6 +115,61 @@ class FakeNvml:
 
 
 class DeviceMemorySamplerTests(unittest.TestCase):
+    def test_macos_counter_records_closed_unified_memory_identity(self) -> None:
+        outputs = {
+            ("sysctl", "-n", "hw.memsize"): "17179869184\n",
+            ("sysctl", "-n", "machdep.cpu.brand_string"): "Apple M1\n",
+            (
+                "memory_pressure",
+                "-Q",
+            ): "System-wide memory free percentage: 25%\n",
+        }
+
+        def run(argv, **_kwargs):
+            key = (Path(argv[0]).name, *argv[1:])
+            return mock.Mock(
+                returncode=0,
+                stdout=outputs[key],
+                stderr="",
+            )
+
+        counter = memory.resolve_memory_counter(
+            source="macos",
+            drm_path="auto",
+            nvml_device_index=None,
+            platform_name="Darwin",
+            macos_command_runner=run,
+        )
+        identity = counter.receipt_identity()
+        self.assertEqual(identity["source"], "macos_unified_used")
+        self.assertIsNone(identity["path"])
+        self.assertEqual(identity["device"]["name"], "Apple M1")
+        self.assertTrue(identity["device"]["unified_memory"])
+        self.assertEqual(counter.read_bytes(), 12 * 1024**3)
+
+    def test_macos_counter_fails_closed_on_malformed_pressure(self) -> None:
+        values = iter(
+            (
+                "17179869184\n",
+                "Apple M1\n",
+                "free memory unavailable\n",
+            )
+        )
+
+        def run(_argv, **_kwargs):
+            return mock.Mock(returncode=0, stdout=next(values), stderr="")
+
+        with self.assertRaisesRegex(
+            memory.DeviceMemoryError, "omitted the free-memory percentage"
+        ):
+            memory.resolve_memory_counter(
+                source="macos",
+                drm_path="auto",
+                nvml_device_index=None,
+                platform_name="Darwin",
+                macos_command_runner=run,
+            )
+
     def test_nvml_counter_records_stable_device_identity(self) -> None:
         library = FakeNvml()
         counter = memory.NvmlMemoryCounter(
@@ -206,6 +261,7 @@ class DeviceMemorySamplerTests(unittest.TestCase):
                         drm_path="auto",
                         nvml_device_index=None,
                         nvml_library_loader=lambda _name: library,
+                        platform_name="Linux",
                     )
         self.assertEqual(library.shutdowns, 1)
 
@@ -224,6 +280,7 @@ class DeviceMemorySamplerTests(unittest.TestCase):
                         drm_path="auto",
                         nvml_device_index=None,
                         nvml_library_loader=lambda _name: library,
+                        platform_name="Linux",
                     )
         self.assertEqual(library.shutdowns, 1)
 
@@ -238,6 +295,7 @@ class DeviceMemorySamplerTests(unittest.TestCase):
                     drm_path="auto",
                     nvml_device_index=None,
                     nvml_library_loader=lambda _name: library,
+                    platform_name="Linux",
                 )
             self.assertEqual(counter.read_bytes(), 123)
             counter.close()

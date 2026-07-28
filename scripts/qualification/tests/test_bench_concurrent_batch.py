@@ -716,6 +716,49 @@ class ServingBenchmarkTests(unittest.TestCase):
         laptop["memory"]["floor_gb"] = 2.0
         self.assertEqual(laptop, desktop)
 
+    def test_metal_macbook_air_bootstrap_inputs_are_bounded_and_closed(self) -> None:
+        name = "kiln-metal-macbook-air-m1-serving-bootstrap-v1"
+        config = self._parse_server_config(
+            ROOT / "qualification" / "server-config" / f"{name}.toml"
+        )
+
+        self.assertEqual(config["server"]["serving_profile"], "stable")
+        self.assertEqual(config["server"]["port"], 8421)
+        self.assertEqual(config["server"]["max_batch_tokens"], 2_048)
+        self.assertEqual(config["server"]["max_prefill_tokens_per_cycle"], 512)
+        self.assertEqual(config["server"]["max_decode_batch"], 8)
+        self.assertEqual(config["accelerator"]["metal_kernel_profile"], "native_default")
+        self.assertEqual(config["accelerator"]["rocm_graph_mode"], "disabled")
+        self.assertEqual(config["memory"]["gpu_memory_gb"], 10.0)
+        self.assertEqual(config["memory"]["floor_gb"], 1.5)
+        self.assertEqual(config["memory"]["reclaim_mode"], "off")
+        self.assertFalse(config["memory"]["kv_autoscale"])
+        self.assertFalse(config["memory"]["cuda_graphs"])
+        self.assertEqual(config["model"]["path"], "Qwen3.5-4B")
+        self.assertEqual(config["model"]["model_id"], "Qwen/Qwen3.5-4B")
+        self.assertEqual(config["model"]["served_model_id"], "Qwen3.5-4B")
+        self.assertFalse(Path(config["model"]["path"]).is_absolute())
+        self.assertFalse(Path(config["model"]["adapter_dir"]).is_absolute())
+        self.assertFalse(Path(config["model"]["snapshot_dir"]).is_absolute())
+
+        launch_path = ROOT / "qualification" / "server-launch" / f"{name}.json"
+        launch = bench.validate_server_launch_config_value(
+            bench.strict_json_loads(launch_path.read_bytes()),
+            config_directory=launch_path.parent,
+            label=name,
+            require_local_paths=False,
+        )
+        self.assertEqual(launch.record["id"], name)
+        self.assertEqual(
+            launch.record["command"],
+            [
+                "./target/release/kiln",
+                "serve",
+                "--config",
+                f"qualification/server-config/{name}.toml",
+            ],
+        )
+
     def test_cuda_vllm_bootstrap_launch_uses_reviewed_immutable_options(self) -> None:
         launch_path = (
             ROOT
@@ -819,6 +862,8 @@ class ServingBenchmarkTests(unittest.TestCase):
             ["--memory-device-uuid=GPU-01234567-89ab-cdef-0123-456789abcdef"]
         )
         self.assertEqual(nvml_uuid.memory_source, "nvml")
+        macos = bench.parse_args(["--memory-source=macos"])
+        self.assertEqual(macos.memory_source, "macos")
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             bench.parse_args(
                 [
@@ -832,6 +877,13 @@ class ServingBenchmarkTests(unittest.TestCase):
                 [
                     "--memory-source=nvml",
                     "--memory-path=/tmp/fixture-drm-counter",
+                ]
+            )
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            bench.parse_args(
+                [
+                    "--memory-source=macos",
+                    "--memory-device-index=0",
                 ]
             )
 
@@ -1147,13 +1199,13 @@ class ServingBenchmarkTests(unittest.TestCase):
         )
         self.assertTrue(all(prompt.startswith(shared_prefix) for prompt in prefix_prompts))
         self.assertEqual(len(mixed_lengths), 4)
-        self.assertEqual(bench.DRIVER_VERSION, "26")
+        self.assertEqual(bench.DRIVER_VERSION, "27")
         self.assertEqual(
             bench.PROMPT_TEMPLATE_VERSION, "fixed-serving-profiles-v2"
         )
         self.assertEqual(
             bench.FIXED_PROMPT_TEMPLATE_V2_DRIVER_VERSIONS,
-            {"26"},
+            {"26", "27"},
         )
         self.assertEqual(bench.LONG_PROMPT_REPETITIONS, 61)
         self.assertEqual(bench.LONG_PROMPT_REPETITIONS_V1, 64)
@@ -2124,18 +2176,29 @@ class ServingBenchmarkTests(unittest.TestCase):
         self.assertEqual(probe.call_count, 2)
 
     def test_shutdown_accounting_failure_still_drains_owned_group(self) -> None:
+        executable = (
+            bench._darwin_process_identity(os.getpid())[2]
+            if sys.platform == "darwin"
+            else sys.executable
+        )
+        command = (
+            executable,
+            "-c",
+            "import time; time.sleep(60)",
+        )
         process = bench.subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                "import time; time.sleep(60)",
-            ],
+            command,
             stdin=bench.subprocess.DEVNULL,
             stdout=bench.subprocess.DEVNULL,
             stderr=bench.subprocess.DEVNULL,
             start_new_session=True,
         )
-        identity = bench.AttachedProcessGroup.attach(process.pid)
+        if sys.platform == "darwin":
+            time.sleep(0.05)
+        identity = bench.AttachedProcessGroup.attach(
+            process.pid,
+            expected_command=command if sys.platform == "darwin" else None,
+        )
 
         class Config:
             shutdown_timeout_seconds = 1.0
@@ -2204,7 +2267,10 @@ class ServingBenchmarkTests(unittest.TestCase):
             proc_root = Path(directory)
             (proc_root / "101").mkdir()
             stat_path = proc_root / "101" / "stat"
-            with mock.patch.object(bench.os, "killpg"):
+            with (
+                mock.patch.object(bench.os, "killpg"),
+                mock.patch.object(bench.sys, "platform", "linux"),
+            ):
                 stat_path.write_text("101 (fixture) Z 1 101 101 0\n", encoding="ascii")
                 self.assertFalse(bench.process_group_alive(101, proc_root))
                 stat_path.write_text("101 (fixture) S 1 101 101 0\n", encoding="ascii")
@@ -2340,14 +2406,20 @@ class ServingBenchmarkTests(unittest.TestCase):
                 )
 
             write_stat(4321, 123456)
-            attached = bench.AttachedProcessGroup.attach(4321, proc_root=root)
+            with mock.patch.object(bench.sys, "platform", "linux"):
+                attached = bench.AttachedProcessGroup.attach(4321, proc_root=root)
             self.assertIsNone(attached.poll())
             self.assertEqual(attached.receipt_identity()["process_group_id"], 4321)
 
             write_stat(4321, 999999)
             self.assertEqual(attached.poll(), 0)
             write_stat(4000, 123456)
-            with self.assertRaisesRegex(bench.BenchmarkError, "lead its process group"):
+            with (
+                mock.patch.object(bench.sys, "platform", "linux"),
+                self.assertRaisesRegex(
+                    bench.BenchmarkError, "lead its process group"
+                ),
+            ):
                 bench.AttachedProcessGroup.attach(4321, proc_root=root)
 
     def test_owned_server_launch_binds_group_shutdown_and_log_evidence(self) -> None:
@@ -2375,10 +2447,15 @@ class ServingBenchmarkTests(unittest.TestCase):
                 "    time.sleep(0.1)\n"
             )
             executable.chmod(0o755)
+            python_executable = (
+                bench._darwin_process_identity(os.getpid())[2]
+                if sys.platform == "darwin"
+                else sys.executable
+            )
             launch_value = {
                 "schema": bench.SERVER_LAUNCH_SCHEMA,
                 "id": "fixture-owned-server-v1",
-                "command": ["./fixture-server.py", str(port)],
+                "command": [python_executable, "./fixture-server.py", str(port)],
                 "working_directory": ".",
                 "log_directory": "logs",
                 "readiness_poll_interval_ms": 10,
@@ -2396,12 +2473,16 @@ class ServingBenchmarkTests(unittest.TestCase):
             original_attach = bench.AttachedProcessGroup.attach
             attach_attempts = 0
 
-            def flaky_attach(pid: int) -> object:
+            def flaky_attach(
+                pid: int,
+                *,
+                expected_command: tuple[str, ...] | None = None,
+            ) -> object:
                 nonlocal attach_attempts
                 attach_attempts += 1
                 if attach_attempts == 1:
                     raise bench.BenchmarkError("injected pre-exec identity race")
-                return original_attach(pid)
+                return original_attach(pid, expected_command=expected_command)
 
             with mock.patch.object(
                 bench.AttachedProcessGroup, "attach", side_effect=flaky_attach
@@ -2504,24 +2585,54 @@ class ServingBenchmarkTests(unittest.TestCase):
                 "dirty": False,
                 "source_tree_sha256": "sha256:" + "b" * 64,
             }
-            with (
-                mock.patch.object(
-                    bench, "repository_identity", return_value=clean_repository
-                ),
-                mock.patch.object(
-                    bench,
-                    "fingerprint_model",
-                    return_value=model_fingerprint,
-                ),
-                mock.patch.object(
-                    bench,
-                    "_fsync_owned_server_log",
-                    side_effect=OSError(
-                        bench.errno.EIO,
-                        "injected owned log durability failure",
-                    ),
-                ),
-            ):
+            with ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.object(
+                        bench, "repository_identity", return_value=clean_repository
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        bench,
+                        "fingerprint_model",
+                        return_value=model_fingerprint,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        bench,
+                        "_fsync_owned_server_log",
+                        side_effect=OSError(
+                            bench.errno.EIO,
+                            "injected owned log durability failure",
+                        ),
+                    )
+                )
+                if sys.platform == "darwin":
+                    def attach_fixture(
+                        pid: int,
+                        **_kwargs,
+                    ) -> bench.AttachedProcessGroup:
+                        process_group_id, start_time, observed_executable = (
+                            bench._darwin_process_identity(pid)
+                        )
+                        return bench.AttachedProcessGroup(
+                            pid=pid,
+                            process_group_id=process_group_id,
+                            start_time_ticks=start_time,
+                            boot_id="fixture-darwin-boot",
+                            executable=observed_executable,
+                            cmdline_sha256="sha256:" + "a" * 64,
+                            platform_name="darwin",
+                        )
+
+                    stack.enter_context(
+                        mock.patch.object(
+                            bench.AttachedProcessGroup,
+                            "attach",
+                            side_effect=attach_fixture,
+                        )
+                    )
                 return_code = bench.main(
                     [
                         "--engine=vllm",
@@ -2683,6 +2794,41 @@ class ServingBenchmarkTests(unittest.TestCase):
             invalid_nvml["receipt_sha256"] = bench.canonical_sha256(invalid_nvml)
             with self.assertRaisesRegex(bench.BenchmarkError, "uuid is invalid"):
                 bench.validate_benchmark_receipt(invalid_nvml)
+
+            macos_receipt = json.loads(json.dumps(receipt))
+            macos_receipt["memory_sampler"] = {
+                "source": "macos_unified_used",
+                "path": None,
+                "device": {
+                    "selector": "system_default",
+                    "index": 0,
+                    "enumerated_device_count": 1,
+                    "name": "Apple M1",
+                    "total_bytes": 16 * 1024**3,
+                    "unified_memory": True,
+                    "counter": "memory_pressure_free_percentage",
+                    "available_definition": (
+                        "physical_total_times_reported_free_percentage"
+                    ),
+                },
+                "interval_ms": 250,
+            }
+            macos_receipt.pop("receipt_sha256")
+            macos_receipt["receipt_sha256"] = bench.canonical_sha256(
+                macos_receipt
+            )
+            bench.validate_benchmark_receipt(macos_receipt)
+
+            historical_macos = json.loads(json.dumps(macos_receipt))
+            historical_macos["driver_version"] = bench.PREVIOUS_DRIVER_VERSION
+            historical_macos.pop("receipt_sha256")
+            historical_macos["receipt_sha256"] = bench.canonical_sha256(
+                historical_macos
+            )
+            with self.assertRaisesRegex(
+                bench.BenchmarkError, "device-memory source is unsupported"
+            ):
+                bench.validate_benchmark_receipt(historical_macos)
 
             tampered_summary = json.loads(json.dumps(receipt))
             tampered_distribution = tampered_summary["runs"][0][

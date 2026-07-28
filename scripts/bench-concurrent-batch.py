@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import ctypes
 import dataclasses
 import datetime as dt
 import errno
@@ -41,22 +42,24 @@ from typing import Any, Callable, Iterable
 SCHEMA = "kiln.serving-benchmark.v1"
 WORKLOAD_SCHEMA = "kiln.serving-benchmark-workload.v1"
 SERVER_LAUNCH_SCHEMA = "kiln.serving-benchmark-server-launch.v1"
-DRIVER_VERSION = "26"
-SUPPORTED_DRIVER_VERSIONS = {DRIVER_VERSION}
-MODERN_DRIVER_VERSIONS = {DRIVER_VERSION}
-LIFECYCLE_DRIVER_VERSIONS = {DRIVER_VERSION}
-OUTPUT_EVIDENCE_DRIVER_VERSIONS = {DRIVER_VERSION}
-ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = {DRIVER_VERSION}
-ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = {DRIVER_VERSION}
-REFERENCE_COMPATIBLE_DRIVER_VERSIONS = {DRIVER_VERSION}
-COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = {DRIVER_VERSION}
-MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = {DRIVER_VERSION}
-REQUEST_PERFORMANCE_DRIVER_VERSIONS = {DRIVER_VERSION}
-PROMPT_SET_IDENTITY_DRIVER_VERSIONS = {DRIVER_VERSION}
-GRAPH_PARITY_DRIVER_VERSIONS = {DRIVER_VERSION}
-REFERENCE_ROLE_DRIVER_VERSIONS = {DRIVER_VERSION}
-ACTOR_ONLY_DIAGNOSTICS_DRIVER_VERSIONS = {DRIVER_VERSION}
-TYPED_MEMORY_SOURCE_DRIVER_VERSIONS = {DRIVER_VERSION}
+DRIVER_VERSION = "27"
+PREVIOUS_DRIVER_VERSION = "26"
+SUPPORTED_DRIVER_VERSIONS = {PREVIOUS_DRIVER_VERSION, DRIVER_VERSION}
+MODERN_DRIVER_VERSIONS = set(SUPPORTED_DRIVER_VERSIONS)
+LIFECYCLE_DRIVER_VERSIONS = set(SUPPORTED_DRIVER_VERSIONS)
+OUTPUT_EVIDENCE_DRIVER_VERSIONS = set(SUPPORTED_DRIVER_VERSIONS)
+ROUTE_AWARE_DIAGNOSTICS_DRIVER_VERSIONS = set(SUPPORTED_DRIVER_VERSIONS)
+ROCM_GRAPH_DIAGNOSTICS_DRIVER_VERSIONS = set(SUPPORTED_DRIVER_VERSIONS)
+REFERENCE_COMPATIBLE_DRIVER_VERSIONS = set(SUPPORTED_DRIVER_VERSIONS)
+COOPERATIVE_ACTOR_CYCLE_IDLE_DRIVER_VERSIONS = set(SUPPORTED_DRIVER_VERSIONS)
+MULTI_ROW_GRAPH_FALLBACK_DRIVER_VERSIONS = set(SUPPORTED_DRIVER_VERSIONS)
+REQUEST_PERFORMANCE_DRIVER_VERSIONS = set(SUPPORTED_DRIVER_VERSIONS)
+PROMPT_SET_IDENTITY_DRIVER_VERSIONS = set(SUPPORTED_DRIVER_VERSIONS)
+GRAPH_PARITY_DRIVER_VERSIONS = set(SUPPORTED_DRIVER_VERSIONS)
+REFERENCE_ROLE_DRIVER_VERSIONS = set(SUPPORTED_DRIVER_VERSIONS)
+ACTOR_ONLY_DIAGNOSTICS_DRIVER_VERSIONS = set(SUPPORTED_DRIVER_VERSIONS)
+TYPED_MEMORY_SOURCE_DRIVER_VERSIONS = set(SUPPORTED_DRIVER_VERSIONS)
+MACOS_MEMORY_SOURCE_DRIVER_VERSIONS = {DRIVER_VERSION}
 REFERENCE_ROLES = {
     "qualification_gate",
     "same_artifact_graph_eager_discriminator",
@@ -65,7 +68,7 @@ OUTPUT_EVIDENCE_MAX_UTF8_BYTES_PER_REQUEST = 1024 * 1024
 LEGACY_PROMPT_TEMPLATE_VERSION = "equal-token-multiset-v1"
 FIXED_PROMPT_TEMPLATE_VERSION_V1 = "fixed-serving-profiles-v1"
 PROMPT_TEMPLATE_VERSION = "fixed-serving-profiles-v2"
-FIXED_PROMPT_TEMPLATE_V2_DRIVER_VERSIONS = {DRIVER_VERSION}
+FIXED_PROMPT_TEMPLATE_V2_DRIVER_VERSIONS = set(SUPPORTED_DRIVER_VERSIONS)
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -538,6 +541,7 @@ class AttachedProcessGroup:
     executable: str
     cmdline_sha256: str
     proc_root: Path = dataclasses.field(default=Path("/proc"), repr=False)
+    platform_name: str = dataclasses.field(default=sys.platform, repr=False)
 
     @staticmethod
     def _read_stat(pid: int, proc_root: Path) -> tuple[str, int, int]:
@@ -568,9 +572,53 @@ class AttachedProcessGroup:
         pid: int,
         *,
         proc_root: Path = Path("/proc"),
+        expected_command: tuple[str, ...] | None = None,
     ) -> "AttachedProcessGroup":
         if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
             raise BenchmarkError("server PID must be an integer greater than one")
+        if sys.platform == "darwin":
+            if expected_command is None:
+                raise BenchmarkError(
+                    "attaching a macOS server requires its exact owned launch command"
+                )
+            process_group_id, start_time_ticks, executable = (
+                _darwin_process_identity(pid)
+            )
+            if process_group_id != pid:
+                raise BenchmarkError(
+                    f"server PID {pid} must lead its process group; observed PGID "
+                    f"{process_group_id}"
+                )
+            expected_executable = Path(expected_command[0]).resolve()
+            if Path(executable).resolve() != expected_executable:
+                raise BenchmarkError(
+                    "owned macOS server executable disagrees with its launch command"
+                )
+            boot = subprocess.run(
+                ["/usr/sbin/sysctl", "-n", "kern.boottime"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                timeout=5.0,
+            )
+            if boot.returncode != 0 or not boot.stdout.strip():
+                raise BenchmarkError("cannot bind the macOS boot identity")
+            command_bytes = b"\0".join(
+                item.encode("utf-8") for item in expected_command
+            ) + b"\0"
+            return cls(
+                pid=pid,
+                process_group_id=process_group_id,
+                start_time_ticks=start_time_ticks,
+                boot_id=boot.stdout.strip(),
+                executable=executable,
+                cmdline_sha256="sha256:"
+                + hashlib.sha256(command_bytes).hexdigest(),
+                proc_root=proc_root,
+                platform_name=sys.platform,
+            )
         state, process_group_id, start_time_ticks = cls._read_stat(pid, proc_root)
         if state == "Z":
             raise BenchmarkError(f"server PID {pid} is a zombie")
@@ -597,9 +645,24 @@ class AttachedProcessGroup:
             executable=executable,
             cmdline_sha256="sha256:" + hashlib.sha256(cmdline).hexdigest(),
             proc_root=proc_root,
+            platform_name=sys.platform,
         )
 
     def poll(self) -> int | None:
+        if self.platform_name == "darwin":
+            try:
+                process_group_id, start_time_ticks, executable = (
+                    _darwin_process_identity(self.pid)
+                )
+            except BenchmarkError:
+                return 0
+            if (
+                process_group_id != self.process_group_id
+                or start_time_ticks != self.start_time_ticks
+                or Path(executable).resolve() != Path(self.executable).resolve()
+            ):
+                return 0
+            return None
         try:
             state, process_group_id, start_time_ticks = self._read_stat(
                 self.pid, self.proc_root
@@ -623,6 +686,75 @@ class AttachedProcessGroup:
             "executable": self.executable,
             "cmdline_sha256": self.cmdline_sha256,
         }
+
+
+class _DarwinProcBsdInfo(ctypes.Structure):
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32),
+        ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32),
+        ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32),
+        ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32),
+        ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32),
+        ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+
+def _darwin_process_identity(pid: int) -> tuple[int, int, str]:
+    try:
+        library = ctypes.CDLL("/usr/lib/libproc.dylib")
+    except OSError as exc:
+        raise BenchmarkError(f"cannot load macOS libproc: {exc}") from exc
+    library.proc_pidinfo.argtypes = [
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_uint64,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    library.proc_pidinfo.restype = ctypes.c_int
+    info = _DarwinProcBsdInfo()
+    size = library.proc_pidinfo(
+        pid,
+        3,
+        0,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+    )
+    if size != ctypes.sizeof(info) or info.pbi_pid != pid:
+        raise BenchmarkError(f"cannot read macOS process identity for PID {pid}")
+    library.proc_pidpath.argtypes = [
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+    ]
+    library.proc_pidpath.restype = ctypes.c_int
+    path_buffer = ctypes.create_string_buffer(4096)
+    path_size = library.proc_pidpath(pid, path_buffer, len(path_buffer))
+    if path_size <= 0:
+        raise BenchmarkError(f"cannot read macOS executable path for PID {pid}")
+    executable = path_buffer.value.decode("utf-8", errors="strict")
+    start_microseconds = (
+        int(info.pbi_start_tvsec) * 1_000_000 + int(info.pbi_start_tvusec)
+    )
+    if info.pbi_pgid <= 1 or start_microseconds <= 0 or not executable:
+        raise BenchmarkError(f"macOS process identity for PID {pid} is incomplete")
+    return int(info.pbi_pgid), start_microseconds, executable
 
 
 SERVER_LAUNCH_KEYS = {
@@ -862,7 +994,14 @@ def launch_owned_server(config: ServerLaunchConfig, run_id: str) -> OwnedServer:
                         "before process identity could be bound"
                     )
                 try:
-                    identity = AttachedProcessGroup.attach(process.pid)
+                    identity = (
+                        AttachedProcessGroup.attach(
+                            process.pid,
+                            expected_command=config.command,
+                        )
+                        if sys.platform == "darwin"
+                        else AttachedProcessGroup.attach(process.pid)
+                    )
                     break
                 except BenchmarkError:
                     if time.monotonic() >= attach_deadline:
@@ -944,6 +1083,8 @@ def process_group_alive(
     except ProcessLookupError:
         return False
     except PermissionError:
+        return True
+    if sys.platform == "darwin":
         return True
     states, certain = _process_group_member_states(process_group_id, proc_root)
     if not certain or not states:
@@ -1028,6 +1169,22 @@ def process_group_socket_inodes(
 
 def require_owned_base_url_unbound(base_url: str) -> int:
     port = loopback_base_url_port(base_url)
+    if sys.platform == "darwin":
+        parsed = urllib.parse.urlsplit(base_url)
+        family = socket.AF_INET6 if parsed.hostname == "::1" else socket.AF_INET
+        address = (
+            ("::1", port, 0, 0)
+            if family == socket.AF_INET6
+            else ("127.0.0.1", port)
+        )
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as probe:
+                probe.bind(address)
+        except OSError as exc:
+            raise BenchmarkError(
+                f"owned server base URL port {port} is already listening or unavailable: {exc}"
+            ) from exc
+        return port
     if listening_socket_inodes(port):
         raise BenchmarkError(
             f"owned server base URL port {port} is already listening before launch"
@@ -1037,6 +1194,21 @@ def require_owned_base_url_unbound(base_url: str) -> int:
 
 def verify_owned_listener(server: OwnedServer, base_url: str) -> None:
     port = loopback_base_url_port(base_url)
+    if sys.platform == "darwin":
+        if server.process.poll() is not None:
+            raise BenchmarkError(
+                "owned macOS server exited before listener verification"
+            )
+        parsed = urllib.parse.urlsplit(base_url)
+        host = "::1" if parsed.hostname == "::1" else "127.0.0.1"
+        try:
+            with socket.create_connection((host, port), timeout=2.0):
+                pass
+        except OSError as exc:
+            raise BenchmarkError(
+                f"owned macOS server port {port} is not reachable after readiness: {exc}"
+            ) from exc
+        return
     listeners = listening_socket_inodes(port)
     owned = process_group_socket_inodes(server.identity.process_group_id)
     if not listeners:
@@ -1085,7 +1257,7 @@ def _emergency_force_drain_owned_server(
 
     try:
         os.killpg(server.identity.process_group_id, signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
     try:
         returncode = server.process.wait(timeout=10.0)
@@ -3454,6 +3626,59 @@ def validate_benchmark_receipt(value: Any) -> dict[str, Any]:
                 raise BenchmarkError(
                     "receipt memory limit exceeds the selected NVML device capacity"
                 )
+        elif (
+            memory_sampler["source"] == "macos_unified_used"
+            and driver_version in MACOS_MEMORY_SOURCE_DRIVER_VERSIONS
+        ):
+            if memory_sampler["path"] is not None:
+                raise BenchmarkError(
+                    "macOS unified-memory telemetry must not claim a path"
+                )
+            device = _object(
+                memory_sampler["device"], "receipt.memory_sampler.device"
+            )
+            _exact_keys(
+                device,
+                {
+                    "selector",
+                    "index",
+                    "enumerated_device_count",
+                    "name",
+                    "total_bytes",
+                    "unified_memory",
+                    "counter",
+                    "available_definition",
+                },
+                "receipt.memory_sampler.device",
+            )
+            index = _nonnegative_int(
+                device["index"], "receipt.memory_sampler.device.index"
+            )
+            device_count = _positive_int(
+                device["enumerated_device_count"],
+                "receipt.memory_sampler.device.enumerated_device_count",
+            )
+            if (
+                device["selector"] != "system_default"
+                or index != 0
+                or device_count != 1
+                or device["unified_memory"] is not True
+                or device["counter"] != "memory_pressure_free_percentage"
+                or device["available_definition"]
+                != "physical_total_times_reported_free_percentage"
+                or not isinstance(device["name"], str)
+                or not device["name"].startswith("Apple M")
+            ):
+                raise BenchmarkError(
+                    "receipt macOS unified-memory device identity is invalid"
+                )
+            total_bytes = _positive_int(
+                device["total_bytes"], "receipt.memory_sampler.device.total_bytes"
+            )
+            if memory_limit_bytes is not None and memory_limit_bytes > total_bytes:
+                raise BenchmarkError(
+                    "receipt memory limit exceeds macOS physical memory"
+                )
         else:
             raise BenchmarkError("receipt device-memory source is unsupported")
     else:
@@ -5622,11 +5847,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--diagnostics-url", default="auto")
     parser.add_argument(
         "--memory-source",
-        choices=("auto", "drm", "nvml"),
+        choices=("auto", "drm", "macos", "nvml"),
         default="auto",
         help=(
             "whole-device memory telemetry source; auto requires exactly one "
-            "unambiguous DRM or NVML device"
+            "unambiguous DRM, macOS unified-memory, or NVML device"
         ),
     )
     parser.add_argument("--memory-path", default="auto")
@@ -5772,6 +5997,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("NVML device selectors cannot be combined with memory-source drm")
     elif args.memory_source == "nvml" and args.memory_path != "auto":
         parser.error("memory-path cannot be combined with memory-source nvml")
+    elif args.memory_source == "macos" and (
+        args.memory_path != "auto"
+        or args.memory_device_index is not None
+        or args.memory_device_uuid is not None
+    ):
+        parser.error(
+            "memory-source macos cannot be combined with DRM or NVML selectors"
+        )
     if args.model_fingerprint_read_mib_per_second != 0 and not (
         MIN_MODEL_FINGERPRINT_READ_MIB_PER_SECOND
         <= args.model_fingerprint_read_mib_per_second

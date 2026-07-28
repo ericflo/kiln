@@ -10,6 +10,10 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import glob
+import platform
+import re
+import shutil
+import subprocess
 import threading
 from pathlib import Path
 from typing import Any, Callable
@@ -85,6 +89,100 @@ class DrmMemoryCounter:
             "source": self.source,
             "path": str(self.path),
             "device": None,
+        }
+
+    def close(self) -> None:
+        return None
+
+
+class MacOsUnifiedMemoryCounter:
+    """macOS whole-host used-memory counter for Apple unified memory."""
+
+    source = "macos_unified_used"
+
+    def __init__(
+        self,
+        *,
+        platform_name: str | None = None,
+        command_runner: Callable[..., Any] = subprocess.run,
+    ) -> None:
+        if (platform_name or platform.system()) != "Darwin":
+            raise DeviceMemoryError("macOS unified-memory telemetry requires Darwin")
+        self._command_runner = command_runner
+        self._sysctl = shutil.which("sysctl") or "/usr/sbin/sysctl"
+        self._memory_pressure = (
+            shutil.which("memory_pressure") or "/usr/bin/memory_pressure"
+        )
+        total_text = self._command([self._sysctl, "-n", "hw.memsize"], "hw.memsize")
+        name = self._command(
+            [self._sysctl, "-n", "machdep.cpu.brand_string"],
+            "Apple chip identity",
+        )
+        try:
+            total_bytes = int(total_text.strip())
+        except ValueError as exc:
+            raise DeviceMemoryError("macOS hw.memsize is not an integer") from exc
+        if total_bytes <= 0 or not name.strip().startswith("Apple M"):
+            raise DeviceMemoryError(
+                "macOS unified-memory telemetry did not identify Apple Silicon"
+            )
+        self._total_bytes = total_bytes
+        self._identity = {
+            "selector": "system_default",
+            "index": 0,
+            "enumerated_device_count": 1,
+            "name": name.strip(),
+            "total_bytes": total_bytes,
+            "unified_memory": True,
+            "counter": "memory_pressure_free_percentage",
+            "available_definition": "physical_total_times_reported_free_percentage",
+        }
+        self.read_bytes()
+
+    def _command(self, argv: list[str], label: str) -> str:
+        try:
+            completed = self._command_runner(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                timeout=5.0,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise DeviceMemoryError(f"macOS {label} probe failed: {exc}") from exc
+        if completed.returncode != 0:
+            detail = completed.stderr.strip()[-500:]
+            raise DeviceMemoryError(
+                f"macOS {label} probe exited {completed.returncode}"
+                + (f": {detail}" if detail else "")
+            )
+        return completed.stdout
+
+    def read_bytes(self) -> int:
+        text = self._command([self._memory_pressure, "-Q"], "memory pressure")
+        match = re.search(
+            r"(?m)^System-wide memory free percentage:\s*([0-9]+)%\s*$",
+            text,
+        )
+        if match is None:
+            raise DeviceMemoryError(
+                "macOS memory_pressure omitted the free-memory percentage"
+            )
+        free_percent = int(match.group(1))
+        if not 0 <= free_percent <= 100:
+            raise DeviceMemoryError(
+                f"macOS memory_pressure returned invalid free percentage {free_percent}"
+            )
+        available = self._total_bytes * free_percent // 100
+        return self._total_bytes - available
+
+    def receipt_identity(self) -> dict[str, Any]:
+        return {
+            "source": self.source,
+            "path": None,
+            "device": dict(self._identity),
         }
 
     def close(self) -> None:
@@ -350,9 +448,25 @@ def resolve_memory_counter(
     nvml_device_index: int | None,
     nvml_device_uuid: str | None = None,
     nvml_library_loader: Callable[[str], Any] = ctypes.CDLL,
-) -> DrmMemoryCounter | NvmlMemoryCounter:
+    platform_name: str | None = None,
+    macos_command_runner: Callable[..., Any] = subprocess.run,
+) -> DrmMemoryCounter | MacOsUnifiedMemoryCounter | NvmlMemoryCounter:
     """Resolve one unambiguous whole-device memory counter."""
 
+    platform_name = platform.system() if platform_name is None else platform_name
+    if source == "macos":
+        if (
+            drm_path != "auto"
+            or nvml_device_index is not None
+            or nvml_device_uuid is not None
+        ):
+            raise DeviceMemoryError(
+                "macOS unified-memory telemetry does not accept DRM or NVML selectors"
+            )
+        return MacOsUnifiedMemoryCounter(
+            platform_name=platform_name,
+            command_runner=macos_command_runner,
+        )
     if source == "drm":
         if nvml_device_index is not None or nvml_device_uuid is not None:
             raise DeviceMemoryError(
@@ -378,6 +492,11 @@ def resolve_memory_counter(
     ):
         raise DeviceMemoryError(
             "explicit memory selectors require --memory-source drm or nvml"
+        )
+    if platform_name == "Darwin":
+        return MacOsUnifiedMemoryCounter(
+            platform_name=platform_name,
+            command_runner=macos_command_runner,
         )
 
     drm_candidates = _drm_candidates()
@@ -422,7 +541,11 @@ class MemorySampler:
 
     def __init__(
         self,
-        counter: DrmMemoryCounter | NvmlMemoryCounter | Path | None,
+        counter: DrmMemoryCounter
+        | MacOsUnifiedMemoryCounter
+        | NvmlMemoryCounter
+        | Path
+        | None,
         interval_ms: int,
     ) -> None:
         if interval_ms <= 0:
