@@ -289,6 +289,10 @@ class ServeRocmSoakTests(unittest.TestCase):
             soak.runtime_for_variant(soak.VULKAN_ENDURANCE_RUNTIME.variant_id),
             soak.VULKAN_ENDURANCE_RUNTIME,
         )
+        self.assertIs(
+            soak.runtime_for_variant(soak.CUDA_ENDURANCE_RUNTIME.variant_id),
+            soak.CUDA_ENDURANCE_RUNTIME,
+        )
         with self.assertRaisesRegex(soak.SoakError, "must name one of"):
             soak.runtime_for_variant("unknown")
 
@@ -403,6 +407,29 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(
             vulkan["soak"]["accelerator_telemetry"]["mode"], "if_available"
         )
+        cuda = soak.effective_config(
+            soak.CUDA_ENDURANCE_DURATION_SECONDS,
+            soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
+            soak.CUDA_ENDURANCE_RUNTIME,
+        )
+        self.assertEqual(cuda["build"]["features"], "cuda")
+        self.assertTrue(cuda["build"]["qualification_device_required"])
+        self.assertNotIn("cuda_archs", cuda["build"])
+        self.assertNotIn("cudarc_cuda_version", cuda["build"])
+        self.assertEqual(cuda["runtime"]["serving_profile"], "stable")
+        self.assertEqual(cuda["server"]["max_decode_batch"], 4)
+        self.assertEqual(
+            cuda["soak"]["wave_concurrency"], {"wave_0": 1, "wave_1": 4}
+        )
+        self.assertEqual(cuda["soak"]["accelerator_telemetry"], {"mode": "disabled"})
+        self.assertEqual(
+            cuda["soak"]["gpu_memory_source"],
+            'server_metrics:kiln_gpu_memory_bytes{kind="used"}',
+        )
+        self.assertEqual(
+            cuda["memory"],
+            {"floor_gb": 1.5, "inference_memory_fraction": 0.7},
+        )
         self.assertEqual(
             soak.effective_config(60.0, 123)["soak"][
                 "active_gpu_peak_growth_limit_bytes"
@@ -426,6 +453,32 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(parsed["server"]["max_decode_batch"], 2)
         self.assertEqual(parsed["batching"]["prefill_admission_quantum"], 2)
         self.assertEqual(parsed["memory"]["vulkan_buffer_pool_gb"], 3.5)
+
+    def test_cuda_launch_file_is_portable_and_uses_the_measured_memory_envelope(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "kiln.toml"
+            runtime = soak.CUDA_ENDURANCE_RUNTIME
+            soak.mixed.write_server_config(
+                path,
+                runtime.variant_id,
+                root / "model",
+                8420,
+                root / "adapters",
+                root / "snapshots",
+                rocm_graph_cache_entries=runtime.graph_cache_max,
+                inference_memory_fraction=runtime.inference_memory_fraction,
+                memory_floor_gb=runtime.memory_floor_gb,
+            )
+            parsed = parse_generated_toml(path.read_text(encoding="utf-8"))
+        self.assertEqual(parsed["server"]["serving_profile"], "stable")
+        self.assertEqual(parsed["server"]["max_decode_batch"], 4)
+        self.assertEqual(parsed["memory"]["inference_memory_fraction"], 0.7)
+        self.assertEqual(parsed["memory"]["floor_gb"], 1.5)
+        self.assertFalse(parsed["memory"]["cuda_graphs"])
+        self.assertEqual(parsed["memory"]["vulkan_buffer_pool_gb"], 0.0)
 
     def test_process_memory_snapshot_requires_and_converts_linux_fields(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1685,6 +1738,54 @@ class ServeRocmSoakTests(unittest.TestCase):
             ),
         )
 
+    def test_checked_in_cuda_endurance_workload_matches_driver_contract(self) -> None:
+        path = ROOT / "qualification/workloads/serving-cuda-endurance-v1.json"
+        workload = json.loads(path.read_text())
+        self.assertEqual(workload["workload_id"], "serving-cuda-endurance-v1")
+        self.assertEqual(workload["kind"], "soak")
+        self.assertIsNone(workload["comparison_policy"])
+        self.assertEqual(len(workload["variants"]), 1)
+        variant = workload["variants"][0]
+        self.assertEqual(variant["id"], soak.CUDA_ENDURANCE_RUNTIME.variant_id)
+        self.assertEqual(variant["backend"], "cuda")
+        self.assertEqual(
+            variant["effective_config"],
+            soak.effective_config(
+                soak.CUDA_ENDURANCE_DURATION_SECONDS,
+                soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
+                soak.CUDA_ENDURANCE_RUNTIME,
+            ),
+        )
+        self.assertEqual(len(variant["cases"]), 1)
+        case = variant["cases"][0]
+        self.assertEqual(case["id"], soak.CASE_ID)
+        self.assertEqual(
+            case["result_protocol"]["declared_metrics"],
+            sorted(soak.metric_definitions(soak.CUDA_ENDURANCE_RUNTIME)),
+        )
+        self.assertEqual(
+            case["command"],
+            [
+                "python3",
+                "scripts/qualification/serve_development_soak.py",
+                "--model-path",
+                "${model_path}",
+                "--seed",
+                "${seed}",
+                "--minimum-duration-seconds",
+                "28800",
+                "--memory-growth-limit-bytes",
+                str(soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES),
+            ],
+        )
+        self.assertEqual(
+            case["timeout_seconds"],
+            soak.qualification_case_timeout_seconds(
+                soak.CUDA_ENDURANCE_DURATION_SECONDS,
+                soak.CUDA_ENDURANCE_RUNTIME,
+            ),
+        )
+
     def test_phase_deadlines_and_case_timeout_are_independent(self) -> None:
         started = 100.0
         self.assertEqual(
@@ -1758,6 +1859,18 @@ class ServeRocmSoakTests(unittest.TestCase):
             guard.metric_values()["host_mem_available_min_bytes"], 7 * 1024**3
         )
 
+    def test_disabled_accelerator_telemetry_has_no_backend_probe_or_metrics(
+        self,
+    ) -> None:
+        sampler = soak.AcceleratorTelemetrySampler(enabled=False, required=False)
+        with mock.patch.object(
+            soak, "resolve_amd_accelerator_telemetry_paths"
+        ) as resolve:
+            sampler.start()
+            sampler.close()
+        resolve.assert_not_called()
+        self.assertEqual(sampler.metric_values_since(None), {})
+        self.assertEqual(sampler.errors, [])
 
     def test_accelerator_telemetry_resolves_and_aggregates_amd_sysfs(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1899,6 +2012,22 @@ class ServeRocmSoakTests(unittest.TestCase):
         )
         self.assertEqual(
             [metric["name"] for metric in vulkan_metrics], sorted(vulkan_values)
+        )
+        cuda_values = {
+            name: 0 for name in soak.metric_definitions(soak.CUDA_ENDURANCE_RUNTIME)
+        }
+        self.assertEqual(
+            set(cuda_values),
+            set(soak.METRIC_DEFINITIONS) | set(soak.HOST_SAFETY_METRIC_DEFINITIONS),
+        )
+        self.assertTrue(
+            set(cuda_values).isdisjoint(soak.ACCELERATOR_TELEMETRY_METRIC_DEFINITIONS)
+        )
+        cuda_metrics = soak.metrics_from_values(
+            cuda_values, soak.CUDA_ENDURANCE_RUNTIME
+        )
+        self.assertEqual(
+            [metric["name"] for metric in cuda_metrics], sorted(cuda_values)
         )
     def test_arguments_enforce_bounded_duration_and_growth(self) -> None:
         args = soak.parse_args(

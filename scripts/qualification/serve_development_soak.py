@@ -29,6 +29,7 @@ RUNTIME_VARIANT = "autoscale-off"
 ROCM_ENDURANCE_VARIANT = "rocm-endurance"
 VULKAN_RUNTIME_VARIANT = "vulkan-development-soak"
 VULKAN_ENDURANCE_VARIANT = "vulkan-endurance"
+CUDA_ENDURANCE_VARIANT = "cuda-endurance"
 VULKAN_MAX_PREFILL_TOKENS_PER_CYCLE = 128
 VULKAN_QUALIFIED_ACTIVE_REQUESTS = 4
 VULKAN_QUALIFIED_DECODE_BATCH = 2
@@ -51,6 +52,7 @@ ROCM_REQUEST_TIMEOUT_SECONDS = 120.0
 QUALIFICATION_DURATION_SECONDS = 1800.0
 ROCM_ENDURANCE_DURATION_SECONDS = 24 * 60 * 60.0
 VULKAN_ENDURANCE_DURATION_SECONDS = 8 * 60 * 60.0
+CUDA_ENDURANCE_DURATION_SECONDS = 8 * 60 * 60.0
 CASE_TEARDOWN_GRACE_SECONDS = 180.0
 REQUEST_WORKER_CLEANUP_TIMEOUT_SECONDS = 10.0
 MAX_STEADY_STATE_WARMUP_WAVES = 16
@@ -150,9 +152,41 @@ def _vulkan_variant_config() -> dict[str, Any]:
     return config
 
 
+CUDA_BUILD_SPEC = mixed.SourceBuildSpec(
+    backend="CUDA",
+    features="cuda",
+    qualification_device_required=True,
+)
+
+
+def _cuda_variant_config() -> dict[str, Any]:
+    config = mixed._variant_config(
+        serving_profile="stable",
+        kv_autoscale_requested=False,
+        kv_autoscale_enabled=False,
+        memory_reclaim_requested_mode="off",
+        memory_reclaim_mode="off",
+        rocm_graphs_requested=False,
+        rocm_graphs_enabled=False,
+        request_timeout_seconds=600,
+        max_decode_batch=4,
+    )
+    config["build"] = CUDA_BUILD_SPEC.effective_config()
+    config["runtime"].update(
+        {
+            "prefix_cache_requested_enabled": True,
+            "prefix_cache_effective_enabled": True,
+            "prefix_cache_effective_reason": "active",
+            "vulkan_buffer_pool_gb": 0.0,
+        }
+    )
+    return config
+
+
 mixed.VARIANT_CONFIGS[ROCM_ENDURANCE_VARIANT] = mixed.VARIANT_CONFIGS[RUNTIME_VARIANT]
 mixed.VARIANT_CONFIGS[VULKAN_RUNTIME_VARIANT] = _vulkan_variant_config()
 mixed.VARIANT_CONFIGS[VULKAN_ENDURANCE_VARIANT] = _vulkan_variant_config()
+mixed.VARIANT_CONFIGS[CUDA_ENDURANCE_VARIANT] = _cuda_variant_config()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -184,6 +218,9 @@ class SoakRuntime:
     setup_deadline_seconds: float
     host_mem_available_floor_bytes: int | None = None
     host_swap_growth_limit_bytes: int | None = None
+    inference_memory_fraction: float | None = None
+    memory_floor_gb: float | None = None
+    accelerator_telemetry_enabled: bool = True
     accelerator_telemetry_required: bool = False
 
 
@@ -254,6 +291,38 @@ VULKAN_ENDURANCE_RUNTIME = dataclasses.replace(
     VULKAN_RUNTIME,
     variant_id=VULKAN_ENDURANCE_VARIANT,
 )
+CUDA_ENDURANCE_RUNTIME = SoakRuntime(
+    variant_id=CUDA_ENDURANCE_VARIANT,
+    backend="cuda",
+    build_spec=CUDA_BUILD_SPEC,
+    gpu_memory_scope="device_global",
+    gpu_memory_source='server_metrics:kiln_gpu_memory_bytes{kind="used"}',
+    graph_execution_required=False,
+    wave_concurrency=(1, 4),
+    prompt_words=(16, 32, 64, 96),
+    prompt_assignment=COHORT_BY_CYCLE,
+    max_tokens=32,
+    cancel_every_waves=4,
+    cancellation_max_tokens=512,
+    cancellation_prompt_words=48,
+    request_timeout_seconds=600.0,
+    max_steady_state_warmup_waves=16,
+    graph_cache_max=mixed.CUDA_GRAPH_CACHE_ENTRIES,
+    min_stabilization_cycles=4,
+    max_stabilization_cycles=8,
+    required_stable_cycles=2,
+    stabilization_gpu_delta_limit_bytes=64 * 1024 * 1024,
+    stabilization_rss_delta_limit_bytes=16 * 1024 * 1024,
+    active_gpu_peak_growth_limit_bytes=DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
+    vulkan_allocation_growth_limit_count=None,
+    vulkan_buffer_pool_gb=0.0,
+    setup_deadline_seconds=1800.0,
+    host_mem_available_floor_bytes=HOST_MEMORY_AVAILABLE_FLOOR_BYTES,
+    host_swap_growth_limit_bytes=HOST_SWAP_GROWTH_LIMIT_BYTES,
+    inference_memory_fraction=0.7,
+    memory_floor_gb=1.5,
+    accelerator_telemetry_enabled=False,
+)
 RUNTIMES = {
     runtime.variant_id: runtime
     for runtime in (
@@ -261,6 +330,7 @@ RUNTIMES = {
         ROCM_ENDURANCE_RUNTIME,
         VULKAN_RUNTIME,
         VULKAN_ENDURANCE_RUNTIME,
+        CUDA_ENDURANCE_RUNTIME,
     )
 }
 
@@ -575,6 +645,10 @@ VULKAN_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "vulkan_buffer_pool_uncached_allocated_bytes": ("bytes", "sum", True),
     "vulkan_buffer_pool_uncached_allocation_count": ("count", "sum", True),
 }
+CUDA_METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
+    **METRIC_DEFINITIONS,
+    **HOST_SAFETY_METRIC_DEFINITIONS,
+}
 
 
 class SoakError(RuntimeError):
@@ -691,25 +765,33 @@ def effective_config(
         effective["batching"] = base["batching"]
     if "model" in base:
         effective["model"] = base["model"]
-    effective["soak"]["accelerator_telemetry"] = {
-        "active_busy_floor_percent": (
-            ACCELERATOR_TELEMETRY_ACTIVE_BUSY_FLOOR_PERCENT
-        ),
-        "amd_gpu_vendor_id": AMD_GPU_VENDOR_ID,
-        "device_selector": "exactly_one_amd_drm_device",
-        "mode": (
-            "required"
-            if runtime.accelerator_telemetry_required
-            else "if_available"
-        ),
-        "poll_interval_ms": int(HOST_GUARD_POLL_INTERVAL_SECONDS * 1000),
-        "sources": {
-            "busy": "drm_device/gpu_busy_percent",
-            "power": "amdgpu_hwmon/power_PPT_average",
-            "sclk": "amdgpu_hwmon/freq_sclk_input",
-            "sclk_advertised_max": "drm_device/pp_dpm_sclk",
-        },
-    }
+    if runtime.inference_memory_fraction is not None:
+        effective["memory"] = {
+            "floor_gb": runtime.memory_floor_gb,
+            "inference_memory_fraction": runtime.inference_memory_fraction,
+        }
+    if runtime.accelerator_telemetry_enabled:
+        effective["soak"]["accelerator_telemetry"] = {
+            "active_busy_floor_percent": (
+                ACCELERATOR_TELEMETRY_ACTIVE_BUSY_FLOOR_PERCENT
+            ),
+            "amd_gpu_vendor_id": AMD_GPU_VENDOR_ID,
+            "device_selector": "exactly_one_amd_drm_device",
+            "mode": (
+                "required"
+                if runtime.accelerator_telemetry_required
+                else "if_available"
+            ),
+            "poll_interval_ms": int(HOST_GUARD_POLL_INTERVAL_SECONDS * 1000),
+            "sources": {
+                "busy": "drm_device/gpu_busy_percent",
+                "power": "amdgpu_hwmon/power_PPT_average",
+                "sclk": "amdgpu_hwmon/freq_sclk_input",
+                "sclk_advertised_max": "drm_device/pp_dpm_sclk",
+            },
+        }
+    else:
+        effective["soak"]["accelerator_telemetry"] = {"mode": "disabled"}
     if runtime.backend == "rocm":
         effective["soak"]["rocm_graph_admission_policy"] = (
             ROCM_GRAPH_ADMISSION_POLICY
@@ -1272,9 +1354,11 @@ class AcceleratorTelemetrySampler:
     def __init__(
         self,
         *,
+        enabled: bool = True,
         required: bool,
         drm_root: Path = Path("/sys/class/drm"),
     ) -> None:
+        self.enabled = enabled
         self.required = required
         self.drm_root = drm_root
         self.paths: AcceleratorTelemetryPaths | None = None
@@ -1291,6 +1375,8 @@ class AcceleratorTelemetrySampler:
         self._closed = False
 
     def start(self) -> None:
+        if not self.enabled:
+            return
         try:
             self.paths = resolve_amd_accelerator_telemetry_paths(self.drm_root)
             self._sample()
@@ -1387,6 +1473,8 @@ class AcceleratorTelemetrySampler:
                 return
 
     def metric_values_since(self, started: float | None) -> dict[str, float | int]:
+        if not self.enabled:
+            return {}
         values: dict[str, float | int] = {
             name: 0 for name in ACCELERATOR_TELEMETRY_METRIC_DEFINITIONS
         }
@@ -2486,6 +2574,8 @@ def metric_definitions(
         return ROCM_METRIC_DEFINITIONS
     if runtime.backend == "vulkan":
         return VULKAN_METRIC_DEFINITIONS
+    if runtime.backend == "cuda":
+        return CUDA_METRIC_DEFINITIONS
     raise SoakError(f"unsupported soak metric backend {runtime.backend!r}")
 
 
@@ -2664,6 +2754,8 @@ def execute(
         adapter_dir,
         snapshot_dir,
         rocm_graph_cache_entries=runtime.graph_cache_max,
+        inference_memory_fraction=runtime.inference_memory_fraction,
+        memory_floor_gb=runtime.memory_floor_gb,
     )
     process, server_log = mixed.start_server(
         binary, config_path, runtime.variant_id, runtime.build_spec
@@ -2678,7 +2770,8 @@ def execute(
             shutil.rmtree(run_dir, ignore_errors=True)
         raise
     accelerator_sampler = AcceleratorTelemetrySampler(
-        required=runtime.accelerator_telemetry_required
+        enabled=runtime.accelerator_telemetry_enabled,
+        required=runtime.accelerator_telemetry_required,
     )
     host_guard = (
         HostMemoryGuard(process, runtime.host_mem_available_floor_bytes)
