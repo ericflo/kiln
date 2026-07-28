@@ -294,7 +294,9 @@ PY
         CARGO_BUILD_JOBS
         CARGO_HOME
         CARGO_NET_OFFLINE
+        CUDARC_CUDA_VERSION
         HOME
+        KILN_CUDA_ARCHS
         KILN_ROCM_ARCHS
         LANG
         LC_ALL
@@ -309,8 +311,6 @@ PY
     )
     if [[ "$environment_policy" == "closed-qualification-test-v1" ]]; then
         closed_environment_names+=(
-            CUDARC_CUDA_VERSION
-            KILN_CUDA_ARCHS
             KILN_QUALIFICATION
             KILN_QUALIFICATION_HF_LOGITS_PATH
             KILN_QUALIFICATION_MODEL_PATH
@@ -366,17 +366,18 @@ if [[ "$execution_mode" == "scope" ]]; then
     fi
 fi
 
-# A process in a bubblewrap PID namespace cannot be attached to the host user
+# A process in a private PID namespace cannot be attached to the host user
 # manager as a scope. Qualification uses a transient service instead: Cargo is
-# still in one bounded cgroup, while PrivateNetwork independently preserves the
-# offline build boundary. The named unit and EXIT trap make client cancellation
-# stop the complete compiler/linker tree; RuntimeMaxSec bounds hard-kill cases.
+# still in one bounded cgroup, while the same fail-closed namespace helper used
+# by qualification supplies loopback-only networking and native executable
+# containment. The named unit and EXIT trap make client cancellation stop the
+# complete compiler/linker tree; RuntimeMaxSec bounds hard-kill cases.
 
 environment_args=()
 if [[ "$environment_policy" == "inherit" ]]; then
     while IFS= read -r name; do
         if [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-            environment_args+=("--setenv=$name")
+            environment_args+=("--setenv=$name=${!name}")
         fi
     done < <(compgen -e)
 else
@@ -387,8 +388,10 @@ else
         CARGO_BUILD_JOBS
         CARGO_HOME
         CARGO_NET_OFFLINE
+        CUDARC_CUDA_VERSION
         DBUS_SESSION_BUS_ADDRESS
         HOME
+        KILN_CUDA_ARCHS
         KILN_ROCM_ARCHS
         LANG
         LC_ALL
@@ -406,8 +409,6 @@ else
         # Runner-owned test controls derived from the committed qualification
         # manifest. Product/runtime KILN_* settings remain excluded.
         closed_source_build_environment+=(
-            CUDARC_CUDA_VERSION
-            KILN_CUDA_ARCHS
             KILN_QUALIFICATION
             KILN_QUALIFICATION_HF_LOGITS_PATH
             KILN_QUALIFICATION_MODEL_PATH
@@ -415,14 +416,39 @@ else
     fi
     for name in "${closed_source_build_environment[@]}"; do
         if [[ -v "$name" ]]; then
-            environment_args+=("--setenv=$name")
+            environment_args+=("--setenv=$name=${!name}")
         fi
     done
 fi
 
-private_network_property="PrivateNetwork=no"
+private_network_prefix=()
 if [[ "$private_network" == "1" ]]; then
-    private_network_property="PrivateNetwork=yes"
+    for tool in unshare python3 ip; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo "error: private-network transient service requires '$tool'" >&2
+            exit 2
+        fi
+    done
+    script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+    namespace_helper="$script_directory/qualification/linux_namespace_exec.py"
+    if [[ -L "$namespace_helper" || ! -f "$namespace_helper" ]]; then
+        echo "error: private-network namespace helper is not a regular file: $namespace_helper" >&2
+        exit 2
+    fi
+    private_network_prefix=(
+        "$(command -v unshare)"
+        --user
+        --map-root-user
+        --net
+        --pid
+        --fork
+        --kill-child=SIGKILL
+        --mount
+        --mount-proc=/proc
+        "$(command -v python3)"
+        "$namespace_helper"
+        --
+    )
 fi
 
 systemd-run \
@@ -443,7 +469,8 @@ systemd-run \
     -p SendSIGKILL=yes \
     -p TimeoutStopSec=15s \
     -p "RuntimeMaxSec=${service_runtime_max_seconds}s" \
-    -p "$private_network_property" \
+    -p PrivateNetwork=no \
+    "${private_network_prefix[@]}" \
     "$cargo_executable" "$@" &
 bounded_runner_pid=$!
 if wait_for_bounded_runner; then

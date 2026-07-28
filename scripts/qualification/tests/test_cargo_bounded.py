@@ -110,16 +110,19 @@ class BoundedCargoTests(unittest.TestCase):
             environment.update(
                 {
                     "CARGO": "/bin/true",
+                    "CUDARC_CUDA_VERSION": "12080",
                     "KILN_CARGO_EXECUTION_MODE": "transient-service",
                     "KILN_CARGO_CPU_QUOTA_PERCENT": "50",
                     "KILN_CARGO_MIN_AVAILABLE_GIB": "1",
                     "KILN_CARGO_PRIVATE_NETWORK": "1",
                     "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS": "300",
+                    "KILN_CUDA_ARCHS": "80,89",
                     "KILN_QUALIFICATION": "1",
                     "KILN_QUALIFICATION_HF_LOGITS_PATH": "/oracles/hf-logits.safetensors",
                     "KILN_QUALIFICATION_MODEL_PATH": "/models/source-pinned",
                     "KILN_TEST_SECRET_TOKEN": "must-not-enter-service",
                     "KILN_TEST_SYSTEMD_RUN_ARGS": str(arguments_path),
+                    "LC_ALL": "",
                     "PATH": f"{tool_dir}:{environment['PATH']}",
                 }
             )
@@ -139,20 +142,47 @@ class BoundedCargoTests(unittest.TestCase):
                 "--wait",
                 "--collect",
                 "--pipe",
-                "--setenv=PATH",
+                f"--setenv=PATH={environment['PATH']}",
+                "--setenv=CUDARC_CUDA_VERSION=12080",
+                "--setenv=KILN_CUDA_ARCHS=80,89",
+                "--setenv=LC_ALL=",
                 "CPUQuota=50%",
                 "MemorySwapMax=0",
                 "KillMode=control-group",
                 "RuntimeMaxSec=300s",
-                "PrivateNetwork=yes",
+                "PrivateNetwork=no",
+                str(ROOT / "scripts/qualification/linux_namespace_exec.py"),
+                "--map-root-user",
+                "--kill-child=SIGKILL",
+                "--mount-proc=/proc",
                 "/bin/true",
                 "check",
             ):
                 self.assertIn(expected, arguments)
-            self.assertNotIn("--setenv=KILN_TEST_SECRET_TOKEN", arguments)
-            self.assertNotIn("--setenv=KILN_QUALIFICATION", arguments)
-            self.assertNotIn("--setenv=KILN_QUALIFICATION_HF_LOGITS_PATH", arguments)
-            self.assertNotIn("--setenv=KILN_QUALIFICATION_MODEL_PATH", arguments)
+            self.assertFalse(
+                any(
+                    argument.startswith("--setenv=KILN_TEST_SECRET_TOKEN=")
+                    for argument in arguments
+                )
+            )
+            self.assertFalse(
+                any(
+                    argument.startswith("--setenv=KILN_QUALIFICATION=")
+                    for argument in arguments
+                )
+            )
+            self.assertFalse(
+                any(
+                    argument.startswith("--setenv=KILN_QUALIFICATION_HF_LOGITS_PATH=")
+                    for argument in arguments
+                )
+            )
+            self.assertFalse(
+                any(
+                    argument.startswith("--setenv=KILN_QUALIFICATION_MODEL_PATH=")
+                    for argument in arguments
+                )
+            )
 
             environment["KILN_CARGO_ENVIRONMENT_POLICY"] = (
                 "closed-qualification-test-v1"
@@ -168,10 +198,21 @@ class BoundedCargoTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             arguments = arguments_path.read_text(encoding="utf-8").splitlines()
-            self.assertIn("--setenv=KILN_QUALIFICATION", arguments)
-            self.assertIn("--setenv=KILN_QUALIFICATION_HF_LOGITS_PATH", arguments)
-            self.assertIn("--setenv=KILN_QUALIFICATION_MODEL_PATH", arguments)
-            self.assertNotIn("--setenv=KILN_TEST_SECRET_TOKEN", arguments)
+            self.assertIn("--setenv=KILN_QUALIFICATION=1", arguments)
+            self.assertIn(
+                "--setenv=KILN_QUALIFICATION_HF_LOGITS_PATH=/oracles/hf-logits.safetensors",
+                arguments,
+            )
+            self.assertIn(
+                "--setenv=KILN_QUALIFICATION_MODEL_PATH=/models/source-pinned",
+                arguments,
+            )
+            self.assertFalse(
+                any(
+                    argument.startswith("--setenv=KILN_TEST_SECRET_TOKEN=")
+                    for argument in arguments
+                )
+            )
 
     def test_scope_applies_aggregate_cpu_quota(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
