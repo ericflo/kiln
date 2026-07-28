@@ -178,12 +178,14 @@ class WorkloadTests(unittest.TestCase):
                     "device-probe",
                     "paged-kv-resize",
                     "server-admission-rejection",
+                    "server-allocation-failure-recovery",
                 ],
             )
             for case_id in (
                 "allocator-reclaim",
                 "paged-kv-resize",
                 "server-admission-rejection",
+                "server-allocation-failure-recovery",
             ):
                 case = cases[case_id]
                 self.assertEqual(case["environment"]["KILN_QUALIFICATION"], "1")
@@ -201,6 +203,15 @@ class WorkloadTests(unittest.TestCase):
                 any(
                     "before allocation" in assertion["pattern"]
                     for assertion in admission["output_assertions"]
+                    if assertion["match"] == "required"
+                )
+            )
+            allocation_failure = cases["server-allocation-failure-recovery"]
+            self.assertTrue(
+                any(
+                    "cuda-allocation-failure" in assertion["pattern"]
+                    and "injected first allocator failure" in assertion["pattern"]
+                    for assertion in allocation_failure["output_assertions"]
                     if assertion["match"] == "required"
                 )
             )

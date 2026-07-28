@@ -2,7 +2,7 @@
   "schema_version": 1,
   "workload_id": "cuda-memory-lifecycle-v1",
   "kind": "correctness",
-  "description": "Run bounded fail-closed CUDA allocator reclaim and full paged-KV physical shrink/grow lifecycle gates on either named RTX 4090 machine.",
+  "description": "Run bounded fail-closed CUDA admission, allocation-failure recovery, allocator reclaim, and full paged-KV physical shrink/grow lifecycle gates on either named RTX 4090 evidence host.",
   "determinism": {
     "seed": 20260721,
     "seed_delivery": "fixed_fixture",
@@ -148,6 +148,56 @@
               "stream": "combined",
               "match": "forbidden",
               "pattern": "(?i)(skip.*cuda|no CUDA device|test result: FAILED|out of memory)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "server-allocation-failure-recovery",
+          "description": "Inject one allocation error into the server auto-sizer, require its lower-budget retry to allocate a real CUDA cache, then drop and trim all device storage.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-server",
+            "--no-default-features",
+            "--features",
+            "cuda",
+            "--lib",
+            "state::tests::cuda_allocator_failure_retries_on_real_device_and_cleans_up",
+            "--",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "CUDARC_CUDA_VERSION": "12080",
+            "KILN_CUDA_ARCHS": "89",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[cuda-allocation-failure\\] OK: injected first allocator failure; fallback allocated real CUDA cache and cleanup succeeded"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(skip.*cuda|no CUDA device|test result: FAILED)"
             }
           ],
           "result_protocol": {
@@ -342,6 +392,56 @@
               "stream": "combined",
               "match": "forbidden",
               "pattern": "(?i)(skip.*cuda|no CUDA device|test result: FAILED|out of memory)"
+            }
+          ],
+          "result_protocol": {
+            "format": "qualification-case-result-v1",
+            "producer": "runner",
+            "path_environment_variable": "KILN_QUALIFICATION_CASE_RESULT",
+            "declared_metrics": ["case_pass", "exit_code", "output_assertion_failures"]
+          }
+        },
+        {
+          "id": "server-allocation-failure-recovery",
+          "description": "Inject one allocation error into the server auto-sizer, require its lower-budget retry to allocate a real CUDA cache, then drop and trim all device storage.",
+          "required": true,
+          "command": [
+            "scripts/qualification/cargo-test-bounded.sh",
+            "test",
+            "--locked",
+            "--offline",
+            "-p",
+            "kiln-server",
+            "--no-default-features",
+            "--features",
+            "cuda",
+            "--lib",
+            "state::tests::cuda_allocator_failure_retries_on_real_device_and_cleans_up",
+            "--",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "working_directory": ".",
+          "environment": {
+            "CARGO_NET_OFFLINE": "true",
+            "CUDARC_CUDA_VERSION": "12080",
+            "KILN_CUDA_ARCHS": "89",
+            "KILN_QUALIFICATION": "1"
+          },
+          "timeout_seconds": 1800,
+          "expected_exit_codes": [0],
+          "output_assertions": [
+            {
+              "stream": "combined",
+              "match": "required",
+              "pattern": "\\[cuda-allocation-failure\\] OK: injected first allocator failure; fallback allocated real CUDA cache and cleanup succeeded"
+            },
+            {
+              "stream": "combined",
+              "match": "forbidden",
+              "pattern": "(?i)(skip.*cuda|no CUDA device|test result: FAILED)"
             }
           ],
           "result_protocol": {

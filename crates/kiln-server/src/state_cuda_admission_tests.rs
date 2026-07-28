@@ -51,3 +51,78 @@ fn cuda_live_allocator_rejects_oversized_kv_before_allocation() {
         SAFETY_FLOOR / MIB,
     );
 }
+
+#[test]
+#[ignore = "requires an explicit CUDA qualification device"]
+fn cuda_allocator_failure_retries_on_real_device_and_cleans_up() {
+    assert!(
+        kiln_tensor::cuda_is_available(),
+        "CUDA qualification requires logical device zero"
+    );
+
+    let allocation_attempt = std::cell::Cell::new(0usize);
+    let compute_blocks = |fraction: f64| if fraction > 0.80 { 16 } else { 8 };
+    let success = auto_size_with_retry(
+        0.85,
+        &[0.75],
+        &compute_blocks,
+        |num_blocks| -> Result<PagedKvCacheKt, String> {
+            let attempt = allocation_attempt.get() + 1;
+            allocation_attempt.set(attempt);
+            if attempt == 1 {
+                return Err("injected CUDA allocation failure".to_string());
+            }
+            PagedKvCacheKt::new_with_fp8(
+                1,
+                num_blocks,
+                16,
+                1,
+                4,
+                DType::F32,
+                kiln_tensor::Device::Cuda(0),
+                false,
+            )
+            .map_err(|error| format!("real CUDA fallback allocation failed: {error}"))
+        },
+    )
+    .unwrap_or_else(|failure| {
+        panic!(
+            "CUDA auto-sizer did not recover from injected allocation failure: {:?}",
+            failure.attempts
+        )
+    });
+
+    assert_eq!(allocation_attempt.get(), 2);
+    assert_eq!(success.fraction, 0.75);
+    assert_eq!(success.num_blocks, 8);
+    assert_eq!(success.attempted_failures.len(), 1);
+    assert_eq!(success.attempted_failures[0].0, 0.85);
+    assert_eq!(success.attempted_failures[0].1, 16);
+    assert_eq!(
+        success.attempted_failures[0].2,
+        "injected CUDA allocation failure"
+    );
+    let (key_pool, _) = success
+        .cache
+        .pool_tensors(0)
+        .expect("real CUDA fallback cache layer");
+    assert!(
+        matches!(key_pool.device(), kiln_tensor::Device::Cuda(0)),
+        "fallback cache must be allocated on logical CUDA device zero"
+    );
+    drop(success);
+
+    kiln_tensor::cuda_synchronize_default_stream(0)
+        .expect("synchronize real CUDA fallback allocation");
+    kiln_tensor::cuda_trim_pool(0, 0).expect("trim after real CUDA fallback allocation");
+    let probe = kiln_tensor::cuda_zeros_ctx(0, kiln_tensor::DType::U8, 1024 * 1024)
+        .expect("post-recovery CUDA allocation");
+    kiln_tensor::cuda_synchronize_default_stream(0)
+        .expect("synchronize post-recovery CUDA allocation");
+    drop(probe);
+    kiln_tensor::cuda_trim_pool(0, 0).expect("final CUDA trim after allocation recovery");
+
+    println!(
+        "[cuda-allocation-failure] OK: injected first allocator failure; fallback allocated real CUDA cache and cleanup succeeded"
+    );
+}
