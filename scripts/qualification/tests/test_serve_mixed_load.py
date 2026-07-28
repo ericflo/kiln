@@ -857,6 +857,31 @@ class ServeMixedLoadTests(unittest.TestCase):
         self.assertEqual(health["generation"], 2)
         self.assertEqual(request.call_count, 2)
 
+    def test_wait_ready_accepts_health_without_backend_prewarm_log(self) -> None:
+        health = {
+            "status": "ok",
+            "checks": [
+                {"name": "model_loaded", "pass": True},
+                {"name": "inference_prewarm_complete", "pass": True},
+            ],
+        }
+        process = mock.Mock()
+        process.poll.return_value = None
+        server_log = mock.Mock()
+        server_log.prewarm_complete = serve.threading.Event()
+
+        with mock.patch.object(serve, "json_request", return_value=health) as request:
+            result = serve.wait_ready(
+                1234,
+                process,
+                server_log,
+                serve.time.monotonic() + 5.0,
+                require_prewarm_log_evidence=False,
+            )
+
+        self.assertEqual(result, health)
+        request.assert_called_once_with(1234, "GET", "/health")
+
     def test_stream_reader_waits_for_readiness_before_touching_http_buffer(self) -> None:
         sock = mock.Mock()
         connection = mock.Mock(sock=sock)

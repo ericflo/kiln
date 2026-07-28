@@ -2834,7 +2834,13 @@ def execute(
     steady_state_warmup_requests = 0
     steady_state_warmup_waves = 0
     try:
-        mixed.wait_ready(port, process, server_log, setup_deadline)
+        mixed.wait_ready(
+            port,
+            process,
+            server_log,
+            setup_deadline,
+            require_prewarm_log_evidence=runtime.backend != "cuda",
+        )
         health_startup = mixed.read_stable_health(
             port, setup_deadline, "soak startup health"
         )

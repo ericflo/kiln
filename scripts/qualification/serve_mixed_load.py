@@ -3099,6 +3099,8 @@ def wait_ready(
     process: subprocess.Popen[str],
     server_log: ServerLog,
     absolute_deadline: float,
+    *,
+    require_prewarm_log_evidence: bool = True,
 ) -> dict[str, Any]:
     deadline = min(
         time.monotonic() + STARTUP_TIMEOUT_SECONDS,
@@ -3112,14 +3114,18 @@ def wait_ready(
         try:
             health = json_request(port, "GET", "/health")
             if health_reports_ready_after_prewarm(health):
-                if not server_log.prewarm_complete.wait(
-                    timeout=remaining_until(deadline, "server prewarm log", 5.0)
-                ):
-                    raise QualificationError("health passed without prewarm completion log evidence")
-                health = json_request(port, "GET", "/health")
-                if health_reports_ready_after_prewarm(health):
-                    return health
-                last_error = "health regressed after prewarm completion log"
+                if require_prewarm_log_evidence:
+                    if not server_log.prewarm_complete.wait(
+                        timeout=remaining_until(deadline, "server prewarm log", 5.0)
+                    ):
+                        raise QualificationError(
+                            "health passed without prewarm completion log evidence"
+                        )
+                    health = json_request(port, "GET", "/health")
+                    if not health_reports_ready_after_prewarm(health):
+                        last_error = "health regressed after prewarm completion log"
+                        continue
+                return health
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
         time.sleep(1.0)
