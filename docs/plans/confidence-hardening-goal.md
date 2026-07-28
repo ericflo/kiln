@@ -5,8 +5,9 @@
 ## Scope
 
 Kiln product behavior must remain portable across supported hosts and
-accelerators. The RTX 4090 Laptop under WSL2 is the current CUDA validation
-host, not a product target or a source of runtime defaults.
+accelerators. Qualification machines are evidence sources, not product targets
+or sources of runtime defaults. Phase 7.1 used the RTX 4090 Laptop under WSL2
+for CUDA; Phase 7.2 uses the MacBook Air M1 for Metal.
 
 - Hardware identity and measurements describe only the machine that produced
   them.
@@ -17,6 +18,9 @@ host, not a product target or a source of runtime defaults.
 - Host and GPU temperatures are read-only platform observations. Missing
   required observability is reported explicitly; readings do not alter
   execution.
+- Qualification may bind receipts to observed hardware identity and capacity;
+  production behavior must not branch on a laptop model, GPU-core count,
+  temperature, or measurements from one qualification host.
 - WSL2 evidence cannot establish native Linux, desktop RTX 4090, Metal, or
   unmeasured endurance behavior.
 
@@ -122,7 +126,37 @@ This receipt establishes only the declared eight-hour mixed-load workload on
 this measured laptop under WSL2. It is not native Linux, desktop RTX 4090,
 Metal, or broader workload evidence.
 
-## Next Backend
+## macOS/Metal Platform Boundary
 
-Metal qualification follows this CUDA/WSL2 checkpoint. No Metal claim is made
-by the work above.
+- [ ] Discover the selected Metal device and cross-check Apple hardware
+  identity, GPU-core count, and unified-memory capacity without assuming a
+  particular MacBook Air configuration.
+- [ ] Bind the macOS build, Xcode or Command Line Tools, Metal compiler, SDK,
+  and runtime provenance.
+- [ ] Probe workspace filesystem identity, durable and atomic operations, case
+  behavior, and link semantics.
+- [ ] Require runner-owned loopback-only networking, private process lifetime,
+  and bounded cleanup using supported macOS safeguards. Missing required
+  containment must fail closed rather than silently weakening the workload.
+- [ ] Record unified-memory accounting, memory-pressure visibility, and
+  available host and GPU observations without adding device-specific policy.
+- [ ] Retain a passing environment receipt from clean pushed source proving the
+  complete boundary on this macOS host.
+
+## Phase 7.2: MacBook Air M1
+
+- [ ] Retain the current-source Metal correctness and oracle subset, including
+  tensor transfer, matmul, graph replay, training, and optimizer coverage.
+- [ ] Retain controlled low-memory admission, allocation failure, reclaim, and
+  process-cleanup evidence appropriate to unified memory.
+- [ ] Run serving correctness and performance at every concurrency that fits
+  without changing workload semantics, and retain the first non-fitting
+  capacity boundary as counterevidence.
+- [ ] Run an eight-hour mixed-load soak using ordinary monotonic elapsed time.
+- [ ] Validate and check in receipts, update this checklist and permanent
+  documentation, commit, and push.
+
+Metal evidence applies only to the declared workloads on the measured MacBook
+Air. It must not be generalized to other Apple Silicon devices, configurations,
+or unmeasured endurance behavior. Completed CUDA/WSL2 receipts remain
+historical evidence and are not rerun or rewritten by this phase.
