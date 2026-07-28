@@ -29,7 +29,7 @@ class BoundedCargoTests(unittest.TestCase):
         self.assertIn("KILN_CARGO_MAX_MEMORY_GIB", completed.stdout)
         self.assertIn("closed-qualification-test-v1", completed.stdout)
 
-    def test_qualification_launcher_pins_the_host_safety_contract(self) -> None:
+    def test_qualification_launcher_preserves_portable_safety_contract(self) -> None:
         self.assertTrue(os.access(QUALIFICATION_SCRIPT, os.X_OK))
         source = QUALIFICATION_SCRIPT.read_text(encoding="utf-8")
         for assignment in (
@@ -37,11 +37,11 @@ class BoundedCargoTests(unittest.TestCase):
             "KILN_CARGO_ENVIRONMENT_POLICY=closed-qualification-test-v1",
             "KILN_CARGO_EXECUTION_MODE=delegated-cgroup",
             "KILN_CARGO_JOBS=1",
-            "KILN_CARGO_MIN_AVAILABLE_GIB=14",
             "KILN_CARGO_PRIVATE_NETWORK=1",
             "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS=1740",
         ):
             self.assertIn(f"export {assignment}", source)
+        self.assertNotIn("export KILN_CARGO_MIN_AVAILABLE_GIB=", source)
         self.assertNotIn("export KILN_CARGO_CPU_QUOTA_PERCENT=", source)
         self.assertIn('exec scripts/cargo-bounded.sh "$@"', source)
 

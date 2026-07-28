@@ -116,6 +116,12 @@ The wrapper does not select a single ROCm architecture unless a caller is
 explicitly building a hardware regression fixture. Normal ROCm builds use the
 toolchain/device target selected by the existing build system.
 
+The qualification launcher also does not pin a machine-sized minimum available
+memory value. `cargo-bounded.sh` derives its admission floor and host reserve
+from the current host, while keeping one build job and aggregate cgroup
+accounting. A caller may still declare an explicit bound when a committed
+workload needs one.
+
 ## Serving Qualification
 
 The serving protocol is defined in
