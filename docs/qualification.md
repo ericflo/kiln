@@ -199,6 +199,11 @@ scripts/cargo-bounded.sh build --release --locked --offline
 scripts/qualification/cargo-test-bounded.sh test --locked --offline
 ```
 
+The qualification test launcher uses a private transient systemd service on
+native Linux and the runner-owned delegated cgroup inside the declared WSL2
+scope. It fails closed instead of treating the WSL2-only boundary as portable
+to native ROCm or Vulkan hosts.
+
 The wrapper does not select a single ROCm architecture unless a caller is
 explicitly building a hardware regression fixture. Normal ROCm builds use the
 toolchain/device target selected by the existing build system.

@@ -35,12 +35,17 @@ class BoundedCargoTests(unittest.TestCase):
         for assignment in (
             "CARGO_NET_OFFLINE=true",
             "KILN_CARGO_ENVIRONMENT_POLICY=closed-qualification-test-v1",
-            "KILN_CARGO_EXECUTION_MODE=delegated-cgroup",
             "KILN_CARGO_JOBS=1",
             "KILN_CARGO_PRIVATE_NETWORK=1",
             "KILN_CARGO_SERVICE_RUNTIME_MAX_SECONDS=1740",
         ):
             self.assertIn(f"export {assignment}", source)
+        self.assertIn(
+            'KILN_WSL2_SCOPE_BOUNDARY:-}" == "systemd-user-scope-feedback-v1"',
+            source,
+        )
+        self.assertIn("export KILN_CARGO_EXECUTION_MODE=delegated-cgroup", source)
+        self.assertIn("export KILN_CARGO_EXECUTION_MODE=transient-service", source)
         self.assertNotIn("export KILN_CARGO_MIN_AVAILABLE_GIB=", source)
         self.assertNotIn("export KILN_CARGO_CPU_QUOTA_PERCENT=", source)
         self.assertIn('exec scripts/cargo-bounded.sh "$@"', source)
