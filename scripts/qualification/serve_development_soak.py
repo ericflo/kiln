@@ -53,6 +53,10 @@ QUALIFICATION_DURATION_SECONDS = 1800.0
 ROCM_ENDURANCE_DURATION_SECONDS = 24 * 60 * 60.0
 VULKAN_ENDURANCE_DURATION_SECONDS = 8 * 60 * 60.0
 CUDA_ENDURANCE_DURATION_SECONDS = 8 * 60 * 60.0
+CUDA_QUALIFIED_WAVE_CONCURRENCY = (1, 4)
+CUDA_QUALIFIED_PROMPT_WORDS = (16, 32, 64, 96)
+CUDA_STABILIZATION_MIN_ROTATIONS = 2
+CUDA_STABILIZATION_MAX_ROTATIONS = 3
 CASE_TEARDOWN_GRACE_SECONDS = 180.0
 REQUEST_WORKER_CLEANUP_TIMEOUT_SECONDS = 10.0
 MAX_STEADY_STATE_WARMUP_WAVES = 16
@@ -305,8 +309,8 @@ CUDA_ENDURANCE_RUNTIME = SoakRuntime(
     gpu_memory_scope="device_global",
     gpu_memory_source='server_metrics:kiln_gpu_memory_bytes{kind="used"}',
     graph_execution_required=False,
-    wave_concurrency=(1, 4),
-    prompt_words=(16, 32, 64, 96),
+    wave_concurrency=CUDA_QUALIFIED_WAVE_CONCURRENCY,
+    prompt_words=CUDA_QUALIFIED_PROMPT_WORDS,
     prompt_assignment=COHORT_BY_CYCLE,
     max_tokens=32,
     cancel_every_waves=4,
@@ -315,8 +319,12 @@ CUDA_ENDURANCE_RUNTIME = SoakRuntime(
     request_timeout_seconds=600.0,
     max_steady_state_warmup_waves=16,
     graph_cache_max=mixed.CUDA_GRAPH_CACHE_ENTRIES,
-    min_stabilization_cycles=4,
-    max_stabilization_cycles=8,
+    min_stabilization_cycles=(
+        CUDA_STABILIZATION_MIN_ROTATIONS * len(CUDA_QUALIFIED_PROMPT_WORDS)
+    ),
+    max_stabilization_cycles=(
+        CUDA_STABILIZATION_MAX_ROTATIONS * len(CUDA_QUALIFIED_PROMPT_WORDS)
+    ),
     required_stable_cycles=2,
     stabilization_gpu_delta_limit_bytes=64 * 1024 * 1024,
     stabilization_rss_delta_limit_bytes=16 * 1024 * 1024,
