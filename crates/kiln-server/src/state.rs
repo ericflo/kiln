@@ -35,6 +35,8 @@ use crate::metrics::Metrics;
 use crate::recent_requests::{DEFAULT_CAPACITY as RECENT_REQUESTS_CAPACITY, RecentRequestsRing};
 use crate::training_queue::{SharedTrainingQueue, ShutdownFlag};
 
+mod prefix_cache_pressure;
+
 // #1082: 64 (was 16) so each FA2 split-KV decode tile (kBlockN=64 for the
 // hdim256 GQA full-attn — flash_fwd_launch_template.h:170) maps to exactly ONE
 // physical page. That makes the kernel's per-tile block_table lookup
@@ -2155,20 +2157,6 @@ impl RealPrefixCache {
             }
         }
         released
-    }
-
-    fn release_entry_blocks(&mut self, block_ids: &[u32]) -> Vec<u32> {
-        let mut freed = Vec::new();
-        for &block_id in block_ids {
-            if let Some(refcount) = self.block_refcounts.get_mut(&block_id) {
-                *refcount = refcount.saturating_sub(1);
-                if *refcount == 0 {
-                    self.block_refcounts.remove(&block_id);
-                    freed.push(block_id);
-                }
-            }
-        }
-        freed
     }
 
     pub fn stats(&self) -> PrefixCacheStats {
@@ -7591,6 +7579,9 @@ mod tests {
         }
         Ok(())
     }
+
+    #[path = "prefix_cache_pressure_tests.rs"]
+    mod prefix_cache_pressure_tests;
 
     #[test]
     fn test_memory_budget_cpu_mode() {

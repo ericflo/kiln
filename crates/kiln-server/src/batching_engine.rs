@@ -45,6 +45,8 @@ use crate::response_delivery::{
 };
 use crate::state::{LoadedAdapterIdentity, RealPrefixCache, RealPrefixCacheRequest};
 
+mod kv_pressure;
+
 const DEFAULT_ENGINE_CHANNEL: usize = 1024;
 const DEFAULT_RESPONSE_CHANNEL: usize = 64;
 const DEFAULT_MAX_DECODE_BATCH: usize = 8;
@@ -644,10 +646,9 @@ pub trait DecodeForward: Send + Sync + 'static {
     }
     /// Grow KV capacity for the ready decode rows BEFORE the forward.
     /// Returns the indices of slots that could NOT be grown because the
-    /// block pool is exhausted — the actor finishes those requests as
-    /// `length` casualties (they outgrew the pool) instead of letting a
-    /// later atomic-grow failure kill the ENTIRE batch. Non-capacity
-    /// errors still propagate.
+    /// block pool is exhausted. The actor defers those rows while any peer
+    /// can still make progress; it never reports a partial generation as a
+    /// successful max-token completion. Non-capacity errors still propagate.
     fn grow_for_decode(&self, _slots: &mut [&mut DecodeSlot]) -> Result<Vec<usize>> {
         Ok(Vec::new())
     }
@@ -918,45 +919,6 @@ impl RealDecodeForward {
         }
 
         Ok(())
-    }
-
-    /// Per-slot KV growth for the actor's pre-decode pass. Unlike the
-    /// atomic `grow_ready_decode_slots` (which the forward keeps as a
-    /// backstop), a pool-exhausted allocation here starves ONLY the slots
-    /// that needed blocks — everyone else keeps decoding.
-    fn grow_for_decode_per_slot(&self, slots: &mut [&mut DecodeSlot]) -> Result<Vec<usize>> {
-        let block_size = self.block_manager_guard()?.block_size();
-        let mut starved = Vec::new();
-        for (idx, slot) in slots.iter_mut().enumerate() {
-            let DecodeSlot::Real {
-                state,
-                first_token_pending: false,
-                ..
-            } = &mut **slot
-            else {
-                continue;
-            };
-            let required_blocks =
-                blocks_needed_for_tokens(state.seq_len.saturating_add(1), block_size);
-            let missing = required_blocks.saturating_sub(state.block_table.blocks.len());
-            if missing == 0 {
-                continue;
-            }
-            let allocated = {
-                let mut bm_guard = self.block_manager_guard()?;
-                bm_guard.allocate(missing)
-            };
-            match allocated {
-                Ok(new_blocks) => {
-                    state.block_table.blocks.extend(new_blocks.iter().copied());
-                    state.allocated_blocks.extend(new_blocks.iter().copied());
-                }
-                Err(kiln_core::block::BlockError::OutOfMemory { .. }) => {
-                    starved.push(idx);
-                }
-            }
-        }
-        Ok(starved)
     }
 }
 
@@ -4332,16 +4294,15 @@ impl BatchingEngineActor {
     }
 
     fn run_decode_batch_with_budget(&mut self, max_rows: usize) -> usize {
-        let (mut ready_indices, mut next_decode_generation) =
+        let (mut ready_indices, next_decode_generation) =
             self.ready_decode_selection_with_limit(max_rows);
         if ready_indices.is_empty() {
             return 0;
         }
 
-        // Pre-grow KV per slot: a request that has outgrown the block pool
-        // finishes as a `length` casualty HERE — the old order let the
-        // forward's atomic grow fail and `finish_batch_with_error` killed
-        // EVERY active request because one conversation got long.
+        // Pre-grow KV per slot. Rows that cannot grow wait while their peers
+        // decode and release blocks; reporting them as successful `length`
+        // completions would silently truncate the caller's requested output.
         {
             let mut probe_slots: Vec<&mut DecodeSlot> = self
                 .active
@@ -4361,25 +4322,30 @@ impl BatchingEngineActor {
                     starved_indices.sort_unstable();
                     starved_indices.dedup();
                     if !starved_indices.is_empty() {
-                        for idx in starved_indices.into_iter().rev() {
-                            if idx >= self.active.len()
-                                || self.active[idx].delivery_state != ActiveDeliveryState::Ready
-                            {
-                                continue;
-                            }
-                            tracing::warn!(
-                                request_id = %self.active[idx].req.request_id,
-                                "KV block pool exhausted for this request — finishing it as \
-                                 `length`; other requests keep decoding"
-                            );
-                            self.finish_active(idx, FinishReason::MaxTokens, None);
-                        }
-                        (ready_indices, next_decode_generation) =
-                            self.ready_decode_selection_with_limit(max_rows);
+                        ready_indices.retain(|idx| !starved_indices.contains(idx));
                         if ready_indices.is_empty() {
+                            let victim_idx =
+                                *starved_indices.last().expect("non-empty starvation cohort");
+                            tracing::warn!(
+                                request_id = %self.active[victim_idx].req.request_id,
+                                starved_requests = starved_indices.len(),
+                                "KV block pool cannot advance any ready request"
+                            );
+                            self.finish_one_with_error(
+                                victim_idx,
+                                "KV block pool exhausted before the requested output length; \
+                                 request terminated to release capacity"
+                                    .to_string(),
+                                None,
+                            );
                             self.refresh_snapshot();
                             return 0;
                         }
+                        tracing::debug!(
+                            starved_requests = starved_indices.len(),
+                            progressing_requests = ready_indices.len(),
+                            "deferring KV-starved decode rows while peers release capacity"
+                        );
                     }
                 }
                 Err(err) => {
@@ -7002,91 +6968,8 @@ mod tests {
         handle.stop().await.unwrap();
     }
 
-    /// Forward that starves one slot's KV growth exactly once — the
-    /// single-victim decode-growth case.
-    struct StarvingGrowForward {
-        inner: MockForward,
-        starve_once: std::sync::atomic::AtomicBool,
-    }
-
-    impl DecodeForward for StarvingGrowForward {
-        fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
-            self.inner.prepare_request(req)
-        }
-        fn grow_for_decode(&self, slots: &mut [&mut DecodeSlot]) -> Result<Vec<usize>> {
-            if slots.len() > 1
-                && self
-                    .starve_once
-                    .swap(false, std::sync::atomic::Ordering::SeqCst)
-            {
-                return Ok(vec![0]);
-            }
-            Ok(Vec::new())
-        }
-        fn forward_decode(
-            &self,
-            slots: &mut [&mut DecodeSlot],
-            sampling: &[SamplingParams],
-        ) -> Result<Vec<TokenId>> {
-            self.inner.forward_decode(slots, sampling)
-        }
-        fn accept_token(&self, slot: &mut DecodeSlot, token: TokenId) -> Result<usize> {
-            self.inner.accept_token(slot, token)
-        }
-        fn finish_request(
-            &self,
-            slot: DecodeSlot,
-            finish_reason: FinishReason,
-        ) -> Result<DecodeForwardOutput> {
-            self.inner.finish_request(slot, finish_reason)
-        }
-    }
-
-    /// A request that outgrows the KV pool finishes as a `length`
-    /// casualty — the rest of the batch keeps decoding. (The old path
-    /// called finish_batch_with_error and killed EVERY active request
-    /// because one conversation got long.)
-    #[tokio::test]
-    async fn kv_growth_starvation_finishes_only_the_victim() {
-        let forward = Arc::new(StarvingGrowForward {
-            inner: MockForward::default(),
-            starve_once: std::sync::atomic::AtomicBool::new(true),
-        });
-        let handle = BatchingEngineHandle::start_with_options(forward, 8);
-
-        let rx_a = handle.enqueue(request(100, 5)).await.unwrap();
-        let rx_b = handle.enqueue(request(200, 5)).await.unwrap();
-
-        let outcome = |mut rx: mpsc::Receiver<EngineEvent>| async move {
-            loop {
-                match rx.recv().await {
-                    Some(EngineEvent::Done { output }) => break Ok(output),
-                    Some(EngineEvent::Error(e)) => break Err(e),
-                    Some(_) => {}
-                    None => break Err("closed".to_string()),
-                }
-            }
-        };
-        let (a, b) = tokio::join!(
-            tokio::time::timeout(Duration::from_secs(10), outcome(rx_a)),
-            tokio::time::timeout(Duration::from_secs(10), outcome(rx_b)),
-        );
-        let a = a
-            .unwrap()
-            .expect("victim finishes cleanly, not with an engine error");
-        let b = b.unwrap().expect("survivor completes");
-        // One of the two was starved (admission order isn't pinned);
-        // whichever it was finished early as `length`, the other decoded
-        // all 5 tokens.
-        let (victim, survivor) = if a.completion_tokens < 5 {
-            (a, b)
-        } else {
-            (b, a)
-        };
-        assert!(victim.completion_tokens < 5, "victim was cut short");
-        assert_eq!(survivor.completion_tokens, 5, "survivor unaffected");
-        handle.stop().await.unwrap();
-    }
+    #[path = "kv_pressure_tests.rs"]
+    mod kv_pressure_tests;
 
     #[tokio::test]
     async fn adapter_swap_executes_immediately_when_idle() {

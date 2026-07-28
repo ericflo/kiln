@@ -34,7 +34,7 @@
     },
     {
       "path": "crates/kiln-server/src/batching_engine.rs",
-      "max_lines": 8736,
+      "max_lines": 8619,
       "rationale": "The sole production scheduler intentionally owns one state machine, but its policy and resource helpers still need reviewed extraction before this exception can shrink."
     },
     {
@@ -49,7 +49,7 @@
     },
     {
       "path": "crates/kiln-server/src/state.rs",
-      "max_lines": 8318,
+      "max_lines": 8309,
       "rationale": "Application state still owns multiple cache and memory authorities; this cap blocks new ownership domains until existing state is split deliberately."
     },
     {
