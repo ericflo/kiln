@@ -1203,6 +1203,23 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 fixed workload and measured laptop under WSL2. It is not an SLO, endurance, native
                 Linux, desktop RTX 4090, or Metal claim.
               </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Retained CUDA endurance receipt
+                <code>20260728t113040389600z-cuda-rtx4090-laptop-wsl2-serving-cuda-endurance-v-0d78751328-v1</code>
+                passed from clean pushed source <code>fe3f1a694704</code>. Its contained case measured
+                28,812.55 seconds with ordinary monotonic time over the fixed c1/c4 and
+                16/32/64/96-word prompt envelope. All 6,980 measured requests completed the exact
+                32-token response oracle with zero failures, all 698 scheduled cancellations were
+                confirmed, and aggregate output throughput was 7.752 tokens per second. The
+                17,171,480,576-byte whole-envelope GPU high-water baseline matched the measured peak;
+                final GPU memory was 15,365,832,704 bytes, post-baseline GPU growth was zero, and RSS
+                grew 8,650,752 bytes. The fixed 303-block KV capacity ended idle with zero unaccounted
+                blocks, and cleanup left no scope or CUDA process. CUDA graphs, allocator reclaim,
+                and prefix caching were disabled; the prefix cache remained quarantined for CUDA
+                prefill semantics. This establishes only the declared eight-hour workload on the
+                measured laptop under WSL2, not native Linux, desktop RTX 4090, Metal, an SLO, or a
+                broader workload claim.
+              </p>
             </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">
               <h4 class="font-semibold mb-2">Memory alerting contract</h4>

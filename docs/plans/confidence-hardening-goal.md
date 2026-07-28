@@ -54,8 +54,8 @@ passed, its owned scope was removed, and no CUDA process remained.
   cleanup evidence.
 - [x] Run serving performance at every concurrency that fits without changing
   workload semantics.
-- [ ] Run an eight-hour mixed-load soak using ordinary monotonic elapsed time.
-- [ ] Validate and check in receipts, update this checklist and permanent
+- [x] Run an eight-hour mixed-load soak using ordinary monotonic elapsed time.
+- [x] Validate and check in receipts, update this checklist and permanent
   documentation, commit, and push.
 
 Correctness evidence: `qualification/receipts/cuda/rtx4090-laptop-wsl2/`
@@ -66,8 +66,8 @@ PyTorch AdamW oracle cases all passed. All five owned scopes exited zero,
 reported no cgroup memory events, were removed, and left no CUDA process.
 This receipt establishes only the declared substrate, graph, and training
 subset; the separate memory-lifecycle receipt below supplies the memory
-evidence. The separate serving-capacity receipts below supply serving and
-concurrency evidence; endurance evidence remains open.
+evidence. The separate serving-capacity and endurance receipts below supply
+their respective evidence.
 
 Memory-lifecycle evidence: `qualification/receipts/cuda/`
 `rtx4090-laptop-wsl2/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-`
@@ -80,9 +80,9 @@ through a 4,000-to-500-to-4,000 block physical KV resize. Every owned scope
 exited zero, reported no cgroup memory event, was removed, and left no CUDA or
 qualification process. The injected error proves the server retry path; it is
 not a claim that a physical device OOM or full-model memory-pressure run
-occurred. The separate serving-capacity receipts below supply serving and
-concurrency evidence; endurance, native Linux, desktop RTX 4090, and Metal
-evidence remain open.
+occurred. The separate serving-capacity and endurance receipts below supply
+their respective evidence. This receipt itself is not native Linux, desktop
+RTX 4090, or Metal evidence.
 
 Serving-capacity evidence: `benchmarks/receipts/cuda/`
 `rtx4090-laptop-wsl2/20260728t090043z-cuda-wsl2-qwen35-4b-greedy-short-`
@@ -98,8 +98,29 @@ completed with the exact required output; its overall failed verdict is the
 retained memory-limit counterevidence. Both runs preserved their bound source,
 binary, configuration, model, and runtime identities and completed process,
 port, and GPU cleanup. These receipts apply only to this workload and measured
-laptop under WSL2; they are not endurance, native Linux, desktop RTX 4090, or
-Metal evidence.
+laptop under WSL2. The separate endurance receipt below supplies soak evidence;
+none of these receipts establishes native Linux, desktop RTX 4090, or Metal
+behavior.
+
+Endurance evidence: `qualification/receipts/cuda/rtx4090-laptop-wsl2/`
+`20260728t113040389600z-cuda-rtx4090-laptop-wsl2-serving-cuda-endurance-v-`
+`0d78751328-v1.json` passed from clean pushed source `fe3f1a694704`. The
+formal contained case measured 28,812.55 seconds using ordinary monotonic time
+over the fixed c1/c4 and 16/32/64/96-word prompt envelope. All 6,980 measured
+requests completed their exact 32-token response oracle with zero request
+failures, zero non-finite or zero-token responses, and 698 confirmed
+cancellations; aggregate output throughput was 7.752 tokens per second. The
+stabilized whole-envelope GPU high-water baseline and measured peak were both
+17,171,480,576 bytes, the final value was 15,365,832,704 bytes, and
+post-baseline GPU growth was zero. RSS grew 8,650,752 bytes. The fixed
+303-block KV capacity ended idle with zero unaccounted blocks. No device fault,
+unexplained ITL outlier, host-memory guard trip, worker residue, forced or
+nonzero shutdown, snapshot residue, cgroup memory event, surviving scope, or
+CUDA process was observed. CUDA graphs, allocator reclaim, and prefix caching
+were disabled; the prefix cache remained quarantined for CUDA prefill semantics.
+This receipt establishes only the declared eight-hour mixed-load workload on
+this measured laptop under WSL2. It is not native Linux, desktop RTX 4090,
+Metal, or broader workload evidence.
 
 ## Next Backend
 

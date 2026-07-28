@@ -158,7 +158,36 @@ identities and passed final process, port, and GPU cleanup.
 
 The c4 ceiling is specific to this fixed workload, configuration, memory gate,
 and measured RTX 4090 Laptop under WSL2. These receipts are not an SLO claim
-and provide no endurance, native Linux, desktop RTX 4090, or Metal evidence.
+and do not themselves provide endurance, native Linux, desktop RTX 4090, or
+Metal evidence. The separate receipt below supplies the declared endurance
+evidence.
+
+## Current CUDA Endurance Evidence
+
+The retained laptop CUDA endurance receipt is
+[`20260728t113040389600z-cuda-rtx4090-laptop-wsl2-serving-cuda-endurance-v-0d78751328-v1.json`](../qualification/receipts/cuda/rtx4090-laptop-wsl2/20260728t113040389600z-cuda-rtx4090-laptop-wsl2-serving-cuda-endurance-v-0d78751328-v1.json).
+It passed from clean pushed source `fe3f1a694704`. The contained case measured
+28,812.55 seconds using ordinary monotonic time over the fixed c1/c4 and
+16/32/64/96-word prompt envelope. All 6,980 measured requests completed the
+exact 32-token response oracle with zero failures, and all 698 scheduled
+cancellations were confirmed. Aggregate output throughput was 7.752 tokens per
+second.
+
+The gate established a 17,171,480,576-byte whole-envelope GPU high-water
+baseline before measurement. The measured peak matched that baseline, the
+final value was 15,365,832,704 bytes, and post-baseline GPU growth was zero.
+RSS grew 8,650,752 bytes. The fixed 303-block KV capacity ended idle with zero
+unaccounted blocks. There were zero device faults, unexplained ITL outliers,
+host-memory guard trips, request-worker residues, forced or nonzero shutdowns,
+snapshot residues, cgroup memory events, surviving scopes, or CUDA processes.
+
+CUDA graphs, allocator reclaim, and prefix caching were disabled for this
+workload; the prefix cache remained quarantined for CUDA prefill semantics.
+The receipt preserves the exact source, workload, effective configuration,
+model hashes, platform boundary, and hashed local logs. This is evidence only
+for the declared eight-hour mixed-load workload on the measured RTX 4090
+Laptop under WSL2. It is not native Linux, desktop RTX 4090, Metal, an SLO, or
+a broader workload claim.
 
 ## Build Boundary
 
