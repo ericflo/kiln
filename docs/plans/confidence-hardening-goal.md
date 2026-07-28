@@ -35,8 +35,14 @@ host, not a product target or a source of runtime defaults.
   accounting, and scope lifecycle.
 - [x] Record typed host and selected-GPU temperature observations, including
   explicit unavailable evidence, without temperature policy.
-- [ ] Retain a passing environment receipt from clean pushed source proving the
+- [x] Retain a passing environment receipt from clean pushed source proving the
   complete boundary on this WSL2 host.
+
+Boundary evidence: `qualification/receipts/cuda/rtx4090-laptop-wsl2/`
+`20260728t050414137676z-cuda-rtx4090-laptop-wsl2-local-environment-v1-`
+`df3e8fee15-v1.json` passed from clean pushed source `6699d9775e3a`. All
+declared outer WSL2 capabilities were available, the contained environment case
+passed, its owned scope was removed, and no CUDA process remained.
 
 ## Phase 7.1: RTX 4090 Laptop GPU, 16 GB
 

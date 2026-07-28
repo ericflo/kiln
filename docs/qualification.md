@@ -96,6 +96,12 @@ limits, or select product behavior. The outer runner requires host
 observability; the contained case records Windows telemetry as unavailable
 because Landlock intentionally blocks Windows execution.
 
+The current retained laptop boundary evidence is
+[`20260728t050414137676z-cuda-rtx4090-laptop-wsl2-local-environment-v1-df3e8fee15-v1.json`](../qualification/receipts/cuda/rtx4090-laptop-wsl2/20260728t050414137676z-cuda-rtx4090-laptop-wsl2-local-environment-v1-df3e8fee15-v1.json).
+It passed from clean pushed source `6699d9775e3a`, recorded all declared outer
+WSL2 capabilities as available, and passed the contained environment case. It
+is evidence for that laptop under WSL2 only.
+
 ## Build Boundary
 
 Bounded build wrappers provide deterministic environment filtering, offline

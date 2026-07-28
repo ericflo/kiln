@@ -1,0 +1,199 @@
+{
+  "artifacts": [
+    {
+      "bytes": 20245,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t050414137676z-cuda-rtx4090-laptop-wsl2-local-environment-v1-df3e8fee15-v1/environment.json",
+      "sha256": "sha256:56f73bc1543f165d686aa9760ae52d3277f4019e1c2ccf81366cdb9934131580"
+    },
+    {
+      "bytes": 42,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t050414137676z-cuda-rtx4090-laptop-wsl2-local-environment-v1-df3e8fee15-v1/cases/001-environment-capture-r001/stdout.log",
+      "sha256": "sha256:ed440461a7fad7e4e27d3c627e7dde0d91bc99539087defb9e71c96e2221074d"
+    },
+    {
+      "bytes": 907,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t050414137676z-cuda-rtx4090-laptop-wsl2-local-environment-v1-df3e8fee15-v1/cases/001-environment-capture-r001/stderr.log",
+      "sha256": "sha256:f78a497c9a424741b12fcc988371e5746c99f1f1df6234c38286ac626fdf992f"
+    },
+    {
+      "bytes": 647,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t050414137676z-cuda-rtx4090-laptop-wsl2-local-environment-v1-df3e8fee15-v1/cases/001-environment-capture-r001/case-result.json",
+      "sha256": "sha256:9704e575fceeb87156aa0f4b1138ab442e9b5caa6f169e9a2f30206a4db591d2"
+    },
+    {
+      "bytes": 6377,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t050414137676z-cuda-rtx4090-laptop-wsl2-local-environment-v1-df3e8fee15-v1/run-config.json",
+      "sha256": "sha256:475366119f0829cdc0c9c05dbfc5800d22232473365ef33f44635a98033a8e82"
+    }
+  ],
+  "created_at_utc": "2026-07-28T05:04:17.333Z",
+  "effective_config": {},
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+      "nvcc": "release 12.4, V12.4.99",
+      "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)"
+    },
+    "device": {
+      "architecture": "sm_89",
+      "compute_capability": "8.9",
+      "compute_units": null,
+      "device_uuid": "GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd",
+      "driver": "NVIDIA 596.36",
+      "logical_index": 0,
+      "memory_available_bytes": 15942549504,
+      "memory_bytes": 17171480576,
+      "name": "NVIDIA GeForce RTX 4090 Laptop GPU",
+      "pci_bus_id": "00000000:01:00.0",
+      "unified_memory": false
+    },
+    "host_id": "rtx4090-laptop-wsl2",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "6.6.87.2-microsoft-standard-WSL2",
+      "name": "Ubuntu",
+      "version": "22.04"
+    },
+    "platform": {
+      "capabilities": {
+        "cgroup_memory_delegation": "available",
+        "cuda_driver_bridge": "available",
+        "cuda_runtime": "available",
+        "cuda_toolkit": "available",
+        "driver_identity": "available",
+        "filesystem_semantics": "available",
+        "gpu_temperature": "available",
+        "host_temperature": "available",
+        "memory_accounting": "available",
+        "network_containment": "available",
+        "nvml": "available",
+        "process_containment": "available",
+        "systemd_system": "available",
+        "systemd_user_transient": "available",
+        "windows_identity": "available",
+        "wsl_identity": "available"
+      },
+      "details": {
+        "cgroup_memory_delegation": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice; controllers=memory,pids; memory.max and swap.max round-trip",
+        "cuda_driver_bridge": "libcuda API 13020; bridge_root=/usr/lib/wsl/lib",
+        "cuda_runtime": "runtime API 12.4; driver API 13.2",
+        "cuda_toolkit": "SDK 12.4.0; nvcc 12.4.99; root=/usr/local/cuda-12.4",
+        "driver_identity": "Windows 32.0.15.9636; NVIDIA 596.36; PNP PCI\\VEN_10DE&DEV_2757&SUBSYS_36081043&REV_A1\\4&6AD973D&0&0008",
+        "filesystem_semantics": "/dev/sdd ext4 at /; atomic+durable+link+case probes passed",
+        "gpu_temperature": "selected device GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd: 67 C at capture",
+        "host_temperature": "Windows formatted thermal provider: \\_TZ.THRM=84050mC",
+        "memory_accounting": "MemAvailable=13405687808; MemTotal=16459145216; SwapFree=3432747008; SwapTotal=4294967296",
+        "nvml": "NVML 13.595.71.01; driver 596.36; UUID GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd",
+        "systemd_system": "PID 1 systemd; system state running",
+        "systemd_user_transient": "user manager running; owned user bus and transient unit passed",
+        "windows_identity": "Microsoft Windows 11 Home 10.0.26200 build 26200; WSL 2.5.9.0",
+        "workload_containment": "util-linux-unshare-user-net-pid-landlock-v1; loopback-only network, private PID namespace, kill-child lifetime, and Landlock-denied WSL interop",
+        "wsl_identity": "kernel=6.6.87.2-microsoft-standard-WSL2; interop=enabled\ninterpreter /init\nflags: PF\noffset 0\nmagic 4d5a"
+      },
+      "kind": "wsl2",
+      "observations": {
+        "gpu_temperature": {
+          "device_uuid": "GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd",
+          "source": "nvml",
+          "temperature_millicelsius": 67000
+        },
+        "host_temperatures": [
+          {
+            "name": "\\_TZ.THRM",
+            "source": "windows_formatted_thermal_zone",
+            "temperature_millicelsius": 84050
+          }
+        ]
+      }
+    },
+    "runtime": {
+      "cuda_driver": "596.36",
+      "cuda_toolkit": "release 12.4, V12.4.99",
+      "execution_environment_sha256": "sha256:fe7e6ff8e8ce179fbc2e5e863a147822255f4cabde7f71ba470dc813b252552b",
+      "nvidia_smi_query": "index,name,uuid,pci.bus_id,compute_cap,memory.total,memory.free,driver_version"
+    }
+  },
+  "metrics": [],
+  "model": null,
+  "notes": [],
+  "qualification": {
+    "backend": "cuda",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "qualification/workloads/environment-v1.json",
+      "--variant",
+      "cuda-rtx4090-laptop-16gb",
+      "--host-id",
+      "rtx4090-laptop-wsl2",
+      "--var",
+      "output_path=.qualification/wsl2/cuda-environment.json"
+    ],
+    "duration_seconds": 3.195791106001707,
+    "finished_at_utc": "2026-07-28T05:04:17.333Z",
+    "kind": "environment",
+    "profile": "local-environment-v1",
+    "started_at_utc": "2026-07-28T05:04:14.137Z",
+    "verdict": "passed"
+  },
+  "receipt_id": "20260728t050414137676z-cuda-rtx4090-laptop-wsl2-local-environment-v1-df3e8fee15-v1",
+  "results": [
+    {
+      "details": null,
+      "duration_seconds": 1.3923341000045184,
+      "id": "environment-capture",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "6699d9775e3a4e98654960e7604ba87d41bf80fb",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:12901420c4eb0545632dc2b59f51e621f8afd2be34b3b84d43e2d7d29a9d0dd7",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "local-environment-v1",
+    "parameters": {
+      "output_path": ".qualification/wsl2/cuda-environment.json",
+      "variant_id": "cuda-rtx4090-laptop-16gb"
+    },
+    "seed": null,
+    "sha256": "sha256:33bab5720a03cd5c6af7f626b132408eb479f1689a536a2465f274d951981c9a"
+  }
+}
