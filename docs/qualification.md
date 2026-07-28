@@ -71,7 +71,8 @@ The default WSL2 scope has:
 
 The boundary records what the platform actually supports. It does not infer
 Windows driver identity from a Linux package, fabricate unavailable NVML data,
-or silently disable a required workload assertion.
+fabricate unavailable temperature data, or silently disable a required workload
+assertion.
 
 ## Environment Receipt
 
@@ -83,11 +84,17 @@ into a product requirement. Depending on the backend, it may record:
 - accelerator API, driver, toolkit, and device inventory;
 - Python/runtime manifest identity;
 - systemd/cgroup capability;
+- point-in-time host and selected-device temperature observability;
 - model and tokenizer content hashes; and
 - source commit and tree.
 
-Temperature sensors and host-specific pacing are not part of the current
-qualification contract.
+WSL2 records host temperature from readable Linux hwmon inputs or the Windows
+formatted thermal provider, and records the selected CUDA device temperature
+through NVML. These are typed read-only observations: unavailable sources are
+reported explicitly, and readings do not pace workloads, define operating
+limits, or select product behavior. The outer runner requires host
+observability; the contained case records Windows telemetry as unavailable
+because Landlock intentionally blocks Windows execution.
 
 ## Build Boundary
 

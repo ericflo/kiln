@@ -1148,7 +1148,9 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 Hardware qualification receipts describe only the machine and boundary that produced
                 them. Current WSL2 execution uses generic scope accounting, a bounded PID count, and
                 process cleanup without a default CPU quota, fixed host-memory ceiling, or
-                machine-specific temperature policy.
+                machine-specific temperature policy. Its platform receipt records point-in-time host
+                and selected-GPU temperature observability as typed read-only evidence; an unavailable
+                source remains explicit and never changes execution or product defaults.
               </p>
             </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">

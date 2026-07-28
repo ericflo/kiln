@@ -70,7 +70,7 @@ QUALIFICATION_KEYS = {
 ENVIRONMENT_REQUIRED_KEYS = {"host_id", "os", "device", "runtime", "compiler"}
 ENVIRONMENT_KEYS = ENVIRONMENT_REQUIRED_KEYS | {"platform"}
 OS_KEYS = {"name", "version", "kernel", "architecture"}
-PLATFORM_KEYS = {"kind", "capabilities", "details"}
+PLATFORM_KEYS = {"kind", "capabilities", "details", "observations"}
 WSL2_CAPABILITY_KEYS = {
     "wsl_identity",
     "windows_identity",
@@ -86,8 +86,14 @@ WSL2_CAPABILITY_KEYS = {
     "systemd_user_transient",
     "cgroup_memory_delegation",
     "memory_accounting",
+    "host_temperature",
+    "gpu_temperature",
 }
 CAPABILITY_STATUSES = {"available", "unavailable"}
+WSL2_OBSERVATION_KEYS = {"host_temperatures", "gpu_temperature"}
+HOST_TEMPERATURE_KEYS = {"source", "name", "temperature_millicelsius"}
+GPU_TEMPERATURE_KEYS = {"source", "device_uuid", "temperature_millicelsius"}
+HOST_TEMPERATURE_SOURCES = {"linux_hwmon", "windows_formatted_thermal_zone"}
 DEVICE_REQUIRED_KEYS = {
     "name",
     "architecture",
@@ -257,6 +263,123 @@ def _check_string_map(errors: list[str], value: Any, context: str) -> None:
         if not isinstance(key, str) or not key:
             errors.append(f"{context} keys must be non-empty strings")
         _check_string(errors, item, f"{context}.{key}")
+
+
+def _check_temperature(
+    errors: list[str],
+    value: Any,
+    context: str,
+    *,
+    minimum: int = -50_000,
+    maximum: int = 200_000,
+) -> None:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not minimum <= value <= maximum
+    ):
+        errors.append(
+            f"{context} must be an integer from {minimum} through {maximum}"
+        )
+
+
+def _validate_wsl2_observations(
+    errors: list[str],
+    value: Any,
+    capabilities: dict[str, Any],
+    device: dict[str, Any],
+) -> None:
+    context = "receipt.environment.platform.observations"
+    observations = _check_exact_keys(
+        errors,
+        value,
+        WSL2_OBSERVATION_KEYS,
+        context,
+    )
+    host_temperatures = observations.get("host_temperatures")
+    if not isinstance(host_temperatures, list):
+        errors.append(f"{context}.host_temperatures must be an array")
+        host_temperatures = []
+    names: set[tuple[str, str]] = set()
+    for index, raw_temperature in enumerate(host_temperatures):
+        item_context = f"{context}.host_temperatures[{index}]"
+        temperature = _check_exact_keys(
+            errors,
+            raw_temperature,
+            HOST_TEMPERATURE_KEYS,
+            item_context,
+        )
+        source = temperature.get("source")
+        if source not in HOST_TEMPERATURE_SOURCES:
+            errors.append(
+                f"{item_context}.source must be one of "
+                f"{sorted(HOST_TEMPERATURE_SOURCES)}"
+            )
+        name = _check_string(errors, temperature.get("name"), f"{item_context}.name")
+        if name and not name.strip():
+            errors.append(f"{item_context}.name must contain a non-whitespace character")
+        identity = (str(source), name)
+        if identity in names:
+            errors.append(
+                f"{context}.host_temperatures contains duplicate source/name "
+                f"{identity!r}"
+            )
+        names.add(identity)
+        _check_temperature(
+            errors,
+            temperature.get("temperature_millicelsius"),
+            f"{item_context}.temperature_millicelsius",
+        )
+
+    gpu_value = observations.get("gpu_temperature")
+    if gpu_value is not None:
+        gpu_context = f"{context}.gpu_temperature"
+        gpu_temperature = _check_exact_keys(
+            errors,
+            gpu_value,
+            GPU_TEMPERATURE_KEYS,
+            gpu_context,
+        )
+        if gpu_temperature.get("source") != "nvml":
+            errors.append(f"{gpu_context}.source must be 'nvml'")
+        device_uuid = _check_string(
+            errors,
+            gpu_temperature.get("device_uuid"),
+            f"{gpu_context}.device_uuid",
+        )
+        selected_uuid = device.get("device_uuid")
+        if not isinstance(selected_uuid, str) or not selected_uuid:
+            errors.append(
+                f"{gpu_context} requires a selected device UUID"
+            )
+        elif device_uuid != selected_uuid:
+            errors.append(
+                f"{gpu_context}.device_uuid must match the selected device"
+            )
+        _check_temperature(
+            errors,
+            gpu_temperature.get("temperature_millicelsius"),
+            f"{gpu_context}.temperature_millicelsius",
+            minimum=1_000,
+            maximum=150_000,
+        )
+
+    host_available = capabilities.get("host_temperature") == "available"
+    if host_available != bool(host_temperatures):
+        errors.append(
+            "receipt.environment.platform host_temperature capability and "
+            "observations disagree"
+        )
+    gpu_available = capabilities.get("gpu_temperature") == "available"
+    if gpu_available != (gpu_value is not None):
+        errors.append(
+            "receipt.environment.platform gpu_temperature capability and "
+            "observations disagree"
+        )
+    if gpu_available and capabilities.get("nvml") != "available":
+        errors.append(
+            "receipt.environment.platform gpu_temperature requires NVML"
+        )
 
 
 def _validate_config(errors: list[str], value: Any, context: str) -> None:
@@ -496,6 +619,12 @@ def validate_receipt(
             errors,
             platform_object.get("details"),
             "receipt.environment.platform.details",
+        )
+        _validate_wsl2_observations(
+            errors,
+            platform_object.get("observations"),
+            capabilities,
+            device,
         )
 
     model = top.get("model")

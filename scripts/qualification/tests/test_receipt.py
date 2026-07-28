@@ -88,12 +88,27 @@ class ReceiptTests(unittest.TestCase):
 
     def test_wsl2_platform_capabilities_are_closed_and_typed(self) -> None:
         value = valid_receipt()
+        value["environment"]["device"]["device_uuid"] = "GPU-1234"
         value["environment"]["platform"] = {
             "kind": "wsl2",
             "capabilities": {
                 key: "available" for key in receipt_module.WSL2_CAPABILITY_KEYS
             },
             "details": {"wsl_identity": "WSL 2.5.9.0"},
+            "observations": {
+                "host_temperatures": [
+                    {
+                        "source": "windows_formatted_thermal_zone",
+                        "name": "\\_TZ.THRM",
+                        "temperature_millicelsius": 72_050,
+                    }
+                ],
+                "gpu_temperature": {
+                    "source": "nvml",
+                    "device_uuid": "GPU-1234",
+                    "temperature_millicelsius": 64_000,
+                },
+            },
         }
         self.assertEqual(receipt_module.validate_receipt(value), [])
         value["environment"]["platform"]["capabilities"][
@@ -103,6 +118,40 @@ class ReceiptTests(unittest.TestCase):
         errors = receipt_module.validate_receipt(value)
         self.assertTrue(any("nvml" in error for error in errors))
         self.assertTrue(any("unknown keys: surprise" in error for error in errors))
+
+    def test_wsl2_temperature_capabilities_match_typed_observations(self) -> None:
+        value = valid_receipt()
+        value["environment"]["platform"] = {
+            "kind": "wsl2",
+            "capabilities": {
+                key: "unavailable" for key in receipt_module.WSL2_CAPABILITY_KEYS
+            },
+            "details": {"wsl_identity": "WSL 2.5.9.0"},
+            "observations": {
+                "host_temperatures": [],
+                "gpu_temperature": None,
+            },
+        }
+        self.assertEqual(receipt_module.validate_receipt(value), [])
+        value["environment"]["platform"]["capabilities"][
+            "host_temperature"
+        ] = "available"
+        value["environment"]["platform"]["observations"]["gpu_temperature"] = {
+            "source": "nvml",
+            "device_uuid": "GPU-other",
+            "temperature_millicelsius": 250_000,
+        }
+        value["environment"]["platform"]["capabilities"]["nvml"] = "unavailable"
+        errors = receipt_module.validate_receipt(value)
+        self.assertTrue(any("host_temperature capability" in error for error in errors))
+        self.assertTrue(any("gpu_temperature capability" in error for error in errors))
+        self.assertTrue(any("temperature_millicelsius" in error for error in errors))
+        self.assertTrue(any("requires a selected device UUID" in error for error in errors))
+        value["environment"]["platform"]["capabilities"][
+            "gpu_temperature"
+        ] = "available"
+        errors = receipt_module.validate_receipt(value)
+        self.assertTrue(any("requires NVML" in error for error in errors))
 
     def test_optional_device_capability_fields_are_typed_and_bounded(self) -> None:
         value = valid_receipt()

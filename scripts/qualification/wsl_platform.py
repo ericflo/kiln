@@ -45,6 +45,8 @@ CAPABILITY_KEYS = {
     "systemd_user_transient",
     "cgroup_memory_delegation",
     "memory_accounting",
+    "host_temperature",
+    "gpu_temperature",
 }
 CAPABILITY_STATUSES = {"available", "unavailable"}
 WSL_CONTAINMENT_MECHANISMS = {
@@ -86,6 +88,83 @@ def decode_windows_output(value: bytes) -> str:
     if b"\x00" in value[:256]:
         return value.decode("utf-16-le").lstrip("\ufeff")
     return value.decode("utf-8-sig")
+
+
+def parse_windows_thermal_zones(text: str) -> list[dict[str, Any]]:
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise PlatformProbeError(
+            f"Windows formatted thermal telemetry is malformed JSON: {exc}"
+        ) from exc
+    rows = raw if isinstance(raw, list) else [raw]
+    if not rows:
+        raise PlatformProbeError("Windows formatted thermal telemetry is empty")
+    normalized: list[dict[str, Any]] = []
+    names: set[str] = set()
+    keys = {
+        "Name",
+        "Temperature",
+        "HighPrecisionTemperature",
+        "PercentPassiveLimit",
+        "ThrottleReasons",
+    }
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict) or set(row) != keys:
+            raise PlatformProbeError(
+                f"Windows formatted thermal row {index} has invalid keys"
+            )
+        name = row["Name"]
+        integer_fields = {key: row[key] for key in keys - {"Name"}}
+        if (
+            not isinstance(name, str)
+            or not name
+            or name != name.strip()
+            or name in names
+            or any(
+                not isinstance(value, int) or isinstance(value, bool)
+                for value in integer_fields.values()
+            )
+        ):
+            raise PlatformProbeError(
+                f"Windows formatted thermal row {index} has invalid values"
+            )
+        kelvin = integer_fields["Temperature"]
+        tenths_kelvin = integer_fields["HighPrecisionTemperature"]
+        percent_passive_limit = integer_fields["PercentPassiveLimit"]
+        throttle_reasons = integer_fields["ThrottleReasons"]
+        if not 1 <= kelvin <= 1000 or not 1 <= tenths_kelvin <= 10_000:
+            raise PlatformProbeError(
+                f"Windows formatted thermal row {index} is implausible"
+            )
+        if not (
+            0 <= percent_passive_limit <= 0xFFFFFFFF
+            and 0 <= throttle_reasons <= 0xFFFFFFFF
+        ):
+            raise PlatformProbeError(
+                f"Windows formatted thermal row {index} has invalid counters"
+            )
+        if abs(kelvin * 10 - tenths_kelvin) > 10:
+            raise PlatformProbeError(
+                f"Windows formatted thermal row {index} precision fields disagree"
+            )
+        millicelsius = tenths_kelvin * 100 - 273_150
+        if not -50_000 <= millicelsius <= 200_000:
+            raise PlatformProbeError(
+                f"Windows formatted thermal row {index} converted implausibly"
+            )
+        names.add(name)
+        normalized.append(
+            {
+                "name": name,
+                "temperature_kelvin": kelvin,
+                "high_precision_temperature_tenths_kelvin": tenths_kelvin,
+                "temperature_millicelsius": millicelsius,
+                "percent_passive_limit": percent_passive_limit,
+                "throttle_reasons": throttle_reasons,
+            }
+        )
+    return normalized
 
 
 def parse_wsl_version(text: str) -> dict[str, str]:
@@ -347,6 +426,13 @@ def _nvml_probe(device_index: int, raw: dict[str, Any]) -> dict[str, Any]:
         name = _nvml_text(nvml.nvmlDeviceGetName, handle)
         memory = NvmlMemory()
         _call_zero(nvml.nvmlDeviceGetMemoryInfo, handle, ctypes.byref(memory))
+        temperature = ctypes.c_uint()
+        _call_zero(
+            nvml.nvmlDeviceGetTemperature,
+            handle,
+            0,
+            ctypes.byref(temperature),
+        )
     finally:
         _call_zero(shutdown)
     result = {
@@ -359,6 +445,7 @@ def _nvml_probe(device_index: int, raw: dict[str, Any]) -> dict[str, Any]:
         "memory_total_bytes": memory.total,
         "memory_free_bytes": memory.free,
         "memory_used_bytes": memory.used,
+        "temperature_c": temperature.value,
     }
     raw["nvml"] = result
     return result
@@ -509,6 +596,60 @@ def _cgroup_probe(raw: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _hwmon_temperatures(
+    root: Path = Path("/sys/class/hwmon"),
+) -> list[dict[str, Any]]:
+    sensors: list[dict[str, Any]] = []
+    for device in sorted(root.glob("hwmon*")):
+        name_path = device / "name"
+        if not name_path.is_file():
+            continue
+        try:
+            name = name_path.read_text(errors="replace").strip()
+        except OSError as exc:
+            raise PlatformProbeError(
+                f"cannot read hwmon name {name_path}: {exc}"
+            ) from exc
+        if not name:
+            raise PlatformProbeError(f"empty hwmon name at {name_path}")
+        for input_path in sorted(device.glob("temp*_input")):
+            try:
+                value = int(input_path.read_text().strip())
+            except (OSError, ValueError) as exc:
+                raise PlatformProbeError(
+                    f"cannot read hwmon temperature {input_path}: {exc}"
+                ) from exc
+            if not -50_000 <= value <= 200_000:
+                raise PlatformProbeError(
+                    f"implausible hwmon temperature {value} at {input_path}"
+                )
+            label_path = input_path.with_name(
+                input_path.name.replace("_input", "_label")
+            )
+            try:
+                label = (
+                    label_path.read_text(errors="replace").strip()
+                    if label_path.is_file()
+                    else input_path.stem
+                )
+                resolved_input = input_path.resolve(strict=True)
+            except OSError as exc:
+                raise PlatformProbeError(
+                    f"cannot identify hwmon temperature {input_path}: {exc}"
+                ) from exc
+            if not label:
+                raise PlatformProbeError(f"empty hwmon label at {label_path}")
+            sensors.append(
+                {
+                    "hwmon_name": name,
+                    "label": label,
+                    "input_path": str(resolved_input),
+                    "temperature_millicelsius": value,
+                }
+            )
+    return sensors
+
+
 def bind_containment(
     platform_value: dict[str, Any],
     results: list[dict[str, Any]],
@@ -600,7 +741,12 @@ def collect(
         "kind": "wsl2",
         "capabilities": capabilities,
         "details": details,
+        "observations": {
+            "host_temperatures": [],
+            "gpu_temperature": None,
+        },
     }
+    observations = platform_value["observations"]
 
     started = time.monotonic()
     kernel = platform.release()
@@ -827,11 +973,25 @@ def collect(
             != nvml["memory_total_bytes"]
         ):
             raise PlatformProbeError("NVML memory accounting is inconsistent")
+        if not 1 <= nvml["temperature_c"] <= 150:
+            raise PlatformProbeError(
+                f"NVML temperature is implausible: {nvml['temperature_c']} C"
+            )
         capabilities["nvml"] = "available"
+        capabilities["gpu_temperature"] = "available"
         details["nvml"] = (
             f"NVML {nvml['version']}; driver {nvml['driver_version']}; "
             f"UUID {nvml['device_uuid']}"
         )
+        details["gpu_temperature"] = (
+            f"selected device {nvml['device_uuid']}: "
+            f"{nvml['temperature_c']} C at capture"
+        )
+        observations["gpu_temperature"] = {
+            "source": "nvml",
+            "device_uuid": nvml["device_uuid"],
+            "temperature_millicelsius": nvml["temperature_c"] * 1000,
+        }
         results.append(
             _result(
                 "wsl2-nvml-identity",
@@ -841,11 +1001,31 @@ def collect(
                 detail=details["nvml"],
             )
         )
+        results.append(
+            _result(
+                "wsl2-gpu-temperature",
+                required=True,
+                passed=True,
+                started=started,
+                detail=details["gpu_temperature"],
+            )
+        )
     except (OSError, PlatformProbeError) as exc:
         detail = str(exc)
+        details["gpu_temperature"] = detail
+        unsupported.append("wsl2_gpu_temperature: " + detail)
         results.append(
             _result(
                 "wsl2-nvml-identity",
+                required=True,
+                passed=False,
+                started=started,
+                detail=detail,
+            )
+        )
+        results.append(
+            _result(
+                "wsl2-gpu-temperature",
                 required=True,
                 passed=False,
                 started=started,
@@ -1083,6 +1263,109 @@ def collect(
         unsupported.append(
             "wsl2_systemd_user_transient: "
             + details["systemd_user_transient"]
+        )
+
+    started = time.monotonic()
+    linux_error: str | None = None
+    try:
+        sensors = _hwmon_temperatures()
+    except PlatformProbeError as exc:
+        sensors = []
+        linux_error = str(exc)
+        linux_detail = str(exc)
+    else:
+        linux_detail = "no readable Linux hwmon temperature inputs"
+    platform_raw["host_temperature_sensors"] = sensors
+    if sensors:
+        capabilities["host_temperature"] = "available"
+        observations["host_temperatures"] = [
+            {
+                "source": "linux_hwmon",
+                "name": (
+                    f"{sensor['hwmon_name']}/{sensor['label']} "
+                    f"[{sensor['input_path']}]"
+                ),
+                "temperature_millicelsius": sensor[
+                    "temperature_millicelsius"
+                ],
+            }
+            for sensor in sensors
+        ]
+        details["host_temperature"] = (
+            f"{len(sensors)} readable Linux hwmon temperature inputs"
+        )
+        host_temperature_passed = True
+    elif linux_error is not None:
+        details["host_temperature"] = linux_error
+        host_temperature_passed = False
+    elif not contained:
+        script = (
+            "$ErrorActionPreference='Stop';"
+            "Get-CimInstance -ClassName "
+            "Win32_PerfFormattedData_Counters_ThermalZoneInformation|"
+            "Select-Object Name,Temperature,HighPrecisionTemperature,"
+            "PercentPassiveLimit,ThrottleReasons|"
+            "ConvertTo-Json -Compress -Depth 3"
+        )
+        try:
+            thermal_text = _command(
+                "wsl2-windows-formatted-temperature",
+                [
+                    str(POWERSHELL),
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    script,
+                ],
+                platform_raw,
+            ).strip()
+            windows_sensors = parse_windows_thermal_zones(thermal_text)
+            platform_raw["host_temperature_sensors"] = windows_sensors
+            capabilities["host_temperature"] = "available"
+            observations["host_temperatures"] = [
+                {
+                    "source": "windows_formatted_thermal_zone",
+                    "name": sensor["name"],
+                    "temperature_millicelsius": sensor[
+                        "temperature_millicelsius"
+                    ],
+                }
+                for sensor in windows_sensors
+            ]
+            details["host_temperature"] = (
+                "Windows formatted thermal provider: "
+                + ", ".join(
+                    f"{sensor['name']}="
+                    f"{sensor['temperature_millicelsius']}mC"
+                    for sensor in windows_sensors
+                )
+            )
+            host_temperature_passed = True
+        except PlatformProbeError as exc:
+            details["host_temperature"] = (
+                f"{linux_detail}; Windows formatted thermal provider "
+                f"unavailable: {exc}"
+            )
+            host_temperature_passed = False
+    else:
+        details["host_temperature"] = (
+            f"{linux_detail}; Windows interop is intentionally unavailable "
+            "inside the contained case"
+        )
+        host_temperature_passed = False
+    results.append(
+        _result(
+            "wsl2-host-temperature",
+            required=not bool(contained),
+            passed=host_temperature_passed,
+            started=started,
+            detail=details["host_temperature"],
+        )
+    )
+    if not host_temperature_passed:
+        unsupported.append(
+            "wsl2_host_temperature: " + details["host_temperature"]
         )
 
     started = time.monotonic()
