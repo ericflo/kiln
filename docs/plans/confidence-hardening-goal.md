@@ -163,8 +163,10 @@ historical evidence and are not rerun or rewritten by this phase.
 
 ## Phase 7.3: Final Cross-Backend Regression Closure
 
-- [ ] On current source, dispatch the complete backend build matrix and require
-  the CUDA, Metal, ROCm, and Vulkan feature lanes to pass on the same commit.
+- [ ] From one current source commit, dispatch GitHub Actions CI with
+  `backend_build=all` and require its CUDA, Metal, ROCm, and Vulkan lanes to
+  pass on their separate compatible hosted runners. This is compile and test
+  evidence, not a requirement that one qualification host run every backend.
 - [ ] On Strix Halo, retain current-source ROCm and Vulkan core-correctness
   receipts.
 - [ ] Retain targeted ROCm and Vulkan serving receipts covering exact output,
