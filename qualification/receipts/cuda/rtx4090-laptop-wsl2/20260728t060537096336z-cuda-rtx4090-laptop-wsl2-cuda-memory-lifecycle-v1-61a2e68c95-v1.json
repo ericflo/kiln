@@ -1,0 +1,400 @@
+{
+  "artifacts": [
+    {
+      "bytes": 20250,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1/environment.json",
+      "sha256": "sha256:26a18f0906ee07bcb13f452432d7a90ee80d53a20d26db8f93e4584416afd3a6"
+    },
+    {
+      "bytes": 35,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1/cases/001-device-probe-r001/stdout.log",
+      "sha256": "sha256:c6d2125838ca3b26273a0880e03a3ccbb4c51cc16d3b0201df2320ceda762a44"
+    },
+    {
+      "bytes": 904,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1/cases/001-device-probe-r001/stderr.log",
+      "sha256": "sha256:282f5c6e2048731069576c704c3eab9e39d84f019ba3187c1d14981696d76132"
+    },
+    {
+      "bytes": 640,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1/cases/001-device-probe-r001/case-result.json",
+      "sha256": "sha256:478bfcd559f5c6dc1ce12f5107a340b310dff646d3bb5f0504e199dd2b1b49a2"
+    },
+    {
+      "bytes": 270,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1/cases/002-allocator-reclaim-r001/stdout.log",
+      "sha256": "sha256:14a6e4970388378e63b27cd3b732b1ad6d8ddfec7d6f7becec7e85dd219c647e"
+    },
+    {
+      "bytes": 4802,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1/cases/002-allocator-reclaim-r001/stderr.log",
+      "sha256": "sha256:7d6fab95fd9b215e3b332c945f8089fe633815fe8631e2d0a66758d99a5c163e"
+    },
+    {
+      "bytes": 644,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1/cases/002-allocator-reclaim-r001/case-result.json",
+      "sha256": "sha256:320eac772a1df45eb39924090385b4e38a5a39f5db4a65c2e886e0061eb40cf8"
+    },
+    {
+      "bytes": 330,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1/cases/003-server-admission-rejection-r001/stdout.log",
+      "sha256": "sha256:f3d8f8f8a083b298b59ffd1eba085b5bab96c37a41b4ccfd3b9cdd9e51864fec"
+    },
+    {
+      "bytes": 30360,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1/cases/003-server-admission-rejection-r001/stderr.log",
+      "sha256": "sha256:43adc05638be310110a95e355cd6b627c2d5d6f58e83cb4d90b6608acb140f92"
+    },
+    {
+      "bytes": 654,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1/cases/003-server-admission-rejection-r001/case-result.json",
+      "sha256": "sha256:c3b2e1c4616b3477a78b412a331f9d65e3fffcc77b796f5653e6669b4487167b"
+    },
+    {
+      "bytes": 322,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1/cases/004-server-allocation-failure-recovery-r001/stdout.log",
+      "sha256": "sha256:2e97cd0281cfea46bae75175bb3e1ee52b695a11ad820a8fd89965e257747609"
+    },
+    {
+      "bytes": 30360,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1/cases/004-server-allocation-failure-recovery-r001/stderr.log",
+      "sha256": "sha256:9686658d4c0b4acb944fb7c07248cad2b1b00dfd00d638b7ebb4f971dce973ab"
+    },
+    {
+      "bytes": 662,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1/cases/004-server-allocation-failure-recovery-r001/case-result.json",
+      "sha256": "sha256:4194ae3044bb75cff70e1700e89cb79fa1dda7601c363671f2e4b05b1baa96da"
+    },
+    {
+      "bytes": 206,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1/cases/005-paged-kv-resize-r001/stdout.log",
+      "sha256": "sha256:75bf5e48b32b280c3432c0ad7cdf8886df81133be74ba3cc371bbb14254d5a2d"
+    },
+    {
+      "bytes": 19453,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1/cases/005-paged-kv-resize-r001/stderr.log",
+      "sha256": "sha256:db38d8de324ea6590dbf98ded1eb5a9db7652d9c0cb5b55104af7191a166aaaa"
+    },
+    {
+      "bytes": 643,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1/cases/005-paged-kv-resize-r001/case-result.json",
+      "sha256": "sha256:38a29f8c457a1868206f6cacd9130bea76943d8c542ba6ccab943d48664a0c9e"
+    },
+    {
+      "bytes": 18464,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1/run-config.json",
+      "sha256": "sha256:264c0f8b03d315d6436f365811114d2d4c25536e3dbc37e39dc74833b06ccf55"
+    }
+  ],
+  "created_at_utc": "2026-07-28T06:05:52.982Z",
+  "effective_config": {},
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+      "nvcc": "release 12.4, V12.4.99",
+      "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)"
+    },
+    "device": {
+      "architecture": "sm_89",
+      "compute_capability": "8.9",
+      "compute_units": null,
+      "device_uuid": "GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd",
+      "driver": "NVIDIA 596.36",
+      "logical_index": 0,
+      "memory_available_bytes": 16259219456,
+      "memory_bytes": 17171480576,
+      "name": "NVIDIA GeForce RTX 4090 Laptop GPU",
+      "pci_bus_id": "00000000:01:00.0",
+      "unified_memory": false
+    },
+    "host_id": "rtx4090-laptop-wsl2",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "6.6.87.2-microsoft-standard-WSL2",
+      "name": "Ubuntu",
+      "version": "22.04"
+    },
+    "platform": {
+      "capabilities": {
+        "cgroup_memory_delegation": "available",
+        "cuda_driver_bridge": "available",
+        "cuda_runtime": "available",
+        "cuda_toolkit": "available",
+        "driver_identity": "available",
+        "filesystem_semantics": "available",
+        "gpu_temperature": "available",
+        "host_temperature": "available",
+        "memory_accounting": "available",
+        "network_containment": "available",
+        "nvml": "available",
+        "process_containment": "available",
+        "systemd_system": "available",
+        "systemd_user_transient": "available",
+        "windows_identity": "available",
+        "wsl_identity": "available"
+      },
+      "details": {
+        "cgroup_memory_delegation": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice; controllers=memory,pids; memory.max and swap.max round-trip",
+        "cuda_driver_bridge": "libcuda API 13020; bridge_root=/usr/lib/wsl/lib",
+        "cuda_runtime": "runtime API 12.4; driver API 13.2",
+        "cuda_toolkit": "SDK 12.4.0; nvcc 12.4.99; root=/usr/local/cuda-12.4",
+        "driver_identity": "Windows 32.0.15.9636; NVIDIA 596.36; PNP PCI\\VEN_10DE&DEV_2757&SUBSYS_36081043&REV_A1\\4&6AD973D&0&0008",
+        "filesystem_semantics": "/dev/sdd ext4 at /; atomic+durable+link+case probes passed",
+        "gpu_temperature": "selected device GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd: 66 C at capture",
+        "host_temperature": "Windows formatted thermal provider: \\_TZ.THRM=83050mC",
+        "memory_accounting": "MemAvailable=15264448512; MemTotal=16459145216; SwapFree=4012347392; SwapTotal=4294967296",
+        "nvml": "NVML 13.595.71.01; driver 596.36; UUID GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd",
+        "systemd_system": "PID 1 systemd; system state running",
+        "systemd_user_transient": "user manager running; owned user bus and transient unit passed",
+        "windows_identity": "Microsoft Windows 11 Home 10.0.26200 build 26200; WSL 2.5.9.0",
+        "workload_containment": "util-linux-unshare-user-net-pid-landlock-v1; loopback-only network, private PID namespace, kill-child lifetime, and Landlock-denied WSL interop",
+        "wsl_identity": "kernel=6.6.87.2-microsoft-standard-WSL2; interop=enabled\ninterpreter /init\nflags: PF\noffset 0\nmagic 4d5a"
+      },
+      "kind": "wsl2",
+      "observations": {
+        "gpu_temperature": {
+          "device_uuid": "GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd",
+          "source": "nvml",
+          "temperature_millicelsius": 66000
+        },
+        "host_temperatures": [
+          {
+            "name": "\\_TZ.THRM",
+            "source": "windows_formatted_thermal_zone",
+            "temperature_millicelsius": 83050
+          }
+        ]
+      }
+    },
+    "runtime": {
+      "cuda_driver": "596.36",
+      "cuda_toolkit": "release 12.4, V12.4.99",
+      "execution_environment_sha256": "sha256:fe7e6ff8e8ce179fbc2e5e863a147822255f4cabde7f71ba470dc813b252552b",
+      "nvidia_smi_query": "index,name,uuid,pci.bus_id,compute_cap,memory.total,memory.free,driver_version"
+    }
+  },
+  "metrics": [],
+  "model": null,
+  "notes": [],
+  "qualification": {
+    "backend": "cuda",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "qualification/workloads/cuda-memory-lifecycle-v1.json",
+      "--variant",
+      "cuda-rtx4090-laptop-16gb",
+      "--host-id",
+      "rtx4090-laptop-wsl2"
+    ],
+    "duration_seconds": 15.885678266000468,
+    "finished_at_utc": "2026-07-28T06:05:52.982Z",
+    "kind": "correctness",
+    "profile": "cuda-memory-lifecycle-v1",
+    "started_at_utc": "2026-07-28T06:05:37.096Z",
+    "verdict": "passed"
+  },
+  "receipt_id": "20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1",
+  "results": [
+    {
+      "details": null,
+      "duration_seconds": 0.2428310240211431,
+      "id": "device-probe",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 8.177162409992889,
+      "id": "allocator-reclaim",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 2.0193805809831247,
+      "id": "server-admission-rejection",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 1.2761726710014045,
+      "id": "server-allocation-failure-recovery",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 1.9749556290043984,
+      "id": "paged-kv-resize",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "4b68c44939726a4acfaf3c14aad61448a6695bd6",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:c58336660ef8968f30fcbbf600b6a75156ac748ee607c540e4828d6b7517ea16",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "cuda-memory-lifecycle-v1",
+    "parameters": {
+      "variant_id": "cuda-rtx4090-laptop-16gb"
+    },
+    "seed": 20260721,
+    "sha256": "sha256:4ff7aadc0dc12bfd9ae322789461eec07c4b177a775bc8ac81bf6026a7e13c9f"
+  }
+}

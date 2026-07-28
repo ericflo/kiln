@@ -114,8 +114,27 @@ output-assertion failure; every owned WSL2 scope was removed without a cgroup
 memory event.
 
 This is evidence for the declared core subset on the measured RTX 4090 Laptop
-under WSL2. It is not serving, low-memory lifecycle, concurrency, soak, native
-Linux, desktop RTX 4090, or Metal evidence.
+under WSL2. The separate memory-lifecycle receipt below supplies memory
+evidence; this core receipt is not serving, concurrency, soak, native Linux,
+desktop RTX 4090, or Metal evidence.
+
+## Current CUDA Memory Lifecycle Evidence
+
+The current retained laptop CUDA memory-lifecycle receipt is
+[`20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1.json`](../qualification/receipts/cuda/rtx4090-laptop-wsl2/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1.json).
+It passed from clean pushed source `4b68c4493972`. Its five required cases
+selected the declared laptop GPU, reclaimed two GiB held by the CUDA pool,
+rejected a request one block above the live admission ceiling before
+allocation, recovered from a controlled injected allocator error by retrying
+a smaller real CUDA cache, and preserved a marker through a
+4,000-to-500-to-4,000 block physical KV resize. Every case exited zero with no
+output-assertion failure; every owned WSL2 scope reported zero cgroup memory
+events, was removed, and left no CUDA or qualification process.
+
+The controlled error proves the server allocation-retry path and its real CUDA
+fallback allocation. It does not claim a physical device OOM, full-model
+memory pressure, serving, concurrency, soak, native Linux, desktop RTX 4090,
+or Metal evidence.
 
 ## Build Boundary
 

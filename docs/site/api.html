@@ -1167,8 +1167,22 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 LoRA SFT step, and a twenty-step BF16 AdamW trajectory against the pinned PyTorch
                 oracle. All five cases exited zero, reported no cgroup memory event, and removed their
                 owned WSL2 scopes. This result applies only to that declared core subset on the
-                measured laptop under WSL2; it is not low-memory lifecycle, serving, concurrency,
-                endurance, native Linux, desktop RTX 4090, or Metal evidence.
+                measured laptop under WSL2; the separate memory-lifecycle receipt supplies the memory
+                evidence, while serving, concurrency, endurance, native Linux, desktop RTX 4090, and
+                Metal evidence remain outside this core result.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Retained CUDA memory-lifecycle receipt
+                <code>20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1</code>
+                passed from clean pushed source <code>4b68c4493972</code>. Its five required cases
+                selected the declared laptop GPU, reclaimed two GiB held by the CUDA pool, rejected
+                a request above the live admission ceiling before allocation, recovered from a
+                controlled injected allocator error by retrying a smaller real CUDA cache, and
+                preserved data through a 4,000-to-500-to-4,000 block physical KV resize. Every case
+                exited zero; every owned scope reported zero cgroup memory events, was removed, and
+                left no CUDA or qualification process. The controlled error proves the retry path,
+                not a physical device OOM or full-model memory-pressure run. It is not serving,
+                concurrency, endurance, native Linux, desktop RTX 4090, or Metal evidence.
               </p>
             </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">

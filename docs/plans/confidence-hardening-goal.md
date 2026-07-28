@@ -50,7 +50,7 @@ passed, its owned scope was removed, and no CUDA process remained.
   device. The independent vLLM exact-output defect was fixed at `d0f74ecb4`;
   the qualification receipt binds the current source and platform
   boundary.
-- [ ] Retain low-memory admission, allocation failure, reclaim, and process
+- [x] Retain low-memory admission, allocation failure, reclaim, and process
   cleanup evidence.
 - [ ] Run serving performance at every concurrency that fits without changing
   workload semantics.
@@ -65,7 +65,22 @@ device, tensor, matmul, CUDA graph/eager parity, CUDA SFT, and twenty-step
 PyTorch AdamW oracle cases all passed. All five owned scopes exited zero,
 reported no cgroup memory events, were removed, and left no CUDA process.
 This receipt establishes only the declared substrate, graph, and training
-subset; low-memory, serving, concurrency, and endurance evidence remain open.
+subset; the separate memory-lifecycle receipt below supplies the memory
+evidence. Serving, concurrency, and endurance evidence remain open.
+
+Memory-lifecycle evidence: `qualification/receipts/cuda/`
+`rtx4090-laptop-wsl2/20260728t060537096336z-cuda-rtx4090-laptop-wsl2-`
+`cuda-memory-lifecycle-v1-61a2e68c95-v1.json` passed from clean pushed source
+`4b68c4493972`. Its five required cases selected the declared laptop GPU,
+reclaimed two GiB held by the CUDA pool, rejected an allocation above the live
+admission ceiling before allocation, recovered from a controlled injected
+allocator error by retrying a smaller real CUDA cache, and preserved data
+through a 4,000-to-500-to-4,000 block physical KV resize. Every owned scope
+exited zero, reported no cgroup memory event, was removed, and left no CUDA or
+qualification process. The injected error proves the server retry path; it is
+not a claim that a physical device OOM or full-model memory-pressure run
+occurred. Serving, concurrency, endurance, native Linux, desktop RTX 4090, and
+Metal evidence remain open.
 
 ## Next Backend
 
