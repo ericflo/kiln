@@ -1159,6 +1159,17 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 its available-memory floor and host reserve from the current host instead of pinning
                 a machine-sized minimum; one build job and aggregate cgroup accounting remain enforced.
               </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Retained CUDA core receipt
+                <code>20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1</code>
+                passed from clean source <code>b81c6787d0a4</code>. It required the selected device,
+                tensor and matmul parity, CUDA graph replay against eager execution, a complete CUDA
+                LoRA SFT step, and a twenty-step BF16 AdamW trajectory against the pinned PyTorch
+                oracle. All five cases exited zero, reported no cgroup memory event, and removed their
+                owned WSL2 scopes. This result applies only to that declared core subset on the
+                measured laptop under WSL2; it is not low-memory lifecycle, serving, concurrency,
+                endurance, native Linux, desktop RTX 4090, or Metal evidence.
+              </p>
             </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">
               <h4 class="font-semibold mb-2">Memory alerting contract</h4>

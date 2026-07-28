@@ -46,9 +46,9 @@ passed, its owned scope was removed, and no CUDA process remained.
 
 ## Phase 7.1: RTX 4090 Laptop GPU, 16 GB
 
-- [ ] Retain the current-source CUDA correctness/oracle subset that fits the
+- [x] Retain the current-source CUDA correctness/oracle subset that fits the
   device. The independent vLLM exact-output defect was fixed at `d0f74ecb4`;
-  the qualification receipt still must bind the current source and platform
+  the qualification receipt binds the current source and platform
   boundary.
 - [ ] Retain low-memory admission, allocation failure, reclaim, and process
   cleanup evidence.
@@ -57,6 +57,15 @@ passed, its owned scope was removed, and no CUDA process remained.
 - [ ] Run an eight-hour mixed-load soak using ordinary monotonic elapsed time.
 - [ ] Validate and check in receipts, update this checklist and permanent
   documentation, commit, and push.
+
+Correctness evidence: `qualification/receipts/cuda/rtx4090-laptop-wsl2/`
+`20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-`
+`9f21d75c94-v1.json` passed from clean source `b81c6787d0a4`. Its required
+device, tensor, matmul, CUDA graph/eager parity, CUDA SFT, and twenty-step
+PyTorch AdamW oracle cases all passed. All five owned scopes exited zero,
+reported no cgroup memory events, were removed, and left no CUDA process.
+This receipt establishes only the declared substrate, graph, and training
+subset; low-memory, serving, concurrency, and endurance evidence remain open.
 
 ## Next Backend
 

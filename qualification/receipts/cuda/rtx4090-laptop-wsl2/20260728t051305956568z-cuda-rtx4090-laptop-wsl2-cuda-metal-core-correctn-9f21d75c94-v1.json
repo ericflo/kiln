@@ -1,0 +1,400 @@
+{
+  "artifacts": [
+    {
+      "bytes": 20248,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1/environment.json",
+      "sha256": "sha256:14314201c74180a1ad9ebd426fff62e6108aa2c5d006157cf7edc9746755c07c"
+    },
+    {
+      "bytes": 35,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1/cases/001-device-probe-r001/stdout.log",
+      "sha256": "sha256:c6d2125838ca3b26273a0880e03a3ccbb4c51cc16d3b0201df2320ceda762a44"
+    },
+    {
+      "bytes": 904,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1/cases/001-device-probe-r001/stderr.log",
+      "sha256": "sha256:4fe2e56ecf6e3a2518d998650921f08403da1ebf10cdf041dfe08d8289a20fa2"
+    },
+    {
+      "bytes": 641,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1/cases/001-device-probe-r001/case-result.json",
+      "sha256": "sha256:5863146e4a9ea8736324f22b982fbab350ce9249cd1bfb5ed5ae1e5d75ac1399"
+    },
+    {
+      "bytes": 210,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1/cases/002-tensor-parity-r001/stdout.log",
+      "sha256": "sha256:20233c2b304029473280974f9db34d7d0f321aa9d4b4e710764b41d31d9fc29f"
+    },
+    {
+      "bytes": 5125,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1/cases/002-tensor-parity-r001/stderr.log",
+      "sha256": "sha256:57cacc8561dd411175dd356f200e78373df8c40f9cd7b67a2fd8b7ef5b8c0c38"
+    },
+    {
+      "bytes": 641,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1/cases/002-tensor-parity-r001/case-result.json",
+      "sha256": "sha256:d387602c0ad48a0fdf1adff8a8442fc855f868f49e632fc64d23fd636540cfec"
+    },
+    {
+      "bytes": 256,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1/cases/003-matmul-parity-r001/stdout.log",
+      "sha256": "sha256:dd3ec2c74f110668775cc4c54a23d3cc6209d7be0d022d7060fbfcbea46aa8e6"
+    },
+    {
+      "bytes": 4495,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1/cases/003-matmul-parity-r001/stderr.log",
+      "sha256": "sha256:cc3e1e3025fe5764c2e85ef2448d645f4e77a9aa5be9de2fbef3e78276e45278"
+    },
+    {
+      "bytes": 641,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1/cases/003-matmul-parity-r001/case-result.json",
+      "sha256": "sha256:882b56142135778359388bd2af767358ad2ff6eb5a35f8fc2856429821e3aa41"
+    },
+    {
+      "bytes": 273,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1/cases/004-graph-parity-r001/stdout.log",
+      "sha256": "sha256:d044996989c4868bcf8d4165c454a89717baadd11052ce59c9a7f5b323997901"
+    },
+    {
+      "bytes": 18982,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1/cases/004-graph-parity-r001/stderr.log",
+      "sha256": "sha256:2f9dcdbb8ac94555f16d4a43b6c39d520cbfd4f6f5a8003fa6ce7a4440bae906"
+    },
+    {
+      "bytes": 639,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1/cases/004-graph-parity-r001/case-result.json",
+      "sha256": "sha256:6a89b8247a42846bae2ecfe46e8e1eac466c93fe2a44f4d192befdb692e88ef9"
+    },
+    {
+      "bytes": 558,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1/cases/005-training-oracles-r001/stdout.log",
+      "sha256": "sha256:cc0e4afab0695e8a031e27bd56f46f406a7b707dc8107cd6069183ca57039888"
+    },
+    {
+      "bytes": 20242,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1/cases/005-training-oracles-r001/stderr.log",
+      "sha256": "sha256:5034d59b9734235d070e035c43dd2e354fd62b2ac01a0ef6dea1ffc0395518d1"
+    },
+    {
+      "bytes": 644,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1/cases/005-training-oracles-r001/case-result.json",
+      "sha256": "sha256:6e2ed91d02fa64b9dff3c364aee9c3e764214708e61b1578844b8e00f4588e8f"
+    },
+    {
+      "bytes": 18307,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1/run-config.json",
+      "sha256": "sha256:99bfb71cb13dc9200f3358823fa0f21aa7a1f6e9551c8748ff8960dd36ad53c0"
+    }
+  ],
+  "created_at_utc": "2026-07-28T05:26:33.128Z",
+  "effective_config": {},
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+      "nvcc": "release 12.4, V12.4.99",
+      "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)"
+    },
+    "device": {
+      "architecture": "sm_89",
+      "compute_capability": "8.9",
+      "compute_units": null,
+      "device_uuid": "GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd",
+      "driver": "NVIDIA 596.36",
+      "logical_index": 0,
+      "memory_available_bytes": 15942549504,
+      "memory_bytes": 17171480576,
+      "name": "NVIDIA GeForce RTX 4090 Laptop GPU",
+      "pci_bus_id": "00000000:01:00.0",
+      "unified_memory": false
+    },
+    "host_id": "rtx4090-laptop-wsl2",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "6.6.87.2-microsoft-standard-WSL2",
+      "name": "Ubuntu",
+      "version": "22.04"
+    },
+    "platform": {
+      "capabilities": {
+        "cgroup_memory_delegation": "available",
+        "cuda_driver_bridge": "available",
+        "cuda_runtime": "available",
+        "cuda_toolkit": "available",
+        "driver_identity": "available",
+        "filesystem_semantics": "available",
+        "gpu_temperature": "available",
+        "host_temperature": "available",
+        "memory_accounting": "available",
+        "network_containment": "available",
+        "nvml": "available",
+        "process_containment": "available",
+        "systemd_system": "available",
+        "systemd_user_transient": "available",
+        "windows_identity": "available",
+        "wsl_identity": "available"
+      },
+      "details": {
+        "cgroup_memory_delegation": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice; controllers=memory,pids; memory.max and swap.max round-trip",
+        "cuda_driver_bridge": "libcuda API 13020; bridge_root=/usr/lib/wsl/lib",
+        "cuda_runtime": "runtime API 12.4; driver API 13.2",
+        "cuda_toolkit": "SDK 12.4.0; nvcc 12.4.99; root=/usr/local/cuda-12.4",
+        "driver_identity": "Windows 32.0.15.9636; NVIDIA 596.36; PNP PCI\\VEN_10DE&DEV_2757&SUBSYS_36081043&REV_A1\\4&6AD973D&0&0008",
+        "filesystem_semantics": "/dev/sdd ext4 at /; atomic+durable+link+case probes passed",
+        "gpu_temperature": "selected device GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd: 67 C at capture",
+        "host_temperature": "Windows formatted thermal provider: \\_TZ.THRM=83050mC",
+        "memory_accounting": "MemAvailable=13397151744; MemTotal=16459145216; SwapFree=3809972224; SwapTotal=4294967296",
+        "nvml": "NVML 13.595.71.01; driver 596.36; UUID GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd",
+        "systemd_system": "PID 1 systemd; system state running",
+        "systemd_user_transient": "user manager running; owned user bus and transient unit passed",
+        "windows_identity": "Microsoft Windows 11 Home 10.0.26200 build 26200; WSL 2.5.9.0",
+        "workload_containment": "util-linux-unshare-user-net-pid-landlock-v1; loopback-only network, private PID namespace, kill-child lifetime, and Landlock-denied WSL interop",
+        "wsl_identity": "kernel=6.6.87.2-microsoft-standard-WSL2; interop=enabled\ninterpreter /init\nflags: PF\noffset 0\nmagic 4d5a"
+      },
+      "kind": "wsl2",
+      "observations": {
+        "gpu_temperature": {
+          "device_uuid": "GPU-fff83066-80fa-ac5f-edbe-4ebd3ac9bbfd",
+          "source": "nvml",
+          "temperature_millicelsius": 67000
+        },
+        "host_temperatures": [
+          {
+            "name": "\\_TZ.THRM",
+            "source": "windows_formatted_thermal_zone",
+            "temperature_millicelsius": 83050
+          }
+        ]
+      }
+    },
+    "runtime": {
+      "cuda_driver": "596.36",
+      "cuda_toolkit": "release 12.4, V12.4.99",
+      "execution_environment_sha256": "sha256:fe7e6ff8e8ce179fbc2e5e863a147822255f4cabde7f71ba470dc813b252552b",
+      "nvidia_smi_query": "index,name,uuid,pci.bus_id,compute_cap,memory.total,memory.free,driver_version"
+    }
+  },
+  "metrics": [],
+  "model": null,
+  "notes": [],
+  "qualification": {
+    "backend": "cuda",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "qualification/workloads/cuda-metal-core-correctness-v1.json",
+      "--variant",
+      "cuda-rtx4090-laptop-16gb",
+      "--host-id",
+      "rtx4090-laptop-wsl2"
+    ],
+    "duration_seconds": 807.1718853359926,
+    "finished_at_utc": "2026-07-28T05:26:33.128Z",
+    "kind": "correctness",
+    "profile": "cuda-metal-core-correctness-v1",
+    "started_at_utc": "2026-07-28T05:13:05.956Z",
+    "verdict": "passed"
+  },
+  "receipt_id": "20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1",
+  "results": [
+    {
+      "details": null,
+      "duration_seconds": 0.24305487400852144,
+      "id": "device-probe",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 46.224662883993005,
+      "id": "tensor-parity",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 2.1062419800146017,
+      "id": "matmul-parity",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 739.8337154950132,
+      "id": "graph-parity",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    },
+    {
+      "details": null,
+      "duration_seconds": 16.245143415988423,
+      "id": "training-oracles",
+      "metrics": [
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "case_pass",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "exit_code",
+          "unit": "code",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "output_assertion_failures",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "b81c6787d0a45039dbb82d85e39d5de63f308553",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:25bbe0c2a83115b8a16d2ac43c04ad3d5d61125dab8b1d7a1de3b9a6a301f43e",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "cuda-metal-core-correctness-v1",
+    "parameters": {
+      "variant_id": "cuda-rtx4090-laptop-16gb"
+    },
+    "seed": 20260721,
+    "sha256": "sha256:1204c7260b80f1b0d6d5367b8406534cb478832f9c47dc7efec3ada2ec9e5ac0"
+  }
+}

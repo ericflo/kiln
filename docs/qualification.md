@@ -102,6 +102,21 @@ It passed from clean pushed source `6699d9775e3a`, recorded all declared outer
 WSL2 capabilities as available, and passed the contained environment case. It
 is evidence for that laptop under WSL2 only.
 
+## Current CUDA Core Evidence
+
+The current retained laptop CUDA core receipt is
+[`20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1.json`](../qualification/receipts/cuda/rtx4090-laptop-wsl2/20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1.json).
+It passed from clean source `b81c6787d0a4` and required the selected CUDA
+device, tensor and matmul parity, CUDA graph replay against eager execution,
+one complete CUDA LoRA SFT step, and a twenty-step BF16 AdamW trajectory
+against the pinned PyTorch oracle. Each required case exited zero with no
+output-assertion failure; every owned WSL2 scope was removed without a cgroup
+memory event.
+
+This is evidence for the declared core subset on the measured RTX 4090 Laptop
+under WSL2. It is not serving, low-memory lifecycle, concurrency, soak, native
+Linux, desktop RTX 4090, or Metal evidence.
+
 ## Build Boundary
 
 Bounded build wrappers provide deterministic environment filtering, offline
