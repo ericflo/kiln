@@ -2,7 +2,7 @@
   "schema_version": 1,
   "workload_id": "serving-cuda-endurance-v1",
   "kind": "soak",
-  "description": "Keep one CUDA server process under mixed streaming load for at least eight hours and fail on deterministic response corruption, late faults, unexplained ITL gaps, leaked KV blocks, host-memory pressure, swap growth, or post-warm memory growth.",
+  "description": "Keep one CUDA server process under mixed streaming load for at least eight hours with the CUDA prefill-semantics prefix-cache quarantine active, and fail on deterministic response corruption, late faults, unexplained ITL gaps, leaked KV blocks, host-memory pressure, swap growth, or post-warm memory growth.",
   "determinism": {
     "seed": 20260728,
     "seed_delivery": "argv",
@@ -15,7 +15,7 @@
   "variants": [
     {
       "id": "cuda-endurance",
-      "description": "Architecture-agnostic CUDA endurance gate over the measured c1/c4 serving envelope, with fixed KV capacity, allocator reclaim and CUDA graphs disabled, periodic cancellation, and fail-closed device and host memory accounting.",
+      "description": "Architecture-agnostic CUDA endurance gate over the measured c1/c4 serving envelope, with fixed KV capacity and with prefix cache, allocator reclaim, and CUDA graphs disabled, periodic cancellation, and fail-closed device and host memory accounting.",
       "backend": "cuda",
       "device_requirement": "required",
       "skip_policy": "fail",
@@ -47,9 +47,9 @@
           "memory_reclaim_mode": "off",
           "rocm_graphs_requested": false,
           "rocm_graphs_enabled": false,
-          "prefix_cache_requested_enabled": true,
-          "prefix_cache_effective_enabled": true,
-          "prefix_cache_effective_reason": "active",
+          "prefix_cache_requested_enabled": false,
+          "prefix_cache_effective_enabled": false,
+          "prefix_cache_effective_reason": "cuda_prefill_semantics_quarantine",
           "vulkan_buffer_pool_gb": 0.0
         },
         "server": {

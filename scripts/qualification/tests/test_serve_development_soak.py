@@ -417,6 +417,12 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertNotIn("cuda_archs", cuda["build"])
         self.assertNotIn("cudarc_cuda_version", cuda["build"])
         self.assertEqual(cuda["runtime"]["serving_profile"], "stable")
+        self.assertFalse(cuda["runtime"]["prefix_cache_requested_enabled"])
+        self.assertFalse(cuda["runtime"]["prefix_cache_effective_enabled"])
+        self.assertEqual(
+            cuda["runtime"]["prefix_cache_effective_reason"],
+            "cuda_prefill_semantics_quarantine",
+        )
         self.assertEqual(cuda["server"]["max_decode_batch"], 4)
         self.assertEqual(cuda["server"]["max_prefill_staging_slots"], 0)
         self.assertEqual(cuda["server"]["max_active_requests"], 4)

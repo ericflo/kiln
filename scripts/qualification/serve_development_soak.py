@@ -181,9 +181,9 @@ def _cuda_variant_config() -> dict[str, Any]:
     )
     config["runtime"].update(
         {
-            "prefix_cache_requested_enabled": True,
-            "prefix_cache_effective_enabled": True,
-            "prefix_cache_effective_reason": "active",
+            "prefix_cache_requested_enabled": False,
+            "prefix_cache_effective_enabled": False,
+            "prefix_cache_effective_reason": "cuda_prefill_semantics_quarantine",
             "vulkan_buffer_pool_gb": 0.0,
         }
     )
