@@ -15,7 +15,7 @@
   "variants": [
     {
       "id": "cuda-endurance",
-      "description": "Architecture-agnostic CUDA endurance gate over the measured c1/c4 serving envelope, with two complete prompt-envelope rotations required before the memory baseline, fixed KV capacity, prefix cache, allocator reclaim, and CUDA graphs disabled, periodic cancellation, and fail-closed device and host memory accounting.",
+      "description": "Architecture-agnostic CUDA endurance gate over the measured c1/c4 serving envelope, with two complete prompt-envelope rotations required before baseline eligibility and one complete stable rotation required before the memory baseline, fixed KV capacity, prefix cache, allocator reclaim, and CUDA graphs disabled, periodic cancellation, and fail-closed device and host memory accounting.",
       "backend": "cuda",
       "device_requirement": "required",
       "skip_policy": "fail",
@@ -102,9 +102,9 @@
           "teardown_grace_seconds": 180,
           "stabilization_gpu_delta_limit_bytes": 67108864,
           "stabilization_memory_boundary": "gpu_and_rss",
-          "stabilization_max_cycles": 12,
+          "stabilization_max_cycles": 16,
           "stabilization_min_cycles": 8,
-          "stabilization_required_stable_cycles": 2,
+          "stabilization_required_stable_cycles": 4,
           "stabilization_rss_delta_limit_bytes": 16777216,
           "stabilization_rss_growth_limit_bytes": null,
           "steady_state_warmup_max_waves": 16,

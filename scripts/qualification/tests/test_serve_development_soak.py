@@ -431,7 +431,8 @@ class ServeRocmSoakTests(unittest.TestCase):
             cuda["soak"]["wave_concurrency"], {"wave_0": 1, "wave_1": 4}
         )
         self.assertEqual(cuda["soak"]["stabilization_min_cycles"], 8)
-        self.assertEqual(cuda["soak"]["stabilization_max_cycles"], 12)
+        self.assertEqual(cuda["soak"]["stabilization_max_cycles"], 16)
+        self.assertEqual(cuda["soak"]["stabilization_required_stable_cycles"], 4)
         self.assertEqual(cuda["soak"]["accelerator_telemetry"], {"mode": "disabled"})
         self.assertEqual(
             cuda["soak"]["gpu_memory_source"],
