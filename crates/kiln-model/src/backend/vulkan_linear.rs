@@ -227,6 +227,15 @@ pub(super) fn linear_decode(
     {
         return Ok(None);
     }
+    // Layer-bounded prefill selects the final hidden row before the LM-head
+    // projection, so inference can arrive here as `[rows, hidden]` even though
+    // the resident kernel's canonical interface is
+    // `[batch, sequence, hidden]`. Normalize every supported leading shape
+    // through that same kernel and restore it afterward. The helper recurses
+    // only with its canonical rank-3 dispatch tensor.
+    if x.rank() != 3 {
+        return cached_linear_matmul(backend, x, weight_t);
+    }
     if matches!(x.device(), kiln_tensor::Device::Vulkan(_))
         && matches!(weight_t.device(), kiln_tensor::Device::Vulkan(_))
     {
@@ -599,6 +608,16 @@ mod tests {
         let output = LinearBackend::runtime_matmul(&backend, &request, &x, &weight)
             .expect("resident mixed Vulkan matmul dispatch")
             .expect("Vulkan backend must own resident flattened F32 x BF16 matmul");
+        assert_eq!(output.dims(), &[2, 3]);
+        assert_eq!(output.dtype(), DType::F32);
+        assert_eq!(output.device(), Device::Vulkan(0));
+        assert_fixture_values(&output, false);
+
+        // Layer-bounded prefill feeds the LM head this exact flattened shape
+        // through runtime_linear_decode rather than the generic matmul facade.
+        let output = LinearBackend::runtime_linear_decode(&backend, &x, &weight)
+            .expect("resident rank-2 Vulkan linear dispatch")
+            .expect("Vulkan decode hook must normalize flattened LM-head rows");
         assert_eq!(output.dims(), &[2, 3]);
         assert_eq!(output.dtype(), DType::F32);
         assert_eq!(output.device(), Device::Vulkan(0));
