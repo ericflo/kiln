@@ -2913,6 +2913,64 @@ class ServingBenchmarkTests(unittest.TestCase):
         recorded_hash = receipt.pop("receipt_sha256")
         self.assertEqual(recorded_hash, bench.canonical_sha256(receipt))
 
+    def test_cli_stops_capacity_sweep_after_first_failed_row(self) -> None:
+        original_run_once = bench.run_once
+
+        def fail_second_row(**kwargs: object) -> dict:
+            row = original_run_once(**kwargs)
+            if kwargs["concurrency"] != 2:
+                return row
+            memory = row["memory"]
+            assert memory is not None
+            memory["peak_bytes"] = 2049
+            memory["peak_delta_bytes"] = 2049 - memory["baseline_bytes"]
+            memory_gate = next(
+                gate
+                for gate in row["gates"]
+                if gate["name"] == "absolute_memory_limit"
+            )
+            memory_gate["passed"] = False
+            memory_gate["detail"] = "2049 bytes <= 2048 bytes"
+            row["verdict"] = "failed"
+            return row
+
+        with (
+            FakeServer() as fake,
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(bench, "run_once", side_effect=fail_second_row),
+        ):
+            return_code, output = self._run_cli_fixture(
+                fake,
+                directory,
+                extra_args=[
+                    "--sizes=1,2,3",
+                    "--stop-after-first-failure",
+                ],
+            )
+            receipt = bench.strict_json_loads(output.read_bytes())
+            bench.validate_benchmark_receipt(receipt)
+
+        self.assertEqual(return_code, 2)
+        self.assertEqual(receipt["verdict"], "failed")
+        self.assertEqual(
+            [(row["concurrency"], row["verdict"]) for row in receipt["runs"]],
+            [(1, "passed"), (2, "failed")],
+        )
+        self.assertEqual(receipt["completion"]["expected_run_count"], 3)
+        self.assertEqual(receipt["completion"]["completed_run_count"], 2)
+        self.assertEqual(
+            receipt["completion"]["failures"],
+            [
+                {
+                    "phase": "measurement",
+                    "detail": (
+                        "stopped after first failed run at concurrency=2 repeat=0; "
+                        "completed 2 of 3 declared runs"
+                    ),
+                }
+            ],
+        )
+
     def test_cli_preserves_completed_rows_when_final_health_probe_fails(self) -> None:
         with (
             FakeServer() as reference_server,

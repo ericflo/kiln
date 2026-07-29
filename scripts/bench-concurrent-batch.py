@@ -5815,6 +5815,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--sizes", default="1,8,16,32,64")
     parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument(
+        "--stop-after-first-failure",
+        action="store_true",
+        help=(
+            "stop an ascending capacity sweep after retaining its first failed "
+            "row; the unexecuted suffix is recorded as a structured measurement "
+            "failure"
+        ),
+    )
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--warmup-requests", type=int, default=1)
     parser.add_argument(
@@ -6270,6 +6279,7 @@ def main(argv: list[str] | None = None) -> int:
                         )
 
                     if warmup is None or warmup["verdict"] == "passed":
+                        stop_after_failed_row = False
                         for concurrency in sizes:
                             for repeat in range(args.repeats):
                                 row = run_once(
@@ -6289,6 +6299,27 @@ def main(argv: list[str] | None = None) -> int:
                                 )
                                 runs.append(row)
                                 print_run(row)
+                                if (
+                                    args.stop_after_first_failure
+                                    and row["verdict"] == "failed"
+                                ):
+                                    stop_after_failed_row = True
+                                    break
+                            if stop_after_failed_row:
+                                break
+                        if (
+                            stop_after_failed_row
+                            and len(runs) < len(sizes) * args.repeats
+                        ):
+                            failed_row = runs[-1]
+                            record_completion_failure(
+                                "measurement",
+                                "stopped after first failed run at "
+                                f"concurrency={failed_row['concurrency']} "
+                                f"repeat={failed_row['repeat']}; completed "
+                                f"{len(runs)} of {len(sizes) * args.repeats} "
+                                "declared runs",
+                            )
                     elif warmup is not None:
                         record_completion_failure("warmup", "warmup verdict failed")
                 except Exception as exc:
