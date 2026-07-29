@@ -295,9 +295,10 @@ The correctness-only
 [`serving-backend-regression-closure-v1.json`](../qualification/workloads/serving-backend-regression-closure-v1.json)
 contract is the bounded current-source serving check for the final
 cross-backend closure. It builds one source-bound server per backend with a
-fixed nine-block KV pool, then runs one 16-token cache-prime request and one
-exact 256-token pressure request. The pressure request crosses four decode
-growth block boundaries without changing workload semantics.
+fixed eight-block KV pool. Its 253-token prime prompt emits 16 tokens, crosses
+token 256, and retains four prefix blocks. Its 255-token pressure prompt
+initially owns the other four blocks and emits exactly 256 tokens across four
+decode-growth block boundaries without changing workload semantics.
 
 On ROCm, a pass requires structured evidence that live decode growth reclaimed
 unleased prefix-cache blocks. On Vulkan, where cross-request prefix reuse

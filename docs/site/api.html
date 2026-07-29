@@ -1281,13 +1281,15 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 The bounded ROCm/Vulkan serving-closure contract builds one current-source server
-                per backend with a fixed nine-block KV pool, runs one 16-token cache-prime request,
-                then requires exact output from one 256-token request crossing four live-decode
-                growth boundaries. ROCm must emit structured reclamation of unleased prefix-cache
-                blocks. Vulkan must complete the same growth with its correctness quarantine
-                effective and zero prefix-cache ownership. Both variants require drained KV
-                accounting, non-forced zero shutdown, and no snapshot residue. This two-request
-                correctness check does not measure performance or search for a capacity limit.
+                per backend with a fixed eight-block KV pool. A 253-token prime prompt emits 16
+                tokens, crosses token 256, and retains four prefix blocks. A 255-token pressure
+                prompt initially owns the other four blocks and emits exactly 256 tokens across
+                four live-decode growth boundaries. ROCm must emit structured reclamation of the
+                unleased prefix blocks. Vulkan must complete the same growth with its correctness
+                quarantine effective and zero prefix-cache ownership. Both variants require
+                drained KV accounting, non-forced zero shutdown, and no snapshot residue. This
+                two-request correctness check does not measure performance or search for a
+                capacity limit.
               </p>
             </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">

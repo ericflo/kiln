@@ -15,7 +15,7 @@
   "variants": [
     {
       "id": "rocm-kv-prefix-closure",
-      "description": "Prime unleased ROCm prefix state, then require exact output while live decode growth reclaims it from a fixed nine-block KV pool.",
+      "description": "Prime unleased ROCm prefix state, then require exact output while live decode growth reclaims it from a fixed eight-block KV pool.",
       "backend": "rocm",
       "device_requirement": "required",
       "skip_policy": "fail",
@@ -41,7 +41,7 @@
         },
         "memory": {
           "kv_autoscale": false,
-          "num_blocks": 9,
+          "num_blocks": 8,
           "reclaim_mode": "off"
         },
         "model": {
@@ -88,13 +88,15 @@
           "expected_finish_reason": "length",
           "expected_request_count": 2,
           "kv_block_size": 64,
-          "kv_num_blocks": 9,
+          "kv_num_blocks": 8,
           "overall_timeout_seconds": 1800,
           "prefix_cache_max_blocks": 4,
           "prefix_cache_max_entries": 4,
+          "prime_prompt_tokens": 253,
           "pressure_max_tokens": 256,
+          "pressure_prompt_tokens": 255,
           "prime_max_tokens": 16,
-          "prompt_words": 96,
+          "prompt_words": 42,
           "request_timeout_seconds": 600,
           "response_oracle": "ascending_zero_padded_integers_prefix_v1",
           "sequence": "prime_then_pressure"
@@ -164,6 +166,7 @@
               "prefix_cache_state_bytes_end",
               "pressure_completion_token_count",
               "pressure_prompt_token_count",
+              "prime_prompt_token_count",
               "request_count",
               "request_failure_count",
               "semantic_output_record_count",
@@ -203,7 +206,7 @@
         },
         "memory": {
           "kv_autoscale": false,
-          "num_blocks": 9,
+          "num_blocks": 8,
           "reclaim_mode": "off"
         },
         "model": {
@@ -251,13 +254,15 @@
           "expected_finish_reason": "length",
           "expected_request_count": 2,
           "kv_block_size": 64,
-          "kv_num_blocks": 9,
+          "kv_num_blocks": 8,
           "overall_timeout_seconds": 1800,
           "prefix_cache_max_blocks": 4,
           "prefix_cache_max_entries": 4,
+          "prime_prompt_tokens": 253,
           "pressure_max_tokens": 256,
+          "pressure_prompt_tokens": 255,
           "prime_max_tokens": 16,
-          "prompt_words": 96,
+          "prompt_words": 42,
           "request_timeout_seconds": 600,
           "response_oracle": "ascending_zero_padded_integers_prefix_v1",
           "sequence": "prime_then_pressure"
@@ -326,6 +331,7 @@
               "prefix_cache_state_bytes_end",
               "pressure_completion_token_count",
               "pressure_prompt_token_count",
+              "prime_prompt_token_count",
               "request_count",
               "request_failure_count",
               "semantic_output_record_count",

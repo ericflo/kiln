@@ -40,10 +40,18 @@ BUILD_TIMEOUT_SECONDS = 900.0
 OVERALL_TIMEOUT_SECONDS = 1800.0
 REQUEST_TIMEOUT_SECONDS = 600.0
 KV_BLOCK_SIZE = 64
-KV_NUM_BLOCKS = 9
+KV_NUM_BLOCKS = 8
 PREFIX_CACHE_MAX_BLOCKS = 4
 PREFIX_CACHE_MAX_ENTRIES = 4
-PROMPT_WORDS = 96
+# Qwen3.5-4B's vendored tokenizer and enable_thinking=false chat template
+# deterministically map this bounded prompt to 253 prime tokens and 255 pressure
+# tokens. The prime therefore publishes a four-block rolling snapshot after
+# token 256. The pressure request initially owns four blocks, then crosses four
+# more block boundaries while its first growth reclaims that snapshot from the
+# otherwise-full eight-block pool.
+PROMPT_WORDS = 42
+EXPECTED_PRIME_PROMPT_TOKENS = 253
+EXPECTED_PRESSURE_PROMPT_TOKENS = 255
 PRIME_MAX_TOKENS = 16
 PRESSURE_MAX_TOKENS = 256
 EXPECTED_REQUESTS = 2
@@ -113,7 +121,9 @@ def effective_config(variant: str) -> dict[str, Any]:
         "overall_timeout_seconds": int(OVERALL_TIMEOUT_SECONDS),
         "prefix_cache_max_blocks": PREFIX_CACHE_MAX_BLOCKS,
         "prefix_cache_max_entries": PREFIX_CACHE_MAX_ENTRIES,
+        "prime_prompt_tokens": EXPECTED_PRIME_PROMPT_TOKENS,
         "pressure_max_tokens": PRESSURE_MAX_TOKENS,
+        "pressure_prompt_tokens": EXPECTED_PRESSURE_PROMPT_TOKENS,
         "prime_max_tokens": PRIME_MAX_TOKENS,
         "prompt_words": PROMPT_WORDS,
         "request_timeout_seconds": int(REQUEST_TIMEOUT_SECONDS),
@@ -155,6 +165,7 @@ METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "prefix_cache_reclaim_event_count": ("count", "sum", False),
     "prefix_cache_reclaimed_block_count": ("blocks", "sum", False),
     "prefix_cache_state_bytes_end": ("bytes", "exact", True),
+    "prime_prompt_token_count": ("tokens", "exact", False),
     "pressure_completion_token_count": ("tokens", "exact", False),
     "pressure_prompt_token_count": ("tokens", "exact", False),
     "request_count": ("count", "sum", False),
@@ -537,6 +548,7 @@ def execute(
                 "prefix_cache_state_bytes_end": prefix_after[
                     "cached_state_bytes"
                 ],
+                "prime_prompt_token_count": prime.prompt_tokens,
                 "pressure_completion_token_count": pressure.completion_tokens,
                 "pressure_prompt_token_count": pressure.prompt_tokens,
                 "request_count": len(results),
@@ -548,6 +560,11 @@ def execute(
             {
                 "prefix_cache_after_prime": prefix_after_prime,
                 "prefix_cache_final": prefix_after,
+                "prime": {
+                    "completion_tokens": prime.completion_tokens,
+                    "finish_reason": prime.finish_reason,
+                    "prompt_tokens": prime.prompt_tokens,
+                },
                 "pressure": {
                     "completion_tokens": pressure.completion_tokens,
                     "decode_growth_blocks": growth_blocks,
@@ -586,7 +603,12 @@ def execute(
             ("kv_blocks_end", KV_NUM_BLOCKS),
             ("kv_blocks_start", KV_NUM_BLOCKS),
             ("length_terminated_request_count", EXPECTED_REQUESTS),
+            ("prime_prompt_token_count", EXPECTED_PRIME_PROMPT_TOKENS),
             ("pressure_completion_token_count", PRESSURE_MAX_TOKENS),
+            (
+                "pressure_prompt_token_count",
+                EXPECTED_PRESSURE_PROMPT_TOKENS,
+            ),
             ("request_count", EXPECTED_REQUESTS),
             ("semantic_output_record_count", EXPECTED_REQUESTS),
         ):
