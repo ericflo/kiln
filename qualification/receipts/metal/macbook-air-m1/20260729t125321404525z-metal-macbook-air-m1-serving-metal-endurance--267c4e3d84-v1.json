@@ -1,0 +1,1198 @@
+{
+  "artifacts": [
+    {
+      "bytes": 25255,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260729t125321404525z-metal-macbook-air-m1-serving-metal-endurance--267c4e3d84-v1/environment.json",
+      "sha256": "sha256:5b3776d8ef17533830e1af9745f9cb173725bf4e7f4f3829b89f5578e66387c3"
+    },
+    {
+      "bytes": 6871633,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260729t125321404525z-metal-macbook-air-m1-serving-metal-endurance--267c4e3d84-v1/cases/001-continuous-mixed-load-r001/stdout.log",
+      "sha256": "sha256:eda12001734d10c28461a643e69f0543c93c0ddd3ef8a8dcf53f495b5ada1a01"
+    },
+    {
+      "bytes": 4194304,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260729t125321404525z-metal-macbook-air-m1-serving-metal-endurance--267c4e3d84-v1/cases/001-continuous-mixed-load-r001/stderr.log",
+      "sha256": "sha256:fff1566073eb90b5a5a19ebdbe4ce88eeae5495fcd5182c163cc967c02b6367d"
+    },
+    {
+      "bytes": 24005,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260729t125321404525z-metal-macbook-air-m1-serving-metal-endurance--267c4e3d84-v1/cases/001-continuous-mixed-load-r001/case-result.json",
+      "sha256": "sha256:4bdb1dc0b7f65cdaa0733962ef80a5774e639db2964a183a71bc708c0a8c27d5"
+    },
+    {
+      "bytes": 17078,
+      "kind": "command_case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260729t125321404525z-metal-macbook-air-m1-serving-metal-endurance--267c4e3d84-v1/cases/001-continuous-mixed-load-r001/command-result.json",
+      "sha256": "sha256:af2b35712ddfbe939b7e38c3b402df7e777ca60378768262d887da40971b7efa"
+    },
+    {
+      "bytes": 10590,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260729t125321404525z-metal-macbook-air-m1-serving-metal-endurance--267c4e3d84-v1/run-config.json",
+      "sha256": "sha256:657f5ba354be16f1fc02ffa9be736f700da19702065b65fb2a5663a11bc040e2"
+    }
+  ],
+  "created_at_utc": "2026-07-29T20:59:56.594Z",
+  "effective_config": {
+    "batching": {
+      "actor_cycle_idle_ms": 0,
+      "prefill_admission_quantum": 4
+    },
+    "build": {
+      "binary": "kiln",
+      "cargo_environment_policy": "closed-source-build-v1",
+      "cargo_execution_mode": "macos-contained",
+      "cargo_jobs": 1,
+      "cargo_memory_scope": "macos_runner_owned_session_process_group_admission_budget_without_hard_memory_or_swap_limit",
+      "cargo_min_available_gib": 1,
+      "cargo_private_network": true,
+      "cargo_service_runtime_max_seconds": 840,
+      "cargo_wrapper": "scripts/cargo-bounded.sh",
+      "features": "metal",
+      "locked": true,
+      "no_default_features": true,
+      "offline": true,
+      "package": "kiln-server",
+      "profile": "release",
+      "timeout_seconds": 900
+    },
+    "memory": {
+      "floor_gb": 1.0,
+      "gpu_memory_gb": 12.0,
+      "inference_memory_fraction": 0.7
+    },
+    "model": {
+      "accelerator_weight_upload_mib_per_second": 256,
+      "checkpoint_read_mib_per_second": 256
+    },
+    "runtime": {
+      "kv_autoscale_enabled": false,
+      "kv_autoscale_requested": false,
+      "memory_reclaim_mode": "off",
+      "memory_reclaim_requested_mode": "off",
+      "prefix_cache_effective_enabled": false,
+      "prefix_cache_effective_reason": "metal_endurance_fixed_capacity",
+      "prefix_cache_requested_enabled": false,
+      "rocm_graphs_enabled": false,
+      "rocm_graphs_requested": false,
+      "serving_profile": "stable",
+      "vulkan_buffer_pool_gb": 0.0
+    },
+    "server": {
+      "chat_performance_metadata_enabled": true,
+      "debug_model_state": true,
+      "default_thinking_enabled": false,
+      "http_send_buffer_bytes": 4096,
+      "log_format": "json",
+      "max_active_requests": 8,
+      "max_batch_tokens": 512,
+      "max_decode_batch": 4,
+      "max_prefill_layers_per_cycle": 4,
+      "max_prefill_staging_priority_burst": 4,
+      "max_prefill_staging_slots": 4,
+      "max_prefill_tokens_per_cycle": 256,
+      "request_timeout_seconds": 600,
+      "stream_stall_grace_ms": 2000
+    },
+    "soak": {
+      "accelerator_telemetry": {
+        "mode": "disabled"
+      },
+      "active_gpu_peak_growth_limit_bytes": 2147483648,
+      "cancel_every_waves": 4,
+      "cancellation_after_semantic_deltas": 4,
+      "cancellation_max_tokens": 256,
+      "cancellation_prompt_words": 48,
+      "deadline_policy": "independent_build_setup_and_measurement",
+      "external_yield_sync_slow_policy": "record_only_failures_and_unexplained_itl_remain_fatal",
+      "gpu_memory_absolute_limit_bytes": 16106127360,
+      "gpu_memory_baseline_mode": "stabilization_envelope_high_water",
+      "gpu_memory_growth_quantization_tolerance": "one_memory_pressure_percentage_point",
+      "gpu_memory_poll_interval_ms": 1000,
+      "gpu_memory_scope": "macos_whole_host_unified_memory",
+      "gpu_memory_source": "macos_memory_pressure:physical_total_minus_reported_free_percentage",
+      "max_tokens": 32,
+      "measurement_deadline_seconds": 29400,
+      "memory_growth_limit_bytes": 536870912,
+      "minimum_duration_seconds": 28800.0,
+      "outlier_absolute_ms": 250,
+      "outlier_history_size": 64,
+      "outlier_multiplier": 5,
+      "prompt_assignment": "cohort_by_cycle",
+      "prompt_identity": "fixed_by_cycle_cohort_measured_unique_by_epoch_warmup",
+      "prompt_words": {
+        "slot_0": 16,
+        "slot_1": 32,
+        "slot_2": 64,
+        "slot_3": 96
+      },
+      "qualification_case_timeout_seconds": 34080,
+      "request_ignore_eos": true,
+      "request_worker_cleanup_timeout_seconds": 10.0,
+      "response_oracle": "ascending_zero_padded_integers_prefix_v1",
+      "response_oracle_integer_width": 6,
+      "rocm_graph_cache_entries": 8,
+      "setup_deadline_seconds": 3600,
+      "stabilization_gpu_delta_limit_bytes": 536870912,
+      "stabilization_max_cycles": 8,
+      "stabilization_memory_boundary": "whole_host_unified_and_process_rss",
+      "stabilization_min_cycles": 4,
+      "stabilization_required_stable_cycles": 2,
+      "stabilization_rss_delta_limit_bytes": 67108864,
+      "stabilization_rss_growth_limit_bytes": null,
+      "steady_state_warmup_max_waves": 16,
+      "teardown_grace_seconds": 180,
+      "vulkan_buffer_pool_gb": 0.0,
+      "wave_concurrency": {
+        "wave_0": 1,
+        "wave_1": 4
+      }
+    }
+  },
+  "environment": {
+    "compiler": {
+      "apple_clang": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
+      "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+      "metal": "/var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.109.0.EbInAh/Metal.xctoolchain/usr/bin/metal",
+      "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)"
+    },
+    "device": {
+      "architecture": "apple_m1",
+      "compute_capability": null,
+      "compute_units": 8,
+      "device_uuid": null,
+      "driver": "macOS 26.6 (25G72)",
+      "logical_index": 0,
+      "memory_available_bytes": null,
+      "memory_bytes": 17179869184,
+      "name": "Apple M1",
+      "pci_bus_id": null,
+      "unified_memory": true
+    },
+    "host_id": "macbook-air-m1",
+    "os": {
+      "architecture": "arm64",
+      "kernel": "25.6.0",
+      "name": "macOS",
+      "version": "26.6"
+    },
+    "platform": {
+      "capabilities": {
+        "apple_hardware_identity": "available",
+        "filesystem_semantics": "available",
+        "gpu_temperature": "unavailable",
+        "host_temperature": "unavailable",
+        "memory_pressure": "available",
+        "metal_compiler": "available",
+        "metal_runtime_identity": "available",
+        "network_containment": "available",
+        "process_containment": "available",
+        "thermal_pressure": "available",
+        "toolchain_provenance": "available",
+        "unified_memory_accounting": "available"
+      },
+      "details": {
+        "apple_hardware_identity": "MacBook Air MacBookAir10,1; Apple M1; 8 GPU cores; 17179869184 unified bytes",
+        "filesystem_semantics": "/dev/disk3s5 apfs at /System/Volumes/Data; atomic+durable+link probes passed; case_sensitive=False",
+        "gpu_temperature": "macOS exposes thermal-pressure state here but no supported unprivileged host or GPU temperature API",
+        "host_temperature": "macOS exposes thermal-pressure state here but no supported unprivileged host or GPU temperature API",
+        "memory_pressure": "memory_pressure free=83%; pageouts=228160; swapouts=3566755",
+        "metal_compiler": "compiled 3536-byte AIR and linked 3529-byte metallib",
+        "metal_runtime_identity": "Apple M1; unified=True; recommended working set=12713115648",
+        "thermal_pressure": "cpu_power_status=not_recorded; performance_warning=not_recorded; thermal_warning=not_recorded",
+        "toolchain_provenance": "Xcode 26.6; Build version 17F113; SDK 26.5 (25F70)",
+        "unified_memory_accounting": "total=17179869184; swap_total=5368709120; compressed_pages=43357",
+        "workload_containment": "macos-sandbox-loopback-only-v1; sandbox-inherited loopback-only networking, a private session/process group, bounded descendant settlement, and TERM/KILL cleanup"
+      },
+      "kind": "macos",
+      "observations": {
+        "filesystem": {
+          "atomic_replace": true,
+          "case_sensitive": false,
+          "directory_fsync": true,
+          "fstype": "apfs",
+          "full_file_sync": true,
+          "hardlink": true,
+          "mount_point": "/System/Volumes/Data",
+          "root": "/Users/ericflo/Development/kiln",
+          "source": "/dev/disk3s5",
+          "symlink": true
+        },
+        "gpu_temperature": null,
+        "hardware_identity": {
+          "chip_type": "Apple M1",
+          "cpu_brand": "Apple M1",
+          "gpu_core_count": 8,
+          "kernel_build": "25G72",
+          "machine_model": "MacBookAir10,1",
+          "machine_name": "MacBook Air",
+          "physical_memory_bytes": 17179869184
+        },
+        "host_temperature": null,
+        "memory_pressure": {
+          "free_percent": 83,
+          "page_size_bytes": 16384,
+          "pageins": 53163237,
+          "pageouts": 228160,
+          "pages_active": 89925,
+          "pages_free": 24049,
+          "pages_inactive": 708460,
+          "pages_occupied_by_compressor": 43357,
+          "pages_wired_down": 119912,
+          "swapins": 2646983,
+          "swapouts": 3566755
+        },
+        "metal_runtime": {
+          "current_allocated_bytes": 65536,
+          "has_unified_memory": true,
+          "max_buffer_length_bytes": 9534832640,
+          "name": "Apple M1",
+          "recommended_max_working_set_bytes": 12713115648
+        },
+        "thermal_pressure": {
+          "cpu_power_status": "not_recorded",
+          "performance_warning": "not_recorded",
+          "thermal_warning": "not_recorded"
+        },
+        "unified_memory": {
+          "swap_encrypted": true,
+          "swap_total_bytes": 5368709120,
+          "swap_used_bytes": 3636985856,
+          "total_bytes": 17179869184
+        }
+      }
+    },
+    "runtime": {
+      "execution_environment_sha256": "sha256:91c9323072794190482826549a5d1d8238d92cec54c92197643eceaacdf50ea3",
+      "macos": "26.6",
+      "macos_build": "25G72",
+      "macos_sdk": "26.5",
+      "metal": "spdisplays_metal4"
+    }
+  },
+  "metrics": [],
+  "model": {
+    "chat_template_hash": "sha256:a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+    "config_hash": "sha256:ddc63e1c717afa86c865bb5e01313d89d72bb53b97ad4a8a03ba8510c0621670",
+    "id": "Qwen3.5-4B",
+    "path": "/Users/ericflo/Development/kiln/Qwen3.5-4B",
+    "tokenizer_hash": "sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+    "weight_files": [
+      {
+        "bytes": 5329398688,
+        "path": "model.safetensors-00001-of-00002.safetensors",
+        "sha256": "sha256:26a93f066e1916adb13453dae5a0c707c0fbc71299ed98779571a907b8e74c61"
+      },
+      {
+        "bytes": 3990429408,
+        "path": "model.safetensors-00002-of-00002.safetensors",
+        "sha256": "sha256:cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188"
+      }
+    ]
+  },
+  "notes": [],
+  "qualification": {
+    "backend": "metal",
+    "command": [
+      "/opt/homebrew/opt/python@3.13/bin/python3.13",
+      "scripts/qualification/run.py",
+      "qualification/workloads/serving-metal-endurance-v1.json",
+      "--variant",
+      "metal-endurance",
+      "--host-id",
+      "macbook-air-m1",
+      "--model",
+      "Qwen3.5-4B",
+      "--model-id",
+      "Qwen3.5-4B"
+    ],
+    "duration_seconds": 29195.190223458005,
+    "finished_at_utc": "2026-07-29T20:59:56.594Z",
+    "kind": "soak",
+    "profile": "serving-metal-endurance-v1",
+    "started_at_utc": "2026-07-29T12:53:21.404Z",
+    "verdict": "passed"
+  },
+  "receipt_id": "20260729t125321404525z-metal-macbook-air-m1-serving-metal-endurance--267c4e3d84-v1",
+  "results": [
+    {
+      "details": null,
+      "duration_seconds": 29169.909336000004,
+      "id": "continuous-mixed-load",
+      "metrics": [
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "attributed_itl_outlier_count",
+          "unit": "count",
+          "value": 1291
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "batching_error_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": false,
+          "name": "batching_max_observed_active_requests",
+          "unit": "requests",
+          "value": 4
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": false,
+          "name": "batching_max_observed_batch_size",
+          "unit": "rows",
+          "value": 4
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "cancellation_confirmed_count",
+          "unit": "count",
+          "value": 184
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "completion_token_count",
+          "unit": "tokens",
+          "value": 59072
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "device_fault_event_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "external_yield_sync_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "external_yield_sync_max_ms",
+          "unit": "ms",
+          "value": 479.052
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "external_yield_sync_slow_count",
+          "unit": "count",
+          "value": 902
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "gpu_memory_baseline_bytes",
+          "unit": "bytes",
+          "value": 13056700580
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "gpu_memory_end_bytes",
+          "unit": "bytes",
+          "value": 12884901888
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "gpu_memory_growth_bytes",
+          "unit": "bytes",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "gpu_memory_peak_bytes",
+          "unit": "bytes",
+          "value": 14774687499
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "gpu_memory_peak_growth_bytes",
+          "unit": "bytes",
+          "value": 1717986919
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "graph_capture_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "graph_capture_success_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "graph_fallback_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "graph_replay_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "graph_replay_success_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "graph_retained_count_end",
+          "unit": "graphs",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "graph_retained_count_start",
+          "unit": "graphs",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "graph_slot_active_count_end",
+          "unit": "slots",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "graph_slot_count_end",
+          "unit": "slots",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "graph_slot_count_start",
+          "unit": "slots",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "graph_slot_create_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "graph_slot_idle_count_end",
+          "unit": "slots",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "graph_slot_reuse_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "p50",
+          "lower_is_better": true,
+          "name": "itl_ms_p50",
+          "unit": "ms",
+          "value": 784.3941459977941
+        },
+        {
+          "aggregation": "p99",
+          "lower_is_better": true,
+          "name": "itl_ms_p99",
+          "unit": "ms",
+          "value": 7808.15728100788
+        },
+        {
+          "aggregation": "p99.9",
+          "lower_is_better": true,
+          "name": "itl_ms_p999",
+          "unit": "ms",
+          "value": 8527.827867374079
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "kv_blocks_end",
+          "unit": "blocks",
+          "value": 389
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "kv_blocks_start",
+          "unit": "blocks",
+          "value": 389
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "kv_blocks_used_end",
+          "unit": "blocks",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "kv_unaccounted_blocks_end",
+          "unit": "blocks",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_actor_admission_ms_total",
+          "unit": "ms",
+          "value": 16585.127944
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "latency_phase_actor_admission_request_count",
+          "unit": "count",
+          "value": 1846
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_actor_cycle_idle_ms_total",
+          "unit": "ms",
+          "value": 0.0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "latency_phase_actor_cycle_idle_request_count",
+          "unit": "count",
+          "value": 1846
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_actor_queue_ms_total",
+          "unit": "ms",
+          "value": 9836.822912
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "latency_phase_actor_queue_request_count",
+          "unit": "count",
+          "value": 1846
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_adapter_ms_total",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "latency_phase_adapter_request_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_client_delivery_ms_total",
+          "unit": "ms",
+          "value": 2085.36442
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "latency_phase_client_delivery_request_count",
+          "unit": "count",
+          "value": 1846
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_decode_ms_total",
+          "unit": "ms",
+          "value": 39515825.785193
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "latency_phase_decode_request_count",
+          "unit": "count",
+          "value": 1846
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_gpu_lock_wait_ms_total",
+          "unit": "ms",
+          "value": 34.272185
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "latency_phase_gpu_lock_wait_request_count",
+          "unit": "count",
+          "value": 1846
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_graph_capture_ms_total",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "latency_phase_graph_capture_request_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_graph_replay_ms_total",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "latency_phase_graph_replay_request_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_handler_queue_ms_total",
+          "unit": "ms",
+          "value": 2817.113131
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "latency_phase_handler_queue_request_count",
+          "unit": "count",
+          "value": 1846
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_metadata_missing_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_prefill_ms_total",
+          "unit": "ms",
+          "value": 22665175.213576
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "latency_phase_prefill_request_count",
+          "unit": "count",
+          "value": 1846
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_readback_ms_total",
+          "unit": "ms",
+          "value": 4636127.789052
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "latency_phase_readback_request_count",
+          "unit": "count",
+          "value": 1846
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_resize_ms_total",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "latency_phase_resize_request_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_response_delivery_ms_total",
+          "unit": "ms",
+          "value": 7840.705668
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "latency_phase_response_delivery_request_count",
+          "unit": "count",
+          "value": 1846
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_sampling_ms_total",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "latency_phase_sampling_request_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_synchronization_ms_total",
+          "unit": "ms",
+          "value": 825131.501978
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "latency_phase_synchronization_request_count",
+          "unit": "count",
+          "value": 1846
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_tokenization_ms_total",
+          "unit": "ms",
+          "value": 7.504547
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "latency_phase_tokenization_request_count",
+          "unit": "count",
+          "value": 1846
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_training_ms_total",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "latency_phase_training_request_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_trim_ms_total",
+          "unit": "ms",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "latency_phase_trim_request_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "latency_phase_unexplained_ms_total",
+          "unit": "ms",
+          "value": 27340254.709619
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "latency_phase_unexplained_request_count",
+          "unit": "count",
+          "value": 1846
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "measurement_final_snapshot_complete",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "non_finite_response_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "rate",
+          "lower_is_better": false,
+          "name": "output_token_throughput_per_second",
+          "unit": "tokens/s",
+          "value": 2.0502704077651988
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "prefix_cache_active_leases_end",
+          "unit": "leases",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "prefix_cache_baseline_cached_entries",
+          "unit": "entries",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "prefix_cache_baseline_state_bytes",
+          "unit": "bytes",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "prefix_cache_cached_blocks_end",
+          "unit": "blocks",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "prefix_cache_cached_entries_end",
+          "unit": "entries",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "prefix_cache_hit_blocks",
+          "unit": "blocks",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "prefix_cache_hit_tokens",
+          "unit": "tokens",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "prefix_cache_lookup_hit_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "prefix_cache_lookup_miss_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "prefix_cache_pending_release_entries_end",
+          "unit": "entries",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "prefix_cache_state_bytes_end",
+          "unit": "bytes",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": false,
+          "name": "prompt_tokens_max",
+          "unit": "tokens",
+          "value": 418
+        },
+        {
+          "aggregation": "min",
+          "lower_is_better": false,
+          "name": "prompt_tokens_min",
+          "unit": "tokens",
+          "value": 178
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "request_count",
+          "unit": "count",
+          "value": 1846
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "request_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "request_worker_residue_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "rss_baseline_bytes",
+          "unit": "bytes",
+          "value": 2665070592
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "rss_end_bytes",
+          "unit": "bytes",
+          "value": 2644131840
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "rss_growth_bytes",
+          "unit": "bytes",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "rss_peak_bytes",
+          "unit": "bytes",
+          "value": 2666692608
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "shutdown_forced_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "shutdown_nonzero_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "snapshot_residue_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "soak_duration_seconds",
+          "unit": "s",
+          "value": 28811.809299042005
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "stabilization_cancellation_count",
+          "unit": "count",
+          "value": 2
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "stabilization_cycle_count",
+          "unit": "count",
+          "value": 4
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "stabilization_final_gpu_delta_bytes",
+          "unit": "bytes",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "stabilization_final_rss_delta_bytes",
+          "unit": "bytes",
+          "value": 22609920
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "stabilization_max_gpu_delta_bytes",
+          "unit": "bytes",
+          "value": 343597383
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "stabilization_max_rss_delta_bytes",
+          "unit": "bytes",
+          "value": 22609920
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "stabilization_request_count",
+          "unit": "count",
+          "value": 20
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "stabilization_rss_growth_bytes",
+          "unit": "bytes",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "stabilization_stable_cycle_count",
+          "unit": "count",
+          "value": 4
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "steady_state_warmup_request_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "steady_state_warmup_wave_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "p50",
+          "lower_is_better": true,
+          "name": "ttft_ms_p50",
+          "unit": "ms",
+          "value": 11437.103020994982
+        },
+        {
+          "aggregation": "p99",
+          "lower_is_better": true,
+          "name": "ttft_ms_p99",
+          "unit": "ms",
+          "value": 27961.704375152105
+        },
+        {
+          "aggregation": "p99.9",
+          "lower_is_better": true,
+          "name": "ttft_ms_p999",
+          "unit": "ms",
+          "value": 32104.5706511133
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "unexplained_itl_outlier_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "wave_count",
+          "unit": "count",
+          "value": 739
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "zero_token_response_count",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "fa3ab5a9dab7589ff010991d98ddd9ce2a4a41f2",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:280255bc602e15c68bd2fe4749baf3126d4e10d3e988710a9ab38c03d9708752",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [
+    "macos_host_temperature: macOS exposes thermal-pressure state here but no supported unprivileged host or GPU temperature API",
+    "macos_gpu_temperature: macOS exposes thermal-pressure state here but no supported unprivileged host or GPU temperature API"
+  ],
+  "workload": {
+    "id": "serving-metal-endurance-v1",
+    "parameters": {
+      "variant_id": "metal-endurance"
+    },
+    "seed": 20260728,
+    "sha256": "sha256:20c7e4b01f2e03dad2d673debabd6081fc2ee83e12fce5a1c04f7a66e4ba39a8"
+  }
+}

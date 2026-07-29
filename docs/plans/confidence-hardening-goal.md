@@ -168,8 +168,8 @@ and did not control execution.
 - [x] Run serving correctness and performance at every concurrency that fits
   without changing workload semantics, and retain the first non-fitting
   capacity boundary as counterevidence.
-- [ ] Run an eight-hour mixed-load soak using ordinary monotonic elapsed time.
-- [ ] Validate and check in receipts, update this checklist and permanent
+- [x] Run an eight-hour mixed-load soak using ordinary monotonic elapsed time.
+- [x] Validate and check in receipts, update this checklist and permanent
   documentation, commit, and push.
 
 Metal evidence applies only to the declared workloads on the measured MacBook
@@ -224,6 +224,44 @@ checks passed, including non-forced zero shutdown. Reported SLO goodput is
 preserved but is not a capacity verdict gate; this c19 ceiling applies only to
 the declared workload and measured MacBook Air.
 
+Endurance evidence:
+`qualification/receipts/metal/macbook-air-m1/`
+`20260729t125321404525z-metal-macbook-air-m1-serving-metal-endurance--`
+`267c4e3d84-v1.json` passed from clean pushed source `fa3ab5a9dab7` and
+passed independent current-source, local-artifact, and known-commit
+validation. After four stable stabilization cycles, one source-built server
+completed 28,811.809 ordinary monotonic seconds, 739 mixed c1/c4 waves, 1,846
+exact 32-token responses over the fixed 16/32/64/96-word prompt cohorts, and
+184 confirmed cancellations. Output throughput was 2.050270 tokens per
+second. Request, zero-token, non-finite-response, synchronization-failure,
+device-fault, batching-error, unexplained-ITL-outlier, and worker-residue
+counts were zero. The 1,291 ITL outliers were all attributed to retained
+runtime events; 902 slow Metal external-yield synchronizations were retained
+as diagnostics, with zero synchronization failures.
+
+The whole-host `memory_pressure` baseline, peak, and end values were
+13,056,700,580, 14,774,687,499, and 12,884,901,888 bytes. The 1,717,986,919-byte
+peak increase was below the raw 2 GiB growth target plus one explicit
+171,798,692-byte counter-resolution step, an effective 2,319,282,340-byte
+gate, and the peak was also below the independent 16,106,127,360-byte absolute
+limit. Final whole-host growth was zero. Process RSS started at
+2,665,070,592 bytes, peaked at 2,666,692,608, ended at 2,644,131,840, and had
+zero final growth. The fixed 389-block KV pool ended with zero used or
+unaccounted blocks, and shutdown was non-forced, zero, and free of snapshot
+or process residue.
+
+The preceding
+`20260729t043210429221z-metal-macbook-air-m1-serving-metal-endurance--`
+`267c4e3d84-v1.json` receipt is retained as failed counterevidence. It
+completed 28,811.213 monotonic seconds with zero correctness or cleanup
+failure, but its 2,233,382,994-byte whole-host peak increase exceeded the raw
+2 GiB gate by the `memory_pressure` counter's next one-percentage-point
+quantum. Checkpoint `fa3ab5a9dab7` made that quantization tolerance explicit
+without changing the raw target or 15 GiB absolute ceiling, and the passing
+source-bound run above exercised the revised gate. These receipts apply only
+to the declared mixed-load workload on this measured M1 MacBook Air. They do
+not establish an SLO or qualify another Apple Silicon device.
+
 ## Phase 7.3: Final Cross-Backend Regression Closure
 
 - [ ] From one current source commit, dispatch GitHub Actions CI with
@@ -235,7 +273,7 @@ the declared workload and measured MacBook Air.
 - [x] Retain targeted ROCm and Vulkan serving receipts covering exact output,
   KV-growth pressure, prefix-cache reclamation, and bounded process and device
   cleanup after the shared server changes made during Phase 7.1.
-- [ ] After Phase 7.2 lands, incorporate its final checkpoint and repeat only
+- [x] After Phase 7.2 lands, incorporate its final checkpoint and repeat only
   the targeted checks affected by later shared runtime or qualification-tooling
   changes. Documentation-only and backend-isolated changes do not require
   unrelated hardware reruns.
@@ -322,7 +360,15 @@ ascending sweep after its first actually failed row and record its unexecuted
 suffix as structured failure. The resulting source-bound sweep passed c19 and
 retained c20 as the first non-fitting row. That campaign driver is not used by
 the bounded Strix closure runner, so the change requires no ROCm or Vulkan
-repeat. Phase 7.2's soak and final documentation items remain open.
+repeat. The later Phase 7.2 checkpoint `fa3ab5a9dab7` added Apple-only unified
+memory admission and macOS process containment plus a backend-selected Metal
+soak runtime. Shared qualification helpers preserve the existing ROCm and
+Vulkan effective configurations, while memory-counter tolerance and slow-sync
+handling are conditional on the Metal/macOS runtime. The focused sampler,
+soak, workload, runner, and receipt suites passed 174 tests with two existing
+skips. These changes are backend-isolated under this phase's rule, so they do
+not require another targeted Strix hardware run. The final exact-commit hosted
+matrix remains open.
 
 Interim hosted checkpoint:
 GitHub Actions
@@ -331,5 +377,4 @@ passed `backend_build=all` from exact pushed source `56000a370874`. Its
 separate Metal, CUDA, ROCm, and Vulkan jobs all passed, as did Linux default
 features, formatting, dependency policy, and portable receipt validation.
 This records a green hosted baseline without closing the first checklist item:
-Phase 7.2 is still active, so the same matrix remains required from the final
-integrated source.
+the same matrix remains required from the final integrated source.

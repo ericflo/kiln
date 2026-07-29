@@ -229,6 +229,46 @@ capacity verdict gates. The c19 ceiling applies only to this fixed workload,
 configuration, timeout, and measured M1 MacBook Air. It is not an endurance,
 other-workload, or other-Apple-Silicon claim.
 
+## Current Metal Endurance Evidence
+
+The retained passing MacBook Air Metal endurance receipt is
+[`20260729t125321404525z-metal-macbook-air-m1-serving-metal-endurance--267c4e3d84-v1.json`](../qualification/receipts/metal/macbook-air-m1/20260729t125321404525z-metal-macbook-air-m1-serving-metal-endurance--267c4e3d84-v1.json).
+It passed from clean pushed source `fa3ab5a9dab7` and passed independent
+current-source, local-artifact, and known-commit validation. One source-built
+server first completed four stable stabilization cycles and then ran for
+28,811.809 ordinary monotonic seconds. Across 739 alternating c1/c4 waves it
+completed 1,846 exact 32-token responses over fixed 16/32/64/96-word prompt
+cohorts, confirmed 184 cancellations, and produced 2.050270 output tokens per
+second.
+
+Request, zero-token, non-finite-response, synchronization-failure,
+device-fault, batching-error, unexplained-ITL-outlier, and worker-residue
+counts were zero. All 1,291 ITL outliers were attributed to retained runtime
+events. The receipt retains 902 slow Metal external-yield synchronizations as
+diagnostics; none failed. The fixed 389-block KV pool ended unchanged with
+zero used or unaccounted blocks. Shutdown was non-forced and zero, with no
+snapshot or descendant residue.
+
+The whole-host `memory_pressure` baseline was 13,056,700,580 bytes, the peak
+was 14,774,687,499, and the end value was 12,884,901,888. The
+1,717,986,919-byte peak increase stayed below the raw 2 GiB growth target plus
+one explicit 171,798,692-byte counter-resolution step, an effective
+2,319,282,340-byte gate. The peak also stayed below the independent
+16,106,127,360-byte absolute limit, and final whole-host growth was zero.
+Process RSS started at 2,665,070,592 bytes, peaked at 2,666,692,608, ended at
+2,644,131,840, and had zero final growth.
+
+The earlier
+[`20260729t043210429221z-metal-macbook-air-m1-serving-metal-endurance--267c4e3d84-v1.json`](../qualification/receipts/metal/macbook-air-m1/20260729t043210429221z-metal-macbook-air-m1-serving-metal-endurance--267c4e3d84-v1.json)
+is retained as failed counterevidence. It completed 28,811.213 monotonic
+seconds with zero correctness or cleanup failure, but its
+2,233,382,994-byte peak increase crossed the raw 2 GiB gate by the
+`memory_pressure` counter's next one-percentage-point quantum. The passing
+source checkpoint makes that measurement tolerance explicit while preserving
+the raw growth target and 15 GiB absolute ceiling. This evidence applies only
+to the declared workload and measured M1 MacBook Air. It is not an SLO or
+evidence for another Apple Silicon device.
+
 ## Current CUDA Core Evidence
 
 The current retained laptop CUDA core receipt is
