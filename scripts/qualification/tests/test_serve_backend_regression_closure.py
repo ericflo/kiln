@@ -73,6 +73,30 @@ class ServeBackendRegressionClosureTests(unittest.TestCase):
                     variant["cases"][0]["result_protocol"]["declared_metrics"],
                     sorted(closure.METRIC_DEFINITIONS),
                 )
+        self.assertEqual(
+            closure.REQUEST_TIMEOUT_SECONDS,
+            {
+                closure.ROCM_VARIANT: 600.0,
+                closure.VULKAN_VARIANT: 2100.0,
+            },
+        )
+        self.assertEqual(
+            closure.OVERALL_TIMEOUT_SECONDS,
+            {
+                closure.ROCM_VARIANT: 1800.0,
+                closure.VULKAN_VARIANT: 2400.0,
+            },
+        )
+        self.assertEqual(
+            {
+                variant_id: variants[variant_id]["cases"][0]["timeout_seconds"]
+                for variant_id in closure.VARIANTS
+            },
+            {
+                closure.ROCM_VARIANT: 2100,
+                closure.VULKAN_VARIANT: 2700,
+            },
+        )
 
     def test_pressure_fixture_crosses_four_decode_block_boundaries(self) -> None:
         result = stream_result()

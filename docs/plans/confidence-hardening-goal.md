@@ -254,4 +254,10 @@ Vulkan must cross the same decode-growth boundaries with its correctness
 quarantine effective and zero prefix-cache ownership. Both variants require
 drained KV accounting, clean process shutdown, and no snapshot residue. This
 two-request contract does not measure performance or search for a capacity
-limit.
+limit. ROCm retains its 600-second per-request and 1,800-second overall
+deadlines. Vulkan has a backend-specific 2,100-second per-request,
+2,400-second overall, and 2,700-second outer case bound because the
+correctness-quarantined current-source path completed the prime request
+exactly but produced only 86 of 256 pressure tokens before the former
+600-second request deadline. The longer finite deadline preserves the exact
+workload and gates; it is not a throughput acceptance rule.

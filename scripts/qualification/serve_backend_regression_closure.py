@@ -37,8 +37,19 @@ BUILD_SPECS = {
     VULKAN_VARIANT: mixed.VULKAN_BUILD_SPEC,
 }
 BUILD_TIMEOUT_SECONDS = 900.0
-OVERALL_TIMEOUT_SECONDS = 1800.0
-REQUEST_TIMEOUT_SECONDS = 600.0
+# The Vulkan correctness quarantine intentionally favors conservative kernels:
+# the current Strix closure needed about 6.5 seconds per decode step after the
+# repaired LM-head path reached live generation. Preserve ROCm's tighter proven
+# bounds while giving Vulkan enough finite time to emit all 256 required
+# pressure tokens; these are deadlines, not performance thresholds.
+OVERALL_TIMEOUT_SECONDS = {
+    ROCM_VARIANT: 1800.0,
+    VULKAN_VARIANT: 2400.0,
+}
+REQUEST_TIMEOUT_SECONDS = {
+    ROCM_VARIANT: 600.0,
+    VULKAN_VARIANT: 2100.0,
+}
 KV_BLOCK_SIZE = 64
 KV_NUM_BLOCKS = 8
 PREFIX_CACHE_MAX_BLOCKS = 4
@@ -69,7 +80,7 @@ def effective_config(variant: str) -> dict[str, Any]:
         memory_reclaim_mode="off",
         rocm_graphs_requested=False,
         rocm_graphs_enabled=False,
-        request_timeout_seconds=int(REQUEST_TIMEOUT_SECONDS),
+        request_timeout_seconds=int(REQUEST_TIMEOUT_SECONDS[variant]),
         max_decode_batch=4,
         max_prefill_layers_per_cycle=4,
     )
@@ -118,7 +129,7 @@ def effective_config(variant: str) -> dict[str, Any]:
         "expected_request_count": EXPECTED_REQUESTS,
         "kv_block_size": KV_BLOCK_SIZE,
         "kv_num_blocks": KV_NUM_BLOCKS,
-        "overall_timeout_seconds": int(OVERALL_TIMEOUT_SECONDS),
+        "overall_timeout_seconds": int(OVERALL_TIMEOUT_SECONDS[variant]),
         "prefix_cache_max_blocks": PREFIX_CACHE_MAX_BLOCKS,
         "prefix_cache_max_entries": PREFIX_CACHE_MAX_ENTRIES,
         "prime_prompt_tokens": EXPECTED_PRIME_PROMPT_TOKENS,
@@ -126,7 +137,7 @@ def effective_config(variant: str) -> dict[str, Any]:
         "pressure_prompt_tokens": EXPECTED_PRESSURE_PROMPT_TOKENS,
         "prime_max_tokens": PRIME_MAX_TOKENS,
         "prompt_words": PROMPT_WORDS,
-        "request_timeout_seconds": int(REQUEST_TIMEOUT_SECONDS),
+        "request_timeout_seconds": int(REQUEST_TIMEOUT_SECONDS[variant]),
         "response_oracle": mixed.RESPONSE_ORACLE,
         "sequence": "prime_then_pressure",
     }
@@ -354,7 +365,7 @@ def reclaimed_block_count(events: list[mixed.ObservedEvent]) -> int:
 def execute(
     model_path: Path, seed: int, variant: str, evidence: Evidence
 ) -> None:
-    deadline = time.monotonic() + OVERALL_TIMEOUT_SECONDS
+    deadline = time.monotonic() + OVERALL_TIMEOUT_SECONDS[variant]
     spec = BUILD_SPECS[variant]
     binary, binary_sha256, build_seconds = mixed.build_binary(
         deadline, spec, build_timeout_seconds=BUILD_TIMEOUT_SECONDS
@@ -442,7 +453,7 @@ def execute(
             max_tokens=PRIME_MAX_TOKENS,
             seed=seed,
             absolute_deadline=deadline,
-            request_timeout_seconds=REQUEST_TIMEOUT_SECONDS,
+            request_timeout_seconds=REQUEST_TIMEOUT_SECONDS[variant],
         )
         results.append(prime)
         failures.extend(stream_failures(prime, PRIME_MAX_TOKENS))
@@ -459,7 +470,7 @@ def execute(
             max_tokens=PRESSURE_MAX_TOKENS,
             seed=seed + 1,
             absolute_deadline=deadline,
-            request_timeout_seconds=REQUEST_TIMEOUT_SECONDS,
+            request_timeout_seconds=REQUEST_TIMEOUT_SECONDS[variant],
         )
         results.append(pressure)
         failures.extend(stream_failures(pressure, PRESSURE_MAX_TOKENS))

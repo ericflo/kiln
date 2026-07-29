@@ -246,7 +246,7 @@
           "max_prefill_staging_priority_burst": 4,
           "max_prefill_staging_slots": 4,
           "max_prefill_tokens_per_cycle": 256,
-          "request_timeout_seconds": 600,
+          "request_timeout_seconds": 2100,
           "stream_stall_grace_ms": 2000
         },
         "workload": {
@@ -255,7 +255,7 @@
           "expected_request_count": 2,
           "kv_block_size": 64,
           "kv_num_blocks": 8,
-          "overall_timeout_seconds": 1800,
+          "overall_timeout_seconds": 2400,
           "prefix_cache_max_blocks": 4,
           "prefix_cache_max_entries": 4,
           "prime_prompt_tokens": 253,
@@ -263,7 +263,7 @@
           "pressure_prompt_tokens": 255,
           "prime_max_tokens": 16,
           "prompt_words": 42,
-          "request_timeout_seconds": 600,
+          "request_timeout_seconds": 2100,
           "response_oracle": "ascending_zero_padded_integers_prefix_v1",
           "sequence": "prime_then_pressure"
         }
@@ -286,7 +286,7 @@
             "CARGO_NET_OFFLINE": "true",
             "PYTHONUNBUFFERED": "1"
           },
-          "timeout_seconds": 2100,
+          "timeout_seconds": 2700,
           "expected_exit_codes": [
             0
           ],

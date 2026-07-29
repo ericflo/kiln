@@ -307,7 +307,13 @@ growth with zero prefix-cache activity or retained state. Both variants require
 zero request, device-fault, resize, synchronization-failure, and unaccounted-KV
 evidence; drained leases and pending releases; non-forced zero shutdown; and no
 private snapshot residue. This is a two-request correctness check, not an
-endurance, thermal, capacity, or performance campaign.
+endurance, thermal, capacity, or performance campaign. ROCm retains its
+600-second request and 1,800-second overall deadlines. Vulkan uses finite
+2,100-second request, 2,400-second overall, and 2,700-second outer-case
+deadlines: the correctness-quarantined current-source path completed the prime
+request exactly but emitted only 86 of the required 256 pressure tokens before
+the former 600-second request deadline. The longer Vulkan window changes no
+prompt, token, KV, output, or cleanup gate and is not a throughput threshold.
 
 ## Build Boundary
 
