@@ -1,0 +1,493 @@
+{
+  "artifacts": [
+    {
+      "bytes": 6507,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260729t013047275616z-vulkan-strix-halo-serving-backend-regressi-2a1ed8c677-v1/environment.json",
+      "sha256": "sha256:49b0e4fb17f7f2b09b046a7e6f87959fdee518fc824108e34db4cb967111b4be"
+    },
+    {
+      "bytes": 27417,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260729t013047275616z-vulkan-strix-halo-serving-backend-regressi-2a1ed8c677-v1/cases/001-vulkan-serving-regression-closure-r001/stdout.log",
+      "sha256": "sha256:aa71d82d67a9037c675fd8fdf2ed58997535f8b326fa3c322550d1dabb73111c"
+    },
+    {
+      "bytes": 173376,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260729t013047275616z-vulkan-strix-halo-serving-backend-regressi-2a1ed8c677-v1/cases/001-vulkan-serving-regression-closure-r001/stderr.log",
+      "sha256": "sha256:07e7489c1d674fe787bb3e966148d81f61df6444c6a24271e578af81d47d1b81"
+    },
+    {
+      "bytes": 10094,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260729t013047275616z-vulkan-strix-halo-serving-backend-regressi-2a1ed8c677-v1/cases/001-vulkan-serving-regression-closure-r001/case-result.json",
+      "sha256": "sha256:728660fae1d120d8ebc8a1d9f92e1659e79152c4526dd85111da80583c9b5d9c"
+    },
+    {
+      "bytes": 7592,
+      "kind": "command_case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260729t013047275616z-vulkan-strix-halo-serving-backend-regressi-2a1ed8c677-v1/cases/001-vulkan-serving-regression-closure-r001/command-result.json",
+      "sha256": "sha256:d7df62f9e53328b87339153667e54534124416be9840dd1b64c3b00f0bd9f945"
+    },
+    {
+      "bytes": 6021,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260729t013047275616z-vulkan-strix-halo-serving-backend-regressi-2a1ed8c677-v1/run-config.json",
+      "sha256": "sha256:c7ebf86a93ceab81da80016153c5975a840ea4432c7d1c12f59be0dc42e472a4"
+    }
+  ],
+  "created_at_utc": "2026-07-29T02:04:56.680Z",
+  "effective_config": {
+    "build": {
+      "binary": "kiln",
+      "cargo_environment_policy": "closed-source-build-v1",
+      "cargo_execution_mode": "transient-service",
+      "cargo_jobs": 1,
+      "cargo_memory_scope": "systemd_user_transient_service_memory_max_no_swap",
+      "cargo_min_available_gib": 1,
+      "cargo_private_network": true,
+      "cargo_service_runtime_max_seconds": 840,
+      "cargo_wrapper": "scripts/cargo-bounded.sh",
+      "features": "vulkan",
+      "locked": true,
+      "no_default_features": true,
+      "offline": true,
+      "package": "kiln-server",
+      "profile": "release",
+      "timeout_seconds": 900
+    },
+    "memory": {
+      "kv_autoscale": false,
+      "num_blocks": 8,
+      "reclaim_mode": "off"
+    },
+    "model": {
+      "accelerator_weight_upload_mib_per_second": 256,
+      "checkpoint_read_mib_per_second": 256,
+      "vulkan_decode_weight_prewarm": true,
+      "vulkan_decode_weight_prewarm_mib_per_second": 256
+    },
+    "prefix_cache": {
+      "effective_enabled": false,
+      "max_blocks": 4,
+      "max_entries": 4,
+      "requested_enabled": true
+    },
+    "runtime": {
+      "kv_autoscale_enabled": false,
+      "kv_autoscale_requested": false,
+      "memory_reclaim_mode": "off",
+      "memory_reclaim_requested_mode": "off",
+      "prefix_cache_effective_enabled": false,
+      "prefix_cache_effective_reason": "vulkan_correctness_quarantine",
+      "prefix_cache_requested_enabled": true,
+      "rocm_graphs_enabled": false,
+      "rocm_graphs_requested": false,
+      "serving_profile": "experimental"
+    },
+    "server": {
+      "chat_performance_metadata_enabled": true,
+      "debug_model_state": true,
+      "default_thinking_enabled": false,
+      "http_send_buffer_bytes": 4096,
+      "log_format": "json",
+      "max_active_requests": 8,
+      "max_batch_tokens": 512,
+      "max_decode_batch": 4,
+      "max_prefill_layers_per_cycle": 4,
+      "max_prefill_staging_priority_burst": 4,
+      "max_prefill_staging_slots": 4,
+      "max_prefill_tokens_per_cycle": 256,
+      "request_timeout_seconds": 2100,
+      "stream_stall_grace_ms": 2000
+    },
+    "workload": {
+      "expected_completion_tokens": 272,
+      "expected_finish_reason": "length",
+      "expected_request_count": 2,
+      "kv_block_size": 64,
+      "kv_num_blocks": 8,
+      "overall_timeout_seconds": 2400,
+      "prefix_cache_max_blocks": 4,
+      "prefix_cache_max_entries": 4,
+      "pressure_max_tokens": 256,
+      "pressure_prompt_tokens": 255,
+      "prime_max_tokens": 16,
+      "prime_prompt_tokens": 253,
+      "prompt_words": 42,
+      "request_timeout_seconds": 2100,
+      "response_oracle": "ascending_zero_padded_integers_prefix_v1",
+      "sequence": "prime_then_pressure"
+    }
+  },
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+      "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+      "shader": "2026.2"
+    },
+    "device": {
+      "architecture": "strix_halo",
+      "compute_capability": null,
+      "compute_units": null,
+      "device_uuid": null,
+      "driver": "radv Mesa 26.1.5-arch1.1",
+      "logical_index": 0,
+      "memory_available_bytes": 100446564352,
+      "memory_bytes": 103079215104,
+      "name": "AMD Radeon 8060S Graphics (RADV STRIX_HALO)",
+      "pci_bus_id": null,
+      "unified_memory": true
+    },
+    "host_id": "strix-halo",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "7.1.4-arch1-1",
+      "name": "EndeavourOS",
+      "version": "2025.03.19"
+    },
+    "runtime": {
+      "driver": "Mesa 26.1.5-arch1.1",
+      "execution_environment_sha256": "sha256:9da324d55bc7c9f8296b97deb7f02138be1ce81ac50aa04a7484bd0c521bea16",
+      "vulkan_device": "1.4.354",
+      "vulkan_instance": "1.4.350"
+    }
+  },
+  "metrics": [],
+  "model": {
+    "chat_template_hash": "sha256:a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+    "config_hash": "sha256:ddc63e1c717afa86c865bb5e01313d89d72bb53b97ad4a8a03ba8510c0621670",
+    "id": "Qwen/Qwen3.5-4B",
+    "path": "/home/ericflo/Development/kiln/Qwen3.5-4B",
+    "tokenizer_hash": "sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+    "weight_files": [
+      {
+        "bytes": 5329398688,
+        "path": "model.safetensors-00001-of-00002.safetensors",
+        "sha256": "sha256:26a93f066e1916adb13453dae5a0c707c0fbc71299ed98779571a907b8e74c61"
+      },
+      {
+        "bytes": 3990429408,
+        "path": "model.safetensors-00002-of-00002.safetensors",
+        "sha256": "sha256:cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188"
+      }
+    ]
+  },
+  "notes": [],
+  "qualification": {
+    "backend": "vulkan",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "qualification/workloads/serving-backend-regression-closure-v1.json",
+      "--variant",
+      "vulkan-kv-prefix-quarantine",
+      "--host-id",
+      "strix-halo",
+      "--model",
+      "/home/ericflo/Development/kiln/Qwen3.5-4B",
+      "--model-id",
+      "Qwen/Qwen3.5-4B"
+    ],
+    "duration_seconds": 2049.4046230579843,
+    "finished_at_utc": "2026-07-29T02:04:56.680Z",
+    "kind": "correctness",
+    "profile": "serving-backend-regression-closure-v1",
+    "started_at_utc": "2026-07-29T01:30:47.275Z",
+    "verdict": "passed"
+  },
+  "receipt_id": "20260729t013047275616z-vulkan-strix-halo-serving-backend-regressi-2a1ed8c677-v1",
+  "results": [
+    {
+      "details": "{\"backend\":\"vulkan\",\"build_seconds\":0.3174928280059248,\"generated_config_sha256\":\"sha256:c89b823da68b98631e126fd0c3ac952b0343e2e93fbe3dde4f869c2b83d4c1f6\",\"kiln_binary_sha256\":\"sha256:84e881cc6486450d15f3d06fb204e412c6c130d0b0b4898b27e75a0650c65389\",\"prefix_cache_after_prime\":{\"active_leases\":0,\"cached_blocks\":0,\"cached_entries\":0,\"cached_state_bytes\":0,\"enabled\":false,\"hit_blocks\":0,\"hit_tokens\":0,\"lookup_hits\":0,\"lookup_misses\":0,\"max_blocks\":0,\"max_entries\":0,\"max_state_bytes\":0,\"pending_release_entries\":0},\"prefix_cache_final\":{\"active_leases\":0,\"cached_blocks\":0,\"cached_entries\":0,\"cached_state_bytes\":0,\"enabled\":false,\"hit_blocks\":0,\"hit_tokens\":0,\"lookup_hits\":0,\"lookup_misses\":0,\"max_blocks\":0,\"max_entries\":0,\"max_state_bytes\":0,\"pending_release_entries\":0},\"pressure\":{\"completion_tokens\":256,\"decode_growth_blocks\":4,\"finish_reason\":\"length\",\"prompt_tokens\":255},\"prime\":{\"completion_tokens\":16,\"finish_reason\":\"length\",\"prompt_tokens\":253},\"reclaim_events\":[],\"semantic_output_sha256\":\"sha256:1d3bae1865c7ba02e676058483fa445928814698f7d9fd42282d5c3d588441fb\",\"shutdown\":{\"duration_ms\":413.90077298274264,\"forced\":false,\"returncode\":0},\"variant\":\"vulkan-kv-prefix-quarantine\"}",
+      "duration_seconds": 2026.6800720110186,
+      "id": "vulkan-serving-regression-closure",
+      "metrics": [
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "batching_error_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "binary_build_count",
+          "unit": "count",
+          "value": 1
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "completion_token_count",
+          "unit": "tokens",
+          "value": 272
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "device_fault_event_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "exact_output_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "external_yield_sync_call_count",
+          "unit": "count",
+          "value": 304
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "external_yield_sync_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "external_yield_sync_max_ms",
+          "unit": "ms",
+          "value": 0.048
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "external_yield_sync_slow_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "external_yield_sync_total_ms",
+          "unit": "ms",
+          "value": 1.614
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "kv_blocks_end",
+          "unit": "blocks",
+          "value": 8
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "kv_blocks_start",
+          "unit": "blocks",
+          "value": 8
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "kv_blocks_used_end",
+          "unit": "blocks",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "kv_decode_growth_blocks",
+          "unit": "blocks",
+          "value": 4
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "kv_resize_event_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "kv_unaccounted_blocks_end",
+          "unit": "blocks",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "length_terminated_request_count",
+          "unit": "count",
+          "value": 2
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "policy_attestation_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "prefix_cache_active_leases_end",
+          "unit": "leases",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "prefix_cache_cached_blocks_after_prime",
+          "unit": "blocks",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "prefix_cache_cached_blocks_end",
+          "unit": "blocks",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "prefix_cache_enabled",
+          "unit": "bool",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "prefix_cache_lookup_miss_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "prefix_cache_pending_release_entries_end",
+          "unit": "entries",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "prefix_cache_reclaim_event_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "prefix_cache_reclaimed_block_count",
+          "unit": "blocks",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "prefix_cache_state_bytes_end",
+          "unit": "bytes",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "pressure_completion_token_count",
+          "unit": "tokens",
+          "value": 256
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "pressure_prompt_token_count",
+          "unit": "tokens",
+          "value": 255
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "prime_prompt_token_count",
+          "unit": "tokens",
+          "value": 253
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "request_count",
+          "unit": "count",
+          "value": 2
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "request_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "semantic_output_record_count",
+          "unit": "count",
+          "value": 2
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "server_exit_before_shutdown_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "shutdown_forced_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "shutdown_nonzero_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "snapshot_residue_count",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "69246007ac4884e8c2984c2790cc2dabb295d3f1",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:3d1395eb976a35bfae1b083f1f955714a2e0e8b5f60cba72bc7e22911e15c2a1",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "serving-backend-regression-closure-v1",
+    "parameters": {
+      "variant_id": "vulkan-kv-prefix-quarantine"
+    },
+    "seed": 20260728,
+    "sha256": "sha256:18b6f07d27d8742d5ea6330872e0ecdf6f6fd375c5c38029c099a6b91f3b8ca5"
+  }
+}

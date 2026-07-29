@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CURRENT_DRIVER_VERSION="26"
+CURRENT_DRIVER_VERSIONS=("26" "27")
 LEGACY_VALIDATOR_COMMIT="9371035bfeb3908ebf47bd107eb53f98c529be3e"
 LEGACY_BENCHMARK_ROOT="benchmarks/receipts/rocm/strix-halo"
 LEGACY_ORACLE_ROOT="qualification/oracle-results/rocm/strix-halo"
@@ -20,7 +20,7 @@ for receipt in "${benchmark_receipts[@]}"; do
             'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("driver_version", ""))' \
             "$receipt"
     )"
-    if [[ "$driver_version" == "$CURRENT_DRIVER_VERSION" ]]; then
+    if [[ " ${CURRENT_DRIVER_VERSIONS[*]} " == *" $driver_version "* ]]; then
         current_benchmark_receipts+=("$receipt")
     else
         legacy_benchmark_receipts+=("$receipt")

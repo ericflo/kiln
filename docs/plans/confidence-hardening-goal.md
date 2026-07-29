@@ -209,7 +209,7 @@ host-OOM or serving-capacity claim.
   evidence, not a requirement that one qualification host run every backend.
 - [x] On Strix Halo, retain current-source ROCm and Vulkan core-correctness
   receipts.
-- [ ] Retain targeted ROCm and Vulkan serving receipts covering exact output,
+- [x] Retain targeted ROCm and Vulkan serving receipts covering exact output,
   KV-growth pressure, prefix-cache reclamation, and bounded process and device
   cleanup after the shared server changes made during Phase 7.1.
 - [ ] After Phase 7.2 lands, incorporate its final checkpoint and repeat only
@@ -261,3 +261,33 @@ correctness-quarantined current-source path completed the prime request
 exactly but produced only 86 of 256 pressure tokens before the former
 600-second request deadline. The longer finite deadline preserves the exact
 workload and gates; it is not a throughput acceptance rule.
+
+Targeted-serving evidence:
+`qualification/receipts/rocm/strix-halo/`
+`20260729t002320595268z-rocm-strix-halo-serving-backend-regressi-`
+`b18fa140d9-v1.json` passed from clean pushed source `ef4d6ba767d9`.
+It completed both exact length-terminated requests with 253/255 prompt tokens,
+16/256 completion tokens, and four pressure-request decode-growth blocks. The
+prime left four unleased prefix blocks; the first live growth reclaimed all
+four through one structured event. Final state retained three valid cached
+blocks but had zero active leases, pending releases, or unaccounted blocks.
+
+`qualification/receipts/vulkan/strix-halo/`
+`20260729t013047275616z-vulkan-strix-halo-serving-backend-regressi-`
+`2a1ed8c677-v1.json` passed from clean pushed source `69246007ac48`.
+It completed the same exact prompt/completion and four-growth-block contract
+with the Vulkan correctness quarantine effective. Prefix-cache enablement,
+lookups, cached blocks, leases, pending releases, reclaim events, and retained
+state bytes were all zero. Both receipts recorded zero request, exact-output,
+device-fault, batching, synchronization-failure, resize, policy-attestation,
+unaccounted-KV, forced-shutdown, nonzero-shutdown, early-exit, and snapshot
+residue evidence, and both passed independent local-artifact, known-commit,
+and current-source validation when produced.
+
+Concurrent Phase 7.2 integration:
+receipt-only Metal checkpoints `c4f2769f1` and `ed63928a8` were incorporated
+after the Vulkan run. They add passing c1-through-c12 and c13 serving receipts
+without changing shared runtime or qualification tooling, so they do not
+invalidate either targeted Strix result and require no backend rerun. Because
+c13 still fits, these checkpoints do not yet close Phase 7.2's required first
+non-fitting capacity boundary, soak, or final documentation items.
