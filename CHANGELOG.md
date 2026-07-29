@@ -1,6 +1,6 @@
 # Kiln Server Changelog
 
-## Unreleased — bounded thinking by tokens or decode time
+## kiln-v0.5.0 — 2026-07-29 — bounded thinking by tokens or decode time
 
 - Canonical-only configuration: every public field environment override now
   derives mechanically as `KILN_<SECTION>_<FIELD>`. All 77 former public
