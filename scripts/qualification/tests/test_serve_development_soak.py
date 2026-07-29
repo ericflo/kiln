@@ -457,7 +457,12 @@ class ServeRocmSoakTests(unittest.TestCase):
         )
         self.assertEqual(metal["build"]["features"], "metal")
         self.assertEqual(metal["build"]["cargo_execution_mode"], "macos-contained")
-        self.assertEqual(metal["server"]["max_active_requests"], 4)
+        self.assertEqual(metal["server"]["max_active_requests"], 8)
+        self.assertEqual(metal["server"]["max_prefill_staging_slots"], 4)
+        self.assertEqual(
+            metal["batching"],
+            {"actor_cycle_idle_ms": 0, "prefill_admission_quantum": 4},
+        )
         self.assertEqual(
             metal["soak"]["gpu_memory_scope"],
             "macos_whole_host_unified_memory",
@@ -572,30 +577,39 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(snapshot.rss_shmem_bytes, 50 * 1024)
         self.assertEqual(snapshot.swap_bytes, 25 * 1024)
 
-    def test_process_memory_snapshot_reads_darwin_ps_rss(self) -> None:
-        completed = mock.Mock(returncode=0, stdout=" 12345\n", stderr="")
-        runner = mock.Mock(return_value=completed)
+    def test_process_memory_snapshot_reads_darwin_libproc_rss(self) -> None:
+        library = mock.Mock()
+
+        def proc_pidinfo(
+            _pid: int,
+            _flavor: int,
+            _argument: int,
+            buffer: object,
+            size: int,
+        ) -> int:
+            info = soak.ctypes.cast(
+                buffer,
+                soak.ctypes.POINTER(soak.DarwinProcTaskInfo),
+            ).contents
+            info.pti_resident_size = 12345
+            return size
+
+        library.proc_pidinfo.side_effect = proc_pidinfo
+        loader = mock.Mock(return_value=library)
 
         snapshot = soak.process_memory_snapshot(
             42,
             platform_name="darwin",
-            command_runner=runner,
+            library_loader=loader,
         )
 
-        self.assertEqual(snapshot.rss_bytes, 12345 * 1024)
+        self.assertEqual(snapshot.rss_bytes, 12345)
         self.assertEqual(snapshot.rss_anon_bytes, 0)
         self.assertEqual(snapshot.rss_file_bytes, 0)
         self.assertEqual(snapshot.rss_shmem_bytes, 0)
         self.assertEqual(snapshot.swap_bytes, 0)
-        runner.assert_called_once_with(
-            ["/bin/ps", "-o", "rss=", "-p", "42"],
-            stdin=soak.subprocess.DEVNULL,
-            stdout=soak.subprocess.PIPE,
-            stderr=soak.subprocess.PIPE,
-            text=True,
-            check=False,
-            timeout=5.0,
-        )
+        loader.assert_called_once_with("/usr/lib/libproc.dylib")
+        self.assertEqual(library.proc_pidinfo.call_args.args[:3], (42, 4, 0))
 
     def test_process_memory_mapping_categories_are_closed(self) -> None:
         self.assertEqual(soak.process_memory_mapping_category(""), "anonymous")

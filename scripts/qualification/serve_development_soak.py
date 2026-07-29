@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import ctypes
 import dataclasses
 import math
 import os
@@ -223,11 +224,15 @@ def _metal_variant_config() -> dict[str, Any]:
     config["build"] = METAL_BUILD_SPEC.effective_config()
     config["server"].update(
         {
-            "max_prefill_staging_slots": 0,
-            "max_active_requests": config["server"]["max_decode_batch"],
-            "max_prefill_staging_priority_burst": 0,
+            "max_prefill_staging_slots": 4,
+            "max_active_requests": config["server"]["max_decode_batch"] + 4,
+            "max_prefill_staging_priority_burst": 4,
         }
     )
+    config["batching"] = {
+        "actor_cycle_idle_ms": 0,
+        "prefill_admission_quantum": 4,
+    }
     config["runtime"].update(
         {
             "prefix_cache_requested_enabled": False,
@@ -955,6 +960,66 @@ class ProcessMemorySnapshot:
     swap_bytes: int
 
 
+class DarwinProcTaskInfo(ctypes.Structure):
+    _fields_ = [
+        ("pti_virtual_size", ctypes.c_uint64),
+        ("pti_resident_size", ctypes.c_uint64),
+        ("pti_total_user", ctypes.c_uint64),
+        ("pti_total_system", ctypes.c_uint64),
+        ("pti_threads_user", ctypes.c_uint64),
+        ("pti_threads_system", ctypes.c_uint64),
+        ("pti_policy", ctypes.c_int32),
+        ("pti_faults", ctypes.c_int32),
+        ("pti_pageins", ctypes.c_int32),
+        ("pti_cow_faults", ctypes.c_int32),
+        ("pti_messages_sent", ctypes.c_int32),
+        ("pti_messages_received", ctypes.c_int32),
+        ("pti_syscalls_mach", ctypes.c_int32),
+        ("pti_syscalls_unix", ctypes.c_int32),
+        ("pti_csw", ctypes.c_int32),
+        ("pti_threadnum", ctypes.c_int32),
+        ("pti_numrunning", ctypes.c_int32),
+        ("pti_priority", ctypes.c_int32),
+    ]
+
+
+def darwin_process_memory_snapshot(
+    pid: int,
+    *,
+    library_loader: Any = None,
+) -> ProcessMemorySnapshot:
+    loader = ctypes.CDLL if library_loader is None else library_loader
+    try:
+        library = loader("/usr/lib/libproc.dylib")
+    except OSError as exc:
+        raise SoakError(f"cannot load macOS libproc for pid {pid}: {exc}") from exc
+    library.proc_pidinfo.argtypes = [
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_uint64,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    library.proc_pidinfo.restype = ctypes.c_int
+    info = DarwinProcTaskInfo()
+    size = library.proc_pidinfo(
+        pid,
+        4,
+        0,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+    )
+    if size != ctypes.sizeof(info) or info.pti_resident_size <= 0:
+        raise SoakError(f"cannot read macOS resident memory for pid {pid}")
+    return ProcessMemorySnapshot(
+        rss_bytes=int(info.pti_resident_size),
+        rss_anon_bytes=0,
+        rss_file_bytes=0,
+        rss_shmem_bytes=0,
+        swap_bytes=0,
+    )
+
+
 @dataclasses.dataclass(frozen=True)
 class ProcessMemoryMappingUsage:
     identity: str
@@ -992,38 +1057,13 @@ def process_memory_snapshot(
     proc_root: Path = Path("/proc"),
     *,
     platform_name: str | None = None,
-    command_runner: Any = None,
+    library_loader: Any = None,
 ) -> ProcessMemorySnapshot:
     platform_value = sys.platform if platform_name is None else platform_name
     if platform_value == "darwin" and proc_root == Path("/proc"):
-        runner = subprocess.run if command_runner is None else command_runner
-        try:
-            completed = runner(
-                ["/bin/ps", "-o", "rss=", "-p", str(pid)],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-                timeout=5.0,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise SoakError(f"cannot read macOS RSS for pid {pid}: {exc}") from exc
-        if completed.returncode != 0:
-            detail = completed.stderr.strip()[-500:]
-            raise SoakError(
-                f"macOS ps could not read RSS for pid {pid}"
-                + (f": {detail}" if detail else "")
-            )
-        raw = completed.stdout.strip()
-        if re.fullmatch(r"[1-9][0-9]*", raw) is None:
-            raise SoakError(f"macOS ps returned invalid RSS for pid {pid}: {raw!r}")
-        return ProcessMemorySnapshot(
-            rss_bytes=int(raw) * 1024,
-            rss_anon_bytes=0,
-            rss_file_bytes=0,
-            rss_shmem_bytes=0,
-            swap_bytes=0,
+        return darwin_process_memory_snapshot(
+            pid,
+            library_loader=library_loader,
         )
 
     status = proc_root / str(pid) / "status"
