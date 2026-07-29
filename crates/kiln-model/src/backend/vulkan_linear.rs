@@ -249,6 +249,19 @@ pub(super) fn linear_decode(
             .context("upload linear activation to resident Vulkan weight device")?;
         return resident_linear_decode(&resident_x, weight_t);
     }
+    if matches!(x.device(), kiln_tensor::Device::Vulkan(_))
+        && matches!(weight_t.device(), kiln_tensor::Device::Cpu)
+    {
+        // Model loading may keep the immutable kt weight on CPU while Vulkan's
+        // private decode cache owns its packed device copy. kt Vulkan tensors
+        // and that private cache do not necessarily share one logical device,
+        // so never bind their raw buffers in the same dispatch. Read back only
+        // the small activation, then reuse the already-prewarmed cached weight.
+        let host_x = x
+            .to_device(kiln_tensor::Device::Cpu)
+            .context("read back resident linear activation for cached Vulkan weight")?;
+        return linear_decode(backend, &host_x, weight_t);
+    }
     if !matches!(x.device(), kiln_tensor::Device::Cpu)
         || !matches!(weight_t.device(), kiln_tensor::Device::Cpu)
     {
@@ -599,6 +612,7 @@ mod tests {
         let x = x
             .to_device(Device::Vulkan(0))
             .expect("resident flattened activation");
+        let cached_weight = weight.clone();
         let weight = weight
             .to_device(Device::Vulkan(0))
             .expect("resident flattened BF16 weight");
@@ -621,6 +635,17 @@ mod tests {
         assert_eq!(output.dims(), &[2, 3]);
         assert_eq!(output.dtype(), DType::F32);
         assert_eq!(output.device(), Device::Vulkan(0));
+        assert_fixture_values(&output, false);
+
+        // Production model loading may keep the immutable kt weight on CPU
+        // while the backend's private packed-weight cache owns its Vulkan
+        // copy. A resident final hidden row must still reach that cache.
+        let output = LinearBackend::runtime_linear_decode(&backend, &x, &cached_weight)
+            .expect("resident activation with cached Vulkan weight dispatch")
+            .expect("Vulkan decode hook must bridge the small activation");
+        assert_eq!(output.dims(), &[2, 3]);
+        assert_eq!(output.dtype(), DType::F32);
+        assert_eq!(output.device(), Device::Cpu);
         assert_fixture_values(&output, false);
 
         // GDN recurrence currently returns a CPU activation while the output
