@@ -185,6 +185,50 @@ admission, injected-failure recovery, ownership-release reclaim, and process
 cleanup evidence. It is not a physical host OOM, full-model pressure,
 serving-capacity, performance, endurance, or other-Apple-Silicon claim.
 
+## Current Metal Serving Capacity Evidence
+
+The fixed greedy-short passing receipts are
+[`c1-c12`](../benchmarks/receipts/metal/macbook-air-m1/20260729t005123z-metal-macbook-air-m1-qwen35-4b-greedy-short-c1-12-capacity-v1.kiln.json),
+[`c13`](../benchmarks/receipts/metal/macbook-air-m1/20260729t013755z-metal-macbook-air-m1-qwen35-4b-greedy-short-c13-capacity-v1.kiln.json),
+[`c14`](../benchmarks/receipts/metal/macbook-air-m1/20260729t015029z-metal-macbook-air-m1-qwen35-4b-greedy-short-c14-capacity-v1.kiln.json),
+[`c15`](../benchmarks/receipts/metal/macbook-air-m1/20260729t020539z-metal-macbook-air-m1-qwen35-4b-greedy-short-c15-capacity-v1.kiln.json),
+[`c16`](../benchmarks/receipts/metal/macbook-air-m1/20260729t021732z-metal-macbook-air-m1-qwen35-4b-greedy-short-c16-capacity-v1.kiln.json),
+[`c17`](../benchmarks/receipts/metal/macbook-air-m1/20260729t023011z-metal-macbook-air-m1-qwen35-4b-greedy-short-c17-capacity-first-nonfit-v1.kiln.json),
+and
+[`c18`](../benchmarks/receipts/metal/macbook-air-m1/20260729t023743z-metal-macbook-air-m1-qwen35-4b-greedy-short-c18-capacity-v1.kiln.json).
+The final
+[`c19/c20 boundary receipt`](../benchmarks/receipts/metal/macbook-air-m1/20260729t025314z-metal-macbook-air-m1-qwen35-4b-greedy-short-c19-64-capacity-boundary-search-v1.kiln.json)
+is retained counterevidence with a failed overall verdict. The c17 run
+identifier was named prospectively: its signed verdict, all 17 requests,
+memory gate, and every other gate passed.
+
+All rows used the same model-visible prompt set and workload semantics:
+temperature zero, seed 17, one repeat, 158 prompt tokens, an exact 64-token
+completion, a 600-second request timeout, and a 16,106,127,360-byte whole-host
+Apple unified-memory limit sampled every 250 ms. Clean pushed sources
+`5187097af964`, `c4f2769f17a5`, and `ed63928a8f6a` supplied the c1-c18 passes.
+The final adjacent c19/c20 discriminator used clean pushed source
+`74a62a614545` and one exact runtime artifact.
+
+All 190 measured requests from c1 through c19 completed successfully with the
+required exact output. Aggregate output throughput ranged from 0.544908 to
+4.517342 tokens per second, and the largest observed passing whole-host peak
+was 15,118,284,882 bytes at c9, below the limit. c19 passed 19/19 at 3.086786
+tokens per second with a 14,602,888,807-byte peak. c20 reached 600.024 seconds
+with 12/20 successes and a 14,431,090,115-byte peak. The eight incomplete
+streams lacked terminal usage records, failing request-success,
+positive-usage, fixed-output, and uniform-prompt-accounting gates rather than
+the memory gate. The stop control retained c19 and c20, recorded c21-c64 as an
+unexecuted suffix, and issued no higher load.
+
+Every receipt preserved its repository, model, artifact, and execution
+identity and completed owned-server finalization. The c19/c20 server returned
+zero after non-forced shutdown and left no listener or process group. SLO
+goodput and tail latency are retained as performance measurements but are not
+capacity verdict gates. The c19 ceiling applies only to this fixed workload,
+configuration, timeout, and measured M1 MacBook Air. It is not an endurance,
+other-workload, or other-Apple-Silicon claim.
+
 ## Current CUDA Core Evidence
 
 The current retained laptop CUDA core receipt is
@@ -346,7 +390,9 @@ signed verdict, all requests, memory gate, and every other gate passed, as did
 c18; it does not establish a non-fitting boundary. Checkpoint `74a62a614`
 subsequently made ascending capacity sweeps stop after the first actually
 failed row and retain the unexecuted suffix as structured failure. That
-campaign driver is separate from this bounded Strix closure runner.
+campaign driver is separate from this bounded Strix closure runner. Its
+source-bound Metal sweep subsequently passed c19 and retained c20 as the first
+non-fitting row.
 
 ## Hosted Cross-Backend Checkpoint
 

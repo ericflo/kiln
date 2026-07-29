@@ -165,7 +165,7 @@ and did not control execution.
   tensor transfer, matmul, graph replay, training, and optimizer coverage.
 - [x] Retain controlled low-memory admission, allocation failure, reclaim, and
   process-cleanup evidence appropriate to unified memory.
-- [ ] Run serving correctness and performance at every concurrency that fits
+- [x] Run serving correctness and performance at every concurrency that fits
   without changing workload semantics, and retain the first non-fitting
   capacity boundary as counterevidence.
 - [ ] Run an eight-hour mixed-load soak using ordinary monotonic elapsed time.
@@ -200,6 +200,29 @@ bytes before another allocation succeeded. Every case ran in the runner-owned
 macOS session/process group and completed its bounded descendant-settlement
 path. This is controlled admission/failure/release evidence, not a physical
 host-OOM or serving-capacity claim.
+
+Serving-capacity evidence:
+`benchmarks/receipts/metal/macbook-air-m1/` retains the fixed greedy-short
+passes from c1 through c19 and the adjacent c20 failure. Every row used
+temperature zero, seed 17, one repeat, a 158-token prompt, an exact 64-token
+completion requirement, a 600-second request timeout, and a 16,106,127,360-byte
+whole-host unified-memory limit. The c1-c12, c13, c14, c15, c16, c17, and c18
+passes were emitted from clean pushed sources `5187097af964`, `c4f2769f17a5`,
+and `ed63928a8f6a`; the prospective `first-nonfit` label in the c17 run
+identifier does not override its passing signed verdict. The final
+`20260729t025314z-metal-macbook-air-m1-qwen35-4b-greedy-short-c19-64-`
+`capacity-boundary-search-v1.kiln.json` receipt ran from clean pushed source
+`74a62a614545` and retained the exact adjacent discriminator: c19 passed all
+19 requests at 3.086786 output tokens per second with a 14,602,888,807-byte
+peak, while c20 reached the 600-second deadline with 12 of 20 requests
+complete. Its eight incomplete streams had no terminal usage record, so the
+request-success, positive-usage, fixed-output, and uniform-prompt-accounting
+gates failed. The c20 14,431,090,115-byte peak remained below the memory limit.
+The driver recorded c21-c64 as an unexecuted suffix and stopped. All
+repository, model, artifact, execution-identity, and owned-server finalization
+checks passed, including non-forced zero shutdown. Reported SLO goodput is
+preserved but is not a capacity verdict gate; this c19 ceiling applies only to
+the declared workload and measured MacBook Air.
 
 ## Phase 7.3: Final Cross-Backend Regression Closure
 
@@ -296,10 +319,10 @@ receipts through c18. The c17 receipt's run identifier contains
 other gate passed; c18 also passed. It is therefore not non-fitting
 counterevidence. Checkpoint `74a62a614` then made the campaign driver stop an
 ascending sweep after its first actually failed row and record its unexecuted
-suffix as structured failure. That driver is not used by the bounded Strix
-closure runner, so the change requires no ROCm or Vulkan repeat. Phase 7.2's
-required first non-fitting capacity boundary, soak, and final documentation
-items remain open.
+suffix as structured failure. The resulting source-bound sweep passed c19 and
+retained c20 as the first non-fitting row. That campaign driver is not used by
+the bounded Strix closure runner, so the change requires no ROCm or Vulkan
+repeat. Phase 7.2's soak and final documentation items remain open.
 
 Interim hosted checkpoint:
 GitHub Actions

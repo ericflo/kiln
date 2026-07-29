@@ -1207,6 +1207,32 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 endurance, or other-Apple-Silicon claim.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Retained Metal serving evidence uses one fixed greedy-short prompt set,
+                temperature zero, seed 17, exact 158-token prompts and 64-token completions,
+                a 600-second request deadline, and a 15 GiB whole-host Apple unified-memory
+                limit. The
+                <a href="https://github.com/ericflo/kiln/blob/main/benchmarks/receipts/metal/macbook-air-m1/20260729t005123z-metal-macbook-air-m1-qwen35-4b-greedy-short-c1-12-capacity-v1.kiln.json" class="link">
+                  c1-c12 receipt
+                </a>
+                and individual c13-c18 receipts passed from clean pushed sources. The c17 run
+                identifier was named prospectively: its signed verdict and all gates passed.
+                The final
+                <a href="https://github.com/ericflo/kiln/blob/main/benchmarks/receipts/metal/macbook-air-m1/20260729t025314z-metal-macbook-air-m1-qwen35-4b-greedy-short-c19-64-capacity-boundary-search-v1.kiln.json" class="link">
+                  c19/c20 boundary receipt
+                </a>
+                ran from clean pushed source <code>74a62a614545</code> with one exact artifact.
+                c19 passed 19/19 at 3.086786 output tokens per second and a
+                14,602,888,807-byte peak. c20 reached 600.024 seconds with 12/20 successes;
+                eight incomplete streams lacked terminal usage, while its
+                14,431,090,115-byte peak remained below the memory limit. The fail-closed driver
+                retained c20, recorded c21-c64 as unexecuted, stopped the sweep, and completed
+                non-forced zero shutdown with every finalization check passing. All 190 measured
+                requests from c1 through c19 produced the required exact output. Tail latency and
+                SLO goodput remain visible measurements, not capacity gates. This c19 ceiling is
+                specific to the declared workload and measured M1 MacBook Air; it is not endurance
+                or broader Apple Silicon evidence.
+              </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 Retained CUDA core receipt
                 <code>20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1</code>
                 passed from clean source <code>b81c6787d0a4</code>. It required the selected device,
@@ -1340,8 +1366,9 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 and every other gate passed; c18 passed as well. It is not evidence of a
                 non-fitting boundary. Checkpoint <code>74a62a614</code> then made ascending
                 capacity sweeps stop after the first actually failed row and retain the
-                unexecuted suffix as structured failure. That campaign driver is separate from
-                the bounded Strix closure runner.
+                unexecuted suffix as structured failure. Its source-bound Metal sweep passed c19
+                and retained c20 as the first non-fitting row. That campaign driver is separate
+                from the bounded Strix closure runner.
               </p>
             </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">
