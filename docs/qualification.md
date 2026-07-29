@@ -451,6 +451,15 @@ compile/test checkpoint from the source that incorporates completed Phase 7.2;
 it is not hardware execution evidence for the hosted compile-only CUDA and
 ROCm lanes.
 
+Closure documentation commit `8e3ea37085f7` then passed its exact-commit
+Pages, repository-hygiene, and release-version-drift workflows. Its local
+audit revalidated every qualification receipt, retained benchmark and oracle
+evidence, repository artifact policy, production file budget, release-version
+drift, and the assembled 54-document site. The four bounded Strix core and
+serving receipts also passed local-artifact and known-commit validation. With
+Phase 7.2 complete, these results close Phase 7.3. The completion update
+changes documentation only and adds no broader hardware claim.
+
 ## Build Boundary
 
 Bounded build wrappers provide deterministic environment filtering, offline

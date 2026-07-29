@@ -1,6 +1,6 @@
 # Confidence Hardening Goal
 
-**Status:** Active.
+**Status:** Complete.
 
 ## Scope
 
@@ -277,7 +277,7 @@ not establish an SLO or qualify another Apple Silicon device.
   the targeted checks affected by later shared runtime or qualification-tooling
   changes. Documentation-only and backend-isolated changes do not require
   unrelated hardware reruns.
-- [ ] Validate and check in the receipts, update this checklist and permanent
+- [x] Validate and check in the receipts, update this checklist and permanent
   documentation, and require all exact-commit workflows to pass before changing
   this plan's status to `Complete`.
 
@@ -378,6 +378,21 @@ passed `backend_build=all` from exact pushed source `f19d2591ab8e`. Its
 separate Metal, CUDA, ROCm, and Vulkan jobs all passed, as did Linux default
 features, formatting, dependency policy, and portable qualification receipt
 validation. The run completed successfully with all seven jobs green. This
-closes the hosted matrix item on the final Phase 7.2-integrated source. The
-last checklist item remains open until this documentation checkpoint and its
-exact-commit workflows pass.
+closed the hosted matrix item on the final Phase 7.2-integrated source. The
+last checklist item remained open until the documentation checkpoint below
+and its exact-commit workflows passed.
+
+Completion checkpoint:
+documentation commit `8e3ea37085f7` passed its exact-commit Pages
+([`30499565309`](https://github.com/ericflo/kiln/actions/runs/30499565309)),
+Repository hygiene
+([`30499565302`](https://github.com/ericflo/kiln/actions/runs/30499565302)),
+and Release Version Drift
+([`30499565273`](https://github.com/ericflo/kiln/actions/runs/30499565273))
+workflows. The same checkpoint passed local validation of every qualification
+receipt, retained benchmark and oracle evidence, repository artifact policy,
+production file budget, release-version drift, and the assembled 54-document
+site. The four bounded Strix core and serving receipts also passed independent
+local-artifact and known-commit validation in the final audit. Phase 7.2 is
+complete, every Phase 7.3 evidence item is satisfied, and this plan is
+therefore complete. This completion update changes documentation only.
