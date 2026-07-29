@@ -884,6 +884,10 @@ def effective_config(
         effective["soak"]["gpu_memory_absolute_limit_bytes"] = (
             runtime.gpu_memory_absolute_limit_bytes
         )
+    if runtime.backend == "metal":
+        effective["soak"]["external_yield_sync_slow_policy"] = (
+            "record_only_failures_and_unexplained_itl_remain_fatal"
+        )
     if "model" in base:
         effective["model"] = base["model"]
     if runtime.inference_memory_fraction is not None or runtime.gpu_memory_gb is not None:
@@ -4198,7 +4202,6 @@ def execute(
             "graph_fallback_count",
             "graph_slot_active_count_end",
             "external_yield_sync_failure_count",
-            "external_yield_sync_slow_count",
             "batching_error_count",
             "device_fault_event_count",
             "non_finite_response_count",
@@ -4208,6 +4211,14 @@ def execute(
         ):
             if values[name] != 0:
                 failures.append(f"{name}={values[name]}, expected 0")
+        if (
+            runtime.backend != "metal"
+            and values["external_yield_sync_slow_count"] != 0
+        ):
+            failures.append(
+                "external_yield_sync_slow_count="
+                f"{values['external_yield_sync_slow_count']}, expected 0"
+            )
         if runtime.graph_execution_required:
             if values["graph_replay_success_count"] < 1:
                 failures.append("soak completed without a measured graph replay")

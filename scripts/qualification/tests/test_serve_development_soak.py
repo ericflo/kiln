@@ -472,6 +472,10 @@ class ServeRocmSoakTests(unittest.TestCase):
         )
         self.assertEqual(metal["soak"]["gpu_memory_poll_interval_ms"], 1000)
         self.assertEqual(
+            metal["soak"]["external_yield_sync_slow_policy"],
+            "record_only_failures_and_unexplained_itl_remain_fatal",
+        )
+        self.assertEqual(
             metal["soak"]["stabilization_memory_boundary"],
             "whole_host_unified_and_process_rss",
         )

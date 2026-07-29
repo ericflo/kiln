@@ -115,6 +115,7 @@
           "gpu_memory_baseline_mode": "stabilization_envelope_high_water",
           "gpu_memory_poll_interval_ms": 1000,
           "gpu_memory_absolute_limit_bytes": 16106127360,
+          "external_yield_sync_slow_policy": "record_only_failures_and_unexplained_itl_remain_fatal",
           "accelerator_telemetry": {
             "mode": "disabled"
           }
