@@ -1332,6 +1332,17 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 that source, so final cross-backend closure still requires the same matrix from the
                 eventual integrated source.
               </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Receipt-only Metal checkpoints through <code>aaca10d4e</code> changed no shared
+                runtime or qualification tooling and do not invalidate the targeted Strix results.
+                Their serving receipts pass through c18. The c17 run identifier contains
+                <code>first-nonfit</code>, but its signed verdict, all 17 requests, memory gate,
+                and every other gate passed; c18 passed as well. It is not evidence of a
+                non-fitting boundary. Checkpoint <code>74a62a614</code> then made ascending
+                capacity sweeps stop after the first actually failed row and retain the
+                unexecuted suffix as structured failure. That campaign driver is separate from
+                the bounded Strix closure runner.
+              </p>
             </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">
               <h4 class="font-semibold mb-2">Memory alerting contract</h4>

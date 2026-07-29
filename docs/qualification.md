@@ -338,9 +338,15 @@ Both receipts recorded zero request, exact-output, device-fault, batching,
 synchronization-failure, resize, policy-attestation, unaccounted-KV,
 forced-shutdown, nonzero-shutdown, early-exit, and snapshot-residue evidence.
 Each passed independent local-artifact, known-commit, and current-source
-validation when produced. Later receipt-only Metal serving checkpoints did not
-change runtime or qualification tooling and therefore do not invalidate these
-backend-targeted results.
+validation when produced. Later receipt-only Metal serving checkpoints through
+`aaca10d4e` did not change runtime or qualification tooling and therefore do
+not invalidate these backend-targeted results. Those Metal receipts pass
+through c18. Although the c17 run identifier contains `first-nonfit`, its
+signed verdict, all requests, memory gate, and every other gate passed, as did
+c18; it does not establish a non-fitting boundary. Checkpoint `74a62a614`
+subsequently made ascending capacity sweeps stop after the first actually
+failed row and retain the unexecuted suffix as structured failure. That
+campaign driver is separate from this bounded Strix closure runner.
 
 ## Hosted Cross-Backend Checkpoint
 

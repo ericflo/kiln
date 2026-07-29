@@ -288,13 +288,18 @@ residue evidence, and both passed independent local-artifact, known-commit,
 and current-source validation when produced.
 
 Concurrent Phase 7.2 integration:
-receipt-only Metal checkpoints `c4f2769f1` and `ed63928a8` were incorporated
-after the Vulkan run and before the refreshed ROCm run. They add passing
-c1-through-c12 and c13 serving receipts without changing shared runtime or
-qualification tooling, so they do not invalidate either targeted Strix
-result. Because c13 still fits, these checkpoints do not yet close Phase
-7.2's required first non-fitting capacity boundary, soak, or final
-documentation items.
+receipt-only Metal checkpoints `c4f2769f1`, `ed63928a8`, and `aaca10d4e` were
+incorporated without changing shared runtime or qualification tooling, so they
+do not invalidate either targeted Strix result. They retain passing serving
+receipts through c18. The c17 receipt's run identifier contains
+`first-nonfit`, but its signed verdict, all 17 requests, memory gate, and every
+other gate passed; c18 also passed. It is therefore not non-fitting
+counterevidence. Checkpoint `74a62a614` then made the campaign driver stop an
+ascending sweep after its first actually failed row and record its unexecuted
+suffix as structured failure. That driver is not used by the bounded Strix
+closure runner, so the change requires no ROCm or Vulkan repeat. Phase 7.2's
+required first non-fitting capacity boundary, soak, and final documentation
+items remain open.
 
 Interim hosted checkpoint:
 GitHub Actions
