@@ -1320,6 +1320,17 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 device-fault, batching, synchronization-failure, resize, policy, unaccounted-KV,
                 forced/nonzero shutdown, early-exit, and snapshot-residue counts were zero.
               </p>
+              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+                Interim hosted
+                <a href="https://github.com/ericflo/kiln/actions/runs/30416196655" class="link">
+                  <code>backend_build=all</code> run 30416196655
+                </a>
+                passed from exact pushed source <code>56000a370874</code>. Separate Metal, CUDA,
+                ROCm, and Vulkan jobs all passed, together with Linux default features, formatting,
+                dependency policy, and portable receipt validation. Phase 7.2 was still active at
+                that source, so final cross-backend closure still requires the same matrix from the
+                eventual integrated source.
+              </p>
             </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">
               <h4 class="font-semibold mb-2">Memory alerting contract</h4>

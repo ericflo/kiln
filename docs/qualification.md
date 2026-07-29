@@ -340,6 +340,17 @@ validation when produced. Later receipt-only Metal serving checkpoints did not
 change runtime or qualification tooling and therefore do not invalidate these
 backend-targeted results.
 
+## Hosted Cross-Backend Checkpoint
+
+GitHub Actions
+[`30416196655`](https://github.com/ericflo/kiln/actions/runs/30416196655)
+passed `backend_build=all` from exact pushed source `56000a370874`. The
+separate Metal, CUDA, ROCm, and Vulkan jobs all passed, along with Linux
+default features, formatting, dependency policy, and portable receipt
+validation. This is an interim hosted compile/test checkpoint: Phase 7.2 was
+still active at that source, so final cross-backend closure still requires the
+same matrix from the eventual integrated source.
+
 ## Build Boundary
 
 Bounded build wrappers provide deterministic environment filtering, offline

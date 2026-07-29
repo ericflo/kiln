@@ -291,3 +291,13 @@ without changing shared runtime or qualification tooling, so they do not
 invalidate either targeted Strix result and require no backend rerun. Because
 c13 still fits, these checkpoints do not yet close Phase 7.2's required first
 non-fitting capacity boundary, soak, or final documentation items.
+
+Interim hosted checkpoint:
+GitHub Actions
+[`30416196655`](https://github.com/ericflo/kiln/actions/runs/30416196655)
+passed `backend_build=all` from exact pushed source `56000a370874`. Its
+separate Metal, CUDA, ROCm, and Vulkan jobs all passed, as did Linux default
+features, formatting, dependency policy, and portable receipt validation.
+This records a green hosted baseline without closing the first checklist item:
+Phase 7.2 is still active, so the same matrix remains required from the final
+integrated source.
