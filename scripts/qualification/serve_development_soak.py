@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Any, Literal
 
+from device_memory_sampler import MacOsUnifiedMemoryCounter
 import serve_mixed_load as mixed
 
 
@@ -30,6 +31,7 @@ ROCM_ENDURANCE_VARIANT = "rocm-endurance"
 VULKAN_RUNTIME_VARIANT = "vulkan-development-soak"
 VULKAN_ENDURANCE_VARIANT = "vulkan-endurance"
 CUDA_ENDURANCE_VARIANT = "cuda-endurance"
+METAL_ENDURANCE_VARIANT = "metal-endurance"
 VULKAN_MAX_PREFILL_TOKENS_PER_CYCLE = 128
 VULKAN_QUALIFIED_ACTIVE_REQUESTS = 4
 VULKAN_QUALIFIED_DECODE_BATCH = 2
@@ -53,6 +55,7 @@ QUALIFICATION_DURATION_SECONDS = 1800.0
 ROCM_ENDURANCE_DURATION_SECONDS = 24 * 60 * 60.0
 VULKAN_ENDURANCE_DURATION_SECONDS = 8 * 60 * 60.0
 CUDA_ENDURANCE_DURATION_SECONDS = 8 * 60 * 60.0
+METAL_ENDURANCE_DURATION_SECONDS = 8 * 60 * 60.0
 CUDA_QUALIFIED_WAVE_CONCURRENCY = (1, 4)
 CUDA_QUALIFIED_PROMPT_WORDS = (16, 32, 64, 96)
 CUDA_STABILIZATION_MIN_ROTATIONS = 2
@@ -163,6 +166,17 @@ CUDA_BUILD_SPEC = mixed.SourceBuildSpec(
 )
 
 
+METAL_BUILD_SPEC = mixed.SourceBuildSpec(
+    backend="Metal",
+    features="metal",
+    cargo_execution_mode="macos-contained",
+    cargo_memory_scope=(
+        "macos_runner_owned_session_process_group_admission_budget_"
+        "without_hard_memory_or_swap_limit"
+    ),
+)
+
+
 def _cuda_variant_config() -> dict[str, Any]:
     config = mixed._variant_config(
         serving_profile="stable",
@@ -194,10 +208,42 @@ def _cuda_variant_config() -> dict[str, Any]:
     return config
 
 
+def _metal_variant_config() -> dict[str, Any]:
+    config = mixed._variant_config(
+        serving_profile="stable",
+        kv_autoscale_requested=False,
+        kv_autoscale_enabled=False,
+        memory_reclaim_requested_mode="off",
+        memory_reclaim_mode="off",
+        rocm_graphs_requested=False,
+        rocm_graphs_enabled=False,
+        request_timeout_seconds=600,
+        max_decode_batch=4,
+    )
+    config["build"] = METAL_BUILD_SPEC.effective_config()
+    config["server"].update(
+        {
+            "max_prefill_staging_slots": 0,
+            "max_active_requests": config["server"]["max_decode_batch"],
+            "max_prefill_staging_priority_burst": 0,
+        }
+    )
+    config["runtime"].update(
+        {
+            "prefix_cache_requested_enabled": False,
+            "prefix_cache_effective_enabled": False,
+            "prefix_cache_effective_reason": "metal_endurance_fixed_capacity",
+            "vulkan_buffer_pool_gb": 0.0,
+        }
+    )
+    return config
+
+
 mixed.VARIANT_CONFIGS[ROCM_ENDURANCE_VARIANT] = mixed.VARIANT_CONFIGS[RUNTIME_VARIANT]
 mixed.VARIANT_CONFIGS[VULKAN_RUNTIME_VARIANT] = _vulkan_variant_config()
 mixed.VARIANT_CONFIGS[VULKAN_ENDURANCE_VARIANT] = _vulkan_variant_config()
 mixed.VARIANT_CONFIGS[CUDA_ENDURANCE_VARIANT] = _cuda_variant_config()
+mixed.VARIANT_CONFIGS[METAL_ENDURANCE_VARIANT] = _metal_variant_config()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -233,6 +279,9 @@ class SoakRuntime:
     memory_floor_gb: float | None = None
     accelerator_telemetry_enabled: bool = True
     accelerator_telemetry_required: bool = False
+    gpu_memory_poll_interval_seconds: float = mixed.MEMORY_POLL_INTERVAL_SECONDS
+    gpu_memory_absolute_limit_bytes: int | None = None
+    gpu_memory_gb: float | None = None
 
 
 ROCM_RUNTIME = SoakRuntime(
@@ -338,6 +387,41 @@ CUDA_ENDURANCE_RUNTIME = SoakRuntime(
     memory_floor_gb=1.5,
     accelerator_telemetry_enabled=False,
 )
+METAL_ENDURANCE_RUNTIME = SoakRuntime(
+    variant_id=METAL_ENDURANCE_VARIANT,
+    backend="metal",
+    build_spec=METAL_BUILD_SPEC,
+    gpu_memory_scope="macos_whole_host_unified_memory",
+    gpu_memory_source=(
+        "macos_memory_pressure:physical_total_minus_reported_free_percentage"
+    ),
+    graph_execution_required=False,
+    wave_concurrency=CUDA_QUALIFIED_WAVE_CONCURRENCY,
+    prompt_words=CUDA_QUALIFIED_PROMPT_WORDS,
+    prompt_assignment=COHORT_BY_CYCLE,
+    max_tokens=32,
+    cancel_every_waves=4,
+    cancellation_max_tokens=256,
+    cancellation_prompt_words=48,
+    request_timeout_seconds=600.0,
+    max_steady_state_warmup_waves=16,
+    graph_cache_max=mixed.CUDA_GRAPH_CACHE_ENTRIES,
+    min_stabilization_cycles=4,
+    max_stabilization_cycles=8,
+    required_stable_cycles=2,
+    stabilization_gpu_delta_limit_bytes=512 * 1024 * 1024,
+    stabilization_rss_delta_limit_bytes=64 * 1024 * 1024,
+    active_gpu_peak_growth_limit_bytes=2 * 1024 * 1024 * 1024,
+    vulkan_allocation_growth_limit_count=None,
+    vulkan_buffer_pool_gb=0.0,
+    setup_deadline_seconds=3600.0,
+    inference_memory_fraction=0.7,
+    memory_floor_gb=1.0,
+    accelerator_telemetry_enabled=False,
+    gpu_memory_poll_interval_seconds=1.0,
+    gpu_memory_absolute_limit_bytes=15 * 1024 * 1024 * 1024,
+    gpu_memory_gb=12.0,
+)
 RUNTIMES = {
     runtime.variant_id: runtime
     for runtime in (
@@ -346,6 +430,7 @@ RUNTIMES = {
         VULKAN_RUNTIME,
         VULKAN_ENDURANCE_RUNTIME,
         CUDA_ENDURANCE_RUNTIME,
+        METAL_ENDURANCE_RUNTIME,
     )
 }
 
@@ -755,7 +840,11 @@ def effective_config(
             "stabilization_memory_boundary": (
                 "process_drm_and_owned_buffers"
                 if runtime.backend == "vulkan"
-                else "gpu_and_rss"
+                else (
+                    "whole_host_unified_and_process_rss"
+                    if runtime.backend == "metal"
+                    else "gpu_and_rss"
+                )
             ),
             "stabilization_max_cycles": runtime.max_stabilization_cycles,
             "stabilization_min_cycles": runtime.min_stabilization_cycles,
@@ -778,16 +867,35 @@ def effective_config(
     }
     if "batching" in base:
         effective["batching"] = base["batching"]
-    if runtime.backend == "cuda":
+    if runtime.backend in {"cuda", "metal"}:
         effective["soak"]["gpu_memory_baseline_mode"] = (
             "stabilization_envelope_high_water"
         )
+    if runtime.gpu_memory_poll_interval_seconds != mixed.MEMORY_POLL_INTERVAL_SECONDS:
+        effective["soak"]["gpu_memory_poll_interval_ms"] = int(
+            runtime.gpu_memory_poll_interval_seconds * 1000
+        )
+    if runtime.gpu_memory_absolute_limit_bytes is not None:
+        effective["soak"]["gpu_memory_absolute_limit_bytes"] = (
+            runtime.gpu_memory_absolute_limit_bytes
+        )
     if "model" in base:
         effective["model"] = base["model"]
-    if runtime.inference_memory_fraction is not None:
+    if runtime.inference_memory_fraction is not None or runtime.gpu_memory_gb is not None:
         effective["memory"] = {
-            "floor_gb": runtime.memory_floor_gb,
-            "inference_memory_fraction": runtime.inference_memory_fraction,
+            **(
+                {"gpu_memory_gb": runtime.gpu_memory_gb}
+                if runtime.gpu_memory_gb is not None
+                else {}
+            ),
+            **(
+                {
+                    "floor_gb": runtime.memory_floor_gb,
+                    "inference_memory_fraction": runtime.inference_memory_fraction,
+                }
+                if runtime.inference_memory_fraction is not None
+                else {}
+            ),
         }
     if runtime.accelerator_telemetry_enabled:
         effective["soak"]["accelerator_telemetry"] = {
@@ -880,8 +988,44 @@ def parse_memory_kib(path: Path, name: str, raw: str, unit: str) -> int:
 
 
 def process_memory_snapshot(
-    pid: int, proc_root: Path = Path("/proc")
+    pid: int,
+    proc_root: Path = Path("/proc"),
+    *,
+    platform_name: str | None = None,
+    command_runner: Any = None,
 ) -> ProcessMemorySnapshot:
+    platform_value = sys.platform if platform_name is None else platform_name
+    if platform_value == "darwin" and proc_root == Path("/proc"):
+        runner = subprocess.run if command_runner is None else command_runner
+        try:
+            completed = runner(
+                ["/bin/ps", "-o", "rss=", "-p", str(pid)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                timeout=5.0,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SoakError(f"cannot read macOS RSS for pid {pid}: {exc}") from exc
+        if completed.returncode != 0:
+            detail = completed.stderr.strip()[-500:]
+            raise SoakError(
+                f"macOS ps could not read RSS for pid {pid}"
+                + (f": {detail}" if detail else "")
+            )
+        raw = completed.stdout.strip()
+        if re.fullmatch(r"[1-9][0-9]*", raw) is None:
+            raise SoakError(f"macOS ps returned invalid RSS for pid {pid}: {raw!r}")
+        return ProcessMemorySnapshot(
+            rss_bytes=int(raw) * 1024,
+            rss_anon_bytes=0,
+            rss_file_bytes=0,
+            rss_shmem_bytes=0,
+            swap_bytes=0,
+        )
+
     status = proc_root / str(pid) / "status"
     names = {"VmRSS", "RssAnon", "RssFile", "RssShmem", "VmSwap"}
     values: dict[str, int] = {}
@@ -1612,6 +1756,11 @@ class GpuMemorySampler:
         self.port = port
         self.pid = pid
         self.runtime = runtime
+        self._macos_counter = (
+            MacOsUnifiedMemoryCounter()
+            if runtime.gpu_memory_scope == "macos_whole_host_unified_memory"
+            else None
+        )
         self.stop = threading.Event()
         self.samples: list[int] = []
         self.errors: list[str] = []
@@ -1637,6 +1786,8 @@ class GpuMemorySampler:
 
     def close(self) -> None:
         self.stop_sampling()
+        if self._macos_counter is not None:
+            self._macos_counter.close()
 
     def read_bytes(self) -> int:
         with self._read_lock:
@@ -1644,6 +1795,8 @@ class GpuMemorySampler:
                 raise SoakError(
                     "GPU memory sampler previously failed: " + ", ".join(self.errors)
                 )
+            if self._macos_counter is not None:
+                return self._macos_counter.read_bytes()
             return gpu_memory_bytes(self.port, self.pid, self.runtime)
 
     def _sample(self) -> None:
@@ -1655,7 +1808,7 @@ class GpuMemorySampler:
             self.stop.set()
 
     def _run(self) -> None:
-        while not self.stop.wait(mixed.MEMORY_POLL_INTERVAL_SECONDS):
+        while not self.stop.wait(self.runtime.gpu_memory_poll_interval_seconds):
             self._sample()
 
 
@@ -2238,7 +2391,7 @@ def stabilization_gpu_growth_delta(
 ) -> int:
     comparison = (
         stabilization_gpu_high_water
-        if runtime.backend == "cuda"
+        if runtime.backend in {"cuda", "metal"}
         else previous_gpu
     )
     return max(0, current_gpu - comparison)
@@ -2250,7 +2403,7 @@ def measurement_gpu_baseline(
     current_gpu: int,
     stabilization_gpu_high_water: int,
 ) -> int:
-    if runtime.backend == "cuda":
+    if runtime.backend in {"cuda", "metal"}:
         return max(current_gpu, stabilization_gpu_high_water)
     return current_gpu
 
@@ -2621,6 +2774,8 @@ def metric_definitions(
         return VULKAN_METRIC_DEFINITIONS
     if runtime.backend == "cuda":
         return CUDA_METRIC_DEFINITIONS
+    if runtime.backend == "metal":
+        return METRIC_DEFINITIONS
     raise SoakError(f"unsupported soak metric backend {runtime.backend!r}")
 
 
@@ -2801,6 +2956,7 @@ def execute(
         rocm_graph_cache_entries=runtime.graph_cache_max,
         inference_memory_fraction=runtime.inference_memory_fraction,
         memory_floor_gb=runtime.memory_floor_gb,
+        gpu_memory_gb=runtime.gpu_memory_gb,
     )
     process, server_log = mixed.start_server(
         binary, config_path, runtime.variant_id, runtime.build_spec
@@ -2884,7 +3040,7 @@ def execute(
             process,
             server_log,
             setup_deadline,
-            require_prewarm_log_evidence=runtime.backend != "cuda",
+            require_prewarm_log_evidence=runtime.backend in {"rocm", "vulkan"},
         )
         health_startup = mixed.read_stable_health(
             port, setup_deadline, "soak startup health"
@@ -4090,6 +4246,14 @@ def execute(
             failures.append(
                 "peak GPU memory exceeded the active-workload growth limit: "
                 f"{gpu_peak - gpu_start} > {active_gpu_peak_growth_limit_bytes} bytes"
+            )
+        if (
+            runtime.gpu_memory_absolute_limit_bytes is not None
+            and gpu_peak > runtime.gpu_memory_absolute_limit_bytes
+        ):
+            failures.append(
+                "peak unified memory exceeded the absolute qualification limit: "
+                f"{gpu_peak} > {runtime.gpu_memory_absolute_limit_bytes} bytes"
             )
         if rss_peak > rss_start + memory_growth_limit_bytes:
             failures.append("peak RSS exceeded the post-warmup growth limit")

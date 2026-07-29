@@ -1466,6 +1466,35 @@ class ServeMixedLoadTests(unittest.TestCase):
             wsl2_runner_environment,
         )
 
+    def test_macos_contained_build_retains_runner_network_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cargo = Path(temp_dir) / "cargo"
+            cargo.write_text("#!/bin/sh\n")
+            cargo.chmod(0o755)
+            environment = serve.source_bound_build_environment(
+                {
+                    "CARGO": str(cargo),
+                    "HOME": temp_dir,
+                    "PATH": "/usr/bin",
+                    serve.RESULT_ENV: "/tmp/result.json",
+                    serve.VARIANT_ENV: "metal-endurance",
+                    "KILN_QUALIFICATION_NETWORK_ISOLATION": (
+                        "macos-sandbox-loopback-only-v1"
+                    ),
+                },
+                dataclasses.replace(
+                    serve.ROCM_BUILD_SPEC,
+                    backend="Metal",
+                    features="metal",
+                    cargo_execution_mode="macos-contained",
+                ),
+            )
+        self.assertEqual(
+            environment["KILN_QUALIFICATION_NETWORK_ISOLATION"],
+            "macos-sandbox-loopback-only-v1",
+        )
+        self.assertEqual(environment["KILN_CARGO_EXECUTION_MODE"], "macos-contained")
+
     def test_vulkan_source_build_is_bounded_without_rocm_environment(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             cargo = Path(temp_dir) / "cargo"
@@ -2519,6 +2548,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
                 cuda_graphs=True,
                 cuda_graph_cache_entries=16,
                 kv_force_blocks=7,
+                gpu_memory_gb=12.0,
                 prefix_cache_max_blocks=16,
                 prefix_cache_max_entries=4,
             )
@@ -2526,6 +2556,7 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
 
         self.assertTrue(parsed["server"]["deterministic"])
         self.assertEqual(parsed["server"]["port"], 4321)
+        self.assertEqual(parsed["memory"]["gpu_memory_gb"], 12.0)
         self.assertEqual(
             parsed["accelerator"]["rocm_synchronization_mode"],
             "stream_ordered",

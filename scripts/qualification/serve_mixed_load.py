@@ -2645,7 +2645,10 @@ def source_bound_build_command(spec: SourceBuildSpec = ROCM_BUILD_SPEC) -> list[
 def source_bound_build_environment(
     source: dict[str, str], spec: SourceBuildSpec = ROCM_BUILD_SPEC
 ) -> dict[str, str]:
-    delegated_wsl2 = spec.cargo_execution_mode == "delegated-cgroup"
+    delegated_containment = spec.cargo_execution_mode in {
+        "delegated-cgroup",
+        "macos-contained",
+    }
     sanitized = sanitized_environment(
         source,
         additional_runner_owned_kiln_environment=WSL2_RUNNER_OWNED_KILN_ENVIRONMENT,
@@ -2700,7 +2703,7 @@ def source_bound_build_environment(
         environment["KILN_CARGO_CPU_QUOTA_PERCENT"] = str(
             spec.cargo_cpu_quota_percent
         )
-    if delegated_wsl2:
+    if delegated_containment:
         environment.update(
             {
                 key: source[key]
@@ -2733,6 +2736,45 @@ def source_bound_build_environment(
     return environment
 
 
+def run_macos_contained_build(
+    command: list[str],
+    *,
+    environment: dict[str, str],
+    timeout_seconds: float,
+) -> subprocess.CompletedProcess[bytes]:
+    process = subprocess.Popen(
+        command,
+        cwd=ROOT,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = process.communicate(timeout=SERVER_KILL_WAIT_SECONDS)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate(timeout=SERVER_KILL_WAIT_SECONDS)
+        raise subprocess.TimeoutExpired(
+            command,
+            timeout_seconds,
+            output=stdout,
+            stderr=stderr,
+        )
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
 def build_binary(
     absolute_deadline: float,
     spec: SourceBuildSpec = ROCM_BUILD_SPEC,
@@ -2749,22 +2791,30 @@ def build_binary(
         raise QualificationError(
             "source-build process timeout must reserve at least 60 seconds "
             "after the transient-service runtime limit"
-        )
+    )
     environment = source_bound_build_environment(dict(os.environ), spec)
     command = source_bound_build_command(spec)
-    completed = subprocess.run(
-        command,
-        cwd=ROOT,
-        env=environment,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=remaining_until(
-            absolute_deadline,
-            f"source-bound {spec.backend} build",
-            process_timeout_seconds,
-        ),
-        check=False,
+    timeout = remaining_until(
+        absolute_deadline,
+        f"source-bound {spec.backend} build",
+        process_timeout_seconds,
     )
+    if spec.cargo_execution_mode == "macos-contained":
+        completed = run_macos_contained_build(
+            command,
+            environment=environment,
+            timeout_seconds=timeout,
+        )
+    else:
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
     if completed.returncode != 0:
         tail = completed.stderr.decode("utf-8", errors="replace")[-4000:]
         raise QualificationError(
@@ -2824,6 +2874,7 @@ def write_server_config(
     cuda_graphs: bool = False,
     cuda_graph_cache_entries: int = CUDA_GRAPH_CACHE_ENTRIES,
     kv_num_blocks: int | None = None,
+    gpu_memory_gb: float | None = None,
     inference_memory_fraction: float | None = None,
     memory_floor_gb: float | None = None,
     kv_force_blocks: int = 0,
@@ -2862,6 +2913,13 @@ def write_server_config(
         raise QualificationError(
             "inference memory fraction must be finite and in 0.0..=1.0"
         )
+    if gpu_memory_gb is not None and (
+        isinstance(gpu_memory_gb, bool)
+        or not isinstance(gpu_memory_gb, (int, float))
+        or not math.isfinite(gpu_memory_gb)
+        or gpu_memory_gb <= 0.0
+    ):
+        raise QualificationError("GPU memory cap must be finite and positive")
     if memory_floor_gb is not None and (
         isinstance(memory_floor_gb, bool)
         or not isinstance(memory_floor_gb, (int, float))
@@ -2952,6 +3010,11 @@ def write_server_config(
         *(
             [f"num_blocks = {kv_num_blocks}"]
             if kv_num_blocks is not None
+            else []
+        ),
+        *(
+            [f"gpu_memory_gb = {gpu_memory_gb}"]
+            if gpu_memory_gb is not None
             else []
         ),
         *(

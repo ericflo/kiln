@@ -293,6 +293,10 @@ class ServeRocmSoakTests(unittest.TestCase):
             soak.runtime_for_variant(soak.CUDA_ENDURANCE_RUNTIME.variant_id),
             soak.CUDA_ENDURANCE_RUNTIME,
         )
+        self.assertIs(
+            soak.runtime_for_variant(soak.METAL_ENDURANCE_RUNTIME.variant_id),
+            soak.METAL_ENDURANCE_RUNTIME,
+        )
         with self.assertRaisesRegex(soak.SoakError, "must name one of"):
             soak.runtime_for_variant("unknown")
 
@@ -446,6 +450,34 @@ class ServeRocmSoakTests(unittest.TestCase):
             cuda["memory"],
             {"floor_gb": 1.5, "inference_memory_fraction": 0.7},
         )
+        metal = soak.effective_config(
+            soak.METAL_ENDURANCE_DURATION_SECONDS,
+            soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
+            soak.METAL_ENDURANCE_RUNTIME,
+        )
+        self.assertEqual(metal["build"]["features"], "metal")
+        self.assertEqual(metal["build"]["cargo_execution_mode"], "macos-contained")
+        self.assertEqual(metal["server"]["max_active_requests"], 4)
+        self.assertEqual(
+            metal["soak"]["gpu_memory_scope"],
+            "macos_whole_host_unified_memory",
+        )
+        self.assertEqual(
+            metal["soak"]["gpu_memory_absolute_limit_bytes"], 15 * 1024**3
+        )
+        self.assertEqual(metal["soak"]["gpu_memory_poll_interval_ms"], 1000)
+        self.assertEqual(
+            metal["soak"]["stabilization_memory_boundary"],
+            "whole_host_unified_and_process_rss",
+        )
+        self.assertEqual(
+            metal["memory"],
+            {
+                "gpu_memory_gb": 12.0,
+                "floor_gb": 1.0,
+                "inference_memory_fraction": 0.7,
+            },
+        )
         self.assertEqual(
             soak.effective_config(60.0, 123)["soak"][
                 "active_gpu_peak_growth_limit_bytes"
@@ -496,6 +528,29 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertFalse(parsed["memory"]["cuda_graphs"])
         self.assertEqual(parsed["memory"]["vulkan_buffer_pool_gb"], 0.0)
 
+    def test_metal_launch_file_uses_the_measured_unified_memory_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "kiln.toml"
+            runtime = soak.METAL_ENDURANCE_RUNTIME
+            soak.mixed.write_server_config(
+                path,
+                runtime.variant_id,
+                root / "model",
+                8420,
+                root / "adapters",
+                root / "snapshots",
+                gpu_memory_gb=runtime.gpu_memory_gb,
+                inference_memory_fraction=runtime.inference_memory_fraction,
+                memory_floor_gb=runtime.memory_floor_gb,
+            )
+            parsed = parse_generated_toml(path.read_text(encoding="utf-8"))
+        self.assertEqual(parsed["server"]["serving_profile"], "stable")
+        self.assertEqual(parsed["server"]["max_decode_batch"], 4)
+        self.assertEqual(parsed["memory"]["gpu_memory_gb"], 12.0)
+        self.assertEqual(parsed["memory"]["inference_memory_fraction"], 0.7)
+        self.assertEqual(parsed["memory"]["floor_gb"], 1.0)
+
     def test_process_memory_snapshot_requires_and_converts_linux_fields(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -516,6 +571,31 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(snapshot.rss_file_bytes, 250 * 1024)
         self.assertEqual(snapshot.rss_shmem_bytes, 50 * 1024)
         self.assertEqual(snapshot.swap_bytes, 25 * 1024)
+
+    def test_process_memory_snapshot_reads_darwin_ps_rss(self) -> None:
+        completed = mock.Mock(returncode=0, stdout=" 12345\n", stderr="")
+        runner = mock.Mock(return_value=completed)
+
+        snapshot = soak.process_memory_snapshot(
+            42,
+            platform_name="darwin",
+            command_runner=runner,
+        )
+
+        self.assertEqual(snapshot.rss_bytes, 12345 * 1024)
+        self.assertEqual(snapshot.rss_anon_bytes, 0)
+        self.assertEqual(snapshot.rss_file_bytes, 0)
+        self.assertEqual(snapshot.rss_shmem_bytes, 0)
+        self.assertEqual(snapshot.swap_bytes, 0)
+        runner.assert_called_once_with(
+            ["/bin/ps", "-o", "rss=", "-p", "42"],
+            stdin=soak.subprocess.DEVNULL,
+            stdout=soak.subprocess.PIPE,
+            stderr=soak.subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=5.0,
+        )
 
     def test_process_memory_mapping_categories_are_closed(self) -> None:
         self.assertEqual(soak.process_memory_mapping_category(""), "anonymous")
@@ -913,6 +993,24 @@ class ServeRocmSoakTests(unittest.TestCase):
         self.assertEqual(sampler.samples, [789])
         self.assertEqual(sampler.errors, [])
         sample.assert_called_once_with(8420, 42, soak.VULKAN_RUNTIME)
+
+    def test_gpu_memory_sampler_reads_the_macos_unified_counter(self) -> None:
+        counter = mock.Mock()
+        counter.read_bytes.return_value = 987
+        with mock.patch.object(
+            soak, "MacOsUnifiedMemoryCounter", return_value=counter
+        ) as counter_type:
+            sampler = soak.GpuMemorySampler(
+                8420, 42, soak.METAL_ENDURANCE_RUNTIME
+            )
+            sampler._sample()
+            sampler.close()
+
+        self.assertEqual(sampler.samples, [987])
+        self.assertEqual(sampler.errors, [])
+        counter_type.assert_called_once_with()
+        counter.read_bytes.assert_called_once_with()
+        counter.close.assert_called_once_with()
 
     def test_vulkan_buffer_snapshot_is_closed_typed_and_monotonic(self) -> None:
         before = {
@@ -1836,6 +1934,87 @@ class ServeRocmSoakTests(unittest.TestCase):
             soak.qualification_case_timeout_seconds(
                 soak.CUDA_ENDURANCE_DURATION_SECONDS,
                 soak.CUDA_ENDURANCE_RUNTIME,
+            ),
+        )
+
+    def test_checked_in_metal_endurance_workload_matches_driver_contract(self) -> None:
+        path = ROOT / "qualification/workloads/serving-metal-endurance-v1.json"
+        workload = json.loads(path.read_text())
+        self.assertEqual(workload["workload_id"], "serving-metal-endurance-v1")
+        self.assertEqual(workload["kind"], "soak")
+        self.assertIsNone(workload["comparison_policy"])
+        self.assertEqual(len(workload["variants"]), 1)
+        variant = workload["variants"][0]
+        self.assertEqual(variant["id"], soak.METAL_ENDURANCE_RUNTIME.variant_id)
+        self.assertEqual(variant["backend"], "metal")
+        self.assertEqual(
+            variant["effective_config"],
+            soak.effective_config(
+                soak.METAL_ENDURANCE_DURATION_SECONDS,
+                soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
+                soak.METAL_ENDURANCE_RUNTIME,
+            ),
+        )
+        self.assertEqual(len(variant["cases"]), 1)
+        case = variant["cases"][0]
+        self.assertEqual(case["id"], soak.CASE_ID)
+        self.assertEqual(
+            case["result_protocol"]["declared_metrics"],
+            sorted(soak.metric_definitions(soak.METAL_ENDURANCE_RUNTIME)),
+        )
+        self.assertEqual(
+            case["command"],
+            [
+                "python3",
+                "scripts/qualification/serve_development_soak.py",
+                "--model-path",
+                "${model_path}",
+                "--seed",
+                "${seed}",
+                "--minimum-duration-seconds",
+                "28800",
+                "--memory-growth-limit-bytes",
+                str(soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES),
+            ],
+        )
+        self.assertEqual(
+            case["timeout_seconds"],
+            soak.qualification_case_timeout_seconds(
+                soak.METAL_ENDURANCE_DURATION_SECONDS,
+                soak.METAL_ENDURANCE_RUNTIME,
+            ),
+        )
+
+    def test_checked_in_metal_development_workload_matches_driver_contract(
+        self,
+    ) -> None:
+        path = (
+            ROOT
+            / "qualification/workloads/serving-metal-development-soak-v1.json"
+        )
+        workload = json.loads(path.read_text())
+        self.assertEqual(
+            workload["workload_id"], "serving-metal-development-soak-v1"
+        )
+        variant = workload["variants"][0]
+        self.assertEqual(variant["id"], soak.METAL_ENDURANCE_RUNTIME.variant_id)
+        self.assertEqual(
+            variant["effective_config"],
+            soak.effective_config(
+                60.0,
+                soak.DEFAULT_MEMORY_GROWTH_LIMIT_BYTES,
+                soak.METAL_ENDURANCE_RUNTIME,
+            ),
+        )
+        case = variant["cases"][0]
+        self.assertEqual(
+            case["command"][-3:],
+            ["60", "--memory-growth-limit-bytes", "536870912"],
+        )
+        self.assertEqual(
+            case["timeout_seconds"],
+            soak.qualification_case_timeout_seconds(
+                60.0, soak.METAL_ENDURANCE_RUNTIME
             ),
         )
 
