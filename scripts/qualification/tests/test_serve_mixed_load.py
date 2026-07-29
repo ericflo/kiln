@@ -2848,6 +2848,40 @@ kiln_gpu_memory_bytes{kind="free"} 127876543211
             del serve.VARIANT_CONFIGS[variant]
         self.assertEqual(failures, [])
 
+    def test_runtime_attestation_uses_variant_rocm_synchronization_mode(self) -> None:
+        variant = "test-stream-ordered-rocm"
+        serve.VARIANT_CONFIGS[variant] = serve._variant_config(
+            serving_profile="experimental",
+            kv_autoscale_requested=False,
+            kv_autoscale_enabled=False,
+            memory_reclaim_requested_mode="off",
+            memory_reclaim_mode="off",
+            rocm_graphs_requested=False,
+            rocm_graphs_enabled=False,
+            max_decode_batch=serve.MAX_DECODE_BATCH,
+            max_prefill_layers_per_cycle=serve.MAX_PREFILL_LAYERS_PER_CYCLE,
+            actor_cycle_idle_ms=serve.ACTOR_CYCLE_IDLE_MS,
+        )
+        serve.VARIANT_CONFIGS[variant]["runtime"][
+            "rocm_synchronization_mode"
+        ] = "stream_ordered"
+        health = health_fixture(kv_autoscale=False, rocm_graphs=False)
+        debug = debug_fixture(kv_autoscale=False, rocm_graphs=False)
+        for value in (
+            health["decode_runtime"]["accelerator_runtime"],
+            debug["accelerator_runtime"],
+        ):
+            value["rocm_synchronization_mode"] = {
+                "configured": "stream_ordered",
+                "effective": "stream_ordered",
+                "source": "config_file",
+            }
+        try:
+            failures = serve.attest_runtime(variant, health, debug)
+        finally:
+            del serve.VARIANT_CONFIGS[variant]
+        self.assertEqual(failures, [])
+
     def test_runtime_attestation_accepts_stable_profile_with_autoscale_disabled(
         self,
     ) -> None:

@@ -323,6 +323,26 @@ fn rocm_bf16_output_matmul_via_f32(
     }
 }
 
+fn should_use_bf16_f32_scalar_fallback(
+    m: usize,
+    n: usize,
+    k: usize,
+    batch: usize,
+    dtype: DType,
+    out_dtype: DType,
+    a_layout: BlasLtMatmulLayout,
+    b_layout: BlasLtMatmulLayout,
+) -> bool {
+    m == 1
+        && n == 1
+        && k == 128
+        && batch <= 65_535
+        && dtype == DType::BF16
+        && out_dtype == DType::F32
+        && a_layout == BlasLtMatmulLayout::RowMajor
+        && b_layout == BlasLtMatmulLayout::RowMajor
+}
+
 // ----------------------------------------------------------------------
 // Public entry points
 // ----------------------------------------------------------------------
@@ -796,6 +816,9 @@ fn rocm_matmul_dispatch(
         .iter()
         .product::<usize>()
         .max(1);
+    if should_use_bf16_f32_scalar_fallback(m, n, k, batch, dtype, out_dtype, a_layout, b_layout) {
+        return crate::rocm_ops::rocm_bf16_matmul_f32_out(a, b);
+    }
     if rocm_bf16_output_matmul_via_f32(
         m,
         n,
@@ -1292,6 +1315,60 @@ mod policy_tests {
             DType::F32,
             DType::BF16,
             crate::RocmBf16MatmulOutputMode::F32ThenCast,
+        ));
+    }
+
+    #[test]
+    fn bf16_f32_scalar_fallback_is_exactly_scoped() {
+        assert!(should_use_bf16_f32_scalar_fallback(
+            1,
+            1,
+            128,
+            32,
+            DType::BF16,
+            DType::F32,
+            BlasLtMatmulLayout::RowMajor,
+            BlasLtMatmulLayout::RowMajor,
+        ));
+        assert!(!should_use_bf16_f32_scalar_fallback(
+            1,
+            2,
+            128,
+            32,
+            DType::BF16,
+            DType::F32,
+            BlasLtMatmulLayout::RowMajor,
+            BlasLtMatmulLayout::RowMajor,
+        ));
+        assert!(!should_use_bf16_f32_scalar_fallback(
+            1,
+            1,
+            128,
+            32,
+            DType::BF16,
+            DType::BF16,
+            BlasLtMatmulLayout::RowMajor,
+            BlasLtMatmulLayout::RowMajor,
+        ));
+        assert!(!should_use_bf16_f32_scalar_fallback(
+            1,
+            1,
+            64,
+            32,
+            DType::BF16,
+            DType::F32,
+            BlasLtMatmulLayout::RowMajor,
+            BlasLtMatmulLayout::RowMajor,
+        ));
+        assert!(!should_use_bf16_f32_scalar_fallback(
+            1,
+            1,
+            128,
+            65_536,
+            DType::BF16,
+            DType::F32,
+            BlasLtMatmulLayout::RowMajor,
+            BlasLtMatmulLayout::RowMajor,
         ));
     }
 }

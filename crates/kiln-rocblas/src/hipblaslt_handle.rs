@@ -705,6 +705,18 @@ impl HipblasLtMatmulHandle {
         };
         if let Some(e) = FfiError::from_code(code) {
             if e.is_fatal_execution() {
+                eprintln!(
+                    "hipBLASLt fatal execution failure: error={e} m={} n={} k={} \
+                     batch={} dtype={} output_dtype={} a_layout={:?} b_layout={:?}",
+                    request.m,
+                    request.n,
+                    request.k,
+                    request.batch_count,
+                    request.dtype,
+                    request.output_dtype,
+                    request.a_layout,
+                    request.b_layout,
+                );
                 stream_submission.quarantine();
             } else {
                 stream_submission.complete();

@@ -1,6 +1,6 @@
 #![cfg(feature = "metal")]
 
-use kiln_tensor::{primary_metal_companion, DType, MetalStorage};
+use kiln_tensor::{DType, MetalStorage, primary_metal_companion};
 
 const MIB: usize = 1024 * 1024;
 const ALLOCATION_BYTES: usize = 256 * MIB;

@@ -1931,9 +1931,7 @@ fn spawn_backend_prewarm(
                     None,
                 );
 
-                if let Err(err) = prewarm_result {
-                    anyhow::bail!("base paged inference prewarm failed: {err}");
-                }
+                prewarm_result.context("base paged inference prewarm failed")?;
             }
             Ok(())
         })
@@ -1969,7 +1967,10 @@ fn spawn_backend_prewarm(
                     "background inference prewarm cancelled during shutdown"
                 )
             }
-            Ok(Err(err)) => tracing::warn!(error = %err, "background inference prewarm failed"),
+            Ok(Err(err)) => tracing::warn!(
+                error = %format!("{err:#}"),
+                "background inference prewarm failed"
+            ),
             Err(err) => tracing::warn!(error = %err, "background inference prewarm task failed"),
         }
         prewarm_complete.store(true, Ordering::Release);

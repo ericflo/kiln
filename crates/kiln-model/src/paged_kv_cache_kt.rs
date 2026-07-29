@@ -196,7 +196,7 @@ fn alloc_pool_tensor(
                 .with_context(|| format!("kt paged-kv: wrap {label} layer {layer_idx}"))
         }
         #[cfg(feature = "rocm")]
-        kiln_tensor::Device::Rocm(i) if crate::forward::rocm_paged_decode_enabled() => {
+        kiln_tensor::Device::Rocm(i) => {
             let storage: kiln_tensor::Storage = if zero_initialize {
                 kiln_tensor::rocm_zeros_ctx(i, storage_dtype, n_elements).map_err(|e| {
                     anyhow::anyhow!("kt paged-kv: alloc {label} (rocm) layer {layer_idx}: {e}")
@@ -500,9 +500,9 @@ impl PagedKvCacheKt {
     /// feature-gated default) so the per-layer K/V `slice_set` writes match
     /// the model's tensors and don't trip `Tensor::slice_set: device
     /// mismatch`. CUDA routes through [`cuda_zeros_ctx`]; Metal through
-    /// `zeros_on(Device::Metal, ..)`; CPU (and any GPU backend whose feature
-    /// isn't compiled in, e.g. Vulkan whose kt pools are CPU-resident)
-    /// through host-resident `zeros_cpu`.
+    /// `zeros_on(Device::Metal, ..)`; ROCm through `rocm_zeros_ctx`; CPU (and
+    /// any GPU backend whose feature isn't compiled in, e.g. Vulkan whose kt
+    /// pools are CPU-resident) through host-resident `zeros_cpu`.
     pub fn new(
         num_full_attn_layers: usize,
         num_blocks: usize,
@@ -551,11 +551,14 @@ impl PagedKvCacheKt {
             // compiled-in backends' allocators are referenced. CPU pools are
             // `zeros_cpu`; CUDA pools route through `cuda_zeros_ctx(i, ..)`;
             // Metal pools through the kt `zeros_on(Device::Metal(i), ..)` UMA
-            // path. Vulkan (kt vulkan tensors are CPU-resident) and any GPU
-            // device whose backend feature isn't compiled in fall to the
-            // host-resident `zeros_cpu` default — matching the prior
-            // non-cuda/non-metal behavior, and exactly what the deleted candle
-            // cache did for the Vulkan backend (it held CPU candle tensors).
+            // path; ROCm pools stay device-resident even when fused paged
+            // decode is quarantined because the portable full-attention path
+            // consumes the same cache through backend-local tensor ops.
+            // Vulkan (kt vulkan tensors are CPU-resident) and any GPU device
+            // whose backend feature isn't compiled in fall to the host-resident
+            // `zeros_cpu` default — matching the prior non-CUDA/non-Metal
+            // behavior and exactly what the deleted candle cache did for the
+            // Vulkan backend (it held CPU candle tensors).
             let (k, v) = alloc_pool_pair(device, &shape, n_elements, storage_dtype, _i)?;
             layers.push((k, v));
         }
@@ -2480,6 +2483,51 @@ mod tests {
     #[cfg(feature = "rocm")]
     #[test]
     #[ignore = "requires an explicit real-ROCm qualification run"]
+    fn rocm_portable_paged_cache_round_trip_stays_device_local() -> Result<()> {
+        assert!(kiln_tensor::rocm_is_available());
+        assert!(
+            !crate::forward::rocm_paged_decode_enabled(),
+            "test must exercise the portable paged-attention policy"
+        );
+
+        let device = kiln_tensor::Device::Rocm(0);
+        let (seq_len, kv_heads, head_dim) = (33usize, 4usize, 256usize);
+        let cache = PagedKvCacheKt::new(1, 1, 64, kv_heads, head_dim, KtDType::BF16, device)?;
+        let table = BlockTable { blocks: vec![0] };
+        let values: Vec<_> = (0..seq_len * kv_heads * head_dim)
+            .map(|index| half::bf16::from_f32((index % 97) as f32 / 97.0))
+            .collect();
+        let k =
+            KtTensor::from_vec_on(device, values.clone(), vec![1, kv_heads, seq_len, head_dim])?;
+        let v =
+            KtTensor::from_vec_on(device, values.clone(), vec![1, kv_heads, seq_len, head_dim])?;
+
+        cache.write(0, &table, 0, &k, &v)?;
+        let (read_k, read_v) = cache.read(0, &table, seq_len)?;
+        assert_eq!(read_k.device(), device);
+        assert_eq!(read_v.device(), device);
+        assert_eq!(read_k.shape(), &[1, kv_heads, seq_len, head_dim]);
+        assert_eq!(read_v.shape(), &[1, kv_heads, seq_len, head_dim]);
+        assert_eq!(
+            read_k
+                .to_device(kiln_tensor::Device::Cpu)?
+                .flatten_all()?
+                .to_vec1::<half::bf16>()?,
+            values
+        );
+        assert_eq!(
+            read_v
+                .to_device(kiln_tensor::Device::Cpu)?
+                .flatten_all()?
+                .to_vec1::<half::bf16>()?,
+            values
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    #[ignore = "requires an explicit real-ROCm qualification run"]
     fn rocm_batched_writers_scatter_noncontiguous_device_slots() -> Result<()> {
         assert!(kiln_tensor::rocm_is_available());
 
@@ -2489,6 +2537,11 @@ mod tests {
         let head_dim = 4usize;
         let cache =
             PagedKvCacheKt::new(1, 4, block_size, kv_heads, head_dim, KtDType::BF16, device)?;
+        let (k_pool, v_pool) = cache
+            .pool_tensors(0)
+            .ok_or_else(|| anyhow::anyhow!("missing layer 0 pools"))?;
+        assert_eq!(k_pool.device(), device);
+        assert_eq!(v_pool.device(), device);
 
         let mk = |value: f32| half::bf16::from_f32(value);
         let row_elems = kv_heads * head_dim;

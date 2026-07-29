@@ -208,6 +208,138 @@ fn matmul_bf16_shapes() {
 }
 
 #[test]
+fn matmul_bf16_serving_projection_shape_is_finite() {
+    if no_rocm() {
+        return;
+    }
+    use half::bf16;
+    use kiln_tensor::{RocmExecutionPolicy, RocmSynchronizationMode};
+
+    // Qwen3.5-4B's first prefill projection. This shape is deliberately
+    // retained because smaller parity fixtures do not exercise the same
+    // hipBLASLt plan selected by the portable F32-output-then-cast policy.
+    // Install the production serving synchronization mode before the first
+    // allocation so the test covers its matmul-to-cast ownership discipline.
+    kiln_tensor::primary_rocm_context_with_execution_policy(
+        0,
+        RocmExecutionPolicy::new(RocmSynchronizationMode::StreamOrdered),
+    )
+    .expect("stream-ordered ROCm context");
+    let (m, k, n) = (32usize, 2_560usize, 8_192usize);
+    let a_f: Vec<f32> = (0..m * k).map(|i| val(i, 0.125)).collect();
+    let b_f: Vec<f32> = (0..k * n).map(|i| val(i + 5, 0.125)).collect();
+    let a_bf: Vec<bf16> = a_f.iter().map(|&x| bf16::from_f32(x)).collect();
+    let b_bf: Vec<bf16> = b_f.iter().map(|&x| bf16::from_f32(x)).collect();
+
+    let ta = Tensor::from_vec_on(Device::Rocm(0), a_bf, vec![m, k]).expect("a");
+    let tb = Tensor::from_vec_on(Device::Rocm(0), b_bf, vec![k, n]).expect("b");
+    let tc = kiln_tensor::rocm_matmul(&ta, &tb)
+        .unwrap_or_else(|e| panic!("BF16 serving projection {m}x{k}x{n}: {e}"));
+    assert_eq!(tc.shape(), &[m, n]);
+    assert_eq!(tc.dtype(), DType::BF16);
+    let got = kiln_tensor::rocm_to_host_copy(&tc)
+        .expect("copy")
+        .to_vec::<bf16>()
+        .expect("to_vec");
+
+    for &(row, col) in &[
+        (0usize, 0usize),
+        (0, n - 1),
+        (m / 2, n / 2),
+        (m - 1, 0),
+        (m - 1, n - 1),
+    ] {
+        let want = cpu_matmul_cell(&a_f, &b_f, k, n, row, col);
+        let got = got[row * n + col].to_f32();
+        let diff = (got - want).abs();
+        let tol = 0.05 + 0.03 * want.abs();
+        assert!(
+            got.is_finite() && diff <= tol,
+            "BF16 serving projection mismatch row={row} col={col}: got {got} want {want} diff {diff} tol {tol}"
+        );
+    }
+}
+
+#[test]
+fn matmul_bf16_to_f32_scalar_output_matches_cpu() {
+    if no_rocm() {
+        return;
+    }
+    use half::bf16;
+    use kiln_tensor::{RocmExecutionPolicy, RocmSynchronizationMode};
+
+    kiln_tensor::primary_rocm_context_with_execution_policy(
+        0,
+        RocmExecutionPolicy::new(RocmSynchronizationMode::StreamOrdered),
+    )
+    .expect("stream-ordered ROCm context");
+
+    let k = 128usize;
+    let a_f: Vec<f32> = (0..k).map(|i| val(i, 0.125)).collect();
+    let b_f: Vec<f32> = (0..k).map(|i| val(i + 5, 0.125)).collect();
+    let a_bf: Vec<bf16> = a_f.iter().map(|&x| bf16::from_f32(x)).collect();
+    let b_bf: Vec<bf16> = b_f.iter().map(|&x| bf16::from_f32(x)).collect();
+    let want: f32 = a_bf
+        .iter()
+        .zip(&b_bf)
+        .map(|(a, b)| a.to_f32() * b.to_f32())
+        .sum();
+
+    let ta = Tensor::from_vec_on(Device::Rocm(0), a_bf, vec![1, k]).expect("a");
+    let tb = Tensor::from_vec_on(Device::Rocm(0), b_bf, vec![k, 1]).expect("b");
+    let tc = kiln_tensor::rocm_matmul_to_dtype(&ta, &tb, DType::F32)
+        .unwrap_or_else(|e| panic!("BF16-to-F32 scalar matmul: {e}"));
+    assert_eq!(tc.shape(), &[1, 1]);
+    assert_eq!(tc.dtype(), DType::F32);
+    let got = kiln_tensor::rocm_to_host_copy(&tc)
+        .expect("copy")
+        .to_vec::<f32>()
+        .expect("to_vec")[0];
+    assert!(
+        (got - want).abs() <= 1e-5,
+        "BF16-to-F32 scalar matmul mismatch: got {got} want {want}"
+    );
+}
+
+#[test]
+fn matmul_bf16_to_f32_batched_scalar_outputs_match_cpu() {
+    if no_rocm() {
+        return;
+    }
+    use half::bf16;
+    use kiln_tensor::{RocmExecutionPolicy, RocmSynchronizationMode};
+
+    kiln_tensor::primary_rocm_context_with_execution_policy(
+        0,
+        RocmExecutionPolicy::new(RocmSynchronizationMode::StreamOrdered),
+    )
+    .expect("stream-ordered ROCm context");
+
+    let (batch, k) = (32usize, 128usize);
+    let a_f: Vec<f32> = (0..batch * k).map(|i| val(i, 0.125)).collect();
+    let b_f: Vec<f32> = (0..batch * k).map(|i| val(i + 5, 0.125)).collect();
+    let a_bf: Vec<bf16> = a_f.iter().map(|&x| bf16::from_f32(x)).collect();
+    let b_bf: Vec<bf16> = b_f.iter().map(|&x| bf16::from_f32(x)).collect();
+    let want: Vec<f32> = a_bf
+        .chunks_exact(k)
+        .zip(b_bf.chunks_exact(k))
+        .map(|(a, b)| a.iter().zip(b).map(|(a, b)| a.to_f32() * b.to_f32()).sum())
+        .collect();
+
+    let ta = Tensor::from_vec_on(Device::Rocm(0), a_bf, vec![batch, 1, k]).expect("a");
+    let tb = Tensor::from_vec_on(Device::Rocm(0), b_bf, vec![batch, k, 1]).expect("b");
+    let tc = kiln_tensor::rocm_matmul_to_dtype(&ta, &tb, DType::F32)
+        .unwrap_or_else(|e| panic!("batched BF16-to-F32 scalar matmul: {e}"));
+    assert_eq!(tc.shape(), &[batch, 1, 1]);
+    assert_eq!(tc.dtype(), DType::F32);
+    let got = kiln_tensor::rocm_to_host_copy(&tc)
+        .expect("copy")
+        .to_vec::<f32>()
+        .expect("to_vec");
+    check_close(&got, &want, 0.0, 1e-5, "batched BF16-to-F32 scalar matmul");
+}
+
+#[test]
 fn matmul_with_bias_f32() {
     if no_rocm() {
         return;

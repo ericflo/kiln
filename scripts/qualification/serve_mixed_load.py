@@ -3469,6 +3469,9 @@ def attest_runtime(
             graphs_requested=expected["rocm_graphs_requested"],
             graphs_enabled=expected["rocm_graphs_enabled"],
             graph_mode=expected.get("rocm_graph_mode"),
+            synchronization_mode=expected.get(
+                "rocm_synchronization_mode", "legacy_host_barriers"
+            ),
             graph_cache_entries=rocm_graph_cache_entries,
             graph_cache_max_bytes=rocm_graph_cache_max_bytes,
         )
@@ -3488,6 +3491,9 @@ def attest_runtime(
             graphs_requested=expected["rocm_graphs_requested"],
             graphs_enabled=expected["rocm_graphs_enabled"],
             graph_mode=expected.get("rocm_graph_mode"),
+            synchronization_mode=expected.get(
+                "rocm_synchronization_mode", "legacy_host_barriers"
+            ),
             graph_cache_entries=rocm_graph_cache_entries,
             graph_cache_max_bytes=rocm_graph_cache_max_bytes,
         )
