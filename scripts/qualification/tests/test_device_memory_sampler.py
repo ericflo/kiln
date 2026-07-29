@@ -145,6 +145,9 @@ class DeviceMemorySamplerTests(unittest.TestCase):
         self.assertIsNone(identity["path"])
         self.assertEqual(identity["device"]["name"], "Apple M1")
         self.assertTrue(identity["device"]["unified_memory"])
+        self.assertEqual(identity["device"]["resolution_percentage_points"], 1)
+        self.assertEqual(identity["device"]["resolution_bytes_ceiling"], 171798692)
+        self.assertEqual(counter.resolution_bytes, 171798692)
         self.assertEqual(counter.read_bytes(), 12 * 1024**3)
 
     def test_macos_counter_fails_closed_on_malformed_pressure(self) -> None:

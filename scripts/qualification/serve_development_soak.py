@@ -505,12 +505,17 @@ def phase_elapsed_seconds(started: float | None, now: float | None = None) -> fl
 def active_gpu_growth_limit_bytes(
     runtime: SoakRuntime,
     memory_growth_limit_bytes: int,
+    *,
+    counter_resolution_bytes: int = 0,
 ) -> int:
-    return (
+    raw_limit = (
         runtime.active_gpu_peak_growth_limit_bytes
         if runtime.active_gpu_peak_growth_limit_bytes is not None
         else memory_growth_limit_bytes
     )
+    if runtime.gpu_memory_scope == "macos_whole_host_unified_memory":
+        return raw_limit + counter_resolution_bytes
+    return raw_limit
 
 METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "attributed_itl_outlier_count": ("count", "sum", True),
@@ -893,6 +898,10 @@ def effective_config(
     if runtime.gpu_memory_absolute_limit_bytes is not None:
         effective["soak"]["gpu_memory_absolute_limit_bytes"] = (
             runtime.gpu_memory_absolute_limit_bytes
+        )
+    if runtime.gpu_memory_scope == "macos_whole_host_unified_memory":
+        effective["soak"]["gpu_memory_growth_quantization_tolerance"] = (
+            "one_memory_pressure_percentage_point"
         )
     if runtime.backend == "metal":
         effective["soak"]["external_yield_sync_slow_policy"] = (
@@ -1852,6 +1861,12 @@ class GpuMemorySampler:
             if self._macos_counter is not None:
                 return self._macos_counter.read_bytes()
             return gpu_memory_bytes(self.port, self.pid, self.runtime)
+
+    @property
+    def counter_resolution_bytes(self) -> int:
+        if self._macos_counter is None:
+            return 0
+        return self._macos_counter.resolution_bytes
 
     def _sample(self) -> None:
         try:
@@ -3702,6 +3717,7 @@ def execute(
         active_gpu_growth_limit = active_gpu_growth_limit_bytes(
             runtime,
             memory_growth_limit_bytes,
+            counter_resolution_bytes=sampler.counter_resolution_bytes,
         )
 
         while True:
@@ -4306,11 +4322,15 @@ def execute(
         active_gpu_peak_growth_limit_bytes = active_gpu_growth_limit_bytes(
             runtime,
             memory_growth_limit_bytes,
+            counter_resolution_bytes=sampler.counter_resolution_bytes,
         )
         if gpu_peak > gpu_start + active_gpu_peak_growth_limit_bytes:
             failures.append(
                 "peak GPU memory exceeded the active-workload growth limit: "
-                f"{gpu_peak - gpu_start} > {active_gpu_peak_growth_limit_bytes} bytes"
+                f"{gpu_peak - gpu_start} > {active_gpu_peak_growth_limit_bytes} "
+                "bytes, including "
+                f"{sampler.counter_resolution_bytes} bytes of counter-resolution "
+                "tolerance"
             )
         if (
             runtime.gpu_memory_absolute_limit_bytes is not None

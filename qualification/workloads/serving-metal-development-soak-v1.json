@@ -75,6 +75,7 @@
           "gpu_memory_scope": "macos_whole_host_unified_memory",
           "gpu_memory_source": "macos_memory_pressure:physical_total_minus_reported_free_percentage",
           "active_gpu_peak_growth_limit_bytes": 2147483648,
+          "gpu_memory_growth_quantization_tolerance": "one_memory_pressure_percentage_point",
           "max_tokens": 32,
           "rocm_graph_cache_entries": 8,
           "memory_growth_limit_bytes": 536870912,

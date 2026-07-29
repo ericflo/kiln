@@ -501,7 +501,19 @@ class ServeRocmSoakTests(unittest.TestCase):
             2 * 1024**3,
         )
         self.assertEqual(
-            soak.active_gpu_growth_limit_bytes(soak.ROCM_RUNTIME, 123),
+            soak.active_gpu_growth_limit_bytes(
+                soak.METAL_ENDURANCE_RUNTIME,
+                123,
+                counter_resolution_bytes=171798692,
+            ),
+            2 * 1024**3 + 171798692,
+        )
+        self.assertEqual(
+            soak.active_gpu_growth_limit_bytes(
+                soak.ROCM_RUNTIME,
+                123,
+                counter_resolution_bytes=171798692,
+            ),
             123,
         )
 

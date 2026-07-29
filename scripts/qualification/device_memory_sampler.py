@@ -127,6 +127,7 @@ class MacOsUnifiedMemoryCounter:
                 "macOS unified-memory telemetry did not identify Apple Silicon"
             )
         self._total_bytes = total_bytes
+        self._resolution_bytes = (total_bytes + 99) // 100
         self._identity = {
             "selector": "system_default",
             "index": 0,
@@ -136,6 +137,8 @@ class MacOsUnifiedMemoryCounter:
             "unified_memory": True,
             "counter": "memory_pressure_free_percentage",
             "available_definition": "physical_total_times_reported_free_percentage",
+            "resolution_percentage_points": 1,
+            "resolution_bytes_ceiling": self._resolution_bytes,
         }
         self.read_bytes()
 
@@ -177,6 +180,10 @@ class MacOsUnifiedMemoryCounter:
             )
         available = self._total_bytes * free_percent // 100
         return self._total_bytes - available
+
+    @property
+    def resolution_bytes(self) -> int:
+        return self._resolution_bytes
 
     def receipt_identity(self) -> dict[str, Any]:
         return {

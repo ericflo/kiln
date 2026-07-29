@@ -2,7 +2,7 @@
   "schema_version": 1,
   "workload_id": "serving-metal-endurance-v1",
   "kind": "soak",
-  "description": "Keep one Metal server process under mixed streaming load for at least eight hours using ordinary monotonic elapsed time, and fail on deterministic response corruption, late faults, unexplained ITL gaps, leaked KV blocks, a 15 GiB whole-host unified-memory ceiling, or post-warm unified-memory and process-RSS growth.",
+  "description": "Keep one Metal server process under mixed streaming load for at least eight hours using ordinary monotonic elapsed time, and fail on deterministic response corruption, late faults, unexplained ITL gaps, leaked KV blocks, a 15 GiB whole-host unified-memory ceiling, or post-warm unified-memory and process-RSS growth. The 2 GiB whole-host growth target permits one explicit percentage-point step from the memory_pressure counter.",
   "determinism": {
     "seed": 20260728,
     "seed_delivery": "argv",
@@ -75,6 +75,7 @@
           "gpu_memory_scope": "macos_whole_host_unified_memory",
           "gpu_memory_source": "macos_memory_pressure:physical_total_minus_reported_free_percentage",
           "active_gpu_peak_growth_limit_bytes": 2147483648,
+          "gpu_memory_growth_quantization_tolerance": "one_memory_pressure_percentage_point",
           "max_tokens": 32,
           "rocm_graph_cache_entries": 8,
           "memory_growth_limit_bytes": 536870912,
