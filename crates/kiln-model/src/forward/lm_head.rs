@@ -415,6 +415,17 @@ pub(super) fn lm_head_forward_backend_decode_if(
             {
                 return Ok(logits);
             }
+            // Production Vulkan keeps the generic linear-decode family behind
+            // an explicit quarantine, but layer-bounded prefill can still
+            // arrive here as the separately qualified resident rank-2 mixed
+            // matmul: F32 `[rows, hidden]` x BF16 `[hidden, vocab]` -> F32.
+            // Give the backend's exact matmul contract a chance before the
+            // ordinary equal-dtype tensor fallback. This does not widen the
+            // linear-decode policy and other backends simply decline or own
+            // their already-advertised request.
+            if let Some(logits) = runtime_matmul_no_broadcast_copy(backend, x, embed_tokens_t)? {
+                return Ok(logits);
+            }
         }
     }
     lm_head_forward(x, embed_tokens_t)

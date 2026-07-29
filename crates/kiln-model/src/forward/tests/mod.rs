@@ -272,7 +272,7 @@ fn materialized_sdpa_aligns_cpu_cache_to_vulkan_query() -> Result<()> {
 
 #[cfg(feature = "vulkan")]
 #[test]
-fn disabled_vulkan_linear_decode_preserves_mixed_projection_fallback() -> Result<()> {
+fn disabled_vulkan_linear_decode_routes_flattened_lm_head_through_matmul() -> Result<()> {
     if std::env::var("KILN_TENSOR_VULKAN_TEST").ok().as_deref() != Some("1") {
         return Ok(());
     }
@@ -296,8 +296,13 @@ fn disabled_vulkan_linear_decode_preserves_mixed_projection_fallback() -> Result
     )?
     .to_dtype(DType::BF16)?
     .to_device(Device::Vulkan(0))?;
-    let output =
-        linear_with_lora_t_backend_decode_if(Some(&backend), false, &x, &weight, None, 0.0)?;
+    let x = x.reshape((2, 4))?;
+    assert!(
+        LinearBackend::runtime_linear_decode(&backend, &x, &weight)?.is_none(),
+        "the generic Vulkan linear-decode quarantine must remain closed"
+    );
+    let output = lm_head_forward_backend_decode_if(Some(&backend), &x, &weight)?;
+    assert_eq!(output.dims(), &[2, 3]);
     assert_eq!(output.device(), Device::Vulkan(0));
     assert_eq!(
         output
