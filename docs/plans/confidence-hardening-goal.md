@@ -264,7 +264,7 @@ not establish an SLO or qualify another Apple Silicon device.
 
 ## Phase 7.3: Final Cross-Backend Regression Closure
 
-- [ ] From one current source commit, dispatch GitHub Actions CI with
+- [x] From one current source commit, dispatch GitHub Actions CI with
   `backend_build=all` and require its CUDA, Metal, ROCm, and Vulkan lanes to
   pass on their separate compatible hosted runners. This is compile and test
   evidence, not a requirement that one qualification host run every backend.
@@ -304,7 +304,7 @@ prefix-cache, and cleanup evidence.
 
 Targeted-serving contract:
 `qualification/workloads/serving-backend-regression-closure-v1.json` defines
-the pending correctness-only hardware closure. Each backend builds current
+the bounded correctness-only hardware closure. Each backend builds current
 source, starts one source-bound server with a fixed eight-block KV pool, and
 runs a 253-token cache-prime prompt with a 16-token completion followed by a
 255-token pressure prompt with an exact 256-token completion. The prime crosses
@@ -364,17 +364,20 @@ repeat. The later Phase 7.2 checkpoint `fa3ab5a9dab7` added Apple-only unified
 memory admission and macOS process containment plus a backend-selected Metal
 soak runtime. Shared qualification helpers preserve the existing ROCm and
 Vulkan effective configurations, while memory-counter tolerance and slow-sync
-handling are conditional on the Metal/macOS runtime. The focused sampler,
-soak, workload, runner, and receipt suites passed 174 tests with two existing
-skips. These changes are backend-isolated under this phase's rule, so they do
-not require another targeted Strix hardware run. The final exact-commit hosted
-matrix remains open.
+handling are conditional on the Metal/macOS runtime. The final Phase 7.2
+retention commit `f19d2591ab8e` added only the passing endurance receipt and
+its documentation after checkpoint `fa3ab5a9dab7`. On that final integrated
+source, the focused sampler, soak, mixed-load, workload, runner, and receipt
+suites passed 178 tests. These changes are backend-isolated under this phase's
+rule, so they do not require another targeted Strix hardware run.
 
-Interim hosted checkpoint:
+Final hosted checkpoint:
 GitHub Actions
-[`30416196655`](https://github.com/ericflo/kiln/actions/runs/30416196655)
-passed `backend_build=all` from exact pushed source `56000a370874`. Its
+[`30498143581`](https://github.com/ericflo/kiln/actions/runs/30498143581)
+passed `backend_build=all` from exact pushed source `f19d2591ab8e`. Its
 separate Metal, CUDA, ROCm, and Vulkan jobs all passed, as did Linux default
-features, formatting, dependency policy, and portable receipt validation.
-This records a green hosted baseline without closing the first checklist item:
-the same matrix remains required from the final integrated source.
+features, formatting, dependency policy, and portable qualification receipt
+validation. The run completed successfully with all seven jobs green. This
+closes the hosted matrix item on the final Phase 7.2-integrated source. The
+last checklist item remains open until this documentation checkpoint and its
+exact-commit workflows pass.

@@ -432,18 +432,24 @@ subsequently made ascending capacity sweeps stop after the first actually
 failed row and retain the unexecuted suffix as structured failure. That
 campaign driver is separate from this bounded Strix closure runner. Its
 source-bound Metal sweep subsequently passed c19 and retained c20 as the first
-non-fitting row.
+non-fitting row. Final Phase 7.2 retention commit `f19d2591ab8e` added only
+the passing endurance receipt and its documentation after the last Metal
+qualification-tooling checkpoint. On that final integrated source, the
+focused sampler, soak, mixed-load, workload, runner, and receipt suites passed
+178 tests. The Metal/macOS changes remain backend-isolated, so the Phase 7.3
+integration rule requires no additional targeted Strix hardware run.
 
 ## Hosted Cross-Backend Checkpoint
 
 GitHub Actions
-[`30416196655`](https://github.com/ericflo/kiln/actions/runs/30416196655)
-passed `backend_build=all` from exact pushed source `56000a370874`. The
+[`30498143581`](https://github.com/ericflo/kiln/actions/runs/30498143581)
+passed `backend_build=all` from exact pushed source `f19d2591ab8e`. The
 separate Metal, CUDA, ROCm, and Vulkan jobs all passed, along with Linux
 default features, formatting, dependency policy, and portable receipt
-validation. This is an interim hosted compile/test checkpoint: Phase 7.2 was
-still active at that source, so final cross-backend closure still requires the
-same matrix from the eventual integrated source.
+validation. All seven jobs completed successfully. This is the final hosted
+compile/test checkpoint from the source that incorporates completed Phase 7.2;
+it is not hardware execution evidence for the hosted compile-only CUDA and
+ROCm lanes.
 
 ## Build Boundary
 

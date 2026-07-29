@@ -1383,15 +1383,15 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 forced/nonzero shutdown, early-exit, and snapshot-residue counts were zero.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Interim hosted
-                <a href="https://github.com/ericflo/kiln/actions/runs/30416196655" class="link">
-                  <code>backend_build=all</code> run 30416196655
+                Final hosted
+                <a href="https://github.com/ericflo/kiln/actions/runs/30498143581" class="link">
+                  <code>backend_build=all</code> run 30498143581
                 </a>
-                passed from exact pushed source <code>56000a370874</code>. Separate Metal, CUDA,
+                passed from exact pushed source <code>f19d2591ab8e</code>. Separate Metal, CUDA,
                 ROCm, and Vulkan jobs all passed, together with Linux default features, formatting,
-                dependency policy, and portable receipt validation. Phase 7.2 was still active at
-                that source, so final cross-backend closure still requires the same matrix from the
-                eventual integrated source.
+                dependency policy, and portable receipt validation. All seven jobs completed
+                successfully on the final Phase 7.2-integrated source. This is hosted compile/test
+                evidence; the compile-only CUDA and ROCm lanes are not hardware execution evidence.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 Receipt-only Metal checkpoints through <code>aaca10d4e</code> changed no shared
@@ -1406,14 +1406,15 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
                 from the bounded Strix closure runner.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Final Phase 7.2 source checkpoint <code>fa3ab5a9dab7</code> added Apple-only
-                unified-memory admission and macOS containment plus a backend-selected Metal
-                soak runtime. Shared qualification helpers preserve the ROCm and Vulkan effective
-                configurations; memory-counter tolerance and slow-sync handling are conditional
-                on Metal/macOS. The focused sampler, soak, workload, runner, and receipt suites
-                passed 174 tests with two existing skips. Under the Phase 7.3 integration rule,
-                those backend-isolated changes require no targeted Strix hardware repeat. The
-                final exact-commit hosted cross-backend matrix remains open.
+                Phase 7.2 tooling checkpoint <code>fa3ab5a9dab7</code> added Apple-only
+                unified-memory admission and macOS containment plus a backend-selected Metal soak
+                runtime. Shared qualification helpers preserve the ROCm and Vulkan effective
+                configurations; memory-counter tolerance and slow-sync handling are conditional on
+                Metal/macOS. Final retention commit <code>f19d2591ab8e</code> then added only the
+                passing endurance receipt and its documentation. On that final integrated source,
+                the focused sampler, soak, mixed-load, workload, runner, and receipt suites passed
+                178 tests. Under the Phase 7.3 integration rule, these backend-isolated changes
+                require no targeted Strix hardware repeat.
               </p>
             </section>
             <section class="pt-4" style="border-top: 1px solid var(--line);">
