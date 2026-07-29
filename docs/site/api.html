@@ -1299,14 +1299,15 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 The retained ROCm serving receipt
-                <a href="https://github.com/ericflo/kiln/blob/main/qualification/receipts/rocm/strix-halo/20260729t002320595268z-rocm-strix-halo-serving-backend-regressi-b18fa140d9-v1.json" class="link">
-                  <code>20260729t002320595268z-…-b18fa140d9-v1</code>
+                <a href="https://github.com/ericflo/kiln/blob/main/qualification/receipts/rocm/strix-halo/20260729t023946445804z-rocm-strix-halo-serving-backend-regressi-b18fa140d9-v1.json" class="link">
+                  <code>20260729t023946445804z-…-b18fa140d9-v1</code>
                 </a>
-                passed from clean pushed source <code>ef4d6ba767d9</code>. It completed exact
+                passed from clean pushed source <code>29ace2467bea</code>. It completed exact
                 253/255-token prompts and 16/256-token completions, crossed four pressure
                 decode-growth blocks, and reclaimed all four unleased prime-cache blocks in one
                 structured event. Three valid cached blocks remained, with zero active leases,
-                pending releases, or unaccounted blocks.
+                pending releases, or unaccounted blocks. This refresh postdates the shared LM-head
+                routing repair used by Vulkan and proves it did not regress ROCm serving closure.
               </p>
               <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
                 The retained Vulkan serving receipt

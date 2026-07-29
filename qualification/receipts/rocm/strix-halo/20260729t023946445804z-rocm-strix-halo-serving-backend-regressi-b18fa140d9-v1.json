@@ -1,0 +1,493 @@
+{
+  "artifacts": [
+    {
+      "bytes": 18410,
+      "kind": "environment_probes",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260729t023946445804z-rocm-strix-halo-serving-backend-regressi-b18fa140d9-v1/environment.json",
+      "sha256": "sha256:04aab25953c0fcb92f3e3484196392fbb3e820396635d6b2bd58908c6262eb1f"
+    },
+    {
+      "bytes": 3517,
+      "kind": "case_stdout",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260729t023946445804z-rocm-strix-halo-serving-backend-regressi-b18fa140d9-v1/cases/001-rocm-serving-regression-closure-r001/stdout.log",
+      "sha256": "sha256:877a4a716c00659c555f638e7b3a9a9e37a38e5a459f84428f9b52a4393475d2"
+    },
+    {
+      "bytes": 62400,
+      "kind": "case_stderr",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260729t023946445804z-rocm-strix-halo-serving-backend-regressi-b18fa140d9-v1/cases/001-rocm-serving-regression-closure-r001/stderr.log",
+      "sha256": "sha256:af4b53ebd5deb2afce9e7052d515e2deafba3d6acec9689ec32cc9190df838d1"
+    },
+    {
+      "bytes": 10127,
+      "kind": "case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260729t023946445804z-rocm-strix-halo-serving-backend-regressi-b18fa140d9-v1/cases/001-rocm-serving-regression-closure-r001/case-result.json",
+      "sha256": "sha256:7e8be78be929c23be8d3584f348060fee25a22b1c7a786b239782cea97c229ec"
+    },
+    {
+      "bytes": 7625,
+      "kind": "command_case_result",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260729t023946445804z-rocm-strix-halo-serving-backend-regressi-b18fa140d9-v1/cases/001-rocm-serving-regression-closure-r001/command-result.json",
+      "sha256": "sha256:36cb6f33dcd50149d3ab32427f0f03ea498ab3f57d6ea73346f5223ef6e0a7e5"
+    },
+    {
+      "bytes": 6080,
+      "kind": "effective_run_config",
+      "location": "local_ignored",
+      "path": ".qualification/runs/20260729t023946445804z-rocm-strix-halo-serving-backend-regressi-b18fa140d9-v1/run-config.json",
+      "sha256": "sha256:58cb730901f0a34eb2ab37687ee663a0ae1b3e8ea31d46f9e6fe60b8ed343fa9"
+    }
+  ],
+  "created_at_utc": "2026-07-29T02:46:23.797Z",
+  "effective_config": {
+    "build": {
+      "binary": "kiln",
+      "cargo_environment_policy": "closed-source-build-v1",
+      "cargo_execution_mode": "transient-service",
+      "cargo_jobs": 1,
+      "cargo_memory_scope": "systemd_user_transient_service_memory_max_no_swap",
+      "cargo_min_available_gib": 1,
+      "cargo_private_network": true,
+      "cargo_service_runtime_max_seconds": 840,
+      "cargo_wrapper": "scripts/cargo-bounded.sh",
+      "features": "rocm",
+      "locked": true,
+      "no_default_features": true,
+      "offline": true,
+      "package": "kiln-server",
+      "profile": "release",
+      "rocm_path": "/opt/rocm",
+      "timeout_seconds": 900
+    },
+    "memory": {
+      "kv_autoscale": false,
+      "num_blocks": 8,
+      "reclaim_mode": "off"
+    },
+    "model": {
+      "accelerator_weight_upload_mib_per_second": 256,
+      "checkpoint_read_mib_per_second": 256
+    },
+    "prefix_cache": {
+      "effective_enabled": true,
+      "max_blocks": 4,
+      "max_entries": 4,
+      "requested_enabled": true
+    },
+    "runtime": {
+      "kv_autoscale_enabled": false,
+      "kv_autoscale_requested": false,
+      "memory_reclaim_mode": "off",
+      "memory_reclaim_requested_mode": "off",
+      "prefix_cache_effective_enabled": true,
+      "prefix_cache_effective_reason": "active",
+      "prefix_cache_requested_enabled": true,
+      "rocm_graphs_enabled": false,
+      "rocm_graphs_requested": false,
+      "rocm_synchronization_mode": "stream_ordered",
+      "serving_profile": "experimental"
+    },
+    "server": {
+      "chat_performance_metadata_enabled": true,
+      "debug_model_state": true,
+      "default_thinking_enabled": false,
+      "http_send_buffer_bytes": 4096,
+      "log_format": "json",
+      "max_active_requests": 8,
+      "max_batch_tokens": 512,
+      "max_decode_batch": 4,
+      "max_prefill_layers_per_cycle": 4,
+      "max_prefill_staging_priority_burst": 4,
+      "max_prefill_staging_slots": 4,
+      "max_prefill_tokens_per_cycle": 256,
+      "request_timeout_seconds": 600,
+      "stream_stall_grace_ms": 2000
+    },
+    "workload": {
+      "expected_completion_tokens": 272,
+      "expected_finish_reason": "length",
+      "expected_request_count": 2,
+      "kv_block_size": 64,
+      "kv_num_blocks": 8,
+      "overall_timeout_seconds": 1800,
+      "prefix_cache_max_blocks": 4,
+      "prefix_cache_max_entries": 4,
+      "pressure_max_tokens": 256,
+      "pressure_prompt_tokens": 255,
+      "prime_max_tokens": 16,
+      "prime_prompt_tokens": 253,
+      "prompt_words": 42,
+      "request_timeout_seconds": 600,
+      "response_oracle": "ascending_zero_padded_integers_prefix_v1",
+      "sequence": "prime_then_pressure"
+    }
+  },
+  "environment": {
+    "compiler": {
+      "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+      "hipcc": "HIP version: 7.2.53211-9999",
+      "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)"
+    },
+    "device": {
+      "architecture": "gfx1151",
+      "compute_capability": null,
+      "compute_units": 40,
+      "device_uuid": null,
+      "driver": "amdgpu kernel 7.1.4-arch1-1",
+      "logical_index": null,
+      "memory_available_bytes": 100502913024,
+      "memory_bytes": 103079215104,
+      "name": "AMD Radeon 8060S Graphics",
+      "pci_bus_id": null,
+      "unified_memory": true
+    },
+    "host_id": "strix-halo",
+    "os": {
+      "architecture": "x86_64",
+      "kernel": "7.1.4-arch1-1",
+      "name": "EndeavourOS",
+      "version": "2025.03.19"
+    },
+    "runtime": {
+      "execution_environment_sha256": "sha256:d2188fa91d3f7076947f84f30ee036df7bbcc1e53daf32f005a54b750db93be0",
+      "hipcc": "HIP version: 7.2.53211-9999",
+      "hsa": "1.18",
+      "rocm": "7.2.4"
+    }
+  },
+  "metrics": [],
+  "model": {
+    "chat_template_hash": "sha256:a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+    "config_hash": "sha256:ddc63e1c717afa86c865bb5e01313d89d72bb53b97ad4a8a03ba8510c0621670",
+    "id": "Qwen/Qwen3.5-4B",
+    "path": "/home/ericflo/Development/kiln/Qwen3.5-4B",
+    "tokenizer_hash": "sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+    "weight_files": [
+      {
+        "bytes": 5329398688,
+        "path": "model.safetensors-00001-of-00002.safetensors",
+        "sha256": "sha256:26a93f066e1916adb13453dae5a0c707c0fbc71299ed98779571a907b8e74c61"
+      },
+      {
+        "bytes": 3990429408,
+        "path": "model.safetensors-00002-of-00002.safetensors",
+        "sha256": "sha256:cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188"
+      }
+    ]
+  },
+  "notes": [],
+  "qualification": {
+    "backend": "rocm",
+    "command": [
+      "/usr/bin/python3",
+      "scripts/qualification/run.py",
+      "qualification/workloads/serving-backend-regression-closure-v1.json",
+      "--variant",
+      "rocm-kv-prefix-closure",
+      "--host-id",
+      "strix-halo",
+      "--model",
+      "Qwen3.5-4B",
+      "--model-id",
+      "Qwen/Qwen3.5-4B"
+    ],
+    "duration_seconds": 397.35159736900823,
+    "finished_at_utc": "2026-07-29T02:46:23.797Z",
+    "kind": "correctness",
+    "profile": "serving-backend-regression-closure-v1",
+    "started_at_utc": "2026-07-29T02:39:46.445Z",
+    "verdict": "passed"
+  },
+  "receipt_id": "20260729t023946445804z-rocm-strix-halo-serving-backend-regressi-b18fa140d9-v1",
+  "results": [
+    {
+      "details": "{\"backend\":\"rocm\",\"build_seconds\":204.7513793350081,\"generated_config_sha256\":\"sha256:1dafe898f502b37a5ec79ff4ec722b5c9f0eb7a8c78ffd37b641bfb2b51acabf\",\"kiln_binary_sha256\":\"sha256:a9a26b206a87e79d325289caa82fbc9959b790f60447af514fc1c8c5c91485dc\",\"prefix_cache_after_prime\":{\"active_leases\":0,\"cached_blocks\":4,\"cached_entries\":2,\"cached_state_bytes\":55050240,\"enabled\":true,\"hit_blocks\":0,\"hit_tokens\":0,\"lookup_hits\":0,\"lookup_misses\":1,\"max_blocks\":4,\"max_entries\":4,\"max_state_bytes\":110100480,\"pending_release_entries\":0},\"prefix_cache_final\":{\"active_leases\":0,\"cached_blocks\":3,\"cached_entries\":1,\"cached_state_bytes\":27525120,\"enabled\":true,\"hit_blocks\":0,\"hit_tokens\":0,\"lookup_hits\":0,\"lookup_misses\":2,\"max_blocks\":4,\"max_entries\":4,\"max_state_bytes\":110100480,\"pending_release_entries\":0},\"pressure\":{\"completion_tokens\":256,\"decode_growth_blocks\":4,\"finish_reason\":\"length\",\"prompt_tokens\":255},\"prime\":{\"completion_tokens\":16,\"finish_reason\":\"length\",\"prompt_tokens\":253},\"reclaim_events\":[{\"reclaimed_prefix_blocks\":4,\"requested_blocks\":1}],\"semantic_output_sha256\":\"sha256:1d3bae1865c7ba02e676058483fa445928814698f7d9fd42282d5c3d588441fb\",\"shutdown\":{\"duration_ms\":163.64941600477323,\"forced\":false,\"returncode\":0},\"variant\":\"rocm-kv-prefix-closure\"}",
+      "duration_seconds": 375.7761441139737,
+      "id": "rocm-serving-regression-closure",
+      "metrics": [
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "batching_error_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "binary_build_count",
+          "unit": "count",
+          "value": 1
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "completion_token_count",
+          "unit": "tokens",
+          "value": 272
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "device_fault_event_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "exact_output_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "external_yield_sync_call_count",
+          "unit": "count",
+          "value": 304
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "external_yield_sync_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "max",
+          "lower_is_better": true,
+          "name": "external_yield_sync_max_ms",
+          "unit": "ms",
+          "value": 6.502
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "external_yield_sync_slow_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "external_yield_sync_total_ms",
+          "unit": "ms",
+          "value": 64.107
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "kv_blocks_end",
+          "unit": "blocks",
+          "value": 8
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "kv_blocks_start",
+          "unit": "blocks",
+          "value": 8
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "kv_blocks_used_end",
+          "unit": "blocks",
+          "value": 3
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "kv_decode_growth_blocks",
+          "unit": "blocks",
+          "value": 4
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "kv_resize_event_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "kv_unaccounted_blocks_end",
+          "unit": "blocks",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "length_terminated_request_count",
+          "unit": "count",
+          "value": 2
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "policy_attestation_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "prefix_cache_active_leases_end",
+          "unit": "leases",
+          "value": 0
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "prefix_cache_cached_blocks_after_prime",
+          "unit": "blocks",
+          "value": 4
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "prefix_cache_cached_blocks_end",
+          "unit": "blocks",
+          "value": 3
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "prefix_cache_enabled",
+          "unit": "bool",
+          "value": 1
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "prefix_cache_lookup_miss_count",
+          "unit": "count",
+          "value": 2
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "prefix_cache_pending_release_entries_end",
+          "unit": "entries",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "prefix_cache_reclaim_event_count",
+          "unit": "count",
+          "value": 1
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "prefix_cache_reclaimed_block_count",
+          "unit": "blocks",
+          "value": 4
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": true,
+          "name": "prefix_cache_state_bytes_end",
+          "unit": "bytes",
+          "value": 27525120
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "pressure_completion_token_count",
+          "unit": "tokens",
+          "value": 256
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "pressure_prompt_token_count",
+          "unit": "tokens",
+          "value": 255
+        },
+        {
+          "aggregation": "exact",
+          "lower_is_better": false,
+          "name": "prime_prompt_token_count",
+          "unit": "tokens",
+          "value": 253
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "request_count",
+          "unit": "count",
+          "value": 2
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "request_failure_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": false,
+          "name": "semantic_output_record_count",
+          "unit": "count",
+          "value": 2
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "server_exit_before_shutdown_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "shutdown_forced_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "shutdown_nonzero_count",
+          "unit": "count",
+          "value": 0
+        },
+        {
+          "aggregation": "sum",
+          "lower_is_better": true,
+          "name": "snapshot_residue_count",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "required": true,
+      "status": "passed"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git_commit": "29ace2467bead395fa4869703586f9b5ee840b30",
+    "git_worktree_clean": true,
+    "tree_hash": "sha256:00b603d17586c6cead5c17dc4dd2fc529b86116f7abb1872c4a9d35e2b892a21",
+    "tree_hash_format": "kiln-source-tree-v1"
+  },
+  "unsupported": [],
+  "workload": {
+    "id": "serving-backend-regression-closure-v1",
+    "parameters": {
+      "variant_id": "rocm-kv-prefix-closure"
+    },
+    "seed": 20260728,
+    "sha256": "sha256:18b6f07d27d8742d5ea6330872e0ecdf6f6fd375c5c38029c099a6b91f3b8ca5"
+  }
+}

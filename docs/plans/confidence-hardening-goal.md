@@ -264,13 +264,16 @@ workload and gates; it is not a throughput acceptance rule.
 
 Targeted-serving evidence:
 `qualification/receipts/rocm/strix-halo/`
-`20260729t002320595268z-rocm-strix-halo-serving-backend-regressi-`
-`b18fa140d9-v1.json` passed from clean pushed source `ef4d6ba767d9`.
+`20260729t023946445804z-rocm-strix-halo-serving-backend-regressi-`
+`b18fa140d9-v1.json` passed from clean pushed source `29ace2467bea`.
 It completed both exact length-terminated requests with 253/255 prompt tokens,
 16/256 completion tokens, and four pressure-request decode-growth blocks. The
 prime left four unleased prefix blocks; the first live growth reclaimed all
 four through one structured event. Final state retained three valid cached
 blocks but had zero active leases, pending releases, or unaccounted blocks.
+This current-source refresh postdates the shared LM-head routing repair used
+by Vulkan and therefore closes its possible impact on ROCm with execution
+evidence rather than path inference.
 
 `qualification/receipts/vulkan/strix-halo/`
 `20260729t013047275616z-vulkan-strix-halo-serving-backend-regressi-`
@@ -286,11 +289,12 @@ and current-source validation when produced.
 
 Concurrent Phase 7.2 integration:
 receipt-only Metal checkpoints `c4f2769f1` and `ed63928a8` were incorporated
-after the Vulkan run. They add passing c1-through-c12 and c13 serving receipts
-without changing shared runtime or qualification tooling, so they do not
-invalidate either targeted Strix result and require no backend rerun. Because
-c13 still fits, these checkpoints do not yet close Phase 7.2's required first
-non-fitting capacity boundary, soak, or final documentation items.
+after the Vulkan run and before the refreshed ROCm run. They add passing
+c1-through-c12 and c13 serving receipts without changing shared runtime or
+qualification tooling, so they do not invalidate either targeted Strix
+result. Because c13 still fits, these checkpoints do not yet close Phase
+7.2's required first non-fitting capacity boundary, soak, or final
+documentation items.
 
 Interim hosted checkpoint:
 GitHub Actions

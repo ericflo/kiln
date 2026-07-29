@@ -316,13 +316,15 @@ the former 600-second request deadline. The longer Vulkan window changes no
 prompt, token, KV, output, or cleanup gate and is not a throughput threshold.
 
 The retained ROCm result is
-[`20260729t002320595268z-rocm-strix-halo-serving-backend-regressi-b18fa140d9-v1.json`](../qualification/receipts/rocm/strix-halo/20260729t002320595268z-rocm-strix-halo-serving-backend-regressi-b18fa140d9-v1.json).
-It passed from clean pushed source `ef4d6ba767d9`. Both requests terminated by
+[`20260729t023946445804z-rocm-strix-halo-serving-backend-regressi-b18fa140d9-v1.json`](../qualification/receipts/rocm/strix-halo/20260729t023946445804z-rocm-strix-halo-serving-backend-regressi-b18fa140d9-v1.json).
+It passed from clean pushed source `29ace2467bea`. Both requests terminated by
 length with exact 253/255 prompt and 16/256 completion-token counts. The
 pressure request crossed four decode-growth block boundaries, and its first
 growth reclaimed all four unleased prime-cache blocks through one structured
 event. Final state retained three valid cached blocks while active leases,
-pending releases, and unaccounted blocks were zero.
+pending releases, and unaccounted blocks were zero. This refresh postdates the
+shared LM-head routing repair used by Vulkan, proving that change did not
+regress the ROCm closure path.
 
 The retained Vulkan result is
 [`20260729t013047275616z-vulkan-strix-halo-serving-backend-regressi-2a1ed8c677-v1.json`](../qualification/receipts/vulkan/strix-halo/20260729t013047275616z-vulkan-strix-halo-serving-backend-regressi-2a1ed8c677-v1.json).
