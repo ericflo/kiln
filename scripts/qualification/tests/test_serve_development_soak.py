@@ -493,6 +493,17 @@ class ServeRocmSoakTests(unittest.TestCase):
             ],
             123,
         )
+        self.assertEqual(
+            soak.active_gpu_growth_limit_bytes(
+                soak.METAL_ENDURANCE_RUNTIME,
+                123,
+            ),
+            2 * 1024**3,
+        )
+        self.assertEqual(
+            soak.active_gpu_growth_limit_bytes(soak.ROCM_RUNTIME, 123),
+            123,
+        )
 
     def test_vulkan_launch_file_enforces_the_qualified_active_ceiling(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

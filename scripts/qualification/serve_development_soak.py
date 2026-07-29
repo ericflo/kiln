@@ -501,6 +501,17 @@ def phase_elapsed_seconds(started: float | None, now: float | None = None) -> fl
     finished = time.monotonic() if now is None else now
     return max(0.0, finished - started)
 
+
+def active_gpu_growth_limit_bytes(
+    runtime: SoakRuntime,
+    memory_growth_limit_bytes: int,
+) -> int:
+    return (
+        runtime.active_gpu_peak_growth_limit_bytes
+        if runtime.active_gpu_peak_growth_limit_bytes is not None
+        else memory_growth_limit_bytes
+    )
+
 METRIC_DEFINITIONS: dict[str, tuple[str, str, bool]] = {
     "attributed_itl_outlier_count": ("count", "sum", True),
     "batching_error_count": ("count", "sum", True),
@@ -802,10 +813,9 @@ def effective_config(
             "cancel_every_waves": runtime.cancel_every_waves,
             "gpu_memory_scope": runtime.gpu_memory_scope,
             "gpu_memory_source": runtime.gpu_memory_source,
-            "active_gpu_peak_growth_limit_bytes": (
-                runtime.active_gpu_peak_growth_limit_bytes
-                if runtime.active_gpu_peak_growth_limit_bytes is not None
-                else memory_growth_limit_bytes
+            "active_gpu_peak_growth_limit_bytes": active_gpu_growth_limit_bytes(
+                runtime,
+                memory_growth_limit_bytes,
             ),
             "max_tokens": runtime.max_tokens,
             "rocm_graph_cache_entries": runtime.graph_cache_max,
@@ -3689,6 +3699,10 @@ def execute(
             setup_elapsed_seconds=measurement_started - runtime_started,
         )
         rss_samples = [rss_start]
+        active_gpu_growth_limit = active_gpu_growth_limit_bytes(
+            runtime,
+            memory_growth_limit_bytes,
+        )
 
         while True:
             elapsed_before_wave = phase_elapsed_seconds(measurement_started)
@@ -3839,9 +3853,10 @@ def execute(
             vulkan_buffers_end = current_vulkan_buffers
             vulkan_pool_end = current_vulkan_pool
             rss_samples.append(current_rss)
-            if current_gpu > gpu_start + memory_growth_limit_bytes:
+            if current_gpu > gpu_start + active_gpu_growth_limit:
                 wave_failures.append(
-                    f"GPU memory grew by {current_gpu - gpu_start} bytes after warmup"
+                    "GPU memory exceeded the active-workload growth limit by "
+                    f"{current_gpu - gpu_start} bytes after warmup"
                 )
             if current_rss > rss_start + memory_growth_limit_bytes:
                 wave_failures.append(
@@ -4288,10 +4303,9 @@ def execute(
             failures.append("KV block capacity changed during soak")
         if sampler.errors:
             failures.append("GPU memory sampler errors: " + ", ".join(sampler.errors))
-        active_gpu_peak_growth_limit_bytes = (
-            runtime.active_gpu_peak_growth_limit_bytes
-            if runtime.active_gpu_peak_growth_limit_bytes is not None
-            else memory_growth_limit_bytes
+        active_gpu_peak_growth_limit_bytes = active_gpu_growth_limit_bytes(
+            runtime,
+            memory_growth_limit_bytes,
         )
         if gpu_peak > gpu_start + active_gpu_peak_growth_limit_bytes:
             failures.append(
