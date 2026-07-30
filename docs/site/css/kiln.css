@@ -1563,7 +1563,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
   font-weight: 600; padding-left: 2px;
 }
 .flywheel-title .icn { color: var(--accent-hover); }
-.flywheel-tagline { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--text-quiet); }
+.flywheel-tagline { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--text-muted); }
 .flywheel {
   display: flex; align-items: stretch;
   background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%);
@@ -1673,7 +1673,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
   height: 20px;
 }
 
-.nav-toggle-close { display: none; }
+.nav-toggle .nav-toggle-close { display: none; }
 .nav-toggle[aria-expanded="true"] .nav-toggle-open { display: none; }
 .nav-toggle[aria-expanded="true"] .nav-toggle-close { display: block; }
 
@@ -1739,6 +1739,111 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
 .nav-explore-menu a {
   width: 100%;
   justify-content: flex-start;
+}
+
+/* Shared shell for long-form product pages. Their source markup stays useful
+   without JavaScript; site.js progressively condenses it into the same
+   top-level navigation used by the homepage. */
+.product-page-enhanced {
+  scroll-padding-top: calc(var(--topbar-h) + 18px);
+}
+
+.product-page-shell .product-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 60;
+  border-bottom: 1px solid rgba(117,107,91,0.22) !important;
+  background: rgba(10,9,8,0.9);
+  backdrop-filter: blur(16px);
+}
+
+.product-page-shell .site-nav-bar {
+  position: relative;
+  min-height: var(--topbar-h);
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  flex-direction: row !important;
+  align-items: center !important;
+}
+
+.product-page-shell .product-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  color: var(--text) !important;
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.product-page-shell .site-nav {
+  display: flex;
+  width: auto;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-muted);
+}
+
+.product-page-shell .site-nav > a,
+.product-page-shell .site-nav .nav-explore-menu a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 7px 12px;
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: 1.45;
+  text-decoration: none;
+}
+
+.product-page-shell .site-nav > a:hover,
+.product-page-shell .site-nav .nav-explore-menu a:hover {
+  color: var(--text);
+  background: rgba(255,255,255,0.04);
+}
+
+.product-page-shell .site-nav a[aria-current="page"],
+.product-page-shell .nav-explore-toggle.has-current {
+  color: var(--text);
+  background: var(--accent-soft);
+}
+
+.product-page-shell .nav-github {
+  margin-left: 4px;
+  color: var(--text-2) !important;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.02);
+}
+
+.product-page-shell p a,
+.product-page-shell li a,
+.product-page-shell td a,
+.product-page-shell figcaption a,
+.product-page-shell .meta-line a,
+.product-page-shell .endpoint a,
+.product-page-shell a.link {
+  text-decoration: underline;
+  text-decoration-color: rgba(243,200,145,0.52);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.product-page-shell p a:hover,
+.product-page-shell li a:hover,
+.product-page-shell td a:hover,
+.product-page-shell figcaption a:hover,
+.product-page-shell .meta-line a:hover,
+.product-page-shell .endpoint a:hover,
+.product-page-shell a.link:hover {
+  text-decoration-color: currentColor;
+}
+
+.product-page-shell pre[data-keyboard-scroll="true"]:focus-visible {
+  outline-offset: -3px;
 }
 
 .home-v2 .nav-github {
@@ -2809,6 +2914,50 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
     overflow: hidden;
   }
 
+  .product-page-shell .site-nav-bar {
+    min-height: 64px;
+  }
+
+  .product-page-shell .nav-toggle {
+    display: inline-flex;
+  }
+
+  .product-page-shell .site-nav {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 24px;
+    right: 24px;
+    z-index: 70;
+    max-height: calc(100vh - 88px);
+    margin: 0;
+    padding: 10px;
+    display: none;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    background: rgba(19,18,16,0.99);
+    box-shadow: var(--shadow-3);
+  }
+
+  .product-page-shell .site-nav[data-open="true"] {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px;
+  }
+
+  .product-page-shell .site-nav > a,
+  .product-page-shell .site-nav .nav-explore-menu a {
+    width: 100%;
+    min-height: 42px;
+    justify-content: flex-start;
+  }
+
+  .product-page-shell .site-nav .nav-github {
+    grid-column: 1 / -1;
+    justify-content: center;
+    margin: 6px 0 0;
+  }
+
   .home-v2 .topbar-inner {
     min-height: 64px;
   }
@@ -2883,6 +3032,16 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
 }
 
 @media (max-width: 700px) {
+  .product-page-shell .site-nav-bar {
+    padding-left: 16px !important;
+    padding-right: 16px !important;
+  }
+
+  .product-page-shell .site-nav {
+    left: 16px;
+    right: 16px;
+  }
+
   .home-v2 .topbar-inner {
     padding: 10px var(--space-4);
   }

@@ -1,0 +1,8 @@
+/*
+ * Input for the small, self-hosted utility sheet used by the static product
+ * guides. Regenerate with:
+ *   npm run build:utilities --prefix scripts/docs-site
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;

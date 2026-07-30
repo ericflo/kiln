@@ -20,8 +20,9 @@
   <meta name="twitter:description" content="Generate rollouts, score completions, submit /v1/train/grpo, and watch Kiln hot-swap the resulting LoRA adapter.">
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image-v2.png">
 
-  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="css/utilities.css">
   <link rel="stylesheet" href="css/fonts.css">
+  <link rel="stylesheet" href="css/kiln.css">
   <style>
     /* Brand mark — stacked-fire-layers cube, mirrors the server dashboard. */
     .brand-mark {
@@ -600,5 +601,6 @@ curl -s http://localhost:8420/v1/adapters/$ADAPTER/receipt \
       });
     })();
   </script>
+  <script src="js/site.js" defer></script>
 </body>
 </html>

@@ -19,7 +19,9 @@
   <meta name="twitter:description" content="Cold start, hot-swap, OpenAI drop-in, custom-reward GRPO, online learning. One server, one GPU.">
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image-v2.png">
 
-  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="../css/utilities.css">
+  <link rel="stylesheet" href="../css/fonts.css">
+  <link rel="stylesheet" href="../css/kiln.css">
 
   <!-- asciinema-player CSS (self-hosted via jsDelivr CDN, version-pinned) -->
   <link rel="stylesheet" type="text/css"
@@ -28,14 +30,14 @@
   <style>
     :root {
       color-scheme: dark;
-      --bg: #0b0d10;
-      --bg-soft: #11141a;
-      --bg-soft-2: #161a22;
-      --line: #1f2530;
-      --line-2: #2a3140;
-      --fg: #e6e9ef;
-      --fg-dim: #a4adbb;
-      --fg-mute: #6f7888;
+      --bg: #0a0908;
+      --bg-soft: #181613;
+      --bg-soft-2: #1d1b17;
+      --line: #2b2720;
+      --line-2: #443c31;
+      --fg: #f7f4ef;
+      --fg-dim: #b0a895;
+      --fg-mute: #938b79;
       --accent: #f97316;
       --accent-soft: rgba(249, 115, 22, 0.12);
     }
@@ -43,8 +45,8 @@
     body {
       background: var(--bg);
       color: var(--fg);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-      font-feature-settings: "ss01", "cv02", "cv11";
+      font-family: 'Inter', 'Inter Fallback', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-feature-settings: "cv02", "cv03", "cv04", "cv11";
       -webkit-font-smoothing: antialiased;
     }
     .skip-link {
@@ -77,7 +79,7 @@
       overflow-x: auto;
       font-size: 13.5px;
       line-height: 1.55;
-      color: #d8dde7;
+      color: #d9d3c7;
     }
     pre code { background: transparent; padding: 0; color: inherit; }
     p code, li code, td code, h2 code, h3 code {
@@ -91,7 +93,7 @@
     .hero-glow {
       background:
         radial-gradient(60% 50% at 50% 0%, rgba(249,115,22,0.10), transparent 70%),
-        radial-gradient(40% 35% at 80% 20%, rgba(56,189,248,0.06), transparent 70%);
+        radial-gradient(40% 35% at 80% 20%, rgba(194,65,12,0.06), transparent 70%);
     }
     .card {
       background: var(--bg-soft);
@@ -311,7 +313,7 @@
   <header class="border-b" style="border-color: var(--line);">
     <div class="site-nav-bar max-w-5xl mx-auto px-6 py-4">
       <a href="../" class="flex items-center gap-2.5">
-        <img src="../assets/logo.png" alt="" width="28" height="28" class="rounded">
+        <img src="../assets/favicon.svg" alt="" width="28" height="28" class="rounded">
         <span class="text-lg font-semibold tracking-tight">Kiln</span>
       </a>
       <nav class="site-nav text-sm">
@@ -784,5 +786,6 @@
       if (CASTS.some(c => c.slug === slug)) selectCast(slug, false);
     });
   </script>
+  <script src="../js/site.js" defer></script>
 </body>
 </html>

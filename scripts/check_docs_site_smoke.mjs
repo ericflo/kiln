@@ -2117,7 +2117,7 @@ function validateLandingDesktopVersionSplitCue() {
 
 function validateQuickstartDesktopVersionSplitCue() {
   const quickstart = readFileSync(resolve(repoRoot, 'docs/site/quickstart.html'), 'utf8');
-  const desktopInstallMatch = quickstart.match(/<h3[^>]*>Desktop App &middot; recommended<\/h3>([\s\S]*?)<\/div>\s*<div class="install-card">/);
+  const desktopInstallMatch = quickstart.match(/<h3[^>]*>Desktop App &middot; recommended<\/h3>([\s\S]*?)<table class="installer-table/);
   if (!desktopInstallMatch) {
     fail('docs/site/quickstart.html: missing Desktop App install card copy');
   }
@@ -2134,6 +2134,49 @@ function validateQuickstartDesktopVersionSplitCue() {
   ];
   for (const term of requiredTerms) {
     assertIncludes(desktopInstallCopy, term, 'docs/site/quickstart.html: Desktop App version-split cue');
+  }
+
+  const desktopAssetLinks = [
+    'releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_aarch64.dmg',
+    'releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_x64-setup.exe',
+    'releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_x64_en-US.msi',
+    'releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_amd64.deb',
+    'releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_amd64.AppImage',
+  ];
+  for (const assetLink of desktopAssetLinks) {
+    assertIncludes(quickstart, assetLink, 'docs/site/quickstart.html: direct Desktop installer link');
+  }
+  assertIncludes(quickstart, 'class="install-alternatives"', 'docs/site/quickstart.html: advanced installer disclosure');
+  assertIncludes(quickstart, 'Four checkpoints. One working endpoint.', 'docs/site/quickstart.html: first-success path');
+}
+
+function validateSelfHostedProductPageAssets() {
+  const productPages = [
+    'quickstart.html',
+    'grpo.html',
+    'evals.html',
+    'api.html',
+    'cli.html',
+    'troubleshooting.html',
+    'architecture.html',
+    'demo/index.html',
+  ];
+  for (const relativePath of productPages) {
+    const html = readFileSync(resolve(repoRoot, 'docs/site', relativePath), 'utf8');
+    if (html.includes('cdn.tailwindcss.com')) {
+      fail(`docs/site/${relativePath}: runtime Tailwind CDN is forbidden; use the self-hosted utility sheet`);
+    }
+    const prefix = relativePath.includes('/') ? '../' : '';
+    assertIncludes(
+      html,
+      `href="${prefix}css/utilities.css"`,
+      `docs/site/${relativePath}: self-hosted utility sheet`,
+    );
+    assertIncludes(
+      html,
+      `src="${prefix}js/site.js"`,
+      `docs/site/${relativePath}: shared product-page shell`,
+    );
   }
 }
 
@@ -3203,6 +3246,7 @@ async function runSmoke() {
   validateGrpoDemoPayloadCue();
   validateLandingDesktopVersionSplitCue();
   validateQuickstartDesktopVersionSplitCue();
+  validateSelfHostedProductPageAssets();
   validateQuickstartMarkdownMedia();
   validateQuickstartServerBinaryPath();
   validateQuickstartCliReference();
@@ -3395,6 +3439,40 @@ async function runSmoke() {
         await page.waitForFunction(() => document.querySelector('.product-shot-window img')?.naturalWidth > 0);
       }
 
+      if (sitePage.path !== homePagePath) {
+        const shellResult = await page.evaluate(() => ({
+          enhanced: document.body.classList.contains('product-page-shell'),
+          hasToggle: Boolean(document.querySelector('.nav-toggle')),
+          hasExplore: Boolean(document.querySelector('.nav-explore-toggle')),
+          closed: getComputedStyle(document.querySelector('.site-nav')).display === 'none',
+        }));
+        if (!shellResult.enhanced || !shellResult.hasToggle || !shellResult.hasExplore || !shellResult.closed) {
+          fail(`${sitePage.path}: shared mobile product navigation shell is incomplete`);
+        }
+
+        await page.click('.nav-toggle');
+        const openNav = await page.evaluate(() => ({
+          expanded: document.querySelector('.nav-toggle')?.getAttribute('aria-expanded'),
+          open: document.querySelector('.site-nav')?.dataset.open,
+          bodyLocked: document.body.classList.contains('nav-open'),
+          visible: getComputedStyle(document.querySelector('.site-nav')).display !== 'none',
+        }));
+        if (openNav.expanded !== 'true' || openNav.open !== 'true' || !openNav.bodyLocked || !openNav.visible) {
+          fail(`${sitePage.path}: shared mobile product navigation does not open accessibly`);
+        }
+
+        await page.keyboard.press('Escape');
+        const closedNav = await page.evaluate(() => ({
+          expanded: document.querySelector('.nav-toggle')?.getAttribute('aria-expanded'),
+          open: document.querySelector('.site-nav')?.dataset.open,
+          bodyLocked: document.body.classList.contains('nav-open'),
+          focused: document.activeElement === document.querySelector('.nav-toggle'),
+        }));
+        if (closedNav.expanded !== 'false' || closedNav.open !== 'false' || closedNav.bodyLocked || !closedNav.focused) {
+          fail(`${sitePage.path}: Escape must close shared product navigation and restore focus`);
+        }
+      }
+
       if (sitePage.path === demoPagePath) {
         const demoResult = await page.evaluate(() => {
           const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -3420,6 +3498,18 @@ async function runSmoke() {
       }
 
       if (sitePage.path === quickstartPagePath) {
+        await page.evaluate(() => {
+          document.querySelector('main img[src="assets/server-ui-dashboard.webp"]')?.scrollIntoView({
+            block: 'center',
+          });
+        });
+        await page.waitForFunction(
+          () => {
+            const image = document.querySelector('main img[src="assets/server-ui-dashboard.webp"]');
+            return Boolean(image?.complete && image.naturalWidth > 0 && image.naturalHeight > 0);
+          },
+          { timeout: 5000 },
+        );
         const quickstartResult = await page.evaluate(() => {
           const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
           const bodyText = normalize(document.body.innerText);
@@ -3433,7 +3523,7 @@ async function runSmoke() {
             href: link.getAttribute('href'),
             text: normalize(link.textContent),
           }));
-          const dashboardImage = document.querySelector('main img[src="assets/server-ui-dashboard.png"]');
+          const dashboardImage = document.querySelector('main img[src="assets/server-ui-dashboard.webp"]');
 
           return {
             bodyText,
@@ -3468,7 +3558,7 @@ async function runSmoke() {
         }
 
         if (!quickstartResult.dashboardImage) {
-          fail(`${sitePage.path}: missing dashboard screenshot assets/server-ui-dashboard.png`);
+          fail(`${sitePage.path}: missing dashboard screenshot assets/server-ui-dashboard.webp`);
         }
         if (!quickstartResult.dashboardImage.complete
             || quickstartResult.dashboardImage.naturalWidth <= 0
