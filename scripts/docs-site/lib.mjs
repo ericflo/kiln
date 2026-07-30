@@ -775,7 +775,7 @@ function renderTopbar(manifest, depth) {
         <input id="docs-search-${depth}" type="search" placeholder="Search documentation" autocomplete="off" spellcheck="false">
         <div class="docs-search-results" data-docs-search-results hidden></div>
       </div>
-      <button class="docs-menu-button" type="button" data-docs-menu aria-controls="docs-sidebar" aria-expanded="false" aria-label="Open documentation navigation" title="Open navigation">Menu</button>
+      <button class="docs-menu-button" type="button" data-docs-menu aria-controls="docs-sidebar" aria-expanded="false" aria-label="Menu, open documentation navigation" title="Open navigation">Menu</button>
     </header>`;
 }
 

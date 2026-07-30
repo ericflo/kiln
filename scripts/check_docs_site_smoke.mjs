@@ -2289,6 +2289,11 @@ function validateSelfHostedProductPageAssets() {
       `src="${prefix}js/site.js"`,
       `docs/site/${relativePath}: shared product-page shell`,
     );
+    assertIncludes(
+      html,
+      "<script>document.documentElement.classList.add('product-page-enhanced');</script>",
+      `docs/site/${relativePath}: pre-render product-page shell`,
+    );
     const externalRuntimeAssets = Array.from(
       html.matchAll(/\b(?:src|href)="(https?:\/\/[^"]+\.(?:css|js)(?:[?#][^"]*)?)"/gi),
       (match) => match[1],
