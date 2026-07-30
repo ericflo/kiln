@@ -82,6 +82,7 @@ const expectedEmbeddedUiAccessibleControls = [
 ];
 
 const demoPagePath = publishedPath('demo/index.html');
+const homePagePath = publishedPath('index.html');
 const quickstartPagePath = publishedPath('quickstart.html');
 const apiPagePath = publishedPath('api.html');
 const cliPagePath = publishedPath('cli.html');
@@ -2070,12 +2071,18 @@ function validateGrpoOverviewRequestsImports() {
   assertRequestsImportNearPost(readmeSection, 'README.md: The GRPO Loop');
 
   const index = readFileSync(resolve(repoRoot, 'docs/site/index.html'), 'utf8');
-  const indexSection = index.match(/<!-- the GRPO loop -->[\s\S]*?<\/section>/);
-  if (!indexSection) {
-    fail('docs/site/index.html: missing The GRPO loop section');
+  const requiredLandingLoopTerms = [
+    'id="learning-pass"',
+    'POST /v1/train/grpo',
+    'reward accepted',
+    'adapter updated',
+    'href="grpo.html"',
+    'Walk through GRPO',
+  ];
+  const missingLandingLoopTerms = requiredLandingLoopTerms.filter((term) => !index.includes(term));
+  if (missingLandingLoopTerms.length > 0) {
+    fail(`docs/site/index.html: learning-pass overview missing terms: ${missingLandingLoopTerms.join(', ')}`);
   }
-  assertRequestsImportNearPost(indexSection[0], 'docs/site/index.html: The GRPO loop');
-  assertOpenAIClientSetupNearChatCreate(indexSection[0], 'docs/site/index.html: The GRPO loop');
 }
 
 function validateGrpoDemoPayloadCue() {
@@ -2093,19 +2100,18 @@ function validateGrpoDemoPayloadCue() {
 
 function validateLandingDesktopVersionSplitCue() {
   const index = readFileSync(resolve(repoRoot, 'docs/site/index.html'), 'utf8');
-  const desktopInstallMatch = index.match(/<h3[^>]*>Desktop App[\s\S]*?<\/h3>([\s\S]*?)<table class="installer-table/);
-  if (!desktopInstallMatch) {
-    fail('docs/site/index.html: missing Desktop App install copy');
-  }
-
-  const desktopInstallCopy = desktopInstallMatch[1];
   const requiredTerms = [
-    'separate GitHub release tags/version numbers',
-    'desktop-v0.2.16',
-    'latest <code>kiln-v*</code>',
+    'Signed releases are available',
+    'Linux CUDA',
+    'ROCm',
+    'Vulkan',
+    'Apple Silicon',
+    'Windows CUDA',
+    'href="quickstart.html"',
+    'https://github.com/ericflo/kiln/releases/latest',
   ];
   for (const term of requiredTerms) {
-    assertIncludes(desktopInstallCopy, term, 'docs/site/index.html: Desktop App version-split cue');
+    assertIncludes(index, term, 'docs/site/index.html: release-platform cue');
   }
 }
 
@@ -3315,6 +3321,78 @@ async function runSmoke() {
       }
       if (result.scrollWidth > result.clientWidth + mobileOverflowTolerancePx) {
         fail(`${sitePage.path}: mobile horizontal overflow at ${mobileViewport.width}x${mobileViewport.height}: scrollWidth ${result.scrollWidth} > clientWidth ${result.clientWidth} + tolerance ${mobileOverflowTolerancePx}; likely overflowing elements: ${formatLikelyOverflowingElements(result.likelyOverflowingElements)}`);
+      }
+
+      if (sitePage.path === homePagePath) {
+        const homeResult = await page.evaluate(() => {
+          const learningPass = document.querySelector('[data-learning-pass]');
+          const replay = document.querySelector('[data-replay-learning]');
+          const productImage = document.querySelector('.product-shot-window img');
+          const navToggle = document.querySelector('.nav-toggle');
+          return {
+            hasLearningPass: Boolean(learningPass),
+            hasBefore: Boolean(learningPass?.querySelector('.learning-answer-before')),
+            hasAfter: Boolean(learningPass?.querySelector('.learning-answer-after')),
+            hasTrainingEvent: Boolean(learningPass?.querySelector('.learning-heat-event')),
+            hasReplay: Boolean(replay),
+            hasNavToggle: Boolean(navToggle),
+            productImageSrc: productImage?.getAttribute('src') || '',
+            productImageLoading: productImage?.getAttribute('loading') || '',
+          };
+        });
+
+        if (!homeResult.hasLearningPass || !homeResult.hasBefore || !homeResult.hasAfter || !homeResult.hasTrainingEvent || !homeResult.hasReplay) {
+          fail(`${sitePage.path}: homepage learning-pass visual is incomplete`);
+        }
+        if (!homeResult.hasNavToggle) {
+          fail(`${sitePage.path}: homepage mobile navigation toggle is missing`);
+        }
+        if (homeResult.productImageSrc !== 'assets/server-ui-dashboard.webp' || homeResult.productImageLoading !== 'lazy') {
+          fail(`${sitePage.path}: homepage product image must use the optimized lazy-loaded WebP asset`);
+        }
+
+        await page.click('.nav-toggle');
+        const openNav = await page.evaluate(() => ({
+          expanded: document.querySelector('.nav-toggle')?.getAttribute('aria-expanded'),
+          open: document.querySelector('.site-nav')?.dataset.open,
+          bodyLocked: document.body.classList.contains('nav-open'),
+          visible: getComputedStyle(document.querySelector('.site-nav')).display !== 'none',
+        }));
+        if (openNav.expanded !== 'true' || openNav.open !== 'true' || !openNav.bodyLocked || !openNav.visible) {
+          fail(`${sitePage.path}: homepage mobile navigation does not open accessibly`);
+        }
+
+        await page.keyboard.press('Escape');
+        const closedNav = await page.evaluate(() => ({
+          expanded: document.querySelector('.nav-toggle')?.getAttribute('aria-expanded'),
+          open: document.querySelector('.site-nav')?.dataset.open,
+          bodyLocked: document.body.classList.contains('nav-open'),
+          focused: document.activeElement === document.querySelector('.nav-toggle'),
+        }));
+        if (closedNav.expanded !== 'false' || closedNav.open !== 'false' || closedNav.bodyLocked || !closedNav.focused) {
+          fail(`${sitePage.path}: Escape must close homepage navigation and restore focus`);
+        }
+
+        await page.click('[data-replay-learning]');
+        const replayStarted = await page.evaluate(() => ({
+          animating: document.querySelector('[data-learning-pass]')?.classList.contains('is-replaying'),
+          disabled: document.querySelector('[data-replay-learning]')?.disabled,
+        }));
+        if (!replayStarted.animating || !replayStarted.disabled) {
+          fail(`${sitePage.path}: learning-pass replay does not expose its active state`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        const replayFinished = await page.evaluate(() => ({
+          animating: document.querySelector('[data-learning-pass]')?.classList.contains('is-replaying'),
+          disabled: document.querySelector('[data-replay-learning]')?.disabled,
+          status: document.querySelector('[data-learning-status]')?.textContent || '',
+        }));
+        if (replayFinished.animating || replayFinished.disabled || !replayFinished.status.includes('improved adapter is serving')) {
+          fail(`${sitePage.path}: learning-pass replay does not settle with an announced result`);
+        }
+
+        await page.$eval('.product-shot-window img', (image) => image.scrollIntoView({ block: 'center' }));
+        await page.waitForFunction(() => document.querySelector('.product-shot-window img')?.naturalWidth > 0);
       }
 
       if (sitePage.path === demoPagePath) {

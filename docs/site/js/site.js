@@ -84,4 +84,92 @@
       btn.focus();
     }
   });
+
+  const nav = document.querySelector('.site-nav');
+  const navToggle = document.querySelector('.nav-toggle');
+  const navExplore = document.querySelector('.nav-explore');
+  const navExploreToggle = document.querySelector('.nav-explore-toggle');
+
+  function setNavigation(open, { restoreFocus = false } = {}) {
+    if (!nav || !navToggle) return;
+    nav.dataset.open = open ? 'true' : 'false';
+    navToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    const label = navToggle.querySelector('.sr-only');
+    if (label) label.textContent = open ? 'Close navigation' : 'Open navigation';
+    document.body.classList.toggle('nav-open', open);
+    if (!open && restoreFocus) navToggle.focus();
+  }
+
+  function setExplore(open) {
+    if (!navExplore || !navExploreToggle) return;
+    navExplore.dataset.open = open ? 'true' : 'false';
+    navExploreToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
+  if (navToggle && nav) {
+    navToggle.addEventListener('click', () => {
+      setNavigation(nav.dataset.open !== 'true');
+    });
+
+    nav.addEventListener('click', (event) => {
+      if (event.target.closest('a')) setNavigation(false);
+    });
+
+    window.addEventListener('resize', () => {
+      if (window.innerWidth > 980) setNavigation(false);
+    });
+  }
+
+  if (navExploreToggle && navExplore) {
+    navExploreToggle.addEventListener('click', () => {
+      setExplore(navExplore.dataset.open !== 'true');
+    });
+  }
+
+  document.addEventListener('click', (event) => {
+    if (navExplore && !navExplore.contains(event.target)) setExplore(false);
+    if (
+      nav
+      && navToggle
+      && nav.dataset.open === 'true'
+      && !nav.contains(event.target)
+      && !navToggle.contains(event.target)
+    ) {
+      setNavigation(false);
+    }
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    if (nav?.dataset.open === 'true') {
+      setNavigation(false, { restoreFocus: true });
+      return;
+    }
+    if (navExplore?.dataset.open === 'true') {
+      setExplore(false);
+      navExploreToggle?.focus();
+    }
+  });
+
+  const learningPass = document.querySelector('[data-learning-pass]');
+  const replayButton = document.querySelector('[data-replay-learning]');
+  const learningStatus = document.querySelector('[data-learning-status]');
+
+  if (learningPass && replayButton) {
+    replayButton.addEventListener('click', () => {
+      learningPass.classList.remove('is-replaying');
+      void learningPass.offsetWidth;
+      learningPass.classList.add('is-replaying');
+      replayButton.disabled = true;
+      if (learningStatus) learningStatus.textContent = 'Training pass replaying.';
+
+      window.setTimeout(() => {
+        learningPass.classList.remove('is-replaying');
+        replayButton.disabled = false;
+        if (learningStatus) {
+          learningStatus.textContent = 'Training pass complete. The improved adapter is serving.';
+        }
+      }, 1100);
+    });
+  }
 })();

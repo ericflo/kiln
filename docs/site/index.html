@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Kiln — your model gets better every time you use it</title>
-  <meta name="description" content="A pure-Rust single-GPU inference server with live LoRA training. OpenAI-compatible API, hot-swap adapters, and SFT, GRPO, and OPD over HTTP. Tuned for Qwen3.5-4B.">
+  <title>Kiln — serve it, teach it, watch it get better</title>
+  <meta name="description" content="Serve, train, and evaluate Qwen3.5-4B on one GPU from one pure-Rust binary. OpenAI-compatible inference, live LoRA training, local evals, and exact receipts.">
   <meta name="theme-color" content="#0a0908">
   <meta name="color-scheme" content="dark">
   <link rel="canonical" href="https://ericflo.github.io/kiln/">
@@ -16,15 +16,15 @@
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Kiln">
   <meta property="og:title" content="Kiln — your model gets better every time you use it">
-  <meta property="og:description" content="A pure-Rust single-GPU inference server with live LoRA training. OpenAI-compatible API, hot-swap adapters, and SFT, GRPO, and OPD over HTTP.">
+  <meta property="og:description" content="Serve, train, and evaluate Qwen3.5-4B on one GPU from one pure-Rust binary.">
   <meta property="og:url" content="https://ericflo.github.io/kiln/">
   <meta property="og:image" content="https://ericflo.github.io/kiln/assets/og-image-v2.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Kiln — pure-Rust single-GPU inference, live LoRA training, and local evals. Current ROCm and Vulkan stability status with vLLM recommended for high concurrency.">
+  <meta property="og:image:alt" content="Kiln — your model gets better every time you use it. Pure-Rust inference, live LoRA training, and local evals in one single-GPU server.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Kiln — your model gets better every time you use it">
-  <meta name="twitter:description" content="A pure-Rust single-GPU inference server with live LoRA training. OpenAI-compatible API, hot-swap adapters, and SFT, GRPO, and OPD over HTTP.">
+  <meta name="twitter:description" content="Serve, train, and evaluate Qwen3.5-4B on one GPU from one pure-Rust binary.">
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image-v2.png">
 
   <link rel="preload" as="font" type="font/woff2" href="fonts/Inter-400.woff2" crossorigin>
@@ -40,31 +40,31 @@
     "name": "Kiln",
     "operatingSystem": "Linux, macOS, Windows",
     "applicationCategory": "DeveloperApplication",
-    "description": "Pure-Rust single-GPU LLM inference server with live LoRA training. OpenAI-compatible API, hot-swap adapters, and SFT, GRPO, and OPD over HTTP.",
+    "description": "Pure-Rust single-GPU LLM server for OpenAI-compatible inference, LoRA training, and local evaluation.",
     "url": "https://ericflo.github.io/kiln/",
+    "downloadUrl": "https://github.com/ericflo/kiln/releases/latest",
+    "softwareHelp": "https://ericflo.github.io/kiln/docs/",
     "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
     "license": "https://opensource.org/license/MIT"
   }
   </script>
 </head>
-<body>
+<body class="home home-v2">
   <a class="skip-link" href="#content">Skip to content</a>
 
-  <!-- Inline icon sprite — mirrors the server dashboard #i-* symbols
-       (24px viewBox, 1.7px stroke). Referenced through SVG use of the symbol ids. -->
   <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
     <symbol id="i-stack" viewBox="0 0 24 24"><path d="M4 8.5l8 4 8-4"/><path d="M6 12.6l6 3 6-3"/><path d="M8 16.7l4 2 4-2"/></symbol>
     <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
-    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 4.5 13.5H11l-1 8.5L19.5 10H13l0-8Z"/></symbol>
     <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></symbol>
-    <symbol id="i-link" viewBox="0 0 24 24"><path d="M9.5 14.5 14.5 9.5"/><path d="M11 6.5 12.2 5.3a4 4 0 0 1 5.7 5.7l-1.2 1.2"/><path d="M13 17.5l-1.2 1.2a4 4 0 0 1-5.7-5.7l1.2-1.2"/></symbol>
     <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l3 8 4-16 3 8h4"/></symbol>
     <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9 3h6"/><path d="M10 3v6.5L5.2 18A1.6 1.6 0 0 0 6.6 21h10.8a1.6 1.6 0 0 0 1.4-3L14 9.5V3"/><path d="M7.6 14.5h8.8"/></symbol>
     <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20V4"/><path d="M4 20h16"/><path d="M8 20v-6"/><path d="M13 20V9"/><path d="M18 20v-4"/></symbol>
     <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></symbol>
     <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3"/><path d="M13 15h4"/></symbol>
-    <symbol id="i-merge" viewBox="0 0 24 24"><path d="M7 21V8"/><path d="M17 21v-6a4 4 0 0 0-4-4H7"/><path d="m4 11 3-3 3 3"/><path d="M14 18l3 3 3-3"/></symbol>
+    <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
   </defs></svg>
 
   <header class="topbar">
@@ -72,19 +72,30 @@
       <a href="./" class="brand" aria-current="page" aria-label="Kiln home">
         <span class="brand-mark" aria-hidden="true"><svg class="brand-flame" viewBox="0 0 24 24"><use href="#i-stack"></use></svg></span>
         <span>kiln</span>
-        <a class="brand-version" href="https://github.com/ericflo/kiln/releases/latest" rel="noopener">preview</a>
       </a>
-      <nav class="nav site-nav" aria-label="Primary">
+      <a class="brand-version" href="https://github.com/ericflo/kiln/releases/latest" rel="noopener">latest</a>
+
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">
+        <span class="sr-only">Open navigation</span>
+        <svg class="icn nav-toggle-open" aria-hidden="true"><use href="#i-menu"></use></svg>
+        <svg class="icn nav-toggle-close" aria-hidden="true"><use href="#i-close"></use></svg>
+      </button>
+
+      <nav class="nav site-nav" id="site-nav" aria-label="Primary" data-open="false">
         <a href="quickstart.html">Quickstart</a>
         <a href="docs/">Documentation</a>
-        <a href="grpo.html">GRPO Guide</a>
-        <a href="evals.html">Evals</a>
-        <a href="api.html">API Reference</a>
-        <a href="cli.html">CLI Reference</a>
         <a href="demo/">Demo</a>
-        <a href="troubleshooting.html">Troubleshooting</a>
-        <a href="architecture.html">Architecture</a>
-        <a href="https://github.com/ericflo/kiln" class="nav-ext" rel="noopener">
+        <div class="nav-explore">
+          <button class="nav-explore-toggle" type="button" aria-expanded="false">Explore <span aria-hidden="true">⌄</span></button>
+          <div class="nav-explore-menu">
+            <a href="grpo.html">GRPO Guide</a>
+            <a href="api.html">API Reference</a>
+            <a href="cli.html">CLI Reference</a>
+            <a href="troubleshooting.html">Troubleshooting</a>
+            <a href="architecture.html">Architecture</a>
+          </div>
+        </div>
+        <a href="https://github.com/ericflo/kiln" class="nav-ext nav-github" rel="noopener">
           <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .2a8 8 0 0 0-2.5 15.6c.4.07.55-.17.55-.38v-1.34c-2.23.49-2.7-1.07-2.7-1.07-.36-.93-.89-1.18-.89-1.18-.73-.5.05-.49.05-.49.81.06 1.23.83 1.23.83.72 1.23 1.88.88 2.34.67.07-.52.28-.88.5-1.08-1.78-.2-3.65-.89-3.65-3.95 0-.87.31-1.59.83-2.15-.08-.2-.36-1.02.08-2.13 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.11.16 1.93.08 2.13.52.56.83 1.28.83 2.15 0 3.07-1.87 3.75-3.66 3.95.29.25.54.74.54 1.5v2.22c0 .21.15.46.55.38A8 8 0 0 0 8 .2z"/></svg>
           GitHub
         </a>
@@ -93,654 +104,339 @@
   </header>
 
   <main id="content">
-
-    <section class="section section--tight hero">
-      <div class="page hero-grid">
-        <div class="hero-copy">
-          <span class="pill"><span class="pill-dot pill-dot--accent" aria-hidden="true"></span><a href="https://github.com/ericflo/kiln/releases/latest" style="color:inherit;text-decoration:none">latest release</a> · pre-1.0 preview</span>
-          <h1 class="hero-title">Your model gets better<br><span class="txt-accent">every time you use it.</span></h1>
-          <p class="hero-subline">
-            Point <strong>pi</strong> or <strong>opencode</strong> at one local endpoint — every request becomes training data.
+    <section class="home-hero">
+      <div class="page home-hero-grid">
+        <div class="home-hero-copy">
+          <a class="release-chip" href="https://github.com/ericflo/kiln/releases/latest" rel="noopener">
+            <span class="release-chip-dot" aria-hidden="true"></span>
+            Latest release
+            <span aria-hidden="true">→</span>
+          </a>
+          <h1>Serve it. Teach it.<br><span>Watch it get better.</span></h1>
+          <p class="home-hero-lede">
+            Kiln serves, trains, and evaluates <strong>Qwen3.5-4B</strong> on one GPU.
+            Turn agent traces and scoring signals into LoRA adapters, prove the change
+            locally, and serve the winner through the same OpenAI-compatible endpoint.
           </p>
-          <p class="hero-lede">
-            Kiln is a pure-Rust, single-GPU inference server with live LoRA training <em>and</em> evals built in.
-            Drop-in OpenAI API. Hot-swap adapters. <strong>SFT, GRPO, and a local eval loop over HTTP</strong> —
-            no frontier-LLM judge required. Built for local Qwen3.5-4B workflows on one GPU.
-          </p>
-          <div class="hero-cta">
-            <a class="btn btn-primary btn-lg" href="quickstart.html">Quickstart</a>
-            <a class="btn btn-lg" href="https://github.com/ericflo/kiln" rel="noopener">
-              <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" width="16" height="16"><path d="M8 .2a8 8 0 0 0-2.5 15.6c.4.07.55-.17.55-.38v-1.34c-2.23.49-2.7-1.07-2.7-1.07-.36-.93-.89-1.18-.89-1.18-.73-.5.05-.49.05-.49.81.06 1.23.83 1.23.83.72 1.23 1.88.88 2.34.67.07-.52.28-.88.5-1.08-1.78-.2-3.65-.89-3.65-3.95 0-.87.31-1.59.83-2.15-.08-.2-.36-1.02.08-2.13 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.11.16 1.93.08 2.13.52.56.83 1.28.83 2.15 0 3.07-1.87 3.75-3.66 3.95.29.25.54.74.54 1.5v2.22c0 .21.15.46.55.38A8 8 0 0 0 8 .2z"/></svg>
-              View on GitHub
+          <div class="home-hero-actions">
+            <a class="btn btn-primary btn-lg" href="quickstart.html">
+              Run Kiln in 5 minutes
+              <svg class="icn" aria-hidden="true"><use href="#i-arrow-right"></use></svg>
             </a>
+            <a class="btn btn-lg" href="#learning-pass">See the learning pass</a>
           </div>
-          <div class="hero-meta">
-            <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" width="14" height="14"><path d="M5 13l4 4L19 7"/></svg> Pure Rust, single binary</span>
-            <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" width="14" height="14"><path d="M5 13l4 4L19 7"/></svg> CUDA, ROCm, Metal, Vulkan</span>
-            <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" width="14" height="14"><path d="M5 13l4 4L19 7"/></svg> MIT license</span>
-          </div>
+          <ul class="hero-proof-list" aria-label="Kiln highlights">
+            <li>Pure Rust</li>
+            <li>One binary</li>
+            <li>One GPU</li>
+            <li>MIT licensed</li>
+          </ul>
         </div>
 
-        <aside class="hero-terminal" aria-label="Connect your agent to Kiln">
-          <div class="hero-terminal-bar">
-            <span class="dot dot--r"></span><span class="dot dot--y"></span><span class="dot dot--g"></span>
-            <span class="hero-terminal-title">connect your agent</span>
+        <div class="learning-pass" id="learning-pass" data-learning-pass>
+          <div class="learning-pass-bar">
+            <div class="window-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+            <span class="learning-pass-title">repair-policy · evaluation trace</span>
+            <span class="learning-pass-live"><i aria-hidden="true"></i> local</span>
           </div>
-          <div class="hero-terminal-body"><span class="t-c"># 1. serve Qwen3.5-4B on one local endpoint</span>
-<span class="t-p">$</span> <span class="t-cmd">kiln serve</span>
-<span class="t-d">  ▸ listening on <span class="t-a">http://localhost:8420/v1</span>  • api key: not required</span>
+          <div class="learning-pass-body">
+            <div class="learning-prompt">
+              <span class="learning-label">task</span>
+              <p>A test fails after a small refactor. What do you do first?</p>
+            </div>
 
-<span class="t-c"># 2. point your coding agent at it (pi or opencode)</span>
-<span class="t-p">$</span> <span class="t-cmd">kiln pi-setup</span>          <span class="t-d"># pi: Qwen3.5-4B is now the default</span>
-<span class="t-p">$</span> <span class="t-cmd">opencode</span>               <span class="t-d"># opencode: pick "Kiln · Qwen3.5-4B"</span>
-
-<span class="t-c"># 3. every agent tool call streams into /ui as training data</span>
-<span class="t-p">&gt;</span> <span class="t-cmd">pi -p "run the tests and fix what fails"</span>
-<span class="t-d">  ▸ <span class="kiln-pulse">●</span> tool_call <span class="t-a">bash</span> · captured · serving with <span class="t-a">helpful-v3</span></span></div>
-        </aside>
-      </div>
-    </section>
-
-    <!-- ===============================================================
-         Connect your agent — the #1 journey, directly under the hero.
-         Mirrors the server dashboard connect-panel: copyable Base URL +
-         Model id, "API key: not required", and the 5-tab snippet block
-         (pi | opencode | OpenAI Python | OpenAI JS | curl).
-         =============================================================== -->
-    <section class="section section--tight" id="connect" aria-label="Connect your agent">
-      <div class="page">
-        <section class="connect-band">
-          <div class="connect-head">
-            <span class="eyebrow eyebrow--accent">Connect your agent</span>
-            <h2>Point pi, opencode, or any OpenAI client at Kiln.</h2>
-            <p class="connect-note">No API key. No SDK swap. Change the base URL, keep your agent — every call it makes is captured as training data in <code>/ui</code>.</p>
-          </div>
-          <div class="connect-grid">
-            <div class="connect-facts">
-              <div class="connect-field">
-                <label for="connect-base-url">Base URL</label>
-                <div class="copy-field">
-                  <code id="connect-base-url">http://localhost:8420/v1</code>
-                  <button class="copy-btn" type="button" data-target="connect-base-url" aria-label="Copy base URL"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg>Copy</button>
-                </div>
+            <div class="learning-answer learning-answer-before">
+              <div>
+                <span class="learning-label">before</span>
+                <span class="score score-bad">0 / 1</span>
               </div>
-              <div class="connect-field">
-                <label for="connect-model">Model id <span style="text-transform:none;letter-spacing:0;font-weight:400;">(the <code style="font-size:10px;">model</code> field)</span></label>
-                <div class="copy-field">
-                  <code id="connect-model">Qwen3.5-4B</code>
-                  <button class="copy-btn" type="button" data-target="connect-model" aria-label="Copy model id"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-copy"></use></svg>Copy</button>
+              <p>Rewrite the module so the implementation is easier to reason about.</p>
+            </div>
+
+            <div class="learning-heat" aria-label="One local training update">
+              <div class="learning-heat-line" aria-hidden="true"><span></span></div>
+              <div class="learning-heat-event">
+                <span class="learning-event-icon" aria-hidden="true"><svg class="icn"><use href="#i-flask"></use></svg></span>
+                <div>
+                  <strong>reward accepted · adapter updated</strong>
+                  <code>POST /v1/train/grpo</code>
                 </div>
-              </div>
-              <div class="connect-field">
-                <label>API key</label>
-                <span class="connect-keychip">
-                  <svg class="icn icn-sm" aria-hidden="true"><use href="#i-check"></use></svg>
-                  Not required — any value works (we use <code>unused</code>)
-                </span>
+                <span class="learning-event-time">1 pass</span>
               </div>
             </div>
 
-            <div class="connect-clients">
-              <span class="connect-clients-label">Set up your client</span>
-              <div class="tabs">
-                <div class="tabs-bar" role="tablist" aria-label="Client setup">
-                  <button class="tab-btn" role="tab" aria-selected="true" aria-controls="cx-pi" id="cxt-pi" tabindex="0">pi</button>
-                  <button class="tab-btn" role="tab" aria-selected="false" aria-controls="cx-opencode" id="cxt-opencode" tabindex="-1">opencode</button>
-                  <button class="tab-btn" role="tab" aria-selected="false" aria-controls="cx-python" id="cxt-python" tabindex="-1">OpenAI Python</button>
-                  <button class="tab-btn" role="tab" aria-selected="false" aria-controls="cx-js" id="cxt-js" tabindex="-1">OpenAI JS</button>
-                  <button class="tab-btn" role="tab" aria-selected="false" aria-controls="cx-curl" id="cxt-curl" tabindex="-1">curl</button>
-                </div>
-
-                <div class="tab-panel connect-snippet" role="tabpanel" id="cx-pi" aria-labelledby="cxt-pi" aria-hidden="false">
-                  <p class="connect-snippet-note">One command — backs up &amp; merges <code>~/.pi/agent/{models,settings}.json</code>, then makes Kiln pi&rsquo;s default model.</p>
-                  <div class="code-shell">
-                    <button class="copy-btn" type="button" data-target="cx-pi-code" aria-label="Copy code">copy</button>
-<pre id="cx-pi-code"><code># Point pi at this Kiln server
-kiln pi-setup
-
-# Remote server? pass its URL — /v1 is appended for you
-kiln pi-setup --kiln-url http://localhost:8420</code></pre>
-                  </div>
-                </div>
-
-                <div class="tab-panel connect-snippet" role="tabpanel" id="cx-opencode" aria-labelledby="cxt-opencode" aria-hidden="true" hidden>
-                  <p class="connect-snippet-note">Add this provider, then run <code>opencode</code> and pick the model with <code>/models</code>. No API key needed.</p>
-                  <div class="code-shell">
-                    <div class="code-block-path">~/.config/opencode/opencode.json</div>
-                    <button class="copy-btn" type="button" data-target="cx-opencode-code" aria-label="Copy code">copy</button>
-<pre id="cx-opencode-code"><code>{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "kiln": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Kiln (local)",
-      "options": { "baseURL": "http://localhost:8420/v1", "apiKey": "unused" },
-      "models": { "Qwen3.5-4B": { "name": "Kiln · Qwen3.5-4B" } }
-    }
-  }
-}</code></pre>
-                  </div>
-                </div>
-
-                <div class="tab-panel connect-snippet" role="tabpanel" id="cx-python" aria-labelledby="cxt-python" aria-hidden="true" hidden>
-                  <p class="connect-snippet-note">Drop-in OpenAI SDK — only <code>base_url</code> changes.</p>
-                  <div class="code-shell">
-                    <button class="copy-btn" type="button" data-target="cx-python-code" aria-label="Copy code">copy</button>
-<pre id="cx-python-code"><code>from openai import OpenAI
-
-client = OpenAI(base_url="http://localhost:8420/v1", api_key="unused")
-
-resp = client.chat.completions.create(
-    model="Qwen3.5-4B",
-    messages=[{"role": "user", "content": "Hello from my agent"}],
-)
-print(resp.choices[0].message.content)</code></pre>
-                  </div>
-                </div>
-
-                <div class="tab-panel connect-snippet" role="tabpanel" id="cx-js" aria-labelledby="cxt-js" aria-hidden="true" hidden>
-                  <p class="connect-snippet-note">Drop-in OpenAI SDK for Node / Bun / Deno.</p>
-                  <div class="code-shell">
-                    <button class="copy-btn" type="button" data-target="cx-js-code" aria-label="Copy code">copy</button>
-<pre id="cx-js-code"><code>import OpenAI from "openai";
-
-const client = new OpenAI({ baseURL: "http://localhost:8420/v1", apiKey: "unused" });
-
-const resp = await client.chat.completions.create({
-  model: "Qwen3.5-4B",
-  messages: [{ role: "user", content: "Hello from my agent" }],
-});
-console.log(resp.choices[0].message.content);</code></pre>
-                  </div>
-                </div>
-
-                <div class="tab-panel connect-snippet" role="tabpanel" id="cx-curl" aria-labelledby="cxt-curl" aria-hidden="true" hidden>
-                  <p class="connect-snippet-note">Raw HTTP — drop into any shell, CI job, or script.</p>
-                  <div class="code-shell">
-                    <button class="copy-btn" type="button" data-target="cx-curl-code" aria-label="Copy code">copy</button>
-<pre id="cx-curl-code"><code>curl -s http://localhost:8420/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen3.5-4B",
-    "messages": [{"role": "user", "content": "Hello from my agent"}]
-  }'</code></pre>
-                  </div>
-                </div>
+            <div class="learning-answer learning-answer-after">
+              <div>
+                <span class="learning-label">after</span>
+                <span class="score score-good">1 / 1</span>
               </div>
+              <p>Run the failing test, isolate the regression, then patch the smallest surface.</p>
             </div>
-          </div>
-        </section>
-      </div>
-    </section>
 
-    <section class="section section--tight" aria-label="Current hardware qualification and performance position">
-      <div class="page">
-        <div class="stat-grid">
-          <div class="stat-cell">
-            <div class="stat-value">12.18 <span class="stat-unit">tok/s</span></div>
-            <div class="stat-label">ROCm mixed soak</div>
-          </div>
-          <div class="stat-cell">
-            <div class="stat-value">30 <span class="stat-unit">min</span></div>
-            <div class="stat-label">ROCm gate passed</div>
-          </div>
-          <div class="stat-cell">
-            <div class="stat-value">0.455 <span class="stat-unit">tok/s</span></div>
-            <div class="stat-label">Vulkan, stability only</div>
-          </div>
-          <div class="stat-cell">
-            <div class="stat-value">vLLM</div>
-            <div class="stat-label">Preferred at high concurrency</div>
+            <div class="learning-pass-footer">
+              <span><i aria-hidden="true"></i> <code>repair-policy-v3</code> is now serving</span>
+              <button class="learning-replay" type="button" data-replay-learning>
+                <svg class="icn" aria-hidden="true"><use href="#i-refresh"></use></svg>
+                Replay
+              </button>
+            </div>
+            <p class="sr-only" aria-live="polite" data-learning-status></p>
           </div>
         </div>
-        <p class="stat-foot">
-          Current source-bound Strix Halo Qwen3.5-4B development receipts. ROCm passed stability at 12.176 aggregate tok/s with explicit long-run variance; Vulkan passed stability with unacceptable serving performance. Kiln makes no current vLLM parity claim.
-          <a href="docs/benchmarks/">See receipts and limits →</a>
-        </p>
+      </div>
+      <div class="page hero-capability-rail" aria-label="Core capabilities">
+        <span><strong>OpenAI API</strong> drop-in clients</span>
+        <span><strong>SFT · GRPO · OPD</strong> over HTTP</span>
+        <span><strong>CUDA · ROCm · Metal · Vulkan</strong></span>
+        <span><strong>Exact receipts</strong> and strict replay</span>
       </div>
     </section>
 
-    <section class="section">
+    <section class="home-section loop-section" id="loop">
       <div class="page">
-        <header class="section-head">
-          <span class="eyebrow">What is kiln</span>
-          <h2>An inference server you can teach.</h2>
-          <p class="section-lede">
-            Most servers stop at autoregressive decode. Kiln keeps going. Same process serves
-            traffic, trains a LoRA adapter on your scoring signal, and hot-swaps it into
-            production — without ever dropping a request.
+        <header class="home-section-head">
+          <span class="eyebrow eyebrow--accent">One local improvement loop</span>
+          <h2>From real work to a verified adapter.<br>Nothing leaves the machine.</h2>
+          <p>
+            Most inference servers stop after the response. Kiln keeps the entire
+            improvement cycle beside the model—from captured work to an adapter you can
+            measure, inspect, and serve.
           </p>
         </header>
 
-        <div class="feature-grid">
-          <article class="feature">
-            <div class="feature-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4h16v6H4z"/><path d="M4 14h16v6H4z"/><circle cx="8" cy="7" r="1.2" fill="currentColor"/><circle cx="8" cy="17" r="1.2" fill="currentColor"/></svg>
-            </div>
-            <h3>OpenAI-compatible inference</h3>
-            <p>
-              <code>/v1/chat/completions</code>, <code>/v1/completions</code>,
-              <code>/v1/embeddings</code>, streaming, function calling. Point any OpenAI
-              client at <code>localhost:8420</code> and you're done.
-            </p>
+        <div class="loop-track">
+          <article class="loop-step">
+            <span class="loop-number">01</span>
+            <svg class="icn" aria-hidden="true"><use href="#i-terminal"></use></svg>
+            <h3>Serve</h3>
+            <p>Point pi, opencode, or any OpenAI client at <code>localhost:8420/v1</code>.</p>
           </article>
-          <article class="feature">
-            <div class="feature-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l3 3M16 16l3 3M5 19l3-3M16 8l3-3"/></svg>
-            </div>
-            <h3>Live LoRA training</h3>
-            <p>
-              POST a batch of rollouts and rewards to <code>/v1/train/grpo</code>. The trainer
-              shares VRAM with the model, computes the policy update, and hot-swaps the
-              new adapter on the next forward pass.
-            </p>
+          <span class="loop-arrow" aria-hidden="true">→</span>
+          <article class="loop-step">
+            <span class="loop-number">02</span>
+            <svg class="icn" aria-hidden="true"><use href="#i-database"></use></svg>
+            <h3>Capture</h3>
+            <p>Requests, tool calls, scores, and A/B judgments become a local corpus.</p>
           </article>
-          <article class="feature">
-            <div class="feature-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 12h6l3-9 3 18 3-9h3"/></svg>
-            </div>
-            <h3>Single-GPU, single binary</h3>
-            <p>
-              Pure-Rust workspace, no Python runtime, no Docker required. CUDA or ROCm on Linux,
-              Metal on Apple Silicon, Vulkan elsewhere. Boots in seconds and stays under
-              ~10&nbsp;GB on A6000.
-            </p>
+          <span class="loop-arrow" aria-hidden="true">→</span>
+          <article class="loop-step loop-step-hot">
+            <span class="loop-number">03</span>
+            <svg class="icn" aria-hidden="true"><use href="#i-flask"></use></svg>
+            <h3>Teach</h3>
+            <p>Run bounded SFT, GRPO, or OPD and publish a versioned LoRA adapter.</p>
           </article>
+          <span class="loop-arrow" aria-hidden="true">→</span>
+          <article class="loop-step">
+            <span class="loop-number">04</span>
+            <svg class="icn" aria-hidden="true"><use href="#i-chart"></use></svg>
+            <h3>Prove</h3>
+            <p>Compare adapters, inspect every example, and strictly replay seeded evals.</p>
+          </article>
+        </div>
+
+        <div class="loop-links">
+          <a href="grpo.html">Walk through GRPO <span aria-hidden="true">→</span></a>
+          <a href="evals.html">See the eval loop <span aria-hidden="true">→</span></a>
+          <a href="docs/training-checkpoints/">Read the checkpoint contract <span aria-hidden="true">→</span></a>
         </div>
       </div>
     </section>
 
-    <!-- the GRPO loop -->
-    <section class="section section--accent" id="grpo">
+    <section class="home-section product-section" id="product">
       <div class="page">
-        <header class="section-head">
-          <span class="eyebrow eyebrow--accent">The killer feature</span>
-          <h2>Online learning over HTTP.</h2>
-          <p class="section-lede">
-            Generate rollouts. Score them with whatever reward function you have lying
-            around. POST them back. The model that serves your next request is the one
-            that just learned.
+        <header class="home-section-head home-section-head-left">
+          <span class="eyebrow">The product is already in the binary</span>
+          <h2>Operate the loop, not a collection of scripts.</h2>
+          <p>
+            Every Kiln server ships a dashboard for live requests, adapters, training,
+            evals, traces, and exact receipts. No separate control plane to install.
           </p>
         </header>
 
-        <div class="grpo-grid">
-          <div class="code-shell" data-lang="python">
-            <div class="code-shell-bar">
-              <span class="code-tag">python</span>
-              <span class="code-title">grpo_loop.py</span>
-              <button class="copy-btn" type="button" data-target="grpo-py" aria-label="Copy code">copy</button>
+        <div class="product-stage">
+          <figure class="product-shot">
+            <div class="product-shot-chrome">
+              <span class="product-shot-url"><i aria-hidden="true"></i> localhost:8420/ui</span>
+              <span>embedded dashboard</span>
             </div>
-<pre id="grpo-py"><code># Drop-in OpenAI client. Same endpoint, same model.
-import openai
-import requests, json
-
-client = openai.OpenAI(base_url="http://localhost:8420/v1", api_key="unused")
-
-# 1. Generate N rollouts on the same prompt.
-prompt = "Write a short, friendly email reply."
-rollouts = [client.chat.completions.create(
-    model="Qwen/Qwen3.5-4B",
-    messages=[{"role": "user", "content": prompt}],
-    temperature=1.0, n=1).choices[0].message.content
-    for _ in range(8)]
-
-# 2. Score with whatever reward you want.
-scored = [{"text": r, "reward": score(prompt, r)} for r in rollouts]
-
-# 3. Send the batch back. Adapter is live on the next request.
-requests.post("http://localhost:8420/v1/train/grpo", json={
-    "groups": [{
-        "messages": [{"role": "user", "content": prompt}],
-        "completions": scored,
-    }],
-    "config": {"output_name": "helpful-v3"},
-})</code></pre>
-          </div>
-
-          <div class="grpo-side">
-            <div class="callout">
-              <div class="callout-step">1</div>
-              <div>
-                <h3>You generate.</h3>
-                <p>Standard OpenAI completions. Use <em>any</em> client — the kiln server doesn't care if it's Python, TypeScript, or curl.</p>
-              </div>
+            <div class="product-shot-window">
+              <img src="assets/server-ui-dashboard.webp" alt="Kiln embedded server dashboard showing server status, live request activity, adapters, training, and operational controls." loading="lazy" decoding="async" width="2880" height="3466">
             </div>
-            <div class="callout">
-              <div class="callout-step">2</div>
-              <div>
-                <h3>You score.</h3>
-                <p>Reward is your code, not a config. A regex, a classifier, a human, an evaluator LLM, a unit test result. Whatever signal you have.</p>
-              </div>
-            </div>
-            <div class="callout">
-              <div class="callout-step">3</div>
-              <div>
-                <h3>Kiln learns.</h3>
-                <p>One HTTP call. The trainer runs in-process, computes the GRPO update, swaps the adapter <em>without</em> reloading the base model. Typical end-to-end: a few seconds.</p>
-              </div>
-            </div>
-            <a class="link-arrow" href="grpo.html">Read the GRPO guide →</a>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section class="section" aria-label="Kiln UIs">
-      <div class="page">
-        <header class="section-head">
-          <span class="eyebrow">Two front ends</span>
-          <h2>One server, browser or desktop.</h2>
-          <p class="section-lede">
-            Every kiln server ships an embedded dashboard. There's also a Tauri desktop
-            app for the same workflows offline.
-          </p>
-        </header>
-
-        <div class="screenshot-grid">
-          <figure class="screenshot">
-            <div class="screenshot-frame">
-              <img src="assets/server-ui-dashboard.png" alt="Kiln server dashboard showing live request log, GPU utilisation, active adapters, and training queue." loading="lazy" width="2880" height="1800">
-            </div>
-            <figcaption>
-              <strong>Embedded server UI.</strong> Visit <code>localhost:8420</code> for a
-              full dashboard — live requests, training jobs, adapters, logs. No extra
-              install.
-            </figcaption>
           </figure>
-          <figure class="screenshot">
-            <div class="screenshot-frame">
-              <img src="assets/desktop-dashboard.png" alt="Kiln Desktop app showing the same dashboard inside a native Tauri shell." loading="lazy" width="2880" height="1800">
-            </div>
-            <figcaption>
-              <strong>Kiln Desktop.</strong> The same dashboard, packaged as a native
-              Tauri app for macOS, Windows, and Linux.
-            </figcaption>
-          </figure>
-        </div>
-      </div>
-    </section>
 
-    <section class="section">
-      <div class="page">
-        <header class="section-head">
-          <span class="eyebrow">Under the hood</span>
-          <h2>Tuned for one model, end to end.</h2>
-          <p class="section-lede">
-            Kiln targets Qwen3.5-4B specifically. The scheduler, paged KV cache, kernels,
-            and quantization are all chosen for its hybrid 24×GDN + 8×GQA layout.
-          </p>
-        </header>
-
-        <div class="feature-grid-4">
-          <div class="feature feature--compact">
-            <h3>Continuous batching</h3>
-            <p>Sarathi-style chunked prefill. Decode requests merge into a running batch without head-of-line blocking.</p>
-          </div>
-          <div class="feature feature--compact">
-            <h3>pi &amp; opencode backend</h3>
-            <p><code>kiln pi-setup</code> wires up pi; one provider block wires up opencode. Both serve <code>Qwen3.5-4B</code> with OpenAI-shaped tool calls. <a href="#connect">Connect ↑</a></p>
-          </div>
-          <div class="feature feature--compact">
-            <h3>Paged KV cache</h3>
-            <p>Block-allocated KV pages with backend-qualified cross-call prefix reuse. Vulkan currently fresh-prefills under an explicit correctness quarantine.</p>
-          </div>
-          <div class="feature feature--compact">
-            <h3>W4A16 + Marlin</h3>
-            <p>MLP projections quantized to 4-bit weights with bf16 activations. Vendored Marlin GEMM, fused RMSNorm + GDN gates.</p>
-          </div>
-          <div class="feature feature--compact">
-            <h3>Hot-swap LoRA</h3>
-            <p>Adapters live alongside the base weights. Applied per request. Switch policies in milliseconds, no reload.</p>
-          </div>
-          <div class="feature feature--compact">
-            <h3>Bounded online LoRA</h3>
-            <p>Fixed-profile native SFT plus GRPO and OPD with exact resume points. Your data, rewards, and identity-bound teachers stay beside the serving model.</p>
-          </div>
-          <div class="feature feature--compact">
-            <h3>FP8 KV (opt-in)</h3>
-            <p><code>KILN_MEMORY_KV_CACHE_FP8=1</code> doubles effective context with no measurable quality loss on Qwen3.5-4B.</p>
-          </div>
-          <div class="feature feature--compact">
-            <h3>Four GPU backends</h3>
-            <p>CUDA on Ampere/Ada/Hopper. ROCm on AMD CDNA/RDNA/Strix Halo. Metal on Apple Silicon (M-series). Vulkan elsewhere. One source tree.</p>
-          </div>
-          <div class="feature feature--compact">
-            <h3>Pure Rust</h3>
-            <p>13-crate workspace. No Python at runtime. <code>cargo build --release --features cuda</code> and you have a server.</p>
-          </div>
-          <div class="feature feature--compact">
-            <h3>Evals as a peer of training</h3>
-            <p>Pluggable scorers (<code>exact_match</code>, <code>regex</code>, <code>tool_call</code>, <code>code</code>, <code>llm_judge</code>, …). Synthesize a suite from any SFT/GRPO dataset. Auto-eval every training run via <code>post_eval</code>. <a href="evals.html">See the eval loop →</a></p>
-          </div>
-          <div class="feature feature--compact">
-            <h3>The judgment flywheel</h3>
-            <p>A/B preferences from <code>/ui</code> compile into an SFT dataset and train a local judge LoRA, used as the <code>judge_adapter</code> in any future <code>llm_judge</code> scorer.</p>
+          <div class="product-points">
+            <article>
+              <span>01</span>
+              <div><h3>See every request</h3><p>Streaming traces, token timing, tool calls, and serving-adapter identity.</p></div>
+            </article>
+            <article>
+              <span>02</span>
+              <div><h3>Train without a sidecar</h3><p>Queue SFT, GRPO, and OPD jobs against the resident model.</p></div>
+            </article>
+            <article>
+              <span>03</span>
+              <div><h3>Judge the result</h3><p>Run suites, compare adapters, and turn A/B picks into training data.</p></div>
+            </article>
+            <article>
+              <span>04</span>
+              <div><h3>Keep the evidence</h3><p>Receipts bind model, data, runtime, adapter, and replay identity.</p></div>
+            </article>
+            <a class="product-demo-link" href="demo/">Watch the recorded workflow <span aria-hidden="true">→</span></a>
           </div>
         </div>
       </div>
     </section>
 
-    <section class="section" id="install">
+    <section class="home-section principles-section">
       <div class="page">
-        <header class="section-head">
-          <span class="eyebrow">Install</span>
-          <h2>Pick a binary. Run it.</h2>
-          <p class="section-lede">
-            Pre-built releases for Linux+CUDA, Linux+ROCm, Linux+Vulkan, Apple Silicon, and Windows CUDA.
-            <a href="quickstart.html">Full quickstart →</a>
+        <header class="home-section-head">
+          <span class="eyebrow">A different kind of model server</span>
+          <h2>Built for the tight loop.</h2>
+          <p>
+            Kiln is deliberately narrow: one model family, one GPU, and one complete path
+            from inference to evidence-backed improvement.
           </p>
         </header>
 
-        <div class="tabs">
-          <div class="tabs-bar" role="tablist" aria-label="Install instructions">
-            <button class="tab-btn" role="tab" aria-selected="true" aria-controls="tab-cuda" id="t-cuda" data-tab="cuda">Linux · CUDA 12.4</button>
-            <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-rocm" id="t-rocm" data-tab="rocm">Linux · ROCm 7.2.4</button>
-            <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-vulkan" id="t-vulkan" data-tab="vulkan">Linux · Vulkan</button>
-            <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-mac" id="t-mac" data-tab="mac">macOS · Metal</button>
-            <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-source" id="t-source" data-tab="source">From source</button>
-          </div>
-
-          <div class="tab-panel" role="tabpanel" id="tab-cuda" aria-labelledby="t-cuda" aria-hidden="false">
-          <div class="code-shell">
-            <div class="code-shell-bar">
-              <span class="code-tag">bash</span>
-              <span class="code-title">install · linux · cuda 12.4</span>
-              <button class="copy-btn" type="button" data-target="snip-cuda">copy</button>
+        <div class="principle-grid">
+          <article class="principle principle-featured">
+            <span class="principle-kicker">One model, end to end</span>
+            <h3>A scalpel, not a framework.</h3>
+            <p>
+              The scheduler, paged KV cache, kernels, quantization, LoRA routes, and
+              training memory plans are tuned for Qwen3.5-4B’s hybrid architecture.
+            </p>
+            <div class="architecture-mark" aria-hidden="true">
+              <span>24× GDN</span><i></i><span>8× GQA</span><i></i><span>4B</span>
             </div>
-<pre id="snip-cuda"><code>KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest \
+          </article>
+          <article class="principle">
+            <span class="principle-kicker">One runtime</span>
+            <h3>Pure Rust. No Python at runtime.</h3>
+            <p>A single executable owns inference, training, evals, adapter lifecycle, metrics, and the dashboard.</p>
+          </article>
+          <article class="principle">
+            <span class="principle-kicker">One source of truth</span>
+            <h3>Proof is a product feature.</h3>
+            <p>Exact receipts, immutable identities, typed configuration, and strict replay make “better” inspectable.</p>
+          </article>
+          <article class="principle">
+            <span class="principle-kicker">Your signal</span>
+            <h3>Reward is code, not a platform.</h3>
+            <p>Use a test, regex, scorer, local judge, A/B pick, or teacher. Kiln accepts the result over HTTP.</p>
+          </article>
+          <article class="principle">
+            <span class="principle-kicker">Your hardware</span>
+            <h3>Four backends. One source tree.</h3>
+            <p>CUDA, ROCm, Metal, and Vulkan builds span workstation GPUs and Apple Silicon.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="home-section install-section" id="install">
+      <div class="page install-layout">
+        <div class="install-copy">
+          <span class="eyebrow eyebrow--accent">Run it locally</span>
+          <h2>One binary.<br>One model path.<br>One endpoint.</h2>
+          <p>
+            Signed releases are available for Linux CUDA, ROCm, and Vulkan; Apple Silicon
+            Metal; and Windows CUDA. The full quickstart covers drivers, Docker, Desktop,
+            and every backend.
+          </p>
+          <div class="install-actions">
+            <a class="btn btn-primary btn-lg" href="quickstart.html">Choose your platform</a>
+            <a class="btn btn-lg" href="https://github.com/ericflo/kiln/releases/latest" rel="noopener">Download latest</a>
+          </div>
+        </div>
+
+        <div class="install-terminal">
+          <div class="code-shell-bar">
+            <span class="code-tag">bash</span>
+            <span class="code-title">linux · cuda 12.4</span>
+            <button class="copy-btn" type="button" data-target="home-install-code" aria-label="Copy install commands">copy</button>
+          </div>
+<pre id="home-install-code" tabindex="0" aria-label="Kiln installation commands"><code># Resolve the newest signed server release
+KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest \
   | sed -n 's/.*"tag_name": "kiln-v\([^"]*\)".*/\1/p')
+
 curl -fsSLO "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-cuda124.tar.gz"
 tar xf "kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-cuda124.tar.gz"
-KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve</code></pre>
-            </div>
-          </div>
 
-          <div class="tab-panel" role="tabpanel" id="tab-rocm" aria-labelledby="t-rocm" aria-hidden="true" hidden>
-          <div class="code-shell">
-            <div class="code-shell-bar">
-              <span class="code-tag">bash</span>
-              <span class="code-title">install · linux · rocm 7.2.4</span>
-              <button class="copy-btn" type="button" data-target="snip-rocm">copy</button>
-            </div>
-<pre id="snip-rocm"><code>KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest \
-  | sed -n 's/.*"tag_name": "kiln-v\([^"]*\)".*/\1/p')
-curl -fsSLO "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-rocm724.tar.gz"
-tar xf "kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-rocm724.tar.gz"
-KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve</code></pre>
-            </div>
-          </div>
+# Serve Qwen3.5-4B
+KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
 
-          <div class="tab-panel" role="tabpanel" id="tab-vulkan" aria-labelledby="t-vulkan" aria-hidden="true" hidden>
-          <div class="code-shell">
-            <div class="code-shell-bar">
-              <span class="code-tag">bash</span>
-              <span class="code-title">install · linux · vulkan</span>
-              <button class="copy-btn" type="button" data-target="snip-vulkan">copy</button>
-            </div>
-<pre id="snip-vulkan"><code>KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest \
-  | sed -n 's/.*"tag_name": "kiln-v\([^"]*\)".*/\1/p')
-curl -fsSLO "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-vulkan.tar.gz"
-tar xf "kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-vulkan.tar.gz"
-KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve</code></pre>
-            </div>
-          </div>
-
-          <div class="tab-panel" role="tabpanel" id="tab-mac" aria-labelledby="t-mac" aria-hidden="true" hidden>
-          <div class="code-shell">
-            <div class="code-shell-bar">
-              <span class="code-tag">bash</span>
-              <span class="code-title">install · macos · apple silicon</span>
-              <button class="copy-btn" type="button" data-target="snip-mac">copy</button>
-            </div>
-<pre id="snip-mac"><code>KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest \
-  | sed -n 's/.*"tag_name": "kiln-v\([^"]*\)".*/\1/p')
-curl -fsSLO "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-aarch64-apple-darwin-metal.tar.gz"
-tar xf "kiln-${KILN_VERSION}-aarch64-apple-darwin-metal.tar.gz"
-KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve</code></pre>
-            </div>
-          </div>
-
-          <div class="tab-panel" role="tabpanel" id="tab-source" aria-labelledby="t-source" aria-hidden="true" hidden>
-          <div class="code-shell">
-            <div class="code-shell-bar">
-              <span class="code-tag">bash</span>
-              <span class="code-title">build · cargo</span>
-              <button class="copy-btn" type="button" data-target="snip-source">copy</button>
-            </div>
-<pre id="snip-source"><code>git clone https://github.com/ericflo/kiln.git
-cd kiln
-KILN_CUDA_ARCHS=86 cargo build --release --features cuda
-# For AMD ROCm/HIP:
-# ROCM_PATH=/opt/rocm KILN_ROCM_ARCHS='gfx90a;gfx942;gfx1100;gfx1151' cargo build --release --no-default-features --features rocm
-KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve</code></pre>
-            </div>
+# Connect pi to the local OpenAI endpoint
+./kiln pi-setup</code></pre>
+          <div class="install-terminal-status">
+            <span><i aria-hidden="true"></i> listening on <strong>localhost:8420/v1</strong></span>
+            <span>API key not required</span>
           </div>
         </div>
-
-        <h3 id="desktop-app">Desktop App</h3>
-        <p class="install-foot">
-          The Kiln Desktop app and the Kiln server use
-          <strong>separate GitHub release tags/version numbers</strong>
-          so each can ship at its own cadence. The latest desktop build is
-          <a href="https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.16"><code>desktop-v0.2.16</code></a>;
-          the server tracks the latest <code>kiln-v*</code> tag.
-        </p>
-        <table class="installer-table">
-          <thead>
-            <tr><th scope="col">Platform</th><th scope="col">Download</th></tr>
-          </thead>
-          <tbody>
-            <tr>
-              <th scope="row">macOS (Apple Silicon)</th>
-              <td><a href="https://github.com/ericflo/kiln/releases/latest">Kiln Desktop · macOS</a></td>
-            </tr>
-            <tr>
-              <th scope="row">Windows</th>
-              <td><a href="https://github.com/ericflo/kiln/releases/latest">Kiln Desktop · Windows</a></td>
-            </tr>
-            <tr>
-              <th scope="row">Linux</th>
-              <td><a href="https://github.com/ericflo/kiln/releases/latest">Kiln Desktop · Linux</a></td>
-            </tr>
-          </tbody>
-        </table>
-        <p class="install-foot">
-          Using pi or opencode as your coding agent? Start Kiln, then run <code>kiln pi-setup</code>
-          (pi) or add a provider in <code>opencode.json</code>.
-          Both point at <code>http://localhost:8420/v1</code>, model <code>Qwen3.5-4B</code>,
-          and stream every tool call into <code>/ui</code> as training data.
-          <a href="#connect">Connect your agent ↑</a> · <a href="cli.html#pi-setup">CLI details →</a>
-        </p>
       </div>
     </section>
 
-    <section class="section">
+    <section class="home-section evidence-section" aria-label="Current hardware qualification and performance position">
       <div class="page">
-        <header class="section-head">
-          <span class="eyebrow">HTTP API</span>
-          <h2>One binary, every endpoint you need.</h2>
+        <header class="home-section-head home-section-head-left evidence-head">
+          <span class="eyebrow">Measured, not marketed</span>
+          <h2>Know exactly where Kiln fits.</h2>
+          <p>
+            Kiln publishes source-bound receipts and keeps its claims inside the measured
+            envelope. It is built for correctness-first local improvement work—not as a
+            blanket replacement for a high-concurrency inference fleet.
+          </p>
         </header>
 
-        <div class="endpoint-table" role="table" aria-label="Kiln HTTP endpoints">
-          <div class="endpoint" role="row">
-            <span class="endpoint-method" data-m="POST" role="cell">POST</span>
-            <code class="endpoint-path" role="cell">/v1/chat/completions</code>
-            <span class="endpoint-desc" role="cell">OpenAI chat with streaming, normalized tools, structured outputs.</span>
-          </div>
-          <div class="endpoint" role="row">
-            <span class="endpoint-method" data-m="POST" role="cell">POST</span>
-            <code class="endpoint-path" role="cell">/v1/completions</code>
-            <span class="endpoint-desc" role="cell">Classic completion API for legacy clients.</span>
-          </div>
-          <div class="endpoint" role="row">
-            <span class="endpoint-method" data-m="POST" role="cell">POST</span>
-            <code class="endpoint-path" role="cell">/v1/embeddings</code>
-            <span class="endpoint-desc" role="cell">Hidden-state embeddings from the same model.</span>
-          </div>
-          <div class="endpoint" role="row">
-            <span class="endpoint-method" data-m="POST" role="cell">POST</span>
-            <code class="endpoint-path" role="cell">/v1/train/sft</code>
-            <span class="endpoint-desc" role="cell">Supervised LoRA training. Send <code>{prompt, completion}</code> pairs.</span>
-          </div>
-          <div class="endpoint" role="row">
-            <span class="endpoint-method" data-m="POST" role="cell">POST</span>
-            <code class="endpoint-path" role="cell">/v1/train/grpo</code>
-            <span class="endpoint-desc" role="cell">GRPO update. Send rollouts + rewards. Adapter hot-swaps on success.</span>
-          </div>
-          <div class="endpoint" role="row">
-            <span class="endpoint-method" data-m="GET" role="cell">GET</span>
-            <code class="endpoint-path" role="cell">/v1/adapters</code>
-            <span class="endpoint-desc" role="cell">List, attach, detach LoRA adapters.</span>
-          </div>
-          <div class="endpoint" role="row">
-            <span class="endpoint-method" data-m="POST" role="cell">POST</span>
-            <code class="endpoint-path" role="cell">/v1/eval/run</code>
-            <span class="endpoint-desc" role="cell">Run a graded eval suite against any adapter. Inline or registered. <a href="evals.html">Full eval API →</a></span>
-          </div>
-          <div class="endpoint" role="row">
-            <span class="endpoint-method" data-m="POST" role="cell">POST</span>
-            <code class="endpoint-path" role="cell">/v1/judgments</code>
-            <span class="endpoint-desc" role="cell">A/B/Tie/Skip preferences → SFT dataset → local judge LoRA. The flywheel.</span>
-          </div>
-          <div class="endpoint" role="row">
-            <span class="endpoint-method" data-m="GET" role="cell">GET</span>
-            <code class="endpoint-path" role="cell">/v1/models</code>
-            <span class="endpoint-desc" role="cell">OpenAI model list. Reports the loaded model and version.</span>
-          </div>
-          <div class="endpoint" role="row">
-            <span class="endpoint-method" data-m="GET" role="cell">GET</span>
-            <code class="endpoint-path" role="cell">/healthz</code>
-            <span class="endpoint-desc" role="cell">Liveness + readiness probe.</span>
-          </div>
+        <div class="evidence-grid">
+          <article>
+            <strong>12.18 <small>tok/s</small></strong>
+            <span>ROCm mixed soak</span>
+            <p>Source-bound Strix Halo development receipt.</p>
+          </article>
+          <article>
+            <strong>30 <small>min</small></strong>
+            <span>ROCm gate passed</span>
+            <p>Stability gate with long-run variance retained.</p>
+          </article>
+          <article>
+            <strong>0.455 <small>tok/s</small></strong>
+            <span>Vulkan, stability only</span>
+            <p>Correctness evidence; unacceptable serving performance.</p>
+          </article>
+          <article class="evidence-caveat">
+            <strong>vLLM</strong>
+            <span>Preferred at high concurrency</span>
+            <p>Kiln makes no current vLLM parity claim.</p>
+          </article>
         </div>
-        <p class="install-foot"><a href="api.html">Full API reference →</a></p>
+        <a class="evidence-link" href="docs/benchmarks/">Inspect the receipts, limitations, and counterevidence <span aria-hidden="true">→</span></a>
       </div>
     </section>
 
-    <section class="section section--tight">
+    <section class="home-section final-cta-section">
       <div class="page">
-        <div class="cta-card">
-          <div>
-            <h2 class="cta-title">Ready to fire it up?</h2>
-            <p class="cta-lede">A single A6000, a 4-billion-parameter model, and a reward function. That's the whole bill of materials.</p>
-          </div>
-          <div class="cta-actions">
-            <a class="btn btn-primary btn-lg" href="quickstart.html">Read the Quickstart</a>
-            <a class="btn btn-lg" href="demo/">Watch the demo</a>
+        <div class="final-cta">
+          <span class="eyebrow eyebrow--accent">Your model already did the work</span>
+          <h2>Now let it learn from it.</h2>
+          <p>Start with one GPU, Qwen3.5-4B, and the scoring signal you already trust.</p>
+          <div class="final-cta-actions">
+            <a class="btn btn-primary btn-lg" href="quickstart.html">Run the quickstart</a>
+            <a class="btn btn-lg" href="demo/">Watch Kiln work</a>
           </div>
         </div>
       </div>
     </section>
   </main>
 
-  <footer class="footer">
+  <footer class="footer home-footer">
     <div class="page footer-inner">
       <div class="footer-brand">
         <a href="./" class="brand">
           <span class="brand-mark" aria-hidden="true"><svg class="brand-flame" viewBox="0 0 24 24"><use href="#i-stack"></use></svg></span>
           <span>kiln</span>
         </a>
-        <p class="footer-blurb">Pure-Rust single-GPU inference + live LoRA training. MIT licensed.</p>
+        <p class="footer-blurb">A pure-Rust, single-GPU server for inference, learning, and proof.</p>
       </div>
       <div>
         <h3>Docs</h3>
@@ -775,7 +471,7 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve</code></pre>
     </div>
     <div class="page footer-meta">
       <span>© 2026 Eric Florenzano</span>
-      <span>Built with kiln · <a href="https://github.com/ericflo/kiln/releases/latest">latest release</a></span>
+      <span>Built in public · <a href="https://github.com/ericflo/kiln">MIT licensed</a></span>
     </div>
   </footer>
 
