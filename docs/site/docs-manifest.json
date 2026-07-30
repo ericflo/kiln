@@ -52,30 +52,38 @@
     { "id": "serving", "title": "Serving" },
     { "id": "training", "title": "Training and Evals" },
     { "id": "interop", "title": "Interoperability" },
-    { "id": "integrity", "title": "Integrity and Artifacts" },
-    { "id": "operations", "title": "Operations and Development" }
+    { "id": "integrity", "title": "Integrity and Artifacts", "navigation": "reference" },
+    { "id": "operations", "title": "Operations and Development", "navigation": "reference" }
   ],
   "documents": [
     {
-      "source": "README.md",
+      "source": "docs/public/OVERVIEW.md",
       "slug": "overview",
       "title": "Kiln Overview",
       "section": "start",
       "description": "Product scope, supported workflows, installation paths, and operational model."
     },
     {
-      "source": "QUICKSTART.md",
+      "source": "docs/public/QUICKSTART.md",
       "slug": "quickstart-reference",
-      "title": "Complete Quickstart",
+      "title": "Quickstart",
       "section": "start",
-      "description": "The complete installation, serving, training, adapter, Docker, and systemd walkthrough."
+      "description": "Install Kiln, start a model, send a request, and find the next workflow."
     },
     {
-      "source": "docs/CONFIGURATION.md",
+      "source": "docs/public/CONFIGURATION.md",
       "slug": "configuration",
       "title": "Configuration Reference",
       "section": "start",
-      "description": "Every supported typed TOML field and mechanically derived environment override, plus deliberately backend-owned policy such as SFT loss routing."
+      "description": "Configure typed TOML and its mechanically derived environment overrides, understand important defaults, and distinguish configuration from backend-owned policy such as SFT loss routing."
+    },
+    {
+      "source": "docs/CONFIGURATION.md",
+      "slug": "configuration-complete",
+      "title": "Complete Configuration Reference",
+      "section": "start",
+      "navigation": "reference",
+      "description": "Exhaustive typed fields, validation, canonical environment overrides, retired names, provenance, and backend-owned policy boundaries."
     },
     {
       "source": "contracts/kiln-config-v1.schema.json",
@@ -114,6 +122,7 @@
       "slug": "changelog",
       "title": "Changelog",
       "section": "start",
+      "navigation": "reference",
       "description": "Release-by-release product, compatibility, and behavior changes."
     },
     {
@@ -124,18 +133,26 @@
       "description": "Supported versions, vulnerability reporting, and deployment boundaries."
     },
     {
-      "source": "ARCHITECTURE.md",
-      "slug": "architecture-reference",
-      "title": "Architecture Deep Dive",
+      "source": "docs/public/ARCHITECTURE.md",
+      "slug": "architecture",
+      "title": "Architecture",
       "section": "serving",
-      "description": "The complete server, batching, model, memory, route-bound training, checkpoint identity, and backend architecture."
+      "description": "How serving, batching, route-bound training, checkpoint identity, adapters, storage, and accelerators fit together."
     },
     {
-      "source": "BENCHMARKS.md",
+      "source": "ARCHITECTURE.md",
+      "slug": "architecture-deep-dive",
+      "title": "Architecture Deep Dive",
+      "section": "serving",
+      "navigation": "reference",
+      "description": "The exhaustive server, batching, model, memory, route-bound training, checkpoint identity, and backend architecture."
+    },
+    {
+      "source": "docs/public/BENCHMARKS.md",
       "slug": "benchmarks",
       "title": "Benchmarks",
       "section": "serving",
-      "description": "Current ROCm and Vulkan receipts, the measured Kiln service envelope, explicit vLLM high-concurrency guidance, and the serving acceptance methodology."
+      "description": "Comparable backend measurements, metric definitions, current Vulkan regression status, and raw evidence links."
     },
     {
       "source": "qualification/schema/hf-next-token-request-v1.schema.json",
@@ -182,6 +199,7 @@
       "slug": "serving-benchmark-protocol",
       "title": "Serving Benchmark Protocol",
       "section": "serving",
+      "navigation": "reference",
       "description": "Complete Kiln/vLLM workload, process ownership, hard-limit and idle-boundary thermal containment, lifecycle evidence, comparison, campaign, and receipt-validation protocol."
     },
     {
@@ -189,6 +207,7 @@
       "slug": "serving-profiles",
       "title": "Serving Profiles",
       "section": "serving",
+      "navigation": "reference",
       "description": "Stable, experimental, and maintenance GPU ownership contracts."
     },
     {
@@ -196,6 +215,7 @@
       "slug": "latency-observability",
       "title": "Latency Observability",
       "section": "serving",
+      "navigation": "reference",
       "description": "Request-local token timing, phase and stall attribution, API and SSE fields, dashboard diagnostics, Prometheus metrics, and pause investigation."
     },
     {
@@ -218,6 +238,7 @@
       "slug": "native-sft-profile",
       "title": "Native SFT Profile",
       "section": "training",
+      "navigation": "reference",
       "description": "The fixed native online-LoRA update, backend-owned loss route, memory admission, receipt, and checkpoint identity contract."
     },
     {
@@ -225,6 +246,7 @@
       "slug": "sft-ingestion",
       "title": "SFT Ingestion and Row Identity",
       "section": "training",
+      "navigation": "reference",
       "description": "Row admission, invalid-input policy, content identity, and receipts."
     },
     {
@@ -232,6 +254,7 @@
       "slug": "sft-tokenization",
       "title": "SFT Tokenization and Loss",
       "section": "training",
+      "navigation": "reference",
       "description": "Canonical chat rendering, assistant-only labels, and parity fixtures."
     },
     {
@@ -239,6 +262,7 @@
       "slug": "training-checkpoints",
       "title": "Native Training Checkpoints",
       "section": "training",
+      "navigation": "reference",
       "description": "Exact publication, validation, cancellation, and resume semantics, including route-bound SFT planning identity."
     },
     {
@@ -246,6 +270,7 @@
       "slug": "grpo",
       "title": "GRPO Training Guide",
       "section": "training",
+      "navigation": "reference",
       "description": "Generate, score, train, inspect, resume, and audit GRPO runs."
     },
     {
@@ -253,6 +278,7 @@
       "slug": "echo",
       "title": "ECHO Guide",
       "section": "training",
+      "navigation": "reference",
       "description": "Environment-feedback training requests, diagnostics, and operating modes."
     },
     {
@@ -260,6 +286,7 @@
       "slug": "dataset-splits",
       "title": "Dataset Splits and Train/Eval Separation",
       "section": "training",
+      "navigation": "reference",
       "description": "Content-addressed rows, deterministic group-aware partitions, held-out synthesis, contamination admission, and training-data provenance."
     },
     {
@@ -267,6 +294,7 @@
       "slug": "evals",
       "title": "Eval Guide",
       "section": "training",
+      "navigation": "reference",
       "description": "Suites, scorers, comparisons, datasets, post-training gates, and judge training."
     },
     {
@@ -290,6 +318,7 @@
       "slug": "hf-trl-interoperability",
       "title": "HF/TRL Interoperability",
       "section": "interop",
+      "navigation": "reference",
       "description": "Immutable exports, pinned runners, verified PEFT imports, and identity checks."
     },
     {
@@ -305,6 +334,7 @@
       "slug": "opd-teacher-jsonl",
       "title": "OPD Teacher JSONL",
       "section": "interop",
+      "navigation": "reference",
       "description": "Offline teacher corpus format, validation, identity, and training usage."
     },
     {
@@ -312,6 +342,7 @@
       "slug": "vllm-teacher-identity",
       "title": "Immutable vLLM Teachers",
       "section": "interop",
+      "navigation": "reference",
       "description": "Register and verify exact remote teacher identities without floating aliases."
     },
     {

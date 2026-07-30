@@ -485,7 +485,7 @@ pub(super) fn rocm_fused_rmsnorm_allowed_for_tensor(x: &Tensor) -> bool {
     crate::rocm_policy::current_rocm_kernel_policy().fused_rmsnorm
 }
 
-/// The unsafe CPU-bridged Vulkan RMSNorm leaf is disabled by portable policy.
+/// The unsafe CPU-bridged Vulkan RMSNorm leaf is disabled by device-neutral policy.
 #[cfg(feature = "vulkan")]
 pub(super) fn vulkan_rmsnorm_forward_inference_enabled() -> bool {
     kiln_vulkan_kernel::kernels::vulkan_kernel_policy().bridged_rmsnorm_forward_enabled

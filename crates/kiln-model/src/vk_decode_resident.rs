@@ -5084,38 +5084,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resident_plans_use_portable_generic_geometry() {
+    fn resident_plans_use_device_neutral_workload_geometry() {
         assert_eq!(
             linear_bf16w_batched_plan(16, 64).0,
-            shaders::LINEAR_DECODE_BATCHED_BF16W
+            shaders::LINEAR_DECODE_BATCHED_ROWS4_BF16W
         );
         assert_eq!(
             linear_bf16w_batched_plan(64, 64).0,
-            shaders::LINEAR_DECODE_BATCHED_BF16W
+            shaders::LINEAR_DECODE_BATCHED_ROWS8_BF16W
         );
         assert_eq!(
             mlp_gate_up_bf16w_batched_plan(8, 64).0,
-            shaders::MLP_GATE_UP_DECODE_BATCHED_BF16W
+            shaders::MLP_GATE_UP_DECODE_BATCHED_ROWS4_BF16W
         );
         assert_eq!(
             mlp_gate_up_bf16w_batched_plan(256, 64).0,
-            shaders::MLP_GATE_UP_DECODE_BATCHED_BF16W
+            shaders::MLP_GATE_UP_DECODE_BATCHED_ROWS8_BF16W
         );
         assert_eq!(
             full_attn_qkv_gate_split_bf16w_plan(2, 64).0,
-            shaders::FULL_ATTN_QKV_GATE_SPLIT_BATCHED_BF16W
+            shaders::FULL_ATTN_QKV_GATE_SPLIT_BATCHED_ROWS4_BF16W
         );
         assert_eq!(
             full_attn_qkv_gate_split_bf16w_plan(64, 64).0,
-            shaders::FULL_ATTN_QKV_GATE_SPLIT_BATCHED_BF16W
+            shaders::FULL_ATTN_QKV_GATE_SPLIT_BATCHED_ROWS8_BF16W
         );
         assert_eq!(
             gdn_in_proj_bf16w_batched_plan(16, 64, 64, 64, 64, 256).0,
-            shaders::GDN_IN_PROJ_DECODE_BATCHED_BF16W
+            shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W
         );
         assert_eq!(
             gdn_in_proj_bf16w_batched_plan(64, 64, 64, 64, 64, 256).0,
-            shaders::GDN_IN_PROJ_DECODE_BATCHED_BF16W
+            shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W
         );
     }
 

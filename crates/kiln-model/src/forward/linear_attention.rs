@@ -415,9 +415,10 @@ pub(super) fn gated_rms_norm(
     eps: f64,
 ) -> Result<Tensor> {
     // (#1082) GDN-on-Vulkan training: the Vulkan `gdn_gated_rms_norm` backend
-    // kernel reads through host bytes and returns `Device::Cpu`, severing the
-    // Vulkan tape. CUDA/ROCm/Metal return resident kt tensors, so active tape
-    // can still use their fused forward and then record the analytic
+    // kernel still crosses host bytes before restoring its result to Vulkan,
+    // so it does not preserve an active tape even though inference remains
+    // device-resident downstream. CUDA/ROCm/Metal preserve the resident tape
+    // path and can use their fused forward before recording the analytic
     // `GdnGatedRmsNormBackward` in the caller.
     #[cfg(any(
         feature = "cuda",
@@ -460,6 +461,17 @@ pub(super) fn gated_rms_norm_fallback(
     weight: &Tensor,
     eps: f64,
 ) -> Result<Tensor> {
+    let x_device = x.device();
+    let z = if z.device() != x_device {
+        z.to_device(x_device)?
+    } else {
+        z.clone()
+    };
+    let weight = if weight.device() != x_device {
+        weight.to_device(x_device)?
+    } else {
+        weight.clone()
+    };
     // #1082: x/z arrive as transposed GDN head views (non-contiguous); kt's
     // CastOp requires contiguous (candle's `to_dtype` copied implicitly).
     // `.contiguous()` is an O(1) no-op when already contiguous.
@@ -583,6 +595,22 @@ pub(super) fn causal_conv1d_prefill_with_dtype(
     kernel_size: usize,
     compute_dtype: DType,
 ) -> Result<Tensor> {
+    // The portable composite requires every operand to share storage. Backend
+    // fast paths may deliberately return a host-resident activation when the
+    // workload is too small to amortize a GPU submission, so align the small
+    // weight and threaded state with that activation before falling back. The
+    // state returns to its entry storage afterward so a temporary prefill
+    // crossover cannot evict the following decode from its resident path.
+    let x_device = x.device();
+    let conv_state_device = conv_state.device();
+    let weight = if weight.device() != x_device {
+        weight.to_device(x_device)?
+    } else {
+        weight.clone()
+    };
+    if conv_state.device() != x_device {
+        *conv_state = conv_state.to_device(x_device)?;
+    }
     let (_batch, channels, seq_len) = x.dims3()?;
     let x_compute = x.to_dtype(compute_dtype)?;
     let x_state_f32 = if compute_dtype == DType::F32 {
@@ -656,6 +684,9 @@ pub(super) fn causal_conv1d_prefill_with_dtype(
             }
         };
         *conv_state = shifted.contiguous()?;
+    }
+    if conv_state.device() != conv_state_device {
+        *conv_state = conv_state.to_device(conv_state_device)?;
     }
 
     Ok(output)
@@ -1601,8 +1632,8 @@ pub(super) fn gdn_recurrent_prefill_native_head_last(
 ) -> Result<Option<Tensor>> {
     let (_, seq_len, _, _) = q.dims4()?;
     if seq_len == 0
-        || q.dtype() != DType::BF16
-        || state.dtype() != DType::BF16
+        || !matches!(q.dtype(), DType::BF16 | DType::F32)
+        || !matches!(state.dtype(), DType::BF16 | DType::F32)
         || any_kt_tensor_tracks_op(&[q, k, v, beta, g, state])
         || !GdnBackend::runtime_supports_gdn_recurrent_prefill_native_head_last(backend)
     {
@@ -1697,16 +1728,25 @@ pub(super) fn gated_deltanet_gates_fallback(
     weights: &GpuLinearAttentionWeights,
     input_dtype: DType,
 ) -> Result<(Tensor, Tensor)> {
+    let gate_device = a.device();
+    let a_log = if weights.a_log.device() != gate_device {
+        weights.a_log.to_device(gate_device)?
+    } else {
+        weights.a_log.clone()
+    };
+    let dt_bias = if weights.dt_bias.device() != gate_device {
+        weights.dt_bias.to_device(gate_device)?
+    } else {
+        weights.dt_bias.clone()
+    };
     let beta = cuda_sigmoid(b).context("gdn gates fallback beta cuda_sigmoid")?; // [B, T, nv], bf16
     let a_f32 = a
         .to_dtype(DType::F32)
         .context("gdn gates fallback a to f32")?;
-    let a_log_f32 = weights
-        .a_log
+    let a_log_f32 = a_log
         .to_dtype(DType::F32)
         .context("gdn gates fallback a_log to f32")?;
-    let dt_bias_f32 = weights
-        .dt_bias
+    let dt_bias_f32 = dt_bias
         .to_dtype(DType::F32)
         .context("gdn gates fallback dt_bias to f32")?;
     let g = {

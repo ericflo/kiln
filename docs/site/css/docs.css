@@ -331,6 +331,80 @@ body.docs-body {
   font-weight: 650;
 }
 
+.docs-sidebar-library {
+  margin: 4px 0 22px;
+  border-top: 1px solid var(--docs-border);
+  border-bottom: 1px solid var(--docs-border);
+}
+
+.docs-sidebar-library summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 0;
+  color: var(--docs-text-soft);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.docs-sidebar-library summary span {
+  min-width: 24px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--docs-surface);
+  color: var(--docs-text-muted);
+  text-align: center;
+  font-size: 10px;
+}
+
+.docs-sidebar-library > div {
+  padding: 2px 0 12px;
+}
+
+.docs-sidebar-library section + section {
+  margin-top: 13px;
+}
+
+.docs-sidebar-library h3 {
+  margin: 0 0 4px;
+  color: var(--docs-text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.docs-sidebar-library ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.docs-sidebar-library a {
+  display: block;
+  margin: 1px -8px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  color: var(--docs-text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.docs-sidebar-library a:hover {
+  color: var(--docs-text);
+  background: var(--docs-surface);
+}
+
+.docs-sidebar-library a[aria-current="page"] {
+  color: var(--docs-accent);
+  background: var(--docs-accent-soft);
+  font-weight: 650;
+}
+
 .docs-sidebar-repo {
   margin-top: 7px;
   font-size: 12px;
@@ -745,6 +819,16 @@ body.docs-body {
   border-bottom: 1px solid var(--docs-border);
 }
 
+.docs-core-library {
+  padding-top: 34px;
+}
+
+.docs-core-library > h2 {
+  margin: 0;
+  color: var(--docs-text);
+  font-size: 23px;
+}
+
 .docs-product-guides h2,
 .docs-directory-section h2 {
   margin: 0 0 16px;
@@ -819,6 +903,62 @@ body.docs-body {
   color: var(--docs-accent);
 }
 
+.docs-reference-library {
+  margin: 18px 0 48px;
+  border: 1px solid var(--docs-border);
+  border-radius: 8px;
+  background: var(--docs-surface);
+}
+
+.docs-reference-library > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 18px 20px;
+  cursor: pointer;
+}
+
+.docs-reference-library > summary span,
+.docs-reference-library > summary small {
+  display: block;
+}
+
+.docs-reference-library > summary strong {
+  color: var(--docs-text);
+  font-size: 15px;
+}
+
+.docs-reference-library > summary small {
+  margin-top: 4px;
+  color: var(--docs-text-muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.docs-reference-library > summary b {
+  flex: 0 0 auto;
+  color: var(--docs-accent);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.docs-reference-library-body {
+  padding: 0 20px 22px;
+  border-top: 1px solid var(--docs-border);
+}
+
+.docs-reference-library-body .docs-directory-section {
+  padding: 24px 0;
+}
+
+.docs-reference-library-body .docs-directory-section h3 {
+  margin: 0 0 12px;
+  color: var(--docs-text);
+  font-size: 16px;
+}
+
 @media (max-width: 1180px) {
   .docs-shell {
     grid-template-columns: var(--docs-sidebar-width) minmax(0, 1fr);
@@ -890,6 +1030,10 @@ body.docs-body {
   .docs-product-guides > div,
   .docs-directory-list {
     grid-template-columns: 1fr;
+  }
+
+  .docs-reference-library > summary {
+    align-items: flex-start;
   }
 }
 

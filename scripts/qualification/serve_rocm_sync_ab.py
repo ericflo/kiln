@@ -249,7 +249,7 @@ def expected_policy(mode: str) -> dict[str, Any]:
     return {
         "schema_id": mixed.ACCELERATOR_RUNTIME_POLICY_SCHEMA_ID,
         "version": mixed.ACCELERATOR_RUNTIME_POLICY_VERSION,
-        "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v4",
+        "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v5",
         "vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1",
         "serving_profile": "experimental",
         "serving_profile_source": "config_file",

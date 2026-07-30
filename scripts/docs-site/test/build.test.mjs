@@ -223,7 +223,9 @@ test('build copies the static site and emits complete deterministic docs', async
   assert.match(guide, /href="\.\.\/configuration\/#load-order"/);
 
   const hub = await readFile(resolve(first, 'docs/index.html'), 'utf8');
-  assert.match(hub, /Complete Kiln documentation/);
+  assert.match(hub, /Start with the answer/);
+  assert.match(hub, /Use the product guides for a workflow/);
+  assert.match(hub, /Reference library/);
   assert.match(hub, /href="\.\/configuration\/"/);
 
   const index = JSON.parse(await readFile(resolve(first, 'docs/search-index.json'), 'utf8'));

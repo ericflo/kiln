@@ -100,7 +100,7 @@ const generatedDocsPages = [
     label: 'Documentation hub',
     path: publishedPath('docs/index.html'),
     canonical: 'https://ericflo.github.io/kiln/docs/',
-    h1: 'Complete Kiln documentation',
+    h1: 'Kiln documentation',
     terms: [
       'Configuration Reference',
       'GRPO Guide',
@@ -143,19 +143,19 @@ const generatedDocsPages = [
     path: publishedPath('docs/benchmarks/index.html'),
     canonical: 'https://ericflo.github.io/kiln/docs/benchmarks/',
     h1: 'Benchmarks',
-    anchors: ['current-measured-service-envelope', 'current-source-bound-receipts', 'what-the-paired-rocm-diagnostic-proves'],
+    anchors: ['bottom-line', 'the-comparable-vulkan-result', 'why-the-old-0455-number-was-misleading'],
     terms: [
-      'no high-concurrency performance-parity claim',
-      'external concurrency 1 through 8',
-      'Use vLLM for serving-only capacity',
-      'ROCm, Strix Halo development soak',
-      '12.176 aggregate output tok/s',
-      '1.82%/2.45% deltas',
-      'Vulkan, Strix Halo development soak',
+      'did regress catastrophically',
+      '0.142 decode tokens/s',
+      '87× decode regression',
+      '11× prefill regression',
+      '28d8c6028',
+      'same short serial workload',
       '0.455 aggregate output tok/s',
-      '0.465x and 0.138x vLLM request-window throughput',
-      'not an accepted performance comparison',
-      'choose vLLM for high-concurrency serving',
+      '83.2 seconds',
+      'about 13.0 decode tok/s',
+      'predates the July 27 policy regression',
+      'no high-concurrency parity claim',
     ],
   },
   {
@@ -671,8 +671,8 @@ const generatedDocsPages = [
   },
   {
     label: 'Architecture Deep Dive',
-    path: publishedPath('docs/architecture-reference/index.html'),
-    canonical: 'https://ericflo.github.io/kiln/docs/architecture-reference/',
+    path: publishedPath('docs/architecture-deep-dive/index.html'),
+    canonical: 'https://ericflo.github.io/kiln/docs/architecture-deep-dive/',
     h1: 'Architecture Deep Dive',
     anchors: ['backend-owned-sft-loss-routing'],
     terms: [
@@ -900,6 +900,26 @@ const generatedDocsPages = [
   },
 ];
 
+const configurationGuideExpectation = generatedDocsPages.find(
+  (page) => page.label === 'Configuration Reference',
+);
+configurationGuideExpectation.anchors = [
+  'minimal-server',
+  'the-settings-people-change-first',
+  'configuration-precedence',
+  'accelerator-policy',
+  'exact-references',
+];
+configurationGuideExpectation.terms = [
+  'Most Kiln deployments need only',
+  'Run kiln config before starting',
+  'effective value and its source',
+  'Portable does not mean',
+  'Device marketing names',
+  'Complete typed configuration reference',
+  'Machine-readable configuration schema',
+];
+
 const expectedQuickstartSections = [
   { label: 'Desktop App path', terms: ['desktop app', 'recommended'] },
   { label: 'server binary path', terms: ['server binary', 'terminal-first'] },
@@ -936,12 +956,13 @@ const expectedQuickstartLinks = [
 ];
 
 const expectedDemoSections = [
-  { label: 'first token', terms: ['first token'] },
-  { label: 'benchmark', terms: ['benchmark'] },
-  { label: 'hot-swap', terms: ['hot-swap'] },
-  { label: 'OpenAI client', terms: ['openai client'] },
-  { label: 'GRPO', terms: ['grpo'] },
-  { label: '60-second loop', terms: ['60-second', 'loop'] },
+  { label: 'freshness', terms: ['updated july 30, 2026', 'kiln v0.5.1 source ui'] },
+  { label: 'provenance', terms: ['ui: current repository source', 'data: deterministic seeded demo fixtures', 'not a live performance run'] },
+  { label: 'observe', terms: ['know what is actually running', 'backend truth', 'request evidence'] },
+  { label: 'serve', terms: ['test the exact request path', 'openai-compatible', 'adapter-explicit'] },
+  { label: 'teach', terms: ['turn evidence into a named training job', 'admission first', 'evaluation separate'] },
+  { label: 'promote', terms: ['compare, inspect, then activate', 'base identity bound', 'hot-swap explicit'] },
+  { label: 'historical archive', terms: ['historical terminal recordings', 'captured may 4, 2026', 'not current product proof'] },
 ];
 
 const expectedDemoCastFiles = [
@@ -1084,7 +1105,7 @@ const expectedApiTrainingAnchors = [
 ];
 
 const expectedApiCodeExamples = [
-  { label: 'accelerator runtime v16 shape', terms: ['"accelerator_runtime"', '"schema_id": "kiln.accelerator-runtime-policy.v16"', '"version": 16', '"vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v4"', '"vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1"', '"kt_api_mode"', '"full_attention_score_budget_mib"', '"configured": 2048', '"effective": 2048', '"vulkan_device_index"', '"configured": null', '"effective": null', '"vulkan_validation"', '"configured": false', '"effective": false', '"cuda_kernel_profile"', '"metal_kernel_profile"', '"configured": "native_default"', '"effective": "native_default"', '"rocm_synchronization_mode"', '"rocm_strided_batched_matmul_mode"', '"rocm_bf16_matmul_output_mode"', '"rocm_kernel_profile"', '"configured": "portable_fallback"', '"effective": "portable_fallback"', '"rocm_graph_mode"', '"rocm_graph_cache_entries"', '"rocm_graph_cache_max_bytes"', '"configured": 1073741824', '"effective": 1073741824'] },
+  { label: 'accelerator runtime v16 shape', terms: ['"accelerator_runtime"', '"schema_id": "kiln.accelerator-runtime-policy.v16"', '"version": 16', '"vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v5"', '"vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1"', '"kt_api_mode"', '"full_attention_score_budget_mib"', '"configured": 2048', '"effective": 2048', '"vulkan_device_index"', '"configured": null', '"effective": null', '"vulkan_validation"', '"configured": false', '"effective": false', '"cuda_kernel_profile"', '"metal_kernel_profile"', '"configured": "native_default"', '"effective": "native_default"', '"rocm_synchronization_mode"', '"rocm_strided_batched_matmul_mode"', '"rocm_bf16_matmul_output_mode"', '"rocm_kernel_profile"', '"configured": "portable_fallback"', '"effective": "portable_fallback"', '"rocm_graph_mode"', '"rocm_graph_cache_entries"', '"rocm_graph_cache_max_bytes"', '"configured": 1073741824', '"effective": 1073741824'] },
   { label: 'CUDA startup policy shape', terms: ['"cuda_marlin_profile"', '"configured": "disabled"', '"effective": "disabled"', '"cuda_flash_backward_mode"', '"configured": "fast"', '"effective": "fast"'] },
   { label: 'batching configuration shape', terms: ['"batching"', '"configuration"', '"rowwise_decode"', '"prefix_aware_admission"', '"prefill_admission_quantum"', '"actor_cycle_idle"', '"actor_active"'] },
   { label: 'streaming-prefill configuration shape', terms: ['"streaming_prefill"', '"dispatch"', '"threshold_tokens"', '"tile_tokens"', '"tape_tile_tokens"', '"detached_full_attn_tile_tokens"', '"immutable_after_startup"', '"restart_required_to_change"'] },
@@ -1188,9 +1209,9 @@ const expectedArchitectureSections = [
   { label: 'immutable batching authority', terms: ['BatchingRuntimeConfig', 'None of those paths rereads', 'mandatory real-backend batching actor', 'actor_active', 'decode_runtime.batching_configuration', 'batching_engine.configuration'] },
   { label: 'immutable streaming-prefill authority', terms: ['one streaming-prefill authority for inference and training', 'StreamingPrefillRuntimeConfig', 'none of those paths rereads', 'SFT/GRPO/OPD', 'checkpoint planning', 'base tiles / tape tiles / detached full-attention tiles', 'prompt-logprob', 'local teacher', 'MTP alignment', 'inference-contract-v2', 'logit-cache identity', 'CPU/Vulkan', '8192 / 65536 / 65536', 'prefill_runtime.streaming_prefill', 'prompt-length dependent'] },
   { label: 'immutable CUDA graph authority', terms: ['CUDA graph policy is startup-owned', 'memory.cuda_graphs', 'memory.cuda_graph_cache_entries', '1..=64', 'Stable paged metadata is mandatory', 'batched CUDA capture remains unavailable', '/v1/config.cuda_graphs', 'decode_runtime.cuda_graphs', 'has no environment opt-in'] },
-  { label: 'portable accelerator execution policy', terms: ['Immutable accelerator routes, attention geometry, ROCm stream ordering, and graph lifecycle', 'kiln.accelerator-runtime-policy.v16', 'Vulkan device creation is typed startup policy', 'kiln.vulkan-kernel-policy.v4', 'ROCm product execution is portable-only', 'hardware-qualification', 'portable_fallback', 'rocm_strided_batched_matmul_mode', 'rocm_bf16_matmul_output_mode', 'per-row GEMMs', 'F32 output', 'retired machine-shaped', 'stream_ordered', 'rocm_graph_cache_max_bytes', 'cleanup-quarantined'] },
+  { label: 'portable accelerator execution policy', terms: ['Immutable accelerator routes, attention geometry, ROCm stream ordering, and graph lifecycle', 'kiln.accelerator-runtime-policy.v16', 'Vulkan device creation is typed startup policy', 'kiln.vulkan-kernel-policy.v5', 'ROCm product execution is portable-only', 'hardware-qualification', 'portable_fallback', 'rocm_strided_batched_matmul_mode', 'rocm_bf16_matmul_output_mode', 'per-row GEMMs', 'F32 output', 'retired machine-shaped', 'stream_ordered', 'rocm_graph_cache_max_bytes', 'cleanup-quarantined'] },
   { label: 'complete CUDA route authority', terms: ['Fixed model, loader, and fallback policy', 'twenty-five CUDA model/backend hot-path', 'fused_rotary_qk', 'fused_attn_sigmoid_mul', 'rmsnorm_backward', 'fused_l2_qk_norm', 'gdn_chunk_pre_permute', 'KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE', 'KILN_DECODE_HOT_PATH_DEBUG_FALLBACK', 'KILN_DISABLE_GPU_TRAINING_MLP_CHUNKING', 'KILN_KEEP_PROJECTION_ORIGINALS', 'KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER', 'KILN_DISABLE_WEIGHTED_LM_HEAD_PREP', 'KILN_ARENA_FORCE_ZERO', 'KILN_CUDA_NATIVE_TRAINING', 'KILN_METAL_GRAPHS', 'KILN_FORCE_EAGER_DECODE', 'KILN_METAL_GRAPH_STABLE_PAGED_METADATA', 'KILN_TAPE_GDN_OFFLOAD_SAVED_TENSORS', 'KILN_TAPE_OFFLOAD_MATMUL_A', 'KILN_TAPE_OFFLOAD_MIN_BYTES', 'KILN_SDPA_SPLIT', 'KILN_SDPA_PREFILL_MIN', 'CANDLE_METAL_COMPUTE_PER_BUFFER', 'KILN_SERVER_DETERMINISTIC', 'Standalone tensor-library use defaults'] },
-  { label: 'portable Vulkan policy', terms: ['Vulkan kernels use one portable source policy', 'kiln.vulkan-kernel-policy.v4', 'portable-fallback object', 'not a TOML, CLI, request, environment, device-name, or PCI-ID surface', 'Device-tuned model routes', 'established generic fallbacks remain authoritative', 'Machine-specific receipts do not alter product dispatch', 'cross-device correctness', 'Former Vulkan route controls', 'have no aliases or replacement fields', 'vulkan_decode_microbench', 'cannot produce a qualified product receipt'] },
+  { label: 'device-neutral Vulkan policy', terms: ['Vulkan kernels use one device-neutral native policy', 'kiln.vulkan-kernel-policy.v5', 'native-default object', 'not a TOML, CLI, request, environment, device-name, or PCI-ID surface', 'Standards-based model routes', 'without inspecting device identity', 'Machine-specific receipts do not alter product dispatch', 'cross-device correctness', 'Former Vulkan route controls', 'have no aliases or replacement fields', 'vulkan_decode_microbench', 'not a product configuration path'] },
   { label: 'ROCm graph product telemetry surfaces', terms: ['rocm_graphs_unavailable_reason', 'rocm_graph_telemetry', 'rocm_graph_telemetry_unavailable_reason', 'phase_telemetry_available', 'phase_telemetry_unavailable_reason', 'state is busy only for lock contention', 'unavailable for no-runner or poisoned-lock state', 'backend_without_graph_runner', 'model_runner_busy', 'model_runner_lock_poisoned', 'graph_runner_busy', 'graph_runner_lock_poisoned', 'kiln_rocm_graph_telemetry_available', 'kiln_rocm_graph_snapshot_unavailable', 'kiln_rocm_graph_phase_telemetry_available', 'kiln_rocm_graph_phase_telemetry_unavailable', 'kiln_rocm_graph_state', 'kiln_rocm_graph_slots', 'kiln_rocm_graph_owner_lifecycle_total', 'kiln_rocm_graph_retained_bytes', 'kiln_rocm_graph_cache_admissions_total', 'kiln_rocm_graph_cache_evictions_total', 'kiln_rocm_graph_cache_admission_rejections_total', 'kiln_rocm_graph_capture_outcomes_total', 'kiln_rocm_graph_replay_outcomes_total', 'kiln_rocm_graph_fallbacks_total', 'full cache/counter families are omitted', 'phase/current/transient families remain authoritative'] },
   { label: 'ROCm graph outcome, phase, and active-slot semantics', terms: ['every runner-owned recurrent/conv slot', 'active graphless slot state remains', 'peak_retained_bytes', 'never below the current total', 'capture_successes means', 'first launch succeeded', 'cache_admission_successes is the retained', 'entry, byte, and accounting post-capture rejection counters', 'memoized by geometry and runner generation', 'blocks new capture rather than dropping live continuity state', 'pre_candidate_headroom', 'candidate_warm', 'pre_native_reservation', 'native_capture', 'native_replay', 'rejected_candidate_cleanup', 'defensive cache admission/publication', 'blocking committed governor debit', 'point-in-time copies', 'authoritative active-phase source', 'successful physical settlement', 'logical restoration', 'post-STOP diagnostic drain'] },
   { label: 'Gated DeltaNet/GDN hybrid', terms: ['gated deltanet', 'gdn', 'hybrid'] },
@@ -1390,7 +1411,7 @@ function validateSftLossRouteDocumentationSourceContract() {
 
   const requiredDescriptions = new Map([
     ['configuration', ['mechanically derived environment override', 'backend-owned policy', 'SFT loss routing']],
-    ['architecture-reference', ['route-bound training', 'checkpoint identity']],
+    ['architecture', ['route-bound training', 'checkpoint identity']],
     ['native-sft-profile', ['backend-owned loss route', 'memory admission', 'receipt', 'checkpoint identity']],
     ['training-checkpoints', ['route-bound SFT planning identity']],
   ]);
@@ -2325,11 +2346,11 @@ function validateSelfHostedProductPageAssets() {
   const responsiveDashboardAssets = [
     {
       path: 'docs/site/assets/server-ui-dashboard-720.webp',
-      sha256: '94217f9ff779d2001adc80620baed99da1bdf3caa7690e67bf4c41c4a68db9fa',
+      sha256: '1652730125e994e02b42bfb931589a714892482da9e53200ef02e34cf6787e7a',
     },
     {
       path: 'docs/site/assets/server-ui-dashboard-1440.webp',
-      sha256: 'a9e3d013ec7ec3ac6ff268f349032086feeb01e6a347bf7750640b162691a0bc',
+      sha256: 'd9aa03bf816f970e027dff9edb44be3002d5e6cf6b60664ba1668ec37aa27957',
     },
   ];
   for (const asset of responsiveDashboardAssets) {
@@ -3165,6 +3186,45 @@ function validateDemoReadmeInventory() {
   }
 }
 
+function validatePrimaryDocsEditorialBudget() {
+  const manifestPath = resolve(repoRoot, 'docs/site/docs-manifest.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  const sectionNavigation = new Map(
+    manifest.sections.map((section) => [section.id, section.navigation || 'primary']),
+  );
+  const expectedCuratedSources = new Map([
+    ['overview', 'docs/public/OVERVIEW.md'],
+    ['quickstart-reference', 'docs/public/QUICKSTART.md'],
+    ['configuration', 'docs/public/CONFIGURATION.md'],
+    ['architecture', 'docs/public/ARCHITECTURE.md'],
+    ['benchmarks', 'docs/public/BENCHMARKS.md'],
+  ]);
+
+  for (const [slug, expectedSource] of expectedCuratedSources) {
+    const document = manifest.documents.find((candidate) => candidate.slug === slug);
+    if (document?.source !== expectedSource) {
+      fail(`docs/site/docs-manifest.json: ${slug} must use curated source ${expectedSource}`);
+    }
+  }
+
+  for (const document of manifest.documents) {
+    const navigation = document.navigation || sectionNavigation.get(document.section) || 'primary';
+    const kind = document.kind || 'markdown';
+    if (navigation !== 'primary' || kind !== 'markdown') continue;
+
+    const source = readFileSync(resolve(repoRoot, document.source), 'utf8');
+    const wordCount = source.trim() ? source.trim().split(/\s+/).length : 0;
+    const lineCount = source.split(/\r?\n/).length;
+    if (wordCount > 1500 || lineCount > 250) {
+      fail(
+        `${document.source}: primary documentation exceeds the editorial budget ` +
+        `(${wordCount} words, ${lineCount} lines; maximum 1500 words and 250 lines); ` +
+        'move exhaustive material to the reference library',
+      );
+    }
+  }
+}
+
 function validateGeneratedDocsArtifacts() {
   const requiredPaths = [
     ...generatedDocsPages.map((page) => page.path),
@@ -3262,7 +3322,7 @@ function validateGeneratedDocsArtifacts() {
     '[GRPO Guide](https://ericflo.github.io/kiln/grpo.html)',
     '[Evals Guide](https://ericflo.github.io/kiln/evals.html)',
     '## Core documentation',
-    'https://raw.githubusercontent.com/ericflo/kiln/refs/heads/main/README.md',
+    'https://raw.githubusercontent.com/ericflo/kiln/refs/heads/main/docs/public/OVERVIEW.md',
     'https://raw.githubusercontent.com/ericflo/kiln/refs/heads/main/docs/GRPO_GUIDE.md',
     'https://raw.githubusercontent.com/ericflo/kiln/refs/heads/main/docs/EVAL_GUIDE.md',
     '## Machine-readable contracts',
@@ -3377,6 +3437,7 @@ async function validateGeneratedDocsBrowser(browser) {
         const result = await page.evaluate((pageSpec) => {
           const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim();
           const bodyText = normalize(document.body.innerText);
+          const documentText = normalize(document.body.textContent);
           const h1 = normalize(document.querySelector('h1')?.textContent);
           const canonical = document.querySelector('link[rel="canonical"]')?.getAttribute('href') || '';
           const logo = document.querySelector('.docs-brand img');
@@ -3401,7 +3462,7 @@ async function validateGeneratedDocsBrowser(browser) {
             hasMobileMenu: Boolean(document.querySelector('button[data-docs-menu]')),
             scrollWidth: document.documentElement.scrollWidth,
             clientWidth: document.documentElement.clientWidth,
-            missingTerms: pageSpec.terms.filter((term) => !bodyText.includes(term)),
+            missingTerms: pageSpec.terms.filter((term) => !documentText.includes(term)),
             missingAnchors: (pageSpec.anchors || [])
               .filter((anchor) => !document.getElementById(anchor)),
           };
@@ -3472,6 +3533,7 @@ async function runSmoke() {
   validateCliHelpOnboardingCopy();
   validateLaunchSentinel();
   validateDemoReadmeInventory();
+  validatePrimaryDocsEditorialBudget();
   validateRuntimeEnvironmentBoundaryDocumentationSourceContract();
   validateSftLossRouteDocumentationSourceContract();
   const hasGeneratedDocs = validateGeneratedDocsArtifacts();
@@ -3699,10 +3761,10 @@ async function runSmoke() {
       if (sitePage.path === demoPagePath) {
         const demoResult = await page.evaluate(() => {
           const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
-          const scriptText = Array.from(document.querySelectorAll('script'))
-            .map((script) => script.textContent || '')
-            .join('\n');
-          const referencedCasts = Array.from(scriptText.matchAll(/cast:\s*["']([^"']+\.cast)["']/g), (match) => match[1]);
+          const referencedCasts = Array.from(
+            document.querySelectorAll('a[href$=".cast"]'),
+            (link) => link.getAttribute('href'),
+          );
 
           return {
             bodyText: normalize(document.body.innerText),

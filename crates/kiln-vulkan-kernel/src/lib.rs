@@ -35,8 +35,8 @@ pub use device::{
     vulkan_device_policy,
 };
 pub use kernels::{
-    PORTABLE_VULKAN_KERNEL_POLICY, VULKAN_KERNEL_POLICY_SCHEMA_ID, VulkanKernelPolicy,
-    vulkan_kernel_policy,
+    NATIVE_VULKAN_KERNEL_POLICY, PORTABLE_VULKAN_KERNEL_POLICY, VULKAN_KERNEL_POLICY_SCHEMA_ID,
+    VulkanKernelPolicy, vulkan_kernel_policy,
 };
 pub use pipeline::ShaderPipeline;
 pub use vk_paged_kv_cache::VkPagedKvCache;

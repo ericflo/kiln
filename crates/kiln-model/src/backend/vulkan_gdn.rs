@@ -17,6 +17,11 @@ use super::vulkan_tensor_bridge::{
     upload_gdn_chunkwise_inputs_from_cpu_bytes_vk, vk_f32_tensors_to_cpu_tensors_batched_vk,
 };
 
+// Small, host-resident elementwise prefill tensors do less work than the
+// upload/submit/readback bridge costs. Keep those on the CPU parity path and
+// reserve these Vulkan dispatches for larger workloads.
+const HOST_BRIDGE_ELEMENTWISE_PREFILL_MIN_ELEMENTS: usize = 1 << 20;
+
 fn fused_gdn_resident_state_enabled() -> bool {
     kiln_vulkan_kernel::kernels::vulkan_kernel_policy().gdn_decode_fused_resident_state_enabled
 }
@@ -24,7 +29,7 @@ fn fused_gdn_resident_state_enabled() -> bool {
 pub(super) fn supports_gdn_forward_substitution(backend: &VulkanBackend) -> bool {
     // solve_tri is experimental: shared-memory layout not yet validated
     // against CPU parity, and may exceed maxComputeSharedMemorySize on many
-    // GPUs. Disabled by the portable Vulkan policy.
+    // GPUs. Disabled by the device-neutral native policy.
     backend.has_vulkan() && backend.gdn_forward_sub_enabled
 }
 
@@ -81,11 +86,15 @@ pub(super) fn gdn_in_proj_decode(
     if !backend.has_vulkan() || !backend.gdn_enabled || x.dtype() != kiln_tensor::DType::F32 {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cpu)
-        || !matches!(in_proj_qkv_t.device(), kiln_tensor::Device::Cpu)
-        || !matches!(in_proj_z_t.device(), kiln_tensor::Device::Cpu)
-        || !matches!(in_proj_a_t.device(), kiln_tensor::Device::Cpu)
-        || !matches!(in_proj_b_t.device(), kiln_tensor::Device::Cpu)
+    let supported_storage = |tensor: &kiln_tensor::Tensor| {
+        matches!(
+            tensor.device(),
+            kiln_tensor::Device::Cpu | kiln_tensor::Device::Vulkan(_)
+        )
+    };
+    if ![x, in_proj_qkv_t, in_proj_z_t, in_proj_a_t, in_proj_b_t]
+        .into_iter()
+        .all(supported_storage)
     {
         return Ok(None);
     }
@@ -892,12 +901,15 @@ pub(super) fn gdn_recurrent_prefill_native_head_last(
     {
         return Ok(None);
     }
-    if !matches!(q.device(), kiln_tensor::Device::Cpu)
-        || !matches!(k.device(), kiln_tensor::Device::Cpu)
-        || !matches!(v.device(), kiln_tensor::Device::Cpu)
-        || !matches!(beta.device(), kiln_tensor::Device::Cpu)
-        || !matches!(g.device(), kiln_tensor::Device::Cpu)
-        || !matches!(state_kt.device(), kiln_tensor::Device::Cpu)
+    let supported_storage = |tensor: &kiln_tensor::Tensor| {
+        matches!(
+            tensor.device(),
+            kiln_tensor::Device::Cpu | kiln_tensor::Device::Vulkan(_)
+        )
+    };
+    if ![q, k, v, beta, g, &*state_kt]
+        .into_iter()
+        .all(supported_storage)
     {
         return Ok(None);
     }
@@ -921,8 +933,7 @@ pub(super) fn gdn_recurrent_prefill_native_head_last(
     let Ok((state_batch, state_heads, state_dk, state_dv)) = state_kt.dims4() else {
         return Ok(None);
     };
-    if seq_len != 1
-        || k_batch != batch
+    if k_batch != batch
         || k_seq_len != seq_len
         || k_heads != q_heads
         || k_dk != dk
@@ -965,7 +976,7 @@ pub(super) fn gdn_recurrent_prefill_native_head_last(
         };
         let (batch, seq_len, q_heads, dk) = q.dims4()?;
         let (_, _, heads, dv) = v.dims4()?;
-        let q_dtype = q.dtype();
+        let output_dtype = state_kt.dtype();
         let (out_data, resident_state) =
             kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_resident_state_bytes(
                 vk_device,
@@ -975,10 +986,7 @@ pub(super) fn gdn_recurrent_prefill_native_head_last(
                 resident_state,
             )
             .context("gdn_recurrent_step native-head resident-state Vulkan kernel failed")?;
-        // `out_data` is the un-unsqueezed [batch, heads, dv] layout.
-        // Reconstruct the kt tensor and re-unsqueeze to match prior public shape.
-        let out_no_seq = kt_tensor_from_f32_bytes(&out_data, &[batch, heads, dv], q_dtype)?;
-        let out = out_no_seq.unsqueeze(1)?;
+        let out = kt_tensor_from_f32_bytes(&out_data, &[batch, seq_len, heads, dv], output_dtype)?;
         insert_recurrent_state_resident_buffer(
             &backend.recurrent_state_resident_registry,
             state_id,
@@ -987,9 +995,8 @@ pub(super) fn gdn_recurrent_prefill_native_head_last(
         return Ok(Some(out));
     }
     let skip_state_readback = crate::forward::vulkan_skip_gdn_state_readback_active();
-    let (batch, _seq, q_heads, dk) = q.dims4()?;
+    let (batch, seq_len, q_heads, dk) = q.dims4()?;
     let (_, _, heads, dv) = v.dims4()?;
-    let q_dtype = q.dtype();
     let state_dtype = state_kt.dtype();
     let state_dims = state_kt.dims().to_vec();
     let q_data = kt_tensor_to_f32_bytes_with_shape(q)?.0;
@@ -1008,6 +1015,7 @@ pub(super) fn gdn_recurrent_prefill_native_head_last(
             &g_data,
             &state_data,
             batch,
+            seq_len,
             q_heads,
             heads,
             dk,
@@ -1015,7 +1023,7 @@ pub(super) fn gdn_recurrent_prefill_native_head_last(
             skip_state_readback,
         )
         .context("gdn_recurrent_step native-head Vulkan kernel failed")?;
-    let out = kt_tensor_from_f32_bytes(&out_data, &[batch, heads, dv], q_dtype)?.unsqueeze(1)?;
+    let out = kt_tensor_from_f32_bytes(&out_data, &[batch, seq_len, heads, dv], state_dtype)?;
     if let Some(sd) = new_state_data {
         *state_kt = kt_tensor_from_f32_bytes(&sd, &state_dims, state_dtype)?;
     }
@@ -1442,6 +1450,12 @@ pub(super) fn gdn_gates(
     ) {
         return Ok(None);
     }
+    if a.dims().get(1).copied().unwrap_or_default() > 1
+        && matches!(a.device(), kiln_tensor::Device::Cpu)
+        && a.elem_count() < HOST_BRIDGE_ELEMENTWISE_PREFILL_MIN_ELEMENTS
+    {
+        return Ok(None);
+    }
     // (#1082) kt-native: weight buffers keyed on the stable kt id; byte
     // extraction + reconstruction run on the kt args.
     let vk_device = backend
@@ -1491,6 +1505,12 @@ pub(super) fn gdn_gated_rms_norm(
     ) {
         return Ok(None);
     }
+    if x.dims().get(1).copied().unwrap_or_default() > 1
+        && matches!(x.device(), kiln_tensor::Device::Cpu)
+        && x.elem_count() < HOST_BRIDGE_ELEMENTWISE_PREFILL_MIN_ELEMENTS
+    {
+        return Ok(None);
+    }
     // (#1082) kt-native: weight buffer keyed on the stable kt id; byte
     // extraction + reconstruction run on the kt args.
     let vk_device = backend
@@ -1517,6 +1537,7 @@ pub(super) fn gdn_gated_rms_norm(
         &out_shape,
     )
     .context("gdn_gated_rms_norm kernel failed")?;
-    let out = kt_tensor_from_f32_bytes(&out_data, &out_shape, output_dtype)?;
+    let out =
+        kt_tensor_from_f32_bytes(&out_data, &out_shape, output_dtype)?.to_device(x.device())?;
     Ok(Some(out))
 }

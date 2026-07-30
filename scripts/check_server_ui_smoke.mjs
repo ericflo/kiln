@@ -1577,7 +1577,7 @@ async function startServer({
         accelerator_runtime: {
           schema_id: 'kiln.accelerator-runtime-policy.v16',
           version: 16,
-          vulkan_kernel_policy_schema_id: 'kiln.vulkan-kernel-policy.v4',
+          vulkan_kernel_policy_schema_id: 'kiln.vulkan-kernel-policy.v5',
           vulkan_device_policy_schema_id: 'kiln.vulkan-device-policy.v1',
           serving_profile: 'stable',
           serving_profile_source: 'default',
@@ -2697,7 +2697,7 @@ async function expectRocmMatmulRuntimeConfig(page, scenarioLabel) {
   const prefix = `${scenarioLabel} ROCm matmul runtime config`;
   const selector = '#runtime-config-body';
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Policy schema[\s\S]*kiln\.accelerator-runtime-policy\.v16[\s\S]*v16/, `${prefix} should render policy schema v16`);
-  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Vulkan kernel policy[\s\S]*kiln\.vulkan-kernel-policy\.v4/, `${prefix} should render the portable Vulkan kernel policy schema`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Vulkan kernel policy[\s\S]*kiln\.vulkan-kernel-policy\.v5/, `${prefix} should render the device-neutral Vulkan kernel policy schema`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Vulkan device policy[\s\S]*kiln\.vulkan-device-policy\.v1/, `${prefix} should render the immutable Vulkan device policy schema`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Vulkan physical device[\s\S]*automatic[\s\S]*config_file/, `${prefix} should render automatic Vulkan physical-device selection and source`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Vulkan validation[\s\S]*disabled[\s\S]*config_file/, `${prefix} should render Vulkan validation policy and source`);
