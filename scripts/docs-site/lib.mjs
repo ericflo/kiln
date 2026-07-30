@@ -955,6 +955,101 @@ async function writeSitemap(outDir) {
   );
 }
 
+function escapeMarkdownLabel(value) {
+  return String(value)
+    .replaceAll('\\', '\\\\')
+    .replaceAll('[', '\\[')
+    .replaceAll(']', '\\]');
+}
+
+function rawRepositorySourceUrl(manifest, source) {
+  const repository = new URL(manifest.site.repository_url);
+  const repositoryPath = repository.pathname
+    .replace(/^\/+/, '')
+    .replace(/\.git$/, '');
+  if (repository.hostname !== 'github.com' || repositoryPath.split('/').length !== 2) {
+    return `${manifest.site.repository_url}/blob/main/${encodeRepoPath(source)}`;
+  }
+  return `https://raw.githubusercontent.com/${repositoryPath}/refs/heads/main/${encodeRepoPath(source)}`;
+}
+
+function llmsFileEntry(title, url, description) {
+  return `- [${escapeMarkdownLabel(title)}](${url}): ${normalizeWhitespace(description)}`;
+}
+
+async function writeLlmsTxt(outDir, manifest) {
+  const documentBySlug = new Map(manifest.documents.map((document) => [document.slug, document]));
+  const documentsFor = (slugs) => slugs
+    .map((slug) => documentBySlug.get(slug))
+    .filter(Boolean)
+    .map((document) => llmsFileEntry(
+      document.title,
+      rawRepositorySourceUrl(manifest, document.source),
+      document.description,
+    ));
+  const productGuides = manifest.site.product_guides.map((guide) => llmsFileEntry(
+    guide.title,
+    new URL(guide.href, `${manifest.site.base_url}/docs/`).href,
+    guide.description,
+  ));
+  const coreDocumentation = documentsFor([
+    'overview',
+    'quickstart-reference',
+    'configuration',
+    'architecture-reference',
+    'grpo',
+    'evals',
+    'benchmarks',
+  ]);
+  const machineReadableContracts = documentsFor([
+    'http-api',
+    'configuration-schema',
+    'inference-schema',
+    'observability-schema',
+    'eval-api-schema',
+    'control-plane-api-schema',
+  ]);
+  const projectDocumentation = documentsFor([
+    'security',
+    'changelog',
+    'contributing',
+  ]);
+  const sections = [
+    '# Kiln',
+    '',
+    '> Kiln is a pure-Rust, single-GPU server for Qwen3.5-4B that combines OpenAI-compatible inference, live LoRA training, local evals, and strict replay in one process.',
+    '',
+    'Kiln deliberately targets one model family and one local improvement loop. The server owns inference, SFT, GRPO, OPD, adapter lifecycle, evaluation, receipts, and the dashboard. CUDA, ROCm, Metal, and Vulkan are supported; performance claims are bounded by the published benchmark receipts.',
+    '',
+    'Prefer the source documents and machine-readable contracts below for implementation details. Use the product guides for task-oriented orientation.',
+    '',
+    '## Product guides',
+    '',
+    ...productGuides,
+  ];
+  if (coreDocumentation.length > 0) {
+    sections.push('', '## Core documentation', '', ...coreDocumentation);
+  }
+  if (machineReadableContracts.length > 0) {
+    sections.push('', '## Machine-readable contracts', '', ...machineReadableContracts);
+  }
+  if (projectDocumentation.length > 0) {
+    sections.push('', '## Project and operations', '', ...projectDocumentation);
+  }
+  sections.push(
+    '',
+    '## Optional',
+    '',
+    llmsFileEntry('Complete documentation directory', `${manifest.site.base_url}/docs/`, 'Searchable HTML reference for every published Kiln document and contract.'),
+    llmsFileEntry('Documentation search index', `${manifest.site.base_url}/docs/search-index.json`, 'Structured titles, descriptions, headings, and searchable text for all published references.'),
+    llmsFileEntry('Sitemap', `${manifest.site.base_url}/sitemap.xml`, 'Complete canonical URL inventory.'),
+    llmsFileEntry('Source repository', manifest.site.repository_url, 'Canonical source, issues, releases, and development history.'),
+    llmsFileEntry('Latest release', `${manifest.site.repository_url}/releases/latest`, 'Current signed Kiln release and platform artifacts.'),
+    '',
+  );
+  await writeFile(resolve(outDir, 'llms.txt'), `${sections.join('\n')}\n`);
+}
+
 async function validateGeneratedHtml(outDir) {
   const errors = [];
   const htmlFiles = await listFiles(outDir, (path) => extname(path).toLowerCase() === '.html');
@@ -1226,6 +1321,7 @@ export async function buildDocsSite({
     }
 
     await writeSitemap(buildOut);
+    await writeLlmsTxt(buildOut, manifest);
     await validateGeneratedHtml(buildOut);
     await writeFile(resolve(buildOut, OUTPUT_MARKER), 'kiln-docs-site-output-v1\n');
     if ((await pathKind(resolvedOut)) === 'directory') {
