@@ -316,74 +316,12 @@ pub(crate) fn use_prefill_row_pair_matmul(batch: usize) -> bool {
 }
 
 #[cfg(test)]
-mod policy_tests {
-    use super::*;
-
-    #[test]
-    fn portable_policy_declines_optional_optimized_routes() {
-        let policy = VulkanKernelPolicy::portable_fallback();
-
-        assert_eq!(
-            VULKAN_KERNEL_POLICY_SCHEMA_ID,
-            "kiln.vulkan-kernel-policy.v6"
-        );
-        assert!(!policy.gdn_enabled);
-        assert!(!policy.linear_decode_enabled);
-        assert!(!policy.full_attn_qkv_enabled);
-        assert!(!policy.mlp_decode_enabled);
-        assert!(!policy.resident_decode_enabled);
-        assert!(!policy.flash_attn_prefill_enabled);
-        assert!(!policy.gdn_chunkwise_forward_enabled);
-        assert!(policy.gdn_chunkwise_fallback_enabled);
-        assert!(!policy.linear_decode_bf16w_rows4);
-        assert!(!policy.linear_decode_bf16w_rows8);
-        assert!(!policy.gdn_in_proj_batch_row_pair);
-        assert!(!policy.gdn_in_proj_batch_row_quad);
-        assert!(!policy.gdn_recurrent_parallel_reduce);
-        assert!(!policy.prefill_row_pair_matmul);
-        assert_eq!(policy.linear_max_flop_per_dispatch, 20_000_000_000);
-        assert_eq!(paged_attn_decode_splitk_chunks(1, 4), 32);
-        assert_eq!(paged_attn_decode_splitk_chunks(4, 32), 4);
-        assert_eq!(paged_attn_decode_splitk_chunks(4, 64), 2);
-        assert_eq!(paged_attn_decode_splitk_chunks(16, 64), 4);
-        assert!(!policy.profile_mlp_kernel_stages);
-        assert!(!policy.profile_resident_decode_timing);
-    }
-
-    #[test]
-    fn capable_device_enables_fast_routes_without_device_identity() {
-        let policy = VulkanKernelPolicy::from_capabilities(VulkanComputeCapabilities {
-            api_version: vk::make_api_version(0, 1, 2, 0),
-            max_compute_work_group_count: [65_535; 3],
-            max_compute_work_group_invocations: 1024,
-            max_compute_work_group_size: [1024, 1024, 64],
-            max_compute_shared_memory_size: 64 * 1024,
-            max_push_constants_size: 256,
-            max_per_stage_descriptor_storage_buffers: 32,
-            max_descriptor_set_storage_buffers: 32,
-            max_storage_buffer_range: u32::MAX as u64,
-            supports_compute_subgroup_basic_arithmetic: true,
-            has_coherent_device_local_host_visible_memory: false,
-            host_visible_staging_is_cached: true,
-        });
-
-        assert!(policy.gdn_enabled);
-        assert!(policy.linear_decode_enabled);
-        assert!(policy.full_attn_qkv_enabled);
-        assert!(policy.mlp_decode_enabled);
-        assert!(policy.resident_decode_enabled);
-        assert!(policy.flash_attn_prefill_enabled);
-        assert!(policy.gdn_chunkwise_forward_enabled);
-        assert!(!policy.gdn_chunkwise_fallback_enabled);
-        assert!(policy.bf16_packed_linear_weights_enabled);
-        assert!(policy.paged_decode_gpu_gather_enabled);
-        assert!(policy.linear_decode_single_submit);
-        assert!(policy.gdn_recurrent_parallel_reduce);
-        assert!(
-            !policy.gdn_recurrent_host_visible_state,
-            "a host-visible state route must not be selected for discrete memory"
-        );
-    }
+#[test]
+fn paged_attention_splitk_policy_uses_workload_shape() {
+    assert_eq!(paged_attn_decode_splitk_chunks(1, 4), 32);
+    assert_eq!(paged_attn_decode_splitk_chunks(4, 32), 4);
+    assert_eq!(paged_attn_decode_splitk_chunks(4, 64), 2);
+    assert_eq!(paged_attn_decode_splitk_chunks(16, 64), 4);
 }
 
 /// Pre-create the validated built-in compute pipelines on this Vulkan device.

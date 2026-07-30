@@ -476,6 +476,55 @@ mod tests {
     }
 
     #[test]
+    fn portable_policy_declines_optional_optimized_routes() {
+        let policy = VulkanKernelPolicy::portable_fallback();
+
+        assert_eq!(
+            VULKAN_KERNEL_POLICY_SCHEMA_ID,
+            "kiln.vulkan-kernel-policy.v6"
+        );
+        assert!(!policy.gdn_enabled);
+        assert!(!policy.linear_decode_enabled);
+        assert!(!policy.full_attn_qkv_enabled);
+        assert!(!policy.mlp_decode_enabled);
+        assert!(!policy.resident_decode_enabled);
+        assert!(!policy.flash_attn_prefill_enabled);
+        assert!(!policy.gdn_chunkwise_forward_enabled);
+        assert!(policy.gdn_chunkwise_fallback_enabled);
+        assert!(!policy.linear_decode_bf16w_rows4);
+        assert!(!policy.linear_decode_bf16w_rows8);
+        assert!(!policy.gdn_in_proj_batch_row_pair);
+        assert!(!policy.gdn_in_proj_batch_row_quad);
+        assert!(!policy.gdn_recurrent_parallel_reduce);
+        assert!(!policy.prefill_row_pair_matmul);
+        assert_eq!(policy.linear_max_flop_per_dispatch, 20_000_000_000);
+        assert!(!policy.profile_mlp_kernel_stages);
+        assert!(!policy.profile_resident_decode_timing);
+    }
+
+    #[test]
+    fn capable_device_enables_fast_routes_without_device_identity() {
+        let policy = VulkanKernelPolicy::from_capabilities(capabilities());
+
+        assert!(policy.gdn_enabled);
+        assert!(policy.linear_decode_enabled);
+        assert!(policy.full_attn_qkv_enabled);
+        assert!(policy.mlp_decode_enabled);
+        assert!(policy.resident_decode_enabled);
+        assert!(policy.flash_attn_prefill_enabled);
+        assert!(policy.gdn_chunkwise_forward_enabled);
+        assert!(!policy.gdn_chunkwise_fallback_enabled);
+        assert!(policy.bf16_packed_linear_weights_enabled);
+        assert!(policy.paged_decode_gpu_gather_enabled);
+        assert!(policy.linear_decode_single_submit);
+        assert!(policy.gdn_recurrent_parallel_reduce);
+        assert!(
+            !policy.gdn_recurrent_host_visible_state,
+            "a host-visible state route must not be selected for discrete memory"
+        );
+    }
+
+    #[test]
     fn workgroup_support_uses_limits_not_identity() {
         let mut caps = capabilities();
         let shader = VulkanShaderRequirements {
