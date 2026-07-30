@@ -14,6 +14,8 @@ const staticOnly = process.env.KILN_DOCS_SMOKE_STATIC_ONLY === 'true';
 const mobileViewport = { width: 390, height: 844, deviceScaleFactor: 2, isMobile: true };
 const desktopViewport = { width: 1440, height: 900, deviceScaleFactor: 1 };
 const mobileOverflowTolerancePx = 2;
+const dashboardImageSrcset = 'assets/server-ui-dashboard-720.webp 720w, assets/server-ui-dashboard-1440.webp 1440w, assets/server-ui-dashboard.webp 2880w';
+const dashboardImageSizes = '(max-width: 760px) calc(100vw - 32px), 960px';
 const runtimeEnvironmentContract = JSON.parse(
   readFileSync(resolve(repoRoot, 'contracts/runtime-env-direct-reads-v1.json'), 'utf8'),
 );
@@ -2314,6 +2316,31 @@ function validateSelfHostedProductPageAssets() {
       fail(`${asset.path}: pinned asciinema-player SHA-256 mismatch; expected ${asset.sha256}, got ${actualSha256}`);
     }
   }
+
+  const responsiveDashboardAssets = [
+    {
+      path: 'docs/site/assets/server-ui-dashboard-720.webp',
+      sha256: '94217f9ff779d2001adc80620baed99da1bdf3caa7690e67bf4c41c4a68db9fa',
+    },
+    {
+      path: 'docs/site/assets/server-ui-dashboard-1440.webp',
+      sha256: 'a9e3d013ec7ec3ac6ff268f349032086feeb01e6a347bf7750640b162691a0bc',
+    },
+  ];
+  for (const asset of responsiveDashboardAssets) {
+    const path = resolve(repoRoot, asset.path);
+    if (!existsSync(path)) fail(`${asset.path}: missing responsive dashboard image`);
+    const actualSha256 = createHash('sha256').update(readFileSync(path)).digest('hex');
+    if (actualSha256 !== asset.sha256) {
+      fail(`${asset.path}: responsive dashboard SHA-256 mismatch; expected ${asset.sha256}, got ${actualSha256}`);
+    }
+  }
+  for (const relativePath of ['index.html', 'quickstart.html']) {
+    const html = readFileSync(resolve(repoRoot, 'docs/site', relativePath), 'utf8');
+    assertIncludes(html, `srcset="${dashboardImageSrcset}"`, `docs/site/${relativePath}: responsive dashboard srcset`);
+    assertIncludes(html, `sizes="${dashboardImageSizes}"`, `docs/site/${relativePath}: responsive dashboard sizes`);
+  }
+
   const asciinemaLicense = readFileSync(
     resolve(repoRoot, 'docs/site/demo/vendor/asciinema-player/LICENSE'),
     'utf8',
@@ -3566,6 +3593,8 @@ async function runSmoke() {
             hasReplay: Boolean(replay),
             hasNavToggle: Boolean(navToggle),
             productImageSrc: productImage?.getAttribute('src') || '',
+            productImageSrcset: productImage?.getAttribute('srcset') || '',
+            productImageSizes: productImage?.getAttribute('sizes') || '',
             productImageLoading: productImage?.getAttribute('loading') || '',
           };
         });
@@ -3578,6 +3607,10 @@ async function runSmoke() {
         }
         if (homeResult.productImageSrc !== 'assets/server-ui-dashboard.webp' || homeResult.productImageLoading !== 'lazy') {
           fail(`${sitePage.path}: homepage product image must use the optimized lazy-loaded WebP asset`);
+        }
+        if (homeResult.productImageSrcset !== dashboardImageSrcset
+            || homeResult.productImageSizes !== dashboardImageSizes) {
+          fail(`${sitePage.path}: homepage product image must declare the responsive dashboard sources`);
         }
 
         await page.click('.nav-toggle');
@@ -3724,8 +3757,11 @@ async function runSmoke() {
             dashboardImage: dashboardImage ? {
               alt: normalize(dashboardImage.getAttribute('alt')),
               complete: dashboardImage.complete,
+              currentSrc: dashboardImage.currentSrc,
               naturalWidth: dashboardImage.naturalWidth,
               naturalHeight: dashboardImage.naturalHeight,
+              sizes: dashboardImage.getAttribute('sizes') || '',
+              srcset: dashboardImage.getAttribute('srcset') || '',
             } : null,
           };
         });
@@ -3755,6 +3791,13 @@ async function runSmoke() {
             || quickstartResult.dashboardImage.naturalWidth <= 0
             || quickstartResult.dashboardImage.naturalHeight <= 0) {
           fail(`${sitePage.path}: dashboard screenshot did not load locally`);
+        }
+        if (quickstartResult.dashboardImage.srcset !== dashboardImageSrcset
+            || quickstartResult.dashboardImage.sizes !== dashboardImageSizes) {
+          fail(`${sitePage.path}: dashboard screenshot must declare the responsive dashboard sources`);
+        }
+        if (!quickstartResult.dashboardImage.currentSrc.endsWith('/assets/server-ui-dashboard-720.webp')) {
+          fail(`${sitePage.path}: mobile viewport must load the 720px dashboard source, got ${quickstartResult.dashboardImage.currentSrc || 'no source'}`);
         }
         if (!expectedQuickstartDashboardTerms.every((term) => quickstartResult.dashboardImage.alt.includes(term))) {
           fail(`${sitePage.path}: dashboard screenshot alt text must mention status, adapters, training, and quick inference`);
