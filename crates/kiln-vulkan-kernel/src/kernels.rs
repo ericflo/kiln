@@ -1,8 +1,8 @@
 use crate::buffer::VulkanBuffer;
 use crate::device::VulkanDevice;
 pub use crate::policy::{
-    NATIVE_VULKAN_KERNEL_POLICY, PORTABLE_VULKAN_KERNEL_POLICY, VULKAN_KERNEL_POLICY_SCHEMA_ID,
-    VulkanKernelPolicy, vulkan_kernel_policy,
+    PORTABLE_VULKAN_KERNEL_POLICY, VULKAN_KERNEL_POLICY_SCHEMA_ID, VulkanComputeCapabilities,
+    VulkanKernelPolicy, VulkanShaderRequirements, vulkan_kernel_policy,
 };
 use anyhow::{Context, Result};
 use ash::vk;
@@ -325,7 +325,7 @@ mod policy_tests {
 
         assert_eq!(
             VULKAN_KERNEL_POLICY_SCHEMA_ID,
-            "kiln.vulkan-kernel-policy.v5"
+            "kiln.vulkan-kernel-policy.v6"
         );
         assert!(!policy.gdn_enabled);
         assert!(!policy.linear_decode_enabled);
@@ -351,11 +351,21 @@ mod policy_tests {
     }
 
     #[test]
-    fn native_default_restores_device_neutral_fast_routes() {
-        let policy = VulkanKernelPolicy::native_default();
+    fn capable_device_enables_fast_routes_without_device_identity() {
+        let policy = VulkanKernelPolicy::from_capabilities(VulkanComputeCapabilities {
+            api_version: vk::make_api_version(0, 1, 2, 0),
+            max_compute_work_group_count: [65_535; 3],
+            max_compute_work_group_invocations: 1024,
+            max_compute_work_group_size: [1024, 1024, 64],
+            max_compute_shared_memory_size: 64 * 1024,
+            max_push_constants_size: 256,
+            max_per_stage_descriptor_storage_buffers: 32,
+            max_descriptor_set_storage_buffers: 32,
+            max_storage_buffer_range: u32::MAX as u64,
+            has_coherent_device_local_host_visible_memory: false,
+            host_visible_staging_is_cached: true,
+        });
 
-        assert_eq!(policy, VulkanKernelPolicy::default());
-        assert_eq!(policy, vulkan_kernel_policy());
         assert!(policy.gdn_enabled);
         assert!(policy.linear_decode_enabled);
         assert!(policy.full_attn_qkv_enabled);
@@ -368,6 +378,10 @@ mod policy_tests {
         assert!(policy.paged_decode_gpu_gather_enabled);
         assert!(policy.linear_decode_single_submit);
         assert!(policy.gdn_recurrent_parallel_reduce);
+        assert!(
+            !policy.gdn_recurrent_host_visible_state,
+            "a host-visible state route must not be selected for discrete memory"
+        );
     }
 }
 
@@ -377,6 +391,25 @@ mod policy_tests {
 /// function fills the per-device pipeline cache so the first live request does
 /// not pay RADV pipeline creation latency on the decode path.
 pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
+    if !vk_device
+        .compute_capabilities()
+        .supports_full_pipeline_prewarm()
+    {
+        tracing::info!(
+            max_compute_work_group_invocations = vk_device
+                .compute_capabilities()
+                .max_compute_work_group_invocations,
+            max_compute_shared_memory_size = vk_device
+                .compute_capabilities()
+                .max_compute_shared_memory_size,
+            max_per_stage_descriptor_storage_buffers = vk_device
+                .compute_capabilities()
+                .max_per_stage_descriptor_storage_buffers,
+            "skipping all-route Vulkan prewarm; compatible selected routes will compile lazily"
+        );
+        return Ok(());
+    }
+
     let shaders = [
         ("full_attn_qkv_decode", 5usize, 20u32),
         ("full_attn_qkv_decode_bf16w", 5usize, 20u32),
@@ -9121,7 +9154,10 @@ pub fn dispatch_gdn_recurrent_step_with_options_bytes(
     // chooses host-visible or device-local state without inspecting identity.
     let host_visible_state = gdn_recurrent_use_host_visible_state(batch);
     let state_buf = if host_visible_state {
-        VulkanBuffer::create_host_visible(device, host_visible_mt, state_data.len() as u64)?
+        let state_memory_type = vk_device
+            .device_local_host_visible_mem_type()
+            .context("Vulkan policy selected host-visible recurrent state without a device-local host-visible memory type")?;
+        VulkanBuffer::create_host_visible(device, state_memory_type, state_data.len() as u64)?
     } else {
         VulkanBuffer::create_device_local(device, device_local_mt, state_data.len() as u64)?
     };
@@ -9830,8 +9866,11 @@ fn dispatch_gdn_recurrent_step_single_submit_bytes(
     let stage_profile = profile_kernel_stages.then(Instant::now);
     let host_visible_state = gdn_recurrent_use_host_visible_state(batch);
     let state_buf = if host_visible_state {
+        let state_memory_type = vk_device
+            .device_local_host_visible_mem_type()
+            .context("Vulkan policy selected host-visible recurrent state without a device-local host-visible memory type")?;
         let buf =
-            VulkanBuffer::create_host_visible(device, host_visible_mt, state_data.len() as u64)?;
+            VulkanBuffer::create_host_visible(device, state_memory_type, state_data.len() as u64)?;
         VulkanBuffer::write_host_visible(device, &buf, state_data)?;
         buf
     } else {

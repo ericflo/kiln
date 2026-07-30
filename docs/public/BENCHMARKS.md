@@ -5,6 +5,14 @@
 Vulkan performance **did regress catastrophically** after the previously
 qualified work, and the old public page made that hard to see.
 
+The v0.5.1 recovery restored the right performance but used the wrong
+abstraction: it renamed the recovered, machine-derived route table as one
+global native default. The follow-up policy derives route legality from the
+selected Vulkan device's workgroup, shared-memory, descriptor, push-constant,
+and memory-topology capabilities. The original recovery workload remains in
+band at **13.46 decode tokens/s**, **74.31 ms mean inter-token latency**, and
+**2.694 s prefill**; device identity is not a policy input.
+
 On 2026-07-30, current `main` at commit `48fb3f7b` measured **0.142 decode
 tokens/s** on an AMD Radeon 8060S using the same short serial workload that
 measured about **12.3 decode tokens/s** in May. Prefill rose from about

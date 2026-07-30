@@ -181,9 +181,11 @@ impl VulkanBackend {
     }
 
     pub fn new(device: kiln_tensor::Device) -> Self {
-        let config = VulkanRuntimeConfig::current();
-
         let vulkan_device = vulkan_device::new_backend_device();
+        let config = vulkan_device
+            .as_ref()
+            .map(|device| VulkanRuntimeConfig::from_policy(device.kernel_policy()))
+            .unwrap_or_else(VulkanRuntimeConfig::current);
 
         // Advertise the physical-device index selected by immutable policy
         // when the logical device is up.

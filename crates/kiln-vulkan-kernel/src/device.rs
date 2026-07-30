@@ -1,3 +1,4 @@
+use crate::policy::{VulkanComputeCapabilities, VulkanKernelPolicy, install_vulkan_kernel_policy};
 use anyhow::{Context, Result, anyhow};
 use ash::vk;
 use std::collections::HashMap;
@@ -77,6 +78,7 @@ pub struct VulkanDevice {
     device_name: String,
     device_local_mem_type: u32,
     host_visible_mem_type: u32,
+    device_local_host_visible_mem_type: Option<u32>,
     /// Sum of device-local memory heap sizes reported by the physical device.
     /// Used by memory-bounded kernels to choose conservative defaults without
     /// requiring operator tuning.
@@ -92,6 +94,8 @@ pub struct VulkanDevice {
     /// dispatches with a meaningful error rather than letting
     /// vkCmdDispatch fail opaquely.
     max_compute_work_group_count: [u32; 3],
+    compute_capabilities: VulkanComputeCapabilities,
+    kernel_policy: VulkanKernelPolicy,
     pipeline_cache: Mutex<HashMap<PipelineKey, CachedComputePipeline>>,
     /// Fast-path cache for `CommandBatch::record_shader` callers.
     /// Keyed by `(shader_path, total_bindings, push_constant_size)` —
@@ -136,6 +140,8 @@ impl std::fmt::Debug for VulkanDevice {
                 "max_compute_shared_memory_size",
                 &self.max_compute_shared_memory_size,
             )
+            .field("compute_capabilities", &self.compute_capabilities)
+            .field("kernel_policy", &self.kernel_policy)
             .field("device_local_heap_bytes", &self.device_local_heap_bytes)
             .field(
                 "pipeline_cache_len",
@@ -342,9 +348,41 @@ impl VulkanDevice {
                 )
             })
             .ok_or_else(|| anyhow!("no host-visible memory type found"))?;
+        let device_local_host_visible_mem_type = Self::find_memory_type(
+            &mem_props,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL
+                | vk::MemoryPropertyFlags::HOST_VISIBLE
+                | vk::MemoryPropertyFlags::HOST_COHERENT,
+        );
+        let host_visible_properties =
+            mem_props.memory_types[host_visible_mem_type as usize].property_flags;
+        let compute_capabilities = VulkanComputeCapabilities {
+            api_version: properties.api_version,
+            max_compute_work_group_count,
+            max_compute_work_group_invocations: properties
+                .limits
+                .max_compute_work_group_invocations,
+            max_compute_work_group_size: properties.limits.max_compute_work_group_size,
+            max_compute_shared_memory_size: properties.limits.max_compute_shared_memory_size,
+            max_push_constants_size: properties.limits.max_push_constants_size,
+            max_per_stage_descriptor_storage_buffers: properties
+                .limits
+                .max_per_stage_descriptor_storage_buffers,
+            max_descriptor_set_storage_buffers: properties
+                .limits
+                .max_descriptor_set_storage_buffers,
+            max_storage_buffer_range: u64::from(properties.limits.max_storage_buffer_range),
+            has_coherent_device_local_host_visible_memory: device_local_host_visible_mem_type
+                .is_some(),
+            host_visible_staging_is_cached: host_visible_properties
+                .contains(vk::MemoryPropertyFlags::HOST_CACHED),
+        };
+        let kernel_policy = VulkanKernelPolicy::from_capabilities(compute_capabilities);
         tracing::info!(
             memory_type = host_visible_mem_type,
-            cached = host_visible_cached_mem_type.is_some(),
+            has_coherent_device_local_memory =
+                compute_capabilities.has_coherent_device_local_host_visible_memory,
+            cached = compute_capabilities.host_visible_staging_is_cached,
             "selected Vulkan host-visible staging memory type"
         );
 
@@ -401,6 +439,21 @@ impl VulkanDevice {
         .context("failed to create Vulkan batch command pool")?;
         let batch_descriptor_pool = Self::create_batch_descriptor_pool(&device)
             .context("failed to create Vulkan batch descriptor pool")?;
+        install_vulkan_kernel_policy(kernel_policy)
+            .context("failed to install selected-device Vulkan kernel policy")?;
+        tracing::info!(
+            policy_schema_id = crate::policy::VULKAN_KERNEL_POLICY_SCHEMA_ID,
+            max_compute_work_group_invocations =
+                compute_capabilities.max_compute_work_group_invocations,
+            max_compute_shared_memory_size = compute_capabilities.max_compute_shared_memory_size,
+            max_per_stage_descriptor_storage_buffers =
+                compute_capabilities.max_per_stage_descriptor_storage_buffers,
+            has_coherent_device_local_host_visible_memory =
+                compute_capabilities.has_coherent_device_local_host_visible_memory,
+            resident_decode = kernel_policy.resident_decode_enabled,
+            chunkwise_gdn = kernel_policy.gdn_chunkwise_forward_enabled,
+            "derived Vulkan kernel policy from selected-device capabilities"
+        );
 
         Ok(Self {
             entry,
@@ -414,9 +467,12 @@ impl VulkanDevice {
             device_name,
             device_local_mem_type,
             host_visible_mem_type,
+            device_local_host_visible_mem_type,
             device_local_heap_bytes,
             max_compute_shared_memory_size,
             max_compute_work_group_count,
+            compute_capabilities,
+            kernel_policy,
             pipeline_cache: Mutex::new(HashMap::new()),
             path_pipeline_cache: Mutex::new(HashMap::new()),
             transient_command_pool: Mutex::new(transient_command_pool),
@@ -519,6 +575,14 @@ impl VulkanDevice {
         self.host_visible_mem_type
     }
 
+    /// Host-mappable memory that is also device-local, when the physical
+    /// device exposes such a type. This is the capability used by the
+    /// recurrent-state zero-copy route; ordinary staging keeps using the
+    /// cached host-visible type.
+    pub fn device_local_host_visible_mem_type(&self) -> Option<u32> {
+        self.device_local_host_visible_mem_type
+    }
+
     /// Check if this is an AMD GPU.
     pub fn is_amd(&self) -> bool {
         self.vendor_id == 0x1002
@@ -567,6 +631,14 @@ impl VulkanDevice {
     pub fn max_compute_work_group_count(&self, axis: usize) -> u32 {
         debug_assert!(axis < 3, "max_compute_work_group_count axis must be 0..3");
         self.max_compute_work_group_count[axis.min(2)]
+    }
+
+    pub fn compute_capabilities(&self) -> VulkanComputeCapabilities {
+        self.compute_capabilities
+    }
+
+    pub fn kernel_policy(&self) -> VulkanKernelPolicy {
+        self.kernel_policy
     }
 
     /// Return a cached compute pipeline compatible with the provided shader,
@@ -1041,6 +1113,11 @@ mod tests {
             assert!(
                 !dev.device_name().is_empty(),
                 "device name should not be empty"
+            );
+            assert_eq!(
+                dev.kernel_policy(),
+                VulkanKernelPolicy::from_capabilities(dev.compute_capabilities()),
+                "selected routes must be a pure projection of Vulkan capabilities"
             );
         }
     }

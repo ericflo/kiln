@@ -2121,7 +2121,7 @@ mod tests {
         );
         assert_eq!(
             json["decode_runtime"]["accelerator_runtime"]["vulkan_kernel_policy_schema_id"],
-            "kiln.vulkan-kernel-policy.v5"
+            "kiln.vulkan-kernel-policy.v6"
         );
         assert_eq!(
             json["decode_runtime"]["accelerator_runtime"]["vulkan_device_policy_schema_id"],

@@ -1,6 +1,6 @@
 //! Vulkan model-route projection of the process-lifetime execution policy.
 
-use kiln_vulkan_kernel::kernels::vulkan_kernel_policy;
+use kiln_vulkan_kernel::kernels::{VulkanKernelPolicy, vulkan_kernel_policy};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct VulkanRuntimeConfig {
@@ -34,8 +34,10 @@ pub(super) struct VulkanRuntimeConfig {
 
 impl VulkanRuntimeConfig {
     pub(super) fn current() -> Self {
-        let policy = vulkan_kernel_policy();
+        Self::from_policy(vulkan_kernel_policy())
+    }
 
+    pub(super) fn from_policy(policy: VulkanKernelPolicy) -> Self {
         Self {
             gdn_enabled: policy.gdn_enabled,
             gdn_prefill_in_proj_enabled: policy.gdn_prefill_in_proj_enabled,
