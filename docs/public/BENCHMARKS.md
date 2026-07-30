@@ -21,10 +21,10 @@ portable performance strategy.
 
 The 2026-07-30 v5 release candidate restores those standards-based routes
 without a device-name, vendor-ID, PCI-ID, or machine allowlist. The clean
-same-workload result is **13.26 decode tokens/s** at **75.41 ms mean
-inter-token latency**: about **94× faster than regressed main** and back in the
-historical range. Prefill is **2.429 s**, a **4.7× recovery** from main but
-still about **2.4× slower** than the May checkpoint. The candidate is
+same-workload result is **13.43 decode tokens/s** at **74.48 ms mean
+inter-token latency**: about **95× faster than regressed main** and back in the
+historical range. Prefill is **2.588 s**, a **4.4× recovery** from main but
+still about **2.6× slower** than the May checkpoint. The candidate is
 parity-tested but is not labeled shipped until the release is published.
 
 ## The comparable Vulkan result
@@ -37,7 +37,7 @@ whether serial decode regressed.
 |---|---:|---:|---:|---|
 | 2026-05-09 Vulkan optimization checkpoint A113 | 995.9 ms | 81.1 ms | about 12.3 tok/s | Historical qualified implementation |
 | 2026-07-30 `main` at `48fb3f7b` | 11,343.1 ms | 7,059.9 ms | 0.142 tok/s | Reproduced regression |
-| 2026-07-30 v5 release candidate | 2,429.3 ms | 75.41 ms | 13.26 tok/s | Clean local run; parity-tested, not yet shipped |
+| 2026-07-30 v5 release candidate | 2,587.6 ms | 74.48 ms | 13.43 tok/s | Clean local run; parity-tested, not yet shipped |
 
 Hardware for the current run: AMD Radeon 8060S Graphics, RADV Strix Halo,
 Mesa 26.1.5, Qwen3.5-4B, Vulkan backend. The current run generated nine tokens;

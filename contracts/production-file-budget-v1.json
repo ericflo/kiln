@@ -69,7 +69,7 @@
     },
     {
       "path": "crates/kiln-vulkan-kernel/src/kernels.rs",
-      "max_lines": 11434,
+      "max_lines": 11277,
       "rationale": "This file is the centralized generated-style Vulkan kernel registry and embedded shader source authority; additions must remain within its reviewed ceiling."
     }
   ]

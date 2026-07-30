@@ -20,6 +20,7 @@ pub mod decode_resident_pool;
 pub mod device;
 pub mod kernels;
 pub mod pipeline;
+pub mod policy;
 pub mod resident;
 pub mod vk_autograd;
 pub mod vk_ops;
@@ -34,11 +35,11 @@ pub use device::{
     VULKAN_DEVICE_POLICY_SCHEMA_ID, VulkanDevice, VulkanDevicePolicy, install_vulkan_device_policy,
     vulkan_device_policy,
 };
-pub use kernels::{
+pub use pipeline::ShaderPipeline;
+pub use policy::{
     NATIVE_VULKAN_KERNEL_POLICY, PORTABLE_VULKAN_KERNEL_POLICY, VULKAN_KERNEL_POLICY_SCHEMA_ID,
     VulkanKernelPolicy, vulkan_kernel_policy,
 };
-pub use pipeline::ShaderPipeline;
 pub use vk_paged_kv_cache::VkPagedKvCache;
 
 /// Public shader source paths for callers (in this crate or downstream)

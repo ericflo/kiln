@@ -8,7 +8,7 @@
   The v4 fallback had disabled resident decode, packed weights, fused
   projections, GPU gather, and submission fusion globally. The same-workload
   regression measured 0.142 decode tok/s and 11.343 s prefill; the clean v5
-  candidate measures 13.26 decode tok/s and 2.429 s prefill. `native_default`
+  candidate measures 13.43 decode tok/s and 2.588 s prefill. `native_default`
   again owns the device-neutral route set. A new multi-token Gated DeltaNet
   recurrent shader passes an independent sequential CPU oracle, while
   workload-size crossovers keep small bridged prefill operations on the
