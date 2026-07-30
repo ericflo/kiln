@@ -45,8 +45,30 @@ fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> 
     crate::buffer_pool::pool_alloc_f32(device, n)
 }
 
-fn flash_rows_tile(rows: usize) -> usize {
-    crate::kernels::flash_attention_row_tile().clamp(1, rows.max(1))
+fn flash_rows_tile(
+    rows: usize,
+    device: &VulkanDevice,
+    tiled_shader_requires_subgroups: bool,
+) -> usize {
+    flash_rows_tile_for_capabilities(
+        rows,
+        tiled_shader_requires_subgroups,
+        device
+            .compute_capabilities()
+            .supports_compute_subgroup_basic_arithmetic,
+    )
+}
+
+fn flash_rows_tile_for_capabilities(
+    rows: usize,
+    tiled_shader_requires_subgroups: bool,
+    supports_compute_subgroup_basic_arithmetic: bool,
+) -> usize {
+    if tiled_shader_requires_subgroups && !supports_compute_subgroup_basic_arithmetic {
+        rows.max(1)
+    } else {
+        crate::kernels::flash_attention_row_tile().clamp(1, rows.max(1))
+    }
 }
 
 fn flash_row_work_budget(rows: usize, row_tile: usize) -> usize {
@@ -230,7 +252,7 @@ pub fn vk_flash_sdpa_prefill_flat_no_grad(
         head_dim as u32,
         scale.to_bits(),
     ];
-    let row_tile = flash_rows_tile(rows);
+    let row_tile = flash_rows_tile(rows, device, true);
     if rows <= row_tile {
         dispatch_simple_3d(
             device,
@@ -396,7 +418,7 @@ fn vk_flash_sdpa_delta(
 ) -> Result<VkTensor> {
     let device = grad_out.device();
     let delta_buf = alloc_f32(device, rows * heads_q)?;
-    let row_tile = flash_rows_tile(rows);
+    let row_tile = flash_rows_tile(rows, device, false);
     if rows <= row_tile {
         let push = [rows as u32, heads_q as u32, head_dim as u32];
         dispatch_simple_3d(
@@ -463,7 +485,7 @@ fn vk_flash_sdpa_bwd_dq(
         head_dim as u32,
         scale.to_bits(),
     ];
-    let row_tile = flash_rows_tile(rows);
+    let row_tile = flash_rows_tile(rows, device, true);
     if rows <= row_tile {
         dispatch_simple_3d(
             device,
@@ -540,7 +562,7 @@ fn vk_flash_sdpa_bwd_dkdv(
         head_dim as u32,
         scale.to_bits(),
     ];
-    let row_tile = flash_rows_tile(rows);
+    let row_tile = flash_rows_tile(rows, device, true);
     if rows <= row_tile {
         dispatch_simple_3d(
             device,
@@ -702,4 +724,22 @@ pub fn vk_flash_sdpa_prefill_flat(
         Arc::clone(out.device()),
         grad_fn,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flash_rows_tile_for_capabilities;
+
+    #[test]
+    fn subgroup_free_devices_keep_flash_attention_on_the_vulkan_1_0_shader() {
+        assert_eq!(flash_rows_tile_for_capabilities(4096, true, false), 4096);
+        assert_eq!(
+            flash_rows_tile_for_capabilities(4096, true, true),
+            crate::kernels::flash_attention_row_tile()
+        );
+        assert_eq!(
+            flash_rows_tile_for_capabilities(4096, false, false),
+            crate::kernels::flash_attention_row_tile()
+        );
+    }
 }

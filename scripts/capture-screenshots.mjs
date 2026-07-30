@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 /* Capture demo screenshots of the kiln dashboard with ?demo=1 fixtures.
-   Headless Chromium, file:// URL, no GPU pod required. */
+   Headless Chromium + ImageMagick, file:// URL, no GPU pod required.
+   Each PNG source is followed by 720/1440/2880 WebP delivery variants. */
 
 import puppeteer from "./docs-site/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdir, readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
@@ -31,6 +34,15 @@ const appFragments = [
 const appJs = `(function() {\n'use strict';\n\n${(
   await Promise.all(appFragments.map((name) => readFile(resolve(uiAppDir, name), "utf8")))
 ).join("\n")}\n})();\n`;
+const execFileAsync = promisify(execFile);
+
+async function writeResponsiveWebp(pngPath) {
+  const stem = pngPath.replace(/\.png$/i, "");
+  const common = ["-strip", "-quality", "82", "-define", "webp:method=6"];
+  await execFileAsync("magick", [pngPath, ...common, `${stem}.webp`]);
+  await execFileAsync("magick", [pngPath, "-filter", "Lanczos", "-resize", "1440x>", ...common, `${stem}-1440.webp`]);
+  await execFileAsync("magick", [pngPath, "-filter", "Lanczos", "-resize", "720x>", ...common, `${stem}-720.webp`]);
+}
 
 const targets = [
   { page: "overview",   out: "docs/site/assets/server-ui-dashboard.png", scrollWait: 0 },
@@ -70,7 +82,8 @@ try {
     const outPath = resolve(repoRoot, t.out);
     await mkdir(dirname(outPath), { recursive: true });
     await page.screenshot({ path: outPath, fullPage: true });
-    console.log(`  saved ${t.out}`);
+    await writeResponsiveWebp(outPath);
+    console.log(`  saved ${t.out} and responsive WebP variants`);
     await page.close();
   }
 } finally {

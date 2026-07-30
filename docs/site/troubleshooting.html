@@ -30,6 +30,10 @@
   <meta name="twitter:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
 
   <script>document.documentElement.classList.add('product-page-enhanced');</script>
+  <link rel="preload" as="font" type="font/woff2" href="fonts/Inter-400.woff2" crossorigin>
+  <link rel="preload" as="font" type="font/woff2" href="fonts/Inter-600.woff2" crossorigin>
+  <link rel="preload" as="font" type="font/woff2" href="fonts/Inter-700.woff2" crossorigin>
+  <link rel="preload" as="font" type="font/woff2" href="fonts/JetBrainsMono-600.woff2" crossorigin>
   <link rel="stylesheet" href="css/utilities.css">
   <link rel="stylesheet" href="css/fonts.css">
   <link rel="stylesheet" href="css/kiln.css">
@@ -383,7 +387,7 @@ curl -s http://localhost:8420/v1/chat/completions \
             <div class="label mb-2">Check</div>
             <ul class="list-disc pl-5">
               <li>Linux and Windows CUDA builds require an NVIDIA GPU.</li>
-              <li>Linux Vulkan builds require a Vulkan 1.2+ AMD/Intel driver; <code>vulkaninfo --summary</code> should list the target GPU.</li>
+              <li>Linux Vulkan builds require a working Vulkan loader and compute-capable driver; <code>vulkaninfo --summary</code> should list the target GPU. Kiln negotiates the loader API up to Vulkan 1.2 rather than requiring 1.2 unconditionally.</li>
               <li>CUDA release builds target CUDA 12.4-era systems.</li>
               <li>macOS uses the Apple Silicon Metal artifact, not a CUDA or Vulkan artifact.</li>
             </ul>
@@ -509,11 +513,13 @@ curl -s http://localhost:8420/metrics \
         </ul>
         <h3 id="vulkan-kernel-policy-diagnosis" class="text-lg font-semibold mt-6 mb-2">Vulkan kernel-policy diagnosis</h3>
         <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
-          The device-neutral native selections documented for <code>kiln.vulkan-kernel-policy.v5</code> are fixed. Their
+          <code>kiln.vulkan-kernel-policy.v6</code> is derived once from the selected physical device's reported
+          workgroup, shared-memory, descriptor, push-constant, subgroup, API, and memory-topology capabilities. Its
           former <code>KILN_DISABLE_VULKAN_*</code>, <code>KILN_ENABLE_VULKAN_*</code>, kernel-threshold,
           split-K, stage-profile, packed-weight, recurrence, and resident-decode variables are not controls and
           must not be used to explain a run. The backend, kernel, and resident-model planners share one source
-          object for those decisions; malformed shell values and device identity cannot select a different path.
+          object for those decisions; malformed shell values, device names, vendor IDs, device IDs, and PCI identity
+          cannot select a different path.
         </p>
         <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config \
   | jq '.accelerator_runtime | {schema_id, version, vulkan_kernel_policy_schema_id, vulkan_device_policy_schema_id, vulkan_device_index, vulkan_validation}'</code></pre>
@@ -527,15 +533,11 @@ curl -s http://localhost:8420/metrics \
           <li>The serving/kernel product no longer reads residual <code>KILN_VK_*</code> tiling or CPU-fallback controls. The separate research executable uses only typed CLI arguments and cannot define a qualified product receipt.</li>
         </ul>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          The current clean-source Strix Halo Vulkan development soak passed safety and lifecycle gates but remains
-          plainly uncompetitive: 55 requests and 880 output tokens over 1,935.219 measured seconds produced only
-          0.455 aggregate output tokens/second, with 83.194-second p50 and 150.588-second p99 TTFT. All 228 ITL
-          outliers were attributed and none were unexplained. Process DRM and live/retained Vulkan ownership ended
-          byte-identical to baseline; measured allocation, free, pool-miss, eviction, and uncached-allocation counts
-          were zero, RSS grew 1.17 MiB, and swap did not grow. The 89.75 C package peak did not trip the 97 C guard,
-          and shutdown was clean. That evidence contradicts a mid-inference VRAM-rebalance explanation for these
-          long phases; it does not make the latency or throughput acceptable, establish vLLM parity, or replace the
-          final eight-hour common-source endurance run.
+          Do not use the July 20 soak's 0.455 aggregate output tokens/second as a decode-rate diagnostic. That value
+          divides all output by a 1,935-second mixed-concurrency request window; its 76.7 ms median inter-token
+          latency corresponds to about 13.0 decode tokens/second. The
+          <a href="docs/benchmarks/">benchmark page</a> separates decode, prefill, TTFT, and request-window throughput
+          and shows the July 27 regression and current correction as comparable runs.
         </p>
         <h3 id="vulkan-prefix-cache-diagnosis" class="text-lg font-semibold mt-6 mb-2">Vulkan prefix-cache diagnosis</h3>
         <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">

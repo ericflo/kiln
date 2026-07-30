@@ -32,6 +32,7 @@
 
   <link rel="preload" as="font" type="font/woff2" href="fonts/Inter-400.woff2" crossorigin>
   <link rel="preload" as="font" type="font/woff2" href="fonts/Inter-600.woff2" crossorigin>
+  <link rel="preload" as="font" type="font/woff2" href="fonts/Inter-700.woff2" crossorigin>
   <link rel="preload" as="font" type="font/woff2" href="fonts/JetBrainsMono-400.woff2" crossorigin>
   <link rel="stylesheet" href="css/fonts.css">
   <link rel="stylesheet" href="css/kiln.css">
@@ -268,7 +269,7 @@
                    srcset="assets/server-ui-dashboard-720.webp 720w, assets/server-ui-dashboard-1440.webp 1440w, assets/server-ui-dashboard.webp 2880w"
                    sizes="(max-width: 760px) calc(100vw - 32px), 960px"
                    alt="Kiln embedded server dashboard showing server status, live request activity, adapters, training, and operational controls."
-                   loading="lazy" decoding="async" width="2880" height="3466">
+                   loading="lazy" decoding="async" width="2880" height="3534">
             </div>
           </figure>
 
@@ -384,41 +385,74 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
       </div>
     </section>
 
-    <section class="home-section evidence-section" aria-label="Current hardware qualification and performance position">
+    <section class="home-section evidence-section" aria-label="Latest verified performance and release provenance">
       <div class="page">
         <header class="home-section-head home-section-head-left evidence-head">
-          <span class="eyebrow">Measured, not marketed</span>
-          <h2>Know exactly where Kiln fits.</h2>
+          <span class="eyebrow">Current, inspectable evidence</span>
+          <h2>Performance you can trace back to the source.</h2>
           <p>
-            Kiln publishes source-bound receipts and keeps its claims inside the measured
-            envelope. It is built for correctness-first local improvement work—not as a
-            blanket replacement for a high-concurrency inference fleet.
+            Every number has a workload, command, source revision, and limitation. Every
+            release artifact has a checksum and build-provenance attestation.
           </p>
         </header>
 
-        <div class="evidence-grid">
-          <article>
-            <strong>12.18 <small>tok/s</small></strong>
-            <span>ROCm mixed soak</span>
-            <p>Source-bound Strix Halo development receipt.</p>
+        <div class="evidence-stage">
+          <article class="evidence-result">
+            <div class="evidence-result-head">
+              <span class="evidence-status"><i aria-hidden="true"></i> Vulkan decode · recovered</span>
+              <a href="docs/benchmarks/">correction branch <span aria-hidden="true">→</span></a>
+            </div>
+
+            <div class="evidence-result-main">
+              <strong>13.46 <small>tok/s</small></strong>
+              <p>Qwen3.5-4B · 64-token prompt · 8-token seeded latency run</p>
+            </div>
+
+            <dl class="evidence-metrics">
+              <div><dt>Mean ITL</dt><dd>74.29 <small>ms</small></dd></div>
+              <div><dt>Recovery</dt><dd>95<small>×</small></dd></div>
+              <div><dt>Prefill</dt><dd>2.81 <small>s</small></dd></div>
+            </dl>
+
+            <p class="evidence-policy">
+              <strong>Capability-led Vulkan.</strong> Production selection follows workload
+              geometry and queried device limits—never a GPU name, vendor ID, PCI ID, or
+              machine allowlist.
+            </p>
+
+            <div class="evidence-actions">
+              <a href="docs/benchmarks/">Read the benchmark receipt <span aria-hidden="true">→</span></a>
+              <a href="https://github.com/ericflo/kiln/commit/28d8c6028d1b187107688c9adea0b079d203f687">Inspect the regression boundary <span aria-hidden="true">↗</span></a>
+            </div>
           </article>
-          <article>
-            <strong>30 <small>min</small></strong>
-            <span>ROCm gate passed</span>
-            <p>Stability gate with long-run variance retained.</p>
-          </article>
-          <article>
-            <strong>0.455 <small>tok/s</small></strong>
-            <span>Vulkan, stability only</span>
-            <p>Correctness evidence; unacceptable serving performance.</p>
-          </article>
-          <article class="evidence-caveat">
-            <strong>vLLM</strong>
-            <span>Preferred at high concurrency</span>
-            <p>Kiln makes no current vLLM parity claim.</p>
+
+          <article class="release-proof">
+            <div class="release-proof-head">
+              <span class="eyebrow">The release matrix</span>
+              <h3>Five native artifacts.<br>One source tree.</h3>
+            </div>
+            <ul class="release-platforms">
+              <li><span><i class="platform-dot platform-cuda" aria-hidden="true"></i><strong>CUDA 12.4</strong></span><small>Linux · Windows</small></li>
+              <li><span><i class="platform-dot platform-rocm" aria-hidden="true"></i><strong>ROCm 7.2.4</strong></span><small>Linux</small></li>
+              <li><span><i class="platform-dot platform-metal" aria-hidden="true"></i><strong>Metal</strong></span><small>Apple Silicon</small></li>
+              <li><span><i class="platform-dot platform-vulkan" aria-hidden="true"></i><strong>Vulkan</strong></span><small>Linux</small></li>
+            </ul>
+            <div class="release-proof-foot">
+              <span>Checksums · attestations · third-party licenses</span>
+              <a href="https://github.com/ericflo/kiln/releases/latest" rel="noopener">Inspect the release <span aria-hidden="true">→</span></a>
+            </div>
           </article>
         </div>
-        <a class="evidence-link" href="docs/benchmarks/">Inspect the receipts, limitations, and counterevidence <span aria-hidden="true">→</span></a>
+
+        <aside class="evidence-boundary">
+          <span>Honest boundary</span>
+          <p>
+            The 13.46 tok/s correction is verified source evidence, not yet a published
+            release. Decode is back in the historical range; prefill remains about 2.8×
+            behind the May baseline, and Kiln makes no vLLM parity claim for high-concurrency serving.
+          </p>
+          <a href="docs/benchmarks/">See every limitation <span aria-hidden="true">→</span></a>
+        </aside>
       </div>
     </section>
 

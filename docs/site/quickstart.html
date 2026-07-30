@@ -30,6 +30,10 @@
   <meta name="twitter:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
 
   <script>document.documentElement.classList.add('product-page-enhanced');</script>
+  <link rel="preload" as="font" type="font/woff2" href="fonts/Inter-400.woff2" crossorigin>
+  <link rel="preload" as="font" type="font/woff2" href="fonts/Inter-600.woff2" crossorigin>
+  <link rel="preload" as="font" type="font/woff2" href="fonts/Inter-700.woff2" crossorigin>
+  <link rel="preload" as="font" type="font/woff2" href="fonts/JetBrainsMono-600.woff2" crossorigin>
   <link rel="stylesheet" href="css/utilities.css">
   <link rel="stylesheet" href="css/fonts.css">
   <link rel="stylesheet" href="css/kiln.css">
@@ -503,12 +507,12 @@ tar -xzf kiln-linux-rocm.tar.gz</code></pre>
           <p class="text-sm mt-3" style="color: var(--fg-mute);">Use this on AMD Linux systems with ROCm/HIP. The binary includes CDNA, RDNA3, and Strix Halo gfx targets.</p>
         </div>
         <div class="install-card">
-          <h3 class="font-semibold mb-2">Linux x86_64 &middot; Vulkan 1.2</h3>
+          <h3 class="font-semibold mb-2">Linux x86_64 &middot; Vulkan</h3>
 <pre class="text-sm"><code>KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*&quot;tag_name&quot;: &quot;kiln-v\([^&quot;]*\)&quot;.*/\1/p')
 curl -L -o kiln-linux-vulkan.tar.gz \
   "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-vulkan.tar.gz"
 tar -xzf kiln-linux-vulkan.tar.gz</code></pre>
-          <p class="text-sm mt-3" style="color: var(--fg-mute);">Use this on AMD/Intel Linux systems where <code>vulkaninfo --summary</code> lists the GPU.</p>
+          <p class="text-sm mt-3" style="color: var(--fg-mute);">Use this on Linux systems where <code>vulkaninfo --summary</code> lists a compute-capable GPU. Kiln negotiates the loader API up to Vulkan 1.2 and admits optional routes only when the selected device reports every capability they require.</p>
         </div>
         <div class="install-card">
           <h3 class="font-semibold mb-2">macOS Apple Silicon &middot; Metal</h3>
@@ -716,7 +720,7 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
         <img src="assets/server-ui-dashboard.webp"
              srcset="assets/server-ui-dashboard-720.webp 720w, assets/server-ui-dashboard-1440.webp 1440w, assets/server-ui-dashboard.webp 2880w"
              sizes="(max-width: 760px) calc(100vw - 32px), 960px"
-             width="2880" height="3466" loading="lazy" decoding="async"
+             width="2880" height="3534" loading="lazy" decoding="async"
              alt="Kiln dashboard showing server status, adapters, training, and quick inference controls"
              class="w-full h-auto block">
         <figcaption class="px-5 py-3 text-sm" style="color: var(--fg-mute);">Use the dashboard as your status checkpoint before starting adapter or training workflows.</figcaption>

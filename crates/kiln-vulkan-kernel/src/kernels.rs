@@ -1,8 +1,8 @@
 use crate::buffer::VulkanBuffer;
 use crate::device::VulkanDevice;
 pub use crate::policy::{
-    NATIVE_VULKAN_KERNEL_POLICY, PORTABLE_VULKAN_KERNEL_POLICY, VULKAN_KERNEL_POLICY_SCHEMA_ID,
-    VulkanKernelPolicy, vulkan_kernel_policy,
+    PORTABLE_VULKAN_KERNEL_POLICY, VULKAN_KERNEL_POLICY_SCHEMA_ID, VulkanComputeCapabilities,
+    VulkanKernelPolicy, VulkanShaderRequirements, vulkan_kernel_policy,
 };
 use anyhow::{Context, Result};
 use ash::vk;
@@ -316,59 +316,12 @@ pub(crate) fn use_prefill_row_pair_matmul(batch: usize) -> bool {
 }
 
 #[cfg(test)]
-mod policy_tests {
-    use super::*;
-
-    #[test]
-    fn portable_policy_declines_optional_optimized_routes() {
-        let policy = VulkanKernelPolicy::portable_fallback();
-
-        assert_eq!(
-            VULKAN_KERNEL_POLICY_SCHEMA_ID,
-            "kiln.vulkan-kernel-policy.v5"
-        );
-        assert!(!policy.gdn_enabled);
-        assert!(!policy.linear_decode_enabled);
-        assert!(!policy.full_attn_qkv_enabled);
-        assert!(!policy.mlp_decode_enabled);
-        assert!(!policy.resident_decode_enabled);
-        assert!(!policy.flash_attn_prefill_enabled);
-        assert!(!policy.gdn_chunkwise_forward_enabled);
-        assert!(policy.gdn_chunkwise_fallback_enabled);
-        assert!(!policy.linear_decode_bf16w_rows4);
-        assert!(!policy.linear_decode_bf16w_rows8);
-        assert!(!policy.gdn_in_proj_batch_row_pair);
-        assert!(!policy.gdn_in_proj_batch_row_quad);
-        assert!(!policy.gdn_recurrent_parallel_reduce);
-        assert!(!policy.prefill_row_pair_matmul);
-        assert_eq!(policy.linear_max_flop_per_dispatch, 20_000_000_000);
-        assert_eq!(paged_attn_decode_splitk_chunks(1, 4), 32);
-        assert_eq!(paged_attn_decode_splitk_chunks(4, 32), 4);
-        assert_eq!(paged_attn_decode_splitk_chunks(4, 64), 2);
-        assert_eq!(paged_attn_decode_splitk_chunks(16, 64), 4);
-        assert!(!policy.profile_mlp_kernel_stages);
-        assert!(!policy.profile_resident_decode_timing);
-    }
-
-    #[test]
-    fn native_default_restores_device_neutral_fast_routes() {
-        let policy = VulkanKernelPolicy::native_default();
-
-        assert_eq!(policy, VulkanKernelPolicy::default());
-        assert_eq!(policy, vulkan_kernel_policy());
-        assert!(policy.gdn_enabled);
-        assert!(policy.linear_decode_enabled);
-        assert!(policy.full_attn_qkv_enabled);
-        assert!(policy.mlp_decode_enabled);
-        assert!(policy.resident_decode_enabled);
-        assert!(policy.flash_attn_prefill_enabled);
-        assert!(policy.gdn_chunkwise_forward_enabled);
-        assert!(!policy.gdn_chunkwise_fallback_enabled);
-        assert!(policy.bf16_packed_linear_weights_enabled);
-        assert!(policy.paged_decode_gpu_gather_enabled);
-        assert!(policy.linear_decode_single_submit);
-        assert!(policy.gdn_recurrent_parallel_reduce);
-    }
+#[test]
+fn paged_attention_splitk_policy_uses_workload_shape() {
+    assert_eq!(paged_attn_decode_splitk_chunks(1, 4), 32);
+    assert_eq!(paged_attn_decode_splitk_chunks(4, 32), 4);
+    assert_eq!(paged_attn_decode_splitk_chunks(4, 64), 2);
+    assert_eq!(paged_attn_decode_splitk_chunks(16, 64), 4);
 }
 
 /// Pre-create the validated built-in compute pipelines on this Vulkan device.
@@ -377,6 +330,25 @@ mod policy_tests {
 /// function fills the per-device pipeline cache so the first live request does
 /// not pay RADV pipeline creation latency on the decode path.
 pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
+    if !vk_device
+        .compute_capabilities()
+        .supports_full_pipeline_prewarm()
+    {
+        tracing::info!(
+            max_compute_work_group_invocations = vk_device
+                .compute_capabilities()
+                .max_compute_work_group_invocations,
+            max_compute_shared_memory_size = vk_device
+                .compute_capabilities()
+                .max_compute_shared_memory_size,
+            max_per_stage_descriptor_storage_buffers = vk_device
+                .compute_capabilities()
+                .max_per_stage_descriptor_storage_buffers,
+            "skipping all-route Vulkan prewarm; compatible selected routes will compile lazily"
+        );
+        return Ok(());
+    }
+
     let shaders = [
         ("full_attn_qkv_decode", 5usize, 20u32),
         ("full_attn_qkv_decode_bf16w", 5usize, 20u32),
@@ -9121,7 +9093,10 @@ pub fn dispatch_gdn_recurrent_step_with_options_bytes(
     // chooses host-visible or device-local state without inspecting identity.
     let host_visible_state = gdn_recurrent_use_host_visible_state(batch);
     let state_buf = if host_visible_state {
-        VulkanBuffer::create_host_visible(device, host_visible_mt, state_data.len() as u64)?
+        let state_memory_type = vk_device
+            .device_local_host_visible_mem_type()
+            .context("Vulkan policy selected host-visible recurrent state without a device-local host-visible memory type")?;
+        VulkanBuffer::create_host_visible(device, state_memory_type, state_data.len() as u64)?
     } else {
         VulkanBuffer::create_device_local(device, device_local_mt, state_data.len() as u64)?
     };
@@ -9830,8 +9805,11 @@ fn dispatch_gdn_recurrent_step_single_submit_bytes(
     let stage_profile = profile_kernel_stages.then(Instant::now);
     let host_visible_state = gdn_recurrent_use_host_visible_state(batch);
     let state_buf = if host_visible_state {
+        let state_memory_type = vk_device
+            .device_local_host_visible_mem_type()
+            .context("Vulkan policy selected host-visible recurrent state without a device-local host-visible memory type")?;
         let buf =
-            VulkanBuffer::create_host_visible(device, host_visible_mt, state_data.len() as u64)?;
+            VulkanBuffer::create_host_visible(device, state_memory_type, state_data.len() as u64)?;
         VulkanBuffer::write_host_visible(device, &buf, state_data)?;
         buf
     } else {

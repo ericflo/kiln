@@ -75,6 +75,12 @@
   let indexPromise = null;
   let activeResult = -1;
 
+  function setSearchOpen(open) {
+    if (!searchInput || !searchResults) return;
+    searchResults.hidden = !open;
+    searchInput.setAttribute('aria-expanded', String(open));
+  }
+
   function loadSearchIndex() {
     if (!indexPromise) {
       indexPromise = fetch(`${docsRoot}/search-index.json`, { credentials: 'same-origin' })
@@ -112,9 +118,11 @@
     links.forEach((link, index) => {
       if (index === activeResult) {
         link.dataset.active = 'true';
+        link.setAttribute('aria-selected', 'true');
         link.scrollIntoView({ block: 'nearest' });
       } else {
         delete link.dataset.active;
+        link.setAttribute('aria-selected', 'false');
       }
     });
   }
@@ -124,7 +132,7 @@
     activeResult = -1;
     const terms = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
     if (terms.length === 0) {
-      searchResults.hidden = true;
+      setSearchOpen(false);
       return;
     }
     const matches = entries
@@ -142,6 +150,8 @@
       for (const { entry } of matches) {
         const link = document.createElement('a');
         link.className = 'docs-search-result';
+        link.setAttribute('role', 'option');
+        link.setAttribute('aria-selected', 'false');
         link.href = docsRoot === '.'
           ? entry.url
           : entry.url.startsWith('../')
@@ -155,15 +165,26 @@
         searchResults.append(link);
       }
     }
-    searchResults.hidden = false;
+    setSearchOpen(true);
   }
 
   if (searchInput && searchResults) {
+    document.addEventListener('keydown', (event) => {
+      const target = event.target;
+      const isEditable = target instanceof HTMLElement
+        && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
+      const slashShortcut = event.key === '/' && !event.metaKey && !event.ctrlKey && !event.altKey;
+      const commandShortcut = event.key.toLowerCase() === 'k' && (event.metaKey || event.ctrlKey);
+      if ((!slashShortcut || isEditable) && !commandShortcut) return;
+      event.preventDefault();
+      searchInput.focus();
+      searchInput.select();
+    });
     searchInput.addEventListener('input', async () => {
       try {
         renderSearchResults(await loadSearchIndex(), searchInput.value);
       } catch {
-        searchResults.hidden = true;
+        setSearchOpen(false);
       }
     });
     searchInput.addEventListener('focus', () => {
@@ -181,12 +202,12 @@
         const link = searchResults.querySelectorAll('.docs-search-result')[activeResult];
         if (link) window.location.assign(link.href);
       } else if (event.key === 'Escape') {
-        searchResults.hidden = true;
+        setSearchOpen(false);
         activeResult = -1;
       }
     });
     document.addEventListener('click', (event) => {
-      if (!search.contains(event.target)) searchResults.hidden = true;
+      if (!search.contains(event.target)) setSearchOpen(false);
     });
   }
 

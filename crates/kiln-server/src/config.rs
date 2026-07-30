@@ -7249,7 +7249,7 @@ mod tests {
         assert_eq!(json["version"], 16);
         assert_eq!(
             json["vulkan_kernel_policy_schema_id"],
-            "kiln.vulkan-kernel-policy.v5"
+            "kiln.vulkan-kernel-policy.v6"
         );
         assert_eq!(
             json["vulkan_device_policy_schema_id"],

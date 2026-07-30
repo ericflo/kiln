@@ -798,6 +798,8 @@ function renderSidebar(manifest, activeSlug, depth) {
 function renderTopbar(manifest, depth) {
   const rootPrefix = depth === 'hub' ? '..' : '../..';
   const docsPrefix = depth === 'hub' ? '.' : '..';
+  const searchId = `docs-search-${depth}`;
+  const searchResultsId = `docs-search-results-${depth}`;
   return `
     <header class="docs-topbar">
       <a class="docs-brand" href="${rootPrefix}/" aria-label="Kiln home">
@@ -806,9 +808,13 @@ function renderTopbar(manifest, depth) {
       </a>
       <a class="docs-product-name" href="${docsPrefix}/">Documentation</a>
       <div class="docs-search" data-docs-search>
-        <label class="sr-only" for="docs-search-${depth}">Search documentation</label>
-        <input id="docs-search-${depth}" type="search" placeholder="Search documentation" autocomplete="off" spellcheck="false">
-        <div class="docs-search-results" data-docs-search-results hidden></div>
+        <label class="sr-only" for="${searchId}">Search documentation</label>
+        <input id="${searchId}" type="search" role="combobox" placeholder="Search documentation"
+          autocomplete="off" spellcheck="false" aria-autocomplete="list"
+          aria-controls="${searchResultsId}" aria-expanded="false"
+          aria-keyshortcuts="/ Control+K Meta+K">
+        <kbd class="docs-search-shortcut" aria-hidden="true">/</kbd>
+        <div class="docs-search-results" id="${searchResultsId}" data-docs-search-results role="listbox" hidden></div>
       </div>
       <button class="docs-menu-button" type="button" data-docs-menu aria-controls="docs-sidebar" aria-expanded="false" aria-label="Menu, open documentation navigation" title="Open navigation">Menu</button>
     </header>`;
@@ -909,10 +915,12 @@ ${pageEnd('document')}`;
 
 function renderHubPage(manifest) {
   const canonical = `${manifest.site.base_url}/docs/`;
+  const productGuideTitles = new Set(manifest.site.product_guides.map((guide) => guide.title));
   const sections = manifest.sections.map((section) => {
     const documents = manifest.documents.filter((document) => (
       document.section === section.id
       && documentNavigation(manifest, document) === 'primary'
+      && !productGuideTitles.has(document.title)
     ));
     if (documents.length === 0) return '';
     return `<section class="docs-directory-section" id="${escapeHtml(section.id)}">
@@ -922,8 +930,14 @@ function renderHubPage(manifest) {
       )).join('')}</div>
     </section>`;
   }).join('');
-  const guides = manifest.site.product_guides.map((guide) => (
-    `<a class="docs-guide" href="${escapeHtml(guide.href)}"><strong>${escapeHtml(guide.title)}</strong><span>${escapeHtml(guide.description)}</span></a>`
+  const guideOutcomes = ['01 · Run', '02 · Teach', '03 · Prove', '04 · Integrate'];
+  const featuredGuides = manifest.site.product_guides.slice(0, guideOutcomes.length);
+  const secondaryGuides = manifest.site.product_guides.slice(guideOutcomes.length);
+  const guides = featuredGuides.map((guide, index) => (
+    `<a class="docs-guide" href="${escapeHtml(guide.href)}"><small>${escapeHtml(guideOutcomes[index])}</small><strong>${escapeHtml(guide.title)}</strong><span>${escapeHtml(guide.description)}</span><b>Open guide <i aria-hidden="true">→</i></b></a>`
+  )).join('');
+  const guideLinks = secondaryGuides.map((guide) => (
+    `<a href="${escapeHtml(guide.href)}">${escapeHtml(guide.title)} <span aria-hidden="true">→</span></a>`
   )).join('');
   const referenceDocuments = manifest.documents.filter(
     (document) => documentNavigation(manifest, document) === 'reference',
@@ -955,14 +969,21 @@ function renderHubPage(manifest) {
       <header class="docs-hub-header">
         <p class="docs-section-label">Start with the answer</p>
         <h1>Kiln documentation</h1>
-        <p>Use the product guides for a workflow, core docs for the mental model, and the reference library only when you need exact schemas or engineering evidence.</p>
+        <p>Choose the outcome you need, or search every guide, contract, schema, and engineering receipt from one place. The deep reference library stays out of the way until you ask for it.</p>
       </header>
       <section class="docs-product-guides" aria-labelledby="product-guides-heading">
-        <h2 id="product-guides-heading">Product guides</h2>
-        <div>${guides}</div>
+        <div class="docs-product-guides-head">
+          <div>
+            <p class="docs-section-label">Choose a goal</p>
+            <h2 id="product-guides-heading">Start with a workflow.</h2>
+          </div>
+          <p>Each path begins with a working command and ends at the next useful decision.</p>
+        </div>
+        <div class="docs-guide-grid">${guides}</div>
+        ${guideLinks ? `<nav class="docs-guide-links" aria-label="More product guides">${guideLinks}</nav>` : ''}
       </section>
       <section class="docs-core-library" aria-labelledby="core-docs-heading">
-        <h2 id="core-docs-heading">Core documentation</h2>
+        <h2 id="core-docs-heading">Understand the system.</h2>
         <div class="docs-directory">${sections}</div>
       </section>
       <details class="docs-reference-library">
