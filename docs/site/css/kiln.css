@@ -1748,6 +1748,23 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
   scroll-padding-top: calc(var(--topbar-h) + 18px);
 }
 
+/* Product pages set product-page-enhanced synchronously in <head>. Keep the
+   unenhanced navigation from occupying multiple rows before site.js condenses
+   it; without JavaScript, the class is never set and the full nav stays usable. */
+@media (max-width: 980px) {
+  .product-page-enhanced .site-nav-bar {
+    min-height: var(--topbar-h);
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    flex-direction: row !important;
+    align-items: center !important;
+  }
+
+  .product-page-enhanced .site-nav {
+    display: none;
+  }
+}
+
 .product-page-shell .product-topbar {
   position: sticky;
   top: 0;

@@ -7,7 +7,7 @@
     if (!menuButton) return;
     body.classList.remove('docs-nav-open');
     menuButton.setAttribute('aria-expanded', 'false');
-    menuButton.setAttribute('aria-label', 'Open documentation navigation');
+    menuButton.setAttribute('aria-label', 'Menu, open documentation navigation');
     menuButton.title = 'Open navigation';
     if (restoreFocus) menuButton.focus();
   }
@@ -17,7 +17,7 @@
       const opening = !body.classList.contains('docs-nav-open');
       body.classList.toggle('docs-nav-open', opening);
       menuButton.setAttribute('aria-expanded', String(opening));
-      menuButton.setAttribute('aria-label', opening ? 'Close documentation navigation' : 'Open documentation navigation');
+      menuButton.setAttribute('aria-label', opening ? 'Menu, close documentation navigation' : 'Menu, open documentation navigation');
       menuButton.title = opening ? 'Close navigation' : 'Open navigation';
     });
 
