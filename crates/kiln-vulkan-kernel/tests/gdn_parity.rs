@@ -332,7 +332,7 @@ fn dispatch_gdn_recurrent_step_native_head_last_with_options_tensor(
     state: &Tensor,
     skip_state_readback: bool,
 ) -> Result<(Tensor, Option<Tensor>)> {
-    let (batch, _seq, q_heads, dk) = q.dims4()?;
+    let (batch, seq_len, q_heads, dk) = q.dims4()?;
     let (_, _, heads, dv) = v.dims4()?;
     let q_dtype = q.dtype();
     let state_dtype = state.dtype();
@@ -353,13 +353,14 @@ fn dispatch_gdn_recurrent_step_native_head_last_with_options_tensor(
             &g_data,
             &state_data,
             batch,
+            seq_len,
             q_heads,
             heads,
             dk,
             dv,
             skip_state_readback,
         )?;
-    let out = create_tensor_from_data(&out_data, &[batch, heads, dv], q_dtype)?.unsqueeze(1)?;
+    let out = create_tensor_from_data(&out_data, &[batch, seq_len, heads, dv], q_dtype)?;
     let new_state = new_state_data
         .as_ref()
         .map(|sd| create_tensor_from_data(sd, &state_dims, state_dtype))
@@ -968,6 +969,110 @@ fn gdn_recurrent_step_native_head_last_matches_expanded_reference() -> Result<()
         &got_state.context("native-head state readback")?,
         &expected_state,
         1e-3,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn gdn_recurrent_prefill_native_head_last_matches_sequential_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, seq_len, q_heads, gqa_ratio, dk, dv) =
+        (2usize, 4usize, 2usize, 3usize, 64usize, 5usize);
+    let heads = q_heads * gqa_ratio;
+    let q = cpu_f32(
+        (0..batch * seq_len * q_heads * dk)
+            .map(|i| ((i as f32 % 19.0) - 9.0) * 0.011)
+            .collect(),
+        (batch, seq_len, q_heads, dk),
+    )?;
+    let k = cpu_f32(
+        (0..batch * seq_len * q_heads * dk)
+            .map(|i| ((i as f32 % 23.0) - 11.0) * -0.009)
+            .collect(),
+        (batch, seq_len, q_heads, dk),
+    )?;
+    let v = cpu_f32(
+        (0..batch * seq_len * heads * dv)
+            .map(|i| ((i as f32 % 17.0) - 8.0) * 0.013)
+            .collect(),
+        (batch, seq_len, heads, dv),
+    )?;
+    let beta = cpu_f32(
+        (0..batch * seq_len * heads)
+            .map(|i| 0.21 + (i as f32 % 7.0) * 0.031)
+            .collect(),
+        (batch, seq_len, heads),
+    )?;
+    let g = cpu_f32(
+        (0..batch * seq_len * heads)
+            .map(|i| -0.03 - (i as f32 % 11.0) * 0.017)
+            .collect(),
+        (batch, seq_len, heads),
+    )?;
+    let state = cpu_f32(
+        (0..batch * heads * dk * dv)
+            .map(|i| ((i as f32 % 29.0) - 14.0) * 0.004)
+            .collect(),
+        (batch, heads, dk, dv),
+    )?;
+
+    let (got_out, got_state) = dispatch_gdn_recurrent_step_native_head_last_with_options_tensor(
+        &vk, &q, &k, &v, &beta, &g, &state, false,
+    )
+    .context("dispatch native-head recurrent prefill")?;
+    let got_state = got_state.context("native-head recurrent prefill state readback")?;
+
+    let qd = tensor_data_f32(&q)?;
+    let kd = tensor_data_f32(&k)?;
+    let vd = tensor_data_f32(&v)?;
+    let bd = tensor_data_f32(&beta)?;
+    let gd = tensor_data_f32(&g)?;
+    let mut expected_state = tensor_data_f32(&state)?;
+    let mut expected_out = vec![0.0f32; batch * seq_len * heads * dv];
+
+    for b in 0..batch {
+        for h in 0..heads {
+            let qh = h / gqa_ratio;
+            let state_base = (b * heads + h) * dk * dv;
+            for t in 0..seq_len {
+                let bth = (b * seq_len + t) * heads + h;
+                let q_base = ((b * seq_len + t) * q_heads + qh) * dk;
+                let v_base = bth * dv;
+                let decay = gd[bth].exp();
+                for d in 0..dv {
+                    let mut v_pred = 0.0f32;
+                    for i in 0..dk {
+                        v_pred += kd[q_base + i] * decay * expected_state[state_base + i * dv + d];
+                    }
+                    let delta = bd[bth] * (vd[v_base + d] - v_pred);
+                    let mut out_acc = 0.0f32;
+                    for i in 0..dk {
+                        let state_idx = state_base + i * dv + d;
+                        let new_s = decay * expected_state[state_idx] + kd[q_base + i] * delta;
+                        expected_state[state_idx] = new_s;
+                        out_acc += qd[q_base + i] * new_s;
+                    }
+                    expected_out[v_base + d] = out_acc;
+                }
+            }
+        }
+    }
+
+    assert_close(
+        "native-head recurrent prefill out",
+        &got_out,
+        &cpu_f32(expected_out, (batch, seq_len, heads, dv))?,
+        2e-3,
+    )?;
+    assert_close(
+        "native-head recurrent prefill state",
+        &got_state,
+        &cpu_f32(expected_state, (batch, heads, dk, dv))?,
+        3e-3,
     )?;
     Ok(())
 }

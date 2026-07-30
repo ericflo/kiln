@@ -489,7 +489,7 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
     let _ = &prefill_ab_for_gates;
 
     let scale = 1.0 / (dk as f64).sqrt();
-    let recurrent_unexpanded_qk = input_dtype == DType::BF16
+    let recurrent_unexpanded_qk = matches!(input_dtype, DType::BF16 | DType::F32)
         && gdn_forward_only_fastpaths
         && seq_len >= 1
         && seq_len <= GDN_RECURRENT_PREFILL_MAX_TOKENS
@@ -1273,7 +1273,6 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
             qk_norm_deferred_to_native_recurrent,
         )
     };
-
     // Phase B11b taps: `gdn_qk_norm_q` / `gdn_qk_norm_k`. Both are post-L2
     // normalization (+ Q scaled by 1/sqrt(dk)). Shapes [B, T, nv, dk] (the
     // GQA head-expand above brought nk→nv). HF mirror: `query` / `key` after
@@ -1955,7 +1954,6 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
             }
         }
     };
-
     // Phase B11b tap: `gdn_recur_out`. Captured post-transpose (shape
     // [B, T, nv, dv]) so the layout matches the input HF passes to its
     // GatedRMSNorm — i.e. the recurrence output transposed into the
@@ -2057,9 +2055,14 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
             };
             casted
         };
+        #[cfg(feature = "vulkan")]
+        let casted = if matches!(x.device(), Device::Vulkan(_)) && casted.device() != x.device() {
+            casted.to_device(x.device())?
+        } else {
+            casted
+        };
         casted
     };
-
     // Phase B11b tap: `gdn_gated_norm`. Output of the GatedRMSNorm /
     // `norm(attn_out) * silu(z)` block, reshaped and cast back to input
     // dtype. Shape [B, T, v_dim]. HF mirror: `core_attn_out` after
@@ -2081,7 +2084,6 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
             lora_scale,
         )?
     };
-
     // Phase B11b tap: `gdn_out_proj`. Output of the final `out_proj` linear
     // (shape [B, T, hidden]) — this is what the caller adds to the residual
     // stream. HF mirror: `self.out_proj(core_attn_out)`.

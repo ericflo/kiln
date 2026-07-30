@@ -447,15 +447,15 @@ training request
           accelerator-policy diagnostic. The nonstandard <code>GGML_VK_VISIBLE_DEVICES</code> behavior is removed.
         </p>
 
-        <h3 class="font-semibold mt-6 mb-3">Vulkan kernels use one portable source policy</h3>
+        <h3 class="font-semibold mt-6 mb-3">Vulkan kernels use one device-neutral native policy</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           Product Vulkan dispatch uses the typed, immutable
-          <code>kiln.vulkan-kernel-policy.v4</code> portable-fallback object. It is not a TOML, CLI, request,
+          <code>kiln.vulkan-kernel-policy.v5</code> native-default object. It is not a TOML, CLI, request,
           environment, device-name, or PCI-ID surface. The Vulkan backend, kernel crate, and resident model
-          planner share this one object. Device-tuned model routes, packed weights, row grouping, fused
-          submissions, parallel recurrence, and resident decode are declined by default; established generic
-          fallbacks remain authoritative. Machine-specific receipts do not alter product dispatch. A source
-          change must version the policy and establish cross-device correctness before enabling a route.
+          planner share this one object. Standards-based model routes, packed weights, row grouping, fused
+          submissions, parallel recurrence, and resident decode are enabled without inspecting device identity.
+          Capability and dispatch limits own narrow fallback or rejection. Machine-specific receipts do not
+          alter product dispatch. A source change must version the policy and establish cross-device correctness.
           Accelerator policy v16 reports this identity as <code>vulkan_kernel_policy_schema_id</code> in config,
           health, trusted debug state, the CLI config check, and the dashboard.
         </p>
@@ -613,7 +613,7 @@ training request
           <table class="w-full text-sm" style="color: var(--fg-dim);">
             <thead style="color: var(--fg);"><tr><th class="text-left p-2">Policy family</th><th class="text-left p-2">Retired names</th><th class="text-left p-2">Product behavior</th></tr></thead>
             <tbody>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Decode fallback</td><td class="p-2"><code>KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE</code>, <code>KILN_ROCM_PAGED_DECODE</code>, <code>KILN_DECODE_HOT_PATH_DEBUG_FALLBACK</code>, <code>KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK</code>, <code>KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK</code>, <code>KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK</code>, and <code>KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY</code></td><td class="p-2">CUDA follows its installed profile. ROCm and Vulkan use their portable fallback policies; unsupported routes fail closed.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Decode fallback</td><td class="p-2"><code>KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE</code>, <code>KILN_ROCM_PAGED_DECODE</code>, <code>KILN_DECODE_HOT_PATH_DEBUG_FALLBACK</code>, <code>KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK</code>, <code>KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK</code>, <code>KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK</code>, and <code>KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY</code></td><td class="p-2">CUDA and Vulkan follow their installed device-neutral profiles; ROCm retains its portable fallback policy. Unsupported routes fail closed.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">CUDA model routes</td><td class="p-2"><code>KILN_DISABLE_FUSED_PAGED_DECODE</code>, <code>KILN_DISABLE_FUSED_CUDA_ROTARY_QK</code>, <code>KILN_DISABLE_CUDA_ATTN_DECODE_QKV_PREP</code>, fused MLP/attention/RMSNorm/L2-QK switches, dynamic-length paged-decode force/disable switches, and <code>KILN_DISABLE_GDN_CHUNK_PRE_PERMUTE</code></td><td class="p-2">All twenty-five decisions come from <code>accelerator.cuda_kernel_profile</code>.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Training geometry</td><td class="p-2"><code>KILN_DISABLE_GPU_TRAINING_MLP_CHUNKING</code>, CUDA variants and token counts, split-Q/gate disable variants, and <code>KILN_SPLIT_Q_GATE_OUTPUT_CHUNK_FEATURES</code></td><td class="p-2">ROCm uses portable fixed geometry; CUDA uses 1,024-token MLP chunks; Vulkan uses at most 1,024 output features per split slice.</td></tr>
               <tr style="border-top:1px solid var(--line);"><td class="p-2">Projection loading</td><td class="p-2"><code>KILN_KEEP_PROJECTION_ORIGINALS</code>, <code>KILN_DROP_PROJECTION_ORIGINALS</code>, <code>KILN_KEEP_PROJECTION_TRANSPOSES</code>, parallel-load disable switches, and <code>KILN_VK_NATIVE_TRAINING</code></td><td class="p-2">CUDA/Metal drop redundant originals; CPU/ROCm/Vulkan retain them; every backend retains cached transposes; Metal parallel uploads remain enabled.</td></tr>

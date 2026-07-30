@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Kiln Demo &mdash; live LoRA training, hot-swap, GRPO over HTTP</title>
-  <meta name="description" content="Watch six short Kiln demos: first token, benchmark, live LoRA hot-swap, OpenAI client, custom-reward GRPO, and online learning on one GPU.">
+  <title>Kiln Product Tour &mdash; serve, train, evaluate, promote</title>
+  <meta name="description" content="A current, annotated tour of Kiln's serving, training, evaluation, and adapter workflow. Updated July 30, 2026 from the v0.5.1 source UI.">
   <meta name="theme-color" content="#0a0908">
   <meta name="color-scheme" content="dark">
   <link rel="canonical" href="https://ericflo.github.io/kiln/demo/">
@@ -12,9 +12,9 @@
   <link rel="alternate icon" type="image/png" href="../assets/logo.png">
   <link rel="apple-touch-icon" href="../assets/logo.png">
 
-  <meta property="og:title" content="Kiln Demo &mdash; six 30-to-90-second asciicasts">
-  <meta property="og:description" content="Watch first token, benchmark, live LoRA hot-swap, OpenAI client, custom-reward GRPO, and online learning on one GPU.">
-  <meta property="og:type" content="article">
+  <meta property="og:title" content="Kiln Product Tour">
+  <meta property="og:description" content="See the current serve, train, evaluate, and adapter workflow—and exactly when the UI was captured.">
+  <meta property="og:type" content="website">
   <meta property="og:locale" content="en_US">
   <meta property="og:site_name" content="Kiln">
   <meta property="og:url" content="https://ericflo.github.io/kiln/demo/">
@@ -24,8 +24,8 @@
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Kiln Demo &mdash; six 30-to-90-second asciicasts">
-  <meta name="twitter:description" content="Watch first token, benchmark, live LoRA hot-swap, OpenAI client, custom-reward GRPO, and online learning on one GPU.">
+  <meta name="twitter:title" content="Kiln Product Tour">
+  <meta name="twitter:description" content="A current, annotated tour of Kiln's local model-improvement loop.">
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image-v3.png">
   <meta name="twitter:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
 
@@ -34,461 +34,461 @@
   <link rel="stylesheet" href="../css/fonts.css">
   <link rel="stylesheet" href="../css/kiln.css">
 
-  <!-- asciinema-player 3.7.1, self-hosted; see vendor/asciinema-player/NOTICE.md -->
-  <link rel="stylesheet" href="vendor/asciinema-player/asciinema-player.css">
-
   <style>
     :root {
       color-scheme: dark;
       --bg: #0a0908;
-      --bg-soft: #181613;
-      --bg-soft-2: #1d1b17;
-      --line: #2b2720;
-      --line-2: #443c31;
+      --surface: #151310;
+      --surface-2: #1d1a16;
+      --line: #302b24;
+      --line-strong: #4a4034;
       --fg: #f7f4ef;
-      --fg-dim: #b0a895;
-      --fg-mute: #938b79;
+      --muted: #aaa18f;
+      --quiet: #817969;
       --accent: #f97316;
-      --accent-soft: rgba(249, 115, 22, 0.12);
+      --accent-soft: rgba(249, 115, 22, 0.11);
+      --green: #65a30d;
     }
-    html { background: var(--bg); }
+    html { background: var(--bg); scroll-behavior: smooth; }
     body {
+      margin: 0;
       background: var(--bg);
       color: var(--fg);
       font-family: 'Inter', 'Inter Fallback', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      font-feature-settings: "cv02", "cv03", "cv04", "cv11";
       -webkit-font-smoothing: antialiased;
+    }
+    a { color: #f4bf84; }
+    a:hover { color: var(--accent); }
+    code, pre {
+      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
     }
     .skip-link {
       position: absolute;
-      left: 1rem;
+      z-index: 100;
       top: 0;
+      left: 1rem;
+      padding: .65rem .85rem;
       transform: translateY(-120%);
-      z-index: 50;
+      border-radius: 0 0 .45rem .45rem;
       background: var(--accent);
-      color: #1a0c00;
-      border-radius: 0 0 0.5rem 0.5rem;
-      padding: 0.65rem 0.9rem;
+      color: #1b0c00;
+      font-weight: 700;
+    }
+    .skip-link:focus { transform: translateY(0); }
+    .demo-page { width: min(1180px, calc(100% - 40px)); margin: 0 auto; }
+    .demo-nav {
+      position: sticky;
+      z-index: 40;
+      top: 0;
+      border-bottom: 1px solid var(--line);
+      background: rgba(10, 9, 8, .93);
+      backdrop-filter: blur(16px);
+    }
+    .demo-nav-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 62px;
+      gap: 24px;
+    }
+    .demo-brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--fg);
       font-weight: 700;
       text-decoration: none;
-      transition: transform 0.15s ease;
     }
-    .skip-link:focus {
-      transform: translateY(0);
-      outline: 2px solid #fed7aa;
-      outline-offset: 2px;
-    }
-    code, pre, kbd, samp {
-      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-    }
-    pre {
-      background: var(--bg-soft);
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 1rem 1.1rem;
-      overflow-x: auto;
-      font-size: 13.5px;
-      line-height: 1.55;
-      color: #d9d3c7;
-    }
-    pre code { background: transparent; padding: 0; color: inherit; }
-    p code, li code, td code, h2 code, h3 code {
-      background: var(--bg-soft);
-      border: 1px solid var(--line);
-      padding: 0.05rem 0.4rem;
-      border-radius: 5px;
-      font-size: 0.875em;
-      color: #f3c891;
-    }
-    .hero-glow {
+    .demo-brand img { width: 28px; height: 28px; }
+    .demo-links { display: flex; flex-wrap: wrap; gap: 18px; font-size: 13px; }
+    .demo-links a { color: var(--muted); text-decoration: none; }
+    .demo-links a[aria-current="page"] { color: var(--fg); }
+    .hero {
+      padding: 86px 0 70px;
       background:
-        radial-gradient(60% 50% at 50% 0%, rgba(249,115,22,0.10), transparent 70%),
-        radial-gradient(40% 35% at 80% 20%, rgba(194,65,12,0.06), transparent 70%);
+        radial-gradient(60% 65% at 75% 0%, rgba(249, 115, 22, .10), transparent 72%),
+        radial-gradient(35% 45% at 10% 5%, rgba(249, 115, 22, .055), transparent 70%);
     }
-    .card {
-      background: var(--bg-soft);
-      border: 1px solid var(--line);
-      border-radius: 12px;
-    }
-    .btn-primary {
-      background: var(--accent);
-      color: #1a0c00;
-      font-weight: 600;
-    }
-    .btn-primary:hover { filter: brightness(1.08); }
-    .btn-secondary {
-      background: transparent;
-      color: var(--fg);
-      border: 1px solid var(--line-2);
-    }
-    .btn-secondary:hover { background: var(--bg-soft); }
-    .divider { border-top: 1px solid var(--line); }
-    .pill {
-      background: var(--accent-soft);
-      color: var(--accent);
-      border: 1px solid rgba(249,115,22,0.35);
-    }
-    a { color: #f3c891; }
-    a:hover { color: var(--accent); }
-    a.btn-primary, a.btn-primary:hover { color: #1a0c00; }
-    a.btn-secondary, a.btn-secondary:hover { color: var(--fg); }
-    .site-nav-bar {
-      display: flex;
+    .freshness {
+      display: inline-flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 1rem;
+      gap: 9px;
+      margin-bottom: 24px;
+      padding: 7px 10px;
+      border: 1px solid rgba(101, 163, 13, .45);
+      border-radius: 999px;
+      background: rgba(101, 163, 13, .09);
+      color: #bef264;
+      font-size: 12px;
+      font-weight: 650;
     }
-    .site-nav {
-      display: flex;
-      align-items: center;
-      gap: 1.25rem;
-      color: var(--fg-dim);
+    .freshness i {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #84cc16;
     }
-    .site-nav a[aria-current="page"] { color: var(--fg); }
-    @media (max-width: 640px) {
-      .site-nav-bar {
-        align-items: flex-start;
-        flex-direction: column;
-        gap: 0.75rem;
-      }
-      .site-nav {
-        flex-wrap: wrap;
-        gap: 0.35rem 1rem;
-        line-height: 1.35;
-        width: 100%;
-      }
+    .hero h1 {
+      max-width: 850px;
+      margin: 0;
+      font-size: clamp(40px, 6vw, 72px);
+      line-height: 1.01;
+      letter-spacing: -.045em;
     }
-    .meta-line { color: var(--fg-mute); font-size: 0.875rem; }
-    .prose-body p { color: var(--fg-dim); line-height: 1.7; margin-bottom: 1.1rem; }
-    .prose-body h2 { font-size: 1.5rem; font-weight: 600; letter-spacing: -0.01em; margin-top: 2.5rem; margin-bottom: 0.9rem; color: var(--fg); }
-    .prose-body h2:first-child { margin-top: 0; }
-    .prose-body h3 { font-size: 1rem; font-weight: 600; margin-top: 1.35rem; margin-bottom: 0.45rem; color: var(--fg); }
-    .prose-body strong { color: var(--fg); font-weight: 600; }
-    .transcript-card {
-      background: var(--bg-soft);
-      border: 1px solid var(--line);
-      border-radius: 12px;
+    .hero h1 span { color: var(--accent); }
+    .hero-lede {
+      max-width: 720px;
+      margin: 24px 0 0;
+      color: var(--muted);
+      font-size: 19px;
+      line-height: 1.7;
     }
-    .transcript-card pre { margin-top: 0.6rem; margin-bottom: 1rem; }
-
-    .asciinema-frame {
-      background: #1c1c1c;
-      border: 1px solid var(--line-2);
-      border-radius: 12px;
-      padding: 0.5rem;
-      overflow: hidden;
-    }
-    .player-fallback {
-      background:
-        radial-gradient(60% 80% at 50% 0%, rgba(249,115,22,0.10), transparent 70%),
-        var(--bg-soft);
-      border: 1px dashed var(--line-2);
-      border-radius: 10px;
-      min-height: 16rem;
-      padding: 1.35rem;
-      display: flex;
-      flex-direction: column;
-      justify-content: center;
-      gap: 0.9rem;
-    }
-    .player-fallback h2 {
-      color: var(--fg);
-      font-size: 1.1rem;
-      font-weight: 600;
-      letter-spacing: -0.01em;
-    }
-    .player-fallback p {
-      color: var(--fg-dim);
-      line-height: 1.6;
-      max-width: 42rem;
-    }
-    .player-fallback__actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.7rem;
-    }
-    .player-fallback__actions a {
-      border-radius: 8px;
-      padding: 0.62rem 0.8rem;
-      text-decoration: none;
-    }
-
-    /* Multi-cast picker */
-    .cast-grid {
+    .truth-note {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 0.6rem;
-    }
-    @media (min-width: 720px) {
-      .cast-grid {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-      }
-    }
-    @media (min-width: 1080px) {
-      .cast-grid {
-        grid-template-columns: repeat(6, minmax(0, 1fr));
-      }
-    }
-    .cast-tile {
-      background: var(--bg-soft);
+      grid-template-columns: auto 1fr;
+      gap: 14px;
+      max-width: 780px;
+      margin-top: 34px;
+      padding: 16px 18px;
       border: 1px solid var(--line);
       border-radius: 10px;
-      padding: 0.85rem 0.95rem;
-      cursor: pointer;
-      text-align: left;
-      transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
-      color: inherit;
-      font: inherit;
-      display: flex;
-      flex-direction: column;
-      min-height: 100%;
+      background: var(--surface);
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
     }
-    .cast-tile:hover {
-      border-color: var(--line-2);
-      background: var(--bg-soft-2);
-    }
-    .cast-tile[aria-selected="true"] {
-      border-color: rgba(249,115,22,0.55);
-      background: var(--accent-soft);
-    }
-    .cast-tile[aria-selected="true"] .cast-tile__title {
+    .truth-note strong { color: var(--fg); }
+    .truth-note .stamp {
       color: var(--accent);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
     }
-    .cast-tile__head {
+    .tour { padding: 70px 0; border-top: 1px solid var(--line); }
+    .tour-heading {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr);
+      gap: 24px;
+      margin-bottom: 30px;
+    }
+    .tour-kicker {
+      color: var(--accent);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      font-weight: 650;
+      text-transform: uppercase;
+    }
+    .tour-copy h2 { margin: 0; font-size: clamp(28px, 4vw, 42px); letter-spacing: -.025em; }
+    .tour-copy > p { max-width: 700px; margin: 13px 0 0; color: var(--muted); line-height: 1.7; }
+    .screen {
+      overflow: hidden;
+      border: 1px solid var(--line-strong);
+      border-radius: 14px;
+      background: #0d0c0a;
+      box-shadow: 0 28px 80px rgba(0, 0, 0, .35);
+    }
+    .screen-bar {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 0.5rem;
-      margin-bottom: 0.25rem;
+      min-height: 46px;
+      padding: 0 15px;
+      border-bottom: 1px solid var(--line);
+      color: var(--quiet);
+      font-size: 11px;
     }
-    .cast-tile__num {
-      color: var(--fg-mute);
-      font-size: 0.7rem;
-      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-      letter-spacing: 0.04em;
+    .screen-dots { display: flex; gap: 6px; }
+    .screen-dots i { width: 8px; height: 8px; border-radius: 50%; background: #463f35; }
+    .screen img { display: block; width: 100%; height: auto; }
+    .tour-points {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 18px;
     }
-    .cast-tile__dur {
-      color: var(--fg-mute);
-      font-size: 0.7rem;
-      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    .tour-point {
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface);
     }
-    .cast-tile__title {
-      color: var(--fg);
-      font-weight: 600;
-      font-size: 0.92rem;
-      letter-spacing: -0.005em;
-      line-height: 1.2;
-      margin-bottom: 0.2rem;
+    .tour-point strong { display: block; font-size: 13px; }
+    .tour-point p { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+    .try {
+      padding: 76px 0;
+      border-top: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(249, 115, 22, .035), transparent);
     }
-    .cast-tile__sub {
-      color: var(--fg-dim);
-      font-size: 0.78rem;
-      line-height: 1.35;
+    .try-grid {
+      display: grid;
+      grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr);
+      gap: 50px;
+      align-items: start;
     }
-
-    .cast-meta {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.6rem 1rem;
-      color: var(--fg-mute);
-      font-size: 0.78rem;
-    }
-    .cast-meta a {
-      color: var(--fg-dim);
-      text-decoration: none;
-      border-bottom: 1px dashed var(--line-2);
-    }
-    .cast-meta a:hover {
-      color: var(--accent);
-      border-bottom-color: var(--accent);
-    }
-    .cast-caption h2 {
-      font-size: 1.45rem;
-      font-weight: 600;
-      letter-spacing: -0.01em;
-      color: var(--fg);
-      margin-bottom: 0.45rem;
-    }
-    .cast-caption p {
-      color: var(--fg-dim);
+    .try h2 { margin: 0; font-size: 34px; letter-spacing: -.025em; }
+    .try p { color: var(--muted); line-height: 1.7; }
+    pre {
+      margin: 0;
+      padding: 20px;
+      overflow-x: auto;
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      background: #11100d;
+      color: #e8e1d5;
+      font-size: 12px;
       line-height: 1.65;
-      margin-bottom: 0.9rem;
+    }
+    .archive {
+      padding: 58px 0 76px;
+      border-top: 1px solid var(--line);
+    }
+    .archive details {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+    }
+    .archive summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 18px 20px;
+      cursor: pointer;
+    }
+    .archive summary strong { font-size: 14px; }
+    .archive summary span { color: var(--quiet); font-size: 12px; }
+    .archive-body { padding: 0 20px 20px; border-top: 1px solid var(--line); }
+    .archive-body p { color: var(--muted); font-size: 13px; line-height: 1.65; }
+    .archive-links { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .archive-links a {
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      color: var(--muted);
+      font-size: 12px;
+      text-decoration: none;
+    }
+    .archive-links a:hover { color: var(--fg); border-color: var(--line-strong); }
+    .demo-footer { padding: 34px 0; border-top: 1px solid var(--line); color: var(--quiet); font-size: 12px; }
+    .demo-footer-inner { display: flex; justify-content: space-between; gap: 20px; }
+    .demo-footer nav { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px 14px; }
+    @media (max-width: 780px) {
+      .demo-links a:nth-child(n+4) { display: none; }
+      .hero { padding: 62px 0 52px; }
+      .tour-heading, .try-grid { grid-template-columns: 1fr; gap: 13px; }
+      .tour-points { grid-template-columns: 1fr; }
+      .archive-links { grid-template-columns: 1fr; }
+      .truth-note { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 520px) {
+      .demo-page { width: min(100% - 28px, 1180px); }
+      .demo-links { gap: 12px; }
+      .demo-links a:nth-child(n+3) { display: none; }
+      .hero h1 { font-size: 39px; }
+      .hero-lede { font-size: 17px; }
+      .tour { padding: 52px 0; }
+      .archive summary { align-items: flex-start; flex-direction: column; }
+      .demo-footer-inner { flex-direction: column; }
     }
   </style>
 </head>
-<body class="min-h-screen">
+<body>
   <a class="skip-link" href="#content">Skip to content</a>
-  <!-- nav -->
-  <header class="border-b" style="border-color: var(--line);">
-    <div class="site-nav-bar max-w-5xl mx-auto px-6 py-4">
-      <a href="../" class="flex items-center gap-2.5">
-        <img src="../assets/favicon.svg" alt="" width="28" height="28" class="rounded">
-        <span class="text-lg font-semibold tracking-tight">Kiln</span>
-      </a>
-      <nav class="site-nav text-sm">
+
+  <header class="demo-nav">
+    <div class="demo-page demo-nav-inner site-nav-bar">
+      <a class="demo-brand" href="../"><img src="../assets/favicon.svg" alt=""><span>kiln</span></a>
+      <nav class="demo-links site-nav" aria-label="Primary">
         <a href="../quickstart.html">Quickstart</a>
         <a href="../docs/">Documentation</a>
+        <a href="./" aria-current="page">Demo</a>
         <a href="../grpo.html">GRPO Guide</a>
         <a href="../evals.html">Evals</a>
         <a href="../api.html">API Reference</a>
         <a href="../cli.html">CLI Reference</a>
-        <a href="./" aria-current=page>Demo</a>
         <a href="../troubleshooting.html">Troubleshooting</a>
         <a href="../architecture.html">Architecture</a>
-        <a href="https://github.com/ericflo/kiln" class="hidden sm:inline">GitHub</a>
+        <a href="https://github.com/ericflo/kiln">GitHub</a>
       </nav>
     </div>
   </header>
 
-  <main id="content" tabindex="-1">
-
-  <!-- hero -->
-  <section class="hero-glow">
-    <div class="max-w-3xl mx-auto px-6 pt-16 pb-8">
-      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">Demos &middot; six casts &middot; one GPU</span>
-      <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">
-        Six short takes on a single-GPU LLM stack.
-      </h1>
-      <p class="text-lg leading-relaxed" style="color: var(--fg-dim);">
-        Six silent asciicasts, 30 to 90 seconds each. One pure-Rust binary, one GPU, no Python sidecar.
-        Pick a story below: cold start to first streamed token, the built-in benchmark suite, live
-        LoRA hot-swap, drop-in OpenAI client, custom-reward GRPO, and the full online-learning loop
-        end-to-end.
-      </p>
-    </div>
-  </section>
-
-  <!-- multi-cast picker + player -->
-  <section class="divider">
-    <div class="max-w-5xl mx-auto px-6 py-10">
-
-      <div id="cast-picker" class="cast-grid mb-6" role="tablist" aria-label="Demo casts"></div>
-
-      <div id="cast-panel" role="tabpanel">
-        <div class="asciinema-frame mb-4">
-          <div id="kiln-demo-player"></div>
+  <main id="content">
+    <section class="hero">
+      <div class="demo-page">
+        <div class="freshness"><i aria-hidden="true"></i>Updated July 30, 2026 &middot; Kiln v0.5.1 source UI</div>
+        <h1>One local loop, <span>not six stale terminal recordings.</span></h1>
+        <p class="hero-lede">
+          This is the current Kiln product tour: serve a model, inspect a request, train an
+          adapter, evaluate it, and promote the result. Every screen below was regenerated from
+          the current embedded dashboard source, and every example is labeled for what it is.
+        </p>
+        <div class="truth-note">
+          <span class="stamp">Provenance</span>
+          <span><strong>UI:</strong> current repository source. <strong>Data:</strong> deterministic seeded
+          demo fixtures, not a live performance run. <strong>Captured:</strong> July 30, 2026 at 1440 px.
+          Performance claims live on the <a href="../docs/benchmarks/">benchmark page</a>, never in a
+          staged screenshot.</span>
         </div>
-
-        <div class="cast-meta mb-3" id="cast-meta"></div>
-
-        <section id="cast-caption" class="cast-caption mt-6"></section>
       </div>
+    </section>
 
-      <p class="meta-line mt-4">
-        Recordings captured on a RunPod NVIDIA RTX A6000 with the release-mode CUDA build of Kiln.
-        Each cast is reproducible end-to-end &mdash; the
-        <a href="https://github.com/ericflo/kiln/blob/main/docs/site/demo/SCRIPTS.md">SCRIPTS.md</a>
-        file pins down the exact terminal size, scene timing, and expected outputs.
-      </p>
+    <section class="tour">
+      <div class="demo-page">
+        <div class="tour-heading">
+          <div class="tour-kicker">01 &middot; Observe</div>
+          <div class="tour-copy">
+            <h2>Know what is actually running.</h2>
+            <p>The overview joins readiness, accelerator state, traffic, memory, adapters, and
+            recent activity. It is the first place to verify the selected backend before drawing
+            conclusions from a request or benchmark.</p>
+          </div>
+        </div>
+        <figure class="screen">
+          <div class="screen-bar"><span class="screen-dots"><i></i><i></i><i></i></span><span>http://127.0.0.1:8420/ui/#overview</span><span>current source</span></div>
+          <img src="../assets/server-ui-dashboard.png" alt="Current Kiln overview dashboard showing server, accelerator, traffic, memory, and adapter state" width="2880" height="3534" loading="eager">
+        </figure>
+        <div class="tour-points">
+          <div class="tour-point"><strong>Backend truth</strong><p>Read the effective accelerator and runtime policy instead of inferring it from a build name.</p></div>
+          <div class="tour-point"><strong>Request evidence</strong><p>Trace traffic, latency phases, failures, and queue behavior from one operational view.</p></div>
+          <div class="tour-point"><strong>Shared ownership</strong><p>See serving, training, adapters, and memory as one process-wide system.</p></div>
+        </div>
+      </div>
+    </section>
 
-    </div>
-  </section>
+    <section class="tour">
+      <div class="demo-page">
+        <div class="tour-heading">
+          <div class="tour-kicker">02 &middot; Serve</div>
+          <div class="tour-copy">
+            <h2>Test the exact request path your client will use.</h2>
+            <p>The playground sends through Kiln's real OpenAI-compatible API. Select the adapter,
+            sampling, output, and thinking policy explicitly; then inspect the response rather than
+            treating a canned chat mockup as runtime proof.</p>
+          </div>
+        </div>
+        <figure class="screen">
+          <div class="screen-bar"><span class="screen-dots"><i></i><i></i><i></i></span><span>/ui/#playground</span><span>seeded example</span></div>
+          <img src="../assets/server-ui-playground.png" alt="Current Kiln playground with OpenAI-compatible request controls and streamed response" width="2880" height="1912" loading="lazy">
+        </figure>
+        <div class="tour-points">
+          <div class="tour-point"><strong>OpenAI-compatible</strong><p>Use the same chat endpoint from curl, the Python SDK, agents, or the browser UI.</p></div>
+          <div class="tour-point"><strong>Adapter-explicit</strong><p>Base and LoRA behavior are selected per request; the newest training job does not silently win.</p></div>
+          <div class="tour-point"><strong>Limits visible</strong><p>Output and reasoning budgets are request policy, not hidden server folklore.</p></div>
+        </div>
+      </div>
+    </section>
 
-  <!-- caption / what's happening -->
-  <section class="divider">
-    <div class="max-w-3xl mx-auto px-6 py-12 prose-body">
+    <section class="tour">
+      <div class="demo-page">
+        <div class="tour-heading">
+          <div class="tour-kicker">03 &middot; Teach</div>
+          <div class="tour-copy">
+            <h2>Turn evidence into a named training job.</h2>
+            <p>Submit SFT, GRPO, OPD, or recipe work with an explicit dataset, adapter name,
+            resource plan, and evaluation boundary. Progress and failure state remain inspectable
+            while the server continues to own the accelerator.</p>
+          </div>
+        </div>
+        <figure class="screen">
+          <div class="screen-bar"><span class="screen-dots"><i></i><i></i><i></i></span><span>/ui/#training</span><span>seeded example</span></div>
+          <img src="../assets/server-ui-training.png" alt="Current Kiln training dashboard showing jobs, datasets, progress, and loss" width="2880" height="3212" loading="lazy">
+        </figure>
+        <div class="tour-points">
+          <div class="tour-point"><strong>Admission first</strong><p>Resolve memory and route support before a long job mutates state.</p></div>
+          <div class="tour-point"><strong>Artifacts named</strong><p>Training produces a versioned adapter and manifest, not an anonymous in-memory change.</p></div>
+          <div class="tour-point"><strong>Evaluation separate</strong><p>A completed optimizer step is not the same thing as a promoted model improvement.</p></div>
+        </div>
+      </div>
+    </section>
 
-      <h2>What you&rsquo;re watching</h2>
-      <p>
-        Each cast is a single uncut shell session. The new structured output landed in PRs
-        <a href="https://github.com/ericflo/kiln/pull/822">#822</a> (server) and
-        <a href="https://github.com/ericflo/kiln/pull/824">#824</a> (bench): a compact banner on
-        startup, cyan section headers, an <code>indicatif</code> progress bar that only renders on a
-        TTY, and a right-aligned summary table with dim labels and bold values. The same binary
-        prints structured JSON through <code>tracing</code> when stderr is not a TTY, so a CI runner
-        and a customer demo see different but equally clean output from the same process.
-      </p>
+    <section class="tour">
+      <div class="demo-page">
+        <div class="tour-heading">
+          <div class="tour-kicker">04 &middot; Promote</div>
+          <div class="tour-copy">
+            <h2>Compare, inspect, then activate.</h2>
+            <p>The adapter library binds artifacts to their base model and evaluation evidence.
+            Load or select a winner deliberately, keep alternatives available, and retain the
+            provenance needed to reproduce the decision.</p>
+          </div>
+        </div>
+        <figure class="screen">
+          <div class="screen-bar"><span class="screen-dots"><i></i><i></i><i></i></span><span>/ui/#adapters</span><span>seeded example</span></div>
+          <img src="../assets/server-ui-adapters.png" alt="Current Kiln adapter library showing active adapter, manifests, and evaluation evidence" width="2880" height="2216" loading="lazy">
+        </figure>
+        <div class="tour-points">
+          <div class="tour-point"><strong>Base identity bound</strong><p>Adapters retain the model and configuration they were trained against.</p></div>
+          <div class="tour-point"><strong>Eval evidence nearby</strong><p>Promotion can be based on a comparison instead of training loss alone.</p></div>
+          <div class="tour-point"><strong>Hot-swap explicit</strong><p>Change what serves without loading another copy of the base weights.</p></div>
+        </div>
+      </div>
+    </section>
 
-      <h2>Why these stories</h2>
-      <p>
-        <strong>Online learning.</strong> The 60-second canonical cast collapses an iteration loop
-        from hours to seconds: ask the base model who Kiln is, get a wrong answer about pottery,
-        POST a two-example correction to <code>/v1/train/sft</code>, and see the next chat completion
-        return the right answer through the hot-swapped adapter. One process, one GPU, no restart.
-      </p>
-      <p>
-        <strong>Hot-swap.</strong> The 45-second cast asks the same prompt three times and gets
-        three different answers &mdash; base model, <code>adapter=demo</code>, <code>adapter=formal</code> &mdash;
-        with no second model load and no second weights copy in VRAM. Mixed-tenant routing happens
-        per request via the <code>"adapter"</code> field on each chat completion.
-      </p>
-      <p>
-        <strong>OpenAI drop-in.</strong> The 30-second cast points the official Python SDK at
-        <code>http://localhost:8420/v1</code>, streams a chat completion token-by-token, and that&rsquo;s
-        the entire migration. Anything you already wrote against <code>api.openai.com</code> works.
-      </p>
-      <p>
-        <strong>GRPO custom reward.</strong> The 75-second cast shows online RL over HTTP: a tiny
-        batch of scored completions (good answers <code>+1.0</code>, off-topic ones <code>-1.0</code>)
-        becomes a hot-swapped LoRA, and the next request samples from the preference-aligned model.
-        Same single-GPU process, same OpenAI-compatible API. Bring your own reward function.
-      </p>
-      <p>
-        <strong>Bench sprint.</strong> The 60-second cast runs the built-in <code>kiln-bench</code> suite
-        with <code>--paged --num-runs 3 --skip-training</code>, shows the structured throughput and
-        latency tables, and demos the new <code>-v</code> flag for CI that wants per-run JSON tracing
-        without losing the pretty default.
-      </p>
-      <p>
-        <strong>First token.</strong> The shortest cast. Cold launch &rarr; banner &rarr; spinner &rarr;
-        listening &rarr; first streamed token. Single binary, no Python, no second weights process.
-      </p>
+    <section class="try">
+      <div class="demo-page try-grid">
+        <div>
+          <h2>Run the current flow.</h2>
+          <p>Start with a real health check and one real request. The complete platform-specific
+          path is in the <a href="../quickstart.html">Quickstart</a>; training and evaluation continue
+          in the <a href="../grpo.html">GRPO</a> and <a href="../evals.html">Evals</a> guides.</p>
+        </div>
+        <pre><code># Verify readiness and the selected backend
+curl -fsS http://127.0.0.1:8420/health | jq
 
-      <h2>Reproduce it yourself</h2>
-      <p>
-        The setup path is in the <a href="../quickstart.html">Quickstart</a>; the full per-cast
-        recording protocol &mdash; terminal size, prerequisites, scene-by-scene timing, expected outputs &mdash; is in
-        <a href="https://github.com/ericflo/kiln/blob/main/docs/site/demo/SCRIPTS.md">SCRIPTS.md</a>.
-        Each cast also has a thin shell driver in
-        <a href="https://github.com/ericflo/kiln/tree/main/docs/site/demo">docs/site/demo/</a>;
-        click <em>view script</em> below the player on any cast to jump straight to its driver.
-      </p>
+# Send the same API shape used by the playground
+curl -fsS http://127.0.0.1:8420/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "Qwen3.5-4B",
+    "messages": [{"role":"user","content":"Give one debugging rule."}],
+    "temperature": 0,
+    "max_tokens": 64
+  }' | jq
 
-    </div>
-  </section>
+# Open the operational UI
+xdg-open http://127.0.0.1:8420/ui/</code></pre>
+      </div>
+    </section>
 
-  <!-- footer / nav back -->
-  <section class="divider">
-    <div class="max-w-3xl mx-auto px-6 py-10 flex flex-wrap gap-3">
-      <a href="../" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
-        &larr; Back to home
-      </a>
-      <a href="../quickstart.html" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
-        Quickstart &rarr;
-      </a>
-      <a href="../api.html" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
-        API &rarr;
-      </a>
-      <a href="../cli.html" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
-        CLI &rarr;
-      </a>
-      <a href="../troubleshooting.html" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
-        Troubleshooting &rarr;
-      </a>
-      <a href="https://github.com/ericflo/kiln" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
-        GitHub &rarr;
-      </a>
-      <a href="../grpo.html" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
-        GRPO Guide &rarr;
-      </a>
-    </div>
-  </section>
-
+    <section class="archive">
+      <div class="demo-page">
+        <details>
+          <summary>
+            <strong>Historical terminal recordings &middot; archived, not current product proof</strong>
+            <span>Captured May 4, 2026 &middot; RTX A6000 &middot; pre-v0.5.0 behavior</span>
+          </summary>
+          <div class="archive-body">
+            <p>
+              These six recordings are retained because they document earlier workflows and output.
+              They were previously presented as the current demo without a capture date, which was
+              misleading. Some endpoints, CLI output, and timing no longer represent the current
+              release. Use the current guides above for reproduction.
+            </p>
+            <div class="archive-links">
+              <a href="first-token.cast">first-token.cast &middot; cold start</a>
+              <a href="kiln-60s.cast">kiln-60s.cast &middot; online loop</a>
+              <a href="hot-swap.cast">hot-swap.cast &middot; adapters</a>
+              <a href="openai.cast">openai.cast &middot; Python client</a>
+              <a href="grpo.cast">grpo.cast &middot; early GRPO flow</a>
+              <a href="bench.cast">bench.cast &middot; old benchmark output</a>
+            </div>
+            <p>Original scripts remain in the
+              <a href="https://github.com/ericflo/kiln/tree/main/docs/site/demo">repository archive</a>
+              for audit.</p>
+          </div>
+        </details>
+      </div>
+    </section>
   </main>
 
-  <!-- footer -->
-  <footer class="divider">
-    <div class="max-w-5xl mx-auto px-6 py-10 flex flex-wrap gap-x-6 gap-y-2 items-center justify-between text-sm" style="color: var(--fg-mute);">
-      <div class="flex items-center gap-2.5">
-        <img src="../assets/logo.png" alt="" width="20" height="20" class="rounded">
-        <span>Kiln &middot; MIT licensed</span>
-      </div>
-      <nav class="flex flex-wrap gap-x-5 gap-y-1">
-        <a href="../">Home</a>
-        <a href="https://github.com/ericflo/kiln/blob/main/README.md">README</a>
-        <a href="../quickstart.html">Quickstart</a>
+  <footer class="demo-footer">
+    <div class="demo-page demo-footer-inner">
+      <span>Kiln &middot; MIT licensed</span>
+      <nav aria-label="Footer">
         <a href="../docs/">Documentation</a>
+        <a href="../quickstart.html">Quickstart</a>
         <a href="../grpo.html">GRPO Guide</a>
         <a href="../evals.html">Evals</a>
         <a href="../api.html">API Reference</a>
@@ -497,306 +497,11 @@
         <a href="../troubleshooting.html">Troubleshooting</a>
         <a href="../architecture.html">Architecture</a>
         <a href="https://github.com/ericflo/kiln/blob/main/CHANGELOG.md">Changelog</a>
-        <a href="https://github.com/ericflo/kiln/blob/main/SECURITY.md">Security</a>
         <a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License</a>
       </nav>
     </div>
   </footer>
 
-  <!-- asciinema-player 3.7.1, self-hosted -->
-  <script src="vendor/asciinema-player/asciinema-player.min.js"></script>
-  <script>
-    /* eslint-env browser */
-    const CASTS = [
-      {
-        slug: "first-token",
-        title: "Cold start to first token",
-        sub: "Banner &rarr; spinner &rarr; listening &rarr; first streamed token. One binary, no Python.",
-        cast: "first-token.cast",
-        script: "https://github.com/ericflo/kiln/blob/main/docs/site/demo/demo-first-token.sh",
-        duration: "0:30",
-        caption: `
-          <h2>Cold start to first streamed token</h2>
-          <p>
-            The shortest cast. The new banner, spinner, and structured ready-line land
-            in under a few seconds, the listener binds, and a single streaming chat completion
-            shows real first-token latency &mdash; tokens land one-by-one as the GPU produces them.
-          </p>
-          <p>
-            The streaming output uses a 20-line stdlib SSE parser at
-            <a href="https://github.com/ericflo/kiln/blob/main/docs/site/demo/demo-stream-parser.py"><code>demo-stream-parser.py</code></a>
-            so the cast captures real per-token cadence, not buffered output.
-          </p>
-        `,
-      },
-      {
-        slug: "kiln-60s",
-        title: "Online learning loop",
-        sub: "Base completion &rarr; <code>/v1/train/sft</code> correction &rarr; hot-swap &rarr; same prompt, right answer.",
-        cast: "kiln-60s.cast",
-        script: "https://github.com/ericflo/kiln/blob/main/docs/site/demo/demo.sh",
-        duration: "1:00",
-        caption: `
-          <h2>The 60-second online-learning loop</h2>
-          <p>
-            Cold start. The base Qwen3.5-4B has never heard of Kiln-the-software, so it guesses
-            pottery. A single <code>curl</code> POST to <code>/v1/train/sft</code> with two correction examples
-            queues a LoRA training job that runs in-process on the same GPU we&rsquo;re serving from.
-            About a minute later the adapter is hot-swapped, the next request opts into it, and the
-            same prompt returns the right answer.
-          </p>
-          <p>
-            Full per-scene transcript and recording protocol:
-            <a href="https://github.com/ericflo/kiln/blob/main/docs/site/demo/SCRIPT.md">SCRIPT.md</a>.
-          </p>
-        `,
-      },
-      {
-        slug: "hot-swap",
-        title: "Live adapter hot-swap",
-        sub: "One server, three answers. Same prompt, no adapter / <code>demo</code> / <code>formal</code>.",
-        cast: "hot-swap.cast",
-        script: "https://github.com/ericflo/kiln/blob/main/docs/site/demo/demo-hot-swap.sh",
-        duration: "0:45",
-        caption: `
-          <h2>One server, many specialists</h2>
-          <p>
-            Two adapters are pre-staged on disk under <code>./adapters/</code>. The cast asks the same
-            prompt three times &mdash; no adapter, <code>adapter=demo</code>, <code>adapter=formal</code> &mdash;
-            and the viewer sees three different answers from one running server with no restart and no
-            second copy of the base weights in VRAM.
-          </p>
-          <p>
-            Mixed-tenant routing happens per request via the <code>"adapter"</code> extension field on
-            each chat completion (see
-            <a href="https://github.com/ericflo/kiln/blob/main/crates/kiln-server/src/api/completions.rs"><code>completions.rs</code></a>).
-            By design Kiln does not implicitly route to the most recently trained adapter &mdash; the
-            client always names the adapter it wants.
-          </p>
-        `,
-      },
-      {
-        slug: "openai",
-        title: "Drop-in OpenAI client",
-        sub: "Official Python SDK, base_url is the only line you change.",
-        cast: "openai.cast",
-        script: "https://github.com/ericflo/kiln/blob/main/docs/site/demo/demo-openai.sh",
-        duration: "0:30",
-        caption: `
-          <h2>Drop-in OpenAI Python client</h2>
-          <p>
-            The most "press-button-receive-result" cast. Shows the unmodified <code>openai</code>
-            Python SDK pointed at <code>http://localhost:8420/v1</code>, streaming tokens, no
-            Kiln-specific code. The cast does a <code>cat</code> of
-            <a href="https://github.com/ericflo/kiln/blob/main/docs/site/demo/demo-openai.py"><code>demo-openai.py</code></a>
-            so you can see exactly how short it is &mdash; three constructor lines and a stream loop.
-          </p>
-          <p>
-            Anything already written against <code>api.openai.com</code> works against Kiln by changing
-            <code>base_url</code> only. <code>model</code>, <code>messages</code>, <code>temperature</code>,
-            <code>stream</code>, <code>max_tokens</code> &mdash; all the standard fields route to the same
-            handler that powers the curl-based casts.
-          </p>
-        `,
-      },
-      {
-        slug: "grpo",
-        title: "GRPO with custom reward",
-        sub: "Online RL over HTTP. Bring your own reward function, hot-swap when training finishes.",
-        cast: "grpo.cast",
-        script: "https://github.com/ericflo/kiln/blob/main/docs/site/demo/demo-grpo.sh",
-        duration: "1:15",
-        caption: `
-          <h2>GRPO with a custom reward, online over HTTP</h2>
-          <p>
-            The most ambitious cast. Two prompts, four scored completions each &mdash; good answers
-            <code>+1.0</code>, off-topic ones <code>-1.0</code> &mdash; pushed to <code>/v1/train/grpo</code>
-            in the schema defined by
-            <a href="https://github.com/ericflo/kiln/blob/main/crates/kiln-train/src/lib.rs"><code>GrpoRequest</code></a>.
-            The KL-regularized update runs on the same GPU we&rsquo;re serving from. When training
-            completes, the adapter hot-swaps and the next request samples from the
-            preference-aligned model.
-          </p>
-          <p>
-            Same OpenAI-compatible API for inference. Different supervision signal at training time.
-            See the <a href="../grpo.html">GRPO Guide</a> for the full reward-function story.
-          </p>
-        `,
-      },
-      {
-        slug: "bench",
-        title: "Built-in benchmark suite",
-        sub: "<code>kiln-bench</code> with structured headers, progress bars, summary tables, and <code>-v</code> for CI.",
-        cast: "bench.cast",
-        script: "https://github.com/ericflo/kiln/blob/main/docs/site/demo/demo-bench.sh",
-        duration: "1:00",
-        caption: `
-          <h2>Throughput, latency, training &mdash; all from one binary</h2>
-          <p>
-            <code>kiln-bench</code> ships with the same release artifact as the server. The cast runs
-            <code>--paged --num-runs 3 --skip-training</code> so the throughput, latency, and summary
-            scenes fit in ~60 seconds on an A6000.
-          </p>
-          <p>
-            New default output: cyan <code>&#9612;</code> section headers, an <code>indicatif</code>
-            progress bar over the throughput runs (TTY-only, finishes cleanly with
-            <code>finish_and_clear</code>), and a right-aligned summary table with
-            <code>console::style</code> &mdash; label dim, value bold-white, unit dim. Pass
-            <code>-v</code> to bump the tracing filter from <code>warn</code> to <code>info</code>
-            so CI builds and log scrapers can grep per-run results without losing the pretty
-            output by default. <code>-q</code> drops to <code>warn</code>-only and wins over <code>-v</code>.
-          </p>
-        `,
-      },
-    ];
-
-    const DEFAULT_SLUG = "first-token";
-    const PANEL_ID = "cast-panel";
-
-    let player = null;
-
-    function castMetaHTML(c) {
-      const repoBase = "https://github.com/ericflo/kiln/blob/main/docs/site/demo/";
-      const castUrl = repoBase + c.cast;
-      return `
-        <span><strong style="color: var(--fg-dim);">Duration:</strong> ${c.duration}</span>
-        <a href="${c.script}" target="_blank" rel="noopener">view script</a>
-        <a href="${castUrl}" target="_blank" rel="noopener">view .cast</a>
-      `;
-    }
-
-    function renderPlayerFallback(c) {
-      const playerEl = document.getElementById("kiln-demo-player");
-      playerEl.innerHTML = `
-        <section class="player-fallback" role="status" aria-live="polite">
-          <h2>${c.title} recording</h2>
-          <p>
-            The embedded player could not initialize. You can still download the local recording and
-            view the exact script used to capture it from source.
-          </p>
-          <div class="player-fallback__actions">
-            <a class="btn-primary" href="${c.cast}">view .cast</a>
-            <a class="btn-secondary" href="${c.script}" target="_blank" rel="noopener">view script</a>
-          </div>
-        </section>
-      `;
-    }
-
-    function createPlayer(c, playerEl) {
-      if (!window.AsciinemaPlayer || typeof window.AsciinemaPlayer.create !== "function") {
-        renderPlayerFallback(c);
-        return null;
-      }
-
-      try {
-        return window.AsciinemaPlayer.create(c.cast, playerEl, {
-          autoPlay: false,
-          preload: true,
-          loop: false,
-          idleTimeLimit: 2,
-          theme: "monokai",
-          poster: "npt:0:02",
-          cols: 120,
-          rows: 32,
-        });
-      } catch (e) {
-        renderPlayerFallback(c);
-        return null;
-      }
-    }
-
-    function renderTiles() {
-      const grid = document.getElementById("cast-picker");
-      grid.innerHTML = CASTS.map((c, i) => `
-        <button class="cast-tile" type="button" role="tab" aria-selected="false"
-                aria-controls="${PANEL_ID}" tabindex="-1" data-slug="${c.slug}" id="tile-${c.slug}">
-          <div class="cast-tile__head">
-            <span class="cast-tile__num">${String(i + 1).padStart(2, "0")}</span>
-            <span class="cast-tile__dur">${c.duration}</span>
-          </div>
-          <div class="cast-tile__title">${c.title}</div>
-          <div class="cast-tile__sub">${c.sub}</div>
-        </button>
-      `).join("");
-
-      grid.querySelectorAll(".cast-tile").forEach(el => {
-        el.addEventListener("click", () => selectCast(el.dataset.slug, true));
-        el.addEventListener("keydown", handleTileKeydown);
-      });
-    }
-
-    function handleTileKeydown(event) {
-      const currentIndex = CASTS.findIndex(c => c.slug === event.currentTarget.dataset.slug);
-      if (currentIndex < 0) return;
-
-      let nextIndex = null;
-      if (event.key === "ArrowRight" || event.key === "ArrowDown") {
-        nextIndex = (currentIndex + 1) % CASTS.length;
-      } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
-        nextIndex = (currentIndex - 1 + CASTS.length) % CASTS.length;
-      } else if (event.key === "Home") {
-        nextIndex = 0;
-      } else if (event.key === "End") {
-        nextIndex = CASTS.length - 1;
-      }
-
-      if (nextIndex === null) return;
-      event.preventDefault();
-      selectCast(CASTS[nextIndex].slug, true, { focus: true });
-    }
-
-    function selectCast(slug, updateHash, options = {}) {
-      const c = CASTS.find(x => x.slug === slug);
-      if (!c) return;
-
-      document.querySelectorAll(".cast-tile").forEach(el => {
-        const selected = el.dataset.slug === slug;
-        el.setAttribute("aria-selected", selected ? "true" : "false");
-        el.tabIndex = selected ? 0 : -1;
-      });
-
-      const selectedTile = document.getElementById(`tile-${slug}`);
-      const panel = document.getElementById(PANEL_ID);
-      if (selectedTile && panel) {
-        panel.setAttribute("aria-labelledby", selectedTile.id);
-      }
-
-      document.getElementById("cast-meta").innerHTML = castMetaHTML(c);
-      document.getElementById("cast-caption").innerHTML = c.caption;
-
-      if (player && typeof player.dispose === "function") {
-        try { player.dispose(); } catch (e) { /* ignore */ }
-      }
-
-      const playerEl = document.getElementById("kiln-demo-player");
-      playerEl.innerHTML = "";
-      player = createPlayer(c, playerEl);
-
-      if (updateHash) {
-        history.replaceState(null, "", "#" + slug);
-      }
-
-      if (options.focus && selectedTile) {
-        selectedTile.focus();
-      }
-    }
-
-    function initialSlug() {
-      const fromHash = (location.hash || "").replace(/^#/, "");
-      if (CASTS.some(c => c.slug === fromHash)) return fromHash;
-      return DEFAULT_SLUG;
-    }
-
-    document.addEventListener("DOMContentLoaded", () => {
-      renderTiles();
-      selectCast(initialSlug(), false);
-    });
-
-    window.addEventListener("hashchange", () => {
-      const slug = (location.hash || "").replace(/^#/, "");
-      if (CASTS.some(c => c.slug === slug)) selectCast(slug, false);
-    });
-  </script>
   <script src="../js/site.js" defer></script>
 </body>
 </html>

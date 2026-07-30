@@ -153,7 +153,7 @@
       accelerator_runtime: {
         schema_id: 'kiln.accelerator-runtime-policy.v16',
         version: 16,
-        vulkan_kernel_policy_schema_id: 'kiln.vulkan-kernel-policy.v4',
+        vulkan_kernel_policy_schema_id: 'kiln.vulkan-kernel-policy.v5',
         vulkan_device_policy_schema_id: 'kiln.vulkan-device-policy.v1',
         serving_profile: 'stable',
         serving_profile_source: 'default',

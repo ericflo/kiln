@@ -565,6 +565,9 @@ export async function loadAndValidateManifest({ repoRoot, manifestPath }) {
       sectionIds.add(section.id);
     }
     if (!nonEmptyString(section?.title)) errors.push(`${label}.title must be non-empty`);
+    if (section?.navigation !== undefined && !['primary', 'reference'].includes(section.navigation)) {
+      errors.push(`${label}.navigation must be primary or reference`);
+    }
   }
 
   for (const [index, guide] of (manifest?.site?.product_guides ?? []).entries()) {
@@ -583,7 +586,7 @@ export async function loadAndValidateManifest({ repoRoot, manifestPath }) {
       errors.push(`${label}.source must be non-empty`);
       continue;
     }
-    if (document.source === 'docs/CONFIGURATION.md') hasConfiguration = true;
+    if (document.slug === 'configuration') hasConfiguration = true;
     if (isAbsolute(document.source) || document.source.includes('\\')) {
       errors.push(`${label}.source must be a repository-relative POSIX path`);
     }
@@ -622,6 +625,9 @@ export async function loadAndValidateManifest({ repoRoot, manifestPath }) {
     }
     if (!nonEmptyString(document?.title)) errors.push(`${label}.title must be non-empty`);
     if (!nonEmptyString(document?.description)) errors.push(`${label}.description must be non-empty`);
+    if (document?.navigation !== undefined && !['primary', 'reference'].includes(document.navigation)) {
+      errors.push(`${label}.navigation must be primary or reference`);
+    }
     if (!sectionIds.has(document?.section)) {
       errors.push(`${label}.section references unknown section ${JSON.stringify(document?.section)}`);
     }
@@ -649,7 +655,7 @@ export async function loadAndValidateManifest({ repoRoot, manifestPath }) {
     }
   }
   if (!hasConfiguration) {
-    errors.push('documents must include docs/CONFIGURATION.md');
+    errors.push('documents must include the configuration slug');
   }
   if (errors.length > 0) throw new DocsBuildError(errors);
   return manifest;
@@ -729,24 +735,53 @@ function sectionMap(manifest) {
   return new Map(manifest.sections.map((section) => [section.id, section]));
 }
 
+function documentNavigation(manifest, document) {
+  if (document.navigation) return document.navigation;
+  if (documentKind(document) !== 'markdown') return 'reference';
+  return sectionMap(manifest).get(document.section)?.navigation ?? 'primary';
+}
+
 function renderSidebar(manifest, activeSlug, depth) {
   const docsPrefix = depth === 'hub' ? '.' : '..';
   const rootPrefix = depth === 'hub' ? '..' : '../..';
   const sections = manifest.sections.map((section) => {
     const links = manifest.documents
+      .filter((document) => (
+        document.section === section.id
+        && documentNavigation(manifest, document) === 'primary'
+      ))
+      .map((document) => {
+        const current = document.slug === activeSlug ? ' aria-current="page"' : '';
+        return `<li><a href="${docsPrefix}/${escapeHtml(document.slug)}/"${current}>${escapeHtml(document.title)}</a></li>`;
+      })
+      .join('');
+    if (!links) return '';
+    return `<section class="docs-sidebar-section"><h2>${escapeHtml(section.title)}</h2><ul>${links}</ul></section>`;
+  }).join('');
+  const referenceDocuments = manifest.documents.filter(
+    (document) => documentNavigation(manifest, document) === 'reference',
+  );
+  const referenceActive = referenceDocuments.some((document) => document.slug === activeSlug);
+  const referenceSections = manifest.sections.map((section) => {
+    const links = referenceDocuments
       .filter((document) => document.section === section.id)
       .map((document) => {
         const current = document.slug === activeSlug ? ' aria-current="page"' : '';
         return `<li><a href="${docsPrefix}/${escapeHtml(document.slug)}/"${current}>${escapeHtml(document.title)}</a></li>`;
       })
       .join('');
-    return `<section class="docs-sidebar-section"><h2>${escapeHtml(section.title)}</h2><ul>${links}</ul></section>`;
+    if (!links) return '';
+    return `<section><h3>${escapeHtml(section.title)}</h3><ul>${links}</ul></section>`;
   }).join('');
   return `
     <aside class="docs-sidebar" id="docs-sidebar" aria-label="Documentation navigation">
       <div class="docs-sidebar-inner">
         <a class="docs-sidebar-home" href="${docsPrefix}/">Documentation home</a>
         ${sections}
+        <details class="docs-sidebar-library"${referenceActive ? ' open' : ''}>
+          <summary>Reference library <span>${referenceDocuments.length}</span></summary>
+          <div>${referenceSections}</div>
+        </details>
         <div class="docs-sidebar-product">
           <h2>Product guides</h2>
           <ul>${manifest.site.product_guides.map((guide) => {
@@ -875,7 +910,11 @@ ${pageEnd('document')}`;
 function renderHubPage(manifest) {
   const canonical = `${manifest.site.base_url}/docs/`;
   const sections = manifest.sections.map((section) => {
-    const documents = manifest.documents.filter((document) => document.section === section.id);
+    const documents = manifest.documents.filter((document) => (
+      document.section === section.id
+      && documentNavigation(manifest, document) === 'primary'
+    ));
+    if (documents.length === 0) return '';
     return `<section class="docs-directory-section" id="${escapeHtml(section.id)}">
       <h2>${escapeHtml(section.title)}</h2>
       <div class="docs-directory-list">${documents.map((document) => (
@@ -886,10 +925,23 @@ function renderHubPage(manifest) {
   const guides = manifest.site.product_guides.map((guide) => (
     `<a class="docs-guide" href="${escapeHtml(guide.href)}"><strong>${escapeHtml(guide.title)}</strong><span>${escapeHtml(guide.description)}</span></a>`
   )).join('');
+  const referenceDocuments = manifest.documents.filter(
+    (document) => documentNavigation(manifest, document) === 'reference',
+  );
+  const references = manifest.sections.map((section) => {
+    const documents = referenceDocuments.filter((document) => document.section === section.id);
+    if (documents.length === 0) return '';
+    return `<section class="docs-directory-section">
+      <h3>${escapeHtml(section.title)}</h3>
+      <div class="docs-directory-list">${documents.map((document) => (
+        `<a href="./${escapeHtml(document.slug)}/"><strong>${escapeHtml(document.title)}</strong><span>${escapeHtml(document.description)}</span></a>`
+      )).join('')}</div>
+    </section>`;
+  }).join('');
   return `${pageHead({
     manifest,
     title: 'Documentation',
-    description: 'Complete serving, configuration, training, evaluation, interoperability, and operations documentation for Kiln.',
+    description: 'Task-focused Kiln guides with a separate searchable library for exact schemas, contracts, and engineering evidence.',
     canonical,
     depth: 'hub',
   })}
@@ -901,15 +953,25 @@ function renderHubPage(manifest) {
     <main class="docs-main docs-hub" id="main-content">
       <nav class="docs-breadcrumbs" aria-label="Breadcrumb"><a href="../">Home</a><span aria-hidden="true">/</span><span>Docs</span></nav>
       <header class="docs-hub-header">
-        <p class="docs-section-label">Reference library</p>
-        <h1>Complete Kiln documentation</h1>
-        <p>Serving, configuration, training, evaluation, interoperability, integrity, and hardware qualification in one searchable reference.</p>
+        <p class="docs-section-label">Start with the answer</p>
+        <h1>Kiln documentation</h1>
+        <p>Use the product guides for a workflow, core docs for the mental model, and the reference library only when you need exact schemas or engineering evidence.</p>
       </header>
       <section class="docs-product-guides" aria-labelledby="product-guides-heading">
         <h2 id="product-guides-heading">Product guides</h2>
         <div>${guides}</div>
       </section>
-      <div class="docs-directory">${sections}</div>
+      <section class="docs-core-library" aria-labelledby="core-docs-heading">
+        <h2 id="core-docs-heading">Core documentation</h2>
+        <div class="docs-directory">${sections}</div>
+      </section>
+      <details class="docs-reference-library">
+        <summary>
+          <span><strong>Reference library</strong><small>Exact schemas, contracts, qualification, and maintainer material</small></span>
+          <b>${referenceDocuments.length} documents</b>
+        </summary>
+        <div class="docs-reference-library-body">${references}</div>
+      </details>
       ${pageFooter({ manifest, depth: 'hub' })}
     </main>
   </div>
@@ -996,7 +1058,7 @@ async function writeLlmsTxt(outDir, manifest) {
     'overview',
     'quickstart-reference',
     'configuration',
-    'architecture-reference',
+    'architecture',
     'grpo',
     'evals',
     'benchmarks',

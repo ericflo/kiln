@@ -1,16 +1,18 @@
-// GDN recurrent single-token step.
+// GDN recurrent sequence.
 //
-// Inputs use the BackendRuntime::gdn_recurrent_step contract:
-//   q, k:  [B, H, dk]
-//   v:     [B, H, dv]
-//   beta:  [B, H]
-//   g:     [B, H]
+// Inputs use the native head-last prefill contract:
+//   q, k:  [B, T, QH, dk]
+//   v:     [B, T, H, dv]
+//   beta:  [B, T, H]
+//   g:     [B, T, H]
 //   state: [B, H, dk, dv]
 // Output:
-//   out:   [B, H, dv]
+//   out:   [B, T, H, dv]
 //
 // The Rust wrapper passes all storage buffers as f32 values converted from the
-// source Candle tensors. It converts the f32 result back to the requested dtype.
+// source tensors. Each invocation owns one state column `(b, h, d)`, so it can
+// advance that column through the sequence without cross-workgroup ordering.
+// T=1 is the decode path and remains the same recurrence.
 #version 450
 #extension GL_EXT_control_flow_attributes : enable
 
@@ -42,30 +44,35 @@ void main() {
     uint h = (idx / dv) % heads;
     uint d = idx % dv;
 
-    uint bh = b * heads + h;
     uint qh = q_heads == heads ? h : h / (heads / q_heads);
-    uint q_off = (b * q_heads + qh) * dk;
-    uint k_off = q_off;
-    uint v_off = bh * dv;
     uint state_off = (b * heads + h) * dk * dv;
 
-    float beta_val = data_beta[bh];
-    float decay = exp(data_g[bh]);
+    for (uint t = 0; t < seq_len; t++) {
+        uint bth = (b * seq_len + t) * heads + h;
+        uint btqh = (b * seq_len + t) * q_heads + qh;
+        uint q_off = btqh * dk;
+        uint k_off = q_off;
+        uint v_off = bth * dv;
 
-    float v_pred = 0.0;
-    for (uint i = 0; i < dk; i++) {
-        float s = data_state[state_off + i * dv + d];
-        v_pred += data_k[k_off + i] * (decay * s);
+        float beta_val = data_beta[bth];
+        float decay = exp(data_g[bth]);
+
+        float v_pred = 0.0;
+        for (uint i = 0; i < dk; i++) {
+            float s = data_state[state_off + i * dv + d];
+            v_pred += data_k[k_off + i] * (decay * s);
+        }
+
+        float delta = beta_val * (data_v[v_off + d] - v_pred);
+
+        float out_acc = 0.0;
+        for (uint i = 0; i < dk; i++) {
+            uint state_idx = state_off + i * dv + d;
+            float new_s = decay * data_state[state_idx] + data_k[k_off + i] * delta;
+            data_state[state_idx] = new_s;
+            out_acc += data_q[q_off + i] * new_s;
+        }
+
+        data_out[v_off + d] = out_acc;
     }
-
-    float delta = beta_val * (data_v[v_off + d] - v_pred);
-
-    float out_acc = 0.0;
-    for (uint i = 0; i < dk; i++) {
-        float new_s = decay * data_state[state_off + i * dv + d] + data_k[k_off + i] * delta;
-        data_state[state_off + i * dv + d] = new_s;
-        out_acc += data_q[q_off + i] * new_s;
-    }
-
-    data_out[bh * dv + d] = out_acc;
 }

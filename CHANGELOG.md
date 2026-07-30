@@ -1,5 +1,28 @@
 # Kiln Server Changelog
 
+## kiln-v0.5.1 — 2026-07-30 — generic Vulkan recovery and usable docs
+
+- Vulkan policy regression and correction: policy v5 restores the
+  standards-based Vulkan compute routes for every supported Vulkan device,
+  with no device-name, vendor-ID, PCI-ID, or qualification-machine dispatch.
+  The v4 fallback had disabled resident decode, packed weights, fused
+  projections, GPU gather, and submission fusion globally. The same-workload
+  regression measured 0.142 decode tok/s and 11.343 s prefill; the clean v5
+  candidate measures 13.43 decode tok/s and 2.588 s prefill. `native_default`
+  again owns the device-neutral route set. A new multi-token Gated DeltaNet
+  recurrent shader passes an independent sequential CPU oracle, while
+  workload-size crossovers keep small bridged prefill operations on the
+  reference path without evicting resident decode state. Dispatch-grid and
+  operator-specific shared-memory checks use queried Vulkan limits; marketing
+  identity is never an acceptable substitute for a capability check.
+- Documentation and demo: replaced the undifferentiated documentation wall
+  with five task-focused primary guides and a collapsed, searchable reference
+  library. The benchmark page now leads with the reproduced Vulkan regression,
+  its boundary, comparable historical/current results, and the remaining
+  prefill gap. The demo now reflects the current Observe, Serve, Teach, and
+  Promote UI; old casts are explicitly dated and archived instead of being
+  presented as current behavior.
+
 ## kiln-v0.5.0 — 2026-07-29 — bounded thinking by tokens or decode time
 
 - Canonical-only configuration: every public field environment override now

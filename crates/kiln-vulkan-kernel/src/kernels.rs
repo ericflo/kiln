@@ -1,225 +1,14 @@
 use crate::buffer::VulkanBuffer;
 use crate::device::VulkanDevice;
+pub use crate::policy::{
+    NATIVE_VULKAN_KERNEL_POLICY, PORTABLE_VULKAN_KERNEL_POLICY, VULKAN_KERNEL_POLICY_SCHEMA_ID,
+    VulkanKernelPolicy, vulkan_kernel_policy,
+};
 use anyhow::{Context, Result};
 use ash::vk;
 use half::bf16;
 use std::sync::Arc;
 use std::time::Instant;
-
-/// Immutable, device-neutral kernel selection used by Vulkan execution.
-///
-/// Device-specific qualification belongs in receipts, not product defaults.
-/// The portable policy declines optimized routes whose correctness or
-/// scheduling has not been established across Vulkan implementations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VulkanKernelPolicy {
-    pub flash_attention_row_tile: usize,
-    pub flash_attention_row_work_budget: usize,
-    pub bf16_weight_row_tile: usize,
-    pub elementwise_tile_elements: usize,
-    pub exp_tile_elements: usize,
-    pub gdn_enabled: bool,
-    pub gdn_prefill_in_proj_enabled: bool,
-    pub gdn_gates_enabled: bool,
-    pub gdn_gated_rms_norm_enabled: bool,
-    pub gdn_full_chunk_forward_enabled: bool,
-    pub fused_conv1d_update_enabled: bool,
-    pub fused_conv1d_prefill_enabled: bool,
-    pub conv1d_prefill_single_submit_enabled: bool,
-    pub gdn_forward_sub_enabled: bool,
-    pub gdn_decode_fused_enabled: bool,
-    pub gdn_recurrent_unexpanded_qk_enabled: bool,
-    pub gdn_recurrent_qk_norm_unexpanded_enabled: bool,
-    pub linear_decode_enabled: bool,
-    pub linear_argmax_batch_enabled: bool,
-    pub full_attn_qkv_enabled: bool,
-    pub paged_attn_decode_batch_enabled: bool,
-    pub mlp_decode_enabled: bool,
-    pub mlp_gate_up_enabled: bool,
-    pub mlp_bf16_gate_up_f32_down_enabled: bool,
-    pub bf16_packed_linear_weights_enabled: bool,
-    pub bf16_packed_gdn_in_proj_weights_enabled: bool,
-    pub bf16_packed_full_attn_qkv_weights_enabled: bool,
-    pub bf16_packed_mlp_decode_weights_enabled: bool,
-    pub recurrent_state_residency_enabled: bool,
-    pub prefill_recurrent_state_residency_enabled: bool,
-    pub resident_decode_enabled: bool,
-    pub bridged_rmsnorm_forward_enabled: bool,
-    pub skip_final_gdn_state_readback_enabled: bool,
-    pub flash_attn_prefill_enabled: bool,
-    pub paged_decode_gpu_gather_enabled: bool,
-    pub gdn_chunkwise_forward_enabled: bool,
-    pub gdn_chunkwise_single_submit_enabled: bool,
-    pub gdn_chunkwise_fallback_enabled: bool,
-    pub gdn_decode_fused_resident_state_enabled: bool,
-    pub linear_max_flop_per_dispatch: u64,
-    pub mlp_bf16_gate_up_rows4: bool,
-    pub mlp_f32_down_rows4: bool,
-    pub mlp_bf16_down_rows4: bool,
-    pub mlp_bf16_rows8: bool,
-    pub mlp_bf16_rows8_min_batch: usize,
-    pub mlp_bf16_gate_up_rows4_min_batch: usize,
-    pub mlp_bf16_down_rows4_min_batch: usize,
-    pub mlp_f32_down_rows4_min_batch: usize,
-    pub linear_decode_bf16w_rows4: bool,
-    pub linear_decode_bf16w_rows8: bool,
-    pub linear_bf16_rows4_min_batch: usize,
-    pub linear_bf16_rows8_min_batch: usize,
-    pub gdn_in_proj_rows4_min_batch: usize,
-    pub gdn_in_proj_rows8_min_batch: usize,
-    pub full_attn_qkv_bf16w_rows4: bool,
-    pub full_attn_qkv_bf16w_rows8: bool,
-    pub full_attn_qkv_bf16_rows4_min_batch: usize,
-    pub full_attn_qkv_bf16_rows8_min_batch: usize,
-    pub paged_attn_single_submit: bool,
-    pub qwen_rmsnorm_single_submit: bool,
-    pub gdn_gates_single_submit: bool,
-    pub gdn_gated_norm_single_submit: bool,
-    pub mlp_gate_up_single_submit: bool,
-    pub causal_conv1d_single_submit: bool,
-    pub mlp_chained_dispatch: bool,
-    pub mlp_chained_transfer_submit: bool,
-    pub gdn_decode_host_visible_state: bool,
-    pub gdn_decode_fused_single_submit: bool,
-    pub gdn_recurrent_host_visible_state: bool,
-    pub gdn_recurrent_host_visible_batch_state: bool,
-    pub gdn_recurrent_single_submit: bool,
-    pub gdn_recurrent_parallel_reduce: bool,
-    pub linear_decode_single_submit: bool,
-    pub linear_decode_argmax_single_submit: bool,
-    pub full_attn_qkv_single_submit: bool,
-    pub gdn_in_proj_single_submit: bool,
-    pub gdn_in_proj_batch_pair_qkv_z: bool,
-    pub gdn_in_proj_batch_row_pair: bool,
-    pub gdn_in_proj_batch_row_quad: bool,
-    pub gdn_in_proj_batch_row_octet: bool,
-    pub gdn_gates_batched_transfers: bool,
-    pub gdn_gated_norm_batched_uploads: bool,
-    pub gdn_chunk_batched_transfers: bool,
-    pub paged_attn_batched_uploads: bool,
-    pub prefill_row_pair_matmul: bool,
-    pub gdn_qk_norm_recurrent_fusion: bool,
-    pub gdn_in_proj_conv_split_fusion: bool,
-    pub profile_mlp_kernel_stages: bool,
-    pub profile_gdn_in_proj_kernel_stages: bool,
-    pub profile_gdn_recurrent_kernel_stages: bool,
-    pub profile_resident_decode_timing: bool,
-}
-
-pub const VULKAN_KERNEL_POLICY_SCHEMA_ID: &str = "kiln.vulkan-kernel-policy.v4";
-
-impl VulkanKernelPolicy {
-    /// Decline device-tuned Vulkan routes while retaining bounded-work limits
-    /// and explicit fallbacks.
-    pub const fn portable_fallback() -> Self {
-        Self {
-            flash_attention_row_tile: 2048,
-            flash_attention_row_work_budget: 10_000_000,
-            bf16_weight_row_tile: 128,
-            elementwise_tile_elements: 1 << 20,
-            exp_tile_elements: 65_536,
-            gdn_enabled: false,
-            gdn_prefill_in_proj_enabled: false,
-            gdn_gates_enabled: false,
-            gdn_gated_rms_norm_enabled: false,
-            gdn_full_chunk_forward_enabled: false,
-            fused_conv1d_update_enabled: false,
-            fused_conv1d_prefill_enabled: false,
-            conv1d_prefill_single_submit_enabled: false,
-            gdn_forward_sub_enabled: false,
-            gdn_decode_fused_enabled: false,
-            gdn_recurrent_unexpanded_qk_enabled: false,
-            gdn_recurrent_qk_norm_unexpanded_enabled: false,
-            linear_decode_enabled: false,
-            linear_argmax_batch_enabled: false,
-            full_attn_qkv_enabled: false,
-            paged_attn_decode_batch_enabled: false,
-            mlp_decode_enabled: false,
-            mlp_gate_up_enabled: false,
-            mlp_bf16_gate_up_f32_down_enabled: false,
-            bf16_packed_linear_weights_enabled: false,
-            bf16_packed_gdn_in_proj_weights_enabled: false,
-            bf16_packed_full_attn_qkv_weights_enabled: false,
-            bf16_packed_mlp_decode_weights_enabled: false,
-            recurrent_state_residency_enabled: false,
-            prefill_recurrent_state_residency_enabled: false,
-            resident_decode_enabled: false,
-            bridged_rmsnorm_forward_enabled: false,
-            skip_final_gdn_state_readback_enabled: false,
-            flash_attn_prefill_enabled: false,
-            paged_decode_gpu_gather_enabled: false,
-            gdn_chunkwise_forward_enabled: false,
-            gdn_chunkwise_single_submit_enabled: false,
-            gdn_chunkwise_fallback_enabled: true,
-            gdn_decode_fused_resident_state_enabled: false,
-            linear_max_flop_per_dispatch: 20_000_000_000,
-            mlp_bf16_gate_up_rows4: false,
-            mlp_f32_down_rows4: false,
-            mlp_bf16_down_rows4: false,
-            mlp_bf16_rows8: false,
-            mlp_bf16_rows8_min_batch: 256,
-            mlp_bf16_gate_up_rows4_min_batch: 8,
-            mlp_bf16_down_rows4_min_batch: 16,
-            mlp_f32_down_rows4_min_batch: 8,
-            linear_decode_bf16w_rows4: false,
-            linear_decode_bf16w_rows8: false,
-            linear_bf16_rows4_min_batch: 16,
-            linear_bf16_rows8_min_batch: 64,
-            gdn_in_proj_rows4_min_batch: 16,
-            gdn_in_proj_rows8_min_batch: 64,
-            full_attn_qkv_bf16w_rows4: false,
-            full_attn_qkv_bf16w_rows8: false,
-            full_attn_qkv_bf16_rows4_min_batch: 2,
-            full_attn_qkv_bf16_rows8_min_batch: 64,
-            paged_attn_single_submit: false,
-            qwen_rmsnorm_single_submit: false,
-            gdn_gates_single_submit: false,
-            gdn_gated_norm_single_submit: false,
-            mlp_gate_up_single_submit: false,
-            causal_conv1d_single_submit: false,
-            mlp_chained_dispatch: false,
-            mlp_chained_transfer_submit: false,
-            gdn_decode_host_visible_state: false,
-            gdn_decode_fused_single_submit: false,
-            gdn_recurrent_host_visible_state: true,
-            gdn_recurrent_host_visible_batch_state: false,
-            gdn_recurrent_single_submit: false,
-            gdn_recurrent_parallel_reduce: false,
-            linear_decode_single_submit: false,
-            linear_decode_argmax_single_submit: false,
-            full_attn_qkv_single_submit: false,
-            gdn_in_proj_single_submit: false,
-            gdn_in_proj_batch_pair_qkv_z: false,
-            gdn_in_proj_batch_row_pair: false,
-            gdn_in_proj_batch_row_quad: false,
-            gdn_in_proj_batch_row_octet: false,
-            gdn_gates_batched_transfers: false,
-            gdn_gated_norm_batched_uploads: false,
-            gdn_chunk_batched_transfers: false,
-            paged_attn_batched_uploads: false,
-            prefill_row_pair_matmul: false,
-            gdn_qk_norm_recurrent_fusion: false,
-            gdn_in_proj_conv_split_fusion: false,
-            profile_mlp_kernel_stages: false,
-            profile_gdn_in_proj_kernel_stages: false,
-            profile_gdn_recurrent_kernel_stages: false,
-            profile_resident_decode_timing: false,
-        }
-    }
-}
-
-impl Default for VulkanKernelPolicy {
-    fn default() -> Self {
-        Self::portable_fallback()
-    }
-}
-
-pub const PORTABLE_VULKAN_KERNEL_POLICY: VulkanKernelPolicy =
-    VulkanKernelPolicy::portable_fallback();
-
-pub fn vulkan_kernel_policy() -> VulkanKernelPolicy {
-    PORTABLE_VULKAN_KERNEL_POLICY
-}
 
 fn profile_vulkan_mlp_kernel_stages_enabled() -> bool {
     vulkan_kernel_policy().profile_mlp_kernel_stages
@@ -527,16 +316,16 @@ pub(crate) fn use_prefill_row_pair_matmul(batch: usize) -> bool {
 }
 
 #[cfg(test)]
-mod portable_policy_tests {
+mod policy_tests {
     use super::*;
 
     #[test]
-    fn portable_policy_declines_device_tuned_routes() {
+    fn portable_policy_declines_optional_optimized_routes() {
         let policy = VulkanKernelPolicy::portable_fallback();
 
         assert_eq!(
             VULKAN_KERNEL_POLICY_SCHEMA_ID,
-            "kiln.vulkan-kernel-policy.v4"
+            "kiln.vulkan-kernel-policy.v5"
         );
         assert!(!policy.gdn_enabled);
         assert!(!policy.linear_decode_enabled);
@@ -559,6 +348,26 @@ mod portable_policy_tests {
         assert_eq!(paged_attn_decode_splitk_chunks(16, 64), 4);
         assert!(!policy.profile_mlp_kernel_stages);
         assert!(!policy.profile_resident_decode_timing);
+    }
+
+    #[test]
+    fn native_default_restores_device_neutral_fast_routes() {
+        let policy = VulkanKernelPolicy::native_default();
+
+        assert_eq!(policy, VulkanKernelPolicy::default());
+        assert_eq!(policy, vulkan_kernel_policy());
+        assert!(policy.gdn_enabled);
+        assert!(policy.linear_decode_enabled);
+        assert!(policy.full_attn_qkv_enabled);
+        assert!(policy.mlp_decode_enabled);
+        assert!(policy.resident_decode_enabled);
+        assert!(policy.flash_attn_prefill_enabled);
+        assert!(policy.gdn_chunkwise_forward_enabled);
+        assert!(!policy.gdn_chunkwise_fallback_enabled);
+        assert!(policy.bf16_packed_linear_weights_enabled);
+        assert!(policy.paged_decode_gpu_gather_enabled);
+        assert!(policy.linear_decode_single_submit);
+        assert!(policy.gdn_recurrent_parallel_reduce);
     }
 }
 
@@ -9277,6 +9086,7 @@ pub fn dispatch_gdn_recurrent_step_with_options_bytes(
             state_data,
             &spirv,
             batch,
+            1,
             heads,
             heads,
             dk,
@@ -9504,6 +9314,19 @@ pub fn dispatch_gdn_recurrent_step_resident_state_bytes(
     } else {
         (workgroup_count, 1, 1)
     };
+    let dispatch_limits = (
+        vk_device.max_compute_work_group_count(0),
+        vk_device.max_compute_work_group_count(1),
+        vk_device.max_compute_work_group_count(2),
+    );
+    anyhow::ensure!(
+        dispatch_counts.0 <= dispatch_limits.0
+            && dispatch_counts.1 <= dispatch_limits.1
+            && dispatch_counts.2 <= dispatch_limits.2,
+        "native-head resident recurrent dispatch {:?} exceeds Vulkan per-axis limits {:?}",
+        dispatch_counts,
+        dispatch_limits
+    );
     let all_handles = vec![
         q_buf.handle(),
         k_buf.handle(),
@@ -9688,8 +9511,8 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state_bytes(
     let (state_batch, state_heads, state_dk, state_dv) = (batch, heads, dk, dv);
 
     anyhow::ensure!(
-        seq_len == 1,
-        "native-head resident recurrent expects seq_len=1"
+        seq_len > 0,
+        "native-head resident recurrent seq_len must be positive"
     );
     anyhow::ensure!(
         (k_batch, k_seq_len, k_heads, k_dk) == (batch, seq_len, q_heads, dk),
@@ -9778,14 +9601,14 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state_bytes(
         None
     };
 
-    let out_size = (batch * heads * dv * 4) as u64;
+    let out_size = (batch * seq_len * heads * dv * 4) as u64;
     let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)?;
     let out_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, out_size)?;
 
     let push_constants: [u32; 6] = [
         batch as u32,
         heads as u32,
-        1,
+        seq_len as u32,
         dk as u32,
         dv as u32,
         q_heads as u32,
@@ -9946,7 +9769,7 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state_bytes(
     }
 
     let out_data = VulkanBuffer::read_host_visible(device, &out_stage)?;
-    let out_shape = vec![batch, heads, dv];
+    let out_shape = vec![batch, seq_len, heads, dv];
     let _ = out_shape;
     Ok((out_data, state_buf))
 }
@@ -9962,6 +9785,7 @@ fn dispatch_gdn_recurrent_step_single_submit_bytes(
     state_data: &[u8],
     spirv: &[u8],
     batch: usize,
+    seq_len: usize,
     heads: usize,
     q_heads: usize,
     dk: usize,
@@ -10034,7 +9858,7 @@ fn dispatch_gdn_recurrent_step_single_submit_bytes(
     );
 
     let stage_profile = profile_kernel_stages.then(Instant::now);
-    let out_size = (batch * heads * dv * 4) as u64;
+    let out_size = (batch * seq_len * heads * dv * 4) as u64;
     let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)?;
     let out_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, out_size)?;
     finish_vulkan_gdn_recurrent_kernel_stage_profile(
@@ -10052,7 +9876,7 @@ fn dispatch_gdn_recurrent_step_single_submit_bytes(
     let push_constants: [u32; 6] = [
         batch as u32,
         heads as u32,
-        1,
+        seq_len as u32,
         dk as u32,
         dv as u32,
         q_heads as u32,
@@ -10065,6 +9889,19 @@ fn dispatch_gdn_recurrent_step_single_submit_bytes(
         (workgroup_count, 1, 1)
     };
     let dispatch_counts = dispatch_counts_override.unwrap_or(dispatch_counts);
+    let dispatch_limits = (
+        vk_device.max_compute_work_group_count(0),
+        vk_device.max_compute_work_group_count(1),
+        vk_device.max_compute_work_group_count(2),
+    );
+    anyhow::ensure!(
+        dispatch_counts.0 <= dispatch_limits.0
+            && dispatch_counts.1 <= dispatch_limits.1
+            && dispatch_counts.2 <= dispatch_limits.2,
+        "GDN recurrent dispatch {:?} exceeds Vulkan per-axis limits {:?}",
+        dispatch_counts,
+        dispatch_limits
+    );
     let all_handles = vec![
         q_buf.handle(),
         k_buf.handle(),
@@ -10299,18 +10136,17 @@ fn dispatch_gdn_recurrent_step_single_submit_bytes(
     Ok((out_data, state_data))
 }
 
-/// Dispatch a single-token recurrent step with unexpanded GQA Q/K heads.
+/// Dispatch a recurrent sequence with unexpanded GQA Q/K heads.
 ///
-/// `q` and `k` are `[batch, 1, q_heads, dk]`; `v`, `beta`, and `g` use value
-/// heads (`[batch, 1, heads, ...]`). The shader maps each value head to its
+/// `q` and `k` are `[batch, seq_len, q_heads, dk]`; `v`, `beta`, and `g` use
+/// value heads (`[batch, seq_len, heads, ...]`). The shader maps each value head to its
 /// source Q/K head with `h / (heads / q_heads)`, matching the regular GQA
 /// expansion used by the portable path without materializing the repeated Q/K
 /// tensors on the host.
 ///
 /// Bytes-only entry point. Caller supplies pre-extracted byte slices and the
 /// shape parameters directly. The returned output bytes have logical shape
-/// `[batch, heads, dv]` (with the caller responsible for any unsqueeze /
-/// reshape on the candle side). Output bytes use the caller-chosen dtype
+/// `[batch, seq_len, heads, dv]`. Output bytes use the caller-chosen dtype
 /// matching the kernel's recurrent dtype; the optional state bytes share
 /// the caller-known state shape and dtype.
 #[allow(clippy::too_many_arguments)]
@@ -10323,12 +10159,17 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_with_options_bytes(
     g_data: &[u8],
     state_data: &[u8],
     batch: usize,
+    seq_len: usize,
     q_heads: usize,
     heads: usize,
     dk: usize,
     dv: usize,
     skip_state_readback: bool,
 ) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
+    anyhow::ensure!(
+        seq_len > 0,
+        "native-head recurrent seq_len must be positive"
+    );
     anyhow::ensure!(
         q_heads > 0,
         "native-head recurrent q_heads must be positive"
@@ -10362,6 +10203,7 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_with_options_bytes(
         state_data,
         &spirv,
         batch,
+        seq_len,
         heads,
         q_heads,
         dk,
@@ -10424,6 +10266,7 @@ pub fn dispatch_gdn_recurrent_qk_norm_step_native_head_last_with_options_bytes(
         state_data,
         &spirv,
         batch,
+        1,
         heads,
         q_heads,
         dk,

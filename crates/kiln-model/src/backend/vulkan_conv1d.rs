@@ -9,6 +9,11 @@ use anyhow::{Context, Result};
 use super::vulkan::VulkanBackend;
 use super::vulkan_tensor_bridge::{kt_tensor_from_f32_bytes_on, kt_tensor_to_f32_bytes_with_shape};
 
+// Host-resident prefill inputs below this work estimate are cheaper to process
+// on the CPU reference path than to upload, submit, wait, and read back. This is
+// a workload crossover, not a device allowlist; larger rows still use Vulkan.
+const HOST_BRIDGE_CONV_PREFILL_MIN_SCALAR_OPS: usize = 4_000_000;
+
 pub(super) fn supports_causal_conv1d_update(backend: &VulkanBackend) -> bool {
     backend.has_vulkan() && backend.fused_conv1d_update_enabled
 }
@@ -32,6 +37,18 @@ pub(super) fn causal_conv1d_update(
         x.dtype(),
         kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
     ) {
+        return Ok(None);
+    }
+    let x_dims = x.dims();
+    if let [batch, channels, seq_len] = x_dims
+        && *seq_len > 1
+        && matches!(x.device(), kiln_tensor::Device::Cpu)
+        && batch
+            .checked_mul(*channels)
+            .and_then(|work| work.checked_mul(*seq_len))
+            .and_then(|work| work.checked_mul(kernel_size))
+            .is_some_and(|work| work < HOST_BRIDGE_CONV_PREFILL_MIN_SCALAR_OPS)
+    {
         return Ok(None);
     }
     // (#1082) kt-native: all args are already kt; `conv_state_kt` is
@@ -90,6 +107,18 @@ pub(super) fn causal_conv1d_prefill(
         x.dtype(),
         kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
     ) {
+        return Ok(None);
+    }
+    let x_dims = x.dims();
+    if let [batch, channels, seq_len] = x_dims
+        && *seq_len > 1
+        && matches!(x.device(), kiln_tensor::Device::Cpu)
+        && batch
+            .checked_mul(*channels)
+            .and_then(|work| work.checked_mul(*seq_len))
+            .and_then(|work| work.checked_mul(kernel_size))
+            .is_some_and(|work| work < HOST_BRIDGE_CONV_PREFILL_MIN_SCALAR_OPS)
+    {
         return Ok(None);
     }
     // (#1082) kt-native: all args are already kt; `conv_state_kt` is

@@ -557,26 +557,31 @@ closed rather than claim the wrong physical device.
 
 Vulkan kernel selection is an immutable implementation contract, not a public
 configuration surface. Product execution uses
-`kiln.vulkan-kernel-policy.v4`, defined by the typed
-`VulkanKernelPolicy::portable_fallback()` object before any dispatch. There is
+`kiln.vulkan-kernel-policy.v5`, defined by the typed
+`VulkanKernelPolicy::native_default()` object before any dispatch. There is
 no TOML, CLI, request, environment, device-name, or PCI-ID override for its
-leaves. Machine qualification data does not alter product dispatch. Changing a
-leaf requires a reviewed source change, a new policy version, backend/oracle
-parity, and cross-device evidence.
+leaves. Device identity and machine qualification data do not alter product
+dispatch. The fast routes use the Vulkan 1.2 compute device Kiln creates and do
+not enable vendor extensions. Dispatch-grid and operator-specific shared-memory
+checks use the selected device's queried limits. A complete per-route
+feature/limit fallback matrix is still required before `v5` can be described as
+cross-device qualified. Changing a leaf requires a reviewed source change, a
+new policy version, backend/oracle parity, performance evidence, and
+cross-device qualification.
 
-The portable policy fixes these route decisions:
+The native policy fixes these route decisions:
 
-| Family | Portable selection |
+| Family | Device-neutral selection |
 |---|---|
-| Model route availability | Device-tuned GDN, conv1d, linear, attention, MLP, packed-weight, state-residency, resident-decode, GPU-gather, and state-readback-elision routes are declined. Callers use their established generic backend/tensor fallbacks. |
-| Kernel scheduling | Rows-four/rows-eight selection, paired/grouped rows, single-submit, chained dispatch/transfer, parallel reduction, fused recurrence, and batched transfer/upload choices are disabled. No device identity selects a different geometry. |
-| Explicit fallback | The non-single-submit GDN chunkwise fallback remains admitted. Host-visible batch-one recurrent state remains available to the fallback implementation; batched host-visible state remains off. |
+| Model route availability | GDN, fused conv1d prefill, linear and batched argmax, full-attention QKV, SDPA prefill, paged decode with GPU gather, fused MLP, packed-weight projections, resident decode, and final-state readback elision are enabled for the Vulkan implementation. Prompt recurrent-state residency remains disabled. |
+| Kernel scheduling | Qualified algorithmic row grouping, single-submit, chained dispatch/transfer, parallel reduction, fused recurrence, and batched transfer/upload routes are enabled. They are ordinary Vulkan shader choices, not a device profile. |
+| Explicit fallback | `VulkanKernelPolicy::portable_fallback()` remains an internal all-routes-declined reference for testing and diagnosis. It is not selected from a device name and is not the product default. |
 | Dispatch safety | Vulkan linear submissions are capped at exactly 20,000,000,000 estimated FLOP and oversized work is sub-chunked. The former floating-point environment parser and its zero-means-unbounded escape are removed. |
 | Bounded operator tiling | Flash attention uses a 2048-row tile and a 10,000,000-element row-work budget. Frozen-BF16-weight matmul uses 128-row tiles. Generic elementwise work uses 1,048,576 elements per dispatch and exponentiation uses 65,536. All are positive immutable policy leaves. |
 | Profiling and references | Kernel-stage and resident-decode profiling are disabled. GDN and normalization CPU-reference functions remain available for parity tests and offline diagnosis, but process environment cannot change live route selection. |
 
 Receipts for earlier `v3` Strix Halo execution describe that historical binary,
-not the current product policy, and cannot qualify `v4`.
+not the current product policy, and do not by themselves qualify `v5`.
 
 The former variables represented by this table, including the applicable
 `KILN_DISABLE_VULKAN_*`, `KILN_ENABLE_VULKAN_*`, kernel-threshold, split-K,
@@ -1929,11 +1934,12 @@ residency enabled and decode residency disabled, the cancellation/drain probe,
 and the checked soak. A micro-kernel or small-state parity result alone is not a
 release gate.
 
-The historical decode residency experiment is also disabled by portable
-`kiln.vulkan-kernel-policy.v4`. Its former enable and disable variables were
-deleted without aliases; neither decode nor prompt residency can be activated
-by process environment. Re-enabling either route requires a reviewed source
-policy version and the full evidence sequence above.
+Prompt recurrent-state residency remains disabled by
+`kiln.vulkan-kernel-policy.v5`; resident decode is enabled by the generic native
+policy. Their former enable and disable variables were deleted without aliases,
+so process environment cannot compose an unreported route mixture. Changing
+either decision requires a reviewed source policy version and the full evidence
+sequence above.
 
 Trusted `GET /v1/debug/model-state` exposes current ownership as
 `caches.resident_recurrent_state.entry_count`, `buffer_bytes`, and

@@ -2,14 +2,35 @@
 /* Capture demo screenshots of the kiln dashboard with ?demo=1 fixtures.
    Headless Chromium, file:// URL, no GPU pod required. */
 
-import puppeteer from "puppeteer-core";
+import puppeteer from "./docs-site/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
 const uiHtml = resolve(repoRoot, "crates/kiln-server/src/ui/index.html");
+const uiAppDir = resolve(repoRoot, "crates/kiln-server/src/ui/app");
+const appFragments = [
+  "shell.js",
+  "adapters.js",
+  "training.js",
+  "playground.js",
+  "evaluations.js",
+  "command_palette.js",
+  "charts.js",
+  "adapter_drill.js",
+  "training_drill.js",
+  "playground_compare.js",
+  "terminal.js",
+  "distillation.js",
+  "agents.js",
+  "preflight.js",
+  "bootstrap.js",
+];
+const appJs = `(function() {\n'use strict';\n\n${(
+  await Promise.all(appFragments.map((name) => readFile(resolve(uiAppDir, name), "utf8")))
+).join("\n")}\n})();\n`;
 
 const targets = [
   { page: "overview",   out: "docs/site/assets/server-ui-dashboard.png", scrollWait: 0 },
@@ -28,6 +49,18 @@ const browser = await puppeteer.launch({
 try {
   for (const t of targets) {
     const page = await browser.newPage();
+    await page.setRequestInterception(true);
+    page.on("request", async (request) => {
+      if (new URL(request.url()).pathname.endsWith("/ui/app.js")) {
+        await request.respond({
+          status: 200,
+          contentType: "application/javascript",
+          body: appJs,
+        });
+        return;
+      }
+      await request.continue();
+    });
     const url = `file://${uiHtml}?demo=1#${t.page}`;
     console.log(`→ ${t.page}: ${url}`);
     await page.goto(url, { waitUntil: "networkidle0", timeout: 30000 });
