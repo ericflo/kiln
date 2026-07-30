@@ -33,9 +33,8 @@
   <link rel="stylesheet" href="../css/fonts.css">
   <link rel="stylesheet" href="../css/kiln.css">
 
-  <!-- asciinema-player CSS (self-hosted via jsDelivr CDN, version-pinned) -->
-  <link rel="stylesheet" type="text/css"
-        href="https://cdn.jsdelivr.net/npm/asciinema-player@3.7.1/dist/bundle/asciinema-player.css" />
+  <!-- asciinema-player 3.7.1, self-hosted; see vendor/asciinema-player/NOTICE.md -->
+  <link rel="stylesheet" href="vendor/asciinema-player/asciinema-player.css">
 
   <style>
     :root {
@@ -503,8 +502,8 @@
     </div>
   </footer>
 
-  <!-- asciinema-player JS -->
-  <script src="https://cdn.jsdelivr.net/npm/asciinema-player@3.7.1/dist/bundle/asciinema-player.min.js"></script>
+  <!-- asciinema-player 3.7.1, self-hosted -->
+  <script src="vendor/asciinema-player/asciinema-player.min.js"></script>
   <script>
     /* eslint-env browser */
     const CASTS = [
@@ -671,9 +670,8 @@
         <section class="player-fallback" role="status" aria-live="polite">
           <h2>${c.title} recording</h2>
           <p>
-            The embedded player could not load, usually because the asciinema-player CDN was blocked,
-            unavailable, or failed certificate validation. You can still download the local recording
-            and view the exact script used to capture it from source.
+            The embedded player could not initialize. You can still download the local recording and
+            view the exact script used to capture it from source.
           </p>
           <div class="player-fallback__actions">
             <a class="btn-primary" href="${c.cast}">view .cast</a>
