@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, extname, relative, sep, join, resolve } from 'node:path';
@@ -2267,7 +2268,39 @@ function validateSelfHostedProductPageAssets() {
       `src="${prefix}js/site.js"`,
       `docs/site/${relativePath}: shared product-page shell`,
     );
+    const externalRuntimeAssets = Array.from(
+      html.matchAll(/\b(?:src|href)="(https?:\/\/[^"]+\.(?:css|js)(?:[?#][^"]*)?)"/gi),
+      (match) => match[1],
+    );
+    if (externalRuntimeAssets.length > 0) {
+      fail(`docs/site/${relativePath}: third-party runtime assets are forbidden: ${externalRuntimeAssets.join(', ')}`);
+    }
   }
+
+  const asciinemaAssets = [
+    {
+      path: 'docs/site/demo/vendor/asciinema-player/asciinema-player.css',
+      sha256: 'a2b6c49acad107f7c1358c30a7496fe89e7ec1939dd3e49b0645c03f291a4993',
+    },
+    {
+      path: 'docs/site/demo/vendor/asciinema-player/asciinema-player.min.js',
+      sha256: '704f17a2607f4e8e8d5c95b2ea6cc6a15dc63f5811daaabe46971470e2c39571',
+    },
+  ];
+  for (const asset of asciinemaAssets) {
+    const path = resolve(repoRoot, asset.path);
+    if (!existsSync(path)) fail(`${asset.path}: missing pinned asciinema-player asset`);
+    const actualSha256 = createHash('sha256').update(readFileSync(path)).digest('hex');
+    if (actualSha256 !== asset.sha256) {
+      fail(`${asset.path}: pinned asciinema-player SHA-256 mismatch; expected ${asset.sha256}, got ${actualSha256}`);
+    }
+  }
+  const asciinemaLicense = readFileSync(
+    resolve(repoRoot, 'docs/site/demo/vendor/asciinema-player/LICENSE'),
+    'utf8',
+  );
+  assertIncludes(asciinemaLicense, 'Apache License', 'vendored asciinema-player license');
+  assertIncludes(asciinemaLicense, 'Version 2.0', 'vendored asciinema-player license version');
 }
 
 function assertRequestsImportNearPost(section, context) {
@@ -3617,6 +3650,9 @@ async function runSmoke() {
           return {
             bodyText: normalize(document.body.innerText),
             referencedCasts,
+            externalResources: performance.getEntriesByType('resource')
+              .map((entry) => entry.name)
+              .filter((url) => /^https?:/i.test(url)),
           };
         });
 
@@ -3625,6 +3661,9 @@ async function runSmoke() {
           .map((section) => section.label);
         if (missingSections.length > 0) {
           fail(`${sitePage.path}: missing demo sections: ${missingSections.join(', ')}`);
+        }
+        if (demoResult.externalResources.length > 0) {
+          fail(`${sitePage.path}: Demo must not fetch third-party runtime resources: ${demoResult.externalResources.join(', ')}`);
         }
 
         validateDemoCasts(sitePage.path, demoResult.referencedCasts);
