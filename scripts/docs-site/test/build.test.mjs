@@ -236,6 +236,11 @@ test('build copies the static site and emits complete deterministic docs', async
   const sitemap = await readFile(resolve(first, 'sitemap.xml'), 'utf8');
   assert.match(sitemap, /https:\/\/example\.test\/kiln\//);
   assert.match(sitemap, /https:\/\/example\.test\/kiln\/docs\/configuration\//);
+  const llms = await readFile(resolve(first, 'llms.txt'), 'utf8');
+  assert.match(llms, /^# Kiln\n\n> Kiln is a pure-Rust, single-GPU server/m);
+  assert.match(llms, /\[Product\]\(https:\/\/example\.test\/kiln\/index\.html\): Product guide\./);
+  assert.match(llms, /\[Configuration\]\(https:\/\/raw\.githubusercontent\.com\/example\/kiln\/refs\/heads\/main\/docs\/CONFIGURATION\.md\): Complete configuration reference\./);
+  assert.match(llms, /\[Documentation search index\]\(https:\/\/example\.test\/kiln\/docs\/search-index\.json\)/);
   assert.deepEqual(await treeDigest(first), await treeDigest(second));
 });
 

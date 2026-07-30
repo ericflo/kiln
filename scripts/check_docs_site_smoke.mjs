@@ -3088,6 +3088,7 @@ function validateGeneratedDocsArtifacts() {
     publishedPath('css/docs.css'),
     publishedPath('js/docs.js'),
     publishedPath('sitemap.xml'),
+    publishedPath('llms.txt'),
   ];
   const missing = requiredPaths.filter((path) => !existsSync(resolve(repoRoot, path)));
   if (missing.length > 0) {
@@ -3166,6 +3167,28 @@ function validateGeneratedDocsArtifacts() {
     if (!sitemap.includes(`<loc>${url}</loc>`)) {
       fail(`generated sitemap is missing ${url}`);
     }
+  }
+
+  const llms = readFileSync(resolve(siteRoot, 'llms.txt'), 'utf8');
+  const requiredLlmsTerms = [
+    '# Kiln',
+    '> Kiln is a pure-Rust, single-GPU server for Qwen3.5-4B',
+    '## Product guides',
+    '[Quickstart](https://ericflo.github.io/kiln/quickstart.html)',
+    '[GRPO Guide](https://ericflo.github.io/kiln/grpo.html)',
+    '[Evals Guide](https://ericflo.github.io/kiln/evals.html)',
+    '## Core documentation',
+    'https://raw.githubusercontent.com/ericflo/kiln/refs/heads/main/README.md',
+    'https://raw.githubusercontent.com/ericflo/kiln/refs/heads/main/docs/GRPO_GUIDE.md',
+    'https://raw.githubusercontent.com/ericflo/kiln/refs/heads/main/docs/EVAL_GUIDE.md',
+    '## Machine-readable contracts',
+    'https://raw.githubusercontent.com/ericflo/kiln/refs/heads/main/contracts/kiln-http-api-v1.openapi.json',
+    '## Optional',
+    '[Documentation search index](https://ericflo.github.io/kiln/docs/search-index.json)',
+  ];
+  const missingLlmsTerms = requiredLlmsTerms.filter((term) => !llms.includes(term));
+  if (missingLlmsTerms.length > 0) {
+    fail(`generated llms.txt is missing agent-discovery terms: ${missingLlmsTerms.join(', ')}`);
   }
   return true;
 }
