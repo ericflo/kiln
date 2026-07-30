@@ -766,7 +766,7 @@ function renderTopbar(manifest, depth) {
   return `
     <header class="docs-topbar">
       <a class="docs-brand" href="${rootPrefix}/" aria-label="Kiln home">
-        <img src="${rootPrefix}/assets/logo.png" width="30" height="30" alt="">
+        <img src="${rootPrefix}/assets/favicon.svg" width="30" height="30" alt="">
         <span>Kiln</span>
       </a>
       <a class="docs-product-name" href="${docsPrefix}/">Documentation</a>

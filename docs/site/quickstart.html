@@ -20,7 +20,7 @@
   <meta name="twitter:description" content="Start Kiln, open the UI, verify health, and send one OpenAI-compatible chat request.">
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image-v2.png">
 
-  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="css/utilities.css">
   <link rel="stylesheet" href="css/fonts.css">
   <link rel="stylesheet" href="css/kiln.css">
   <style>
@@ -140,6 +140,104 @@
       padding: 1rem;
       min-width: 0;
     }
+    .install-card-recommended {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(22rem, 0.95fr);
+      gap: 1.5rem;
+      align-items: start;
+      padding: 1.35rem;
+      border-color: rgba(249, 115, 22, 0.3);
+      background:
+        linear-gradient(135deg, rgba(249, 115, 22, 0.09), transparent 46%),
+        var(--bg-soft-2);
+    }
+    .install-alternatives {
+      grid-column: 1 / -1;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--bg-soft);
+    }
+    .install-alternatives summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      min-height: 58px;
+      padding: 0.9rem 1rem;
+      color: var(--fg);
+      cursor: pointer;
+      font-weight: 600;
+      list-style: none;
+    }
+    .install-alternatives summary::-webkit-details-marker { display: none; }
+    .install-alternatives summary::after {
+      content: "+";
+      display: inline-grid;
+      width: 1.7rem;
+      height: 1.7rem;
+      place-items: center;
+      flex: none;
+      border: 1px solid var(--line-2);
+      border-radius: 999px;
+      color: var(--accent);
+      font-size: 1.1rem;
+      line-height: 1;
+    }
+    .install-alternatives[open] summary {
+      border-bottom: 1px solid var(--line);
+    }
+    .install-alternatives[open] summary::after { content: "−"; }
+    .install-alternatives summary span {
+      color: var(--fg-mute);
+      font-size: 0.8rem;
+      font-weight: 500;
+    }
+    .install-alternatives .install-grid { padding: 1rem; }
+    .quickstart-path {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 1px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--line);
+    }
+    .quickstart-path a {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      grid-template-rows: auto auto;
+      gap: 0 0.75rem;
+      min-width: 0;
+      padding: 1rem;
+      background: var(--bg-soft);
+      color: var(--fg);
+    }
+    .quickstart-path a:hover { background: var(--bg-soft-2); }
+    .quickstart-path .step {
+      grid-row: 1 / -1;
+      align-self: center;
+    }
+    .quickstart-path small {
+      color: var(--accent);
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .quickstart-path strong {
+      overflow-wrap: anywhere;
+      font-size: 0.9rem;
+      line-height: 1.3;
+    }
+    .quickstart-stop {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.65rem;
+      margin-top: 1rem;
+      color: var(--fg-dim);
+      font-size: 0.9rem;
+    }
     .installer-table {
       width: 100%;
       border-collapse: collapse;
@@ -229,6 +327,10 @@
       border-color: rgba(34, 197, 94, 0.55);
       color: #86efac;
     }
+    @media (max-width: 760px) {
+      .install-card-recommended { grid-template-columns: 1fr; }
+      .quickstart-path { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
   </style>
 </head>
 <body class="min-h-screen">
@@ -282,7 +384,7 @@
         Install Kiln, start the server, point your agent at it.
       </h1>
       <p class="text-lg leading-relaxed max-w-3xl" style="color: var(--fg-dim);">
-        Three steps to a coding agent backed by your own GPU: install Kiln, start the server, then connect <strong style="color: var(--fg);">pi</strong> or <strong style="color: var(--fg);">opencode</strong> to one local endpoint. Every request your agent makes becomes training data. Every path serves the same target model: <code>Qwen/Qwen3.5-4B</code>.
+        Four checkpoints to a coding agent backed by your own GPU: install Kiln, start the server, connect <strong style="color: var(--fg);">pi</strong> or <strong style="color: var(--fg);">opencode</strong>, then see the request land in the dashboard. Every path serves the same target model: <code>Qwen/Qwen3.5-4B</code>.
       </p>
       <div class="mt-8 flex flex-wrap gap-3">
         <a href="#install" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Install Kiln</a>
@@ -292,28 +394,21 @@
     </div>
   </section>
 
-  <!-- reader map -->
+  <!-- first-run path -->
   <section id="reader-map" class="divider">
     <div class="max-w-5xl mx-auto px-6 py-10">
-      <p class="label mb-2">Reader map</p>
-      <h2 class="text-2xl font-semibold tracking-tight mb-4">Know where to stop</h2>
-      <div class="grid md:grid-cols-3 gap-4">
-        <div class="card p-5">
-          <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-4">Basic path</span>
-          <h3 class="font-semibold mb-2">Get Kiln running first</h3>
-          <p style="color: var(--fg-dim);">Follow prerequisites, install, model download, server start, <code>/health</code>, and <code>/ui</code>. If chat works, the first-run path is complete.</p>
-        </div>
-        <div class="card p-5">
-          <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-4">Optional learning</span>
-          <h3 class="font-semibold mb-2">Train after verification</h3>
-          <p style="color: var(--fg-dim);">Use <a href="#sft-corrections">SFT</a>, <a href="grpo.html">GRPO</a>, and adapter workflows only after the server is healthy and you have sent one chat request.</p>
-        </div>
-        <div class="card p-5">
-          <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-4">Advanced reference</span>
-          <h3 class="font-semibold mb-2">Return when integrating</h3>
-          <p style="color: var(--fg-dim);">Use the <a href="api.html">API Reference</a> and <a href="cli.html">CLI Reference</a> for tools, batch generation, adapter import/export, merge, composition, and webhooks.</p>
-        </div>
-      </div>
+      <p class="label mb-2">Your first successful run</p>
+      <h2 class="text-2xl font-semibold tracking-tight mb-4">Four checkpoints. One working endpoint.</h2>
+      <nav class="quickstart-path" aria-label="Quickstart checkpoints">
+        <a href="#install"><span class="step">1</span><small>Install</small><strong>Choose one build</strong></a>
+        <a href="#serve"><span class="step">2</span><small>Start</small><strong>Serve Qwen3.5-4B</strong></a>
+        <a href="#pi-agent"><span class="step">3</span><small>Connect</small><strong>Point your agent at Kiln</strong></a>
+        <a href="#verify"><span class="step">4</span><small>Verify</small><strong>See one captured request</strong></a>
+      </nav>
+      <p class="quickstart-stop">
+        <svg class="icn icn-sm" aria-hidden="true" style="color:#4ade80;"><use href="#i-check"></use></svg>
+        Stop after checkpoint four if you only need local inference. SFT, GRPO, evals, and adapter workflows are the optional next loop—not prerequisites.
+      </p>
     </div>
   </section>
 
@@ -328,11 +423,15 @@
         </div>
       </div>
       <div class="install-grid lg:grid-cols-2">
-        <div class="install-card">
-          <h3 class="font-semibold mb-2">Desktop App &middot; recommended</h3>
-          <p class="mb-3" style="color: var(--fg-dim);">
-            Download <a href="https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.16">Kiln Desktop v0.2.16</a>, then choose or download the Qwen3.5-4B model in the app and start the server from the GUI.
-          </p>
+        <div class="install-card install-card-recommended">
+          <div>
+            <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-4">Recommended first run</span>
+            <h3 class="font-semibold mb-2">Desktop App &middot; recommended</h3>
+            <p class="mb-3" style="color: var(--fg-dim);">
+              Download <a href="https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.16">Kiln Desktop v0.2.16</a>, then choose or download the Qwen3.5-4B model in the app and start the server from the GUI.
+            </p>
+            <p class="text-sm" style="color: var(--fg-mute);">Desktop and server release lines intentionally differ: the Desktop app ships under <code>desktop-v*</code> tags, downloads and verifies the latest <code>kiln-v*</code> server binary for you, and the pinned links here match the newest Desktop release.</p>
+          </div>
           <table class="installer-table mb-3" aria-label="Kiln Desktop installer downloads">
             <thead>
               <tr>
@@ -343,20 +442,22 @@
             <tbody>
               <tr>
                 <td>macOS Apple Silicon</td>
-                <td><a href="https://github.com/ericflo/kiln/releases/latest">.dmg &middot; latest release</a></td>
+                <td><a href="https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_aarch64.dmg">Download .dmg</a></td>
               </tr>
               <tr>
                 <td>Windows</td>
-                <td><a href="https://github.com/ericflo/kiln/releases/latest">.exe (NSIS) / .msi &middot; latest release</a></td>
+                <td><a href="https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_x64-setup.exe">Download .exe</a> &middot; <a href="https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_x64_en-US.msi">.msi</a></td>
               </tr>
               <tr>
                 <td>Linux</td>
-                <td><a href="https://github.com/ericflo/kiln/releases/latest">.deb / .AppImage &middot; latest release</a></td>
+                <td><a href="https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_amd64.deb">Download .deb</a> &middot; <a href="https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_amd64.AppImage">.AppImage</a></td>
               </tr>
             </tbody>
           </table>
-          <p class="text-sm" style="color: var(--fg-mute);">Desktop and server release lines intentionally differ: the Desktop app ships under <code>desktop-v*</code> tags, downloads and verifies the latest <code>kiln-v*</code> server binary for you, and the links above always resolve to the newest release.</p>
         </div>
+        <details class="install-alternatives">
+          <summary>Need a terminal-first server binary? <span>5 GPU and platform builds</span></summary>
+          <div class="install-grid lg:grid-cols-2">
         <div class="install-card">
           <h3 class="font-semibold mb-2">Linux x86_64 &middot; CUDA 12.4</h3>
 <pre class="text-sm"><code>KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*&quot;tag_name&quot;: &quot;kiln-v\([^&quot;]*\)&quot;.*/\1/p')
@@ -394,6 +495,8 @@ curl.exe -L -o kiln-windows.zip `
   "https://github.com/ericflo/kiln/releases/download/kiln-v$KilnVersion/kiln-$KilnVersion-x86_64-pc-windows-msvc-cuda124.zip"
 Expand-Archive .\kiln-windows.zip -DestinationPath .\kiln</code></pre>
         </div>
+          </div>
+        </details>
       </div>
     </div>
   </section>
@@ -563,7 +666,7 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
         </div>
       </div>
       <figure class="card mt-6 overflow-hidden">
-        <img src="assets/server-ui-dashboard.png" alt="Kiln dashboard showing server status, adapters, training, and quick inference controls" class="w-full h-auto block">
+        <img src="assets/server-ui-dashboard.webp" width="2880" height="3466" loading="lazy" decoding="async" alt="Kiln dashboard showing server status, adapters, training, and quick inference controls" class="w-full h-auto block">
         <figcaption class="px-5 py-3 text-sm" style="color: var(--fg-mute);">Use the dashboard as your status checkpoint before starting adapter or training workflows.</figcaption>
       </figure>
       <p class="text-sm mt-4" style="color: var(--fg-mute);">
@@ -820,5 +923,6 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
       });
     })();
   </script>
+  <script src="js/site.js" defer></script>
 </body>
 </html>
