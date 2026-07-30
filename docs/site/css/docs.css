@@ -166,7 +166,7 @@ body.docs-body {
   color: var(--docs-text);
   font: inherit;
   font-size: 13px;
-  padding: 0 12px;
+  padding: 0 42px 0 12px;
 }
 
 .docs-search input::placeholder {
@@ -176,6 +176,27 @@ body.docs-body {
 .docs-search input:focus {
   border-color: var(--docs-accent-strong);
   background: var(--docs-surface-raised);
+}
+
+.docs-search-shortcut {
+  position: absolute;
+  top: 50%;
+  right: 9px;
+  min-width: 22px;
+  padding: 2px 5px;
+  transform: translateY(-50%);
+  border: 1px solid var(--docs-border);
+  border-radius: 4px;
+  background: var(--docs-bg);
+  color: var(--docs-text-muted);
+  font: 600 10px/1.3 var(--docs-font-mono);
+  text-align: center;
+  pointer-events: none;
+}
+
+.docs-search:focus-within .docs-search-shortcut {
+  border-color: rgba(251, 146, 60, 0.45);
+  color: var(--docs-accent);
 }
 
 .docs-search-results {
@@ -644,6 +665,9 @@ body.docs-body {
   max-width: 100%;
   margin: 22px 0;
   overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--docs-border-strong) transparent;
   border: 1px solid var(--docs-border);
   border-radius: 6px;
 }
@@ -662,6 +686,15 @@ body.docs-body {
   border-bottom: 1px solid var(--docs-border);
   text-align: left;
   vertical-align: top;
+}
+
+.docs-table-scroll th {
+  white-space: nowrap;
+}
+
+.docs-table-scroll td {
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 .docs-table-scroll th:last-child,
@@ -810,23 +843,33 @@ body.docs-body {
 }
 
 .docs-hub-header {
-  padding-bottom: 34px;
-  border-bottom: 1px solid var(--docs-border);
+  position: relative;
+  overflow: hidden;
+  padding: 42px 40px;
+  border: 1px solid var(--docs-border);
+  border-radius: 10px;
+  background:
+    linear-gradient(rgba(251,146,60,0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(251,146,60,0.045) 1px, transparent 1px),
+    radial-gradient(520px 260px at 88% 18%, rgba(249,115,22,0.13), transparent 72%),
+    var(--docs-surface);
+  background-size: 34px 34px, 34px 34px, auto, auto;
 }
 
 .docs-product-guides {
-  padding: 34px 0;
+  padding: 42px 0;
   border-bottom: 1px solid var(--docs-border);
 }
 
 .docs-core-library {
-  padding-top: 34px;
+  padding-top: 42px;
 }
 
 .docs-core-library > h2 {
   margin: 0;
   color: var(--docs-text);
-  font-size: 23px;
+  font-size: 27px;
+  letter-spacing: -0.02em;
 }
 
 .docs-product-guides h2,
@@ -836,36 +879,85 @@ body.docs-body {
   font-size: 20px;
 }
 
-.docs-product-guides > div {
+.docs-product-guides-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(260px, 0.9fr);
+  align-items: end;
+  gap: 30px;
+  margin-bottom: 24px;
+}
+
+.docs-product-guides-head .docs-section-label {
+  margin: 0 0 8px;
+}
+
+.docs-product-guides-head h2 {
+  margin: 0;
+  font-size: 29px;
+  letter-spacing: -0.025em;
+}
+
+.docs-product-guides-head > p {
+  margin: 0;
+  color: var(--docs-text-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.docs-guide-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 12px;
 }
 
 .docs-guide {
+  position: relative;
   min-width: 0;
-  padding: 14px 15px;
+  min-height: 178px;
+  display: flex;
+  flex-direction: column;
+  padding: 20px;
+  overflow: hidden;
   border: 1px solid var(--docs-border);
-  border-radius: 6px;
+  border-radius: 8px;
+  background: linear-gradient(145deg, rgba(28,27,24,0.72), rgba(20,20,18,0.82));
   color: var(--docs-text) !important;
   text-decoration: none;
+  transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
 }
 
 .docs-guide:hover {
   border-color: var(--docs-accent-strong);
-  background: var(--docs-accent-soft);
+  background:
+    radial-gradient(320px 150px at 100% 0, rgba(249,115,22,0.13), transparent 72%),
+    var(--docs-surface-raised);
+  transform: translateY(-2px);
 }
 
+.docs-guide small,
 .docs-guide strong,
 .docs-guide span,
+.docs-guide b,
 .docs-directory-list strong,
 .docs-directory-list span {
   display: block;
 }
 
+.docs-guide small {
+  margin-bottom: 20px;
+  color: var(--docs-accent);
+  font: 650 10px/1.3 var(--docs-font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.055em;
+}
+
 .docs-guide strong,
 .docs-directory-list strong {
   font-size: 14px;
+}
+
+.docs-guide strong {
+  font-size: 17px;
 }
 
 .docs-guide span,
@@ -874,6 +966,49 @@ body.docs-body {
   color: var(--docs-text-muted);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.docs-guide b {
+  margin-top: auto;
+  padding-top: 18px;
+  color: var(--docs-text-soft);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.docs-guide b i {
+  color: var(--docs-accent);
+  font-style: normal;
+}
+
+.docs-guide-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  margin-top: 14px;
+}
+
+.docs-guide-links a {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--docs-text-muted);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.docs-guide-links a:hover {
+  border-color: var(--docs-border);
+  background: var(--docs-surface);
+  color: var(--docs-text);
+}
+
+.docs-guide-links a span {
+  margin: 0;
+  color: var(--docs-accent);
 }
 
 .docs-directory {
@@ -1027,7 +1162,12 @@ body.docs-body {
     font-size: 31px;
   }
 
-  .docs-product-guides > div,
+  .docs-product-guides-head {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .docs-guide-grid,
   .docs-directory-list {
     grid-template-columns: 1fr;
   }
@@ -1056,9 +1196,28 @@ body.docs-body {
     padding-left: 15px;
   }
 
+  .docs-hub-header {
+    padding: 28px 22px;
+  }
+
   .docs-article-header h1,
   .docs-hub-header h1 {
     font-size: 27px;
+  }
+
+  .docs-guide {
+    min-height: 0;
+  }
+
+  .docs-guide-links {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px;
+  }
+
+  .docs-guide-links a {
+    min-width: 0;
+    justify-content: space-between;
   }
 
   .docs-article h2 {
@@ -1087,7 +1246,12 @@ body.docs-body {
     scroll-behavior: auto;
   }
 
-  .docs-sidebar {
+  .docs-sidebar,
+  .docs-guide {
     transition: none;
+  }
+
+  .docs-guide:hover {
+    transform: none;
   }
 }

@@ -152,7 +152,7 @@
       "slug": "benchmarks",
       "title": "Benchmarks",
       "section": "serving",
-      "description": "Comparable backend measurements, metric definitions, current Vulkan regression status, and raw evidence links."
+      "description": "Current measured performance, comparable runs, reproduction commands, limitations, and raw evidence links."
     },
     {
       "source": "qualification/schema/hf-next-token-request-v1.schema.json",

@@ -224,7 +224,8 @@ test('build copies the static site and emits complete deterministic docs', async
 
   const hub = await readFile(resolve(first, 'docs/index.html'), 'utf8');
   assert.match(hub, /Start with the answer/);
-  assert.match(hub, /Use the product guides for a workflow/);
+  assert.match(hub, /Choose the outcome you need/);
+  assert.match(hub, /Start with a workflow/);
   assert.match(hub, /Reference library/);
   assert.match(hub, /href="\.\/configuration\/"/);
 
@@ -595,8 +596,14 @@ test('search loads its index and resolves product and reference results over HTT
     });
     const page = await browser.newPage();
     await page.goto(`${server.url}/docs/`, { waitUntil: 'domcontentloaded' });
+    await page.keyboard.press('/');
+    assert.equal(
+      await page.$eval('#docs-search-hub', (element) => document.activeElement === element),
+      true,
+    );
     await page.locator('#docs-search-hub').fill('Product');
     await page.waitForSelector('.docs-search-result');
+    assert.equal(await page.$eval('#docs-search-hub', (element) => element.getAttribute('aria-expanded')), 'true');
     const product = await page.$eval('.docs-search-result', (element) => ({
       text: element.textContent,
       href: element.getAttribute('href'),

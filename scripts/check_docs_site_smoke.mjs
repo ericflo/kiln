@@ -16,6 +16,8 @@ const desktopViewport = { width: 1440, height: 900, deviceScaleFactor: 1 };
 const mobileOverflowTolerancePx = 2;
 const dashboardImageSrcset = 'assets/server-ui-dashboard-720.webp 720w, assets/server-ui-dashboard-1440.webp 1440w, assets/server-ui-dashboard.webp 2880w';
 const dashboardImageSizes = '(max-width: 760px) calc(100vw - 32px), 960px';
+const demoImageSizes = '(max-width: 780px) calc(100vw - 32px), 1180px';
+const demoImageNames = ['dashboard', 'playground', 'training', 'adapters'];
 const runtimeEnvironmentContract = JSON.parse(
   readFileSync(resolve(repoRoot, 'contracts/runtime-env-direct-reads-v1.json'), 'utf8'),
 );
@@ -143,19 +145,22 @@ const generatedDocsPages = [
     path: publishedPath('docs/benchmarks/index.html'),
     canonical: 'https://ericflo.github.io/kiln/docs/benchmarks/',
     h1: 'Benchmarks',
-    anchors: ['bottom-line', 'the-comparable-vulkan-result', 'why-the-old-0455-number-was-misleading'],
+    anchors: ['current-measured-position', 'what-happened', 'why-the-old-0455-number-did-not-describe-decode-speed'],
     terms: [
-      'did regress catastrophically',
-      '0.142 decode tokens/s',
-      '87× decode regression',
-      '11× prefill regression',
+      'Vulkan decode is back in its historical range',
+      '13.46 tok/s',
+      'Latest verified source result',
+      'not yet a published release',
+      '0.142 tok/s',
+      'roughly 87×',
       '28d8c6028',
-      'same short serial workload',
-      '0.455 aggregate output tok/s',
+      'same Qwen3.5-4B short serial workload',
+      'Device name, vendor ID, device ID, PCI identity, and driver name are never policy inputs',
+      '0.455 aggregate output',
       '83.2 seconds',
       'about 13.0 decode tok/s',
-      'predates the July 27 policy regression',
-      'no high-concurrency parity claim',
+      'predates the July 27 regression',
+      'does not claim high-concurrency parity',
     ],
   },
   {
@@ -956,7 +961,7 @@ const expectedQuickstartLinks = [
 ];
 
 const expectedDemoSections = [
-  { label: 'freshness', terms: ['updated july 30, 2026', 'kiln v0.5.1 source ui'] },
+  { label: 'freshness', terms: ['captured july 30, 2026', 'current repository ui'] },
   { label: 'provenance', terms: ['ui: current repository source', 'data: deterministic seeded demo fixtures', 'not a live performance run'] },
   { label: 'observe', terms: ['know what is actually running', 'backend truth', 'request evidence'] },
   { label: 'serve', terms: ['test the exact request path', 'openai-compatible', 'adapter-explicit'] },
@@ -1105,7 +1110,7 @@ const expectedApiTrainingAnchors = [
 ];
 
 const expectedApiCodeExamples = [
-  { label: 'accelerator runtime v16 shape', terms: ['"accelerator_runtime"', '"schema_id": "kiln.accelerator-runtime-policy.v16"', '"version": 16', '"vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v5"', '"vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1"', '"kt_api_mode"', '"full_attention_score_budget_mib"', '"configured": 2048', '"effective": 2048', '"vulkan_device_index"', '"configured": null', '"effective": null', '"vulkan_validation"', '"configured": false', '"effective": false', '"cuda_kernel_profile"', '"metal_kernel_profile"', '"configured": "native_default"', '"effective": "native_default"', '"rocm_synchronization_mode"', '"rocm_strided_batched_matmul_mode"', '"rocm_bf16_matmul_output_mode"', '"rocm_kernel_profile"', '"configured": "portable_fallback"', '"effective": "portable_fallback"', '"rocm_graph_mode"', '"rocm_graph_cache_entries"', '"rocm_graph_cache_max_bytes"', '"configured": 1073741824', '"effective": 1073741824'] },
+  { label: 'accelerator runtime v16 shape', terms: ['"accelerator_runtime"', '"schema_id": "kiln.accelerator-runtime-policy.v16"', '"version": 16', '"vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v6"', '"vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1"', '"kt_api_mode"', '"full_attention_score_budget_mib"', '"configured": 2048', '"effective": 2048', '"vulkan_device_index"', '"configured": null', '"effective": null', '"vulkan_validation"', '"configured": false', '"effective": false', '"cuda_kernel_profile"', '"metal_kernel_profile"', '"configured": "native_default"', '"effective": "native_default"', '"rocm_synchronization_mode"', '"rocm_strided_batched_matmul_mode"', '"rocm_bf16_matmul_output_mode"', '"rocm_kernel_profile"', '"configured": "portable_fallback"', '"effective": "portable_fallback"', '"rocm_graph_mode"', '"rocm_graph_cache_entries"', '"rocm_graph_cache_max_bytes"', '"configured": 1073741824', '"effective": 1073741824'] },
   { label: 'CUDA startup policy shape', terms: ['"cuda_marlin_profile"', '"configured": "disabled"', '"effective": "disabled"', '"cuda_flash_backward_mode"', '"configured": "fast"', '"effective": "fast"'] },
   { label: 'batching configuration shape', terms: ['"batching"', '"configuration"', '"rowwise_decode"', '"prefix_aware_admission"', '"prefill_admission_quantum"', '"actor_cycle_idle"', '"actor_active"'] },
   { label: 'streaming-prefill configuration shape', terms: ['"streaming_prefill"', '"dispatch"', '"threshold_tokens"', '"tile_tokens"', '"tape_tile_tokens"', '"detached_full_attn_tile_tokens"', '"immutable_after_startup"', '"restart_required_to_change"'] },
@@ -1209,9 +1214,9 @@ const expectedArchitectureSections = [
   { label: 'immutable batching authority', terms: ['BatchingRuntimeConfig', 'None of those paths rereads', 'mandatory real-backend batching actor', 'actor_active', 'decode_runtime.batching_configuration', 'batching_engine.configuration'] },
   { label: 'immutable streaming-prefill authority', terms: ['one streaming-prefill authority for inference and training', 'StreamingPrefillRuntimeConfig', 'none of those paths rereads', 'SFT/GRPO/OPD', 'checkpoint planning', 'base tiles / tape tiles / detached full-attention tiles', 'prompt-logprob', 'local teacher', 'MTP alignment', 'inference-contract-v2', 'logit-cache identity', 'CPU/Vulkan', '8192 / 65536 / 65536', 'prefill_runtime.streaming_prefill', 'prompt-length dependent'] },
   { label: 'immutable CUDA graph authority', terms: ['CUDA graph policy is startup-owned', 'memory.cuda_graphs', 'memory.cuda_graph_cache_entries', '1..=64', 'Stable paged metadata is mandatory', 'batched CUDA capture remains unavailable', '/v1/config.cuda_graphs', 'decode_runtime.cuda_graphs', 'has no environment opt-in'] },
-  { label: 'portable accelerator execution policy', terms: ['Immutable accelerator routes, attention geometry, ROCm stream ordering, and graph lifecycle', 'kiln.accelerator-runtime-policy.v16', 'Vulkan device creation is typed startup policy', 'kiln.vulkan-kernel-policy.v5', 'ROCm product execution is portable-only', 'hardware-qualification', 'portable_fallback', 'rocm_strided_batched_matmul_mode', 'rocm_bf16_matmul_output_mode', 'per-row GEMMs', 'F32 output', 'retired machine-shaped', 'stream_ordered', 'rocm_graph_cache_max_bytes', 'cleanup-quarantined'] },
+  { label: 'portable accelerator execution policy', terms: ['Immutable accelerator routes, attention geometry, ROCm stream ordering, and graph lifecycle', 'kiln.accelerator-runtime-policy.v16', 'Vulkan device creation is typed startup policy', 'kiln.vulkan-kernel-policy.v6', 'ROCm product execution is portable-only', 'hardware-qualification', 'portable_fallback', 'rocm_strided_batched_matmul_mode', 'rocm_bf16_matmul_output_mode', 'per-row GEMMs', 'F32 output', 'retired machine-shaped', 'stream_ordered', 'rocm_graph_cache_max_bytes', 'cleanup-quarantined'] },
   { label: 'complete CUDA route authority', terms: ['Fixed model, loader, and fallback policy', 'twenty-five CUDA model/backend hot-path', 'fused_rotary_qk', 'fused_attn_sigmoid_mul', 'rmsnorm_backward', 'fused_l2_qk_norm', 'gdn_chunk_pre_permute', 'KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE', 'KILN_DECODE_HOT_PATH_DEBUG_FALLBACK', 'KILN_DISABLE_GPU_TRAINING_MLP_CHUNKING', 'KILN_KEEP_PROJECTION_ORIGINALS', 'KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER', 'KILN_DISABLE_WEIGHTED_LM_HEAD_PREP', 'KILN_ARENA_FORCE_ZERO', 'KILN_CUDA_NATIVE_TRAINING', 'KILN_METAL_GRAPHS', 'KILN_FORCE_EAGER_DECODE', 'KILN_METAL_GRAPH_STABLE_PAGED_METADATA', 'KILN_TAPE_GDN_OFFLOAD_SAVED_TENSORS', 'KILN_TAPE_OFFLOAD_MATMUL_A', 'KILN_TAPE_OFFLOAD_MIN_BYTES', 'KILN_SDPA_SPLIT', 'KILN_SDPA_PREFILL_MIN', 'CANDLE_METAL_COMPUTE_PER_BUFFER', 'KILN_SERVER_DETERMINISTIC', 'Standalone tensor-library use defaults'] },
-  { label: 'device-neutral Vulkan policy', terms: ['Vulkan kernels use one device-neutral native policy', 'kiln.vulkan-kernel-policy.v5', 'native-default object', 'not a TOML, CLI, request, environment, device-name, or PCI-ID surface', 'Standards-based model routes', 'without inspecting device identity', 'Machine-specific receipts do not alter product dispatch', 'cross-device correctness', 'Former Vulkan route controls', 'have no aliases or replacement fields', 'vulkan_decode_microbench', 'not a product configuration path'] },
+  { label: 'capability-derived Vulkan policy', terms: ['Vulkan routes are derived from device capabilities', 'kiln.vulkan-kernel-policy.v6', 'workgroup', 'shared-memory', 'descriptor', 'push-constant', 'subgroup', 'memory-topology', 'device-name, vendor-ID, device-ID, driver-name, or PCI-ID surface', 'Unsupported optional routes retain narrow fallbacks', 'Machine-specific receipts do not alter product dispatch', 'cross-device correctness', 'negotiates the loader API up to Vulkan 1.2', 'common shader set targets Vulkan 1.0', 'Former Vulkan route controls', 'have no aliases or replacement fields', 'vulkan_decode_microbench', 'not a product configuration path'] },
   { label: 'ROCm graph product telemetry surfaces', terms: ['rocm_graphs_unavailable_reason', 'rocm_graph_telemetry', 'rocm_graph_telemetry_unavailable_reason', 'phase_telemetry_available', 'phase_telemetry_unavailable_reason', 'state is busy only for lock contention', 'unavailable for no-runner or poisoned-lock state', 'backend_without_graph_runner', 'model_runner_busy', 'model_runner_lock_poisoned', 'graph_runner_busy', 'graph_runner_lock_poisoned', 'kiln_rocm_graph_telemetry_available', 'kiln_rocm_graph_snapshot_unavailable', 'kiln_rocm_graph_phase_telemetry_available', 'kiln_rocm_graph_phase_telemetry_unavailable', 'kiln_rocm_graph_state', 'kiln_rocm_graph_slots', 'kiln_rocm_graph_owner_lifecycle_total', 'kiln_rocm_graph_retained_bytes', 'kiln_rocm_graph_cache_admissions_total', 'kiln_rocm_graph_cache_evictions_total', 'kiln_rocm_graph_cache_admission_rejections_total', 'kiln_rocm_graph_capture_outcomes_total', 'kiln_rocm_graph_replay_outcomes_total', 'kiln_rocm_graph_fallbacks_total', 'full cache/counter families are omitted', 'phase/current/transient families remain authoritative'] },
   { label: 'ROCm graph outcome, phase, and active-slot semantics', terms: ['every runner-owned recurrent/conv slot', 'active graphless slot state remains', 'peak_retained_bytes', 'never below the current total', 'capture_successes means', 'first launch succeeded', 'cache_admission_successes is the retained', 'entry, byte, and accounting post-capture rejection counters', 'memoized by geometry and runner generation', 'blocks new capture rather than dropping live continuity state', 'pre_candidate_headroom', 'candidate_warm', 'pre_native_reservation', 'native_capture', 'native_replay', 'rejected_candidate_cleanup', 'defensive cache admission/publication', 'blocking committed governor debit', 'point-in-time copies', 'authoritative active-phase source', 'successful physical settlement', 'logical restoration', 'post-STOP diagnostic drain'] },
   { label: 'Gated DeltaNet/GDN hybrid', terms: ['gated deltanet', 'gdn', 'hybrid'] },
@@ -1684,12 +1689,23 @@ function validateCurrentPerformancePositioning() {
   const indexPath = resolve(repoRoot, 'docs/site/index.html');
   const index = readFileSync(indexPath, 'utf8');
   const requiredTerms = [
-    'Current hardware qualification and performance position',
-    '12.18',
-    'ROCm mixed soak',
-    'Vulkan, stability only',
-    'Preferred at high concurrency',
-    'Kiln makes no current vLLM parity claim',
+    'Latest verified performance and release provenance',
+    '13.46',
+    '74.29',
+    '2.81',
+    'Vulkan decode · recovered',
+    'correction branch',
+    'Capability-led Vulkan',
+    'never a GPU name, vendor ID, PCI ID, or',
+    'machine allowlist',
+    'Five native artifacts',
+    'CUDA 12.4',
+    'ROCm 7.2.4',
+    'Apple Silicon',
+    'Checksums · attestations · third-party licenses',
+    'Honest boundary',
+    'verified source evidence, not yet a published',
+    'Kiln makes no vLLM parity claim',
     'docs/benchmarks/',
     'assets/og-image-v3.png',
   ];
@@ -1703,6 +1719,10 @@ function validateCurrentPerformancePositioning() {
     'A6000 benchmarks',
     'KILN_W4A16=1',
     'assets/og-image.png',
+    '0.455',
+    'Vulkan, stability only',
+    'unacceptable serving performance',
+    'Source-bound Strix Halo development receipt',
   ];
   const presentRetiredTerms = retiredTerms.filter((term) => index.includes(term));
   if (presentRetiredTerms.length > 0) {
@@ -2300,11 +2320,17 @@ function validateSelfHostedProductPageAssets() {
       fail(`docs/site/${relativePath}: runtime Tailwind CDN is forbidden; use the self-hosted utility sheet`);
     }
     const prefix = relativePath.includes('/') ? '../' : '';
-    assertIncludes(
-      html,
-      `href="${prefix}css/utilities.css"`,
-      `docs/site/${relativePath}: self-hosted utility sheet`,
-    );
+    if (relativePath === 'demo/index.html') {
+      if (html.includes('css/utilities.css') || html.includes('css/kiln.css')) {
+        fail(`docs/site/${relativePath}: standalone tour must not import the unused product-page stylesheets`);
+      }
+    } else {
+      assertIncludes(
+        html,
+        `href="${prefix}css/utilities.css"`,
+        `docs/site/${relativePath}: self-hosted utility sheet`,
+      );
+    }
     assertIncludes(
       html,
       `src="${prefix}js/site.js"`,
@@ -2343,28 +2369,26 @@ function validateSelfHostedProductPageAssets() {
     }
   }
 
-  const responsiveDashboardAssets = [
-    {
-      path: 'docs/site/assets/server-ui-dashboard-720.webp',
-      sha256: '1652730125e994e02b42bfb931589a714892482da9e53200ef02e34cf6787e7a',
-    },
-    {
-      path: 'docs/site/assets/server-ui-dashboard-1440.webp',
-      sha256: 'd9aa03bf816f970e027dff9edb44be3002d5e6cf6b60664ba1668ec37aa27957',
-    },
-  ];
-  for (const asset of responsiveDashboardAssets) {
-    const path = resolve(repoRoot, asset.path);
-    if (!existsSync(path)) fail(`${asset.path}: missing responsive dashboard image`);
-    const actualSha256 = createHash('sha256').update(readFileSync(path)).digest('hex');
-    if (actualSha256 !== asset.sha256) {
-      fail(`${asset.path}: responsive dashboard SHA-256 mismatch; expected ${asset.sha256}, got ${actualSha256}`);
-    }
-  }
   for (const relativePath of ['index.html', 'quickstart.html']) {
     const html = readFileSync(resolve(repoRoot, 'docs/site', relativePath), 'utf8');
     assertIncludes(html, `srcset="${dashboardImageSrcset}"`, `docs/site/${relativePath}: responsive dashboard srcset`);
     assertIncludes(html, `sizes="${dashboardImageSizes}"`, `docs/site/${relativePath}: responsive dashboard sizes`);
+  }
+  const demoHtml = readFileSync(resolve(repoRoot, 'docs/site/demo/index.html'), 'utf8');
+  for (const name of demoImageNames) {
+    const srcset = `../assets/server-ui-${name}-720.webp 720w, ../assets/server-ui-${name}-1440.webp 1440w, ../assets/server-ui-${name}.webp 2880w`;
+    assertIncludes(demoHtml, `src="../assets/server-ui-${name}.webp"`, `docs/site/demo/index.html: optimized ${name} image`);
+    assertIncludes(demoHtml, `srcset="${srcset}"`, `docs/site/demo/index.html: responsive ${name} srcset`);
+    assertIncludes(demoHtml, `sizes="${demoImageSizes}"`, `docs/site/demo/index.html: responsive ${name} sizes`);
+    for (const suffix of ['-720.webp', '-1440.webp', '.webp']) {
+      const assetPath = resolve(repoRoot, `docs/site/assets/server-ui-${name}${suffix}`);
+      if (!existsSync(assetPath)) fail(`${relative(repoRoot, assetPath)}: missing responsive demo image`);
+      const maximumBytes = suffix === '-720.webp' ? 60_000 : suffix === '-1440.webp' ? 160_000 : 320_000;
+      const bytes = statSync(assetPath).size;
+      if (bytes > maximumBytes) {
+        fail(`${relative(repoRoot, assetPath)}: responsive demo image is ${bytes} bytes; expected at most ${maximumBytes}`);
+      }
+    }
   }
 
   const asciinemaLicense = readFileSync(
@@ -3759,16 +3783,37 @@ async function runSmoke() {
       }
 
       if (sitePage.path === demoPagePath) {
+        const demoImages = await page.$$('.screen img');
+        for (const image of demoImages) {
+          await image.evaluate((element) => element.scrollIntoView({ block: 'center' }));
+          await page.waitForFunction(
+            (element) => Boolean(element?.complete && element.naturalWidth > 0 && element.naturalHeight > 0),
+            { timeout: 5000 },
+            image,
+          );
+        }
         const demoResult = await page.evaluate(() => {
           const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
           const referencedCasts = Array.from(
             document.querySelectorAll('a[href$=".cast"]'),
             (link) => link.getAttribute('href'),
           );
+          const tourImages = Array.from(document.querySelectorAll('.screen img'), (image) => ({
+            src: image.getAttribute('src') || '',
+            srcset: image.getAttribute('srcset') || '',
+            sizes: image.getAttribute('sizes') || '',
+            loading: image.getAttribute('loading') || '',
+            decoding: image.getAttribute('decoding') || '',
+            currentSrc: image.currentSrc,
+            complete: image.complete,
+            naturalWidth: image.naturalWidth,
+            naturalHeight: image.naturalHeight,
+          }));
 
           return {
             bodyText: normalize(document.body.innerText),
             referencedCasts,
+            tourImages,
             externalResources: performance.getEntriesByType('resource')
               .map((entry) => entry.name)
               .filter((url) => /^https?:/i.test(url)),
@@ -3784,6 +3829,27 @@ async function runSmoke() {
         if (demoResult.externalResources.length > 0) {
           fail(`${sitePage.path}: Demo must not fetch third-party runtime resources: ${demoResult.externalResources.join(', ')}`);
         }
+        if (demoResult.tourImages.length !== demoImageNames.length) {
+          fail(`${sitePage.path}: expected ${demoImageNames.length} responsive tour images, got ${demoResult.tourImages.length}`);
+        }
+        demoResult.tourImages.forEach((image, index) => {
+          const name = demoImageNames[index];
+          const expectedSrc = `../assets/server-ui-${name}.webp`;
+          const expectedSrcset = `../assets/server-ui-${name}-720.webp 720w, ../assets/server-ui-${name}-1440.webp 1440w, ../assets/server-ui-${name}.webp 2880w`;
+          if (image.src !== expectedSrc
+              || image.srcset !== expectedSrcset
+              || image.sizes !== demoImageSizes
+              || image.loading !== 'lazy'
+              || image.decoding !== 'async') {
+            fail(`${sitePage.path}: ${name} tour image is not fully responsive and deferred: ${JSON.stringify(image)}`);
+          }
+          if (!image.complete || image.naturalWidth <= 0 || image.naturalHeight <= 0) {
+            fail(`${sitePage.path}: ${name} responsive tour image did not load`);
+          }
+          if (!image.currentSrc.endsWith(`/assets/server-ui-${name}-720.webp`)) {
+            fail(`${sitePage.path}: mobile ${name} tour image must load the 720px source, got ${image.currentSrc || 'no source'}`);
+          }
+        });
 
         validateDemoCasts(sitePage.path, demoResult.referencedCasts);
       }
@@ -3881,7 +3947,7 @@ async function runSmoke() {
       if (sitePage.path === apiPagePath) {
         const apiResult = await page.evaluate(() => {
           const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
-          const bodyText = normalize(document.body.innerText);
+          const bodyText = normalize(document.body.textContent);
           const endpointText = normalize(Array.from(document.querySelectorAll('.endpoint, code'))
             .map((element) => element.textContent || '')
             .join('\n'));
@@ -3896,6 +3962,7 @@ async function runSmoke() {
           const copyableCodeBlocks = Array.from(document.querySelectorAll('pre > code'))
             .map((code) => normalize(code.innerText || code.textContent));
           const copyButtons = Array.from(document.querySelectorAll('.copy-code-button'));
+          const deepReference = document.querySelector('.reference-details');
 
           return {
             bodyText,
@@ -3905,8 +3972,18 @@ async function runSmoke() {
             headings,
             copyableCodeBlocks,
             copyButtonCount: copyButtons.length,
+            deepReference: deepReference ? {
+              open: deepReference.open,
+              summary: normalize(deepReference.querySelector('summary')?.textContent),
+            } : null,
           };
         });
+
+        if (!apiResult.deepReference
+            || apiResult.deepReference.open
+            || !apiResult.deepReference.summary.includes('deep reference: resolved runtime configuration')) {
+          fail(`${sitePage.path}: exhaustive runtime policy must be present behind a clearly labeled, closed disclosure`);
+        }
 
         const missingEndpoints = expectedApiEndpoints.filter((endpoint) => {
           const normalizedEndpoint = endpoint.toLowerCase();

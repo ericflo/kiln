@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Kiln Product Tour &mdash; serve, train, evaluate, promote</title>
-  <meta name="description" content="A current, annotated tour of Kiln's serving, training, evaluation, and adapter workflow. Updated July 30, 2026 from the v0.5.1 source UI.">
+  <title>Kiln Product Tour &mdash; from request to promoted adapter</title>
+  <meta name="description" content="See Kiln's complete local improvement loop: observe the server, test the real API, train an adapter, evaluate it, and promote the winner.">
   <meta name="theme-color" content="#0a0908">
   <meta name="color-scheme" content="dark">
   <link rel="canonical" href="https://ericflo.github.io/kiln/demo/">
@@ -13,7 +13,7 @@
   <link rel="apple-touch-icon" href="../assets/logo.png">
 
   <meta property="og:title" content="Kiln Product Tour">
-  <meta property="og:description" content="See the current serve, train, evaluate, and adapter workflow—and exactly when the UI was captured.">
+  <meta property="og:description" content="See the complete local loop from an OpenAI-compatible request to a promoted, evidence-backed adapter.">
   <meta property="og:type" content="website">
   <meta property="og:locale" content="en_US">
   <meta property="og:site_name" content="Kiln">
@@ -25,14 +25,14 @@
   <meta property="og:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Kiln Product Tour">
-  <meta name="twitter:description" content="A current, annotated tour of Kiln's local model-improvement loop.">
+  <meta name="twitter:description" content="See the complete local loop from an OpenAI-compatible request to a promoted, evidence-backed adapter.">
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image-v3.png">
   <meta name="twitter:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
 
   <script>document.documentElement.classList.add('product-page-enhanced');</script>
-  <link rel="stylesheet" href="../css/utilities.css">
+  <link rel="preload" as="font" type="font/woff2" href="../fonts/Inter-400.woff2" crossorigin>
+  <link rel="preload" as="font" type="font/woff2" href="../fonts/Inter-700.woff2" crossorigin>
   <link rel="stylesheet" href="../css/fonts.css">
-  <link rel="stylesheet" href="../css/kiln.css">
 
   <style>
     :root {
@@ -57,6 +57,7 @@
       font-family: 'Inter', 'Inter Fallback', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       -webkit-font-smoothing: antialiased;
     }
+    *, *::before, *::after { box-sizing: border-box; }
     a { color: #f4bf84; }
     a:hover { color: var(--accent); }
     code, pre {
@@ -75,6 +76,17 @@
       font-weight: 700;
     }
     .skip-link:focus { transform: translateY(0); }
+    .sr-only {
+      position: absolute !important;
+      width: 1px !important;
+      height: 1px !important;
+      padding: 0 !important;
+      margin: -1px !important;
+      overflow: hidden !important;
+      clip: rect(0, 0, 0, 0) !important;
+      white-space: nowrap !important;
+      border: 0 !important;
+    }
     .demo-page { width: min(1180px, calc(100% - 40px)); margin: 0 auto; }
     .demo-nav {
       position: sticky;
@@ -85,6 +97,7 @@
       backdrop-filter: blur(16px);
     }
     .demo-nav-inner {
+      position: relative;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -102,7 +115,110 @@
     .demo-brand img { width: 28px; height: 28px; }
     .demo-links { display: flex; flex-wrap: wrap; gap: 18px; font-size: 13px; }
     .demo-links a { color: var(--muted); text-decoration: none; }
-    .demo-links a[aria-current="page"] { color: var(--fg); }
+    .demo-links > a {
+      min-height: 38px;
+      display: inline-flex;
+      align-items: center;
+      padding: 7px 10px;
+      border-radius: 7px;
+    }
+    .demo-links a[aria-current="page"] { background: var(--accent-soft); color: var(--fg); }
+    .nav-toggle {
+      display: none;
+      width: 38px;
+      height: 38px;
+      margin-left: auto;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--fg);
+      cursor: pointer;
+    }
+    .nav-toggle .icn {
+      width: 20px;
+      height: 20px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.7;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .nav-toggle .nav-toggle-close { display: none; }
+    .nav-toggle[aria-expanded="true"] .nav-toggle-open { display: none; }
+    .nav-toggle[aria-expanded="true"] .nav-toggle-close { display: block; }
+    .nav-explore { position: relative; }
+    .nav-explore-toggle {
+      display: inline-flex;
+      min-height: 38px;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 10px;
+      border: 0;
+      border-radius: 7px;
+      background: transparent;
+      color: var(--muted);
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      line-height: 1.4;
+      cursor: pointer;
+    }
+    .nav-explore-toggle:hover,
+    .nav-explore-toggle[aria-expanded="true"],
+    .nav-explore-toggle.has-current {
+      background: var(--accent-soft);
+      color: var(--fg);
+    }
+    .nav-explore-menu {
+      position: absolute;
+      z-index: 50;
+      top: calc(100% + 10px);
+      right: 0;
+      min-width: 220px;
+      display: grid;
+      gap: 2px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(21, 19, 16, .99);
+      box-shadow: 0 22px 54px rgba(0, 0, 0, .52);
+      opacity: 0;
+      transform: translateY(-5px);
+      pointer-events: none;
+      transition: opacity 140ms ease, transform 140ms ease;
+    }
+    .nav-explore-menu::before {
+      position: absolute;
+      inset: -12px 0 auto;
+      height: 12px;
+      content: "";
+    }
+    .nav-explore:hover .nav-explore-menu,
+    .nav-explore:focus-within .nav-explore-menu,
+    .nav-explore[data-open="true"] .nav-explore-menu {
+      opacity: 1;
+      transform: translateY(0);
+      pointer-events: auto;
+    }
+    .nav-explore-menu a {
+      min-height: 38px;
+      display: flex;
+      align-items: center;
+      padding: 7px 10px;
+      border-radius: 6px;
+    }
+    .nav-explore-menu a:hover { background: rgba(255, 255, 255, .04); color: var(--fg); }
+    .nav-github {
+      min-height: 38px;
+      display: inline-flex;
+      align-items: center;
+      padding: 7px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, .02);
+    }
     .hero {
       padding: 86px 0 70px;
       background:
@@ -143,6 +259,42 @@
       font-size: 19px;
       line-height: 1.7;
     }
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 11px;
+      margin-top: 28px;
+    }
+    .demo-btn {
+      display: inline-flex;
+      min-height: 44px;
+      align-items: center;
+      justify-content: center;
+      padding: 0 17px;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--fg);
+      font-size: 13px;
+      font-weight: 700;
+      text-decoration: none;
+    }
+    .demo-btn:hover {
+      border-color: #6f5d49;
+      background: var(--surface-2);
+      color: var(--fg);
+    }
+    .demo-btn-primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #1b0c00;
+      box-shadow: 0 10px 30px rgba(249, 115, 22, .18);
+    }
+    .demo-btn-primary:hover {
+      border-color: #fb923c;
+      background: #fb923c;
+      color: #1b0c00;
+    }
     .truth-note {
       display: grid;
       grid-template-columns: auto 1fr;
@@ -158,6 +310,11 @@
       line-height: 1.55;
     }
     .truth-note strong { color: var(--fg); }
+    .truth-note a {
+      text-decoration: underline;
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
+    }
     .truth-note .stamp {
       color: var(--accent);
       font-family: 'JetBrains Mono', monospace;
@@ -257,7 +414,7 @@
       cursor: pointer;
     }
     .archive summary strong { font-size: 14px; }
-    .archive summary span { color: var(--quiet); font-size: 12px; }
+    .archive summary span { color: var(--muted); font-size: 12px; }
     .archive-body { padding: 0 20px 20px; border-top: 1px solid var(--line); }
     .archive-body p { color: var(--muted); font-size: 13px; line-height: 1.65; }
     .archive-links { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
@@ -273,8 +430,65 @@
     .demo-footer { padding: 34px 0; border-top: 1px solid var(--line); color: var(--quiet); font-size: 12px; }
     .demo-footer-inner { display: flex; justify-content: space-between; gap: 20px; }
     .demo-footer nav { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px 14px; }
+    @media (max-width: 980px) {
+      body.nav-open { overflow: hidden; }
+      .product-page-enhanced .site-nav-bar {
+        min-height: 64px;
+        flex-direction: row;
+        align-items: center;
+      }
+      .product-page-enhanced .site-nav { display: none; }
+      .product-page-shell .nav-toggle { display: inline-flex; }
+      .product-page-shell .site-nav {
+        position: absolute;
+        z-index: 70;
+        top: calc(100% + 8px);
+        right: 0;
+        left: 0;
+        max-height: calc(100vh - 88px);
+        margin: 0;
+        padding: 10px;
+        overflow-y: auto;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: #151310;
+        box-shadow: 0 22px 54px rgba(0, 0, 0, .52);
+      }
+      .product-page-shell .site-nav[data-open="true"] {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 4px;
+      }
+      .product-page-shell .site-nav > a,
+      .product-page-shell .site-nav .nav-explore-menu a {
+        width: 100%;
+        min-height: 42px;
+        display: flex;
+        align-items: center;
+        justify-content: flex-start;
+        padding: 8px 10px;
+        border-radius: 7px;
+      }
+      .product-page-shell .site-nav > a:hover {
+        background: rgba(255, 255, 255, .04);
+        color: var(--fg);
+      }
+      .product-page-shell .site-nav .nav-github {
+        grid-column: 1 / -1;
+        justify-content: center;
+        margin-top: 6px;
+      }
+      .nav-explore { display: contents; }
+      .nav-explore-toggle { display: none; }
+      .nav-explore-menu {
+        position: static;
+        display: contents;
+        opacity: 1;
+        transform: none;
+        pointer-events: auto;
+      }
+    }
     @media (max-width: 780px) {
-      .demo-links a:nth-child(n+4) { display: none; }
       .hero { padding: 62px 0 52px; }
       .tour-heading, .try-grid { grid-template-columns: 1fr; gap: 13px; }
       .tour-points { grid-template-columns: 1fr; }
@@ -282,14 +496,19 @@
       .truth-note { grid-template-columns: 1fr; }
     }
     @media (max-width: 520px) {
-      .demo-page { width: min(100% - 28px, 1180px); }
-      .demo-links { gap: 12px; }
-      .demo-links a:nth-child(n+3) { display: none; }
+      .demo-page { width: min(100% - 32px, 1180px); }
+      .product-page-shell .site-nav[data-open="true"] { grid-template-columns: 1fr; }
+      .product-page-shell .site-nav .nav-github { grid-column: auto; }
       .hero h1 { font-size: 39px; }
       .hero-lede { font-size: 17px; }
+      .hero-actions, .demo-btn { width: 100%; }
       .tour { padding: 52px 0; }
       .archive summary { align-items: flex-start; flex-direction: column; }
       .demo-footer-inner { flex-direction: column; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .nav-explore-menu { transition: none; }
     }
   </style>
 </head>
@@ -317,15 +536,19 @@
   <main id="content">
     <section class="hero">
       <div class="demo-page">
-        <div class="freshness"><i aria-hidden="true"></i>Updated July 30, 2026 &middot; Kiln v0.5.1 source UI</div>
-        <h1>One local loop, <span>not six stale terminal recordings.</span></h1>
+        <div class="freshness"><i aria-hidden="true"></i>Captured July 30, 2026 &middot; current repository UI</div>
+        <h1>See the whole loop, <span>from request to promoted adapter.</span></h1>
         <p class="hero-lede">
-          This is the current Kiln product tour: serve a model, inspect a request, train an
-          adapter, evaluate it, and promote the result. Every screen below was regenerated from
-          the current embedded dashboard source, and every example is labeled for what it is.
+          Observe the server, test the real API path, train a named adapter, compare the
+          evidence, and activate the winner. Every screen below comes from the current embedded
+          dashboard source, with staged data and measured performance kept clearly separate.
         </p>
+        <div class="hero-actions">
+          <a class="demo-btn demo-btn-primary" href="../quickstart.html">Run Kiln in 5 minutes <span aria-hidden="true">&nbsp;→</span></a>
+          <a class="demo-btn" href="../docs/benchmarks/">Read the benchmark receipts</a>
+        </div>
         <div class="truth-note">
-          <span class="stamp">Provenance</span>
+          <span class="stamp">Verified tour</span>
           <span><strong>UI:</strong> current repository source. <strong>Data:</strong> deterministic seeded
           demo fixtures, not a live performance run. <strong>Captured:</strong> July 30, 2026 at 1440 px.
           Performance claims live on the <a href="../docs/benchmarks/">benchmark page</a>, never in a
@@ -347,7 +570,11 @@
         </div>
         <figure class="screen">
           <div class="screen-bar"><span class="screen-dots"><i></i><i></i><i></i></span><span>http://127.0.0.1:8420/ui/#overview</span><span>current source</span></div>
-          <img src="../assets/server-ui-dashboard.png" alt="Current Kiln overview dashboard showing server, accelerator, traffic, memory, and adapter state" width="2880" height="3534" loading="eager">
+          <img src="../assets/server-ui-dashboard.webp"
+               srcset="../assets/server-ui-dashboard-720.webp 720w, ../assets/server-ui-dashboard-1440.webp 1440w, ../assets/server-ui-dashboard.webp 2880w"
+               sizes="(max-width: 780px) calc(100vw - 32px), 1180px"
+               alt="Current Kiln overview dashboard showing server, accelerator, traffic, memory, and adapter state"
+               width="2880" height="3534" loading="lazy" decoding="async">
         </figure>
         <div class="tour-points">
           <div class="tour-point"><strong>Backend truth</strong><p>Read the effective accelerator and runtime policy instead of inferring it from a build name.</p></div>
@@ -370,7 +597,11 @@
         </div>
         <figure class="screen">
           <div class="screen-bar"><span class="screen-dots"><i></i><i></i><i></i></span><span>/ui/#playground</span><span>seeded example</span></div>
-          <img src="../assets/server-ui-playground.png" alt="Current Kiln playground with OpenAI-compatible request controls and streamed response" width="2880" height="1912" loading="lazy">
+          <img src="../assets/server-ui-playground.webp"
+               srcset="../assets/server-ui-playground-720.webp 720w, ../assets/server-ui-playground-1440.webp 1440w, ../assets/server-ui-playground.webp 2880w"
+               sizes="(max-width: 780px) calc(100vw - 32px), 1180px"
+               alt="Current Kiln playground with OpenAI-compatible request controls and streamed response"
+               width="2880" height="1912" loading="lazy" decoding="async">
         </figure>
         <div class="tour-points">
           <div class="tour-point"><strong>OpenAI-compatible</strong><p>Use the same chat endpoint from curl, the Python SDK, agents, or the browser UI.</p></div>
@@ -393,7 +624,11 @@
         </div>
         <figure class="screen">
           <div class="screen-bar"><span class="screen-dots"><i></i><i></i><i></i></span><span>/ui/#training</span><span>seeded example</span></div>
-          <img src="../assets/server-ui-training.png" alt="Current Kiln training dashboard showing jobs, datasets, progress, and loss" width="2880" height="3212" loading="lazy">
+          <img src="../assets/server-ui-training.webp"
+               srcset="../assets/server-ui-training-720.webp 720w, ../assets/server-ui-training-1440.webp 1440w, ../assets/server-ui-training.webp 2880w"
+               sizes="(max-width: 780px) calc(100vw - 32px), 1180px"
+               alt="Current Kiln training dashboard showing jobs, datasets, progress, and loss"
+               width="2880" height="3212" loading="lazy" decoding="async">
         </figure>
         <div class="tour-points">
           <div class="tour-point"><strong>Admission first</strong><p>Resolve memory and route support before a long job mutates state.</p></div>
@@ -416,7 +651,11 @@
         </div>
         <figure class="screen">
           <div class="screen-bar"><span class="screen-dots"><i></i><i></i><i></i></span><span>/ui/#adapters</span><span>seeded example</span></div>
-          <img src="../assets/server-ui-adapters.png" alt="Current Kiln adapter library showing active adapter, manifests, and evaluation evidence" width="2880" height="2216" loading="lazy">
+          <img src="../assets/server-ui-adapters.webp"
+               srcset="../assets/server-ui-adapters-720.webp 720w, ../assets/server-ui-adapters-1440.webp 1440w, ../assets/server-ui-adapters.webp 2880w"
+               sizes="(max-width: 780px) calc(100vw - 32px), 1180px"
+               alt="Current Kiln adapter library showing active adapter, manifests, and evaluation evidence"
+               width="2880" height="2216" loading="lazy" decoding="async">
         </figure>
         <div class="tour-points">
           <div class="tour-point"><strong>Base identity bound</strong><p>Adapters retain the model and configuration they were trained against.</p></div>

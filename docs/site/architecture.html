@@ -30,6 +30,10 @@
   <meta name="twitter:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
 
   <script>document.documentElement.classList.add('product-page-enhanced');</script>
+  <link rel="preload" as="font" type="font/woff2" href="fonts/Inter-400.woff2" crossorigin>
+  <link rel="preload" as="font" type="font/woff2" href="fonts/Inter-600.woff2" crossorigin>
+  <link rel="preload" as="font" type="font/woff2" href="fonts/Inter-700.woff2" crossorigin>
+  <link rel="preload" as="font" type="font/woff2" href="fonts/JetBrainsMono-600.woff2" crossorigin>
   <link rel="stylesheet" href="css/utilities.css">
   <link rel="stylesheet" href="css/fonts.css">
   <link rel="stylesheet" href="css/kiln.css">
@@ -447,17 +451,24 @@ training request
           accelerator-policy diagnostic. The nonstandard <code>GGML_VK_VISIBLE_DEVICES</code> behavior is removed.
         </p>
 
-        <h3 class="font-semibold mt-6 mb-3">Vulkan kernels use one device-neutral native policy</h3>
+        <h3 class="font-semibold mt-6 mb-3">Vulkan routes are derived from device capabilities</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
-          Product Vulkan dispatch uses the typed, immutable
-          <code>kiln.vulkan-kernel-policy.v5</code> native-default object. It is not a TOML, CLI, request,
-          environment, device-name, or PCI-ID surface. The Vulkan backend, kernel crate, and resident model
-          planner share this one object. Standards-based model routes, packed weights, row grouping, fused
-          submissions, parallel recurrence, and resident decode are enabled without inspecting device identity.
-          Capability and dispatch limits own narrow fallback or rejection. Machine-specific receipts do not
-          alter product dispatch. A source change must version the policy and establish cross-device correctness.
+          Product Vulkan dispatch installs typed, immutable
+          <code>kiln.vulkan-kernel-policy.v6</code> from the selected physical device's reported workgroup,
+          shared-memory, descriptor, push-constant, subgroup, API, and memory-topology capabilities. It is not a
+          TOML, CLI, request, environment, device-name, vendor-ID, device-ID, driver-name, or PCI-ID surface. The
+          Vulkan backend, kernel crate, and resident model planner share this one object. Each standards-based model
+          route, packed-weight path, row grouping, fused submission, parallel recurrence path, and resident-decode
+          path is admitted only when its own requirements fit. Unsupported optional routes retain narrow fallbacks;
+          unrelated routes stay enabled. Machine-specific receipts do not alter product dispatch. A source change
+          must version the policy and establish cross-device correctness.
           Accelerator policy v16 reports this identity as <code>vulkan_kernel_policy_schema_id</code> in config,
           health, trusted debug state, the CLI config check, and the dashboard.
+        </p>
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          Instance creation negotiates the loader API up to Vulkan 1.2. The common shader set targets Vulkan 1.0.
+          Three subgroup-tiled attention shaders target Vulkan 1.1 and are selected only when compute-stage subgroup
+          basic and arithmetic operations are both available; otherwise the Vulkan 1.0 untiled shader remains active.
         </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
           Former Vulkan route controls, including the applicable
