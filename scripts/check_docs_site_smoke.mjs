@@ -100,6 +100,8 @@ const generatedDocsPages = [
     h1: 'Complete Kiln documentation',
     terms: [
       'Configuration Reference',
+      'GRPO Guide',
+      'Evals Guide',
       'Configuration Schema',
       'HTTP API Contract',
       'Observability API Schema',
@@ -3101,6 +3103,22 @@ function validateGeneratedDocsArtifacts() {
   }
   if (!Array.isArray(searchIndex) || searchIndex.length === 0) {
     fail('generated documentation search index must contain published documents');
+  }
+  const expectedProductGuideOrder = [
+    'Quickstart',
+    'GRPO Guide',
+    'Evals Guide',
+    'API Reference',
+    'CLI Reference',
+    'Architecture',
+    'Troubleshooting',
+    'Demo',
+  ];
+  const productGuideOrder = searchIndex
+    .filter((entry) => entry?.kind === 'product_guide')
+    .map((entry) => entry.title);
+  if (JSON.stringify(productGuideOrder) !== JSON.stringify(expectedProductGuideOrder)) {
+    fail(`generated documentation search index has the wrong product-guide order: ${productGuideOrder.join(', ')}`);
   }
   for (const expected of generatedDocsPages.filter((page) => page.label !== 'Documentation hub')) {
     const slug = expected.path.split('/').filter(Boolean).at(-2);

@@ -11,6 +11,16 @@
         "description": "Install Kiln, start a model, and send the first request."
       },
       {
+        "title": "GRPO Guide",
+        "href": "../grpo.html",
+        "description": "Generate, score, train, and hot-swap LoRA adapters over HTTP."
+      },
+      {
+        "title": "Evals Guide",
+        "href": "../evals.html",
+        "description": "Grade, compare, replay, and turn local judgments back into training."
+      },
+      {
         "title": "API Reference",
         "href": "../api.html",
         "description": "Serving, training, eval, adapter, and diagnostics endpoints."
@@ -19,6 +29,11 @@
         "title": "CLI Reference",
         "href": "../cli.html",
         "description": "Terminal workflows for serving, training, evals, and adapters."
+      },
+      {
+        "title": "Architecture",
+        "href": "../architecture.html",
+        "description": "Trace request flow, backends, scheduling, training, and adapter hot-swap."
       },
       {
         "title": "Troubleshooting",
