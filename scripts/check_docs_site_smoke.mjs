@@ -27,6 +27,7 @@ const pages = [
   { label: 'Home', path: publishedPath('index.html'), currentLabel: null },
   { label: 'Quickstart', path: publishedPath('quickstart.html'), currentLabel: 'Quickstart' },
   { label: 'GRPO Guide', path: publishedPath('grpo.html'), currentLabel: 'GRPO Guide' },
+  { label: 'Evals', path: publishedPath('evals.html'), currentLabel: 'Evals' },
   { label: 'API Reference', path: publishedPath('api.html'), currentLabel: 'API Reference' },
   { label: 'CLI Reference', path: publishedPath('cli.html'), currentLabel: 'CLI Reference' },
   { label: 'Troubleshooting', path: publishedPath('troubleshooting.html'), currentLabel: 'Troubleshooting' },
@@ -38,6 +39,7 @@ const expectedNavLabels = [
   'Quickstart',
   'Documentation',
   'GRPO Guide',
+  'Evals',
   'API Reference',
   'CLI Reference',
   'Demo',
@@ -49,6 +51,7 @@ const expectedFooterLinks = [
   { label: 'Documentation', localPath: publishedPath('docs/') },
   { label: 'Quickstart', localPath: publishedPath('quickstart.html') },
   { label: 'GRPO Guide', localPath: publishedPath('grpo.html') },
+  { label: 'Evals', localPath: publishedPath('evals.html') },
   { label: 'API Reference', localPath: publishedPath('api.html') },
   { label: 'CLI Reference', localPath: publishedPath('cli.html') },
   { label: 'Demo', localPath: publishedPath('demo/') },
@@ -1662,7 +1665,7 @@ function validateCurrentPerformancePositioning() {
     'Preferred at high concurrency',
     'Kiln makes no current vLLM parity claim',
     'docs/benchmarks/',
-    'assets/og-image-v2.png',
+    'assets/og-image-v3.png',
   ];
   const missingTerms = requiredTerms.filter((term) => !index.includes(term));
   if (missingTerms.length > 0) {
@@ -1680,25 +1683,110 @@ function validateCurrentPerformancePositioning() {
     fail(`docs/site/index.html: retired performance claims remain: ${presentRetiredTerms.join(', ')}`);
   }
 
-  const socialAssetPath = resolve(repoRoot, 'docs/site/assets/og-image-v2.png');
+  const socialAssetPath = resolve(repoRoot, 'docs/site/assets/og-image-v3.png');
   if (!existsSync(socialAssetPath)) {
-    fail('docs/site/assets/og-image-v2.png: current social preview is missing');
+    fail('docs/site/assets/og-image-v3.png: current social preview is missing');
   }
   const socialAsset = readFileSync(socialAssetPath);
   const pngSignature = socialAsset.subarray(0, 8).toString('hex');
   const width = socialAsset.length >= 24 ? socialAsset.readUInt32BE(16) : 0;
   const height = socialAsset.length >= 24 ? socialAsset.readUInt32BE(20) : 0;
   if (pngSignature !== '89504e470d0a1a0a' || width !== 1200 || height !== 630) {
-    fail(`docs/site/assets/og-image-v2.png: expected a 1200x630 PNG, got ${width}x${height}`);
+    fail(`docs/site/assets/og-image-v3.png: expected a 1200x630 PNG, got ${width}x${height}`);
+  }
+  if (socialAsset.length > 300 * 1024) {
+    fail(`docs/site/assets/og-image-v3.png: social preview must stay at or below 300 KiB, got ${socialAsset.length} bytes`);
   }
 
   const staleSocialReferences = [];
   for (const sitePage of pages) {
     const source = readFileSync(resolve(repoRoot, sitePage.path), 'utf8');
-    if (source.includes('assets/og-image.png')) staleSocialReferences.push(sitePage.path);
+    if (source.includes('assets/og-image.png') || source.includes('assets/og-image-v2.png')) {
+      staleSocialReferences.push(sitePage.path);
+    }
   }
   if (staleSocialReferences.length > 0) {
     fail(`static site pages still reference the retired social preview: ${staleSocialReferences.join(', ')}`);
+  }
+}
+
+function tagAttributeValue(tag, attribute) {
+  const pattern = '\\b' + attribute + '\\s*=\\s*(?:"([^"]*)"|\\\'([^\\\']*)\\\'|([^\\s"\\\'=<>`]+))';
+  const match = tag.match(new RegExp(pattern, 'i'));
+  return decodeHtmlAttribute(match?.[1] ?? match?.[2] ?? match?.[3] ?? '').trim();
+}
+
+function metaContent(html, selectorAttribute, selectorValue) {
+  for (const match of html.matchAll(/<meta\b[^>]*>/gi)) {
+    const tag = match[0];
+    if (tagAttributeValue(tag, selectorAttribute).toLowerCase() === selectorValue.toLowerCase()) {
+      return tagAttributeValue(tag, 'content');
+    }
+  }
+  return '';
+}
+
+function validateSocialMetadataForHtml(displayPath, html, canonical, { enforceSnippetLength = false } = {}) {
+  const titleMatch = html.match(/<title>([\s\S]*?)<\/title>/i);
+  const title = decodeHtmlAttribute(titleMatch?.[1] ?? '').replace(/<[^>]+>/g, '').trim();
+  const description = metaContent(html, 'name', 'description');
+  const socialImage = 'https://ericflo.github.io/kiln/assets/og-image-v3.png';
+  const expectedImageAlt = 'Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.';
+  const expected = [
+    ['theme-color', metaContent(html, 'name', 'theme-color'), '#0a0908'],
+    ['color-scheme', metaContent(html, 'name', 'color-scheme'), 'dark'],
+    ['og:type', metaContent(html, 'property', 'og:type'), 'website', 'article'],
+    ['og:locale', metaContent(html, 'property', 'og:locale'), 'en_US'],
+    ['og:site_name', metaContent(html, 'property', 'og:site_name'), 'Kiln'],
+    ['og:url', metaContent(html, 'property', 'og:url'), canonical],
+    ['og:image', metaContent(html, 'property', 'og:image'), socialImage],
+    ['og:image:type', metaContent(html, 'property', 'og:image:type'), 'image/png'],
+    ['og:image:width', metaContent(html, 'property', 'og:image:width'), '1200'],
+    ['og:image:height', metaContent(html, 'property', 'og:image:height'), '630'],
+    ['og:image:alt', metaContent(html, 'property', 'og:image:alt'), expectedImageAlt],
+    ['twitter:card', metaContent(html, 'name', 'twitter:card'), 'summary_large_image'],
+    ['twitter:image', metaContent(html, 'name', 'twitter:image'), socialImage],
+    ['twitter:image:alt', metaContent(html, 'name', 'twitter:image:alt'), expectedImageAlt],
+  ];
+
+  for (const [label, actual, ...allowed] of expected) {
+    if (!allowed.includes(actual)) {
+      fail(`${displayPath}: ${label} must be ${allowed.join(' or ')}, got ${actual || '(missing)'}`);
+    }
+  }
+
+  for (const label of ['og:title', 'og:description']) {
+    if (!metaContent(html, 'property', label)) fail(`${displayPath}: ${label} must not be empty`);
+  }
+  for (const label of ['twitter:title', 'twitter:description']) {
+    if (!metaContent(html, 'name', label)) fail(`${displayPath}: ${label} must not be empty`);
+  }
+  if (!html.includes('rel="apple-touch-icon"')) {
+    fail(`${displayPath}: missing apple-touch-icon`);
+  }
+  if (html.includes('og-image-v2.png') || html.includes('/assets/og-image.png')) {
+    fail(`${displayPath}: references a retired social preview`);
+  }
+
+  if (enforceSnippetLength) {
+    if (title.length < 20 || title.length > 65) {
+      fail(`${displayPath}: title must be 20–65 characters, got ${title.length}`);
+    }
+    if (description.length < 80 || description.length > 160) {
+      fail(`${displayPath}: meta description must be 80–160 characters, got ${description.length}`);
+    }
+  }
+}
+
+function validateStaticSocialMetadata() {
+  for (const sitePage of pages) {
+    const html = readFileSync(resolve(repoRoot, sitePage.path), 'utf8');
+    validateSocialMetadataForHtml(
+      sitePage.path,
+      html,
+      expectedCanonicalHref(sitePage.path),
+      { enforceSnippetLength: true },
+    );
   }
 }
 
@@ -2539,7 +2627,9 @@ function decodeHtmlAttribute(value) {
     .replace(/&amp;/g, '&')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'");
+    .replace(/&apos;/g, "'")
+    .replace(/&mdash;/g, '—')
+    .replace(/&ndash;/g, '–');
 }
 
 function hrefPathOnly(href) {
@@ -3040,6 +3130,7 @@ function validateGeneratedDocsArtifacts() {
   for (const expected of generatedDocsPages) {
     const htmlPath = resolve(repoRoot, expected.path);
     const html = readFileSync(htmlPath, 'utf8');
+    validateSocialMetadataForHtml(expected.path, html, expected.canonical);
     const missingTerms = missingNormalizedTerms(normalizedHtmlText(html), expected.terms);
     if (missingTerms.length > 0) {
       fail(`${expected.path}: generated documentation content missing terms: ${missingTerms.join(', ')}`);
@@ -3237,6 +3328,7 @@ async function runSmoke() {
   validateReadmeStartupBanner();
   validateReadmeMedia();
   validateCurrentPerformancePositioning();
+  validateStaticSocialMetadata();
   validateReadmeColdReaderCoverage();
   validateReadmeImageReferences();
   validateReadmeQuickStartPaths();

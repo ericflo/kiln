@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
+    "build:social": "node render-social-preview.mjs",
     "build:utilities": "tailwindcss -i tailwind.css -o ../../docs/site/css/utilities.css --content '../../docs/site/**/*.html' --minify",
     "test": "node --test test/*.test.mjs"
   },
