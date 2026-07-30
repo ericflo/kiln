@@ -712,7 +712,12 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
         </div>
       </div>
       <figure class="card mt-6 overflow-hidden">
-        <img src="assets/server-ui-dashboard.webp" width="2880" height="3466" loading="lazy" decoding="async" alt="Kiln dashboard showing server status, adapters, training, and quick inference controls" class="w-full h-auto block">
+        <img src="assets/server-ui-dashboard.webp"
+             srcset="assets/server-ui-dashboard-720.webp 720w, assets/server-ui-dashboard-1440.webp 1440w, assets/server-ui-dashboard.webp 2880w"
+             sizes="(max-width: 760px) calc(100vw - 32px), 960px"
+             width="2880" height="3466" loading="lazy" decoding="async"
+             alt="Kiln dashboard showing server status, adapters, training, and quick inference controls"
+             class="w-full h-auto block">
         <figcaption class="px-5 py-3 text-sm" style="color: var(--fg-mute);">Use the dashboard as your status checkpoint before starting adapter or training workflows.</figcaption>
       </figure>
       <p class="text-sm mt-4" style="color: var(--fg-mute);">
