@@ -200,6 +200,14 @@ test('build copies the static site and emits complete deterministic docs', async
 
   const configuration = await readFile(resolve(first, 'docs/configuration/index.html'), 'utf8');
   assert.match(configuration, /<link rel="canonical" href="https:\/\/example\.test\/kiln\/docs\/configuration\/">/);
+  assert.match(configuration, /<meta name="theme-color" content="#0a0908">/);
+  assert.match(configuration, /<meta property="og:title" content="Configuration — Kiln Documentation">/);
+  assert.match(configuration, /<meta property="og:url" content="https:\/\/example\.test\/kiln\/docs\/configuration\/">/);
+  assert.match(configuration, /<meta property="og:image" content="https:\/\/example\.test\/kiln\/assets\/og-image-v3\.png">/);
+  assert.match(configuration, /<meta property="og:image:width" content="1200">/);
+  assert.match(configuration, /<meta property="og:image:height" content="630">/);
+  assert.match(configuration, /<meta name="twitter:card" content="summary_large_image">/);
+  assert.match(configuration, /<meta name="twitter:image:alt" content="Kiln — Serve it\. Teach it\. Watch it get better\./);
   assert.match(configuration, /<h1 id="original-configuration-title">Configuration<\/h1>/);
   assert.match(configuration, /href="\.\.\/guide\/#deep-dive"/);
   assert.match(configuration, /src="\.\.\/_assets\/docs\/diagram\.png"/);

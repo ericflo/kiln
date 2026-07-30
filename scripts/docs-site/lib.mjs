@@ -781,6 +781,9 @@ function renderTopbar(manifest, depth) {
 
 function pageHead({ manifest, title, description, canonical, depth }) {
   const rootPrefix = depth === 'hub' ? '..' : '../..';
+  const socialTitle = `${title} — Kiln Documentation`;
+  const socialImage = `${manifest.site.base_url}/assets/og-image-v3.png`;
+  const socialImageAlt = 'Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.';
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -788,9 +791,30 @@ function pageHead({ manifest, title, description, canonical, depth }) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${escapeHtml(title)} &mdash; Kiln Documentation</title>
   <meta name="description" content="${escapeHtml(description)}">
+  <meta name="theme-color" content="#0a0908">
+  <meta name="color-scheme" content="dark">
   <link rel="canonical" href="${escapeHtml(canonical)}">
   <link rel="icon" type="image/svg+xml" href="${rootPrefix}/assets/favicon.svg">
   <link rel="alternate icon" type="image/png" href="${rootPrefix}/assets/logo.png">
+  <link rel="apple-touch-icon" href="${rootPrefix}/assets/logo.png">
+
+  <meta property="og:title" content="${escapeHtml(socialTitle)}">
+  <meta property="og:description" content="${escapeHtml(description)}">
+  <meta property="og:type" content="website">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:site_name" content="Kiln">
+  <meta property="og:url" content="${escapeHtml(canonical)}">
+  <meta property="og:image" content="${escapeHtml(socialImage)}">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="${escapeHtml(socialImageAlt)}">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="${escapeHtml(socialTitle)}">
+  <meta name="twitter:description" content="${escapeHtml(description)}">
+  <meta name="twitter:image" content="${escapeHtml(socialImage)}">
+  <meta name="twitter:image:alt" content="${escapeHtml(socialImageAlt)}">
+
   <link rel="stylesheet" href="${rootPrefix}/css/docs.css">
 </head>`;
 }
