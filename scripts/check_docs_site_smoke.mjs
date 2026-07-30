@@ -2192,7 +2192,10 @@ function validateGrpoDemoPayloadCue() {
 function validateLandingDesktopVersionSplitCue() {
   const index = readFileSync(resolve(repoRoot, 'docs/site/index.html'), 'utf8');
   const requiredTerms = [
-    'Signed releases are available',
+    'Provenance-attested release archives are available',
+    'macOS binary is also signed',
+    'notarized',
+    'newest provenance-attested server release',
     'Linux CUDA',
     'ROCm',
     'Vulkan',
@@ -2203,6 +2206,9 @@ function validateLandingDesktopVersionSplitCue() {
   ];
   for (const term of requiredTerms) {
     assertIncludes(index, term, 'docs/site/index.html: release-platform cue');
+  }
+  if (index.includes('Signed releases are available')) {
+    fail('docs/site/index.html: release copy must distinguish provenance attestation from platform code signing');
   }
 }
 
@@ -2238,6 +2244,19 @@ function validateQuickstartDesktopVersionSplitCue() {
     assertIncludes(quickstart, assetLink, 'docs/site/quickstart.html: direct Desktop installer link');
   }
   assertIncludes(quickstart, 'class="install-alternatives"', 'docs/site/quickstart.html: advanced installer disclosure');
+  const releaseIntegrityTerms = [
+    'Release integrity',
+    'Verify provenance before extraction',
+    'Sigstore-backed GitHub build-provenance',
+    'macOS binary is also code-signed',
+    'Linux and Windows archives are intentionally not platform code-signed',
+    'gh attestation verify kiln-linux-cuda.tar.gz',
+    '--repo ericflo/kiln',
+    '--signer-workflow ericflo/kiln/.github/workflows/server-release.yml',
+  ];
+  for (const term of releaseIntegrityTerms) {
+    assertIncludes(quickstart, term, 'docs/site/quickstart.html: server release integrity cue');
+  }
   assertIncludes(quickstart, 'Four checkpoints. One working endpoint.', 'docs/site/quickstart.html: first-success path');
 }
 

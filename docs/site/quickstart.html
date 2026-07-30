@@ -203,6 +203,24 @@
       font-weight: 500;
     }
     .install-alternatives .install-grid { padding: 1rem; }
+    .release-verification {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: minmax(0, 0.85fr) minmax(22rem, 1.15fr);
+      gap: 1.25rem;
+      align-items: center;
+      border-color: rgba(74, 222, 128, 0.24);
+      background:
+        linear-gradient(135deg, rgba(74, 222, 128, 0.055), transparent 48%),
+        var(--bg-soft-2);
+    }
+    .release-verification p { color: var(--fg-dim); }
+    .release-verification pre { margin: 0; }
+    .release-verification > *,
+    .release-verification .copy-code-shell {
+      min-width: 0;
+      max-width: 100%;
+    }
     .quickstart-path {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -338,6 +356,7 @@
     }
     @media (max-width: 760px) {
       .install-card-recommended { grid-template-columns: 1fr; }
+      .release-verification { grid-template-columns: 1fr; }
       .quickstart-path { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
   </style>
@@ -503,6 +522,24 @@ tar -xzf kiln-macos.tar.gz</code></pre>
 curl.exe -L -o kiln-windows.zip `
   "https://github.com/ericflo/kiln/releases/download/kiln-v$KilnVersion/kiln-$KilnVersion-x86_64-pc-windows-msvc-cuda124.zip"
 Expand-Archive .\kiln-windows.zip -DestinationPath .\kiln</code></pre>
+        </div>
+        <div class="install-card release-verification">
+          <div>
+            <p class="label mb-2">Release integrity</p>
+            <h3 class="font-semibold mb-2">Verify provenance before extraction</h3>
+            <p class="text-sm">
+              Every server archive has a SHA-256 file and a Sigstore-backed GitHub build-provenance
+              attestation from the release workflow. The macOS binary is also code-signed and
+              notarized; Linux and Windows archives are intentionally not platform code-signed.
+            </p>
+            <p class="text-sm mt-3">
+              Install the <a href="https://cli.github.com/manual/gh_attestation_verify">GitHub CLI</a>,
+              then replace the example filename with the archive you downloaded.
+            </p>
+          </div>
+<pre class="text-sm" tabindex="0" aria-label="Verify Kiln release provenance"><code>gh attestation verify kiln-linux-cuda.tar.gz \
+  --repo ericflo/kiln \
+  --signer-workflow ericflo/kiln/.github/workflows/server-release.yml</code></pre>
         </div>
           </div>
         </details>

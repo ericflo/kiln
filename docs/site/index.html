@@ -344,9 +344,9 @@
           <span class="eyebrow eyebrow--accent">Run it locally</span>
           <h2>One binary.<br>One model path.<br>One endpoint.</h2>
           <p>
-            Signed releases are available for Linux CUDA, ROCm, and Vulkan; Apple Silicon
-            Metal; and Windows CUDA. The full quickstart covers drivers, Docker, Desktop,
-            and every backend.
+            Provenance-attested release archives are available for Linux CUDA, ROCm, and
+            Vulkan; Apple Silicon Metal; and Windows CUDA. The macOS binary is also signed
+            and notarized. The full quickstart covers drivers, Docker, Desktop, and every backend.
           </p>
           <div class="install-actions">
             <a class="btn btn-primary btn-lg" href="quickstart.html">Choose your platform</a>
@@ -360,7 +360,7 @@
             <span class="code-title">linux · cuda 12.4</span>
             <button class="copy-btn" type="button" data-target="home-install-code" aria-label="Copy install commands">copy</button>
           </div>
-<pre id="home-install-code" tabindex="0" aria-label="Kiln installation commands"><code># Resolve the newest signed server release
+<pre id="home-install-code" tabindex="0" aria-label="Kiln installation commands"><code># Resolve the newest provenance-attested server release
 KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest \
   | sed -n 's/.*"tag_name": "kiln-v\([^"]*\)".*/\1/p')
 
