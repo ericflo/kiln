@@ -17,6 +17,7 @@ pub struct VulkanComputeCapabilities {
     pub max_per_stage_descriptor_storage_buffers: u32,
     pub max_descriptor_set_storage_buffers: u32,
     pub max_storage_buffer_range: u64,
+    pub supports_compute_subgroup_basic_arithmetic: bool,
     pub has_coherent_device_local_host_visible_memory: bool,
     pub host_visible_staging_is_cached: bool,
 }
@@ -197,10 +198,10 @@ impl VulkanKernelPolicy {
             push_constant_bytes: 28,
         });
         let flash_prefill = capabilities.supports_shader(VulkanShaderRequirements {
-            local_size: [128, 1, 1],
-            shared_memory_bytes: 512,
-            storage_buffer_bindings: 4,
-            push_constant_bytes: 24,
+            local_size: [256, 1, 1],
+            shared_memory_bytes: 1024,
+            storage_buffer_bindings: 5,
+            push_constant_bytes: 20,
         });
         let linear_rows4 = capabilities.supports_shader(VulkanShaderRequirements {
             local_size: [32, 4, 1],
@@ -459,7 +460,7 @@ mod tests {
 
     fn capabilities() -> VulkanComputeCapabilities {
         VulkanComputeCapabilities {
-            api_version: 0,
+            api_version: ash::vk::make_api_version(0, 1, 2, 0),
             max_compute_work_group_count: [65_535; 3],
             max_compute_work_group_invocations: 1024,
             max_compute_work_group_size: [1024, 1024, 64],
@@ -468,6 +469,7 @@ mod tests {
             max_per_stage_descriptor_storage_buffers: 32,
             max_descriptor_set_storage_buffers: 32,
             max_storage_buffer_range: u32::MAX as u64,
+            supports_compute_subgroup_basic_arithmetic: true,
             has_coherent_device_local_host_visible_memory: false,
             host_visible_staging_is_cached: true,
         }
@@ -497,6 +499,8 @@ mod tests {
     #[test]
     fn standard_minimum_device_keeps_compatible_routes_only() {
         let mut caps = capabilities();
+        caps.api_version = ash::vk::make_api_version(0, 1, 0, 0);
+        caps.supports_compute_subgroup_basic_arithmetic = false;
         caps.max_compute_work_group_invocations = 128;
         caps.max_compute_work_group_size = [128, 128, 64];
         caps.max_compute_shared_memory_size = 16 * 1024;
@@ -504,7 +508,7 @@ mod tests {
         caps.max_descriptor_set_storage_buffers = 4;
 
         let policy = VulkanKernelPolicy::from_capabilities(caps);
-        assert!(policy.flash_attn_prefill_enabled);
+        assert!(!policy.flash_attn_prefill_enabled);
         assert!(policy.linear_decode_bf16w_rows4);
         assert!(policy.linear_decode_bf16w_rows8);
         assert!(policy.mlp_bf16_gate_up_rows4);
@@ -558,6 +562,7 @@ mod tests {
             max_per_stage_descriptor_storage_buffers: 1_048_576,
             max_descriptor_set_storage_buffers: 1_048_576,
             max_storage_buffer_range: u32::MAX as u64,
+            supports_compute_subgroup_basic_arithmetic: true,
             has_coherent_device_local_host_visible_memory: false,
             host_visible_staging_is_cached: true,
         };

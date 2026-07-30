@@ -8,13 +8,17 @@
   shared-memory budget, descriptor and push-constant limits, and memory
   topology. Shader legality has narrow per-capability fallbacks; device names,
   vendor IDs, device IDs, PCI identity, and driver names are not policy inputs.
+  Instance creation now negotiates the loader API up to Vulkan 1.2 instead of
+  unconditionally requesting 1.2. Non-subgroup shaders target Vulkan 1.0;
+  the three subgroup-arithmetic tiled attention shaders target Vulkan 1.1 and
+  fall back to their Vulkan 1.0 untiled counterparts when unsupported.
   Host-visible recurrent state is selected only when a coherent,
   host-visible, device-local memory type exists, while ordinary staging keeps
   its cached host-visible type. Full all-route prewarm is skipped when the
   device cannot legally create the complete pipeline set, and compatible
   routes compile lazily instead. On the original recovery workload, the new
-  capability-derived policy retains 13.46 decode tok/s at 74.31 ms mean ITL
-  and 2.694 s prefill.
+  capability-derived policy retains 13.46 decode tok/s at 74.29 ms mean ITL
+  and 2.805 s prefill.
 
 ## kiln-v0.5.1 — 2026-07-30 — generic Vulkan recovery and usable docs
 

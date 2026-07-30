@@ -156,6 +156,13 @@ impl std::fmt::Debug for VulkanDevice {
 }
 
 impl VulkanDevice {
+    fn negotiated_instance_api_version(entry: &ash::Entry) -> Result<u32> {
+        let loader_version = unsafe { entry.try_enumerate_instance_version() }
+            .context("failed to query the Vulkan loader API version")?
+            .unwrap_or_else(|| vk::make_api_version(0, 1, 0, 0));
+        Ok(loader_version.min(vk::make_api_version(0, 1, 2, 0)))
+    }
+
     /// Cheap probe: check if Vulkan is available without creating a logical device.
     ///
     /// Creates a minimal Vulkan instance and enumerates physical devices.
@@ -181,11 +188,12 @@ impl VulkanDevice {
         };
 
         let policy = vulkan_device_policy();
+        let instance_api_version = Self::negotiated_instance_api_version(&entry)?;
 
         let app_info = vk::ApplicationInfo::default()
             .application_name(CStr::from_bytes_with_nul(b"Kiln Probe\0").unwrap())
             .engine_name(CStr::from_bytes_with_nul(b"Kiln\0").unwrap())
-            .api_version(vk::make_api_version(0, 1, 2, 0));
+            .api_version(instance_api_version);
 
         let validation_layer = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
         let mut layer_ptrs: Vec<*const i8> = Vec::new();
@@ -240,12 +248,13 @@ impl VulkanDevice {
     pub fn new() -> Result<Self> {
         let entry = unsafe { ash::Entry::load() }
             .map_err(|e| anyhow::anyhow!("failed to load Vulkan entry: {}", e))?;
+        let instance_api_version = Self::negotiated_instance_api_version(&entry)?;
 
         // Create instance
         let app_info = vk::ApplicationInfo::default()
             .application_name(CStr::from_bytes_with_nul(b"Kiln Vulkan Backend\0").unwrap())
             .engine_name(CStr::from_bytes_with_nul(b"Kiln\0").unwrap())
-            .api_version(vk::make_api_version(0, 1, 2, 0));
+            .api_version(instance_api_version);
 
         let policy = vulkan_device_policy();
 
@@ -308,6 +317,24 @@ impl VulkanDevice {
 
         // Get device properties (includes limits for shared-memory budget checks)
         let properties = unsafe { instance.get_physical_device_properties(physical_device) };
+        let effective_api_version = properties.api_version.min(instance_api_version);
+        let supports_compute_subgroup_basic_arithmetic = if effective_api_version
+            >= vk::make_api_version(0, 1, 1, 0)
+        {
+            let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
+            let mut properties2 = vk::PhysicalDeviceProperties2::default().push_next(&mut subgroup);
+            unsafe {
+                instance.get_physical_device_properties2(physical_device, &mut properties2);
+            }
+            subgroup
+                .supported_stages
+                .contains(vk::ShaderStageFlags::COMPUTE)
+                && subgroup.supported_operations.contains(
+                    vk::SubgroupFeatureFlags::BASIC | vk::SubgroupFeatureFlags::ARITHMETIC,
+                )
+        } else {
+            false
+        };
         let vendor_id = properties.vendor_id;
         let device_name = extract_device_name(&properties.device_name);
         let max_compute_shared_memory_size =
@@ -357,7 +384,7 @@ impl VulkanDevice {
         let host_visible_properties =
             mem_props.memory_types[host_visible_mem_type as usize].property_flags;
         let compute_capabilities = VulkanComputeCapabilities {
-            api_version: properties.api_version,
+            api_version: effective_api_version,
             max_compute_work_group_count,
             max_compute_work_group_invocations: properties
                 .limits
@@ -372,6 +399,7 @@ impl VulkanDevice {
                 .limits
                 .max_descriptor_set_storage_buffers,
             max_storage_buffer_range: u64::from(properties.limits.max_storage_buffer_range),
+            supports_compute_subgroup_basic_arithmetic,
             has_coherent_device_local_host_visible_memory: device_local_host_visible_mem_type
                 .is_some(),
             host_visible_staging_is_cached: host_visible_properties
@@ -448,6 +476,8 @@ impl VulkanDevice {
             max_compute_shared_memory_size = compute_capabilities.max_compute_shared_memory_size,
             max_per_stage_descriptor_storage_buffers =
                 compute_capabilities.max_per_stage_descriptor_storage_buffers,
+            supports_compute_subgroup_basic_arithmetic =
+                compute_capabilities.supports_compute_subgroup_basic_arithmetic,
             has_coherent_device_local_host_visible_memory =
                 compute_capabilities.has_coherent_device_local_host_visible_memory,
             resident_decode = kernel_policy.resident_decode_enabled,

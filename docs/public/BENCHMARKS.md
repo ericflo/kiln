@@ -10,8 +10,10 @@ abstraction: it renamed the recovered, machine-derived route table as one
 global native default. The follow-up policy derives route legality from the
 selected Vulkan device's workgroup, shared-memory, descriptor, push-constant,
 and memory-topology capabilities. The original recovery workload remains in
-band at **13.46 decode tokens/s**, **74.31 ms mean inter-token latency**, and
-**2.694 s prefill**; device identity is not a policy input.
+band at **13.46 decode tokens/s**, **74.29 ms mean inter-token latency**, and
+**2.805 s prefill**; device identity is not a policy input. The common shader
+set targets Vulkan 1.0, while the three Vulkan 1.1 subgroup-tiled attention
+variants are selected only when the device reports those subgroup operations.
 
 On 2026-07-30, current `main` at commit `48fb3f7b` measured **0.142 decode
 tokens/s** on an AMD Radeon 8060S using the same short serial workload that

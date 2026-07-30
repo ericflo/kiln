@@ -362,6 +362,7 @@ mod policy_tests {
             max_per_stage_descriptor_storage_buffers: 32,
             max_descriptor_set_storage_buffers: 32,
             max_storage_buffer_range: u32::MAX as u64,
+            supports_compute_subgroup_basic_arithmetic: true,
             has_coherent_device_local_host_visible_memory: false,
             host_visible_staging_is_cached: true,
         });

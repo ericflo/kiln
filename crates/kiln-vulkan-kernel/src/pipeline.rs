@@ -7,16 +7,12 @@ fn compile_shader_command(
     glsl_path: &str,
     spv_path: &std::path::Path,
 ) -> std::io::Result<std::process::Output> {
-    // Subgroup-op shaders (vk_flash_sdpa_*) need SPIR-V 1.3, which
-    // requires `--target-env=vulkan1.1` for glslc / `--target-env
-    // vulkan1.1` for glslangValidator. Mirrors the same flag in
-    // `build.rs::compile_shader_command` so embedded + runtime
-    // compilation produce equivalent SPIR-V.
+    let target_env = shader_target_env(glsl_path);
     let glslc = std::process::Command::new("glslc")
         .arg(glsl_path)
         .arg("-o")
         .arg(spv_path)
-        .arg("--target-env=vulkan1.1")
+        .arg(format!("--target-env={target_env}"))
         .arg("-DFLOAT_TYPE=float")
         .arg("-DUSE_BFLOAT16=1")
         .arg("-DUSE_SUBGROUP_ADD=1")
@@ -32,12 +28,26 @@ fn compile_shader_command(
         .arg("-o")
         .arg(spv_path)
         .arg("--target-env")
-        .arg("vulkan1.1")
+        .arg(target_env)
         .arg("-DFLOAT_TYPE=float")
         .arg("-DUSE_BFLOAT16=1")
         .arg("-DUSE_SUBGROUP_ADD=1")
         .arg("-DUSE_SUBGROUP_CLUSTERED=1")
         .output()
+}
+
+fn shader_target_env(glsl_path: &str) -> &'static str {
+    match std::path::Path::new(glsl_path)
+        .file_stem()
+        .and_then(|name| name.to_str())
+    {
+        Some(
+            "vk_flash_sdpa_fwd_f32_offset"
+            | "vk_flash_sdpa_bwd_dq_f32_offset"
+            | "vk_flash_sdpa_bwd_dkdv_f32_offset",
+        ) => "vulkan1.1",
+        _ => "vulkan1.0",
+    }
 }
 
 // Include the build-time generated SPIR-V modules

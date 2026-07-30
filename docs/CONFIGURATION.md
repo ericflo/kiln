@@ -563,6 +563,12 @@ projected. There is no TOML, CLI, request, environment, device-name, vendor-ID,
 device-ID, driver-name, or PCI-ID override for its leaves. Device identity and
 machine qualification data do not alter product dispatch.
 
+Kiln negotiates the instance API exposed by the Vulkan loader, capped at 1.2.
+The common shader set targets Vulkan 1.0. Three tiled attention shaders use
+subgroup basic/arithmetic operations and target Vulkan 1.1; they are selected
+only when the physical device reports compute-stage support for both operations,
+otherwise the Vulkan 1.0 untiled shader remains active.
+
 Policy derivation checks each shader family's local workgroup geometry,
 invocation count, shared-memory requirement, storage-buffer binding count, and
 push-constant size against `VkPhysicalDeviceLimits`. Workload-dependent
