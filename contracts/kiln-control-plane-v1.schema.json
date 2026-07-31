@@ -3685,6 +3685,12 @@
         "progress": {
           "$ref": "#/$defs/OpenEnvEnvironmentEvalProgress"
         },
+        "baseline_stats": {
+          "$ref": "#/$defs/OpenEnvRolloutStats"
+        },
+        "candidate_stats": {
+          "$ref": "#/$defs/OpenEnvRolloutStats"
+        },
         "evidence": {
           "$ref": "#/$defs/OpenEnvEnvironmentEvalEvidence"
         },
@@ -4049,6 +4055,63 @@
       "x-kiln-rust-type": "kiln_train::OpenEnvRolloutProvenanceV1",
       "x-kiln-field-schema-status": "complete"
     },
+    "OpenEnvRolloutStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mean_episode_return",
+        "done_count",
+        "max_steps_count",
+        "invalid_model_action_count",
+        "protocol_error_count",
+        "recoverable_protocol_error_count",
+        "capacity_retry_count",
+        "total_environment_steps",
+        "total_model_tokens",
+        "mean_model_latency_ms"
+      ],
+      "properties": {
+        "mean_episode_return": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "min_episode_return": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "max_episode_return": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "done_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "max_steps_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "invalid_model_action_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "protocol_error_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "recoverable_protocol_error_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "capacity_retry_count": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "total_environment_steps": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "total_model_tokens": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "mean_model_latency_ms": {
+          "$ref": "#/$defs/FiniteNumber"
+        }
+      },
+      "description": "Artifact-published OpenEnv reward, terminal-outcome, recovery, environment-work, and policy-cost statistics.",
+      "x-kiln-rust-type": "OpenEnvRolloutStats",
+      "x-kiln-field-schema-status": "complete"
+    },
     "OpenEnvRunAdmission": {
       "type": "object",
       "additionalProperties": false,
@@ -4410,6 +4473,9 @@
         },
         "progress": {
           "$ref": "#/$defs/OpenEnvRunProgress"
+        },
+        "rollout_stats": {
+          "$ref": "#/$defs/OpenEnvRolloutStats"
         },
         "environments": {
           "type": "array",
@@ -8001,6 +8067,20 @@
               "rollouts_completed": 12,
               "rollouts_total": 32
             },
+            "rollout_stats": {
+              "mean_episode_return": 0.75,
+              "min_episode_return": 0.0,
+              "max_episode_return": 1.0,
+              "done_count": 31,
+              "max_steps_count": 1,
+              "invalid_model_action_count": 0,
+              "protocol_error_count": 0,
+              "recoverable_protocol_error_count": 2,
+              "capacity_retry_count": 1,
+              "total_environment_steps": 48,
+              "total_model_tokens": 384,
+              "mean_model_latency_ms": 125.5
+            },
             "environments": [
               {
                 "schema": "kiln.openenv-identity.v1",
@@ -8247,6 +8327,20 @@
           "groups_total": 8,
           "rollouts_completed": 12,
           "rollouts_total": 32
+        },
+        "rollout_stats": {
+          "mean_episode_return": 0.75,
+          "min_episode_return": 0.0,
+          "max_episode_return": 1.0,
+          "done_count": 31,
+          "max_steps_count": 1,
+          "invalid_model_action_count": 0,
+          "protocol_error_count": 0,
+          "recoverable_protocol_error_count": 2,
+          "capacity_retry_count": 1,
+          "total_environment_steps": 48,
+          "total_model_tokens": 384,
+          "mean_model_latency_ms": 125.5
         },
         "environments": [
           {

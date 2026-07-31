@@ -20,7 +20,7 @@ Every successful collection publishes three files:
    group's exact reset payload and reset observation, then every candidate's
    ordered action/result exchanges and final state. It links to the canonical
    JSONL digest instead of creating a second training representation.
-3. `openenv.rollout-summary.json` is the collection receipt. Summary v4 binds
+3. `openenv.rollout-summary.json` is the collection receipt. Summary v5 binds
    the other files plus the ordered, seed-free per-environment reset plan by
    SHA-256 and records schemas, controls, statistics, any immutable admitted
    training contract, and any submission. Offline verification still accepts
@@ -111,6 +111,23 @@ Restore the original bundle or recollect instead of editing retained artifacts.
 The summary is an audit receipt, not proof that an implementation behind the
 same URL has remained unchanged. Pin an environment image or binary and retain
 its deployment identity for serious experiments.
+
+### Operational rollout telemetry
+
+Once the three-file bundle is published, its `OpenEnvRolloutStats` projection
+is stored in `run.json` and returned as `rollout_stats`. It includes return
+mean/range, all four terminal outcomes, recoverable errors, capacity retries,
+environment steps, model tokens, and mean model latency. Paired held-out status
+uses the same type as `baseline_stats` and `candidate_stats`. CLI follow and the
+dashboard therefore show the same statistics that offline verification binds.
+
+Prometheus accumulates published collections as
+`kiln_openenv_episode_terminations_total{termination="done"|"max_steps"|"invalid_model_action"|"protocol_error"}`
+plus recoverable-error, capacity-retry, environment-step, model-token, and
+model-latency totals. These are closed global dimensions: environment URLs,
+names, adapters, credentials, and run IDs never become labels. Per-run return
+values remain in bounded status and receipts rather than creating unsafe metric
+cardinality.
 
 ### Authentication boundary
 

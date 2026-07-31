@@ -1781,6 +1781,9 @@ fn print_openenv_server_run(run: &Value) {
     {
         println!("  Submission: retry key {key}");
     }
+    if let Some(stats) = run.get("rollout_stats") {
+        print_openenv_rollout_stats("Rollouts", stats);
+    }
     if let Some(contract) = run.get("training_contract") {
         let config = contract.get("effective_config").unwrap_or(&Value::Null);
         let optimizer = config
@@ -1902,6 +1905,12 @@ fn print_openenv_server_run(run: &Value) {
         println!(
             "  Environment eval: {eval_state} · {groups_done}/{groups_total} held-out seed groups"
         );
+        if let Some(stats) = evaluation.get("baseline_stats") {
+            print_openenv_rollout_stats("Baseline rollouts", stats);
+        }
+        if let Some(stats) = evaluation.get("candidate_stats") {
+            print_openenv_rollout_stats("Candidate rollouts", stats);
+        }
         if let Some(evidence) = evaluation.get("evidence") {
             println!(
                 "    return {:.6} → {:.6} ({:+.6}) · {} seed groups improved / {} regressed / {} tied · exact p={:.6}",
@@ -1995,6 +2004,58 @@ fn print_openenv_server_run(run: &Value) {
             );
         }
     }
+}
+
+fn print_openenv_rollout_stats(label: &str, stats: &Value) {
+    let mean = stats
+        .get("mean_episode_return")
+        .and_then(Value::as_f64)
+        .unwrap_or_default();
+    let range = stats
+        .get("min_episode_return")
+        .and_then(Value::as_f64)
+        .zip(stats.get("max_episode_return").and_then(Value::as_f64))
+        .map(|(min, max)| format!(" · range {min:.6}…{max:.6}"))
+        .unwrap_or_default();
+    println!(
+        "  {label}: mean return {mean:.6}{range} · {} done · {} max steps · {} invalid actions · {} protocol errors",
+        stats.get("done_count").and_then(Value::as_u64).unwrap_or(0),
+        stats
+            .get("max_steps_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        stats
+            .get("invalid_model_action_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        stats
+            .get("protocol_error_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+    );
+    println!(
+        "  {label} work: {} environment steps · {} model tokens · {:.3} ms mean model latency · {} recoverable errors · {} capacity retries",
+        stats
+            .get("total_environment_steps")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        stats
+            .get("total_model_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        stats
+            .get("mean_model_latency_ms")
+            .and_then(Value::as_f64)
+            .unwrap_or_default(),
+        stats
+            .get("recoverable_protocol_error_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        stats
+            .get("capacity_retry_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+    );
 }
 
 fn openenv_rollout_options(args: &OpenEnvRolloutArgs) -> OpenEnvRolloutOptions {

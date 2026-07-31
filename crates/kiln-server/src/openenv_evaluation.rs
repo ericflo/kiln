@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::openenv_cli::{
     OpenEnvCollectionControl, OpenEnvCollectionProgress, OpenEnvPolicyTransport,
-    OpenEnvRolloutOptions, OpenEnvRolloutRecord, collect_openenv_rollouts_with_policy,
-    write_openenv_outputs,
+    OpenEnvRolloutOptions, OpenEnvRolloutRecord, OpenEnvRolloutStats,
+    collect_openenv_rollouts_with_policy, write_openenv_outputs,
 };
 use crate::state::AppState;
 
@@ -156,6 +156,10 @@ pub struct OpenEnvEnvironmentEvalStatus {
     pub candidate: OpenEnvPolicyIdentity,
     pub progress: OpenEnvEnvironmentEvalProgress,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_stats: Option<OpenEnvRolloutStats>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_stats: Option<OpenEnvRolloutStats>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<OpenEnvEnvironmentEvalEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<OpenEnvEnvironmentEvalOutcome>,
@@ -182,6 +186,8 @@ pub struct OpenEnvEnvironmentEvalReceipt {
 #[derive(Debug)]
 pub(crate) struct OpenEnvEnvironmentEvalCollection {
     pub evidence: OpenEnvEnvironmentEvalEvidence,
+    pub baseline_stats: OpenEnvRolloutStats,
+    pub candidate_stats: OpenEnvRolloutStats,
 }
 
 pub(crate) type OpenEnvEnvironmentEvalProgressCallback =
@@ -330,7 +336,11 @@ pub(crate) async fn collect_environment_evaluation(
         &candidate.summary.rollouts,
         gate,
     )?;
-    Ok(OpenEnvEnvironmentEvalCollection { evidence })
+    Ok(OpenEnvEnvironmentEvalCollection {
+        evidence,
+        baseline_stats: baseline.summary.stats,
+        candidate_stats: candidate.summary.stats,
+    })
 }
 
 fn ensure_paired_environment_replays(

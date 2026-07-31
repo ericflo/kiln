@@ -724,6 +724,26 @@ def build_openenv_types() -> None:
         "Live bounded progress for the baseline or candidate half of paired evaluation.",
     )
     add_object(
+        "OpenEnvRolloutStats",
+        "OpenEnvRolloutStats",
+        {
+            "mean_episode_return": ref("FiniteNumber"),
+            "min_episode_return": ref("FiniteNumber"),
+            "max_episode_return": ref("FiniteNumber"),
+            "done_count": ref("NonNegativeInteger"),
+            "max_steps_count": ref("NonNegativeInteger"),
+            "invalid_model_action_count": ref("NonNegativeInteger"),
+            "protocol_error_count": ref("NonNegativeInteger"),
+            "recoverable_protocol_error_count": ref("NonNegativeInteger"),
+            "capacity_retry_count": ref("NonNegativeInteger"),
+            "total_environment_steps": ref("NonNegativeInteger"),
+            "total_model_tokens": ref("NonNegativeInteger"),
+            "mean_model_latency_ms": ref("FiniteNumber"),
+        },
+        "Artifact-published OpenEnv reward, terminal-outcome, recovery, environment-work, and policy-cost statistics.",
+        optional=("min_episode_return", "max_episode_return"),
+    )
+    add_object(
         "OpenEnvEnvironmentEvalStatus",
         "OpenEnvEnvironmentEvalStatus",
         {
@@ -734,12 +754,14 @@ def build_openenv_types() -> None:
             "baseline": ref("OpenEnvPolicyIdentity"),
             "candidate": ref("OpenEnvPolicyIdentity"),
             "progress": ref("OpenEnvEnvironmentEvalProgress"),
+            "baseline_stats": ref("OpenEnvRolloutStats"),
+            "candidate_stats": ref("OpenEnvRolloutStats"),
             "evidence": ref("OpenEnvEnvironmentEvalEvidence"),
             "outcome": ref("OpenEnvEnvironmentEvalOutcome"),
             "verdict": ref("String"),
         },
         "Authoritative paired held-out environment evaluation status and promotion result.",
-        optional=("evidence", "outcome", "verdict"),
+        optional=("baseline_stats", "candidate_stats", "evidence", "outcome", "verdict"),
     )
     add_object(
         "OpenEnvArtifact",
@@ -975,6 +997,7 @@ def build_openenv_types() -> None:
             "admission": ref("OpenEnvRunAdmission"),
             "finished_unix_ms": ref("NonNegativeInteger"),
             "progress": ref("OpenEnvRunProgress"),
+            "rollout_stats": ref("OpenEnvRolloutStats"),
             "environments": array(ref("OpenEnvIdentity")),
             "artifacts": array(ref("OpenEnvArtifact")),
             "training_job_id": ref("String"),
@@ -990,6 +1013,7 @@ def build_openenv_types() -> None:
         optional=(
             "admission",
             "finished_unix_ms",
+            "rollout_stats",
             "environments",
             "artifacts",
             "training_job_id",
@@ -1867,6 +1891,20 @@ def build_examples() -> dict[str, list[Any]]:
             }],
         },
     }
+    openenv_rollout_stats = {
+        "mean_episode_return": 0.75,
+        "min_episode_return": 0.0,
+        "max_episode_return": 1.0,
+        "done_count": 31,
+        "max_steps_count": 1,
+        "invalid_model_action_count": 0,
+        "protocol_error_count": 0,
+        "recoverable_protocol_error_count": 2,
+        "capacity_retry_count": 1,
+        "total_environment_steps": 48,
+        "total_model_tokens": 384,
+        "mean_model_latency_ms": 125.5,
+    }
     openenv_status = {
         "schema": "kiln.openenv-run.v5",
         "run_id": "80a26e21-8451-4a64-8666-890c06fd80bd",
@@ -1886,6 +1924,7 @@ def build_examples() -> dict[str, list[Any]]:
             "rollouts_completed": 12,
             "rollouts_total": 32,
         },
+        "rollout_stats": openenv_rollout_stats,
         "environments": [openenv_inspection["identity"]],
         "artifacts": [
             {

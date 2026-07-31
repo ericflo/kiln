@@ -133,7 +133,8 @@ OpenEnv is also native to the embedded dashboard and control plane. Use
 `kiln openenv start --request openenv-run.json --idempotency-key <attempt-key> --follow`; Kiln persists
 discovery and collection progress,
 canonical artifact links, native GRPO progress and loss, linked evaluation
-results, promotion-gate outcomes, failures, and cancellation across browser
+results, promotion-gate outcomes, artifact-bound rollout returns, terminal
+outcomes, recoveries, capacity retries, policy cost, failures, and cancellation across browser
 refreshes. Valid submissions enter a bounded FIFO when all configured OpenEnv
 workflow slots are occupied; CLI and dashboard expose live queue position,
 admission wait, immediate cancellation before execution, and safe restart of
@@ -168,6 +169,9 @@ retryability, operator hint, and exact OpenEnv protocol or HTTP evidence when
 available. API, CLI, dashboard, capability pipelines, and the fixed-cardinality
 `kiln_openenv_run_failures_total{stage,retryable}` metric all consume that
 diagnosis; the legacy `error` string remains only for compatibility.
+Prometheus also exports fixed-cardinality episode terminations, recoverable
+errors, capacity retries, environment steps, policy tokens, and aggregate model
+latency from the same published collection statistics shown by CLI and dashboard.
 
 ```bash
 # Inspect the environment's health, metadata, schemas, and content identity.

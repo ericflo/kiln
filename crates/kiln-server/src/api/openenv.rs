@@ -39,7 +39,7 @@ use crate::error::ApiError;
 use crate::openenv_cli::{
     MAX_OPENENV_TASK_PAGE_SIZE, OPENENV_TRAINING_CONTRACT_SCHEMA_V1,
     OPENENV_TRAINING_PREFLIGHT_SCHEMA_V1, OpenEnvCollectionControl, OpenEnvCollectionProgress,
-    OpenEnvPolicyTransport, OpenEnvRolloutOptions, OpenEnvRolloutSummary,
+    OpenEnvPolicyTransport, OpenEnvRolloutOptions, OpenEnvRolloutStats, OpenEnvRolloutSummary,
     OpenEnvTrainingCapacitySnapshot, OpenEnvTrainingContract, OpenEnvTrainingPreflightReceipt,
     OpenEnvTrainingPreflightRequest, collect_openenv_rollouts_with_policy, validate_options,
     write_openenv_outputs, write_summary_atomic,
@@ -70,6 +70,8 @@ const POST_EVAL_PUBLICATION_GRACE: Duration = Duration::from_secs(5);
 const POST_EVAL_GATE_TIMEOUT: Duration = Duration::from_secs(300);
 
 mod failure;
+#[cfg(test)]
+mod rollout_stats_tests;
 mod training_evidence;
 
 pub use failure::{
@@ -173,6 +175,8 @@ fn pending_environment_evaluation(
             rollouts_completed: 0,
             rollouts_total,
         },
+        baseline_stats: None,
+        candidate_stats: None,
         evidence: None,
         outcome: None,
         verdict: None,
@@ -371,6 +375,10 @@ pub struct OpenEnvRunStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_unix_ms: Option<u64>,
     pub progress: OpenEnvRunProgress,
+    /// Reward, outcome, recovery, and policy-cost statistics from the exact
+    /// artifact-published training collection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_stats: Option<OpenEnvRolloutStats>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub environments: Vec<OpenEnvIdentity>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -416,6 +424,7 @@ impl OpenEnvRunStatus {
             })
             && self.progress.groups_completed == 0
             && self.progress.rollouts_completed == 0
+            && self.rollout_stats.is_none()
             && self.environments.is_empty()
             && self.artifacts.is_empty()
             && self.training_job_id.is_none()
@@ -979,6 +988,7 @@ impl OpenEnvRunRegistry {
                 rollouts_completed: 0,
                 rollouts_total,
             },
+            rollout_stats: None,
             request,
             environments: Vec::new(),
             artifacts: Vec::new(),
@@ -2373,10 +2383,9 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
         &collection.replay,
         &collection.summary,
     )?;
-    state.metrics.openenv_episodes_collected.fetch_add(
-        u64::try_from(collection.summary.rollout_count).unwrap_or(u64::MAX),
-        Ordering::Relaxed,
-    );
+    state
+        .metrics
+        .record_openenv_rollout_stats(&collection.summary.stats);
 
     let artifacts = artifacts_for(run_id, &collection.summary)?;
     if request.kind == OpenEnvRunKind::Rollout {
@@ -2385,6 +2394,7 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
             status.finished_unix_ms = Some(now_unix_ms());
             status.progress.groups_completed = request.groups;
             status.progress.rollouts_completed = request.groups.saturating_mul(request.group_size);
+            status.rollout_stats = Some(collection.summary.stats.clone());
             status.environments = collection
                 .summary
                 .environments
@@ -2413,6 +2423,7 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
         status.finished_unix_ms = None;
         status.progress.groups_completed = request.groups;
         status.progress.rollouts_completed = request.groups.saturating_mul(request.group_size);
+        status.rollout_stats = Some(collection.summary.stats.clone());
         status.environments = collection
             .summary
             .environments
@@ -2583,6 +2594,8 @@ async fn run_openenv_environment_evaluation(
                 rollouts_completed: 0,
                 rollouts_total,
             },
+            baseline_stats: None,
+            candidate_stats: None,
             evidence: None,
             outcome: None,
             verdict: None,
@@ -2649,10 +2662,12 @@ async fn run_openenv_environment_evaluation(
             return Err(error);
         }
     };
-    state.metrics.openenv_episodes_collected.fetch_add(
-        u64::try_from(rollouts_total.saturating_mul(2)).unwrap_or(u64::MAX),
-        Ordering::Relaxed,
-    );
+    state
+        .metrics
+        .record_openenv_rollout_stats(&collection.baseline_stats);
+    state
+        .metrics
+        .record_openenv_rollout_stats(&collection.candidate_stats);
     if cancel.load(Ordering::Relaxed) {
         let _ = state.openenv_runs.update(run_id, |status| {
             if let Some(environment_evaluation) = status.environment_evaluation.as_mut() {
@@ -2775,6 +2790,8 @@ async fn run_openenv_environment_evaluation(
                 rollouts_completed: rollouts_total,
                 rollouts_total,
             },
+            baseline_stats: Some(collection.baseline_stats),
+            candidate_stats: Some(collection.candidate_stats),
             evidence: Some(collection.evidence),
             outcome: Some(outcome),
             verdict: Some(verdict),

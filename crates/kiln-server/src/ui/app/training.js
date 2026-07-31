@@ -1341,6 +1341,16 @@ function openEnvStateLabel(state) {
   return String(state || 'unknown').replaceAll('_', ' ');
 }
 
+function openEnvRolloutStatsLine(label, stats) {
+  if (!stats) return '';
+  const min = stats.min_episode_return;
+  const max = stats.max_episode_return;
+  const range = min != null && max != null
+    ? ` · range ${Number(min).toFixed(3)}…${Number(max).toFixed(3)}`
+    : '';
+  return `<div class="training-card-meta">${escapeHtml(label)} · mean return ${Number(stats.mean_episode_return || 0).toFixed(3)}${range} · ${Number(stats.done_count || 0).toLocaleString()} done · ${Number(stats.max_steps_count || 0).toLocaleString()} max steps · ${Number(stats.invalid_model_action_count || 0).toLocaleString()} invalid actions · ${Number(stats.protocol_error_count || 0).toLocaleString()} protocol errors · ${Number(stats.total_environment_steps || 0).toLocaleString()} steps · ${Number(stats.total_model_tokens || 0).toLocaleString()} policy tokens · ${Number(stats.mean_model_latency_ms || 0).toFixed(1)} ms mean model latency · ${Number(stats.recoverable_protocol_error_count || 0).toLocaleString()} recoveries · ${Number(stats.capacity_retry_count || 0).toLocaleString()} capacity retries</div>`;
+}
+
 function openEnvRunCard(run) {
   const state = String(run.state || 'unknown');
   const progress = run.progress || {};
@@ -1421,6 +1431,7 @@ function openEnvRunCard(run) {
   const trainingDetail = training
     ? `<div class="training-card-meta">Trainer · ${escapeHtml(String(training.state || 'unknown'))} · ${Math.round(Number(training.progress || 0) * 100)}%${training.current_loss != null ? ` · loss ${Number(training.current_loss).toFixed(4)}` : ''}${training.epoch != null ? ` · epoch ${Number(training.epoch).toLocaleString()}` : ''}</div>`
     : '';
+  const rolloutDetail = openEnvRolloutStatsLine('Training collection', run.rollout_stats);
   const trainingLineage = training?.training_data?.openenv || null;
   const lineageEnvironmentNames = Array.isArray(trainingLineage?.environments)
     ? trainingLineage.environments.map(environment => environment.environment_name).filter(Boolean).join(', ')
@@ -1440,6 +1451,10 @@ function openEnvRunCard(run) {
   const environmentDetail = environmentEvaluation
     ? `<div class="training-card-meta">Held-out environment · ${escapeHtml(String(environmentEvaluation.state || 'pending').replaceAll('_', ' '))}${environmentEvidence ? ` · return ${Number(environmentEvidence.baseline_mean_return).toFixed(3)} → ${Number(environmentEvidence.candidate_mean_return).toFixed(3)} (${Number(environmentEvidence.mean_return_improvement) >= 0 ? '+' : ''}${Number(environmentEvidence.mean_return_improvement).toFixed(3)}) · exact p=${Number(environmentEvidence.exact_sign_test_p_value).toFixed(4)}` : ''}</div>`
     : '';
+  const environmentStatsDetail = environmentEvaluation
+    ? openEnvRolloutStatsLine('Held-out baseline', environmentEvaluation.baseline_stats)
+      + openEnvRolloutStatsLine('Held-out candidate', environmentEvaluation.candidate_stats)
+    : '';
   const gateOutcome = environmentEvaluation?.outcome || training?.gate_outcome;
   const gate = gateOutcome
     ? `<span class="training-card-type">${escapeHtml(gateOutcome)}</span>`
@@ -1458,10 +1473,12 @@ function openEnvRunCard(run) {
     ${submissionDetail}
     ${contractDetail}
     ${admissionDetail}
+    ${rolloutDetail}
     ${trainingDetail}
     ${lineageDetail}
     ${evalDetail}
     ${environmentDetail}
+    ${environmentStatsDetail}
     <div class="training-card-progress">
       <div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
       <div class="training-stat"><span class="training-stat-num">${escapeHtml(statValue)}</span><span class="training-stat-label">${escapeHtml(statLabel)}</span></div>

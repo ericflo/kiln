@@ -99,6 +99,9 @@ kiln openenv rollout \
 
 Use `rollout` to inspect reward variance, compare policies, retain a batch for audit, or submit
 the JSONL later with `kiln train grpo`. It is canonical `AgenticGroup` JSONL.
+Persisted status, `status --follow`, and dashboard cards expose the published
+mean/range, terminal outcomes, recoveries, capacity retries, steps, policy
+tokens, and latency without requiring an artifact download.
 
 ### Verify and replay
 
@@ -206,6 +209,11 @@ dataset, replay, and summary each stay under 256 MiB.
 Only manifest-declared artifacts download; each request rechecks bytes and SHA-256.
 Exhaustion publishes no partial bundle. Pin deployments. See the
 [replay and recovery reference](OPENENV_REPLAY_REFERENCE.md) for artifact and drift boundaries.
+
+Prometheus accumulates published episode terminations, recoverable errors,
+capacity retries, environment steps, model tokens, and model latency with only
+closed labels. Per-run returns stay in status and receipts, avoiding endpoint,
+adapter, or run-ID metric cardinality.
 
 ## Failure and capacity semantics
 

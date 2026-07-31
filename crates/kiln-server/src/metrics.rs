@@ -3,6 +3,8 @@
 //! Uses atomic counters and gauges — no external dependencies.
 //! The `/metrics` endpoint renders all metrics in Prometheus text exposition format.
 
+mod openenv;
+
 use kiln_core::thinking_budget::ThinkingBudgetSource;
 use kiln_model::ExternalYieldSyncStats;
 use kiln_scheduler::PrefixCacheStats;
@@ -247,6 +249,12 @@ pub struct Metrics {
     /// ID, or protocol payload is ever admitted as a Prometheus label.
     openenv_run_failures: [AtomicU64; OPENENV_FAILURE_STAGES.len() * 2],
     pub openenv_episodes_collected: AtomicU64,
+    openenv_episode_terminations: [AtomicU64; 4],
+    openenv_recoverable_protocol_errors: AtomicU64,
+    openenv_capacity_retries: AtomicU64,
+    openenv_environment_steps: AtomicU64,
+    openenv_model_tokens: AtomicU64,
+    openenv_model_latency_us_total: AtomicU64,
     pub openenv_authenticated_inspections: AtomicU64,
     pub openenv_task_catalog_inspections_started: AtomicU64,
     pub openenv_task_catalog_inspections_completed: AtomicU64,
@@ -320,6 +328,12 @@ impl Metrics {
             openenv_runs_cancelled: AtomicU64::new(0),
             openenv_run_failures: std::array::from_fn(|_| AtomicU64::new(0)),
             openenv_episodes_collected: AtomicU64::new(0),
+            openenv_episode_terminations: std::array::from_fn(|_| AtomicU64::new(0)),
+            openenv_recoverable_protocol_errors: AtomicU64::new(0),
+            openenv_capacity_retries: AtomicU64::new(0),
+            openenv_environment_steps: AtomicU64::new(0),
+            openenv_model_tokens: AtomicU64::new(0),
+            openenv_model_latency_us_total: AtomicU64::new(0),
             openenv_authenticated_inspections: AtomicU64::new(0),
             openenv_task_catalog_inspections_started: AtomicU64::new(0),
             openenv_task_catalog_inspections_completed: AtomicU64::new(0),
@@ -3215,6 +3229,7 @@ impl Metrics {
                 self.openenv_episodes_collected.load(Ordering::Relaxed)
             ),
         );
+        openenv::render_rollout_metrics(self, &mut out);
         out.push_str("# HELP kiln_openenv_task_catalog_inspections_total Bounded OpenEnv Task API catalog inspections by lifecycle outcome.\n");
         out.push_str("# TYPE kiln_openenv_task_catalog_inspections_total counter\n");
         for (status, value) in [

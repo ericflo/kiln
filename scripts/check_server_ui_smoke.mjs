@@ -2136,6 +2136,20 @@ async function startServer({
           rollouts_completed: 8,
           rollouts_total: request.groups * request.group_size,
         },
+        rollout_stats: {
+          mean_episode_return: 0.625,
+          min_episode_return: -1,
+          max_episode_return: 1,
+          done_count: 6,
+          max_steps_count: 1,
+          invalid_model_action_count: 0,
+          protocol_error_count: 1,
+          recoverable_protocol_error_count: 2,
+          capacity_retry_count: 3,
+          total_environment_steps: 19,
+          total_model_tokens: 144,
+          mean_model_latency_ms: 12.5,
+        },
         environments: [],
         artifacts: [
           {
@@ -2199,6 +2213,34 @@ async function startServer({
             groups_total: request.environment_eval?.groups || 20,
             rollouts_completed: (request.environment_eval?.groups || 20) * (request.environment_eval?.group_size || 1),
             rollouts_total: (request.environment_eval?.groups || 20) * (request.environment_eval?.group_size || 1),
+          },
+          baseline_stats: {
+            mean_episode_return: 0.1,
+            min_episode_return: 0,
+            max_episode_return: 1,
+            done_count: 20,
+            max_steps_count: 0,
+            invalid_model_action_count: 0,
+            protocol_error_count: 0,
+            recoverable_protocol_error_count: 0,
+            capacity_retry_count: 0,
+            total_environment_steps: 20,
+            total_model_tokens: 80,
+            mean_model_latency_ms: 10,
+          },
+          candidate_stats: {
+            mean_episode_return: 0.8,
+            min_episode_return: 0,
+            max_episode_return: 1,
+            done_count: 20,
+            max_steps_count: 0,
+            invalid_model_action_count: 0,
+            protocol_error_count: 0,
+            recoverable_protocol_error_count: 1,
+            capacity_retry_count: 0,
+            total_environment_steps: 20,
+            total_model_tokens: 72,
+            mean_model_latency_ms: 9,
           },
           evidence: {
             policy_version: 'paired_return_sign_test_v1',
@@ -4960,6 +5002,8 @@ async function runSmoke(baseUrl, {
     await waitForPanelText(page, '#openenv-runs', /smoke-op[\s\S]*Retry key · [0-9a-f-]{36}/, 'OpenEnv run history should expose the persisted retry key');
     await waitForPanelText(page, '#openenv-runs', /smoke-op[\s\S]*Admitted contract · muon · rank 8 · policy base@bbbbbbbbbbbb · output openenv-agent · auto-load off/, 'OpenEnv run history should expose the immutable admitted trainer contract and behavior policy');
     await waitForPanelText(page, '#openenv-runs', /smoke-op[\s\S]*Execution admitted after 250 ms/, 'OpenEnv run history should retain admission wait evidence');
+    await waitForPanelText(page, '#openenv-runs', /Training collection · mean return 0\.625 · range -1\.000…1\.000 · 6 done · 1 max steps · 0 invalid actions · 1 protocol errors · 19 steps · 144 policy tokens · 12\.5 ms mean model latency · 2 recoveries · 3 capacity retries/, 'OpenEnv run history should expose artifact-bound rollout quality, recovery, and policy-cost statistics');
+    await waitForPanelText(page, '#openenv-runs', /Held-out baseline · mean return 0\.100[\s\S]*Held-out candidate · mean return 0\.800/, 'OpenEnv run history should expose both held-out policy collection statistics');
     await waitForPanelText(page, '#openenv-runs', /dataset[\s\S]*aaaaaaaaaaaa/, 'OpenEnv artifact controls should expose the manifest digest identity');
     await waitForPanelText(page, '#openenv-runs', /OpenEnv corpus · math-env · 2 groups · 4 rollouts · policy base@bbbbbbbbbbbb · seeds 7–8/, 'OpenEnv run history should expose admitted corpus and behavior-policy lineage without opening a second control plane');
     await waitForPanelText(page, '#openenv-runs', /train_receipt[\s\S]*adapter_manifest/, 'OpenEnv run history should expose retained native training evidence');

@@ -500,7 +500,8 @@ behavior adapter before GPU work.
 
 Server-owned runs are bounded by `[openenv]` policy and persisted below
 `<adapter_dir>/.openenv/runs/<run-id>/`. `run.json` records request, immutable
-training contract, discovery identity, progress, lifecycle state, artifacts, error, and optional training
+training contract, discovery identity, progress, artifact-bound rollout
+quality/recovery statistics, lifecycle state, artifacts, error, and optional training
 job. `max_active_runs` admits complete workflows in strict FIFO order; excess
 valid submissions remain bounded by `max_tracked_runs`, expose one-based queue
 position, stable admission sequence, and admission wait, and can be cancelled without touching an
@@ -551,7 +552,7 @@ backs off and opens a fresh socket under an explicit wait deadline.
 Reset configuration is either one shared object or an ordered object per
 environment. The collector removes any caller-supplied `seed`, inserts its
 deterministic group seed, and assigns whole groups round-robin. It requires at
-least one group per configured endpoint. Summary v4 hashes the ordered,
+least one group per configured endpoint. Summary v5 hashes the ordered,
 seed-free plan; offline verification reconstructs that plan from replay groups
 and rejects missing environments, per-environment drift, or a digest mismatch.
 
@@ -571,6 +572,13 @@ descriptor with exact length and digest headers. Disk drift therefore becomes
 a structured integrity failure, never an unverified training-data response.
 The CLI repeats the manifest, header, length, and digest checks rather than
 trusting either a guessed pathname or transport success.
+
+The exact summary statistics are projected into persisted run status rather
+than hidden behind an artifact download. CLI follow and dashboard cards expose
+return range, terminal outcomes, recoverable errors, capacity retries,
+environment steps, policy tokens, and latency for training and both paired-eval
+halves. `/metrics` accumulates the same work with only closed termination labels;
+environment URLs, adapter names, and run IDs never become metric dimensions.
 
 The boundary is intentionally bounded: redirects are disabled, discovery
 bodies and WebSocket frames have independent byte limits, client messages,
