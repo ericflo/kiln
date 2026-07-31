@@ -405,9 +405,9 @@ curl -fsS http://localhost:8420/v1/config | jq '.effective_configuration'</code>
         <h2 id="copy-paste-first-requests" class="text-2xl font-semibold mb-4">Copy-paste first requests</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
           Once Kiln is serving on <code>localhost:8420</code>, start with chat.
-          The SFT and GRPO examples require
-          <code>KILN_SERVER_SERVING_PROFILE=experimental</code> and a backend
-          whose runtime capability report admits the requested training workload.
+          The SFT and GRPO examples use the default <code>stable</code> profile and
+          require a backend whose runtime capability report admits the requested
+          training workload.
           Both examples leave the new adapter inactive so evaluation can decide
           whether it should be served.
         </p>
@@ -478,9 +478,9 @@ curl -fsS http://localhost:8420/v1/config | jq '.effective_configuration'</code>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
           After the first chat and training jobs work, these examples cover provenance-bound rollouts,
           text-only batch generation, adapter portability, adapter merging, per-request composition, and training-completion webhooks.
-          Upload, merge, and live composition are adapter mutations and therefore
-          require the <code>experimental</code> or drained
-          <code>maintenance</code> profile.
+          Upload, merge, and live composition are coordinated adapter mutations
+          supported by the default <code>stable</code> profile; use
+          <code>maintenance</code> only when inference must be drained.
         </p>
         <div class="grid gap-4">
           <section class="endpoint">
@@ -863,12 +863,10 @@ KILN_SERVER_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
         <div class="label mb-3">Adapters</div>
         <h2 id="lora-lifecycle" class="text-2xl font-semibold mb-4">LoRA lifecycle</h2>
         <p class="mb-4 leading-relaxed" style="color: var(--fg-dim);">
-          Adapter reads are available in every profile. Loading, unloading,
-          uploading, merging, deleting, or otherwise changing adapter weights
-          requires <code>experimental</code> or drained
-          <code>maintenance</code>. Kiln currently has no startup option for a
-          saved LoRA, so the default <code>stable</code> profile cannot serve or
-          evaluate one.
+          Adapter reads and coordinated loading, unloading, uploading, merging,
+          deleting, or otherwise changing adapter weights are available under
+          the default <code>stable</code> profile. <code>maintenance</code> performs
+          the same mutations with inference drained.
         </p>
         <div class="endpoint-list" style="color: var(--fg-dim);">
           <div class="endpoint"><span class="method">GET</span> <code>/v1/adapters</code> &mdash; list saved/available LoRA adapters, identify the active adapter, and report the exact loaded name/content revision.</div>
@@ -904,11 +902,11 @@ KILN_SERVER_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
         <div class="label mb-3">Training</div>
         <h2 id="training" class="text-2xl font-semibold mb-4">SFT, GRPO, OPD, status, and queue control</h2>
         <p class="mb-4 leading-relaxed" style="color: var(--fg-dim);">
-          The default <code>stable</code> serving profile rejects training and live weight transitions.
-          Use <code>experimental</code> for a controlled train, eval, and activation
-          loop. <code>maintenance</code> admits drained training but disables
-          generation and eval; its artifact remains inactive until a later
-          <code>experimental</code> process evaluates or loads it. GPU training
+          The default <code>stable</code> serving profile supports the complete
+          train, eval, and activation loop with coordinated live weight transitions.
+          <code>maintenance</code> admits drained training but disables generation
+          and eval; its artifact remains inactive until a later <code>stable</code>
+          process evaluates or loads it. GPU training
           takes exclusive accelerator ownership even though jobs are managed by
           a background queue. Native training is capability-gated: for example,
           the current hybrid Vulkan server rejects it before dataset admission
@@ -991,7 +989,7 @@ KILN_SERVER_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
     "num_steps": 1,
     "admission": {
       "supported": false,
-      "unavailable_reason": "step 1 (opd) is unavailable: serving profile `stable` prohibits training GPU ownership"
+      "unavailable_reason": "step 1 (opd) is unavailable: resident backend tuple does not support OPD training"
     }
   }]
 }</code></pre></div>
@@ -1195,8 +1193,8 @@ kiln openenv artifact &lt;run-id&gt; environment_eval_receipt --output receipt.j
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
           Run a registered or inline suite against one target, compare targets
           on shared sampling inputs, or bind post-training activation to held-out
-          evidence. Saved-adapter eval requires the <code>experimental</code>
-          profile; <code>maintenance</code> rejects eval admission. See the task-oriented
+          evidence. The default <code>stable</code> profile supports saved-adapter
+          eval; <code>maintenance</code> rejects eval admission. See the task-oriented
           <a href="evals.html">Evals guide</a> and generated <a href="docs/evals/">Eval guide</a>
           for complete request shapes, scorer behavior, and <code>kiln-eval</code> commands.
         </p>
@@ -1286,8 +1284,8 @@ kiln openenv artifact &lt;run-id&gt; environment_eval_receipt --output receipt.j
         <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>{
   "error": {
     "code": "serving_profile_conflict",
-    "message": "Serving profile `stable` prohibits live adapter weight transitions",
-    "hint": "Restart with KILN_SERVER_SERVING_PROFILE=experimental for controlled concurrent mutation, or KILN_SERVER_SERVING_PROFILE=maintenance for drained exclusive work."
+    "message": "Serving profile `maintenance` prohibits inference while drained work is active",
+    "hint": "Restart with the default stable profile for inference, evaluation, and coordinated live adapter transitions."
   }
 }</code></pre>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">

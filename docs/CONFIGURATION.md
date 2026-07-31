@@ -174,32 +174,19 @@ override it.
 
 | Profile | Inference | Training GPU ownership | Adapter weight transitions | Dynamic KV resize / allocator reclaim | Live graph capture | Exclusive behavior |
 |---|---|---|---|---|---|---|
-| `stable` | admitted | rejected | rejected | disabled | disabled | reject |
+| `stable` | admitted | allowed | allowed | enabled | enabled | writer priority |
 | `experimental` | admitted | allowed | allowed | enabled | enabled | writer priority |
 | `maintenance` | not admitted | allowed | allowed | enabled | disabled | drain, then exclusive |
 
-`memory.cuda_graphs = true` does not override the profile: the default `stable`
-profile selects eager-only model-runner options because live graph capture is
-disabled.
+The default `stable` profile is the normal full product: inference, training,
+adapter transitions, memory management, and guarded graph capture do not need
+a special opt-in. `experimental` is reserved for backend routes under an
+explicit correctness quarantine; it is not a faster user mode.
 
-Every value that activates experimental or maintenance-only execution is
-listed below. This is the complete profile-gated set, not a selection of
-examples. The JSON Schema attaches the same machine-readable
-`x-kiln-profile-gate` object to each field and expresses every gate as an
-executable `if`/`then` rule. `kiln config`, `kiln serve`, and the generated
-website therefore reject the same combinations. Domain settings stay in their
-owned sections; `server.serving_profile` is the single opt-in authority, so
-there is no parallel `[experimental]` namespace with duplicate controls.
+The only profile-gated configuration is an offline forced KV resize:
 
 | Field | Values requiring the profile | Required profile |
 |---|---|---|
-| **`accelerator.kt_api_mode`** | `all`, `disabled` | `experimental` |
-| **`accelerator.vulkan_validation`** | `true` | `experimental` |
-| **`accelerator.cuda_marlin_profile`** | `attention_mlp`, `attention_mlp_gdn` | `experimental` |
-| **`accelerator.rocm_synchronization_mode`** | `stream_ordered` | `experimental` |
-| **`accelerator.rocm_strided_batched_matmul_mode`** | `enabled` | `experimental` |
-| **`accelerator.rocm_bf16_matmul_output_mode`** | `native_bf16` | `experimental` |
-| **`accelerator.rocm_graph_mode`** | `warmup_then_eager`, `lazy_capture_replay` | `experimental` |
 | **`memory.kv_force_blocks`** | every positive integer | `maintenance` plus `memory.kv_autoscale = true` |
 
 `server.debug_model_state` is not an execution experiment: it only exposes the
@@ -220,19 +207,19 @@ do not re-read these public environment names.
 
 | TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
-| `accelerator.kt_api_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_KT_API_MODE` (implemented) | none | `auto`, `all`, or `disabled`, case-insensitive. `auto` enables the qualified kiln-tensor adapter routes while leaving the experimental generic matmul and paged-KV routes inactive. `all` enables every adapter route; `disabled` forces legacy fallbacks. The two explicit modes require `server.serving_profile = "experimental"`. The mode is resolved before accelerator execution, remains immutable for the process lifetime, and is reported with source attribution. Restart required. |
+| `accelerator.kt_api_mode` | string enum; `"auto"` | `KILN_ACCELERATOR_KT_API_MODE` (implemented) | none | `auto`, `all`, or `disabled`, case-insensitive. `auto` enables qualified routes, `all` enables every adapter route, and `disabled` forces legacy fallbacks. Restart required. |
 | `accelerator.full_attention_score_budget_mib` | unsigned integer MiB; `2048` | `KILN_ACCELERATOR_FULL_ATTENTION_SCORE_BUDGET_MIB` (implemented) | none | `64..=2048`. Immutable ceiling for exact full-attention materialized score and scratch geometry across CPU, CUDA, ROCm, Metal, and Vulkan model routes. ROCm online attention derives `min(value, 1024)` MiB while retaining fixed qualified 2048-query/4096-key tiles. Runtime memory observations remain fail-closed admission and reservation checks; they never resize the geometry or switch to smaller tiles during a request. Restart required. |
 | `accelerator.vulkan_device_index` | `"auto"` or unsigned integer; `"auto"` | `KILN_ACCELERATOR_VULKAN_DEVICE_INDEX` (implemented) | none | `auto` preserves automatic discrete-GPU preference and otherwise chooses the first enumerated Vulkan physical device. An integer strictly selects that zero-based Vulkan enumeration index. An unavailable index fails logical-device startup; it is never ignored or replaced with another device. The immutable selection is installed before Vulkan device creation and reported with source attribution. Restart required. |
-| `accelerator.vulkan_validation` | boolean; `false` | `KILN_ACCELERATOR_VULKAN_VALIDATION` (implemented) | none | `true` requires `server.serving_profile = "experimental"` and enables `VK_LAYER_KHRONOS_validation` when the Vulkan instance is created. Startup fails if the layer is not installed. This is not mutable per request or dispatch. Restart required. |
+| `accelerator.vulkan_validation` | boolean; `false` | `KILN_ACCELERATOR_VULKAN_VALIDATION` (implemented) | none | `true` enables `VK_LAYER_KHRONOS_validation` at startup and fails if the layer is unavailable. Restart required. |
 | `accelerator.cuda_kernel_profile` | string enum; `"native_default"` | `KILN_ACCELERATOR_CUDA_KERNEL_PROFILE` (implemented) | none | `native_default` enables the device-neutral subset of twenty-four CUDA model/backend routes and declines the GDN full-chunk multiblock route whose performance evidence covers only one GPU configuration. `portable_fallback` declines every owned route. The complete twenty-five-route set is installed before CUDA backend construction, immutable for the process lifetime, and reported with source attribution. Restart required. |
-| `accelerator.cuda_marlin_profile` | string enum; `"disabled"` | `KILN_ACCELERATOR_CUDA_MARLIN_PROFILE` (implemented) | none | `disabled`, `attention_mlp`, or `attention_mlp_gdn`, case-insensitive. `disabled` preserves BF16 projections. `attention_mlp` packs full-attention Q and every MLP projection as Marlin W4A16. `attention_mlp_gdn` also packs the quality-sensitive GDN output projection. Both non-default profiles require `server.serving_profile = "experimental"`. The selected weight layout is immutable after upload. Packing always uses the established parallel implementation. Restart required. |
+| `accelerator.cuda_marlin_profile` | string enum; `"disabled"` | `KILN_ACCELERATOR_CUDA_MARLIN_PROFILE` (implemented) | none | `disabled` preserves BF16 projections; `attention_mlp` and `attention_mlp_gdn` select immutable Marlin W4A16 layouts. Restart required. |
 | `accelerator.cuda_flash_backward_mode` | string enum; `"fast"` | `KILN_ACCELERATOR_CUDA_FLASH_BACKWARD_MODE` (implemented) | none | `fast` or `deterministic`, case-insensitive. `fast` preserves the established CUDA FlashAttention backward accumulation. `deterministic` selects split accumulation for exact replay and diagnosis. The mode is installed before model construction and cannot change between training jobs. Restart required. |
 | `accelerator.metal_kernel_profile` | string enum; `"native_default"` | `KILN_ACCELERATOR_METAL_KERNEL_PROFILE` (implemented) | none | `native_default` or `portable_fallback`, case-insensitive. `native_default` preserves forty-five of the forty-six Metal backend routes active before consolidation; custom LM-head argmax remains disabled by default. `portable_fallback` declines every owned route. The complete route set is installed before Metal backend construction, immutable for the process lifetime, and reported with source attribution. Restart required. |
-| `accelerator.rocm_synchronization_mode` | string enum; `"legacy_host_barriers"` | `KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE` (implemented) | none | `legacy_host_barriers` or `stream_ordered`, case-insensitive. `stream_ordered` requires `server.serving_profile = "experimental"`; other profiles fail startup rather than silently weakening the request. Restart required. |
-| `accelerator.rocm_strided_batched_matmul_mode` | string enum; `"disabled"` | `KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE` (implemented) | none | `disabled` uses one hipBLASLt operation per logical batch row and is the portable default. `enabled` selects strided batching and requires the experimental profile. The retired machine-shaped `auto` value is rejected. Restart required. |
-| `accelerator.rocm_bf16_matmul_output_mode` | string enum; `"f32_then_cast"` | `KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE` (implemented) | none | `f32_then_cast` is the portable default. `native_bf16` requires the experimental profile. The retired ROCm-version-shaped `auto` value is rejected. Restart required. |
-| `accelerator.rocm_kernel_profile` | string enum; `"portable_fallback"` | `KILN_ACCELERATOR_ROCM_KERNEL_PROFILE` (implemented) | none | `portable_fallback` is the only product value and declines all machine-qualified accelerated routes while retaining fixed correctness and bounded-work safeguards. The retired `qualified` and `experimental_multiblock` values fail startup. Historical route attribution is compiled only by the dedicated `hardware-qualification` example feature and is not server configuration. Restart required. |
-| `accelerator.rocm_graph_mode` | string enum; `"profile"` | `KILN_ACCELERATOR_ROCM_GRAPH_MODE` (implemented) | none | `profile`, `disabled`, `warmup_then_eager`, or `lazy_capture_replay`, case-insensitive. `profile` resolves to `disabled` under stable/maintenance and `lazy_capture_replay` under experimental. The two explicit non-disabled modes require the experimental profile. Restart required. |
+| `accelerator.rocm_synchronization_mode` | string enum; `"legacy_host_barriers"` | `KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE` (implemented) | none | `legacy_host_barriers` or `stream_ordered`, case-insensitive. Restart required. |
+| `accelerator.rocm_strided_batched_matmul_mode` | string enum; `"disabled"` | `KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE` (implemented) | none | `disabled` uses one operation per logical row; `enabled` selects strided batching. The retired `auto` value is rejected. Restart required. |
+| `accelerator.rocm_bf16_matmul_output_mode` | string enum; `"f32_then_cast"` | `KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE` (implemented) | none | `f32_then_cast` is the portable default; `native_bf16` explicitly requests native BF16 output. Restart required. |
+| `accelerator.rocm_kernel_profile` | string enum; `"native_default"` | `KILN_ACCELERATOR_ROCM_KERNEL_PROFILE` (implemented) | none | `native_default` enables native single-row and batched dynamic-length paged attention. `portable_fallback` is the explicit diagnostic route. The retired `qualified` and `experimental_multiblock` values fail startup. Restart required. |
+| `accelerator.rocm_graph_mode` | string enum; `"profile"` | `KILN_ACCELERATOR_ROCM_GRAPH_MODE` (implemented) | none | `profile` selects guarded lazy capture during serving and eager execution during maintenance. Explicit modes are startup-immutable. Restart required. |
 | `accelerator.rocm_graph_cache_entries` | unsigned integer; `8` | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES` (implemented) | none | `1..=64`. Bounds retained native graph entries in every product and embedding constructor. At saturation, admission reclaims idle owners first and then the minimum fair-LRU active entries while preserving one graph per active owner after the incoming candidate. Zero or unbounded capacities are rejected. Restart required. |
 | `accelerator.rocm_graph_cache_max_bytes` | unsigned integer bytes; `1073741824` (1 GiB) | `KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES` (implemented) | none | `67108864..=17179869184` (64 MiB through 16 GiB). Independently bounds requested physical bytes retained by graph-owned stable tensors, capture arenas, private-stream hipBLASLt workspaces, and owner slot state. Opaque HIP graph/exec/stream/event overhead is counted as objects and remains subject to live driver-pressure policy. Restart required. |
 
@@ -291,7 +278,7 @@ training. Use the complete profile; individual route combinations are not a
 supported product configuration.
 
 `accelerator.cuda_marlin_profile` owns the complete CUDA Marlin weight-layout
-choice. Both W4A16 profiles require `server.serving_profile = "experimental"`:
+choice:
 
 | Profile | Full-attention Q | MLP gate/up/down | GDN output | Packing |
 |---|---:|---:|---:|---:|
@@ -716,8 +703,7 @@ external-yield stream wait, so replay work is included.
 The portable defaults are `disabled` strided batching and `f32_then_cast`
 output. They select per-row GEMMs and F32 output followed by an on-device BF16
 cast without inspecting the device model or ROCm version. `enabled` and
-`native_bf16` are explicit experimental comparison routes and require
-`server.serving_profile = "experimental"`.
+`native_bf16` are explicit diagnostic comparison routes.
 
 The retired machine-shaped `auto` values fail parsing. The effective values
 are reported with source attribution by `kiln config`, `/v1/config`, health,
@@ -726,8 +712,9 @@ no matmul path reads process environment during execution.
 
 ### ROCm token-only LM-head qualification fixture
 
-Product execution uses `portable_fallback`, disables the W8 token-only LM-head
-routes, and retains the ordinary BF16 LM head. Historical W8/W8A8 route
+The default `native_default` profile disables the W8 token-only LM-head routes,
+as does `portable_fallback`; both retain the
+ordinary BF16 LM head. Historical W8/W8A8 route
 attribution is available only in the explicit `hardware-qualification` example
 build; it is not a server profile or environment-selectable product path.
 See [Local Hardware Qualification](qualification.md) for fixture behavior,
@@ -787,10 +774,9 @@ default.
   remains eager. It exists for controlled graph-state-machine comparisons.
 - `lazy_capture_replay` warms eagerly and may capture/replay eligible decode
   shapes while serving. Capture/fallback/replay state remains visible in
-  `/health`; use this only in the experimental profile.
-- `profile` is the recommended default because the serving profile remains the
-  authority: stable and maintenance stay eager, while experimental selects
-  lazy capture/replay.
+  `/health`.
+- `profile` is the recommended default: stable and development serving select
+  guarded lazy capture/replay, while drained maintenance stays eager.
 
 Entry count and retained bytes are independent hard limits. Byte accounting
 deduplicates physical ROCm allocations by device pointer, counts graph-stable
@@ -1175,7 +1161,7 @@ and transposed model weights. `kiln config` prints the same resolved path.
 | `memory.floor_gb` | finite number; `1.0` | `KILN_MEMORY_FLOOR_GB` (implemented) | none | Must be finite, non-negative, representable as bytes, and strictly smaller than the selected accelerator's effective capacity after `memory.gpu_memory_gb` is applied. Units are GiB. Accelerator startup rejects an equal or larger floor before model upload and reports both configured and effective byte values. The process-wide governor subtracts this additional floor, then outstanding soft reservations, from live free memory when computing allocation headroom. On unified-memory devices it is separate from the physical-memory reserve applied during safe-capacity detection. |
 | `memory.probe_ms` | unsigned integer; `500` | `KILN_MEMORY_PROBE_MS` (implemented) | none | Must be greater than zero. Sets the background memory-sampler cadence. Request, inference, health, and metrics paths read only the published sample and never run a driver/OS probe synchronously. Cached admission fails closed when the sample is older than `max(5000 ms, 4 * probe_ms)`, the latest probe failed, or a required sampler is not running. An explicit refresh after a material allocation or release bypasses the cadence. |
 | `memory.reclaim_mode` | string enum; `"off"` | `KILN_MEMORY_RECLAIM_MODE` (implemented) | none | Exactly `off`, `on-demand`, or `automatic`, case-insensitive with surrounding whitespace ignored. `off` prevents execution of registered allocator reclaim hooks; `on-demand` permits explicit pressure and allocation-retry reclaim calls; `automatic` also permits the background pressure monitor. The immutable serving profile remains authoritative: a profile with allocator reclaim disabled keeps the effective mode off and does not start the monitor. |
-| `memory.kv_autoscale` | boolean; `true` | `KILN_MEMORY_KV_AUTOSCALE` (implemented) | none | Requests the pressure-driven physical KV-cache control loop. The serving profile and backend remain authoritative: stable mode and backends without device-resident KV pressure report the request as unavailable rather than silently enabling mutation. `/health`, `/v1/config`, and the trusted debug state expose the request, effective state, bounded reason, and source. |
+| `memory.kv_autoscale` | boolean; `true` | `KILN_MEMORY_KV_AUTOSCALE` (implemented) | none | Requests the pressure-driven physical KV-cache control loop. Backends without device-resident KV pressure report the request as unavailable rather than silently enabling mutation. `/health`, `/v1/config`, and the trusted debug state expose the request, effective state, bounded reason, and source. |
 | `memory.kv_force_blocks` | unsigned integer; `0` (disabled) | `KILN_MEMORY_KV_FORCE_BLOCKS` (implemented) | none | A positive value requests one exact startup resize before the normal autoscaler loop. It requires `memory.kv_autoscale=true` and `server.serving_profile="maintenance"`; every other combination fails configuration validation. Zero disables the one-shot operation. The resize still uses full replacement-pool reservation, exclusive GPU ownership, graph invalidation, transactional publication, and typed `forced_configuration` attribution. This is an offline maintenance/qualification control, not a per-request tuning knob. |
 | `memory.kv_cache_fp8` | boolean; `false` | `KILN_MEMORY_KV_CACHE_FP8` (implemented) | none | Requests E4M3FN KV storage. Backend storage policy may reject or disable the request when unsupported. |
 | `memory.cuda_graphs` | boolean; `true` | `KILN_MEMORY_CUDA_GRAPHS` (implemented) | none | CUDA-only request. Non-CUDA backends ignore it, and a serving profile with live graph capture disabled selects eager-only execution regardless of this value. |

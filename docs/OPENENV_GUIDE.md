@@ -2,12 +2,11 @@
 
 OpenEnv is Kiln's native path from an interactive RL environment to a trained
 LoRA. The environment owns state and reward; Kiln owns policy, GRPO, and receipts.
-
 The shortest complete loop is:
 
 ```bash
-# Terminal 1: serve the model with training enabled.
-KILN_SERVER_SERVING_PROFILE=experimental KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
+# Terminal 1: serve the model. Stable admits training by default.
+KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
 
 # Terminal 2: start any OpenEnv-compatible environment on port 8990.
 # Use that environment implementation's normal server command.
@@ -117,8 +116,6 @@ kiln openenv replay --summary counter.rollout-summary.json
 action, result, and final state. Archive all three files together. See the
 [replay reference](OPENENV_REPLAY_REFERENCE.md) for drift and prefix semantics.
 
-Protected replay repeats aligned `--credential-env`; it matches auth method but permits rotation.
-
 ### Collect and train
 
 ```bash
@@ -225,57 +222,28 @@ end.
 
 ## Identity and artifacts
 
-Each rollout carries `kiln.openenv-rollout.v1`: environment, schema, reset,
-seed, outcome, and exact behavior policy. Native collection rejects policy
-drift, and malformed identity fails closed. After its last episode and before
-artifact derivation, collection re-reads health, metadata, environment names,
-OpenAPI version, and all schemas for every endpoint. Exact discovery equality
-is required. Persisted status exposes this as `revalidating`; drift returns
-`environment_identity_changed` at `identity_verification` and publishes no
-mixed-deployment corpus.
-
-Native GRPO lifts episodes into `kiln.openenv-training-data.v1`. Inline and
-JSONL validators require coherent group identity, rewards, schemas, and one
-behavior policy. Admission checks it against live model and adapter bytes;
-status, receipts, and manifests expose the result.
-
-JSONL trains; replay retains exchanges; summary binds config, stats, hashes,
-and submission. Collection charges each turn against a
-512 MiB aggregate retained-representation budget. Reset files are prebounded;
-dataset, replay, and summary each stay under 256 MiB.
-Only manifest-declared artifacts download; each request rechecks bytes and SHA-256.
-Exhaustion publishes no partial bundle. Final revalidation proves the deployment
-identity was equal at the collection boundaries, not that the URL will remain
-immutable later, so pin deployments. See the
-[replay and recovery reference](OPENENV_REPLAY_REFERENCE.md) for artifact and drift boundaries.
-
-Prometheus accumulates published episode terminations, recoverable errors,
-capacity retries, environment steps, model tokens, and model latency with only
-closed labels. Per-run returns stay in status and receipts, avoiding endpoint,
-adapter, or run-ID metric cardinality.
+Each rollout binds environment discovery, reset, seed, outcome, and exact
+behavior policy. Collection rejects policy drift and revalidates every
+endpoint after its last episode; discovery drift publishes no mixed-deployment
+corpus. Native GRPO validates coherent group identity and one behavior policy
+against live model and adapter bytes. JSONL trains, replay retains exchanges,
+and summary binds configuration, statistics, hashes, and submission. Artifacts
+are bounded, manifest-declared, and rehashed on download. Pin deployments: the
+final check proves boundary equality, not future URL immutability. See the
+[replay and recovery reference](OPENENV_REPLAY_REFERENCE.md) for full identity,
+artifact, metric, size, and drift contracts.
 
 ## Failure and capacity semantics
 
-Recoverable errors become feedback on the same socket within a bounded budget;
-terminal errors end the candidate. Capacity saturation retries a fresh session.
-Invalid JSON and `max_steps` remain distinct outcomes. Timeouts and malformed
-frames poison the socket; lock-step cannot resynchronize. The
-[recovery reference](OPENENV_REPLAY_REFERENCE.md) lists
-codes, rewards, retry rules, and bounds.
+Recoverable errors become bounded same-socket feedback; terminal errors end the
+candidate, and capacity saturation retries a fresh session. The
+[recovery reference](OPENENV_REPLAY_REFERENCE.md) lists exact outcomes, codes,
+rewards, retry rules, and bounds.
 
 ## Security boundary
 
-OpenEnv actions and observations are untrusted external data that enter the
-model context and corpus. Prefer loopback or a private network; use HTTPS/WSS
-with an origin-scoped server credential remotely. Inspect the schema and
-implementation, treat prompts and observations as potentially injected, and
-retain the summary plus deployment identity before promoting an adapter.
-Environment URL credentials, queries, and fragments are rejected. Bearer
-response bodies are still untrusted and bounded; authentication establishes
-access, not environment integrity.
-
-## Troubleshooting
-
-See [OpenEnv troubleshooting](OPENENV_REPLAY_REFERENCE.md#troubleshooting) for
-capacity, recovery, replay drift, reset determinism, action, reward, training,
-and redirect failures.
+OpenEnv data is untrusted. Prefer loopback or a private network; remotely, use
+HTTPS/WSS and an origin-scoped credential. Inspect schemas, assume prompt
+injection, and retain deployment identity before promotion. Authentication
+establishes access, not environment integrity. See
+[troubleshooting](OPENENV_REPLAY_REFERENCE.md#troubleshooting) for failures.

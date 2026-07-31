@@ -1,17 +1,16 @@
 # Serving profiles
 
-A serving profile is an immutable, process-wide GPU ownership policy. It
-controls inference admission, training writers, adapter weight transitions,
-physical KV-cache changes, allocator reclaim, live graph capture, and Vulkan
-resident prefill. Requests cannot select or override a profile.
+A serving profile is an immutable, process-wide GPU ownership policy. Normal
+users do not need to choose one: `stable` is the default and supports
+inference, training, adapter transitions, guarded memory management, and live
+graph capture. Requests cannot select or override a profile.
 
-`stable` is the default. Choose another profile only when its additional
-operations are required:
+Choose another profile only for backend development or drained maintenance:
 
 | Profile | Use it for | Do not use it for |
 |---|---|---|
-| **stable** | Predictable base-model inference without live GPU mutations | Training, loading or unloading an adapter, or live memory and graph changes |
-| **experimental** | Development and qualification that require inference plus training or adapter changes in one process | A latency or correctness baseline |
+| **stable** | Normal inference, training, adapters, evaluation, and automatic performance paths | Backend routes that are still under an explicit correctness quarantine |
+| **experimental** | Backend development and qualification of quarantined routes | Ordinary use; it is never required for normal speed or training |
 | **maintenance** | Drained training, adapter changes, and physical memory maintenance | Any inference or evaluation |
 
 ## Select a profile
@@ -26,7 +25,7 @@ serving_profile = "stable"
 Or override TOML for one process:
 
 ```bash
-KILN_SERVER_SERVING_PROFILE=experimental kiln serve
+KILN_SERVER_SERVING_PROFILE=maintenance kiln serve
 ```
 
 Accepted values are exactly `stable`, `experimental`, and `maintenance`.
@@ -43,13 +42,13 @@ the resolved value and its source.
 | Effective policy | `stable` (default) | `experimental` | `maintenance` |
 |---|---:|---:|---:|
 | Inference admission | yes | yes | no |
-| Training GPU ownership | no | yes | yes |
-| Adapter weight transitions | no | yes | yes |
-| Dynamic physical KV resize | no | yes | yes |
-| Allocator reclaim | no | yes | yes |
-| Live graph capture | no | yes | no |
+| Training GPU ownership | yes | yes | yes |
+| Adapter weight transitions | yes | yes | yes |
+| Dynamic physical KV resize | yes | yes | yes |
+| Allocator reclaim | yes | yes | yes |
+| Live graph capture | yes | yes | no |
 | Vulkan resident prefill | no | yes | no |
-| Exclusive GPU behavior | reject | writer priority | inference disabled; drain, then run exclusively |
+| Exclusive GPU behavior | writer priority | writer priority | inference disabled; drain, then run exclusively |
 
 The profile is one policy boundary, not a hardware selector. Kiln still
 selects backend routes from runtime capabilities, tensor shapes, data types,
@@ -59,31 +58,24 @@ profile or a Vulkan kernel.
 
 ## Stable
 
-Use `stable` for predictable inference. Logical batching, request
-cancellation, eviction, and supported prefix-cache reuse remain available, but
-the process rejects training GPU ownership and real adapter weight changes
-before either can wait for the GPU writer. Dynamic physical KV resize,
-allocator reclaim, and live graph capture are disabled.
+Use `stable` for normal product operation. Logical batching, request
+cancellation, eviction, supported prefix-cache reuse, training, real adapter
+weight changes, dynamic physical KV resize, allocator reclaim, and guarded live
+graph capture are available. Writer-priority ownership serializes accelerator
+mutations against inference instead of making the user restart into a special
+mode.
 
 Vulkan currently disables cross-request prefix reuse under a correctness
 quarantine, so stable Vulkan requests use fresh prefill. Stable also keeps the
 generic layer-resumable prompt path authoritative instead of enabling the
 experimental resident-prefill route.
 
-There is an important current limitation: Kiln starts a serving process with
-the base model active and has no startup setting for selecting a saved adapter.
-Loading or unloading an adapter is a live weight transition, which `stable`
-rejects. A stable process therefore cannot currently serve or evaluate a saved,
-unmerged adapter. Use `experimental` when adapter inference is required. This
-is a product limitation, not a hidden configuration option.
-
 ## Experimental
 
-Use `experimental` for controlled development and qualification that require
-inference and GPU-writer operations in the same process. Training, adapter
-transitions, dynamic KV changes, allocator reclaim, and live graph capture are
-allowed. Writer-priority work can pause inference, and memory or graph changes
-can alter latency, so this profile is not the stable performance baseline.
+`experimental` is a backend-development profile, not a faster product mode.
+It has the same inference/training/adapter/memory/graph ownership contract as
+`stable`; its only purpose is admitting a route that remains under an explicit
+correctness quarantine. Ordinary users should not select it.
 
 On Vulkan, `experimental` permits resident token prefill only after the
 backend's capability and request-shape checks pass. The route batches one
@@ -116,11 +108,9 @@ restart as the ownership boundary:
 4. Stop the process, start the next profile, and wait for `/health` before
    restoring traffic.
 
-For drained training, use `maintenance` while the writer owns the GPU. The
-result remains on disk, but `maintenance` cannot evaluate it and `stable`
-cannot load it. Start a separate `experimental` process to load, evaluate, or
-serve the unmerged adapter. If you need generation, training, and evaluation
-in one process, use `experimental` for the entire controlled loop.
+For ordinary training, evaluation, and adapter serving, remain on `stable`.
+Use `maintenance` only when inference must be fully drained while a writer or
+physical-memory operation runs exclusively.
 
 ## Observe the resolved policy
 
@@ -137,22 +127,19 @@ the same `serving_profile` object:
   "effective_policy_source": "serving_profile",
   "effective_policy": {
     "inference_admission": true,
-    "training_gpu_ownership": false,
-    "adapter_weight_transitions": false,
-    "dynamic_kv_resize": false,
-    "allocator_reclaim": false,
-    "live_graph_capture": false,
+    "training_gpu_ownership": true,
+    "adapter_weight_transitions": true,
+    "dynamic_kv_resize": true,
+    "allocator_reclaim": true,
+    "live_graph_capture": true,
     "vulkan_resident_prefill": false,
-    "exclusive_gpu_behavior": "reject"
+    "exclusive_gpu_behavior": "writer_priority"
   }
 }
 ```
 
 `source` is `default`, `config_file`, or `environment`. Request selection is
-never a source. In stable mode,
-`decode_runtime.memory_governor.reclaim_mode` is `"off"` even when
-`requested_reclaim_mode` contains another configured value, and
-`disabled_by_serving_profile` is `true`.
+never a source.
 
 Backend health and readiness are separate. A healthy maintenance process can
 report `backend_runtime.healthy: true` while its `inference_admission` check is

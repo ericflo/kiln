@@ -13,7 +13,7 @@
       {
         "title": "GRPO Guide",
         "href": "../grpo.html",
-        "description": "Start Kiln in the experimental profile, submit a scored group, and inspect the adapter and receipt."
+        "description": "Start Kiln normally, submit a scored group, and inspect the adapter and receipt."
       },
       {
         "title": "OpenEnv Training",
@@ -213,7 +213,7 @@
       "title": "Serving profiles",
       "section": "serving",
       "navigation": "reference",
-      "description": "Choose the stable, experimental, or maintenance GPU-ownership profile; understand each operation, tradeoff, and current adapter limitation."
+      "description": "Use the complete stable product by default, drained maintenance when needed, and experimental only for backend qualification."
     },
     {
       "source": "docs/LATENCY_OBSERVABILITY.md",

@@ -174,9 +174,9 @@ const generatedDocsPages = [
       'A serving profile is an immutable, process-wide GPU ownership policy',
       'The profile is one policy boundary, not a hardware selector',
       'Device marketing names, vendor or device IDs, driver strings',
-      'has no startup setting for selecting a saved adapter',
-      'This is a product limitation, not a hidden configuration option',
-      'Start a separate experimental process to load, evaluate, or serve the unmerged adapter',
+      'stable is the default and supports inference, training, adapter transitions',
+      'experimental is a backend-development profile, not a faster product mode',
+      'Writer-priority ownership serializes accelerator mutations against inference',
     ],
   },
   {
@@ -481,7 +481,6 @@ const generatedDocsPages = [
       'Canonical environment target',
       'Alternate environment spelling',
       'Profile gate',
-      'experimental when enum "attention_mlp", "attention_mlp_gdn"',
       'maintenance when minimum 1',
       'server.serving_profile',
       'KILN_SERVER_SERVING_PROFILE',
@@ -512,8 +511,8 @@ const generatedDocsPages = [
     h1: 'HTTP API Contract',
     terms: [
       'Kiln HTTP API',
-      '109 paths',
-      '123 operations',
+      'aggregate field status',
+      'field-complete',
       'complete',
       'DELETE 13, GET 57, POST 52, PUT 1',
       '/v1/agent/runs/{id}/events',
@@ -1073,7 +1072,7 @@ const expectedDemoSections = [
   { label: 'serve', terms: ['test the exact request path', 'openai-compatible', 'adapter-explicit'] },
   { label: 'teach', terms: ['turn evidence into a named training job', 'admission first', 'evaluation separate'] },
   { label: 'promote', terms: ['compare, inspect, then activate', 'base identity bound', 'hot-swap explicit'] },
-  { label: 'profile boundary', terms: ['works in the default stable profile', 'interactive train, evaluate, and adapter-activation loop', 'requires the experimental profile', 'current saved-adapter limitation'] },
+  { label: 'profile boundary', terms: ['complete interactive train, evaluate, and adapter-activation loop', 'default stable profile', 'experimental is reserved for backend qualification'] },
   { label: 'historical archive', terms: ['historical terminal recordings', 'captured may 4, 2026', 'not current product proof'] },
 ];
 
@@ -1161,7 +1160,7 @@ const expectedApiSections = [
   { label: 'complete effective configuration', terms: ['kiln.effective-configuration.v1', 'all 112 fixed typed startup leaves', 'two dynamic leaves for each teacher credential', 'post-precedence typed value', 'command_line', 'canonical environment spelling', 'explicitly empty compatibility-name list', 'redacted null entries', 'kiln config --json'] },
   { label: 'typed CUDA graph diagnostics', terms: ['top-level cuda_graphs configured/effective/cache/invariant state', 'decode_runtime.cuda_graphs', 'requested and profile-effective single-row CUDA graph policy', 'mandatory stable metadata', 'unavailable batched route', 'trusted debug response repeats that exact object', 'qualification receipt can bind the launch policy'] },
   { label: 'immutable operational runtime', terms: ['immutable operational snapshot', 'terminal/agent access', 'pi resolution', 'library URL', 'cache/session paths'] },
-  { label: 'typed accelerator retained-byte diagnostics', terms: ['kiln.accelerator-runtime-policy.v16', '"version": 16', 'All fifteen typed [accelerator] fields', 'kt_api_mode', 'full_attention_score_budget_mib', 'vulkan_device_policy_schema_id', 'kiln.vulkan-device-policy.v1', 'cuda_kernel_profile', 'metal_kernel_profile', 'rocm_synchronization_mode', 'rocm_strided_batched_matmul_mode', 'disabled is the portable default', 'rocm_bf16_matmul_output_mode', 'f32_then_cast is the portable default', 'rocm_kernel_profile', 'portable_fallback is the only product value', 'Retired machine-qualified values fail startup', 'hardware-qualification', 'rocm_graph_mode', 'rocm_graph_cache_entries', 'rocm_graph_cache_max_bytes', '1073741824', '67108864..=17179869184', 'KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES', 'retained_bytes', 'opaque_native_object_count', 'quarantined_retained_bytes', 'decode_runtime.rocm_graphs', 'rocm_graphs_unavailable_reason', 'rocm_graph_telemetry', 'rocm_graph_telemetry_unavailable_reason'] },
+  { label: 'typed accelerator retained-byte diagnostics', terms: ['kiln.accelerator-runtime-policy.v16', '"version": 16', 'All fifteen typed [accelerator] fields', 'kt_api_mode', 'full_attention_score_budget_mib', 'vulkan_device_policy_schema_id', 'kiln.vulkan-device-policy.v1', 'cuda_kernel_profile', 'metal_kernel_profile', 'rocm_synchronization_mode', 'rocm_strided_batched_matmul_mode', 'disabled is the portable default', 'rocm_bf16_matmul_output_mode', 'f32_then_cast is the portable default', 'rocm_kernel_profile', 'native_default is the normal product profile', 'native single-row and batched dynamic-length paged attention', 'Retired machine-qualified values fail startup', 'rocm_graph_mode', 'rocm_graph_cache_entries', 'rocm_graph_cache_max_bytes', '1073741824', '67108864..=17179869184', 'KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES', 'retained_bytes', 'opaque_native_object_count', 'quarantined_retained_bytes', 'decode_runtime.rocm_graphs', 'rocm_graphs_unavailable_reason', 'rocm_graph_telemetry', 'rocm_graph_telemetry_unavailable_reason'] },
   { label: 'ROCm live API and Prometheus contract', terms: ['independent top-level rocm_graphs full statistics', 'rocm_graphs_unavailable_reason', 'rocm_graph_telemetry', 'rocm_graph_telemetry_unavailable_reason', 'busy only for model_runner_busy or graph_runner_busy', 'unavailable for backend_without_graph_runner', 'model_runner_lock_poisoned', 'graph_runner_lock_poisoned', 'Owner and slot lifecycle', 'decode_owner_release_count', 'tracked_decode_owner_count', 'ROCm graph Prometheus contract', 'kiln_rocm_graph_telemetry_available', 'kiln_rocm_graph_snapshot_unavailable{reason}', 'kiln_rocm_graph_phase_telemetry_available', 'kiln_rocm_graph_phase_telemetry_unavailable{reason}', 'kiln_rocm_graph_state{kind}', 'kiln_rocm_graph_slots{state=', 'kiln_rocm_graph_owner_lifecycle_total{event=', 'kiln_rocm_graph_retained_bytes{kind}', 'kiln_rocm_graph_cache_admissions_total', 'kiln_rocm_graph_cache_evictions_by_cause_total', 'kiln_rocm_graph_cache_admission_rejections_total', 'kiln_rocm_graph_pre_capture_skips_total', 'kiln_rocm_graph_capture_outcomes_total', 'kiln_rocm_graph_replay_outcomes_total', 'kiln_rocm_graph_current_phase{phase}', 'kiln_rocm_graph_phase_calls_total{phase}', 'kiln_rocm_graph_transient_candidate_bytes{kind="last|peak"}', 'kiln_rocm_graph_fallbacks_total{reason}', 'kiln_rocm_graph_fallback_slow_total', 'kiln_rocm_graph_fallback_duration_seconds_total', 'kiln_rocm_graph_fallback_duration_seconds_max', 'cold_cache_host_round_trip', 'persistent_host_round_trip', 'shape_dependent_attention', 'graph_cache_capacity', 'graph_cache_byte_budget', 'graph_accounting_incomplete', 'moderate_memory_pressure', 'tight_memory_pressure', 'critical_memory_pressure', 'memory_reservation_denied', 'memory_governor_selector_mismatch', 'capture_failure', 'replay_failure', 'Counter labels are closed sets'] },
   { label: 'ROCm multi-row graph-route accounting', terms: ['all 14 reason counters', 'multi_row_batch_unsupported', 'Current ROCm capture includes contiguous BF16 multi-row decode', 'real capture/replay activity'] },
   { label: 'ROCm graph outcome, phase, and rollback distinctions', terms: ['recurrent/conv state in every runner-owned owner slot', 'active slot state that outlives graph eviction', 'peak_retained_bytes', 'never reported below the current total', 'capture_successes means native graph instantiation and its first launch succeeded', 'cache_admission_successes is the retained, replayable subset', 'point-in-time phase/transient copy', 'six phase summary objects', 'pre_candidate_headroom_phase', 'candidate_warm_phase', 'pre_native_reservation_phase', 'native_capture_phase', 'native_replay_phase', 'rejected_candidate_cleanup_phase', 'last_transient_candidate_bytes', 'peak_transient_candidate_bytes', 'capture_rollback', 'logical recurrent-state restoration', 'sticky STOP', 'post-STOP diagnostic drain', 'fixed 23-reason array'] },
@@ -1211,7 +1210,7 @@ const expectedApiSections = [
 ];
 
 const expectedApiCodeExamples = [
-  { label: 'accelerator runtime v16 shape', terms: ['"accelerator_runtime"', '"schema_id": "kiln.accelerator-runtime-policy.v16"', '"version": 16', '"vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v6"', '"vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1"', '"kt_api_mode"', '"full_attention_score_budget_mib"', '"configured": 2048', '"effective": 2048', '"vulkan_device_index"', '"configured": null', '"effective": null', '"vulkan_validation"', '"configured": false', '"effective": false', '"cuda_kernel_profile"', '"metal_kernel_profile"', '"configured": "native_default"', '"effective": "native_default"', '"rocm_synchronization_mode"', '"rocm_strided_batched_matmul_mode"', '"rocm_bf16_matmul_output_mode"', '"rocm_kernel_profile"', '"configured": "portable_fallback"', '"effective": "portable_fallback"', '"rocm_graph_mode"', '"rocm_graph_cache_entries"', '"rocm_graph_cache_max_bytes"', '"configured": 1073741824', '"effective": 1073741824'] },
+  { label: 'accelerator runtime v16 shape', terms: ['"accelerator_runtime"', '"schema_id": "kiln.accelerator-runtime-policy.v16"', '"version": 16', '"vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v6"', '"vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1"', '"kt_api_mode"', '"full_attention_score_budget_mib"', '"configured": 2048', '"effective": 2048', '"vulkan_device_index"', '"configured": null', '"effective": null', '"vulkan_validation"', '"configured": false', '"effective": false', '"cuda_kernel_profile"', '"metal_kernel_profile"', '"configured": "native_default"', '"effective": "native_default"', '"rocm_synchronization_mode"', '"rocm_strided_batched_matmul_mode"', '"rocm_bf16_matmul_output_mode"', '"rocm_kernel_profile"', '"rocm_graph_mode"', '"rocm_graph_cache_entries"', '"rocm_graph_cache_max_bytes"', '"configured": 1073741824', '"effective": 1073741824'] },
   { label: 'CUDA startup policy shape', terms: ['"cuda_marlin_profile"', '"configured": "disabled"', '"effective": "disabled"', '"cuda_flash_backward_mode"', '"configured": "fast"', '"effective": "fast"'] },
   { label: 'batching configuration shape', terms: ['"batching"', '"configuration"', '"rowwise_decode"', '"prefix_aware_admission"', '"prefill_admission_quantum"', '"actor_cycle_idle"', '"actor_active"'] },
   { label: 'streaming-prefill configuration shape', terms: ['"streaming_prefill"', '"dispatch"', '"threshold_tokens"', '"tile_tokens"', '"tape_tile_tokens"', '"detached_full_attn_tile_tokens"', '"immutable_after_startup"', '"restart_required_to_change"'] },
@@ -2558,9 +2557,9 @@ function validateGrpoSafetyAndPromotionCues() {
   const grpo = readFileSync(resolve(repoRoot, 'docs/site/grpo.html'), 'utf8')
     .replace(/\s+/g, ' ');
   for (const term of [
-    'experimental training workflow',
-    'cannot start a <code>stable</code> process with a saved LoRA adapter',
-    '<code>KILN_SERVER_SERVING_PROFILE=experimental</code>',
+    'native training workflow',
+    'default <code>stable</code> profile supports generation, training',
+    'is not needed for speed or training',
     '"auto_load": false',
     'evaluation should gate activation',
     'Recommended: bind activation to held-out evidence',
@@ -2569,7 +2568,7 @@ function validateGrpoSafetyAndPromotionCues() {
     'only <code>promoted</code> activates the adapter',
     'Manual review for an ungated artifact',
     '/v1/adapters/load',
-    'The current <code>stable</code> profile cannot load or start with a saved LoRA adapter',
+    'The default profile runs the complete loop',
   ]) {
     assertIncludes(grpo, term, 'docs/site/grpo.html: safe profile-gated GRPO workflow');
   }
@@ -2602,7 +2601,7 @@ function validateApiProfileAndMutationCues() {
   const api = readFileSync(resolve(repoRoot, 'docs/site/api.html'), 'utf8')
     .replace(/\s+/g, ' ');
   for (const term of [
-    '<code>KILN_SERVER_SERVING_PROFILE=experimental</code>',
+    'default <code>stable</code> profile',
     '"output_name": "first-sft"',
     '"behavior_policy": "no_importance_correction"',
     '"auto_load": false',
@@ -2636,7 +2635,7 @@ function validateCliDistributionAndProfileCues() {
     '<code>auto_load: false</code> or a held-out',
     '<code>kiln-eval</code> is a source-built client',
     'source-built developer tools rather than release-archive binaries',
-    'The default <code>stable</code> profile cannot load a saved LoRA',
+    'loading and unloading weights are coordinated under the default <code>stable</code> profile',
     'There is no trash or automatic undo',
     'OpenCode&rsquo;s OpenAI-compatible provider accepts a local endpoint without an <code>apiKey</code>',
     'https://opencode.ai/docs/providers/#custom-provider',

@@ -281,9 +281,9 @@
       <p class="text-lg leading-relaxed max-w-3xl" style="color: var(--fg-dim);">
         Grade one target, compare several targets on the same sampling inputs,
         replay one run byte-for-byte, or bind activation to held-out evidence.
-        These are separate operations with separate claims. Adapter evaluation
-        and live promotion require the <code>experimental</code> profile; a
-        base-model suite can run under <code>stable</code>.
+        These are separate operations with separate claims. Adapter evaluation,
+        live promotion, and base-model suites all run under the default
+        <code>stable</code> profile.
       </p>
       <div class="flex flex-wrap gap-3 mt-8">
         <a href="api.html#evals" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
@@ -335,8 +335,8 @@
           Eval generation shares the inference side of the GPU lock: it can run
           beside ordinary inference but waits while training has exclusive
           accelerator ownership. <code>maintenance</code> rejects eval admission.
-          Use <code>experimental</code> when a run needs a saved adapter or when
-          training and gated promotion share one process.
+          The default <code>stable</code> profile supports saved adapters, training,
+          and gated promotion in one process.
         </p>
         <p class="text-sm" style="color: var(--fg-mute);">
           By default, Kiln stores suites, datasets, and judgments under
@@ -542,9 +542,8 @@ curl -fsS -X POST http://localhost:8420/v1/eval/jobs/eval_123/replay \
         <div class="label mb-3">Post-training auto-eval</div>
         <h2 id="post-eval" class="text-2xl font-semibold mb-4">Grade training against declared held-out data</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          This live train &rarr; eval &rarr; promotion workflow requires the
-          <code>experimental</code> serving profile. The default
-          <code>stable</code> profile rejects training and adapter-weight
+          The default <code>stable</code> profile supports this live train &rarr;
+          eval &rarr; promotion workflow, including coordinated adapter-weight
           transitions. <code>maintenance</code> admits drained training but rejects
           every eval request because inference is disabled.
         </p>
@@ -618,7 +617,7 @@ curl -fsS -X POST http://localhost:8420/v1/eval/jobs/eval_123/replay \
           local judge LoRA that a future suite can use as an
           <code>llm_judge</code> scorer. In <code>/ui</code> &rsaquo; Judgments,
           each choice is written to a judgment dataset. Compile those choices
-          into SFT JSONL, train the judge in the <code>experimental</code>
+          into SFT JSONL, train the judge under the default <code>stable</code>
           profile, and validate it against a held-out slice before use.
         </p>
         <div class="endpoint-list">

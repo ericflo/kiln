@@ -325,7 +325,7 @@ def build_definitions() -> None:
     add_enum(
         "RocmKernelProfile",
         "RocmKernelProfile",
-        ["portable_fallback"],
+        ["native_default", "portable_fallback"],
         "The complete process-lifetime ROCm model-kernel route set.",
     )
     add_enum(
@@ -1927,7 +1927,12 @@ def build_schema() -> dict[str, Any]:
     health["serving_profile"].update({"profile": "stable", "immutable_after_startup": True})
     health["serving_profile"]["effective_policy"].update({
         "inference_admission": True,
-        "exclusive_gpu_behavior": "reject",
+        "training_gpu_ownership": True,
+        "adapter_weight_transitions": True,
+        "dynamic_kv_resize": True,
+        "allocator_reclaim": True,
+        "live_graph_capture": True,
+        "exclusive_gpu_behavior": "writer_priority",
     })
     health["model_defaults_profile"].update({
         "name": "Qwen3.5-4B",

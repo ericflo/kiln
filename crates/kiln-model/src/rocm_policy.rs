@@ -1,15 +1,13 @@
-#[cfg(feature = "hardware-qualification")]
 use anyhow::Result;
-#[cfg(feature = "hardware-qualification")]
 use std::sync::OnceLock;
 
-#[cfg(feature = "hardware-qualification")]
 static ROCM_KERNEL_POLICY: OnceLock<RocmKernelPolicy> = OnceLock::new();
 
 /// Complete process-lifetime ROCm model-kernel policy.
 ///
-/// Normal product builds use the portable fallback. Historical machine
-/// profiles are available only to the explicit hardware-qualification build.
+/// The server installs one product policy before model construction. Direct
+/// library consumers default conservatively to the portable fallback;
+/// historical machine profiles exist only in explicit qualification builds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RocmKernelPolicy {
     pub(crate) full_attn_qkv_in_proj: bool,
@@ -132,6 +130,24 @@ impl RocmKernelPolicy {
             split_q_gate_training: true,
             split_q_gate_output_chunk_features: 1024,
             split_q_gate_row_tile_tokens: 512,
+        }
+    }
+
+    /// Portable model fallbacks plus the native, graph-stable paged-attention
+    /// decode routes.
+    ///
+    /// Unlike [`Self::qualified`], this profile does not enable the historical
+    /// Strix-Halo-qualified projection, GDN, MLP, normalization, or sampling
+    /// routes. It promotes only the ROCm paged-decode kernels whose eligibility
+    /// is checked from tensor dtype and geometry at each call site. The
+    /// single-row and dynamic-length batch routes are one contract: graph
+    /// capture needs both so a scheduler batch-width change cannot fall through
+    /// to sequence-length-shaped attention tensors.
+    pub const fn native_default() -> Self {
+        Self {
+            fused_paged_decode: true,
+            paged_decode_dyn_seqlen_batch: true,
+            ..Self::portable_fallback()
         }
     }
 
@@ -309,7 +325,6 @@ pub const PORTABLE_ROCM_KERNEL_POLICY: RocmKernelPolicy = RocmKernelPolicy::port
 
 /// Install process-lifetime ROCm kernel policy. Reinstalling the same value is
 /// idempotent; conflicting values fail instead of changing live dispatch.
-#[cfg(feature = "hardware-qualification")]
 pub fn install_rocm_kernel_policy(policy: RocmKernelPolicy) -> Result<()> {
     match ROCM_KERNEL_POLICY.set(policy) {
         Ok(()) => Ok(()),
@@ -319,13 +334,7 @@ pub fn install_rocm_kernel_policy(policy: RocmKernelPolicy) -> Result<()> {
 }
 
 pub(crate) fn current_rocm_kernel_policy() -> RocmKernelPolicy {
-    #[cfg(feature = "hardware-qualification")]
-    {
-        return *ROCM_KERNEL_POLICY.get_or_init(RocmKernelPolicy::default);
-    }
-
-    #[cfg(not(feature = "hardware-qualification"))]
-    PORTABLE_ROCM_KERNEL_POLICY
+    *ROCM_KERNEL_POLICY.get_or_init(RocmKernelPolicy::default)
 }
 
 #[cfg(test)]
@@ -336,6 +345,7 @@ mod tests {
     fn profiles_cover_accelerated_routes_and_training_safeguards() {
         let qualified = RocmKernelPolicy::qualified();
         let fallback = RocmKernelPolicy::portable_fallback();
+        let native_default = RocmKernelPolicy::native_default();
         let gdn_fallback = RocmKernelPolicy::gdn_fallback();
         let non_gdn_fallback = RocmKernelPolicy::non_gdn_fallback();
         let fused_norm_mlp_fallback = RocmKernelPolicy::fused_norm_mlp_fallback();
@@ -358,6 +368,13 @@ mod tests {
             ]
         );
         assert_eq!(fallback.accelerated_routes(), [false; 30]);
+        let native_routes = native_default.accelerated_routes();
+        assert_eq!(
+            native_routes.into_iter().filter(|enabled| *enabled).count(),
+            2
+        );
+        assert!(native_default.fused_paged_decode);
+        assert!(native_default.paged_decode_dyn_seqlen_batch);
         assert_eq!(
             gdn_fallback.accelerated_routes(),
             [

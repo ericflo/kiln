@@ -428,7 +428,7 @@ curl -fsS http://localhost:8420/v1/config | jq '.effective_configuration.fields[
         <h2 class="text-2xl font-semibold tracking-tight mb-4">Bound retained decode graphs at startup</h2>
         <p class="mb-4" style="color: var(--fg-dim);">Single-row CUDA graph capture and its retained geometry limit are typed memory policy. The cache limit is <code>1..=64</code>, defaults to <code>8</code>, and every change requires restart. Stable paged metadata is mandatory; batched CUDA graph capture is unavailable and has no hidden opt-in.</p>
 <pre class="text-sm"><code>[server]
-serving_profile = "experimental"
+serving_profile = "stable"
 
 [memory]
 cuda_graphs = true
@@ -437,7 +437,7 @@ cuda_graph_cache_entries = 8</code></pre>
 kiln serve --config kiln.toml
 curl -fsS http://localhost:8420/v1/config | jq '.cuda_graphs'
 curl -fsS http://localhost:8420/health | jq '.decode_runtime.cuda_graphs'</code></pre>
-        <p class="text-sm mt-4" style="color: var(--fg-mute);">The canonical cache override is <code>KILN_MEMORY_CUDA_GRAPH_CACHE_ENTRIES</code>. The default <code>stable</code> profile reports the request but resolves capture off; <code>experimental</code> permits the requested single-row policy. Decode never re-reads process environment.</p>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">The canonical cache override is <code>KILN_MEMORY_CUDA_GRAPH_CACHE_ENTRIES</code>. The default <code>stable</code> profile permits guarded single-row capture; drained <code>maintenance</code> resolves to eager execution. Decode never re-reads process environment.</p>
       </div>
       <div class="card p-6 lg:col-span-2">
         <p class="label mb-2">Batching policy</p>
@@ -682,11 +682,11 @@ kiln openenv cancel 80a26e21-8451-4a64-8666-890c06fd80bd</code></pre>
       <h2 class="text-2xl font-semibold tracking-tight mb-4">Run native jobs or move a verified HF/TRL handoff</h2>
       <p class="max-w-3xl mb-6" style="color: var(--fg-dim);">Training commands talk to an already-running server. SFT reads JSONL with one chat correction example per line, each with a <code>messages</code> array. GRPO accepts either one JSON request/batch with <code>groups</code> or streamed JSONL with one group per line; each group has prompt <code>messages</code> plus candidate <code>completions</code> containing <code>text</code> and <code>reward</code> scores. OPD reads one <code>/v1/train/opd</code> request object, or a JSON prompt array paired with <code>--teacher</code>, and binds the registered teacher's exact content revision. The nested <code>train hf</code> commands create and manage immutable bundles for broader Transformers/TRL/PEFT training.</p>
       <div class="card p-5 mb-6" style="background: rgba(249, 115, 22, 0.08); border-color: rgba(249, 115, 22, 0.22);">
-        <h3 class="font-semibold mb-2">The running server must admit training</h3>
+        <h3 class="font-semibold mb-2">The default server admits training</h3>
         <p style="color: var(--fg-dim);">
-          The default <code>stable</code> profile rejects training and live adapter transitions. Start the
-          server with <code>server.serving_profile = "experimental"</code> for an interactive loop, or use a
-          drained <code>maintenance</code> process for artifact production without inference or eval.
+          The default <code>stable</code> profile supports training and coordinated live
+          adapter transitions. Use a drained <code>maintenance</code> process only for
+          artifact production without inference or eval.
           These CLI commands do not expose <code>auto_load</code> or <code>post_eval</code>; they inherit the
           server&rsquo;s <code>auto_load: true</code> training default. Use the
           <a href="api.html#training">HTTP training API</a> with <code>auto_load: false</code> or a held-out
@@ -939,9 +939,9 @@ kiln train status --url http://gpu-box:8420</code></pre>
       <h2 class="text-2xl font-semibold tracking-tight mb-4">Manage LoRA adapters</h2>
       <p class="max-w-3xl mb-6" style="color: var(--fg-dim);">
         Adapter commands call the running server&rsquo;s adapter API. Listing is
-        read-only; loading or unloading weights requires the
-        <code>experimental</code> or drained <code>maintenance</code> profile.
-        The default <code>stable</code> profile cannot load a saved LoRA. Use
+        read-only; loading and unloading weights are coordinated under the
+        default <code>stable</code> profile, while <code>maintenance</code> drains
+        inference first. Use
         these commands in scripts; use <code>/ui</code> for upload, download,
         merge, or visual confirmation before deletion.
       </p>

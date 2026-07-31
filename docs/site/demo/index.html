@@ -678,11 +678,10 @@
           <p>Start with a real health check and one real request. The complete platform-specific
           path is in the <a href="../quickstart.html">Quickstart</a>; training and evaluation continue
           in the <a href="../grpo.html">GRPO</a> and <a href="../evals.html">Evals</a> guides.</p>
-          <p>That request works in the default <code>stable</code> profile. The interactive
-            train, evaluate, and adapter-activation loop shown above requires the
-            <code>experimental</code> profile. See
-            <a href="../docs/serving-profiles/">Serving profiles</a> for the exact ownership policy
-            and current saved-adapter limitation.</p>
+          <p>The complete interactive train, evaluate, and adapter-activation loop shown
+            above works in the default <code>stable</code> profile. <code>experimental</code>
+            is reserved for backend qualification. See
+            <a href="../docs/serving-profiles/">Serving profiles</a> for the exact ownership policy.</p>
         </div>
         <pre><code># Verify readiness and the selected backend
 curl -fsS http://127.0.0.1:8420/health | python3 -m json.tool

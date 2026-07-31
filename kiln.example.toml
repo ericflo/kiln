@@ -125,9 +125,9 @@ debug_model_state = false               # Trusted /v1/debug/model-state access w
 [accelerator]
 kt_api_mode = "auto"                    # auto | all | disabled. Auto enables the qualified
                                       # kiln-tensor adapter routes while leaving experimental
-                                      # matmul and paged-KV routes off. `all` and `disabled`
-                                      # require server.serving_profile="experimental". Override
-                                      # with KILN_ACCELERATOR_KT_API_MODE.
+                                      # matmul and paged-KV routes off. `all` and `disabled` are
+                                      # backend diagnostics, independent of the serving lifecycle
+                                      # profile. Override with KILN_ACCELERATOR_KT_API_MODE.
 full_attention_score_budget_mib = 2048 # Exact-attention score/scratch ceiling (64..=2048 MiB).
                                       # ROCm online attention uses at most 1024 MiB. Live pressure
                                       # rejects admission instead of changing tile geometry during
@@ -137,7 +137,6 @@ vulkan_device_index = "auto"          # auto or a strict zero-based Vulkan physi
                                       # Auto prefers a discrete GPU, then the first enumerated device.
                                       # Override with KILN_ACCELERATOR_VULKAN_DEVICE_INDEX.
 vulkan_validation = false             # Enable VK_LAYER_KHRONOS_validation at instance creation.
-                                      # True requires server.serving_profile="experimental".
                                       # Override with KILN_ACCELERATOR_VULKAN_VALIDATION.
 cuda_kernel_profile = "native_default" # native_default | portable_fallback. One immutable
                                       # twenty-five-route CUDA model/backend policy replaces retired
@@ -147,7 +146,6 @@ cuda_kernel_profile = "native_default" # native_default | portable_fallback. One
                                       # KILN_ACCELERATOR_CUDA_KERNEL_PROFILE.
 cuda_marlin_profile = "disabled"     # disabled | attention_mlp | attention_mlp_gdn. Selects
                                       # one immutable CUDA projection layout before upload;
-                                      # non-default profiles require serving_profile=experimental;
                                       # packing uses the fixed parallel implementation. Override
                                       # mechanically with KILN_ACCELERATOR_CUDA_MARLIN_PROFILE.
 cuda_flash_backward_mode = "fast"    # fast | deterministic. CUDA training FlashAttention
@@ -161,25 +159,21 @@ metal_kernel_profile = "native_default" # native_default | portable_fallback. On
                                       # KILN_ACCELERATOR_METAL_KERNEL_PROFILE.
 rocm_synchronization_mode = "legacy_host_barriers" # Portable default. `stream_ordered` removes
                                       # only proven same-stream host barriers and uses a primary-
-                                      # stream external-yield wait; it requires
-                                      # server.serving_profile="experimental" until local ROCm
-                                      # parity/latency/memory qualification passes. Override with
+                                      # stream external-yield wait. Override with
                                       # KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE.
 rocm_strided_batched_matmul_mode = "disabled" # disabled | enabled. Per-row GEMMs are the
-                                      # portable default; enabled requires the experimental
-                                      # profile. Override mechanically with
+                                      # portable default. Override mechanically with
                                       # KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE.
 rocm_bf16_matmul_output_mode = "f32_then_cast" # f32_then_cast | native_bf16. F32 output
-                                      # plus an on-device cast is the portable default;
-                                      # native_bf16 requires the experimental profile.
-rocm_kernel_profile = "portable_fallback" # The only product value. Machine-qualified
-                                      # profiles are not server configuration. Override with
+                                      # plus an on-device cast is the portable default.
+rocm_kernel_profile = "native_default" # native_default | portable_fallback. Native default
+                                      # enables correctness-qualified native paged decode and
+                                      # falls back portably for ineligible shapes. Override with
                                       # KILN_ACCELERATOR_ROCM_KERNEL_PROFILE.
 rocm_graph_mode = "profile"           # profile | disabled | warmup_then_eager |
-                                      # lazy_capture_replay. Profile resolves to disabled under
-                                      # stable/maintenance and lazy capture/replay under
-                                      # experimental. Explicit non-disabled modes require the
-                                      # experimental profile. Override with
+                                      # lazy_capture_replay. Profile resolves to guarded lazy
+                                      # capture/replay under stable or experimental and disabled
+                                      # under drained maintenance. Override with
                                       # KILN_ACCELERATOR_ROCM_GRAPH_MODE.
 rocm_graph_cache_entries = 8          # Bounded retained native graph entries, 1..=64. Override
                                       # with KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES.

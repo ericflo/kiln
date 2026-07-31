@@ -177,11 +177,10 @@ Then start with:
 ./target/release/kiln serve --config kiln.toml
 ```
 
-`stable` is the default and is the recommended profile for ordinary serving.
-It rejects training GPU ownership and real adapter weight transitions. The
-tutorial's later train-then-eval loop uses `experimental` explicitly; a
-production deployment should use the drained `maintenance` restart workflow
-instead. See [Serving Profiles](docs/SERVING_PROFILES.md) before step 6.
+`stable` is the default and is the recommended profile for serving, training,
+evaluation, and adapter transitions. Use `maintenance` only when inference must
+be drained; `experimental` is reserved for backend qualification. See
+[Serving Profiles](docs/SERVING_PROFILES.md) before step 6.
 
 By default, Kiln logs in colored "pretty" format when stderr is an interactive
 terminal and switches to structured JSON when stderr is piped or redirected
@@ -325,17 +324,16 @@ Next steps are optional:
 
 ## 6. Submit SFT Training
 
-Training requires GPU-writer ownership. For this interactive tutorial, stop the
-stable server and restart the same command with the development profile:
+Training requires GPU-writer ownership, which the default stable server
+coordinates automatically. Keep the same process running:
 
 ```bash
-KILN_SERVER_SERVING_PROFILE=experimental \
-  KILN_MODEL_PATH=./Qwen3.5-4B \
+KILN_MODEL_PATH=./Qwen3.5-4B \
   ./target/release/kiln serve
 ```
 
-This keeps inference, live adapter activation, and post-training eval available
-in one process. For production, remove the instance from traffic, restart with
+Stable keeps inference, live adapter activation, and post-training eval
+available in one process. To drain traffic deliberately, restart with
 `KILN_SERVER_SERVING_PROFILE=maintenance`, train without `post_eval`, then restart in
 `stable` and run the eval before restoring traffic. The full drain procedure is
 in [Serving profiles](docs/SERVING_PROFILES.md#move-between-profiles).
@@ -395,10 +393,10 @@ Training runs in the background. Final adapter weights, receipt, and replay
 data remain in a staging tree until the job finishes; exact SFT, GRPO, and OPD
 checkpoints are published durably in the adapter registry as committed steps,
 optimizer groups, or OPD candidates complete. Under
-`experimental`, the model continues serving while the writer-priority training
+`stable`, the model continues serving while the writer-priority training
 operation runs. Under `maintenance`, inference is disabled. At completion Kiln
 publishes the adapter atomically; with the default `auto_load=true`, subsequent
-requests in `experimental` use the new revision. A
+requests in `stable` use the new revision. A
 same-name adapter that was already serving is reloaded inside that publication
 barrier even when `auto_load=false`, because its on-disk bytes cannot change
 behind the loaded weights.
@@ -839,7 +837,7 @@ Payload (`Content-Type: application/json`):
 
 ## 10. Evaluate your adapter
 
-Once you've trained an adapter, you'll want to know whether it's actually any better than the base model on the prompts you care about. In the tutorial's `experimental` profile, the eval system runs in the same process as inference and training, so the loop is `train → eval → drill into failures → fix → repeat`. A production `maintenance` process cannot run evals; restart into `stable` first.
+Once you've trained an adapter, you'll want to know whether it's actually any better than the base model on the prompts you care about. In the default `stable` profile, the eval system runs in the same process as inference and training, so the loop is `train → eval → drill into failures → fix → repeat`. A `maintenance` process cannot run evals; restart into `stable` first.
 
 The fastest path is to **synthesize an eval suite from an existing SFT dataset** — Kiln walks the conversations, extracts (prompt, target) pairs, picks an appropriate scorer per example (`numeric_tolerance`, `json_validity`, `multiple_choice`, `contains`, `tool_call`, `code`, `exact_match`, …), and registers a named suite you can re-run forever:
 
@@ -1017,8 +1015,8 @@ complete field, nullability, unknown-field, constraint, and example reference.
 | GET | `/v1/adapters/{name}/download` | Stream adapter as `application/gzip` tar.gz (see [9.5](#95-export-an-adapter-download-targz)). |
 | POST | `/v1/adapters/upload` | Import adapter from a multipart `archive` tar.gz (see [9.6](#96-import-an-adapter-upload-targz)). |
 | POST | `/v1/adapters/merge` | Combine adapters via `weighted_average`, `ties`, or `concat` mode (see [9.7](#97-merge-adapters-ties)). |
-| POST | `/v1/train/sft` | Submit SFT training examples (`experimental` or `maintenance`) |
-| POST | `/v1/train/grpo` | Submit GRPO training batch in `experimental` or `maintenance` (supports new `agentic_groups` shape with multi-turn trajectories; ECHO on by default) |
+| POST | `/v1/train/sft` | Submit SFT training examples (`stable`, `experimental`, or drained `maintenance`) |
+| POST | `/v1/train/grpo` | Submit GRPO training batch in `stable`, `experimental`, or drained `maintenance` (supports new `agentic_groups` shape with multi-turn trajectories; ECHO on by default) |
 | POST | `/v1/train/agentic` | Canonical alias of `/v1/train/grpo` — semantically-honest name for multi-turn rollouts |
 | POST | `/v1/train/opd` | Submit on-policy/off-policy distillation against a registered exact teacher identity; exact checkpoint cadence defaults to 25 steps |
 | GET | `/v1/train/status` | Training queue status |

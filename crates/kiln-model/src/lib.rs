@@ -131,10 +131,8 @@ pub use rocm_graph::{
     RocmGraphLiveTelemetry, RocmGraphPhase, RocmGraphPhaseStats, RocmGraphStats,
     RocmGraphStatsUnavailable, RocmGraphTelemetryHandle,
 };
-#[cfg(feature = "hardware-qualification")]
-pub use rocm_policy::install_rocm_kernel_policy;
 #[cfg(feature = "rocm")]
-pub use rocm_policy::{PORTABLE_ROCM_KERNEL_POLICY, RocmKernelPolicy};
+pub use rocm_policy::{PORTABLE_ROCM_KERNEL_POLICY, RocmKernelPolicy, install_rocm_kernel_policy};
 pub use rocm_w8_proj::RocmW8LmHeadStats;
 pub use speculative::SpeculativeConfig;
 pub use weight_upload::{

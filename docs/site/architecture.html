@@ -427,7 +427,7 @@ OpenEnv RL
         </p>
         <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
           Policy generation may be slower than an environment server&rsquo;s WebSocket idle timeout. Kiln
-          pumps Ping/Pong control frames and periodic read-only <code>state</code> exchanges while the model thinks.
+          pumps Ping/Pong control frames while the model thinks and also sends periodic read-only <code>state</code> exchanges.
           A timeout, malformed or unsolicited frame, transport failure, or wrong response type poisons
           the session permanently&mdash;lock-step has no request ID with which to resynchronize.
         </p>
@@ -564,8 +564,10 @@ OpenEnv RL
 
         <h3 class="text-lg font-semibold mt-7 mb-3">Other backends follow the same boundary</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
-          CUDA and Metal use typed kernel profiles; ROCm product execution uses its portable profile plus typed
-          synchronization, matmul, and graph policy. Backend-specific optimized routes may have narrower
+          CUDA and Metal use typed kernel profiles; ROCm product execution defaults to its
+          correctness-qualified native paged-decode routes and falls back portably when a request is
+          ineligible, alongside typed synchronization, matmul, and graph policy.
+          Backend-specific optimized routes may have narrower
           eligibility than baseline inference. Their presence in source does not mean that stable serving
           activates them, and no hot path is allowed to reinterpret a changed shell variable between requests.
         </p>

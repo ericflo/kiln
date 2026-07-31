@@ -21,7 +21,6 @@
 set -e
 
 export KILN_MODEL_PATH="${KILN_MODEL_PATH:-./Qwen3.5-4B}"
-export KILN_SERVER_SERVING_PROFILE=experimental
 KILN_BIN="${KILN_BIN:-./target/release/kiln}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,7 +43,7 @@ beat() { sleep "$1"; }
 # ------------------------------------------------------------------
 # Scene 1 — Boot kiln. Banner + spinner + ready.
 # ------------------------------------------------------------------
-typecmd "KILN_SERVER_SERVING_PROFILE=experimental ${KILN_BIN} serve --config kiln.example.toml &"
+typecmd "${KILN_BIN} serve --config kiln.example.toml &"
 
 # Server logs redirected to a file so they don't bleed into the asciinema TTY.
 "${KILN_BIN}" serve --config kiln.example.toml >/tmp/kiln-grpo.log 2>&1 &

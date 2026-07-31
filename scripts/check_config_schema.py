@@ -39,34 +39,6 @@ SECTIONS = (
 )
 
 PROFILE_GATES = {
-    "accelerator.kt_api_mode": {
-        "profile": "experimental",
-        "when": {"enum": ["all", "disabled"]},
-    },
-    "accelerator.vulkan_validation": {
-        "profile": "experimental",
-        "when": {"const": True},
-    },
-    "accelerator.cuda_marlin_profile": {
-        "profile": "experimental",
-        "when": {"enum": ["attention_mlp", "attention_mlp_gdn"]},
-    },
-    "accelerator.rocm_synchronization_mode": {
-        "profile": "experimental",
-        "when": {"const": "stream_ordered"},
-    },
-    "accelerator.rocm_strided_batched_matmul_mode": {
-        "profile": "experimental",
-        "when": {"const": "enabled"},
-    },
-    "accelerator.rocm_bf16_matmul_output_mode": {
-        "profile": "experimental",
-        "when": {"const": "native_bf16"},
-    },
-    "accelerator.rocm_graph_mode": {
-        "profile": "experimental",
-        "when": {"enum": ["warmup_then_eager", "lazy_capture_replay"]},
-    },
     "memory.kv_force_blocks": {
         "profile": "maintenance",
         "when": {"minimum": 1},

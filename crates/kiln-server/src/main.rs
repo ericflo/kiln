@@ -2174,61 +2174,73 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stable_and_maintenance_profiles_force_eager_runners() {
-        for profile in [
-            kiln_server::config::ServingProfile::Stable,
-            kiln_server::config::ServingProfile::Maintenance,
-        ] {
-            let profile_setting = kiln_server::config::ServingProfileSetting::new(
-                profile,
-                kiln_server::config::ConfigValueSource::Default,
-            );
-            let accelerator_policy = kiln_server::config::AcceleratorRuntimeConfig::default()
-                .resolved_policy(profile_setting);
-            let options = resolve_model_runner_runtime_options(
-                profile.runtime_policy(),
-                accelerator_policy,
-                true,
-                13,
-                Some(17),
-            )
-            .unwrap();
-            assert_eq!(
-                options,
-                ModelRunnerRuntimeOptions {
-                    max_decode_batch: Some(17),
-                    ..ModelRunnerRuntimeOptions::eager_only()
-                }
-            );
-        }
+    fn maintenance_profile_forces_eager_runner() {
+        let profile = kiln_server::config::ServingProfile::Maintenance;
+        let profile_setting = kiln_server::config::ServingProfileSetting::new(
+            profile,
+            kiln_server::config::ConfigValueSource::Default,
+        );
+        let accelerator_policy = kiln_server::config::AcceleratorRuntimeConfig::default()
+            .resolved_policy(profile_setting);
+        let options = resolve_model_runner_runtime_options(
+            profile.runtime_policy(),
+            accelerator_policy,
+            true,
+            13,
+            Some(17),
+        )
+        .unwrap();
+        assert_eq!(
+            options,
+            ModelRunnerRuntimeOptions {
+                max_decode_batch: Some(17),
+                ..ModelRunnerRuntimeOptions::eager_only()
+            }
+        );
     }
 
     #[test]
-    fn experimental_profile_preserves_explicit_graph_eligibility() {
-        let profile = kiln_server::config::ServingProfile::Experimental;
-        let policy = profile.runtime_policy();
-        let accelerator_policy = kiln_server::config::AcceleratorRuntimeConfig::default()
-            .resolved_policy(kiln_server::config::ServingProfileSetting::new(
-                profile,
-                kiln_server::config::ConfigValueSource::ConfigFile,
-            ));
-        assert_eq!(
-            resolve_model_runner_runtime_options(policy, accelerator_policy, true, 13, Some(17))
+    fn normal_serving_profiles_preserve_graph_eligibility() {
+        for profile in [
+            kiln_server::config::ServingProfile::Stable,
+            kiln_server::config::ServingProfile::Experimental,
+        ] {
+            let policy = profile.runtime_policy();
+            let accelerator_policy = kiln_server::config::AcceleratorRuntimeConfig::default()
+                .resolved_policy(kiln_server::config::ServingProfileSetting::new(
+                    profile,
+                    kiln_server::config::ConfigValueSource::ConfigFile,
+                ));
+            assert_eq!(
+                resolve_model_runner_runtime_options(
+                    policy,
+                    accelerator_policy,
+                    true,
+                    13,
+                    Some(17)
+                )
                 .unwrap(),
-            ModelRunnerRuntimeOptions {
-                cuda_graph: kiln_model::CudaGraphExecutionPolicy::try_new(true, 13).unwrap(),
-                rocm_graph: kiln_model::RocmGraphExecutionPolicy::lazy_capture_replay(),
-                metal_graphs: true,
-                max_decode_batch: Some(17),
-                streaming_prefill: None,
-            }
-        );
-        assert!(
-            !resolve_model_runner_runtime_options(policy, accelerator_policy, false, 13, Some(17),)
+                ModelRunnerRuntimeOptions {
+                    cuda_graph: kiln_model::CudaGraphExecutionPolicy::try_new(true, 13).unwrap(),
+                    rocm_graph: kiln_model::RocmGraphExecutionPolicy::lazy_capture_replay(),
+                    metal_graphs: true,
+                    max_decode_batch: Some(17),
+                    streaming_prefill: None,
+                }
+            );
+            assert!(
+                !resolve_model_runner_runtime_options(
+                    policy,
+                    accelerator_policy,
+                    false,
+                    13,
+                    Some(17),
+                )
                 .unwrap()
                 .cuda_graph
                 .enabled()
-        );
+            );
+        }
     }
 
     #[test]

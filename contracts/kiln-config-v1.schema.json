@@ -333,21 +333,12 @@
             "disabled"
           ],
           "default": "auto",
-          "description": "auto, all, or disabled, case-insensitive. auto enables the qualified kiln-tensor adapter routes while leaving the experimental generic matmul and paged-KV routes inactive. all enables every adapter route; disabled forces legacy fallbacks. The two explicit modes require server.serving_profile = \"experimental\". The mode is resolved before accelerator execution, remains immutable for the process lifetime, and is reported with source attribution. Restart required.",
+          "description": "auto, all, or disabled, case-insensitive. auto enables the qualified kiln-tensor adapter routes while leaving diagnostic generic matmul and paged-KV routes inactive. all enables every adapter route; disabled forces legacy fallbacks. The mode is resolved before accelerator execution, remains immutable for the process lifetime, and is reported with source attribution. Restart required.",
           "x-kiln-path": "accelerator.kt_api_mode",
           "x-kiln-type-and-default": "string enum; \"auto\"",
           "x-kiln-canonical-env": "KILN_ACCELERATOR_KT_API_MODE (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-profile-gate": {
-            "profile": "experimental",
-            "when": {
-              "enum": [
-                "all",
-                "disabled"
-              ]
-            }
-          },
-          "x-kiln-validation": "auto, all, or disabled, case-insensitive. auto enables the qualified kiln-tensor adapter routes while leaving the experimental generic matmul and paged-KV routes inactive. all enables every adapter route; disabled forces legacy fallbacks. The two explicit modes require server.serving_profile = \"experimental\". The mode is resolved before accelerator execution, remains immutable for the process lifetime, and is reported with source attribution. Restart required."
+          "x-kiln-validation": "auto, all, or disabled, case-insensitive. auto enables qualified routes, all enables every adapter route, and disabled forces legacy fallbacks. Restart required."
         },
         "full_attention_score_budget_mib": {
           "type": "integer",
@@ -382,18 +373,12 @@
         "vulkan_validation": {
           "type": "boolean",
           "default": false,
-          "description": "true requires server.serving_profile = \"experimental\" and enables VK_LAYER_KHRONOS_validation when the Vulkan instance is created. Startup fails if the layer is not installed. This is not mutable per request or dispatch. Restart required.",
+          "description": "true enables VK_LAYER_KHRONOS_validation when the Vulkan instance is created. Startup fails if the layer is not installed. This diagnostic is not mutable per request or dispatch. Restart required.",
           "x-kiln-path": "accelerator.vulkan_validation",
           "x-kiln-type-and-default": "boolean; false",
           "x-kiln-canonical-env": "KILN_ACCELERATOR_VULKAN_VALIDATION (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-profile-gate": {
-            "profile": "experimental",
-            "when": {
-              "const": true
-            }
-          },
-          "x-kiln-validation": "true requires server.serving_profile = \"experimental\" and enables VK_LAYER_KHRONOS_validation when the Vulkan instance is created. Startup fails if the layer is not installed. This is not mutable per request or dispatch. Restart required."
+          "x-kiln-validation": "true enables VK_LAYER_KHRONOS_validation at startup and fails if the layer is unavailable. Restart required."
         },
         "cuda_kernel_profile": {
           "type": "string",
@@ -417,21 +402,12 @@
             "attention_mlp_gdn"
           ],
           "default": "disabled",
-          "description": "disabled, attention_mlp, or attention_mlp_gdn, case-insensitive. disabled preserves BF16 projections. attention_mlp packs full-attention Q and every MLP projection as Marlin W4A16. attention_mlp_gdn also packs the quality-sensitive GDN output projection. Both non-default profiles require server.serving_profile = \"experimental\". The selected weight layout is immutable after upload. Packing always uses the established parallel implementation. Restart required.",
+          "description": "disabled, attention_mlp, or attention_mlp_gdn, case-insensitive. disabled preserves BF16 projections. attention_mlp packs full-attention Q and every MLP projection as Marlin W4A16. attention_mlp_gdn also packs the quality-sensitive GDN output projection. The selected weight layout is immutable after upload. Packing always uses the established parallel implementation. Restart required.",
           "x-kiln-path": "accelerator.cuda_marlin_profile",
           "x-kiln-type-and-default": "string enum; \"disabled\"",
           "x-kiln-canonical-env": "KILN_ACCELERATOR_CUDA_MARLIN_PROFILE (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-profile-gate": {
-            "profile": "experimental",
-            "when": {
-              "enum": [
-                "attention_mlp",
-                "attention_mlp_gdn"
-              ]
-            }
-          },
-          "x-kiln-validation": "disabled, attention_mlp, or attention_mlp_gdn, case-insensitive. disabled preserves BF16 projections. attention_mlp packs full-attention Q and every MLP projection as Marlin W4A16. attention_mlp_gdn also packs the quality-sensitive GDN output projection. Both non-default profiles require server.serving_profile = \"experimental\". The selected weight layout is immutable after upload. Packing always uses the established parallel implementation. Restart required."
+          "x-kiln-validation": "disabled preserves BF16 projections; attention_mlp and attention_mlp_gdn select immutable Marlin W4A16 layouts. Restart required."
         },
         "cuda_flash_backward_mode": {
           "type": "string",
@@ -468,18 +444,12 @@
             "stream_ordered"
           ],
           "default": "legacy_host_barriers",
-          "description": "legacy_host_barriers or stream_ordered, case-insensitive. stream_ordered requires server.serving_profile = \"experimental\"; other profiles fail startup rather than silently weakening the request. Restart required.",
+          "description": "legacy_host_barriers or stream_ordered, case-insensitive. Legacy host barriers are the portable default; stream_ordered is an explicit diagnostic comparison. Restart required.",
           "x-kiln-path": "accelerator.rocm_synchronization_mode",
           "x-kiln-type-and-default": "string enum; \"legacy_host_barriers\"",
           "x-kiln-canonical-env": "KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-profile-gate": {
-            "profile": "experimental",
-            "when": {
-              "const": "stream_ordered"
-            }
-          },
-          "x-kiln-validation": "legacy_host_barriers or stream_ordered, case-insensitive. stream_ordered requires server.serving_profile = \"experimental\"; other profiles fail startup rather than silently weakening the request. Restart required."
+          "x-kiln-validation": "legacy_host_barriers or stream_ordered, case-insensitive. Restart required."
         },
         "rocm_strided_batched_matmul_mode": {
           "type": "string",
@@ -488,18 +458,12 @@
             "enabled"
           ],
           "default": "disabled",
-          "description": "disabled uses one hipBLASLt operation per logical batch row and is the portable default. enabled selects strided batching and requires the experimental profile. The retired machine-shaped auto value is rejected. Restart required.",
+          "description": "disabled uses one hipBLASLt operation per logical batch row and is the portable default. enabled selects strided batching. The retired machine-shaped auto value is rejected. Restart required.",
           "x-kiln-path": "accelerator.rocm_strided_batched_matmul_mode",
           "x-kiln-type-and-default": "string enum; \"disabled\"",
           "x-kiln-canonical-env": "KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-profile-gate": {
-            "profile": "experimental",
-            "when": {
-              "const": "enabled"
-            }
-          },
-          "x-kiln-validation": "disabled uses one hipBLASLt operation per logical batch row and is the portable default. enabled selects strided batching and requires the experimental profile. The retired machine-shaped auto value is rejected. Restart required."
+          "x-kiln-validation": "disabled uses one operation per logical row; enabled selects strided batching. The retired auto value is rejected. Restart required."
         },
         "rocm_bf16_matmul_output_mode": {
           "type": "string",
@@ -508,31 +472,26 @@
             "native_bf16"
           ],
           "default": "f32_then_cast",
-          "description": "f32_then_cast is the portable default. native_bf16 requires the experimental profile. The retired ROCm-version-shaped auto value is rejected. Restart required.",
+          "description": "f32_then_cast is the portable default. native_bf16 explicitly requests native BF16 output. The retired ROCm-version-shaped auto value is rejected. Restart required.",
           "x-kiln-path": "accelerator.rocm_bf16_matmul_output_mode",
           "x-kiln-type-and-default": "string enum; \"f32_then_cast\"",
           "x-kiln-canonical-env": "KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-profile-gate": {
-            "profile": "experimental",
-            "when": {
-              "const": "native_bf16"
-            }
-          },
-          "x-kiln-validation": "f32_then_cast is the portable default. native_bf16 requires the experimental profile. The retired ROCm-version-shaped auto value is rejected. Restart required."
+          "x-kiln-validation": "f32_then_cast is the portable default; native_bf16 explicitly requests native BF16 output. Restart required."
         },
         "rocm_kernel_profile": {
           "type": "string",
           "enum": [
+            "native_default",
             "portable_fallback"
           ],
-          "default": "portable_fallback",
-          "description": "portable_fallback is the only product value and declines all machine-qualified accelerated routes while retaining fixed correctness and bounded-work safeguards. The retired qualified and experimental_multiblock values fail startup. Historical route attribution is compiled only by the dedicated hardware-qualification example feature and is not server configuration. Restart required.",
+          "default": "native_default",
+          "description": "native_default is the normal product profile. It enables native single-row and batched dynamic-length paged attention while leaving historical machine-qualified projection, GDN, MLP, normalization, and sampling routes disabled. portable_fallback declines all profile-governed accelerated routes for diagnosis. The retired qualified and experimental_multiblock values fail startup. Restart required.",
           "x-kiln-path": "accelerator.rocm_kernel_profile",
-          "x-kiln-type-and-default": "string enum; \"portable_fallback\"",
+          "x-kiln-type-and-default": "string enum; \"native_default\"",
           "x-kiln-canonical-env": "KILN_ACCELERATOR_ROCM_KERNEL_PROFILE (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-validation": "portable_fallback is the only product value and declines all machine-qualified accelerated routes while retaining fixed correctness and bounded-work safeguards. The retired qualified and experimental_multiblock values fail startup. Historical route attribution is compiled only by the dedicated hardware-qualification example feature and is not server configuration. Restart required."
+          "x-kiln-validation": "native_default enables native single-row and batched dynamic-length paged attention. portable_fallback is the explicit diagnostic route. The retired qualified and experimental_multiblock values fail startup. Restart required."
         },
         "rocm_graph_mode": {
           "type": "string",
@@ -543,21 +502,12 @@
             "lazy_capture_replay"
           ],
           "default": "profile",
-          "description": "profile, disabled, warmup_then_eager, or lazy_capture_replay, case-insensitive. profile resolves to disabled under stable/maintenance and lazy_capture_replay under experimental. The two explicit non-disabled modes require the experimental profile. Restart required.",
+          "description": "profile, disabled, warmup_then_eager, or lazy_capture_replay, case-insensitive. profile resolves to guarded lazy_capture_replay during stable or development serving and disabled during drained maintenance. Restart required.",
           "x-kiln-path": "accelerator.rocm_graph_mode",
           "x-kiln-type-and-default": "string enum; \"profile\"",
           "x-kiln-canonical-env": "KILN_ACCELERATOR_ROCM_GRAPH_MODE (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-profile-gate": {
-            "profile": "experimental",
-            "when": {
-              "enum": [
-                "warmup_then_eager",
-                "lazy_capture_replay"
-              ]
-            }
-          },
-          "x-kiln-validation": "profile, disabled, warmup_then_eager, or lazy_capture_replay, case-insensitive. profile resolves to disabled under stable/maintenance and lazy_capture_replay under experimental. The two explicit non-disabled modes require the experimental profile. Restart required."
+          "x-kiln-validation": "profile selects guarded lazy capture during serving and eager execution during maintenance. Explicit modes are startup-immutable. Restart required."
         },
         "rocm_graph_cache_entries": {
           "type": "integer",
@@ -879,7 +829,7 @@
           "x-kiln-type-and-default": "boolean; true",
           "x-kiln-canonical-env": "KILN_MEMORY_KV_AUTOSCALE (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-validation": "Requests the pressure-driven physical KV-cache control loop. The serving profile and backend remain authoritative: stable mode and backends without device-resident KV pressure report the request as unavailable rather than silently enabling mutation. /health, /v1/config, and the trusted debug state expose the request, effective state, bounded reason, and source."
+          "x-kiln-validation": "Requests the pressure-driven physical KV-cache control loop. Backends without device-resident KV pressure report the request as unavailable rather than silently enabling mutation. /health, /v1/config, and the trusted debug state expose the request, effective state, bounded reason, and source."
         },
         "kv_force_blocks": {
           "type": "integer",
@@ -1740,267 +1690,6 @@
     }
   },
   "allOf": [
-    {
-      "if": {
-        "properties": {
-          "accelerator": {
-            "properties": {
-              "kt_api_mode": {
-                "enum": [
-                  "all",
-                  "disabled"
-                ]
-              }
-            },
-            "required": [
-              "kt_api_mode"
-            ]
-          }
-        },
-        "required": [
-          "accelerator"
-        ]
-      },
-      "then": {
-        "properties": {
-          "server": {
-            "properties": {
-              "serving_profile": {
-                "const": "experimental"
-              }
-            },
-            "required": [
-              "serving_profile"
-            ]
-          }
-        },
-        "required": [
-          "server"
-        ]
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "accelerator": {
-            "properties": {
-              "vulkan_validation": {
-                "const": true
-              }
-            },
-            "required": [
-              "vulkan_validation"
-            ]
-          }
-        },
-        "required": [
-          "accelerator"
-        ]
-      },
-      "then": {
-        "properties": {
-          "server": {
-            "properties": {
-              "serving_profile": {
-                "const": "experimental"
-              }
-            },
-            "required": [
-              "serving_profile"
-            ]
-          }
-        },
-        "required": [
-          "server"
-        ]
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "accelerator": {
-            "properties": {
-              "cuda_marlin_profile": {
-                "enum": [
-                  "attention_mlp",
-                  "attention_mlp_gdn"
-                ]
-              }
-            },
-            "required": [
-              "cuda_marlin_profile"
-            ]
-          }
-        },
-        "required": [
-          "accelerator"
-        ]
-      },
-      "then": {
-        "properties": {
-          "server": {
-            "properties": {
-              "serving_profile": {
-                "const": "experimental"
-              }
-            },
-            "required": [
-              "serving_profile"
-            ]
-          }
-        },
-        "required": [
-          "server"
-        ]
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "accelerator": {
-            "properties": {
-              "rocm_synchronization_mode": {
-                "const": "stream_ordered"
-              }
-            },
-            "required": [
-              "rocm_synchronization_mode"
-            ]
-          }
-        },
-        "required": [
-          "accelerator"
-        ]
-      },
-      "then": {
-        "properties": {
-          "server": {
-            "properties": {
-              "serving_profile": {
-                "const": "experimental"
-              }
-            },
-            "required": [
-              "serving_profile"
-            ]
-          }
-        },
-        "required": [
-          "server"
-        ]
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "accelerator": {
-            "properties": {
-              "rocm_strided_batched_matmul_mode": {
-                "const": "enabled"
-              }
-            },
-            "required": [
-              "rocm_strided_batched_matmul_mode"
-            ]
-          }
-        },
-        "required": [
-          "accelerator"
-        ]
-      },
-      "then": {
-        "properties": {
-          "server": {
-            "properties": {
-              "serving_profile": {
-                "const": "experimental"
-              }
-            },
-            "required": [
-              "serving_profile"
-            ]
-          }
-        },
-        "required": [
-          "server"
-        ]
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "accelerator": {
-            "properties": {
-              "rocm_bf16_matmul_output_mode": {
-                "const": "native_bf16"
-              }
-            },
-            "required": [
-              "rocm_bf16_matmul_output_mode"
-            ]
-          }
-        },
-        "required": [
-          "accelerator"
-        ]
-      },
-      "then": {
-        "properties": {
-          "server": {
-            "properties": {
-              "serving_profile": {
-                "const": "experimental"
-              }
-            },
-            "required": [
-              "serving_profile"
-            ]
-          }
-        },
-        "required": [
-          "server"
-        ]
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "accelerator": {
-            "properties": {
-              "rocm_graph_mode": {
-                "enum": [
-                  "warmup_then_eager",
-                  "lazy_capture_replay"
-                ]
-              }
-            },
-            "required": [
-              "rocm_graph_mode"
-            ]
-          }
-        },
-        "required": [
-          "accelerator"
-        ]
-      },
-      "then": {
-        "properties": {
-          "server": {
-            "properties": {
-              "serving_profile": {
-                "const": "experimental"
-              }
-            },
-            "required": [
-              "serving_profile"
-            ]
-          }
-        },
-        "required": [
-          "server"
-        ]
-      }
-    },
     {
       "if": {
         "properties": {

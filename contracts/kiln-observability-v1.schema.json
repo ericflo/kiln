@@ -119,8 +119,8 @@
             "source": "default"
           },
           "rocm_kernel_profile": {
-            "configured": "portable_fallback",
-            "effective": "portable_fallback",
+            "configured": "native_default",
+            "effective": "native_default",
             "source": "default"
           },
           "rocm_graph_mode": {
@@ -726,12 +726,12 @@
           "effective_policy_source": "value",
           "effective_policy": {
             "inference_admission": true,
-            "training_gpu_ownership": false,
-            "adapter_weight_transitions": false,
-            "dynamic_kv_resize": false,
-            "allocator_reclaim": false,
-            "live_graph_capture": false,
-            "exclusive_gpu_behavior": "reject"
+            "training_gpu_ownership": true,
+            "adapter_weight_transitions": true,
+            "dynamic_kv_resize": true,
+            "allocator_reclaim": true,
+            "live_graph_capture": true,
+            "exclusive_gpu_behavior": "writer_priority"
           }
         },
         "http": {
@@ -970,8 +970,8 @@
               "source": "default"
             },
             "rocm_kernel_profile": {
-              "configured": "portable_fallback",
-              "effective": "portable_fallback",
+              "configured": "native_default",
+              "effective": "native_default",
               "source": "default"
             },
             "rocm_graph_mode": {
@@ -1578,8 +1578,8 @@
             "source": "default"
           },
           "rocm_kernel_profile": {
-            "configured": "portable_fallback",
-            "effective": "portable_fallback",
+            "configured": "native_default",
+            "effective": "native_default",
             "source": "default"
           },
           "rocm_graph_mode": {
@@ -8945,6 +8945,7 @@
     "RocmKernelProfile": {
       "type": "string",
       "enum": [
+        "native_default",
         "portable_fallback"
       ],
       "description": "The complete process-lifetime ROCm model-kernel route set.",

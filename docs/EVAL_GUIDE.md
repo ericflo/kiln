@@ -15,18 +15,18 @@ the same workflow under **Evals → Datasets / Suites / Jobs / Judgments**.
 
 ## Serving profile
 
-Choose the profile before starting the server:
+Normal eval and training use the default profile:
 
 | Task | Profile |
 | --- | --- |
-| Evaluate the base model or an adapter already active at startup | `stable` or `experimental` |
-| Train, load the resulting unmerged adapter, and evaluate it in one process | `experimental` |
+| Evaluate the base model or any saved adapter | `stable` |
+| Train, load the resulting unmerged adapter, and evaluate it in one process | `stable` |
 | Drain inference and train without eval traffic | `maintenance` |
 
 `maintenance` disables inference, so it cannot run evals. After
-maintenance-mode training, restart in `experimental` to load and evaluate the
-saved unmerged adapter. Do not restart in `stable` for that transition:
-`stable` deliberately rejects runtime adapter changes. See
+maintenance-mode training, restart in `stable` to load and evaluate the saved
+unmerged adapter. `experimental` is reserved for backend development and is
+not required for this workflow. See
 [Serving profiles](SERVING_PROFILES.md).
 
 ## Choose a workflow

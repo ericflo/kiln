@@ -98,7 +98,7 @@ impl ApiError {
             status: StatusCode::CONFLICT,
             code: "serving_profile_conflict",
             message: format!("Serving profile `{profile}` prohibits {operation}"),
-            hint: "Restart with KILN_SERVER_SERVING_PROFILE=experimental for controlled concurrent mutation, or KILN_SERVER_SERVING_PROFILE=maintenance for drained exclusive work.",
+            hint: "The default stable profile admits coordinated inference, training, and adapter transitions. Use maintenance only for drained exclusive work, and inspect the resolved serving policy for this operation.",
             retry_after_seconds: None,
         }
     }

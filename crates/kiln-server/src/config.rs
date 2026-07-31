@@ -801,9 +801,9 @@ pub struct MaxDecodeBatchDiagnostics {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ServingProfile {
-    /// Predictable inference. Dynamic physical memory operations, live graph
-    /// capture, training GPU writers, and live adapter weight transitions are
-    /// prohibited.
+    /// Normal product operation: inference, training, adapters, guarded memory
+    /// management, and live graph capture share the accelerator through the
+    /// writer-priority ownership protocol.
     #[default]
     Stable,
     /// Developer profile preserving concurrent inference/training and dynamic
@@ -838,13 +838,13 @@ impl ServingProfile {
         match self {
             Self::Stable => ServingRuntimePolicy {
                 inference_admission: true,
-                training_gpu_ownership: false,
-                adapter_weight_transitions: false,
-                dynamic_kv_resize: false,
-                allocator_reclaim: false,
-                live_graph_capture: false,
+                training_gpu_ownership: true,
+                adapter_weight_transitions: true,
+                dynamic_kv_resize: true,
+                allocator_reclaim: true,
+                live_graph_capture: true,
                 vulkan_resident_prefill: false,
-                exclusive_gpu_behavior: "reject",
+                exclusive_gpu_behavior: "writer_priority",
             },
             Self::Experimental => ServingRuntimePolicy {
                 inference_admission: true,
@@ -997,9 +997,9 @@ pub enum KtApiMode {
     /// matmul and paged-KV routes remain inactive.
     #[default]
     Auto,
-    /// Activate every adapter route. Requires the experimental profile.
+    /// Activate every adapter route for backend diagnosis.
     All,
-    /// Disable every adapter route. Requires the experimental profile.
+    /// Disable every adapter route for fallback diagnosis.
     Disabled,
 }
 
@@ -1184,7 +1184,7 @@ impl<'de> Deserialize<'de> for RocmSynchronizationModeSetting {
 #[serde(rename_all = "snake_case")]
 pub enum RocmStridedBatchedMatmulMode {
     /// Always use the strided-batched hipBLASLt route when batch is greater
-    /// than one. This requires the experimental serving profile.
+    /// than one.
     Enabled,
     /// Always issue one hipBLASLt operation per logical batch row.
     #[default]
@@ -1277,8 +1277,7 @@ impl<'de> Deserialize<'de> for RocmStridedBatchedMatmulModeSetting {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RocmBf16MatmulOutputMode {
-    /// Always request native BF16 output from hipBLASLt. This requires the
-    /// experimental serving profile.
+    /// Always request native BF16 output from hipBLASLt.
     NativeBf16,
     /// Always request F32 output and cast it to BF16 on-device.
     #[default]
@@ -1738,23 +1737,27 @@ impl<'de> Deserialize<'de> for MetalKernelProfileSetting {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RocmKernelProfile {
-    /// Decline all profile-governed routes and use portable model fallbacks.
+    /// Use the portable model routes plus native graph-stable paged decode.
     #[default]
+    NativeDefault,
+    /// Decline all profile-governed routes and use portable model fallbacks.
     PortableFallback,
 }
 
 impl RocmKernelProfile {
     fn parse(raw: &str, label: &str) -> Result<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
+            "native_default" => Ok(Self::NativeDefault),
             "portable_fallback" => Ok(Self::PortableFallback),
             _ => anyhow::bail!(
-                "{label} must be portable_fallback; machine-qualified profiles are not product configuration; got {raw:?}"
+                "{label} must be native_default or portable_fallback; machine-qualified profiles are not product configuration; got {raw:?}"
             ),
         }
     }
 
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::NativeDefault => "native_default",
             Self::PortableFallback => "portable_fallback",
         }
     }
@@ -1794,10 +1797,7 @@ impl RocmKernelProfileSetting {
 
 impl Default for RocmKernelProfileSetting {
     fn default() -> Self {
-        Self::new(
-            RocmKernelProfile::PortableFallback,
-            ConfigValueSource::Default,
-        )
+        Self::new(RocmKernelProfile::NativeDefault, ConfigValueSource::Default)
     }
 }
 
@@ -2289,8 +2289,10 @@ impl AcceleratorRuntimeConfig {
         let configured_graph_mode = self.rocm_graph_mode.mode();
         let effective_graph_mode = match configured_graph_mode {
             RocmGraphMode::Profile => match serving_profile.profile() {
-                ServingProfile::Experimental => RocmGraphMode::LazyCaptureReplay,
-                ServingProfile::Stable | ServingProfile::Maintenance => RocmGraphMode::Disabled,
+                ServingProfile::Stable | ServingProfile::Experimental => {
+                    RocmGraphMode::LazyCaptureReplay
+                }
+                ServingProfile::Maintenance => RocmGraphMode::Disabled,
             },
             explicit => explicit,
         };
@@ -2379,61 +2381,12 @@ impl AcceleratorRuntimeConfig {
         }
     }
 
-    /// Fail closed when an experimental accelerator behavior is requested
-    /// under a profile that does not permit live accelerator experiments.
-    pub fn validate_for_serving_profile(&self, profile: ServingProfile) -> Result<()> {
-        if self.kt_api_mode.mode() != KtApiMode::Auto && profile != ServingProfile::Experimental {
-            anyhow::bail!(
-                "accelerator.kt_api_mode={} requires server.serving_profile=experimental; got {profile}",
-                self.kt_api_mode.mode()
-            );
-        }
-        if self.vulkan_validation.enabled() && profile != ServingProfile::Experimental {
-            anyhow::bail!(
-                "accelerator.vulkan_validation=true requires server.serving_profile=experimental; got {profile}"
-            );
-        }
-        if self.cuda_marlin_profile.profile() != CudaMarlinProfile::Disabled
-            && profile != ServingProfile::Experimental
-        {
-            anyhow::bail!(
-                "accelerator.cuda_marlin_profile={} requires server.serving_profile=experimental; got {profile}",
-                self.cuda_marlin_profile.profile()
-            );
-        }
-        if self.rocm_synchronization_mode.mode() == RocmSynchronizationMode::StreamOrdered
-            && profile != ServingProfile::Experimental
-        {
-            anyhow::bail!(
-                "accelerator.rocm_synchronization_mode=stream_ordered requires server.serving_profile=experimental; got {profile}"
-            );
-        }
-        if self.rocm_strided_batched_matmul_mode.mode() == RocmStridedBatchedMatmulMode::Enabled
-            && profile != ServingProfile::Experimental
-        {
-            anyhow::bail!(
-                "accelerator.rocm_strided_batched_matmul_mode={} requires server.serving_profile=experimental; got {profile}",
-                self.rocm_strided_batched_matmul_mode.mode()
-            );
-        }
-        if self.rocm_bf16_matmul_output_mode.mode() == RocmBf16MatmulOutputMode::NativeBf16
-            && profile != ServingProfile::Experimental
-        {
-            anyhow::bail!(
-                "accelerator.rocm_bf16_matmul_output_mode={} requires server.serving_profile=experimental; got {profile}",
-                self.rocm_bf16_matmul_output_mode.mode()
-            );
-        }
-        if matches!(
-            self.rocm_graph_mode.mode(),
-            RocmGraphMode::WarmupThenEager | RocmGraphMode::LazyCaptureReplay
-        ) && profile != ServingProfile::Experimental
-        {
-            anyhow::bail!(
-                "accelerator.rocm_graph_mode={} requires server.serving_profile=experimental; got {profile}",
-                self.rocm_graph_mode.mode()
-            );
-        }
+    /// Validate accelerator settings independently of the serving lifecycle.
+    ///
+    /// Backend routes own their capability and correctness checks. The serving
+    /// profile controls accelerator ownership, not whether a normal product
+    /// feature is artificially labelled experimental.
+    pub fn validate_for_serving_profile(&self, _profile: ServingProfile) -> Result<()> {
         validate_rocm_graph_cache_entries(self.rocm_graph_cache_entries.entries())?;
         validate_rocm_graph_cache_max_bytes(self.rocm_graph_cache_max_bytes.bytes())?;
         kiln_model::validate_full_attention_score_budget_mib(
@@ -6951,7 +6904,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             config.accelerator.rocm_kernel_profile.profile(),
-            RocmKernelProfile::PortableFallback
+            RocmKernelProfile::NativeDefault
         );
         assert_eq!(
             config.accelerator.rocm_graph_mode.mode(),
@@ -7139,7 +7092,7 @@ pub(crate) mod tests {
     fn accelerator_policy_defaults_resolve_by_serving_profile_and_serialize() {
         let accelerator = AcceleratorRuntimeConfig::default();
         for (profile, expected_graph_mode) in [
-            (ServingProfile::Stable, RocmGraphMode::Disabled),
+            (ServingProfile::Stable, RocmGraphMode::LazyCaptureReplay),
             (
                 ServingProfile::Experimental,
                 RocmGraphMode::LazyCaptureReplay,
@@ -7255,8 +7208,8 @@ pub(crate) mod tests {
             assert_eq!(
                 resolved.rocm_kernel_profile,
                 ResolvedAcceleratorValue {
-                    configured: RocmKernelProfile::PortableFallback,
-                    effective: RocmKernelProfile::PortableFallback,
+                    configured: RocmKernelProfile::NativeDefault,
+                    effective: RocmKernelProfile::NativeDefault,
                     source: ConfigValueSource::Default,
                 }
             );
@@ -7321,14 +7274,8 @@ pub(crate) mod tests {
         assert_eq!(json["metal_kernel_profile"]["configured"], "native_default");
         assert_eq!(json["metal_kernel_profile"]["effective"], "native_default");
         assert_eq!(json["metal_kernel_profile"]["source"], "default");
-        assert_eq!(
-            json["rocm_kernel_profile"]["configured"],
-            "portable_fallback"
-        );
-        assert_eq!(
-            json["rocm_kernel_profile"]["effective"],
-            "portable_fallback"
-        );
+        assert_eq!(json["rocm_kernel_profile"]["configured"], "native_default");
+        assert_eq!(json["rocm_kernel_profile"]["effective"], "native_default");
         assert_eq!(json["rocm_kernel_profile"]["source"], "default");
         assert_eq!(json["rocm_graph_mode"]["configured"], "profile");
         assert_eq!(json["rocm_graph_mode"]["effective"], "lazy_capture_replay");
@@ -7336,11 +7283,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn accelerator_toml_is_strict_source_tracked_bounded_and_profile_gated() {
+    fn accelerator_toml_is_strict_source_tracked_bounded_and_profile_independent() {
         let config: KilnConfig = toml::from_str(
             r#"
 [server]
-serving_profile = "experimental"
+serving_profile = "stable"
 
 [accelerator]
 kt_api_mode = "all"
@@ -7521,116 +7468,39 @@ rocm_graph_cache_max_bytes = 17179869184
         }
 
         for profile in [ServingProfile::Stable, ServingProfile::Maintenance] {
-            for mode in [KtApiMode::All, KtApiMode::Disabled] {
-                let mut gated = KilnConfig::default();
-                gated.server.serving_profile =
-                    ServingProfileSetting::new(profile, ConfigValueSource::ConfigFile);
-                gated.accelerator.kt_api_mode =
-                    KtApiModeSetting::new(mode, ConfigValueSource::ConfigFile);
-                let detail = gated.validate().unwrap_err().to_string();
-                assert!(detail.contains("accelerator.kt_api_mode"), "{detail}");
-                assert!(detail.contains("experimental"), "{detail}");
-            }
-
-            for mode in [
-                RocmGraphMode::WarmupThenEager,
-                RocmGraphMode::LazyCaptureReplay,
-            ] {
-                let mut gated = KilnConfig::default();
-                gated.server.serving_profile =
-                    ServingProfileSetting::new(profile, ConfigValueSource::ConfigFile);
-                gated.accelerator.rocm_graph_mode =
-                    RocmGraphModeSetting::new(mode, ConfigValueSource::ConfigFile);
-                let detail = gated.validate().unwrap_err().to_string();
-                assert!(detail.contains("accelerator.rocm_graph_mode"), "{detail}");
-                assert!(detail.contains("experimental"), "{detail}");
-            }
-
-            let mut gated = KilnConfig::default();
-            gated.server.serving_profile =
+            let mut config = KilnConfig::default();
+            config.server.serving_profile =
                 ServingProfileSetting::new(profile, ConfigValueSource::ConfigFile);
-            gated.accelerator.cuda_marlin_profile = CudaMarlinProfileSetting::new(
+            config.accelerator.kt_api_mode =
+                KtApiModeSetting::new(KtApiMode::All, ConfigValueSource::ConfigFile);
+            config.accelerator.vulkan_validation =
+                VulkanValidationSetting::new(true, ConfigValueSource::ConfigFile);
+            config.accelerator.cuda_marlin_profile = CudaMarlinProfileSetting::new(
                 CudaMarlinProfile::AttentionMlp,
                 ConfigValueSource::ConfigFile,
             );
-            let detail = gated.validate().unwrap_err().to_string();
-            assert!(
-                detail.contains("accelerator.cuda_marlin_profile"),
-                "{detail}"
-            );
-            assert!(detail.contains("experimental"), "{detail}");
-
-            let mut gated = KilnConfig::default();
-            gated.server.serving_profile =
-                ServingProfileSetting::new(profile, ConfigValueSource::ConfigFile);
-            gated.accelerator.rocm_synchronization_mode = RocmSynchronizationModeSetting::new(
+            config.accelerator.rocm_synchronization_mode = RocmSynchronizationModeSetting::new(
                 RocmSynchronizationMode::StreamOrdered,
                 ConfigValueSource::ConfigFile,
             );
-            let detail = gated.validate().unwrap_err().to_string();
-            assert!(
-                detail.contains("accelerator.rocm_synchronization_mode"),
-                "{detail}"
-            );
-            assert!(detail.contains("experimental"), "{detail}");
-
-            let mut gated = KilnConfig::default();
-            gated.server.serving_profile =
-                ServingProfileSetting::new(profile, ConfigValueSource::ConfigFile);
-            gated.accelerator.vulkan_validation =
-                VulkanValidationSetting::new(true, ConfigValueSource::ConfigFile);
-            let detail = gated.validate().unwrap_err().to_string();
-            assert!(detail.contains("accelerator.vulkan_validation"), "{detail}");
-            assert!(detail.contains("experimental"), "{detail}");
-
-            for (strided_mode, output_mode, expected_field) in [
-                (
+            config.accelerator.rocm_strided_batched_matmul_mode =
+                RocmStridedBatchedMatmulModeSetting::new(
                     RocmStridedBatchedMatmulMode::Enabled,
-                    RocmBf16MatmulOutputMode::F32ThenCast,
-                    "accelerator.rocm_strided_batched_matmul_mode",
-                ),
-                (
-                    RocmStridedBatchedMatmulMode::Disabled,
-                    RocmBf16MatmulOutputMode::NativeBf16,
-                    "accelerator.rocm_bf16_matmul_output_mode",
-                ),
-            ] {
-                let mut gated = KilnConfig::default();
-                gated.server.serving_profile =
-                    ServingProfileSetting::new(profile, ConfigValueSource::ConfigFile);
-                gated.accelerator.rocm_strided_batched_matmul_mode =
-                    RocmStridedBatchedMatmulModeSetting::new(
-                        strided_mode,
-                        ConfigValueSource::ConfigFile,
-                    );
-                gated.accelerator.rocm_bf16_matmul_output_mode =
-                    RocmBf16MatmulOutputModeSetting::new(
-                        output_mode,
-                        ConfigValueSource::ConfigFile,
-                    );
-                let detail = gated.validate().unwrap_err().to_string();
-                assert!(detail.contains(expected_field), "{detail}");
-                assert!(detail.contains("experimental"), "{detail}");
-            }
-
-            for allowed_mode in [RocmGraphMode::Profile, RocmGraphMode::Disabled] {
-                let mut allowed = KilnConfig::default();
-                allowed.server.serving_profile =
-                    ServingProfileSetting::new(profile, ConfigValueSource::ConfigFile);
-                allowed.accelerator.rocm_graph_mode =
-                    RocmGraphModeSetting::new(allowed_mode, ConfigValueSource::ConfigFile);
-                allowed.validate().unwrap();
-
-                allowed.accelerator.rocm_kernel_profile = RocmKernelProfileSetting::new(
-                    RocmKernelProfile::PortableFallback,
                     ConfigValueSource::ConfigFile,
                 );
-                allowed.accelerator.cuda_flash_backward_mode = CudaFlashBackwardModeSetting::new(
-                    CudaFlashBackwardMode::Deterministic,
-                    ConfigValueSource::ConfigFile,
-                );
-                allowed.validate().unwrap();
-            }
+            config.accelerator.rocm_bf16_matmul_output_mode = RocmBf16MatmulOutputModeSetting::new(
+                RocmBf16MatmulOutputMode::NativeBf16,
+                ConfigValueSource::ConfigFile,
+            );
+            config.accelerator.rocm_kernel_profile = RocmKernelProfileSetting::new(
+                RocmKernelProfile::NativeDefault,
+                ConfigValueSource::ConfigFile,
+            );
+            config.accelerator.rocm_graph_mode = RocmGraphModeSetting::new(
+                RocmGraphMode::LazyCaptureReplay,
+                ConfigValueSource::ConfigFile,
+            );
+            config.validate().unwrap();
         }
     }
 
@@ -7768,18 +7638,20 @@ rocm_graph_cache_max_bytes = 17179869184
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let environment = ScopedConfigEnvironment::isolated();
 
-        environment.set("KILN_ACCELERATOR_ROCM_KERNEL_PROFILE", "portable_fallback");
-        let mut config = KilnConfig::default();
-        config.apply_env_overrides().unwrap();
-        assert_eq!(
-            config.accelerator.rocm_kernel_profile.profile(),
-            RocmKernelProfile::PortableFallback
-        );
-        assert_eq!(
-            config.accelerator.rocm_kernel_profile.source(),
-            ConfigValueSource::Environment
-        );
-        environment.remove("KILN_ACCELERATOR_ROCM_KERNEL_PROFILE");
+        for (raw, expected) in [
+            ("native_default", RocmKernelProfile::NativeDefault),
+            ("portable_fallback", RocmKernelProfile::PortableFallback),
+        ] {
+            environment.set("KILN_ACCELERATOR_ROCM_KERNEL_PROFILE", raw);
+            let mut config = KilnConfig::default();
+            config.apply_env_overrides().unwrap();
+            assert_eq!(config.accelerator.rocm_kernel_profile.profile(), expected);
+            assert_eq!(
+                config.accelerator.rocm_kernel_profile.source(),
+                ConfigValueSource::Environment
+            );
+            environment.remove("KILN_ACCELERATOR_ROCM_KERNEL_PROFILE");
+        }
 
         for retired in ["qualified", "experimental_multiblock", "custom"] {
             environment.set("KILN_ACCELERATOR_ROCM_KERNEL_PROFILE", retired);
@@ -10259,13 +10131,13 @@ last_token_lm_head = true
             ServingProfile::Stable.runtime_policy(),
             ServingRuntimePolicy {
                 inference_admission: true,
-                training_gpu_ownership: false,
-                adapter_weight_transitions: false,
-                dynamic_kv_resize: false,
-                allocator_reclaim: false,
-                live_graph_capture: false,
+                training_gpu_ownership: true,
+                adapter_weight_transitions: true,
+                dynamic_kv_resize: true,
+                allocator_reclaim: true,
+                live_graph_capture: true,
                 vulkan_resident_prefill: false,
-                exclusive_gpu_behavior: "reject",
+                exclusive_gpu_behavior: "writer_priority",
             }
         );
         assert_eq!(

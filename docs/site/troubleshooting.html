@@ -608,7 +608,7 @@ curl -fsS http://localhost:8420/metrics \
         <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
           <div>
             <div class="label mb-2">Establish policy</div>
-            <p>Inspect the typed request before attributing behavior to capture. The default <code>stable</code> serving profile disables live graph capture even when <code>memory.cuda_graphs=true</code>.</p>
+            <p>Inspect the typed request before attributing behavior to capture. The default <code>stable</code> serving profile admits guarded live graph capture when the backend and request shape qualify; <code>maintenance</code> selects eager execution.</p>
           </div>
           <div>
             <div class="label mb-2">Check the bound</div>
@@ -1017,7 +1017,7 @@ kiln adapters list --url http://gpu-box:8420</code></pre>
               <li><code>environment_identity_changed</code> at <code>identity_verification</code> means stable discovery changed between initial inspection and the post-episode <code>revalidating</code> phase. Kiln published none of that attempt&rsquo;s episodes.</li>
               <li>Use one shared reset object, or exactly one <code>environment_reset_options</code> object per URL; groups must cover every endpoint.</li>
               <li>Protected origins need an exact-origin credential; remote server runs require explicit operator policy and HTTPS.</li>
-              <li>Inspect server logs for WebSocket timeouts or unsolicited frames. Kiln pumps Ping/Pong and periodic read-only <code>state</code> exchanges while inference is pending, then poisons ambiguous lock-step sessions.</li>
+              <li>Inspect server logs for WebSocket timeouts or unsolicited frames. Kiln pumps Ping/Pong while inference is pending and sends periodic read-only <code>state</code> exchanges, then poisons ambiguous lock-step sessions.</li>
               <li>If thinking-on rollouts end as <code>invalid_model_action</code>, inspect whether <code>max_action_tokens</code> truncated the reasoning before a final schema-valid answer. Increase the action budget; disable thinking only for an intentionally final-action-only policy.</li>
               <li>A retained-representation budget error reports current and additional bytes. Reduce group size, concurrency, steps, action size, or observation size; Kiln publishes no partial artifact bundle.</li>
               <li>An artifact integrity failure means the manifest byte count or SHA-256 no longer matches the bounded regular file. Restore the original bundle or recollect; never edit retained artifacts in place.</li>

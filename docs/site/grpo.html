@@ -274,7 +274,7 @@
   <!-- hero -->
   <section class="hero-glow">
     <div class="max-w-4xl mx-auto px-6 pt-16 pb-10">
-      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">GRPO &middot; experimental training workflow</span>
+      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">GRPO &middot; native training workflow</span>
       <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">
         Train a LoRA adapter from scored completions.
       </h1>
@@ -335,23 +335,21 @@
           accelerator ownership; inference resumes only after that ownership is released.
         </p>
         <div class="card p-5 mt-5" style="background: rgba(249, 115, 22, 0.08); border-color: rgba(249, 115, 22, 0.22);">
-          <h3 class="font-semibold mb-2">Run this loop only in the experimental profile</h3>
+          <h3 class="font-semibold mb-2">The default profile runs the complete loop</h3>
           <p style="color: var(--fg-dim);">
-            The default <code>stable</code> profile rejects training and adapter-weight
-            transitions. <code>maintenance</code> admits drained mutation but disables the
-            generation and evaluation halves of this workflow. The current release also
-            cannot start a <code>stable</code> process with a saved LoRA adapter. Use a
-            separate <code>experimental</code> process for the complete generate, train,
-            evaluate, and activate loop. See
+            The default <code>stable</code> profile supports generation, training,
+            evaluation, and coordinated adapter-weight transitions in one process.
+            <code>maintenance</code> admits drained mutation but disables generation and
+            evaluation. <code>experimental</code> is reserved for backend development and
+            is not needed for speed or training. See
             <a href="docs/serving-profiles/">Serving profiles</a>.
           </p>
         </div>
         <div class="card p-5 mt-5">
           <h3 class="font-semibold mb-2">Before you run the commands</h3>
           <p style="color: var(--fg-dim);">
-            Start Kiln with real <code>Qwen/Qwen3.5-4B</code> weights and
-            <code>KILN_SERVER_SERVING_PROFILE=experimental</code>. The CLI examples
-            assume that the extracted <code>kiln</code> binary is on your
+            Start Kiln normally with real <code>Qwen/Qwen3.5-4B</code> weights. The CLI
+            examples assume that the extracted <code>kiln</code> binary is on your
             <code>PATH</code>; otherwise replace <code>kiln</code> with its local path.
             Generate and score data from a trusted client because Kiln does not
             authenticate its HTTP API.
@@ -578,9 +576,8 @@ kiln train grpo \
   -d '{"name": "math-correctness"}' \
   | python3 -m json.tool</code></pre>
           <p class="text-sm mt-3" style="color: var(--fg-mute);">
-            This is an operator-controlled <code>experimental</code>-profile action,
-            not evidence-bound automatic promotion. The current <code>stable</code>
-            profile cannot load or start with a saved LoRA adapter.
+            This is an operator-controlled action under the default
+            <code>stable</code> profile, not evidence-bound automatic promotion.
           </p>
         </section>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">

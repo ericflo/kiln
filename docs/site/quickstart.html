@@ -789,21 +789,18 @@ pi -p "Use the bash tool to run: pwd"
         and evaluation boundary for every improvement job.
       </p>
       <div class="card p-5 mb-6" style="background: rgba(249, 115, 22, 0.08); border-color: rgba(249, 115, 22, 0.22);">
-        <h3 class="font-semibold mb-2">Restart into a profile that admits training</h3>
+        <h3 class="font-semibold mb-2">Train with the server that is already running</h3>
         <p class="mb-3" style="color: var(--fg-dim);">
-          The server command above uses the default <code>stable</code> profile, which rejects training and live
-          adapter-weight transitions. For an interactive local loop, stop it and restart with
-          <code>experimental</code> before submitting SFT, GRPO, or OPD:
+          The server command above uses the default <code>stable</code> profile, which
+          supports SFT, GRPO, OPD, evaluation, and coordinated live adapter transitions.
+          No restart or profile setting is required:
         </p>
-<pre class="text-sm"><code>KILN_SERVER_SERVING_PROFILE=experimental \
-KILN_MODEL_PATH=./Qwen3.5-4B \
-./kiln serve</code></pre>
+<pre class="text-sm"><code>KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve</code></pre>
         <p class="text-sm mt-3" style="color: var(--fg-mute);">
-          <code>maintenance</code> can drain traffic before a mutation, but the current
-          <code>stable</code> process cannot start with or activate an unmerged saved adapter.
-          Keep the live train/evaluate/adapter loop in a separate <code>experimental</code>
-          process. See <a href="docs/serving-profiles/">Serving profiles</a> for the exact
-          ownership and transition rules.
+          Use <code>maintenance</code> only to drain inference before exclusive work.
+          <code>experimental</code> is for qualifying quarantined backend routes, not for
+          ordinary speed or training. See <a href="docs/serving-profiles/">Serving profiles</a>
+          for the exact ownership and transition rules.
         </p>
       </div>
       <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">

@@ -20,20 +20,17 @@ and can submit native GRPO directly. See the
 
 ## Before you start
 
-Use the `experimental` serving profile for a controlled loop that generates,
-trains, and evaluates in one process:
+Use the default `stable` serving profile for the complete loop that generates,
+trains, evaluates, and activates in one process:
 
 ```bash
-KILN_SERVER_SERVING_PROFILE=experimental kiln serve
+kiln serve
 ```
 
-The default `stable` profile allows inference but rejects training and live
-adapter transitions. `maintenance` allows drained training and adapter changes
-but rejects inference and evaluation. Therefore a
-stable → maintenance → stable sequence cannot evaluate or serve the resulting
-unmerged adapter: the last stable process cannot load it. Either use
-`experimental` for the complete controlled loop, or train under `maintenance`
-and start an `experimental` process to load and evaluate the result.
+`maintenance` allows drained training and adapter changes but rejects inference
+and evaluation; restart in `stable` to evaluate its result. `experimental` is
+reserved for backend qualification and is never required for ordinary speed,
+training, or adapter transitions.
 
 Serving profiles are GPU-ownership policies, not hardware selectors. They do
 not contain device-name, vendor-ID, or model-specific route allowlists. See

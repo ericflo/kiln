@@ -31,7 +31,7 @@ Pre-recording dry run:
 ```bash
 # Sanity check: server starts cleanly and serves a base-model completion.
 KILN_BIN=${KILN_BIN:-./target/release/kiln}
-KILN_SERVER_SERVING_PROFILE=experimental KILN_MODEL_PATH=./Qwen3.5-4B "$KILN_BIN" serve --config kiln.example.toml &
+KILN_MODEL_PATH=./Qwen3.5-4B "$KILN_BIN" serve --config kiln.example.toml &
 sleep 30  # model load + warmup
 curl -s http://localhost:8420/v1/chat/completions \
   -H 'Content-Type: application/json' \
@@ -53,7 +53,7 @@ Type:
 
 ```bash
 $ KILN_BIN=${KILN_BIN:-./target/release/kiln}
-$ KILN_SERVER_SERVING_PROFILE=experimental KILN_MODEL_PATH=./Qwen3.5-4B "$KILN_BIN" serve --config kiln.example.toml
+$ KILN_MODEL_PATH=./Qwen3.5-4B "$KILN_BIN" serve --config kiln.example.toml
 ```
 
 Expected on-screen output (abbreviated by the asciicast — let it scroll naturally for ~8s, then the listen line lands):

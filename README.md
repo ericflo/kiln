@@ -30,7 +30,7 @@
 
 ---
 
-Kiln serves a language model, trains it, and evaluates it on one GPU from one Rust binary. The default `stable` profile isolates predictable inference from GPU-writer transitions. Interactive train/eval loops opt into `experimental`; production systems enter a drained `maintenance` process for training or adapter changes, then restart into `stable`. See [Serving Profiles](docs/SERVING_PROFILES.md).
+Kiln serves a language model, trains it, and evaluates it on one GPU from one Rust binary. The default `stable` profile is the complete product: inference, training, evaluation, adapter transitions, and correctness-qualified acceleration work together without profile tuning. Use `maintenance` only when inference must be drained, and `experimental` only to qualify a quarantined backend route. See [Serving Profiles](docs/SERVING_PROFILES.md).
 
 It targets one model ([Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B)) and optimizes everything for that model — the scheduler, the memory manager, the kernels. This isn't a general-purpose framework. It's a scalpel.
 
@@ -43,11 +43,10 @@ are published in [Benchmarks](BENCHMARKS.md#current-measured-service-envelope).
 
 ## Why
 
-Today, improving a deployed model looks like: collect failure examples, format them, upload to a training service, wait hours, download new weights, build a separate eval harness in Python, redeploy, hope. Kiln collapses that into one local binary and artifact set. For the interactive loop below, start the server with the explicit development profile:
+Today, improving a deployed model looks like: collect failure examples, format them, upload to a training service, wait hours, download new weights, build a separate eval harness in Python, redeploy, hope. Kiln collapses that into one local binary and artifact set. Start the normal server:
 
 ```bash
-# Development only: admit inference plus GPU-writer transitions in one process
-KILN_SERVER_SERVING_PROFILE=experimental KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
+KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
 
 # Submit a correction — the model learns it in seconds
 curl http://localhost:8420/v1/train/sft \
@@ -84,17 +83,17 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 - **OpenAI-compatible API** — drop in as a local replacement. SSE streaming, chat completions, tool use formatting, and first-class thinking budgets by token count or decode time.
 - **pi integration** — `kiln pi-setup` backs up and merges `~/.pi/agent/models.json` + `settings.json`, then points pi at Kiln as an OpenAI-compatible tool-calling backend.
 - **Embedded agent runs** — the server drives pi itself (`POST /v1/agent/runs`): spawns `pi --mode rpc` against its own model, streams the trajectory live with steer/abort, and auto-indexes finished sessions into the trace layer the self-improvement flywheel trains on.
-- **Bounded online-LoRA SFT** over HTTP — one conversation per optimizer update under the fixed `native_online_lora_v1` profile; submit in `experimental` or drained `maintenance`, with atomic publication.
+- **Bounded online-LoRA SFT** over HTTP — one conversation per optimizer update under the fixed `native_online_lora_v1` profile, with atomic publication under normal `stable` serving or drained `maintenance`.
 - **GRPO training** over HTTP — submit scored completions for reinforcement learning. You control the reward function; GPU ownership follows the selected serving profile.
 - **Native OpenEnv training** — discover any OpenEnv server, run seed-matched stateful WebSocket episodes, preserve typed rewards and multi-turn action/observation trajectories, then collect or directly train a LoRA with `kiln openenv`.
 - **On-policy distillation (OPD)** over HTTP — train against an identity-bound local or vLLM teacher, with exact candidate-boundary checkpoints and resume.
 - **First-class evals** over HTTP — register suites, run them against any adapter, drill into per-example outcomes, and strictly replay a completed seeded run against exact model/adapter, tokenizer/template, backend/binary, generation/scorer, and raw decoder-byte identities. Auto-detect picks the right scorer per example (`numeric_tolerance`, `multiple_choice`, `json_validity`, `regex`, `contains`, `tool_call`, `code`, `llm_judge`, `all`/`any` composites).
 - **Dataset → eval synthesis** — upload an SFT JSONL and Kiln decomposes it into an eval suite (final-assistant / first-turn / every-turn / tool-call-prediction strategies). No separate eval harness to write.
 - **Judgment flywheel** — A/B-judge two adapters in `/ui/`, save your picks into a judgment dataset, compile to SFT, train a *local* judge LoRA, validate it on a held-out slice. The dashboard ships a streaming side-by-side viewer with `A`/`B`/`Tie`/`Skip` keyboard shortcuts.
-- **Post-training auto-eval** — in `experimental`, attach a held-out `post_eval` to SFT/GRPO and Kiln rejects exact, normalized, source-row, group, or session contamination before queuing; explicit `train-set-eval` runs are diagnostic-only. Results are back-linked to the training job.
+- **Post-training auto-eval** — attach a held-out `post_eval` to SFT/GRPO and Kiln rejects exact, normalized, source-row, group, or session contamination before queuing; explicit `train-set-eval` runs are diagnostic-only. Results are back-linked to the training job.
 - **Adapter smoke tests** — pass `--adapter-smoke-test` on SFT/GRPO CLI submissions to record base-vs-adapter canary metrics in `train_receipt.json` before a full eval.
 - **Capability-bound optimizers** — Muon is the default, with AdamW and SGD selectable only when the exact resident optimizer tuple and requested workload support them. Product updates are fixed to round-to-nearest; Muon ranks are 2+ on CPU, 2..=48 on CUDA/ROCm, and 2..=32 on Metal/Vulkan, and Metal SGD is rejected. `GET /v1/config` field `training.optimizer_support` separates raw implementation, resident tuple, per-workload admission, and dynamic memory checks so portable CPU tuples and Vulkan hooks never overclaim server training.
-- **Atomic LoRA transitions** — `experimental` supports live hot-swap; `maintenance` supports drained activation; `stable` rejects real weight transitions before GPU ownership changes.
+- **Atomic LoRA transitions** — normal `stable` serving coordinates live hot-swap with inference; `maintenance` supports drained activation.
 - **Continuous batching** with token-budgeted prefill — long prompts yield after every bounded quantum so ready decode rows keep advancing.
 - **Typed tiled-prefill policy** — backend dispatch, inference tiles, tape-training tiles, detached full-attention tiles, and last-token LM-head behavior resolve once at startup with provenance and no mid-request environment rereads.
 - **128K+ context** on 24GB — Qwen3.5-4B's hybrid architecture (24 linear attention + 8 full attention layers) means KV cache is 4x smaller than a pure transformer.
@@ -330,7 +329,7 @@ responses = [
 # 2. Score them however you want — regex, unit tests, another model, human eval
 scored = [{"text": r.choices[0].message.content, "reward": my_score(r)} for r in responses]
 
-# 3. Submit — an experimental-profile server trains and hot-swaps atomically
+# 3. Submit — the default server trains and hot-swaps atomically
 requests.post("http://localhost:8420/v1/train/grpo", json={
     "groups": [{
         "messages": [{"role": "user", "content": prompt}],
@@ -455,7 +454,7 @@ See [docs/VLLM_TEACHER_IDENTITY.md](docs/VLLM_TEACHER_IDENTITY.md).
 
 ## The Eval Loop
 
-Training is half the story; the other half is knowing whether your last training run actually helped. In the `experimental` development profile, Kiln's eval system runs in the same process against the same model weights. In production, train under `maintenance`, restart into `stable`, and evaluate before restoring traffic. Both workflows use the same first-class artifacts: registered suites, drillable per-example outcomes, A/B comparisons across adapters, and a judgment flywheel that turns your A/B picks into a *local* judge LoRA you can re-use.
+Training is half the story; the other half is knowing whether your last training run actually helped. Under the default `stable` profile, Kiln's eval system runs in the same process against the same model weights, so the full train/eval/activate loop needs no restart or special mode. A drained `maintenance` process can train but cannot evaluate until restarted in `stable`. Both workflows use the same first-class artifacts: registered suites, drillable per-example outcomes, A/B comparisons across adapters, and a judgment flywheel that turns your A/B picks into a *local* judge LoRA you can re-use.
 
 ```bash
 # 1. Upload an SFT JSONL — Kiln will use it as the source of truth for examples
@@ -588,9 +587,7 @@ curl http://localhost:8420/v1/chat/completions \
   -d '{"messages": [{"role": "user", "content": "Hello!"}], "stream": true}'
 ```
 
-The default server is `stable`. To run the development training example, stop
-it and restart the same binary/model command with
-`KILN_SERVER_SERVING_PROFILE=experimental`, then submit:
+The default server is `stable` and admits training, so submit directly:
 
 ```bash
 # Train
@@ -820,7 +817,7 @@ open inputs and include validated examples for every public entrypoint.
 | POST | `/v1/chat/completions` | Chat completions (OpenAI-compatible), including per-request thinking budgets, bounded `ignore_eos`, and opt-in exact single-choice `rollout_provenance` |
 | POST | `/v1/completions` | vLLM-shaped prompt-logprob subset with a canonical base-teacher identity fingerprint |
 | POST | `/v1/completions/batch` | Text-only batch generation (up to 64 prompts per request), with the same thinking-budget and bounded `ignore_eos` controls but no recorded behavior-policy probabilities |
-| POST | `/v1/train/sft` | Submit bounded `native_online_lora_v1` SFT examples and return the exact effective seed under `experimental` or `maintenance` (optionally with a `post_eval` hook in `experimental`) |
+| POST | `/v1/train/sft` | Submit bounded `native_online_lora_v1` SFT examples and return the exact effective seed (optionally with a `post_eval` hook) under normal `stable` serving or drained `maintenance` |
 | POST | `/v1/train/hf/sft/exports` | Atomically publish an immutable, identity-bound SFT bundle with the pinned HF/TRL runner |
 | POST | `/v1/train/hf/grpo/exports` | Atomically publish an immutable recorded-GRPO bundle from inline groups or server-local canonical JSONL |
 | GET | `/v1/train/hf/exports` | List server-owned HF/TRL export summaries |
@@ -828,7 +825,7 @@ open inputs and include validated examples for every public entrypoint.
 | GET | `/v1/train/hf/exports/{name}/download` | Revalidate and stream one `.kiln-hf` bundle as tar.gz |
 | DELETE | `/v1/train/hf/exports/{name}` | Durably delete an immutable server-owned export, optionally identity-conditional with `If-Match` |
 | POST | `/v1/train/hf/peft/imports/{name}` | Stream, fully verify, resident-validate, and atomically publish one `.kiln-hf-import` PEFT result |
-| POST | `/v1/train/grpo` | Submit GRPO scored completions and return the exact effective seed under `experimental` or `maintenance` (optionally with a `post_eval` hook in `experimental`). Supports the new `agentic_groups` shape with multi-turn `trajectory` fields; action/observation masks are built end-to-end, and the ECHO env-CE term applies by default (λ=0.05) to trajectories with observation segments. |
+| POST | `/v1/train/grpo` | Submit GRPO scored completions and return the exact effective seed under normal `stable` serving or drained `maintenance` (optionally with a `post_eval` hook in `stable`). Supports the new `agentic_groups` shape with multi-turn `trajectory` fields; action/observation masks are built end-to-end, and the ECHO env-CE term applies by default (λ=0.05) to trajectories with observation segments. |
 | POST | `/v1/train/agentic` | Canonical alias of `/v1/train/grpo` — same handler, semantically-honest name for multi-turn rollouts |
 | POST | `/v1/train/opd` | Submit on-policy or off-policy distillation against a registered, identity-bound teacher, return the exact effective seed, and default exact checkpoints to every 25 committed optimizer steps |
 | GET | `/v1/train/status` | Training queue, job status, and exact effective seeds |

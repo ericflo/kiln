@@ -233,6 +233,20 @@ fn model_metal_kernel_policy(
 }
 
 #[cfg(feature = "rocm")]
+fn model_rocm_kernel_policy(
+    policy: ResolvedAcceleratorRuntimePolicy,
+) -> kiln_model::RocmKernelPolicy {
+    match policy.rocm_kernel_profile.effective {
+        crate::config::RocmKernelProfile::NativeDefault => {
+            kiln_model::RocmKernelPolicy::native_default()
+        }
+        crate::config::RocmKernelProfile::PortableFallback => {
+            kiln_model::RocmKernelPolicy::portable_fallback()
+        }
+    }
+}
+
+#[cfg(feature = "rocm")]
 fn tensor_rocm_kernel_policy(
     _policy: ResolvedAcceleratorRuntimePolicy,
 ) -> kiln_tensor::RocmTensorKernelPolicy {
@@ -312,6 +326,8 @@ pub fn install_startup_policy(
 
     #[cfg(feature = "rocm")]
     {
+        kiln_model::install_rocm_kernel_policy(model_rocm_kernel_policy(policy))
+            .context("failed to install immutable ROCm model-kernel policy")?;
         let synchronization_mode = match policy.rocm_synchronization_mode.effective {
             RocmSynchronizationMode::LegacyHostBarriers => {
                 kiln_tensor::RocmSynchronizationMode::LegacyHostBarriers
@@ -593,16 +609,32 @@ mod tests {
 
     #[cfg(feature = "rocm")]
     #[test]
-    fn rocm_product_policy_is_portable() {
-        let config = AcceleratorRuntimeConfig::default();
-        let policy = config.resolved_policy(ServingProfileSetting::new(
-            ServingProfile::Stable,
-            ConfigValueSource::Default,
-        ));
-        assert_eq!(
-            tensor_rocm_kernel_policy(policy),
-            kiln_tensor::RocmTensorKernelPolicy::portable_fallback()
-        );
+    fn rocm_product_profiles_map_to_narrow_model_policies() {
+        for (configured, expected) in [
+            (
+                crate::config::RocmKernelProfile::NativeDefault,
+                kiln_model::RocmKernelPolicy::native_default(),
+            ),
+            (
+                crate::config::RocmKernelProfile::PortableFallback,
+                kiln_model::RocmKernelPolicy::portable_fallback(),
+            ),
+        ] {
+            let mut config = AcceleratorRuntimeConfig::default();
+            config.rocm_kernel_profile = crate::config::RocmKernelProfileSetting::new(
+                configured,
+                ConfigValueSource::ConfigFile,
+            );
+            let policy = config.resolved_policy(ServingProfileSetting::new(
+                ServingProfile::Experimental,
+                ConfigValueSource::ConfigFile,
+            ));
+            assert_eq!(model_rocm_kernel_policy(policy), expected);
+            assert_eq!(
+                tensor_rocm_kernel_policy(policy),
+                kiln_tensor::RocmTensorKernelPolicy::portable_fallback()
+            );
+        }
         assert_eq!(
             kiln_model::PORTABLE_ROCM_KERNEL_POLICY,
             kiln_model::RocmKernelPolicy::portable_fallback()
@@ -610,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn default_graph_policy_is_eager_for_stable_and_lazy_only_for_experimental() {
+    fn default_graph_policy_is_lazy_for_serving_and_off_for_maintenance() {
         let config = AcceleratorRuntimeConfig::default();
         let stable = config.resolved_policy(ServingProfileSetting::new(
             ServingProfile::Stable,
@@ -620,14 +652,22 @@ mod tests {
             ServingProfile::Experimental,
             crate::config::ConfigValueSource::ConfigFile,
         ));
+        let maintenance = config.resolved_policy(ServingProfileSetting::new(
+            ServingProfile::Maintenance,
+            crate::config::ConfigValueSource::ConfigFile,
+        ));
 
         assert_eq!(
             model_rocm_graph_policy(stable).unwrap().mode(),
-            kiln_model::RocmGraphExecutionMode::Disabled
+            kiln_model::RocmGraphExecutionMode::LazyCaptureReplay
         );
         assert_eq!(
             model_rocm_graph_policy(experimental).unwrap().mode(),
             kiln_model::RocmGraphExecutionMode::LazyCaptureReplay
+        );
+        assert_eq!(
+            model_rocm_graph_policy(maintenance).unwrap().mode(),
+            kiln_model::RocmGraphExecutionMode::Disabled
         );
         assert_eq!(
             model_rocm_graph_policy(experimental)
