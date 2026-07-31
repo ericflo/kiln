@@ -1677,6 +1677,8 @@ function validateSftLossRouteDocumentationSourceContract() {
     'poisons the session permanently',
     '512 MiB aggregate collection budget',
     'Exhaustion publishes no partial bundle',
+    'Only manifest-declared artifacts are downloadable',
+    'every request rechecks exact byte count and SHA-256 on the same descriptor before streaming',
   ]);
   if (missingArchitectureTerms.length > 0) {
     fail(`docs/site/architecture.html: reader architecture contract missing terms: ${missingArchitectureTerms.join(', ')}`);
@@ -1703,6 +1705,8 @@ function validateSftLossRouteDocumentationSourceContract() {
     'poisons ambiguous lock-step sessions',
     'retained-representation budget error reports current and additional bytes',
     'publishes no partial artifact bundle',
+    'openenv_artifact_integrity_failed',
+    'Restore the original bundle or recollect; never edit retained artifacts in place',
     'do not edit the receipt',
   ]);
   if (missingTroubleshootingTerms.length > 0) {
@@ -1740,12 +1744,19 @@ function validateSftLossRouteDocumentationSourceContract() {
     'kiln_prompt_logprob_selection_rows_total',
     'compact_device',
     'bounded_host_fallback',
+    'OpenEnv is a native persisted training lifecycle, not an environment-specific adapter',
+    'Only manifest-declared artifacts are downloadable',
+    'Every download rechecks the exact byte count and SHA-256 on the same opened file descriptor before streaming',
+    'openenv_artifact_integrity_failed',
   ]);
   if (missingApiTerms.length > 0) {
     fail(`docs/site/api.html: retained deep-reference wording missing terms: ${missingApiTerms.join(', ')}`);
   }
   if (apiText.includes('current path performs correctness-first o(tv) host readback')) {
     fail('docs/site/api.html: remove the stale blanket O(TV) prompt-logprob claim');
+  }
+  if (!apiHtml.includes('id="openenv-control-plane"')) {
+    fail('docs/site/api.html: missing stable #openenv-control-plane anchor');
   }
 }
 

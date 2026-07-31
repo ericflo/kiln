@@ -2057,7 +2057,12 @@ async function startServer({
           rollouts_total: request.groups * request.group_size,
         },
         environments: [],
-        artifacts: [],
+        artifacts: [{
+          kind: 'dataset',
+          url: '/v1/openenv/runs/smoke-openenv-run/artifacts/dataset',
+          sha256: `sha256:${'a'.repeat(64)}`,
+          bytes: 1024,
+        }],
         environment_evaluation: {
           state: 'completed',
           seed_start: request.groups,
@@ -4773,6 +4778,7 @@ async function runSmoke(baseUrl, {
     }
     await expectTrainingToast(page, 'OpenEnv train run smoke-op started');
     await waitForPanelText(page, '#openenv-runs', /OpenEnv train[\s\S]*smoke-op[\s\S]*completed[\s\S]*promoted[\s\S]*8 \/ 32 episodes[\s\S]*Held-out environment · completed · return 0\.100 → 0\.800 \(\+0\.700\) · exact p=0\.0000/, 'OpenEnv run history should render paired-return evidence and promotion outcome');
+    await waitForPanelText(page, '#openenv-runs', /dataset[\s\S]*aaaaaaaaaaaa/, 'OpenEnv artifact controls should expose the manifest digest identity');
 
     await clickAndWait(page, '#training-tab-sft', 'Could not open SFT tab');
     await waitForVisiblePanel(page, '#tab-sft', 'SFT tab did not activate');

@@ -302,10 +302,18 @@ def main() -> int:
     cli = (ROOT / "crates" / "kiln-server" / "src" / "openenv_cli.rs").read_text(
         encoding="utf-8"
     )
+    api_source = (
+        ROOT / "crates" / "kiln-server" / "src" / "api" / "openenv.rs"
+    ).read_text(encoding="utf-8")
     client = (ROOT / "crates" / "kiln-openenv" / "src" / "client.rs").read_text(
         encoding="utf-8"
     )
     guide = (ROOT / "docs" / "OPENENV_GUIDE.md").read_text(encoding="utf-8")
+    http_api = json.loads(
+        (ROOT / "contracts" / "kiln-http-api-v1.openapi.json").read_text(
+            encoding="utf-8"
+        )
+    )
     required_source_terms = [
         "kiln.openenv-replay.v1",
         "kiln.openenv-verification.v1",
@@ -314,9 +322,55 @@ def main() -> int:
     for term in required_source_terms:
         if term not in source:
             failures.append(f"openenv_replay.rs is missing contract identifier {term}")
-    for term in ["BoundedVecWriter", "encode_replay_with_limit"]:
+    for term in [
+        "BoundedVecWriter",
+        "encode_replay_with_limit",
+        "bounded_artifact_metadata",
+        "open_verified_artifact",
+        "regular non-symlink file",
+    ]:
         if term not in source:
             failures.append(f"openenv_replay.rs is missing bounded encoder term {term}")
+    for term in [
+        "status.artifacts",
+        "openenv_artifact_integrity_failed",
+        'HeaderValue::from_static("private, no-store")',
+        "CONTENT_LENGTH",
+        "ETAG",
+    ]:
+        if term not in api_source:
+            failures.append(f"api/openenv.rs is missing manifest-bound artifact term {term}")
+    expected_artifact_kinds = {
+        "dataset",
+        "replay",
+        "summary",
+        "environment_eval_baseline_dataset",
+        "environment_eval_baseline_replay",
+        "environment_eval_baseline_summary",
+        "environment_eval_candidate_dataset",
+        "environment_eval_candidate_replay",
+        "environment_eval_candidate_summary",
+        "environment_eval_receipt",
+    }
+    artifact_operation = http_api["paths"][
+        "/v1/openenv/runs/{run_id}/artifacts/{kind}"
+    ]["get"]
+    artifact_kind_parameter = next(
+        parameter
+        for parameter in artifact_operation["parameters"]
+        if parameter["name"] == "kind"
+    )
+    if set(artifact_kind_parameter["schema"]["enum"]) != expected_artifact_kinds:
+        failures.append("OpenEnv artifact OpenAPI kind enum is incomplete")
+    artifact_headers = set(artifact_operation["responses"]["200"].get("headers", {}))
+    if artifact_headers != {
+        "Cache-Control",
+        "Content-Disposition",
+        "Content-Length",
+        "ETag",
+        "X-Content-Type-Options",
+    }:
+        failures.append("OpenEnv artifact OpenAPI integrity headers are incomplete")
     if "kiln.openenv-rollout-summary.v3" not in cli:
         failures.append("openenv_cli.rs is missing summary v3")
     for term in [
@@ -356,6 +410,7 @@ def main() -> int:
         "poison the socket",
         "lock-step cannot resynchronize",
         "512 MiB aggregate retained-representation budget",
+        "Only manifest-declared artifacts download; each request rechecks bytes and SHA-256.",
         "Exhaustion publishes no partial bundle",
     ]:
         if command not in guide:
@@ -364,7 +419,7 @@ def main() -> int:
     if failures:
         raise SystemExit("\n".join(failures))
     print(
-        "OpenEnv bounded collection, session lifecycle, summary, replay, paired evaluation, verification, and live-replay contracts match"
+        "OpenEnv bounded collection, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, and live-replay contracts match"
     )
     return 0
 

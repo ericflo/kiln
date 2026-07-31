@@ -712,7 +712,17 @@ impl OpenEnvRunRegistry {
         })
     }
 
-    fn artifact_path(&self, run_id: &str, kind: &str) -> Option<(PathBuf, &'static str)> {
+    fn artifact_path(
+        &self,
+        run_id: &str,
+        kind: &str,
+    ) -> Option<(PathBuf, &'static str, OpenEnvArtifact)> {
+        let status = self.get(run_id)?;
+        let artifact = status
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == kind)?
+            .clone();
         let filename = match kind {
             "dataset" => ("rollouts.jsonl", "application/x-ndjson"),
             "replay" => ("replay.json", "application/json"),
@@ -746,8 +756,7 @@ impl OpenEnvRunRegistry {
             }
             _ => return None,
         };
-        self.get(run_id)?;
-        Some((self.run_dir(run_id).join(filename.0), filename.1))
+        Some((self.run_dir(run_id).join(filename.0), filename.1, artifact))
     }
 }
 
@@ -1410,7 +1419,7 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
         Ordering::Relaxed,
     );
 
-    let artifacts = artifacts_for(run_id, &collection.summary);
+    let artifacts = artifacts_for(run_id, &collection.summary)?;
     if request.kind == OpenEnvRunKind::Rollout {
         state.openenv_runs.update(run_id, |status| {
             status.state = OpenEnvRunState::RolloutReady;
@@ -1504,7 +1513,7 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
     collection.summary.training_submission =
         Some(serde_json::to_value(&submission).context("serialize training submission")?);
     write_summary_atomic(&summary_output, &collection.summary)?;
-    let artifacts = artifacts_for(run_id, &collection.summary);
+    let artifacts = artifacts_for(run_id, &collection.summary)?;
     let training = training_status_for(state, &submission.job_id)
         .context("admitted OpenEnv training job disappeared")?;
     state.openenv_runs.update(run_id, |status| {
@@ -2071,29 +2080,45 @@ async fn follow_openenv_training(
     }
 }
 
-fn artifacts_for(run_id: &str, summary: &OpenEnvRolloutSummary) -> Vec<OpenEnvArtifact> {
+fn artifacts_for(run_id: &str, summary: &OpenEnvRolloutSummary) -> Result<Vec<OpenEnvArtifact>> {
     let prefix = format!("/v1/openenv/runs/{run_id}/artifacts");
-    let summary_bytes = std::fs::read(&summary.summary_output_path).unwrap_or_default();
-    vec![
+    let (dataset_sha256, dataset_bytes) =
+        crate::openenv_replay::bounded_artifact_metadata(Path::new(&summary.output_path))
+            .context("bind published OpenEnv dataset to its on-disk bytes")?;
+    anyhow::ensure!(
+        dataset_sha256 == summary.dataset_sha256 && dataset_bytes == summary.dataset_bytes,
+        "published OpenEnv dataset differs from its collection receipt"
+    );
+    let (replay_sha256, replay_bytes) =
+        crate::openenv_replay::bounded_artifact_metadata(Path::new(&summary.replay_output_path))
+            .context("bind published OpenEnv replay to its on-disk bytes")?;
+    anyhow::ensure!(
+        replay_sha256 == summary.replay_sha256 && replay_bytes == summary.replay_bytes,
+        "published OpenEnv replay differs from its collection receipt"
+    );
+    let (summary_sha256, summary_bytes) =
+        crate::openenv_replay::bounded_artifact_metadata(Path::new(&summary.summary_output_path))
+            .context("bind published OpenEnv summary to its on-disk bytes")?;
+    Ok(vec![
         OpenEnvArtifact {
             kind: "dataset".into(),
             url: format!("{prefix}/dataset"),
-            sha256: summary.dataset_sha256.clone(),
-            bytes: summary.dataset_bytes,
+            sha256: dataset_sha256,
+            bytes: dataset_bytes,
         },
         OpenEnvArtifact {
             kind: "replay".into(),
             url: format!("{prefix}/replay"),
-            sha256: summary.replay_sha256.clone(),
-            bytes: summary.replay_bytes,
+            sha256: replay_sha256,
+            bytes: replay_bytes,
         },
         OpenEnvArtifact {
             kind: "summary".into(),
             url: format!("{prefix}/summary"),
-            sha256: crate::openenv_replay::sha256_bytes(&summary_bytes),
-            bytes: summary_bytes.len(),
+            sha256: summary_sha256,
+            bytes: summary_bytes,
         },
-    ]
+    ])
 }
 
 fn environment_evaluation_artifacts(run_id: &str, run_dir: &Path) -> Result<Vec<OpenEnvArtifact>> {
@@ -2127,17 +2152,18 @@ fn environment_evaluation_artifacts(run_id: &str, run_dir: &Path) -> Result<Vec<
     ]
     .into_iter()
     .map(|(kind, path)| {
-        let bytes = std::fs::read(&path).with_context(|| {
-            format!(
-                "read OpenEnv environment evaluation artifact {}",
-                path.display()
-            )
-        })?;
+        let (sha256, bytes) = crate::openenv_replay::bounded_artifact_metadata(&path)
+            .with_context(|| {
+                format!(
+                    "bind OpenEnv environment evaluation artifact {}",
+                    path.display()
+                )
+            })?;
         Ok(OpenEnvArtifact {
             kind: kind.to_string(),
             url: format!("/v1/openenv/runs/{run_id}/artifacts/{kind}"),
-            sha256: crate::openenv_replay::sha256_bytes(&bytes),
-            bytes: bytes.len(),
+            sha256,
+            bytes,
         })
     })
     .collect()
@@ -2199,7 +2225,7 @@ async fn download_artifact(
     State(state): State<AppState>,
     AxumPath((run_id, kind)): AxumPath<(String, String)>,
 ) -> Result<Response, ApiError> {
-    let (path, content_type) = state
+    let (path, content_type, artifact) = state
         .openenv_runs
         .artifact_path(&run_id, &kind)
         .ok_or_else(|| {
@@ -2207,29 +2233,57 @@ async fn download_artifact(
                 StatusCode::NOT_FOUND,
                 "openenv_artifact_not_found",
                 format!("OpenEnv artifact {kind:?} for run {run_id} was not found"),
-                "Use dataset, replay, or summary from the run's artifacts array.",
+                "Use only a kind currently declared in the run's artifacts array; files are unavailable before manifest publication.",
             )
         })?;
-    let file = tokio::fs::File::open(&path).await.map_err(|error| {
+    let verify_path = path.clone();
+    let expected_sha256 = artifact.sha256.clone();
+    let expected_bytes = artifact.bytes;
+    let verified = tokio::task::spawn_blocking(move || {
+        crate::openenv_replay::open_verified_artifact(
+            &verify_path,
+            &expected_sha256,
+            expected_bytes,
+        )
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(|error| {
+        tracing::warn!(
+            run_id,
+            artifact_kind = kind,
+            error = %error,
+            "refusing to stream an OpenEnv artifact that drifted from its manifest"
+        );
         openenv_error(
-            StatusCode::NOT_FOUND,
-            "openenv_artifact_not_ready",
+            StatusCode::CONFLICT,
+            "openenv_artifact_integrity_failed",
             format!(
-                "OpenEnv artifact {} is unavailable: {error}",
-                path.display()
+                "OpenEnv artifact {kind:?} no longer matches the manifest published by run {run_id}"
             ),
-            "Wait for the run to reach rollout_ready or training_queued.",
+            "Restore the original content-addressed artifact bundle or recollect; never edit retained artifacts in place.",
         )
     })?;
+    let file = tokio::fs::File::from_std(verified);
     let (tx, rx) = mpsc::channel::<std::io::Result<Vec<u8>>>(8);
     tokio::spawn(async move {
         let mut file = file;
-        loop {
-            let mut chunk = vec![0u8; ARTIFACT_CHUNK_BYTES];
+        let mut remaining = expected_bytes;
+        while remaining > 0 {
+            let mut chunk = vec![0u8; ARTIFACT_CHUNK_BYTES.min(remaining)];
             match file.read(&mut chunk).await {
-                Ok(0) => break,
+                Ok(0) => {
+                    let _ = tx
+                        .send(Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "verified OpenEnv artifact was truncated while streaming",
+                        )))
+                        .await;
+                    break;
+                }
                 Ok(read) => {
                     chunk.truncate(read);
+                    remaining -= read;
                     if tx.send(Ok(chunk)).await.is_err() {
                         break;
                     }
@@ -2243,9 +2297,17 @@ async fn download_artifact(
     });
     let disposition = HeaderValue::from_str(&format!(
         "attachment; filename=\"openenv-{run_id}-{kind}.{}\"",
-        if kind == "dataset" { "jsonl" } else { "json" }
+        if content_type == "application/x-ndjson" {
+            "jsonl"
+        } else {
+            "json"
+        }
     ))
     .map_err(ApiError::internal)?;
+    let content_length =
+        HeaderValue::from_str(&artifact.bytes.to_string()).map_err(ApiError::internal)?;
+    let etag =
+        HeaderValue::from_str(&format!("\"{}\"", artifact.sha256)).map_err(ApiError::internal)?;
     Ok((
         StatusCode::OK,
         [
@@ -2254,6 +2316,16 @@ async fn download_artifact(
                 HeaderValue::from_str(content_type).map_err(ApiError::internal)?,
             ),
             (header::CONTENT_DISPOSITION, disposition),
+            (header::CONTENT_LENGTH, content_length),
+            (header::ETAG, etag),
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("private, no-store"),
+            ),
+            (
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            ),
         ],
         Body::from_stream(ReceiverStream::new(rx)),
     )
@@ -2842,6 +2914,94 @@ mod tests {
                 .unwrap()
                 .next()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_downloads_require_publication_and_reverify_the_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(&temp, OpenEnvConfig::default());
+        let (run, _) = state
+            .openenv_runs
+            .insert(request(OpenEnvRunKind::Rollout))
+            .unwrap();
+        let artifact_bytes = b"{\"group\":1}\n";
+        let artifact_path = state
+            .openenv_runs
+            .run_dir(&run.run_id)
+            .join("rollouts.jsonl");
+        std::fs::write(&artifact_path, artifact_bytes).unwrap();
+        let artifact_url = format!("/v1/openenv/runs/{}/artifacts/dataset", run.run_id);
+        let app = routes().with_state(state.clone());
+
+        let unpublished = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&artifact_url)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unpublished.status(), StatusCode::NOT_FOUND);
+
+        let sha256 = crate::openenv_replay::sha256_bytes(artifact_bytes);
+        state
+            .openenv_runs
+            .update(&run.run_id, |status| {
+                status.state = OpenEnvRunState::RolloutReady;
+                status.artifacts = vec![OpenEnvArtifact {
+                    kind: "dataset".into(),
+                    url: artifact_url.clone(),
+                    sha256: sha256.clone(),
+                    bytes: artifact_bytes.len(),
+                }];
+            })
+            .unwrap();
+
+        let published = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&artifact_url)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(published.status(), StatusCode::OK);
+        assert_eq!(
+            published.headers()[header::CONTENT_LENGTH],
+            artifact_bytes.len().to_string()
+        );
+        assert_eq!(published.headers()[header::ETAG], format!("\"{sha256}\""));
+        assert_eq!(
+            published.headers()[header::CACHE_CONTROL],
+            "private, no-store"
+        );
+        let body = axum::body::to_bytes(published.into_body(), artifact_bytes.len())
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), artifact_bytes);
+
+        std::fs::write(&artifact_path, b"{\"group\":2}\n").unwrap();
+        let drifted = app
+            .oneshot(
+                Request::builder()
+                    .uri(&artifact_url)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(drifted.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(drifted.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"],
+            "openenv_artifact_integrity_failed"
         );
     }
 

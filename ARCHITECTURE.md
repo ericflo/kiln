@@ -505,6 +505,14 @@ links both artifacts by digest. Offline verification cross-checks hashes,
 counts, provenance, and reward arithmetic; live replay also pins the discovered
 schema identity and compares every wire result exactly.
 
+The server's artifact manifest is the publication boundary. A known filename
+inside a run directory is not downloadable until its digest and byte count
+appear in persisted run status. Publication hashes bounded regular,
+non-symlink files and cross-checks the dataset and replay against the summary;
+download repeats both checks on one file descriptor and streams that same
+descriptor with exact length and digest headers. Disk drift therefore becomes
+a structured integrity failure, never an unverified training-data response.
+
 The boundary is intentionally bounded: redirects are disabled, discovery
 bodies and WebSocket frames have independent byte limits, client messages,
 environment count, sessions, groups, candidates, steps, recoveries, capacity

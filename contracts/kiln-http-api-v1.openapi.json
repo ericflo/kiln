@@ -3330,7 +3330,7 @@
         "tags": [
           "openenv"
         ],
-        "summary": "Stream a retained OpenEnv dataset, replay transcript, or summary receipt",
+        "summary": "Verify and stream a manifest-published OpenEnv training or held-out-evaluation artifact",
         "operationId": "openenv_download_artifact_get_v1_openenv_runs_run_id_artifacts_kind",
         "x-kiln-handler": "openenv::download_artifact",
         "x-kiln-rust-signature": "async fn download_artifact(State(state): State<AppState>, AxumPath((run_id, kind)): AxumPath<(String, String)>) -> Result<Response, ApiError>",
@@ -3355,14 +3355,48 @@
               "enum": [
                 "dataset",
                 "replay",
-                "summary"
+                "summary",
+                "environment_eval_baseline_dataset",
+                "environment_eval_baseline_replay",
+                "environment_eval_baseline_summary",
+                "environment_eval_candidate_dataset",
+                "environment_eval_candidate_replay",
+                "environment_eval_candidate_summary",
+                "environment_eval_receipt"
               ]
             }
           }
         ],
         "responses": {
           "200": {
-            "description": "The immutable run artifact, streamed with a content-disposition filename.",
+            "description": "The manifest-declared artifact after bounded on-disk size and SHA-256 verification.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {

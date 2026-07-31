@@ -1345,9 +1345,11 @@ function openEnvRunCard(run) {
   }
   const terminal = ['rollout_ready', 'completed', 'failed', 'cancelled'].includes(state);
   const environments = (run.environments || []).map(item => item.metadata?.name || item.identity?.metadata?.name).filter(Boolean);
-  const artifacts = (run.artifacts || []).map(artifact =>
-    `<a class="btn btn-sm" href="${escapeHtml(artifact.url)}" download>${escapeHtml(artifact.kind)}${artifact.bytes ? ` · ${fmtBytes(artifact.bytes)}` : ''}</a>`
-  ).join('');
+  const artifacts = (run.artifacts || []).map(artifact => {
+    const digest = String(artifact.sha256 || '');
+    const shortDigest = digest.startsWith('sha256:') ? digest.slice(7, 19) : digest.slice(0, 12);
+    return `<a class="btn btn-sm" href="${escapeHtml(artifact.url)}" download title="Manifest-bound artifact ${escapeHtml(digest)}">${escapeHtml(artifact.kind)}${artifact.bytes ? ` · ${fmtBytes(artifact.bytes)}` : ''}${shortDigest ? ` · <code>${escapeHtml(shortDigest)}</code>` : ''}</a>`;
+  }).join('');
   const job = run.training_job_id
     ? `<button class="btn btn-sm" type="button" data-openenv-training-job="${escapeHtml(run.training_job_id)}">Training ${escapeHtml(run.training_job_id.slice(0, 8))}</button>`
     : '';

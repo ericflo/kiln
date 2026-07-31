@@ -20,7 +20,10 @@
   charges all retained training/replay/receipt projections against a 512 MiB
   aggregate budget, compacts candidates without full-object clones, bounds
   reset files before reading, streams dataset hashing, and stops replay
-  encoding at its cap before excess allocation. New `openenv verify` and
+  encoding at its cap before excess allocation. Server artifact links are now
+  manifest-gated; publication and every download stream-hash bounded regular
+  files, verify exact bytes and SHA-256, and fail closed on disk drift instead
+  of serving replaced or partially published data. New `openenv verify` and
   `openenv replay` commands validate the artifact bundle offline and replay
   exact live environment behavior. CI drives pinned miniopenenv counter,
   bandit, Connect Four, maze, and Wordle servers plus a native

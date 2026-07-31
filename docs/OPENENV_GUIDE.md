@@ -207,11 +207,12 @@ name and URL, schema and reset hashes, seed, steps, return, termination, and an
 optional protocol-error code. This identity participates in the scored-rollout
 payload hash and fails closed when malformed.
 
-JSONL trains; replay retains exact exchanges; summary binds configuration,
-statistics, hashes, and submission. Collection charges each turn against a
+JSONL trains; replay retains exchanges; summary binds config, stats, hashes,
+and submission. Collection charges each turn against a
 512 MiB aggregate retained-representation budget. Reset files are prebounded;
 dataset, replay, and summary each stay under 256 MiB.
-Exhaustion publishes no partial bundle. Pin URL deployments. See the
+Only manifest-declared artifacts download; each request rechecks bytes and SHA-256.
+Exhaustion publishes no partial bundle. Pin deployments. See the
 [replay and recovery reference](OPENENV_REPLAY_REFERENCE.md) for artifact and drift boundaries.
 
 ## Failure and capacity semantics

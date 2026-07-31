@@ -5,7 +5,8 @@
 //! owns the complementary exact transcript used to verify an artifact bundle
 //! offline and to replay every environment exchange against a live server.
 
-use std::io::{Read, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -26,7 +27,7 @@ pub const OPENENV_REPLAY_SCHEMA_V1: &str = "kiln.openenv-replay.v1";
 pub const OPENENV_VERIFICATION_SCHEMA_V1: &str = "kiln.openenv-verification.v1";
 pub const OPENENV_REPLAY_RUN_SCHEMA_V1: &str = "kiln.openenv-replay-run.v1";
 
-const MAX_ARTIFACT_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const MAX_OPENENV_ARTIFACT_BYTES: usize = 256 * 1024 * 1024;
 const CAPACITY_RETRY_FLOOR: Duration = Duration::from_millis(250);
 const CAPACITY_RETRY_CEILING: Duration = Duration::from_secs(2);
 
@@ -311,7 +312,7 @@ fn validate_candidate(
 }
 
 pub fn encode_replay(manifest: &OpenEnvReplayManifest) -> Result<Vec<u8>> {
-    encode_replay_with_limit(manifest, MAX_ARTIFACT_BYTES)
+    encode_replay_with_limit(manifest, MAX_OPENENV_ARTIFACT_BYTES)
 }
 
 fn encode_replay_with_limit(manifest: &OpenEnvReplayManifest, limit: usize) -> Result<Vec<u8>> {
@@ -366,7 +367,10 @@ impl Write for BoundedVecWriter {
 }
 
 pub fn sha256_bytes(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
+    format_sha256(Sha256::digest(bytes).as_slice())
+}
+
+fn format_sha256(digest: &[u8]) -> String {
     format!(
         "sha256:{}",
         digest
@@ -374,6 +378,108 @@ pub fn sha256_bytes(bytes: &[u8]) -> String {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
     )
+}
+
+/// Hash one server-owned artifact without allocating an artifact-sized buffer.
+///
+/// Paths are required to name regular, non-symlink files and both metadata and
+/// bytes read are capped. This is the publication boundary used before a run
+/// advertises an artifact through its durable status manifest.
+pub(crate) fn bounded_artifact_metadata(path: &Path) -> Result<(String, usize)> {
+    let mut file = open_bounded_artifact(path, MAX_OPENENV_ARTIFACT_BYTES)?;
+    hash_bounded_artifact(&mut file, path, MAX_OPENENV_ARTIFACT_BYTES)
+}
+
+/// Open and rewind the exact artifact named by a published manifest entry.
+///
+/// The returned descriptor is the same descriptor that was hashed. Atomic path
+/// replacement after verification therefore cannot substitute a different
+/// inode between integrity checking and response streaming.
+pub(crate) fn open_verified_artifact(
+    path: &Path,
+    expected_sha256: &str,
+    expected_bytes: usize,
+) -> Result<File> {
+    ensure_sha256("artifact digest", expected_sha256)?;
+    anyhow::ensure!(
+        expected_bytes <= MAX_OPENENV_ARTIFACT_BYTES,
+        "OpenEnv artifact manifest declares {expected_bytes} bytes; limit is {MAX_OPENENV_ARTIFACT_BYTES}"
+    );
+    let mut file = open_bounded_artifact(path, expected_bytes)?;
+    let (actual_sha256, actual_bytes) =
+        hash_bounded_artifact(&mut file, path, MAX_OPENENV_ARTIFACT_BYTES)?;
+    anyhow::ensure!(
+        actual_bytes == expected_bytes,
+        "OpenEnv artifact {} byte count drifted: manifest {expected_bytes}, disk {actual_bytes}",
+        path.display()
+    );
+    anyhow::ensure!(
+        actual_sha256 == expected_sha256,
+        "OpenEnv artifact {} digest drifted: manifest {expected_sha256}, disk {actual_sha256}",
+        path.display()
+    );
+    file.seek(SeekFrom::Start(0))
+        .with_context(|| format!("rewind verified OpenEnv artifact {}", path.display()))?;
+    Ok(file)
+}
+
+fn open_bounded_artifact(path: &Path, limit: usize) -> Result<File> {
+    let path_metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("stat OpenEnv artifact path {}", path.display()))?;
+    anyhow::ensure!(
+        !path_metadata.file_type().is_symlink() && path_metadata.file_type().is_file(),
+        "OpenEnv artifact {} must be a regular non-symlink file",
+        path.display()
+    );
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .with_context(|| format!("open OpenEnv artifact {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("stat opened OpenEnv artifact {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.file_type().is_file(),
+        "OpenEnv artifact {} must remain a regular file after open",
+        path.display()
+    );
+    anyhow::ensure!(
+        metadata.len() <= limit as u64,
+        "OpenEnv artifact {} contains {} bytes; limit is {limit}",
+        path.display(),
+        metadata.len()
+    );
+    Ok(file)
+}
+
+fn hash_bounded_artifact(file: &mut File, path: &Path, limit: usize) -> Result<(String, usize)> {
+    let mut hasher = Sha256::new();
+    let mut total = 0usize;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("read OpenEnv artifact {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(read)
+            .context("OpenEnv artifact byte count overflow")?;
+        anyhow::ensure!(
+            total <= limit,
+            "OpenEnv artifact {} grew beyond the {limit} byte limit while hashing",
+            path.display()
+        );
+        hasher.update(&buffer[..read]);
+    }
+    Ok((format_sha256(hasher.finalize().as_slice()), total))
 }
 
 pub async fn connect_and_reset_with_capacity(
@@ -445,7 +551,7 @@ pub fn verify_openenv_artifacts(
     dataset_override: Option<&Path>,
     replay_override: Option<&Path>,
 ) -> Result<VerifiedOpenEnvArtifacts> {
-    let summary_bytes = read_bounded(summary_path, MAX_ARTIFACT_BYTES)?;
+    let summary_bytes = read_bounded(summary_path, MAX_OPENENV_ARTIFACT_BYTES)?;
     let summary: OpenEnvRolloutSummary = serde_json::from_slice(&summary_bytes)
         .with_context(|| format!("decode OpenEnv summary {}", summary_path.display()))?;
     match summary.schema.as_str() {
@@ -472,8 +578,8 @@ pub fn verify_openenv_artifacts(
         replay_override,
         Path::new(&summary.replay_output_path),
     );
-    let dataset_bytes = read_bounded(&dataset_path, MAX_ARTIFACT_BYTES)?;
-    let replay_bytes = read_bounded(&replay_path, MAX_ARTIFACT_BYTES)?;
+    let dataset_bytes = read_bounded(&dataset_path, MAX_OPENENV_ARTIFACT_BYTES)?;
+    let replay_bytes = read_bounded(&replay_path, MAX_OPENENV_ARTIFACT_BYTES)?;
     let dataset_sha256 = sha256_bytes(&dataset_bytes);
     let replay_sha256 = sha256_bytes(&replay_bytes);
     anyhow::ensure!(
@@ -1215,6 +1321,50 @@ mod tests {
         let error = encode_replay_with_limit(&manifest, 32).unwrap_err();
         assert!(error.to_string().contains("bounded OpenEnv replay"));
         assert!(format!("{error:#}").contains("32 byte artifact limit"));
+    }
+
+    #[test]
+    fn server_artifact_metadata_streams_and_verified_open_rewinds() {
+        let contents = b"content-addressed OpenEnv artifact\n";
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), contents).unwrap();
+        let expected = sha256_bytes(contents);
+        let (sha256, bytes) = bounded_artifact_metadata(file.path()).unwrap();
+        assert_eq!(sha256, expected);
+        assert_eq!(bytes, contents.len());
+
+        let mut verified = open_verified_artifact(file.path(), &expected, bytes).unwrap();
+        let mut round_trip = Vec::new();
+        verified.read_to_end(&mut round_trip).unwrap();
+        assert_eq!(round_trip, contents);
+
+        assert!(
+            open_verified_artifact(file.path(), &format!("sha256:{}", "0".repeat(64)), bytes)
+                .unwrap_err()
+                .to_string()
+                .contains("digest drifted")
+        );
+        assert!(
+            open_verified_artifact(file.path(), &expected, bytes - 1)
+                .unwrap_err()
+                .to_string()
+                .contains(&format!("contains {bytes} bytes"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn server_artifact_metadata_rejects_symlinks() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.json");
+        let link = directory.path().join("artifact.json");
+        std::fs::write(&target, b"{}\n").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let error = bounded_artifact_metadata(&link).unwrap_err();
+        assert!(
+            error.to_string().contains("regular non-symlink file"),
+            "{error:#}"
+        );
     }
 
     #[test]

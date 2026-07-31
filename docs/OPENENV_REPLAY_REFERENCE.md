@@ -43,6 +43,18 @@ the linked native training job. An interrupted active run is marked failed
 after restart because a stateful environment session cannot be assumed
 resumable.
 
+A pathname is not publication. The download route accepts only artifact kinds
+present in that run's persisted `artifacts` manifest, so staged or partially
+written bundles remain unreachable. Publication hashes each regular,
+non-symlink file with bounded streaming reads and cross-checks dataset and
+replay bytes against the summary. Every download repeats the exact byte-count
+and SHA-256 check on one opened descriptor before streaming that same
+descriptor. Valid responses carry the manifest byte count as `Content-Length`,
+the quoted digest as a strong `ETag`, `private, no-store`, and `nosniff`.
+Missing, replaced, oversized, symlinked, truncated, or modified files fail with
+`409 openenv_artifact_integrity_failed`; Kiln never serves the drifted bytes.
+Restore the original bundle or recollect instead of editing retained artifacts.
+
 The summary is an audit receipt, not proof that an implementation behind the
 same URL has remained unchanged. Pin an environment image or binary and retain
 its deployment identity for serious experiments.

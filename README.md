@@ -201,6 +201,11 @@ dataset, replay, and summary artifacts remain capped at 256 MiB each, reset
 files are bounded before reading, and hashes stream without group-sized
 buffers. Exhaustion aborts the run before any partial artifact bundle is
 published.
+Server downloads are manifest-gated rather than filename-gated. Kiln hashes
+bounded regular files before publishing their links, then rechecks the exact
+byte count and SHA-256 on the same opened descriptor before every stream.
+Drift, replacement, symlinks, truncation, or growth fail closed; successful
+responses expose the digest as a strong `ETag` and forbid intermediary caches.
 When an observation offers a non-empty `input_text`, Kiln foregrounds that
 generic environment-provided decision text while retaining the complete wire
 observation and discovered JSON action schema; it remains optional, never a

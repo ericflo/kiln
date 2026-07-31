@@ -325,6 +325,7 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#thinking-budgets">Thinking budgets</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#lora-lifecycle">LoRA lifecycle</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#training">Training</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#openenv-control-plane">OpenEnv RL</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#remote-teachers">Remote teachers</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#evals">Evals</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#training-data-safety">Training data safety</a>
@@ -1068,6 +1069,52 @@ curl -fsS http://localhost:8420/v1/train/opd \
         </p>
           </div>
         </details>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">OpenEnv RL</div>
+        <h2 id="openenv-control-plane" class="text-2xl font-semibold mb-4">Collect, train, evaluate, replay, and recover agent runs</h2>
+        <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
+          OpenEnv is a native persisted training lifecycle, not an environment-specific adapter.
+          Kiln discovers any compatible environment from its URL, preserves its action and observation
+          schemas, drives the stateful WebSocket episode protocol, collects scored GRPO groups, submits
+          training, and can compare the base and candidate policies on held-out environment returns.
+          Public loopback environments need no credentials; protected origins use server-owned opaque
+          credential IDs aligned with their URLs so secrets never enter requests, run records, or artifacts.
+        </p>
+        <div class="endpoint-list" style="color: var(--fg-dim);">
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/inspect</code> &mdash; discover and normalize the protocol metadata, action schema, and observation schema for one compatible environment.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/tasks</code> &mdash; list the environment&rsquo;s reset-task catalog through the same origin and credential policy.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/runs</code> &mdash; start a collect-only or collect-and-train run across one or more compatible environment URLs.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/openenv/runs</code> &mdash; list retained runs with progress, terminal evidence, gates, and published artifact manifests.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/openenv/runs/{run_id}</code> &mdash; retrieve one durable run snapshot across collection, training, paired evaluation, completion, failure, or cancellation.</div>
+          <div class="endpoint"><span class="method">DELETE</span> <code>/v1/openenv/runs/{run_id}</code> &mdash; request cancellation in the collector, trainer, or evaluator while retaining completed evidence.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/openenv/runs/{run_id}/artifacts/{kind}</code> &mdash; download a published training or paired held-out evaluation artifact by the exact link returned in <code>artifacts</code>.</div>
+        </div>
+        <div class="code-block mt-4"><pre><code>curl -fsS http://localhost:8420/v1/openenv/runs \
+  -H 'content-type: application/json' \
+  -d '{"kind":"train","environment_urls":["http://127.0.0.1:8990"],
+       "adapter":"base","output_adapter":"math-agent",
+       "groups":8,"group_size":4,"max_steps":8,
+       "environment_eval":{"groups":20,"group_size":1}}'
+
+curl -fsS http://localhost:8420/v1/openenv/runs | python3 -m json.tool</code></pre></div>
+        <p class="mt-3 text-sm" style="color: var(--fg-dim);">
+          Follow artifact links from the returned manifest; do not construct filenames. Training publishes
+          dataset, replay, and summary evidence, while paired evaluation can additionally publish baseline
+          and candidate datasets, replays, summaries, and its receipt. Only manifest-declared artifacts are
+          downloadable. Every download rechecks the exact byte count and SHA-256 on the same opened file
+          descriptor before streaming, and returns exact <code>Content-Length</code>, a strong digest
+          <code>ETag</code>, <code>Cache-Control: private, no-store</code>, and
+          <code>X-Content-Type-Options: nosniff</code>. Drift returns HTTP 409 with
+          <code>openenv_artifact_integrity_failed</code> and no artifact bytes.
+        </p>
+        <p class="mt-3 text-sm" style="color: var(--fg-dim);">
+          For request schemas, reset-task alignment, math and arcade action examples, lifecycle semantics,
+          replay verification, and recovery, see the <a href="docs/openenv/">OpenEnv guide</a>,
+          <a href="https://github.com/ericflo/kiln/blob/main/docs/OPENENV_REPLAY_REFERENCE.md">replay reference</a>,
+          and generated <a href="docs/http-api/">HTTP contract</a>.
+        </p>
       </article>
 
       <article class="card p-6">

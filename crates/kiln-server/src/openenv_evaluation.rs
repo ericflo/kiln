@@ -511,13 +511,14 @@ pub(crate) fn evaluate_paired_returns(
 }
 
 pub(crate) fn summary_sha256(path: &Path) -> Result<String> {
-    let bytes = std::fs::read(path).with_context(|| {
-        format!(
-            "read OpenEnv environment evaluation summary {}",
-            path.display()
-        )
-    })?;
-    Ok(crate::openenv_replay::sha256_bytes(&bytes))
+    crate::openenv_replay::bounded_artifact_metadata(path)
+        .map(|(sha256, _)| sha256)
+        .with_context(|| {
+            format!(
+                "hash bounded OpenEnv environment evaluation summary {}",
+                path.display()
+            )
+        })
 }
 
 pub(crate) fn write_environment_evaluation_receipt(
@@ -543,6 +544,16 @@ pub(crate) fn write_environment_evaluation_receipt(
     serde_json::to_writer_pretty(staged.as_file_mut(), receipt)
         .context("serialize OpenEnv environment evaluation receipt")?;
     staged.as_file_mut().write_all(b"\n")?;
+    let receipt_bytes = staged
+        .as_file()
+        .metadata()
+        .context("stat staged OpenEnv environment evaluation receipt")?
+        .len();
+    anyhow::ensure!(
+        receipt_bytes <= crate::openenv_replay::MAX_OPENENV_ARTIFACT_BYTES as u64,
+        "OpenEnv environment evaluation receipt contains {receipt_bytes} bytes; limit is {}",
+        crate::openenv_replay::MAX_OPENENV_ARTIFACT_BYTES
+    );
     staged.as_file().sync_all().with_context(|| {
         format!(
             "sync OpenEnv environment evaluation receipt {}",

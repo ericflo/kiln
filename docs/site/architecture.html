@@ -380,6 +380,11 @@ OpenEnv RL
           and receipt ownership without full-object clones; reset files are bounded before read,
           hashes stream, and replay encoding stops at its cap. Exhaustion publishes no partial bundle.
         </p>
+        <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
+          Only manifest-declared artifacts are downloadable. Publication hashes bounded regular files,
+          and every request rechecks exact byte count and SHA-256 on the same descriptor before streaming.
+          Replacement, symlinks, growth, truncation, or mutation fail closed instead of serving drifted bytes.
+        </p>
         <p class="mt-4 text-sm leading-relaxed" style="color: var(--fg-mute);">
           Exact action/observation transcripts, reward arithmetic, recovery, capacity backoff, cancellation,
           origin-scoped credentials, metrics, and paired promotion evidence remain server-owned. The production
