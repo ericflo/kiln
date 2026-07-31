@@ -1901,11 +1901,11 @@
         "runtime": {
           "serving_profile": "stable",
           "kv_autoscale_requested": true,
-          "kv_autoscale_enabled": false,
+          "kv_autoscale_enabled": true,
           "memory_reclaim_requested_mode": "automatic",
-          "memory_reclaim_mode": "off",
+          "memory_reclaim_mode": "automatic",
           "rocm_graphs_requested": true,
-          "rocm_graphs_enabled": false,
+          "rocm_graphs_enabled": true,
           "prefix_cache_effective_enabled": true,
           "prefix_cache_effective_reason": "active",
           "prefix_cache_requested_enabled": true

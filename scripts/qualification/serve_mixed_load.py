@@ -481,11 +481,11 @@ VARIANT_CONFIGS: dict[str, dict[str, Any]] = {
     "stable": _mixed_variant_config(
         serving_profile="stable",
         kv_autoscale_requested=True,
-        kv_autoscale_enabled=False,
+        kv_autoscale_enabled=True,
         memory_reclaim_requested_mode="automatic",
-        memory_reclaim_mode="off",
+        memory_reclaim_mode="automatic",
         rocm_graphs_requested=True,
-        rocm_graphs_enabled=False,
+        rocm_graphs_enabled=True,
     ),
 }
 for variant_id, config in VARIANT_CONFIGS.items():
@@ -512,13 +512,13 @@ PROFILE_POLICIES: dict[str, dict[str, bool | str]] = {
     },
     "stable": {
         "inference_admission": True,
-        "training_gpu_ownership": False,
-        "adapter_weight_transitions": False,
-        "dynamic_kv_resize": False,
-        "allocator_reclaim": False,
-        "live_graph_capture": False,
+        "training_gpu_ownership": True,
+        "adapter_weight_transitions": True,
+        "dynamic_kv_resize": True,
+        "allocator_reclaim": True,
+        "live_graph_capture": True,
         "vulkan_resident_prefill": False,
-        "exclusive_gpu_behavior": "reject",
+        "exclusive_gpu_behavior": "writer_priority",
     },
     "maintenance": {
         "inference_admission": False,
@@ -3677,13 +3677,6 @@ def attest_runtime(
                 "state": "disabled",
                 "reason": "configuration",
             }
-        elif expected_profile == "stable":
-            expected_autoscaler_fields = {
-                "requested": True,
-                "enabled": False,
-                "state": "unavailable",
-                "reason": "serving_profile_stable",
-            }
         else:
             expected_autoscaler_fields = {
                 "requested": expected["kv_autoscale_requested"],
@@ -3694,7 +3687,7 @@ def attest_runtime(
                 "state": "enabled" if expected_autoscaler else "disabled",
                 "reason": "active" if expected_autoscaler else "configuration",
             }
-        if expected_profile == "stable" or not expected["kv_autoscale_requested"]:
+        if not expected["kv_autoscale_requested"]:
             expected_autoscaler_fields.update(
                 {
                     "requested_source": "config_file",
@@ -3725,9 +3718,7 @@ def attest_runtime(
             )
         if governor.get("source") != "config_file":
             failures.append("memory reclaim mode was not sourced from the launch file")
-        if governor.get("disabled_by_serving_profile") != (
-            expected_profile == "stable"
-        ):
+        if governor.get("disabled_by_serving_profile") is not False:
             failures.append("memory reclaim profile suppression state is incorrect")
     batching = runtime.get("batching_engine")
     if not isinstance(batching, dict):

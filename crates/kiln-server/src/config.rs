@@ -806,8 +806,9 @@ pub enum ServingProfile {
     /// writer-priority ownership protocol.
     #[default]
     Stable,
-    /// Developer profile preserving concurrent inference/training and dynamic
-    /// runtime mutation for controlled experiments.
+    /// Backend-development profile for qualifying routes that remain
+    /// quarantined from normal product operation. It is not required for
+    /// training, adapters, memory management, or graph acceleration.
     Experimental,
     /// Drained exclusive work. Inference admission is disabled while training,
     /// adapter activation, and physical memory maintenance are allowed.

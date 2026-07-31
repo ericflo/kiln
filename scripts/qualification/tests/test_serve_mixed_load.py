@@ -352,15 +352,11 @@ def health_fixture(
                 "state": (
                     "disabled"
                     if not kv_autoscale_requested
-                    else "unavailable"
-                    if serving_profile == "stable"
                     else "enabled" if kv_autoscale else "disabled"
                 ),
                 "reason": (
                     "configuration"
                     if not kv_autoscale_requested
-                    else "serving_profile_stable"
-                    if serving_profile == "stable"
                     else "active" if kv_autoscale else "configuration"
                 ),
             },
@@ -369,7 +365,7 @@ def health_fixture(
                 "requested_reclaim_mode": memory_reclaim_requested_mode,
                 "automatic_monitor_enabled": memory_reclaim_mode == "automatic",
                 "source": "config_file",
-                "disabled_by_serving_profile": serving_profile == "stable",
+                "disabled_by_serving_profile": False,
             },
             "batching_engine": {
                 "stream_stall_grace_ms": serve.STREAM_STALL_GRACE_MS,
@@ -586,7 +582,7 @@ def debug_fixture(
         },
         "rocm_graph_telemetry_unavailable_reason": None,
         "kv_autoscaler": health_fixture(
-            kv_autoscale=kv_autoscale and serving_profile != "stable",
+            kv_autoscale=kv_autoscale,
             rocm_graphs=rocm_graphs_enabled,
             serving_profile=serving_profile,
             kv_autoscale_requested=kv_autoscale,
@@ -647,13 +643,13 @@ class ServeMixedLoadTests(unittest.TestCase):
                 },
                 "stable": {
                     "inference_admission": True,
-                    "training_gpu_ownership": False,
-                    "adapter_weight_transitions": False,
-                    "dynamic_kv_resize": False,
-                    "allocator_reclaim": False,
-                    "live_graph_capture": False,
+                    "training_gpu_ownership": True,
+                    "adapter_weight_transitions": True,
+                    "dynamic_kv_resize": True,
+                    "allocator_reclaim": True,
+                    "live_graph_capture": True,
                     "vulkan_resident_prefill": False,
-                    "exclusive_gpu_behavior": "reject",
+                    "exclusive_gpu_behavior": "writer_priority",
                 },
                 "maintenance": {
                     "inference_admission": False,

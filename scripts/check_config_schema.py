@@ -490,8 +490,8 @@ def run_self_tests(schema: dict[str, Any]) -> list[str]:
         ),
         (
             {"accelerator": {"rocm_synchronization_mode": "stream_ordered"}},
-            False,
-            "stream-ordered default profile rejection",
+            True,
+            "stream-ordered stable profile",
         ),
         (
             {
@@ -503,8 +503,8 @@ def run_self_tests(schema: dict[str, Any]) -> list[str]:
         ),
         (
             {"accelerator": {"kt_api_mode": "all"}},
-            False,
-            "explicit tensor API mode default profile rejection",
+            True,
+            "explicit tensor API mode stable profile",
         ),
         (
             {
@@ -516,8 +516,8 @@ def run_self_tests(schema: dict[str, Any]) -> list[str]:
         ),
         (
             {"accelerator": {"vulkan_validation": True}},
-            False,
-            "Vulkan validation default profile rejection",
+            True,
+            "Vulkan validation stable profile",
         ),
         (
             {"accelerator": {"rocm_kernel_profile": "portable_fallback"}},
@@ -546,8 +546,8 @@ def run_self_tests(schema: dict[str, Any]) -> list[str]:
         ),
         (
             {"accelerator": {"cuda_marlin_profile": "attention_mlp_gdn"}},
-            False,
-            "CUDA Marlin default profile rejection",
+            True,
+            "CUDA Marlin stable profile",
         ),
         (
             {

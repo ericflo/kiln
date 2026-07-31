@@ -4383,7 +4383,7 @@ impl AppState {
         } else if !serving_policy.dynamic_kv_resize {
             crate::kv_autoscaler::KvAutoscalerState::unavailable(
                 kv_autoscaler_config,
-                "serving_profile_stable",
+                "serving_profile_disallows_dynamic_kv_resize",
             )
         } else if backend_capabilities.storage.kv_cache_device_memory_pressure {
             crate::kv_autoscaler::spawn(

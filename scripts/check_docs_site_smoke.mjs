@@ -1671,6 +1671,8 @@ function validateSftLossRouteDocumentationSourceContract() {
     'requests cannot select it',
     'no TOML field',
     'does not claim that the complete training path is available',
+    'Stable serving runs the complete product loop',
+    'experimental is reserved for qualifying quarantined backend routes',
     'OpenEnv episodes are a native training input',
     'ordered seed-free plan',
     'production path depends only on OpenEnv compatibility',

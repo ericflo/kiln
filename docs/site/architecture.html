@@ -625,8 +625,9 @@ OpenEnv RL
           </div>
         </div>
         <p class="mt-5 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          Stable serving rejects training and live adapter-weight transitions. Experimental and maintenance
-          profiles admit different mutation classes; see the
+          Stable serving runs the complete product loop: inference, training, evaluation, adapter transitions,
+          guarded memory management, and correctness-qualified acceleration. Maintenance drains inference for
+          exclusive operational work; experimental is reserved for qualifying quarantined backend routes. See the
           <a href="docs/serving-profiles/">serving-profile matrix</a>.
         </p>
       </article>
