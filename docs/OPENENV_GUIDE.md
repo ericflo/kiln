@@ -1,7 +1,7 @@
 # OpenEnv training
-OpenEnv is Kiln's native path from an interactive reinforcement-learning environment
-to a trained LoRA adapter. The environment owns task, state, observations, terminal
-signals, and rewards; Kiln owns policy sampling, trajectories, GRPO, receipts, and publication.
+
+OpenEnv is Kiln's native path from an interactive RL environment to a trained
+LoRA. The environment owns state and reward; Kiln owns policy, GRPO, and receipts.
 
 The shortest complete loop is:
 
@@ -21,53 +21,45 @@ KILN_SERVER_SERVING_PROFILE=experimental KILN_MODEL_PATH=./Qwen3.5-4B ./kiln ser
   --output-adapter counter-agent
 ```
 
-`openenv.rollouts.jsonl`, `openenv.replay.json`, and
-`openenv.rollout-summary.json` are published before the training request. Keep
-all three with the adapter's normal `train_receipt.json`: together they bind
-the environment-facing rollout, its exact executable transcript, and the
-optimizer-facing training attempt.
+Keep the pre-training JSONL, replay, and summary with `train_receipt.json`;
+held-out evaluation also retains paired bundles and a decision receipt.
 
-The same loop is a first-class server workflow under **Training → OpenEnv** in
-`/ui/`. Kiln persists artifacts, native GRPO progress/loss, linked eval and
-gate outcomes, failures, and cancellation. Restarts preserve terminal history
-and explicitly fail interrupted work.
+**Training → OpenEnv** in `/ui/` persists artifacts, GRPO progress, evaluations,
+gates, failures, and cancellation. Restarts fail interrupted work explicitly.
 
 ## How the loop works
 
-For each group, Kiln selects an environment and seed, opens one stateful `WS /ws`
-session per candidate, resets them identically, asks for JSON actions, and records
-observations, rewards, and `done`. Recoverable errors become same-socket feedback.
-Kiln writes one `AgenticGroup` and submits train runs to native GRPO.
+For each group, Kiln opens one stateful `WS /ws` session per candidate, resets
+identically, samples JSON actions, records outcomes, and submits an `AgenticGroup`.
 
 Candidates share initial messages, environment, reset payload, and seed: the unit
 for group-relative advantages. Groups increment seeds and rotate across URLs.
 
-Reset rewards are preserved in the reset observation but do not contribute to
-episode return: reset is not a transition. Step rewards retain OpenEnv's wire
-type (`null`, boolean, integer, or float) in the trajectory and map to a finite
-training scalar (`null = 0`, `false = 0`, `true = 1`).
+Reset reward is recorded but excluded from return. Step rewards retain their
+wire type and map finitely (`null = 0`, `false = 0`, `true = 1`).
 
 ## Commands
 
 ### Dashboard and server API
 
-The dashboard and API use the same collector, in-process chat handler, artifact
-writer, and GRPO admission path as the CLI. In `/ui/`, choose
-**Training → OpenEnv**. The equivalent API is:
+Dashboard, API, and CLI share the collector, chat handler, artifacts, and GRPO
+admission path. In `/ui/`, choose **Training → OpenEnv**. The equivalent API is:
 
 ```bash
 curl -sS localhost:8420/v1/openenv/runs \
   -H 'content-type: application/json' \
   -d '{"kind":"train","environment_urls":["http://127.0.0.1:8990"],
        "adapter":"base","output_adapter":"counter-agent",
-       "groups":8,"group_size":4,"max_steps":8}'
+       "groups":8,"group_size":4,"max_steps":8,
+       "environment_eval":{"groups":20,"group_size":1,
+         "gate":{"min_mean_improvement":0.05}}}'
 ```
 
 Use `POST /v1/openenv/inspect` for discovery, `GET /v1/openenv/runs` for status,
-and `DELETE /v1/openenv/runs/{run_id}` to cancel any active phase. Version 2
-continues from `training_queued` through `training_running`, optional
-`post_evaluating`, and `completed`. Cancellation reaches the authoritative
-trainer or evaluator. Status and artifacts persist under
+and `DELETE /v1/openenv/runs/{run_id}` to cancel any active phase. Version 3
+continues through `training_running`, optional `post_evaluating`,
+`environment_evaluating`, and `completed`. Cancellation reaches the active
+collector, trainer, or evaluator. Status and artifacts persist under
 `<adapter_dir>/.openenv/runs/<run_id>/`.
 
 The CLI exposes the same lifecycle:
@@ -78,8 +70,7 @@ kiln openenv status 80a26e21-8451-4a64-8666-890c06fd80bd --follow
 kiln openenv cancel 80a26e21-8451-4a64-8666-890c06fd80bd
 ```
 
-`status --follow --json` emits one terminal snapshot; human output includes
-trainer loss, eval accuracy, and gate outcome.
+`status --follow --json` emits one terminal snapshot; human output follows trainer loss, eval accuracy, held-out returns, exact p-values, and gates.
 
 Server runs accept loopback origins by default. `[openenv]` controls remote
 origins, capacity, retention, and TTL; each field has a canonical
@@ -164,6 +155,14 @@ publication, and serving-profile rules are the same as any other native GRPO
 job. Use `kiln train status --job-id …`, the dashboard, and the adapter's
 `train_receipt.json` normally.
 
+### Held-out environment returns
+
+`environment_eval` runs the behavior and candidate policies with identical URLs, resets, seeds, candidate indices, generation seeds, and bounds. Its default seed range follows training; overlap is rejected. Both sides get canonical dataset, replay, and summary artifacts, and identity drift fails closed.
+
+Without `gate`, results are diagnostic and normal `auto_load` remains. A gate defers loading and requires 20 seed groups, a two-sided exact sign-test win over per-seed means (`p < 0.05`), and configured thresholds. Same-seed replications do not inflate significance. It cannot coexist with `post_eval.min_accuracy`.
+
+The `kiln.openenv-environment-evaluation.v1` receipt binds policy identities, execution provenance, both summary hashes, evidence, decision, and promotion. Status and dashboard show both phases and returns.
+
 ## Reset tasks and multiple environments
 
 Pass environment-specific reset options in a JSON object such as
@@ -186,12 +185,12 @@ inside environments when mixing tasks with radically different ranges.
 
 ## Actions, observations, and ECHO
 
-The system prompt contains the discovered action JSON Schema. At each turn,
-the policy must emit one JSON object and no prose. Kiln currently accepts a
-bare object or an otherwise exact JSON object inside one Markdown JSON fence.
-The environment remains authoritative: its validation and execution errors
-become explicit protocol outcomes. Recoverable errors are full feedback turns,
-so a policy can correct its next action without losing episode state.
+The system prompt contains the discovered action JSON Schema. At each turn, the
+policy must emit one JSON object and no prose. A non-empty observation
+`input_text` is foregrounded as optional environment-provided decision text,
+while the complete wire observation remains present; it is not a protocol
+field or requirement. The environment remains authoritative: recoverable
+validation/execution errors are feedback turns on the same episode.
 
 Every sampled action is a `TurnKind::Action`. Every environment observation is
 a `TurnKind::Observation`. Native GRPO therefore applies policy-gradient loss

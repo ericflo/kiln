@@ -522,6 +522,7 @@ def build_openenv_types() -> None:
             "training_queued",
             "training_running",
             "post_evaluating",
+            "environment_evaluating",
             "completed",
             "failed",
             "cancelled",
@@ -540,10 +541,132 @@ def build_openenv_types() -> None:
         "Bounded group and episode progress for one OpenEnv run.",
     )
     add_object(
+        "OpenEnvEnvironmentEvalGate",
+        "OpenEnvEnvironmentEvalGate",
+        {
+            "min_mean_return": ref("FiniteNumber"),
+            "min_mean_improvement": {"type": "number", "minimum": 0},
+        },
+        "Fail-closed paired-return promotion thresholds. Statistical significance is always required in addition to these point estimates.",
+        optional=("min_mean_return", "min_mean_improvement"),
+    )
+    add_object(
+        "OpenEnvEnvironmentEvalConfig",
+        "OpenEnvEnvironmentEvalConfig",
+        {
+            "groups": ref("PositiveInteger"),
+            "group_size": ref("PositiveInteger"),
+            "seed_start": ref("NonNegativeInteger"),
+            "gate": ref("OpenEnvEnvironmentEvalGate"),
+        },
+        "Paired held-out OpenEnv evaluation collected after native training. Omitted seed_start begins immediately after the training seed range.",
+        optional=("groups", "group_size", "seed_start", "gate"),
+    )
+    add_enum(
+        "OpenEnvEnvironmentEvalState",
+        "OpenEnvEnvironmentEvalState",
+        [
+            "pending",
+            "collecting_baseline",
+            "collecting_candidate",
+            "completed",
+            "failed",
+            "cancelled",
+        ],
+        "Lifecycle phase for paired held-out environment evaluation.",
+    )
+    add_enum(
+        "OpenEnvEnvironmentEvalDecision",
+        "OpenEnvEnvironmentEvalDecision",
+        ["diagnostic", "passed", "rejected", "inconclusive"],
+        "Fixed paired-return policy decision before adapter promotion is applied.",
+    )
+    add_enum(
+        "OpenEnvEnvironmentEvalOutcome",
+        "OpenEnvEnvironmentEvalOutcome",
+        ["diagnostic", "promoted", "kept", "rejected", "inconclusive", "error"],
+        "Observable result after the paired decision and requested promotion policy are applied.",
+    )
+    add_object(
+        "OpenEnvPolicyIdentity",
+        "OpenEnvPolicyIdentity",
+        {
+            "adapter": ref("String"),
+            "adapter_content_revision": ref("Sha256"),
+            "execution_provenance_sha256": ref("Sha256"),
+        },
+        "Exact baseline or candidate policy identity. An omitted adapter denotes the base model.",
+        optional=("adapter", "adapter_content_revision", "execution_provenance_sha256"),
+    )
+    add_object(
+        "OpenEnvEnvironmentEvalEvidence",
+        "OpenEnvEnvironmentEvalEvidence",
+        {
+            "policy_version": ref("NonEmptyString"),
+            "paired_groups": ref("PositiveInteger"),
+            "paired_episodes": ref("PositiveInteger"),
+            "minimum_paired_groups": ref("PositiveInteger"),
+            "baseline_mean_return": ref("FiniteNumber"),
+            "candidate_mean_return": ref("FiniteNumber"),
+            "mean_return_improvement": ref("FiniteNumber"),
+            "improved_groups": ref("NonNegativeInteger"),
+            "regressed_groups": ref("NonNegativeInteger"),
+            "tied_groups": ref("NonNegativeInteger"),
+            "exact_sign_test_p_value": ref("UnitInterval"),
+            "exact_sign_test_alpha": ref("UnitInterval"),
+            "decision": ref("OpenEnvEnvironmentEvalDecision"),
+            "reason": ref("NonEmptyString"),
+        },
+        "Environment-owned returns and an exact two-sided sign test over independent per-seed mean-return pairs.",
+    )
+    add_object(
+        "OpenEnvEnvironmentEvalProgress",
+        "OpenEnvEnvironmentEvalProgress",
+        {
+            "state": ref("OpenEnvEnvironmentEvalState"),
+            "groups_completed": ref("NonNegativeInteger"),
+            "groups_total": ref("PositiveInteger"),
+            "rollouts_completed": ref("NonNegativeInteger"),
+            "rollouts_total": ref("PositiveInteger"),
+        },
+        "Live bounded progress for the baseline or candidate half of paired evaluation.",
+    )
+    add_object(
+        "OpenEnvEnvironmentEvalStatus",
+        "OpenEnvEnvironmentEvalStatus",
+        {
+            "state": ref("OpenEnvEnvironmentEvalState"),
+            "seed_start": ref("NonNegativeInteger"),
+            "groups": ref("PositiveInteger"),
+            "group_size": ref("PositiveInteger"),
+            "baseline": ref("OpenEnvPolicyIdentity"),
+            "candidate": ref("OpenEnvPolicyIdentity"),
+            "progress": ref("OpenEnvEnvironmentEvalProgress"),
+            "evidence": ref("OpenEnvEnvironmentEvalEvidence"),
+            "outcome": ref("OpenEnvEnvironmentEvalOutcome"),
+            "verdict": ref("String"),
+        },
+        "Authoritative paired held-out environment evaluation status and promotion result.",
+        optional=("evidence", "outcome", "verdict"),
+    )
+    add_object(
         "OpenEnvArtifact",
         "OpenEnvArtifact",
         {
-            "kind": {"enum": ["dataset", "replay", "summary"]},
+            "kind": {
+                "enum": [
+                    "dataset",
+                    "replay",
+                    "summary",
+                    "environment_eval_baseline_dataset",
+                    "environment_eval_baseline_replay",
+                    "environment_eval_baseline_summary",
+                    "environment_eval_candidate_dataset",
+                    "environment_eval_candidate_replay",
+                    "environment_eval_candidate_summary",
+                    "environment_eval_receipt",
+                ]
+            },
             "url": ref("String"),
             "sha256": ref("Sha256"),
             "bytes": ref("NonNegativeInteger"),
@@ -623,8 +746,9 @@ def build_openenv_types() -> None:
             "training_config": ref("GrpoConfig"),
             "auto_load": ref("Boolean"),
             "post_eval": ref("PostEvalConfig"),
+            "environment_eval": ref("OpenEnvEnvironmentEvalConfig"),
         },
-        "A persisted OpenEnv rollout or rollout-and-train request. `environments` is accepted as an input alias for `environment_urls`.",
+        "A persisted OpenEnv rollout or rollout-and-train request with optional paired held-out environment evaluation. `environments` is accepted as an input alias for `environment_urls`.",
         optional=(
             "kind",
             "adapter",
@@ -644,12 +768,16 @@ def build_openenv_types() -> None:
             "training_config",
             "auto_load",
             "post_eval",
+            "environment_eval",
         ),
         extra={
             "x-kiln-input-aliases": {"environments": "environment_urls"},
             "x-kiln-semantic-constraints": [
                 "kind=train requires output_adapter",
-                "kind=rollout rejects output_adapter",
+                "kind=rollout rejects output_adapter and environment_eval",
+                "environment_eval requires a distinct behavior and output adapter, and its seed interval must not overlap training",
+                "environment_eval.gate requires at least 20 distinct paired seed groups and cannot be combined with post_eval.min_accuracy",
+                "an environment gate defers auto_load until a significant exact paired sign-test win also satisfies configured return thresholds",
                 "Kiln overrides behavior_policy, base_adapter, output_name, and auto_load in training_config",
             ],
         },
@@ -659,7 +787,11 @@ def build_openenv_types() -> None:
         "OpenEnvRunStatus",
         {
             "schema": {
-                "enum": ["kiln.openenv-run.v1", "kiln.openenv-run.v2"]
+                "enum": [
+                    "kiln.openenv-run.v1",
+                    "kiln.openenv-run.v2",
+                    "kiln.openenv-run.v3",
+                ]
             },
             "run_id": ref("String"),
             "kind": ref("OpenEnvRunKind"),
@@ -674,9 +806,10 @@ def build_openenv_types() -> None:
             "training_submission": ref("TrainingResponse"),
             "training": ref("OpenEnvTrainingStatus"),
             "post_evaluations": array(ref("OpenEnvPostEvalStatus")),
+            "environment_evaluation": ref("OpenEnvEnvironmentEvalStatus"),
             "error": ref("String"),
         },
-        "Persisted status, collection artifacts, and authoritative training and post-evaluation lifecycle for one OpenEnv run. Version 1 records may retain the historical terminal training_queued handoff; version 2 follows learning to completion.",
+        "Persisted status, collection artifacts, and authoritative training and evaluation lifecycle for one OpenEnv run. Version 1 records may retain the historical terminal training_queued handoff; version 2 follows learning to completion; version 3 includes paired held-out environment evaluation.",
         optional=(
             "finished_unix_ms",
             "environments",
@@ -685,6 +818,7 @@ def build_openenv_types() -> None:
             "training_submission",
             "training",
             "post_evaluations",
+            "environment_evaluation",
             "error",
         ),
     )
@@ -692,7 +826,7 @@ def build_openenv_types() -> None:
         "OpenEnvRunList",
         "OpenEnvRunList",
         {
-            "schema": {"const": "kiln.openenv-run-list.v2"},
+            "schema": {"const": "kiln.openenv-run-list.v3"},
             "runs": array(ref("OpenEnvRunStatus")),
         },
         "Newest-first retained OpenEnv run records.",
@@ -1222,12 +1356,20 @@ def build_examples() -> dict[str, list[Any]]:
         "output_adapter": "bandit-agent",
         "training_config": {"lora_rank": 8},
         "auto_load": True,
+        "environment_eval": {
+            "groups": 20,
+            "group_size": 1,
+            "gate": {
+                "min_mean_return": 0.5,
+                "min_mean_improvement": 0.05,
+            },
+        },
     }
     openenv_status = {
-        "schema": "kiln.openenv-run.v2",
+        "schema": "kiln.openenv-run.v3",
         "run_id": "80a26e21-8451-4a64-8666-890c06fd80bd",
         "kind": "train",
-        "state": "training_running",
+        "state": "environment_evaluating",
         "request": openenv_request,
         "submitted_unix_ms": 1_700_000_000_000,
         "progress": {
@@ -1240,10 +1382,30 @@ def build_examples() -> dict[str, list[Any]]:
         "training_job_id": "grpo-openenv-1",
         "training": {
             "job_id": "grpo-openenv-1",
-            "state": "running",
-            "progress": 0.375,
-            "current_loss": 0.42,
-            "epoch": 1,
+            "state": "completed",
+            "progress": 1.0,
+            "current_loss": 0.31,
+            "epoch": 3,
+            "adapter_path": "/srv/adapters/bandit-agent",
+        },
+        "environment_evaluation": {
+            "state": "collecting_candidate",
+            "seed_start": 8,
+            "groups": 20,
+            "group_size": 1,
+            "baseline": {},
+            "candidate": {
+                "adapter": "bandit-agent",
+                "adapter_content_revision": "sha256:" + "1" * 64,
+                "execution_provenance_sha256": "sha256:" + "2" * 64,
+            },
+            "progress": {
+                "state": "collecting_candidate",
+                "groups_completed": 8,
+                "groups_total": 20,
+                "rollouts_completed": 8,
+                "rollouts_total": 20,
+            },
         },
     }
     examples: dict[str, list[Any]] = {
@@ -1285,7 +1447,7 @@ def build_examples() -> dict[str, list[Any]]:
         "OpdRequest": [opd],
         "OpenEnvInspectRequest": [{"environment_urls": ["http://127.0.0.1:8000"]}],
         "OpenEnvInspectResponse": [{"schema": "kiln.openenv-inspection.v1", "environments": [openenv_inspection]}],
-        "OpenEnvRunList": [{"schema": "kiln.openenv-run-list.v2", "runs": [openenv_status]}],
+        "OpenEnvRunList": [{"schema": "kiln.openenv-run-list.v3", "runs": [openenv_status]}],
         "OpenEnvRunRequest": [openenv_request],
         "OpenEnvRunStatus": [openenv_status],
         "PublishPayload": [{"description": "Math adapter", "uploader": "local-user"}],

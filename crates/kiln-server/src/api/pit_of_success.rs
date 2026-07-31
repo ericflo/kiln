@@ -217,6 +217,7 @@ async fn submit_front_door(
             info,
             QueueEntry {
                 job_id: job_id.clone(),
+                external_promotion_gate_pending: false,
                 reserved_bytes: 0,
                 teacher_bindings: Vec::new(),
                 admitted_resume_checkpoint: None,

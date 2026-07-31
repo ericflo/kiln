@@ -126,9 +126,11 @@ OpenEnv is also native to the embedded dashboard and control plane. Use
 `POST /v1/openenv/runs`; Kiln persists discovery and collection progress,
 canonical artifact links, native GRPO progress and loss, linked evaluation
 results, promotion-gate outcomes, failures, and cancellation across browser
-refreshes. A train run is terminal only after training and every requested
-post-evaluation has reached an outcome; restart-interrupted active work fails
-explicitly instead of pretending that an orphaned trainer still belongs to it.
+refreshes. After training, it can pair behavior and candidate policies on
+identical, disjoint held-out environment seeds, compare environment-owned
+returns with an exact sign test, and defer auto-load until the candidate earns
+promotion. A train run is terminal only after every requested evaluation has
+an outcome; restart-interrupted active work fails explicitly.
 
 ```bash
 # Inspect the environment's health, metadata, schemas, and content identity.
@@ -146,6 +148,12 @@ kiln openenv train \
 kiln openenv status 80a26e21-8451-4a64-8666-890c06fd80bd --follow
 ```
 
+The dashboard and API expose this held-out evaluation as `environment_eval`.
+Adding `gate` requires significant paired improvement plus optional mean-return
+thresholds. Kiln retains baseline and candidate dataset/replay/summary bundles
+and a content-addressed `kiln.openenv-environment-evaluation.v1` decision
+receipt.
+
 Every run first publishes canonical GRPO JSONL, an exact content-addressed
 environment replay transcript, and a summary receipt. `kiln openenv verify`
 cross-checks the bundle offline; `kiln openenv replay` re-executes every
@@ -161,8 +169,12 @@ The reusable `kiln-openenv` crate implements bounded HTTP discovery and the
 lock-step stateful `WS /ws` protocol, including tagged rewards and the complete
 OpenEnv error vocabulary. Recoverable protocol errors become corrective policy
 turns, while capacity saturation triggers bounded fresh-session acquisition.
-CI drives real pinned miniopenenv counter, bandit, Connect Four, maze, and
-Wordle episodes plus collect/train/verify/replay end to end. See the
+When an observation offers a non-empty `input_text`, Kiln foregrounds that
+generic environment-provided decision text while retaining the complete wire
+observation and discovered JSON action schema; it remains optional, never a
+protocol requirement. CI discovers and resets all fourteen text-profiled
+arcade environments from the pinned oracle, then drives representative
+episodes plus collect/train/verify/replay end to end. See the
 [OpenEnv Training Guide](docs/OPENENV_GUIDE.md)
 for multi-environment training, reset tasks, security, ECHO behavior, artifacts,
 and troubleshooting.

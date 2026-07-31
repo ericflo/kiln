@@ -963,6 +963,11 @@ impl QueuedJob {
 /// Entry in the training queue.
 pub struct QueueEntry {
     pub job_id: String,
+    /// A server-owned evaluator outside the ordinary post-eval queue owns the
+    /// promotion decision. This participates in the same adapter revision
+    /// barrier as native post-eval gates so trained bytes cannot become
+    /// physically active before that evaluator reaches a verdict.
+    pub external_promotion_gate_pending: bool,
     /// Estimated per-step working-set bytes from the submit-time preflight
     /// (#24). `execute_job` holds a governor reservation of this size across the
     /// job so the KV autoscaler proactively shrinks inference KV before training
@@ -985,6 +990,25 @@ pub struct QueueEntry {
     /// popped entry executes.
     pub prepared_data_permit: PreparedTrainingDataPermit,
     pub job: QueuedJob,
+}
+
+impl QueueEntry {
+    pub(crate) fn new(
+        job_id: String,
+        job: QueuedJob,
+        external_promotion_gate_pending: bool,
+    ) -> Self {
+        Self {
+            job_id,
+            external_promotion_gate_pending,
+            reserved_bytes: 0,
+            teacher_bindings: Vec::new(),
+            admitted_resume_checkpoint: None,
+            prepared_data: Default::default(),
+            prepared_data_permit: Default::default(),
+            job,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4122,7 +4146,7 @@ fn prepare_training_publication(
     let serial = crate::adapter_swap::adapter_mutation_guard_blocking(state)?;
     if !allow_loaded_reload && state.loaded_adapter_name().as_deref() == Some(adapter_name) {
         return Err(format!(
-            "adapter_revision_conflict: gated training cannot rewrite physically loaded adapter `{adapter_name}` before its post-eval gate runs; unload it or choose a different config.output_name, then resubmit (no weights were changed)"
+            "adapter_revision_conflict: gated training cannot rewrite physically loaded adapter `{adapter_name}` before its promotion gate runs; unload it or choose a different config.output_name, then resubmit (no weights were changed)"
         ));
     }
     let expected_revision =
@@ -4318,6 +4342,7 @@ fn stamp_gate_enqueue_error(state: &AppState, job_id: &str, verdict: String) {
 fn execute_job(state: AppState, mut entry: QueueEntry) {
     let training_runtime = state.training_runtime;
     let job_id = entry.job_id.clone();
+    let external_promotion_gate_pending = entry.external_promotion_gate_pending;
 
     {
         let jobs = state.training_jobs.read().unwrap();
@@ -4474,7 +4499,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
             usize::from(if_suite.is_some()) + usize::from(qa_suite.is_some())
         },
     );
-    let promotion_gate_pending = automatic_gate_count > 0;
+    let promotion_gate_pending = automatic_gate_count > 0 || external_promotion_gate_pending;
     let publication = prepare_training_publication(&state, &adapter_name, !promotion_gate_pending);
 
     let metric_type = match job_type {
@@ -4868,9 +4893,13 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
             // the eval that would catch it is still in the queue. (The old
             // order hot-swapped the fresh adapter BEFORE the eval was even
             // enqueued.)
-            let canary_ok = adapter_canary_allows_auto_load(&adapter_path, &adapter_name, &job_id);
+            let canary_ok = crate::adapter_swap::adapter_canary_allows_auto_load(
+                &adapter_path,
+                &adapter_name,
+                &job_id,
+            );
             if auto_load && canary_ok && !promotion_gate_pending {
-                if let Err(e) = auto_load_adapter(
+                if let Err(e) = crate::adapter_swap::activate_trained_adapter(
                     &state,
                     &adapter_path,
                     &adapter_name,
@@ -4885,7 +4914,7 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
                     tracing::info!(
                         job_id = %job_id,
                         adapter = %adapter_name,
-                        "auto-load deferred until the post-eval gate passes (§8.7)"
+                        "auto-load deferred until the promotion gate passes (§8.7)"
                     );
                 }
                 // Publication already purged this name at the revision
@@ -5132,62 +5161,6 @@ pub fn enqueue_post_training_eval(
     } else {
         push(Some(adapter_name.to_string()))?;
     }
-    Ok(())
-}
-
-fn adapter_canary_allows_auto_load(
-    adapter_path: &std::path::Path,
-    adapter_name: &str,
-    job_id: &str,
-) -> bool {
-    match kiln_train::read_adapter_canary_status_from_adapter_dir(adapter_path) {
-        Ok(Some(status)) if status.is_quarantined() => {
-            tracing::warn!(
-                job_id = %job_id,
-                adapter = %adapter_name,
-                reason = ?status.failure_reason,
-                "skipping post-training auto-load because adapter canary status is quarantined"
-            );
-            false
-        }
-        Ok(_) => true,
-        Err(err) => {
-            tracing::warn!(
-                job_id = %job_id,
-                adapter = %adapter_name,
-                error = %err,
-                "skipping post-training auto-load because adapter canary status could not be read"
-            );
-            false
-        }
-    }
-}
-
-/// Load a LoRA adapter using the two-phase RwLock pattern.
-fn auto_load_adapter(
-    state: &AppState,
-    adapter_path: &std::path::Path,
-    adapter_name: &str,
-    content_changed: bool,
-) -> Result<(), String> {
-    // Barrier swap (see `adapter_swap`): in-flight requests finish on the
-    // weights they started with, THEN the fresh adapter activates and its
-    // stale name-keyed cache entries purge — `content_changed` because the
-    // directory was just rewritten by training.
-    crate::adapter_swap::swap_runtime_adapter_blocking(
-        state,
-        crate::adapter_swap::SwapRequest {
-            target: crate::adapter_swap::SwapTarget::Resolved {
-                active_name: adapter_name.to_string(),
-                dir: adapter_path.to_path_buf(),
-            },
-            content_changed,
-            default_adapter: crate::adapter_swap::DefaultAdapterUpdate::Replace(Some(
-                adapter_name.to_string(),
-            )),
-            reason: "training_auto_load",
-        },
-    )?;
     Ok(())
 }
 
@@ -6771,6 +6744,7 @@ mod tests {
         let mut q = TrainingQueue::new();
         q.push(QueueEntry {
             job_id: "job-1".into(),
+            external_promotion_gate_pending: false,
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
             admitted_resume_checkpoint: None,
@@ -6788,6 +6762,7 @@ mod tests {
         });
         q.push(QueueEntry {
             job_id: "job-2".into(),
+            external_promotion_gate_pending: false,
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
             admitted_resume_checkpoint: None,
@@ -6805,6 +6780,7 @@ mod tests {
         });
         q.push(QueueEntry {
             job_id: "job-3".into(),
+            external_promotion_gate_pending: false,
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
             admitted_resume_checkpoint: None,
@@ -6833,6 +6809,7 @@ mod tests {
         let mut q = TrainingQueue::new();
         q.push(QueueEntry {
             job_id: "job-1".into(),
+            external_promotion_gate_pending: false,
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
             admitted_resume_checkpoint: None,
@@ -6850,6 +6827,7 @@ mod tests {
         });
         q.push(QueueEntry {
             job_id: "job-2".into(),
+            external_promotion_gate_pending: false,
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
             admitted_resume_checkpoint: None,
@@ -6867,6 +6845,7 @@ mod tests {
         });
         q.push(QueueEntry {
             job_id: "job-3".into(),
+            external_promotion_gate_pending: false,
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
             admitted_resume_checkpoint: None,

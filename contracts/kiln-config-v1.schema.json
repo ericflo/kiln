@@ -1106,12 +1106,12 @@
           "type": "integer",
           "minimum": 1,
           "default": 4,
-          "description": "Maximum concurrent server-owned OpenEnv rollout collectors.",
+          "description": "Maximum concurrent server-owned OpenEnv workflows.",
           "x-kiln-path": "openenv.max_active_runs",
           "x-kiln-type-and-default": "unsigned integer; 4",
           "x-kiln-canonical-env": "KILN_OPENENV_MAX_ACTIVE_RUNS (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-validation": "Must be greater than zero and no greater than max_tracked_runs. Bounds complete live OpenEnv workflows, including collection, queued or running GRPO, and requested post-evaluation; the underlying trainer and evaluator still use their normal bounded queues."
+          "x-kiln-validation": "Must be greater than zero and no greater than max_tracked_runs. Bounds complete live OpenEnv workflows, including collection, queued or running GRPO, static post-evaluation, and paired held-out environment evaluation; underlying executors retain their own bounds."
         },
         "max_tracked_runs": {
           "type": "integer",
@@ -1133,7 +1133,7 @@
           "x-kiln-type-and-default": "unsigned integer; 604800",
           "x-kiln-canonical-env": "KILN_OPENENV_TRACKED_RUN_TTL_SECS (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-validation": "Must be greater than zero. Terminal status records age out after this window; the content-addressed dataset, replay, and summary artifacts remain under <adapter_dir>/.openenv/runs/."
+          "x-kiln-validation": "Must be greater than zero. Terminal status records age out after this window; content-addressed rollout and paired-evaluation artifacts remain under <adapter_dir>/.openenv/runs/."
         },
         "allow_remote_environments": {
           "type": "boolean",

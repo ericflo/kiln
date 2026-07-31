@@ -3432,7 +3432,14 @@
           "enum": [
             "dataset",
             "replay",
-            "summary"
+            "summary",
+            "environment_eval_baseline_dataset",
+            "environment_eval_baseline_replay",
+            "environment_eval_baseline_summary",
+            "environment_eval_candidate_dataset",
+            "environment_eval_candidate_replay",
+            "environment_eval_candidate_summary",
+            "environment_eval_receipt"
           ]
         },
         "url": {
@@ -3447,6 +3454,231 @@
       },
       "description": "Content-addressed artifact downloadable from a retained OpenEnv run.",
       "x-kiln-rust-type": "OpenEnvArtifact",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvEnvironmentEvalConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "groups": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "group_size": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "seed_start": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "gate": {
+          "$ref": "#/$defs/OpenEnvEnvironmentEvalGate"
+        }
+      },
+      "description": "Paired held-out OpenEnv evaluation collected after native training. Omitted seed_start begins immediately after the training seed range.",
+      "x-kiln-rust-type": "OpenEnvEnvironmentEvalConfig",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvEnvironmentEvalDecision": {
+      "type": "string",
+      "enum": [
+        "diagnostic",
+        "passed",
+        "rejected",
+        "inconclusive"
+      ],
+      "description": "Fixed paired-return policy decision before adapter promotion is applied.",
+      "x-kiln-rust-type": "OpenEnvEnvironmentEvalDecision",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvEnvironmentEvalEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_version",
+        "paired_groups",
+        "paired_episodes",
+        "minimum_paired_groups",
+        "baseline_mean_return",
+        "candidate_mean_return",
+        "mean_return_improvement",
+        "improved_groups",
+        "regressed_groups",
+        "tied_groups",
+        "exact_sign_test_p_value",
+        "exact_sign_test_alpha",
+        "decision",
+        "reason"
+      ],
+      "properties": {
+        "policy_version": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "paired_groups": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "paired_episodes": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "minimum_paired_groups": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "baseline_mean_return": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "candidate_mean_return": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "mean_return_improvement": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "improved_groups": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "regressed_groups": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "tied_groups": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "exact_sign_test_p_value": {
+          "$ref": "#/$defs/UnitInterval"
+        },
+        "exact_sign_test_alpha": {
+          "$ref": "#/$defs/UnitInterval"
+        },
+        "decision": {
+          "$ref": "#/$defs/OpenEnvEnvironmentEvalDecision"
+        },
+        "reason": {
+          "$ref": "#/$defs/NonEmptyString"
+        }
+      },
+      "description": "Environment-owned returns and an exact two-sided sign test over independent per-seed mean-return pairs.",
+      "x-kiln-rust-type": "OpenEnvEnvironmentEvalEvidence",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvEnvironmentEvalGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "min_mean_return": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "min_mean_improvement": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "description": "Fail-closed paired-return promotion thresholds. Statistical significance is always required in addition to these point estimates.",
+      "x-kiln-rust-type": "OpenEnvEnvironmentEvalGate",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvEnvironmentEvalOutcome": {
+      "type": "string",
+      "enum": [
+        "diagnostic",
+        "promoted",
+        "kept",
+        "rejected",
+        "inconclusive",
+        "error"
+      ],
+      "description": "Observable result after the paired decision and requested promotion policy are applied.",
+      "x-kiln-rust-type": "OpenEnvEnvironmentEvalOutcome",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvEnvironmentEvalProgress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "groups_completed",
+        "groups_total",
+        "rollouts_completed",
+        "rollouts_total"
+      ],
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/OpenEnvEnvironmentEvalState"
+        },
+        "groups_completed": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "groups_total": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "rollouts_completed": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "rollouts_total": {
+          "$ref": "#/$defs/PositiveInteger"
+        }
+      },
+      "description": "Live bounded progress for the baseline or candidate half of paired evaluation.",
+      "x-kiln-rust-type": "OpenEnvEnvironmentEvalProgress",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvEnvironmentEvalState": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "collecting_baseline",
+        "collecting_candidate",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "description": "Lifecycle phase for paired held-out environment evaluation.",
+      "x-kiln-rust-type": "OpenEnvEnvironmentEvalState",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvEnvironmentEvalStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "seed_start",
+        "groups",
+        "group_size",
+        "baseline",
+        "candidate",
+        "progress"
+      ],
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/OpenEnvEnvironmentEvalState"
+        },
+        "seed_start": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "groups": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "group_size": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "baseline": {
+          "$ref": "#/$defs/OpenEnvPolicyIdentity"
+        },
+        "candidate": {
+          "$ref": "#/$defs/OpenEnvPolicyIdentity"
+        },
+        "progress": {
+          "$ref": "#/$defs/OpenEnvEnvironmentEvalProgress"
+        },
+        "evidence": {
+          "$ref": "#/$defs/OpenEnvEnvironmentEvalEvidence"
+        },
+        "outcome": {
+          "$ref": "#/$defs/OpenEnvEnvironmentEvalOutcome"
+        },
+        "verdict": {
+          "$ref": "#/$defs/String"
+        }
+      },
+      "description": "Authoritative paired held-out environment evaluation status and promotion result.",
+      "x-kiln-rust-type": "OpenEnvEnvironmentEvalStatus",
       "x-kiln-field-schema-status": "complete"
     },
     "OpenEnvEpisodeTerminationV1": {
@@ -3636,6 +3868,25 @@
       "x-kiln-rust-type": "kiln_openenv::OpenEnvMetadata",
       "x-kiln-field-schema-status": "complete"
     },
+    "OpenEnvPolicyIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "adapter": {
+          "$ref": "#/$defs/String"
+        },
+        "adapter_content_revision": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "execution_provenance_sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "description": "Exact baseline or candidate policy identity. An omitted adapter denotes the base model.",
+      "x-kiln-rust-type": "OpenEnvPolicyIdentity",
+      "x-kiln-field-schema-status": "complete"
+    },
     "OpenEnvPostEvalStatus": {
       "type": "object",
       "additionalProperties": false,
@@ -3757,7 +4008,7 @@
       ],
       "properties": {
         "schema": {
-          "const": "kiln.openenv-run-list.v2"
+          "const": "kiln.openenv-run-list.v3"
         },
         "runs": {
           "type": "array",
@@ -3864,6 +4115,9 @@
         },
         "post_eval": {
           "$ref": "#/$defs/PostEvalConfig"
+        },
+        "environment_eval": {
+          "$ref": "#/$defs/OpenEnvEnvironmentEvalConfig"
         }
       },
       "x-kiln-input-aliases": {
@@ -3871,10 +4125,13 @@
       },
       "x-kiln-semantic-constraints": [
         "kind=train requires output_adapter",
-        "kind=rollout rejects output_adapter",
+        "kind=rollout rejects output_adapter and environment_eval",
+        "environment_eval requires a distinct behavior and output adapter, and its seed interval must not overlap training",
+        "environment_eval.gate requires at least 20 distinct paired seed groups and cannot be combined with post_eval.min_accuracy",
+        "an environment gate defers auto_load until a significant exact paired sign-test win also satisfies configured return thresholds",
         "Kiln overrides behavior_policy, base_adapter, output_name, and auto_load in training_config"
       ],
-      "description": "A persisted OpenEnv rollout or rollout-and-train request. `environments` is accepted as an input alias for `environment_urls`.",
+      "description": "A persisted OpenEnv rollout or rollout-and-train request with optional paired held-out environment evaluation. `environments` is accepted as an input alias for `environment_urls`.",
       "x-kiln-rust-type": "OpenEnvRunRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3889,6 +4146,7 @@
         "training_queued",
         "training_running",
         "post_evaluating",
+        "environment_evaluating",
         "completed",
         "failed",
         "cancelled"
@@ -3913,7 +4171,8 @@
         "schema": {
           "enum": [
             "kiln.openenv-run.v1",
-            "kiln.openenv-run.v2"
+            "kiln.openenv-run.v2",
+            "kiln.openenv-run.v3"
           ]
         },
         "run_id": {
@@ -3964,11 +4223,14 @@
             "$ref": "#/$defs/OpenEnvPostEvalStatus"
           }
         },
+        "environment_evaluation": {
+          "$ref": "#/$defs/OpenEnvEnvironmentEvalStatus"
+        },
         "error": {
           "$ref": "#/$defs/String"
         }
       },
-      "description": "Persisted status, collection artifacts, and authoritative training and post-evaluation lifecycle for one OpenEnv run. Version 1 records may retain the historical terminal training_queued handoff; version 2 follows learning to completion.",
+      "description": "Persisted status, collection artifacts, and authoritative training and evaluation lifecycle for one OpenEnv run. Version 1 records may retain the historical terminal training_queued handoff; version 2 follows learning to completion; version 3 includes paired held-out environment evaluation.",
       "x-kiln-rust-type": "OpenEnvRunStatus",
       "x-kiln-field-schema-status": "complete"
     },
@@ -6881,13 +7143,13 @@
     ],
     "OpenEnvRunList": [
       {
-        "schema": "kiln.openenv-run-list.v2",
+        "schema": "kiln.openenv-run-list.v3",
         "runs": [
           {
-            "schema": "kiln.openenv-run.v2",
+            "schema": "kiln.openenv-run.v3",
             "run_id": "80a26e21-8451-4a64-8666-890c06fd80bd",
             "kind": "train",
-            "state": "training_running",
+            "state": "environment_evaluating",
             "request": {
               "kind": "train",
               "environment_urls": [
@@ -6910,7 +7172,15 @@
               "training_config": {
                 "lora_rank": 8
               },
-              "auto_load": true
+              "auto_load": true,
+              "environment_eval": {
+                "groups": 20,
+                "group_size": 1,
+                "gate": {
+                  "min_mean_return": 0.5,
+                  "min_mean_improvement": 0.05
+                }
+              }
             },
             "submitted_unix_ms": 1700000000000,
             "progress": {
@@ -6943,10 +7213,30 @@
             "training_job_id": "grpo-openenv-1",
             "training": {
               "job_id": "grpo-openenv-1",
-              "state": "running",
-              "progress": 0.375,
-              "current_loss": 0.42,
-              "epoch": 1
+              "state": "completed",
+              "progress": 1.0,
+              "current_loss": 0.31,
+              "epoch": 3,
+              "adapter_path": "/srv/adapters/bandit-agent"
+            },
+            "environment_evaluation": {
+              "state": "collecting_candidate",
+              "seed_start": 8,
+              "groups": 20,
+              "group_size": 1,
+              "baseline": {},
+              "candidate": {
+                "adapter": "bandit-agent",
+                "adapter_content_revision": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "execution_provenance_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+              },
+              "progress": {
+                "state": "collecting_candidate",
+                "groups_completed": 8,
+                "groups_total": 20,
+                "rollouts_completed": 8,
+                "rollouts_total": 20
+              }
             }
           }
         ]
@@ -6975,15 +7265,23 @@
         "training_config": {
           "lora_rank": 8
         },
-        "auto_load": true
+        "auto_load": true,
+        "environment_eval": {
+          "groups": 20,
+          "group_size": 1,
+          "gate": {
+            "min_mean_return": 0.5,
+            "min_mean_improvement": 0.05
+          }
+        }
       }
     ],
     "OpenEnvRunStatus": [
       {
-        "schema": "kiln.openenv-run.v2",
+        "schema": "kiln.openenv-run.v3",
         "run_id": "80a26e21-8451-4a64-8666-890c06fd80bd",
         "kind": "train",
-        "state": "training_running",
+        "state": "environment_evaluating",
         "request": {
           "kind": "train",
           "environment_urls": [
@@ -7006,7 +7304,15 @@
           "training_config": {
             "lora_rank": 8
           },
-          "auto_load": true
+          "auto_load": true,
+          "environment_eval": {
+            "groups": 20,
+            "group_size": 1,
+            "gate": {
+              "min_mean_return": 0.5,
+              "min_mean_improvement": 0.05
+            }
+          }
         },
         "submitted_unix_ms": 1700000000000,
         "progress": {
@@ -7039,10 +7345,30 @@
         "training_job_id": "grpo-openenv-1",
         "training": {
           "job_id": "grpo-openenv-1",
-          "state": "running",
-          "progress": 0.375,
-          "current_loss": 0.42,
-          "epoch": 1
+          "state": "completed",
+          "progress": 1.0,
+          "current_loss": 0.31,
+          "epoch": 3,
+          "adapter_path": "/srv/adapters/bandit-agent"
+        },
+        "environment_evaluation": {
+          "state": "collecting_candidate",
+          "seed_start": 8,
+          "groups": 20,
+          "group_size": 1,
+          "baseline": {},
+          "candidate": {
+            "adapter": "bandit-agent",
+            "adapter_content_revision": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "execution_provenance_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+          },
+          "progress": {
+            "state": "collecting_candidate",
+            "groups_completed": 8,
+            "groups_total": 20,
+            "rollouts_completed": 8,
+            "rollouts_total": 20
+          }
         }
       }
     ],

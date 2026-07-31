@@ -602,6 +602,27 @@
               <textarea id="openenv-training-config" rows="3" spellcheck="false" placeholder='{"learning_rate":0.00001,"kl_coeff":0.1}'>{}</textarea>
               <div class="form-help">Any native GRPO config fields. Kiln fixes the behavior policy contract, source adapter, output name, and auto-load fields to match this live rollout.</div>
             </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="openenv-environment-eval-mode">Held-out environment evaluation</label>
+                <select id="openenv-environment-eval-mode">
+                  <option value="diagnostic" selected>Paired diagnostic</option>
+                  <option value="gate">Gate adapter promotion</option>
+                  <option value="off">Off</option>
+                </select>
+                <div class="form-help">Re-runs the behavior and trained policies on identical, disjoint OpenEnv seeds and publishes exact replay bundles.</div>
+              </div>
+              <div class="form-group"><label for="openenv-environment-eval-groups">Held-out seeds</label><input id="openenv-environment-eval-groups" type="number" value="20" min="1" max="16384"></div>
+              <div class="form-group"><label for="openenv-environment-eval-group-size">Episodes per seed</label><input id="openenv-environment-eval-group-size" type="number" value="1" min="1" max="256"></div>
+              <div class="form-group" id="openenv-environment-gate-floor-group" hidden>
+                <label for="openenv-environment-gate-floor">Minimum mean return <span class="hint">— optional</span></label>
+                <input id="openenv-environment-gate-floor" type="number" step="any" placeholder="no absolute floor">
+              </div>
+              <div class="form-group" id="openenv-environment-gate-improvement-group" hidden>
+                <label for="openenv-environment-gate-improvement">Minimum mean improvement</label>
+                <input id="openenv-environment-gate-improvement" type="number" value="0" min="0" step="any">
+              </div>
+            </div>
             <label style="display:inline-flex;gap:var(--space-2);align-items:center;text-transform:none;font-weight:500;"><input id="openenv-thinking" type="checkbox"> Enable policy thinking</label>
             <label style="display:inline-flex;gap:var(--space-2);align-items:center;text-transform:none;font-weight:500;margin-left:var(--space-4);"><input id="openenv-auto-load" type="checkbox" checked> Auto-load trained adapter</label>
           </div>

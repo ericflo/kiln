@@ -225,6 +225,12 @@ pub struct Metrics {
     pub openenv_runs_failed: AtomicU64,
     pub openenv_runs_cancelled: AtomicU64,
     pub openenv_episodes_collected: AtomicU64,
+    pub openenv_environment_evaluations_started: AtomicU64,
+    pub openenv_environment_evaluations_completed: AtomicU64,
+    pub openenv_environment_evaluations_failed: AtomicU64,
+    pub openenv_environment_gates_passed: AtomicU64,
+    pub openenv_environment_gates_rejected: AtomicU64,
+    pub openenv_environment_gates_inconclusive: AtomicU64,
 }
 
 impl Metrics {
@@ -278,6 +284,12 @@ impl Metrics {
             openenv_runs_failed: AtomicU64::new(0),
             openenv_runs_cancelled: AtomicU64::new(0),
             openenv_episodes_collected: AtomicU64::new(0),
+            openenv_environment_evaluations_started: AtomicU64::new(0),
+            openenv_environment_evaluations_completed: AtomicU64::new(0),
+            openenv_environment_evaluations_failed: AtomicU64::new(0),
+            openenv_environment_gates_passed: AtomicU64::new(0),
+            openenv_environment_gates_rejected: AtomicU64::new(0),
+            openenv_environment_gates_inconclusive: AtomicU64::new(0),
         }
     }
 
@@ -3093,6 +3105,60 @@ impl Metrics {
                 self.openenv_episodes_collected.load(Ordering::Relaxed)
             ),
         );
+        out.push_str("# HELP kiln_openenv_environment_evaluations_total Paired held-out OpenEnv evaluations by lifecycle outcome.\n");
+        out.push_str("# TYPE kiln_openenv_environment_evaluations_total counter\n");
+        for (status, value) in [
+            (
+                "started",
+                self.openenv_environment_evaluations_started
+                    .load(Ordering::Relaxed),
+            ),
+            (
+                "completed",
+                self.openenv_environment_evaluations_completed
+                    .load(Ordering::Relaxed),
+            ),
+            (
+                "failed",
+                self.openenv_environment_evaluations_failed
+                    .load(Ordering::Relaxed),
+            ),
+        ] {
+            prom_counter(
+                &mut out,
+                "kiln_openenv_environment_evaluations_total",
+                "status",
+                status,
+                value,
+            );
+        }
+        out.push_str("# HELP kiln_openenv_environment_gates_total Paired-return OpenEnv promotion gates by decision.\n");
+        out.push_str("# TYPE kiln_openenv_environment_gates_total counter\n");
+        for (decision, value) in [
+            (
+                "passed",
+                self.openenv_environment_gates_passed
+                    .load(Ordering::Relaxed),
+            ),
+            (
+                "rejected",
+                self.openenv_environment_gates_rejected
+                    .load(Ordering::Relaxed),
+            ),
+            (
+                "inconclusive",
+                self.openenv_environment_gates_inconclusive
+                    .load(Ordering::Relaxed),
+            ),
+        ] {
+            prom_counter(
+                &mut out,
+                "kiln_openenv_environment_gates_total",
+                "decision",
+                decision,
+                value,
+            );
+        }
         out.push_str(
             "# HELP kiln_openenv_runs_active Currently active server-owned OpenEnv runs.\n",
         );

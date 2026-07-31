@@ -175,11 +175,53 @@ def fixtures() -> dict[str, dict]:
         "capacity_retries": 0,
         "environment_prefix_only_rollouts": 0,
     }
+    environment_evaluation = {
+        "schema": "kiln.openenv-environment-evaluation.v1",
+        "run_id": "80a26e21-8451-4a64-8666-890c06fd80bd",
+        "config": {
+            "groups": 20,
+            "group_size": 1,
+            "gate": {
+                "min_mean_return": 0.5,
+                "min_mean_improvement": 0.1,
+            },
+        },
+        "seed_start": 8,
+        "baseline": {
+            "execution_provenance_sha256": hash_value("e"),
+        },
+        "candidate": {
+            "adapter": "bandit-agent",
+            "adapter_content_revision": hash_value("f"),
+            "execution_provenance_sha256": hash_value("e"),
+        },
+        "baseline_summary_sha256": hash_value("1"),
+        "candidate_summary_sha256": hash_value("2"),
+        "evidence": {
+            "policy_version": "paired_return_sign_test_v1",
+            "paired_groups": 20,
+            "paired_episodes": 20,
+            "minimum_paired_groups": 20,
+            "baseline_mean_return": 0.1,
+            "candidate_mean_return": 0.8,
+            "mean_return_improvement": 0.7,
+            "improved_groups": 20,
+            "regressed_groups": 0,
+            "tied_groups": 0,
+            "exact_sign_test_p_value": 0.0000019073486328125,
+            "exact_sign_test_alpha": 0.05,
+            "decision": "passed",
+            "reason": "significant paired return improvement",
+        },
+        "outcome": "promoted",
+        "verdict": "Environment promotion gate passed and the candidate was promoted.",
+    }
     return {
         "OpenEnvRolloutSummary": summary,
         "OpenEnvReplayManifest": replay,
         "VerificationReport": verification,
         "ReplayRunReport": replay_run,
+        "EnvironmentEvaluationReceipt": environment_evaluation,
     }
 
 
@@ -221,9 +263,34 @@ def main() -> int:
         ):
             failures.append("self-test: summary exceeding the recovery bound was accepted")
 
+        missing_candidate_hash = copy.deepcopy(values["EnvironmentEvaluationReceipt"])
+        del missing_candidate_hash["candidate_summary_sha256"]
+        if not validate_instance(
+            missing_candidate_hash,
+            schema["$defs"]["EnvironmentEvaluationReceipt"],
+            schema,
+        ):
+            failures.append(
+                "self-test: environment evaluation without a candidate summary hash was accepted"
+            )
+
+        inconsistent_outcome = copy.deepcopy(values["EnvironmentEvaluationReceipt"])
+        inconsistent_outcome["outcome"] = "rejected"
+        if not validate_instance(
+            inconsistent_outcome,
+            schema["$defs"]["EnvironmentEvaluationReceipt"],
+            schema,
+        ):
+            failures.append(
+                "self-test: passed environment evidence with a rejected outcome was accepted"
+            )
+
     source = (ROOT / "crates" / "kiln-server" / "src" / "openenv_replay.rs").read_text(
         encoding="utf-8"
     )
+    evaluation_source = (
+        ROOT / "crates" / "kiln-server" / "src" / "openenv_evaluation.rs"
+    ).read_text(encoding="utf-8")
     cli = (ROOT / "crates" / "kiln-server" / "src" / "openenv_cli.rs").read_text(
         encoding="utf-8"
     )
@@ -238,13 +305,23 @@ def main() -> int:
             failures.append(f"openenv_replay.rs is missing contract identifier {term}")
     if "kiln.openenv-rollout-summary.v2" not in cli:
         failures.append("openenv_cli.rs is missing summary v2")
+    for term in [
+        "kiln.openenv-environment-evaluation.v1",
+        "paired_return_sign_test_v1",
+    ]:
+        if term not in evaluation_source:
+            failures.append(
+                f"openenv_evaluation.rs is missing contract identifier {term}"
+            )
     for command in ["kiln openenv verify", "kiln openenv replay"]:
         if command not in guide:
             failures.append(f"OpenEnv guide is missing {command}")
 
     if failures:
         raise SystemExit("\n".join(failures))
-    print("OpenEnv summary, replay, verification, and live-replay contracts match")
+    print(
+        "OpenEnv summary, replay, paired evaluation, verification, and live-replay contracts match"
+    )
     return 0
 
 

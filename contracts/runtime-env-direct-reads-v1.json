@@ -1447,6 +1447,19 @@
     },
     {
       "api": "var",
+      "argument": "KILN_OPENENV_INTEROP_ARCADE_URLS",
+      "argument_kind": "literal",
+      "classification": "test_only",
+      "classification_basis": "unit-test source surface",
+      "count": 1,
+      "language": "rust",
+      "operation": "read",
+      "path": "crates/kiln-openenv/tests/miniopenenv_interop.rs",
+      "phase": "runtime",
+      "surface": "unit-test"
+    },
+    {
+      "api": "var",
       "argument": "KILN_OPENENV_INTEROP_BANDIT_URL",
       "argument_kind": "literal",
       "classification": "test_only",
@@ -2029,6 +2042,19 @@
       "path": "crates/kiln-server/src/logging.rs",
       "phase": "runtime",
       "surface": "source"
+    },
+    {
+      "api": "var",
+      "argument": "KILN_OPENENV_INTEROP_BANDIT_URL",
+      "argument_kind": "literal",
+      "classification": "test_only",
+      "classification_basis": "unit-test source surface",
+      "count": 1,
+      "language": "rust",
+      "operation": "read",
+      "path": "crates/kiln-server/src/openenv_evaluation.rs",
+      "phase": "runtime",
+      "surface": "unit-test"
     },
     {
       "api": "var",
@@ -3084,15 +3110,15 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 125,
-    "literal_kiln_read_names": 36,
+    "literal_kiln_read_call_sites": 127,
+    "literal_kiln_read_names": 37,
     "literal_kiln_read_names_by_classification": {
       "build_time": 6,
       "credential_provider": 0,
       "experimental_debug": 0,
       "public_stable": 1,
       "startup_safety": 0,
-      "test_only": 29
+      "test_only": 30
     },
     "process_mutation_call_sites": 19,
     "process_mutation_call_sites_by_classification": {
@@ -3104,15 +3130,15 @@
       "test_only": 11
     },
     "process_mutation_entries": 16,
-    "read_call_sites": 445,
+    "read_call_sites": 447,
     "read_call_sites_by_classification": {
       "build_time": 326,
       "credential_provider": 1,
       "experimental_debug": 0,
       "public_stable": 6,
       "startup_safety": 1,
-      "test_only": 111
+      "test_only": 113
     },
-    "read_entries": 220
+    "read_entries": 222
   }
 }

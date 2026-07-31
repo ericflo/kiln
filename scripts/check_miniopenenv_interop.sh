@@ -5,9 +5,14 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 oracle_root=${OPENENV_INTEROP_ROOT:-"$repo_root/../miniopenenv"}
 cargo_bin=${CARGO_BIN:-cargo}
 base_port=${KILN_OPENENV_INTEROP_PORT:-18990}
-declare -a server_names=(counter bandit connect4 maze wordle)
+declare -a server_names=(
+    counter bandit cartpole snake g2048 wordle blackjack maze pong connect4 kuhn
+    dyna inducto logic filtro
+)
 declare -a server_pids=()
 declare -a log_files=()
+declare -a arcade_urls=()
+declare -A server_urls=()
 forbidden_oracle_namespace='MINI''OPENENV'
 
 if rg --quiet --fixed-strings "$forbidden_oracle_namespace" "$repo_root/crates"; then
@@ -30,15 +35,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
+declare -a server_targets=()
+for name in "${server_names[@]}"; do
+    server_targets+=("build/rel/bin/$name")
+done
+# Always ask the oracle's own build graph to refresh the binaries. A locally
+# cached executable must never make source-level protocol drift invisible.
+make -C "$oracle_root" "${server_targets[@]}"
+
 for index in "${!server_names[@]}"; do
     name=${server_names[$index]}
     binary="$oracle_root/build/rel/bin/$name"
     port=$((base_port + index))
     log_file=$(mktemp "${TMPDIR:-/tmp}/kiln-miniopenenv-$name.XXXXXX.log")
     log_files+=("$log_file")
-    if [[ ! -x "$binary" ]]; then
-        make -C "$oracle_root" "build/rel/bin/$name"
-    fi
     extra=()
     if [[ "$name" == bandit ]]; then
         extra=(--max-sessions 1)
@@ -56,6 +66,10 @@ for index in "${!server_names[@]}"; do
         sleep 0.05
     done
     curl --fail --silent "http://127.0.0.1:$port/health" >/dev/null
+    server_urls["$name"]="http://127.0.0.1:$port"
+    if [[ "$name" != counter ]]; then
+        arcade_urls+=("http://127.0.0.1:$port")
+    fi
 done
 
 (
@@ -64,14 +78,20 @@ done
         api::openenv::tests --lib
     "$cargo_bin" test -p kiln-server --no-default-features \
         openenv_cli::tests --lib
-    KILN_OPENENV_INTEROP_COUNTER_URL="http://127.0.0.1:$base_port" \
-    KILN_OPENENV_INTEROP_BANDIT_URL="http://127.0.0.1:$((base_port + 1))" \
-    KILN_OPENENV_INTEROP_CONNECT4_URL="http://127.0.0.1:$((base_port + 2))" \
-    KILN_OPENENV_INTEROP_MAZE_URL="http://127.0.0.1:$((base_port + 3))" \
-    KILN_OPENENV_INTEROP_WORDLE_URL="http://127.0.0.1:$((base_port + 4))" \
-        "$cargo_bin" test -p kiln-openenv --test miniopenenv_interop -- --ignored
-    KILN_OPENENV_INTEROP_BANDIT_URL="http://127.0.0.1:$((base_port + 1))" \
+    KILN_OPENENV_INTEROP_ARCADE_URLS="$(IFS=,; echo "${arcade_urls[*]}")" \
+    KILN_OPENENV_INTEROP_COUNTER_URL="${server_urls[counter]}" \
+    KILN_OPENENV_INTEROP_BANDIT_URL="${server_urls[bandit]}" \
+    KILN_OPENENV_INTEROP_CONNECT4_URL="${server_urls[connect4]}" \
+    KILN_OPENENV_INTEROP_MAZE_URL="${server_urls[maze]}" \
+    KILN_OPENENV_INTEROP_WORDLE_URL="${server_urls[wordle]}" \
+        "$cargo_bin" test -p kiln-openenv --test miniopenenv_interop -- \
+        --ignored --test-threads=1
+    KILN_OPENENV_INTEROP_BANDIT_URL="${server_urls[bandit]}" \
         "$cargo_bin" test -p kiln-server --no-default-features \
         --test openenv_training_interop -- --ignored --exact \
         collects_submits_verifies_and_replays_a_real_arcade_batch
+    KILN_OPENENV_INTEROP_BANDIT_URL="${server_urls[bandit]}" \
+        "$cargo_bin" test -p kiln-server --no-default-features --lib \
+        openenv_evaluation::tests::paired_evaluation_drives_a_real_openenv_bandit \
+        -- --ignored --exact
 )

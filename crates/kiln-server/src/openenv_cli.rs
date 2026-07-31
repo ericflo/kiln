@@ -624,27 +624,28 @@ pub async fn run_openenv(command: &OpenEnvCommands) -> Result<()> {
             json,
         } => {
             validate_openenv_run_id(run_id)?;
-            let mut previous_state = None;
+            let mut previous_fingerprint = None;
             loop {
                 let value =
                     openenv_control_plane_request(kiln_url, Some(run_id), reqwest::Method::GET)
                         .await?;
-                let state = value
+                value
                     .get("state")
                     .and_then(Value::as_str)
                     .context("Kiln OpenEnv status omitted state")?;
-                if !json && previous_state.as_deref() != Some(state) {
+                let fingerprint = openenv_server_run_fingerprint(&value);
+                if !json && previous_fingerprint.as_deref() != Some(fingerprint.as_str()) {
                     print_openenv_server_run(&value);
                 }
                 if !follow || openenv_server_run_terminal(&value) {
                     if *json {
                         println!("{}", serde_json::to_string_pretty(&value)?);
-                    } else if previous_state.as_deref() == Some(state) {
+                    } else if previous_fingerprint.as_deref() == Some(fingerprint.as_str()) {
                         print_openenv_server_run(&value);
                     }
                     break;
                 }
-                previous_state = Some(state.to_string());
+                previous_fingerprint = Some(fingerprint);
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
@@ -785,6 +786,36 @@ fn openenv_server_run_terminal(run: &Value) -> bool {
         && state == "training_queued")
 }
 
+fn openenv_server_run_fingerprint(run: &Value) -> String {
+    let training_progress = run
+        .pointer("/training/progress")
+        .and_then(Value::as_f64)
+        .map(|value| (value * 100.0).floor() as u64)
+        .unwrap_or_default();
+    let static_eval_done = run
+        .get("post_evaluations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|evaluation| evaluation.get("examples_completed").and_then(Value::as_u64))
+        .sum::<u64>();
+    format!(
+        "{}:{}:{}:{}:{}:{}",
+        run.get("state").and_then(Value::as_str).unwrap_or_default(),
+        run.pointer("/training/state")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        training_progress,
+        static_eval_done,
+        run.pointer("/environment_evaluation/state")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        run.pointer("/environment_evaluation/progress/groups_completed")
+            .and_then(Value::as_u64)
+            .unwrap_or_default()
+    )
+}
+
 fn print_openenv_server_run(run: &Value) {
     let run_id = run
         .get("run_id")
@@ -858,6 +889,60 @@ fn print_openenv_server_run(run: &Value) {
                     .map(|accuracy| format!(" · {:.1}% accuracy", accuracy * 100.0))
                     .unwrap_or_default()
             );
+        }
+    }
+    if let Some(evaluation) = run.get("environment_evaluation") {
+        let eval_state = evaluation
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let progress = evaluation.get("progress").unwrap_or(&Value::Null);
+        let groups_done = progress
+            .get("groups_completed")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let groups_total = progress
+            .get("groups_total")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        println!(
+            "  Environment eval: {eval_state} · {groups_done}/{groups_total} held-out seed groups"
+        );
+        if let Some(evidence) = evaluation.get("evidence") {
+            println!(
+                "    return {:.6} → {:.6} ({:+.6}) · {} seed groups improved / {} regressed / {} tied · exact p={:.6}",
+                evidence
+                    .get("baseline_mean_return")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0),
+                evidence
+                    .get("candidate_mean_return")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0),
+                evidence
+                    .get("mean_return_improvement")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0),
+                evidence
+                    .get("improved_groups")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                evidence
+                    .get("regressed_groups")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                evidence
+                    .get("tied_groups")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                evidence
+                    .get("exact_sign_test_p_value")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(1.0),
+            );
+        }
+        if let Some(outcome) = evaluation.get("outcome").and_then(Value::as_str) {
+            println!("    Environment gate: {outcome}");
         }
     }
     if let Some(error) = run.get("error").and_then(Value::as_str) {
@@ -1488,8 +1573,7 @@ pub(crate) fn initial_messages(
 ) -> Result<Vec<ChatMessage>> {
     let action_schema = serde_json::to_string(&inspection.schema.action)
         .context("serialize OpenEnv action schema")?;
-    let observation =
-        serde_json::to_string(reset).context("serialize complete OpenEnv reset observation")?;
+    let observation = model_observation_content("reset result", reset)?;
     let metadata = &inspection.identity.metadata;
     Ok(vec![
         ChatMessage::new(
@@ -1499,16 +1583,17 @@ pub(crate) fn initial_messages(
                  Environment description: {description}\n\
                  At every turn, reply with exactly one JSON object that validates against this action schema:\n\
                  {action_schema}\n\
-                 Do not use Markdown, commentary, or a code fence. The environment observation will follow.",
+                 Do not use Markdown, commentary, or a code fence. If the observation includes an \
+                 input_text field, treat it as environment-provided decision text, but still encode \
+                 your answer as the JSON object required by the action schema. The complete \
+                 environment observation will follow.",
                 name = metadata.name,
                 description = metadata.description
             ),
         ),
         ChatMessage::new(
             "user",
-            format!(
-                "OpenEnv reset result (observation, reward, done, and optional metadata):\n{observation}\n\nChoose the next action as one JSON object."
-            ),
+            format!("{observation}\n\nChoose the next action as one JSON object."),
         ),
     ])
 }
@@ -1523,14 +1608,36 @@ fn action_segment(content: String) -> TurnSegment {
     }
 }
 
-fn observation_segment(observation: &impl Serialize) -> Result<TurnSegment> {
+fn observation_segment(observation: &OpenEnvObservation) -> Result<TurnSegment> {
     Ok(TurnSegment {
         role: "tool".to_string(),
-        content: serde_json::to_string(observation)
-            .context("serialize OpenEnv observation trajectory segment")?,
+        content: model_observation_content("step result", observation)?,
         kind: TurnKind::Observation,
         tool_call_id: None,
         warning_prefix_len: None,
+    })
+}
+
+pub(crate) fn model_observation_content(
+    label: &str,
+    observation: &OpenEnvObservation,
+) -> Result<String> {
+    let complete = serde_json::to_string(observation)
+        .with_context(|| format!("serialize complete OpenEnv {label}"))?;
+    let input_text = observation
+        .observation
+        .get("input_text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty());
+    Ok(match input_text {
+        Some(input_text) => format!(
+            "OpenEnv input_text (environment-provided decision text):\n{input_text}\n\n\
+             Complete OpenEnv {label} (authoritative observation, reward, done, and optional metadata JSON):\n\
+             {complete}"
+        ),
+        None => format!(
+            "OpenEnv {label} (observation, reward, done, and optional metadata JSON):\n{complete}"
+        ),
     })
 }
 
@@ -2189,6 +2296,35 @@ mod tests {
         let reset = reset_payload(&base, 7).unwrap();
         assert_eq!(reset, json!({"difficulty": 3, "seed": 7}));
         assert_eq!(sha256_json(&reset).unwrap().len(), "sha256:".len() + 64);
+    }
+
+    #[test]
+    fn optional_input_text_is_foregrounded_without_hiding_the_wire_observation() {
+        let observation = OpenEnvObservation {
+            observation: json!({
+                "input_text": "Board here. Reply with one digit.",
+                "legal_actions": [0, 2]
+            }),
+            reward: kiln_openenv::OpenEnvReward::Integer(1),
+            done: false,
+            metadata: None,
+        };
+        let content = model_observation_content("step result", &observation).unwrap();
+        assert!(content.starts_with("OpenEnv input_text"));
+        assert!(content.contains("Board here. Reply with one digit."));
+        assert!(content.contains("Complete OpenEnv step result"));
+        assert!(content.contains(r#""legal_actions":[0,2]"#));
+        assert!(content.contains(r#""reward":1"#));
+
+        let ordinary = OpenEnvObservation {
+            observation: json!({"position": 7}),
+            reward: kiln_openenv::OpenEnvReward::Null,
+            done: false,
+            metadata: None,
+        };
+        let content = model_observation_content("reset result", &ordinary).unwrap();
+        assert!(!content.contains("OpenEnv input_text"));
+        assert!(content.contains(r#""position":7"#));
     }
 
     #[test]

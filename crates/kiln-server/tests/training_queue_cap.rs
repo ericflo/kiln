@@ -73,6 +73,7 @@ fn fill_queue(state: &AppState, n: usize) {
     for i in 0..n {
         q.push(QueueEntry {
             job_id: format!("placeholder-{i}"),
+            external_promotion_gate_pending: false,
             reserved_bytes: 0,
             teacher_bindings: Vec::new(),
             admitted_resume_checkpoint: None,

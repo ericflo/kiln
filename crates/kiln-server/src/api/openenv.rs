@@ -38,12 +38,19 @@ use crate::openenv_cli::{
     OpenEnvRolloutOptions, OpenEnvRolloutSummary, collect_openenv_rollouts_with_policy,
     validate_options, write_openenv_outputs, write_summary_atomic,
 };
+use crate::openenv_evaluation::{
+    OpenEnvEnvironmentEvalConfig, OpenEnvEnvironmentEvalDecision, OpenEnvEnvironmentEvalOutcome,
+    OpenEnvEnvironmentEvalProgress, OpenEnvEnvironmentEvalReceipt, OpenEnvEnvironmentEvalState,
+    OpenEnvEnvironmentEvalStatus, OpenEnvPolicyIdentity, collect_environment_evaluation,
+    evaluation_paths, normalized_adapter, policy_identity, summary_sha256,
+    write_environment_evaluation_receipt,
+};
 use crate::recent_requests::now_unix_ms;
 use crate::state::AppState;
 
 const OPENENV_RUN_SCHEMA_V1: &str = "kiln.openenv-run.v1";
-const OPENENV_RUN_SCHEMA_V2: &str = "kiln.openenv-run.v2";
-const OPENENV_RUN_LIST_SCHEMA_V2: &str = "kiln.openenv-run-list.v2";
+const OPENENV_RUN_SCHEMA_V3: &str = "kiln.openenv-run.v3";
+const OPENENV_RUN_LIST_SCHEMA_V3: &str = "kiln.openenv-run-list.v3";
 const OPENENV_INSPECTION_SCHEMA_V1: &str = "kiln.openenv-inspection.v1";
 const OPENENV_API_BODY_LIMIT: usize = 1024 * 1024;
 const MAX_ENVIRONMENTS: usize = 64;
@@ -101,6 +108,54 @@ fn default_reset_options() -> Value {
     Value::Object(Map::new())
 }
 
+fn resolved_environment_eval_seed_start(request: &OpenEnvRunRequest) -> Option<u64> {
+    request.environment_eval.as_ref().map(|config| {
+        config.seed_start.unwrap_or_else(|| {
+            request
+                .seed_start
+                .checked_add(u64::try_from(request.groups).unwrap_or(u64::MAX))
+                .unwrap_or(u64::MAX)
+        })
+    })
+}
+
+fn pending_environment_evaluation(
+    request: &OpenEnvRunRequest,
+) -> Option<OpenEnvEnvironmentEvalStatus> {
+    let config = request.environment_eval.as_ref()?;
+    let seed_start = resolved_environment_eval_seed_start(request)?;
+    let rollouts_total = config.groups.saturating_mul(config.group_size);
+    Some(OpenEnvEnvironmentEvalStatus {
+        state: OpenEnvEnvironmentEvalState::Pending,
+        seed_start,
+        groups: config.groups,
+        group_size: config.group_size,
+        baseline: OpenEnvPolicyIdentity {
+            adapter: normalized_adapter(&request.adapter),
+            adapter_content_revision: None,
+            execution_provenance_sha256: None,
+        },
+        candidate: OpenEnvPolicyIdentity {
+            adapter: request
+                .output_adapter
+                .as_deref()
+                .and_then(normalized_adapter),
+            adapter_content_revision: None,
+            execution_provenance_sha256: None,
+        },
+        progress: OpenEnvEnvironmentEvalProgress {
+            state: OpenEnvEnvironmentEvalState::Pending,
+            groups_completed: 0,
+            groups_total: config.groups,
+            rollouts_completed: 0,
+            rollouts_total,
+        },
+        evidence: None,
+        outcome: None,
+        verdict: None,
+    })
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OpenEnvRunKind {
@@ -120,6 +175,7 @@ pub enum OpenEnvRunState {
     TrainingQueued,
     TrainingRunning,
     PostEvaluating,
+    EnvironmentEvaluating,
     Completed,
     Failed,
     Cancelled,
@@ -178,6 +234,11 @@ pub struct OpenEnvRunRequest {
     pub auto_load: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_eval: Option<kiln_eval::PostEvalConfig>,
+    /// Optional paired held-out evaluation against the behavior policy after
+    /// training. It reuses the same OpenEnv protocol client with a disjoint
+    /// seed range and may own deferred adapter promotion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_eval: Option<OpenEnvEnvironmentEvalConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -260,16 +321,18 @@ pub struct OpenEnvRunStatus {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub post_evaluations: Vec<OpenEnvPostEvalStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_evaluation: Option<OpenEnvEnvironmentEvalStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 impl OpenEnvRunStatus {
     fn terminal(&self) -> bool {
         self.state.unconditionally_terminal()
-            // Before v2, `training_queued` explicitly meant the OpenEnv
+            // In v1, `training_queued` explicitly meant the OpenEnv
             // orchestrator had handed ownership off and finished. Preserve
-            // that historical record on upgrade while v2 runs keep following
-            // the trainer to a real terminal outcome.
+            // that historical record on upgrade while newer runs keep
+            // following every requested phase to a real terminal outcome.
             || (self.schema == OPENENV_RUN_SCHEMA_V1
                 && self.state == OpenEnvRunState::TrainingQueued)
     }
@@ -465,8 +528,9 @@ impl OpenEnvRunRegistry {
             .groups
             .checked_mul(request.group_size)
             .context("OpenEnv rollout count overflow")?;
+        let environment_evaluation = pending_environment_evaluation(&request);
         let status = OpenEnvRunStatus {
-            schema: OPENENV_RUN_SCHEMA_V2.to_string(),
+            schema: OPENENV_RUN_SCHEMA_V3.to_string(),
             run_id: run_id.clone(),
             kind: request.kind,
             state: OpenEnvRunState::Queued,
@@ -485,6 +549,7 @@ impl OpenEnvRunRegistry {
             training_submission: None,
             training: None,
             post_evaluations: Vec::new(),
+            environment_evaluation,
             error: None,
         };
         persist_status_to(&run_dir.join("run.json"), &status)?;
@@ -608,6 +673,33 @@ impl OpenEnvRunRegistry {
             "dataset" => ("rollouts.jsonl", "application/x-ndjson"),
             "replay" => ("replay.json", "application/json"),
             "summary" => ("summary.json", "application/json"),
+            "environment_eval_baseline_dataset" => (
+                "environment-evaluation/baseline/rollouts.jsonl",
+                "application/x-ndjson",
+            ),
+            "environment_eval_baseline_replay" => (
+                "environment-evaluation/baseline/replay.json",
+                "application/json",
+            ),
+            "environment_eval_baseline_summary" => (
+                "environment-evaluation/baseline/summary.json",
+                "application/json",
+            ),
+            "environment_eval_candidate_dataset" => (
+                "environment-evaluation/candidate/rollouts.jsonl",
+                "application/x-ndjson",
+            ),
+            "environment_eval_candidate_replay" => (
+                "environment-evaluation/candidate/replay.json",
+                "application/json",
+            ),
+            "environment_eval_candidate_summary" => (
+                "environment-evaluation/candidate/summary.json",
+                "application/json",
+            ),
+            "environment_eval_receipt" => {
+                ("environment-evaluation/receipt.json", "application/json")
+            }
             _ => return None,
         };
         self.get(run_id)?;
@@ -726,17 +818,22 @@ fn validate_run_request(
         ));
     }
     match request.kind {
-        OpenEnvRunKind::Rollout if request.output_adapter.is_some() => {
+        OpenEnvRunKind::Rollout
+            if request.output_adapter.is_some() || request.environment_eval.is_some() =>
+        {
             return Err(openenv_error(
                 StatusCode::BAD_REQUEST,
                 "openenv_invalid_request",
-                "output_adapter is valid only for kind=train",
-                "Remove output_adapter or set kind to train.",
+                "output_adapter and environment_eval are valid only for kind=train",
+                "Remove training-only fields or set kind to train.",
             ));
         }
         OpenEnvRunKind::Train => {
             let output = request.output_adapter.as_deref().unwrap_or_default();
             crate::api::adapters::validate_adapter_name(output)?;
+            if let Some(config) = &request.environment_eval {
+                validate_environment_eval(request, output, config)?;
+            }
         }
         OpenEnvRunKind::Rollout => {}
     }
@@ -749,6 +846,74 @@ fn validate_run_request(
         )
     })?;
     Ok(())
+}
+
+fn validate_environment_eval(
+    request: &OpenEnvRunRequest,
+    output_adapter: &str,
+    config: &OpenEnvEnvironmentEvalConfig,
+) -> Result<(), ApiError> {
+    let fail = |message: String| {
+        openenv_error(
+            StatusCode::BAD_REQUEST,
+            "openenv_invalid_environment_eval",
+            message,
+            "Use a non-overlapping held-out seed range and valid bounded paired-evaluation settings.",
+        )
+    };
+    if normalized_adapter(&request.adapter) == normalized_adapter(output_adapter) {
+        return Err(fail(
+            "environment_eval requires output_adapter to differ from the behavior adapter so the baseline revision remains evaluable".to_string(),
+        ));
+    }
+    let training_groups = u64::try_from(request.groups)
+        .map_err(|_| fail("training groups exceed the supported seed range".to_string()))?;
+    let training_end = request
+        .seed_start
+        .checked_add(training_groups)
+        .ok_or_else(|| fail("training seed range overflows u64".to_string()))?;
+    let eval_start = config.seed_start.unwrap_or(training_end);
+    let eval_groups = u64::try_from(config.groups)
+        .map_err(|_| fail("environment_eval groups exceed the supported seed range".to_string()))?;
+    let eval_end = eval_start
+        .checked_add(eval_groups)
+        .ok_or_else(|| fail("environment_eval seed range overflows u64".to_string()))?;
+    if request.seed_start < eval_end && eval_start < training_end {
+        return Err(fail(format!(
+            "environment_eval seed range [{eval_start}, {eval_end}) overlaps training range [{}, {training_end})",
+            request.seed_start
+        )));
+    }
+    if let Some(gate) = &config.gate {
+        if request
+            .post_eval
+            .as_ref()
+            .is_some_and(|post_eval| post_eval.min_accuracy.is_some())
+        {
+            return Err(fail(
+                "environment_eval.gate cannot be combined with post_eval.min_accuracy; one workflow may own only one automatic promotion gate".to_string(),
+            ));
+        }
+        if gate.min_mean_return.is_some_and(|value| !value.is_finite())
+            || !gate.min_mean_improvement.is_finite()
+            || gate.min_mean_improvement < 0.0
+        {
+            return Err(fail(
+                "environment_eval gate thresholds must be finite and min_mean_improvement must be non-negative".to_string(),
+            ));
+        }
+        if config.groups < crate::openenv_evaluation::OPENENV_ENVIRONMENT_EVAL_MIN_GROUPS {
+            return Err(fail(format!(
+                "environment_eval gate requires at least {} distinct paired seed groups, got {}",
+                crate::openenv_evaluation::OPENENV_ENVIRONMENT_EVAL_MIN_GROUPS,
+                config.groups
+            )));
+        }
+    }
+    let options =
+        environment_eval_rollout_options(request, Path::new("."), output_adapter, "candidate")
+            .map_err(&fail)?;
+    validate_options(&options).map_err(|error| fail(error.to_string()))
 }
 
 fn rollout_options_for(request: &OpenEnvRunRequest, run_dir: &Path) -> OpenEnvRolloutOptions {
@@ -773,6 +938,42 @@ fn rollout_options_for(request: &OpenEnvRunRequest, run_dir: &Path) -> OpenEnvRo
         replay_output: run_dir.join("replay.json"),
         summary_output: run_dir.join("summary.json"),
     }
+}
+
+fn environment_eval_rollout_options(
+    request: &OpenEnvRunRequest,
+    run_dir: &Path,
+    adapter: &str,
+    side: &str,
+) -> Result<OpenEnvRolloutOptions, String> {
+    let config = request
+        .environment_eval
+        .as_ref()
+        .ok_or_else(|| "OpenEnv environment evaluation was not requested".to_string())?;
+    let seed_start = resolved_environment_eval_seed_start(request)
+        .ok_or_else(|| "OpenEnv environment evaluation seed is unavailable".to_string())?;
+    let paths = evaluation_paths(run_dir, side);
+    Ok(OpenEnvRolloutOptions {
+        kiln_url: "in-process".to_string(),
+        environment_urls: request.environment_urls.clone(),
+        adapter: adapter.to_string(),
+        groups: config.groups,
+        group_size: config.group_size,
+        seed_start,
+        reset_options: None,
+        reset_options_value: Some(request.reset_options.clone()),
+        max_steps: request.max_steps,
+        concurrency: request.concurrency.min(config.group_size),
+        max_action_tokens: request.max_action_tokens,
+        temperature: request.temperature,
+        thinking: request.thinking,
+        protocol_error_reward: request.protocol_error_reward,
+        max_recoverable_errors: request.max_recoverable_errors,
+        capacity_wait_seconds: request.capacity_wait_seconds,
+        output: paths.output,
+        replay_output: paths.replay_output,
+        summary_output: paths.summary_output,
+    })
 }
 
 async fn inspect(
@@ -986,7 +1187,14 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
         .context("OpenEnv train run has no output adapter")?;
     let mut config = request.training_config.clone().unwrap_or_default();
     config.output_name = Some(output_adapter.clone());
-    config.auto_load = request.auto_load;
+    // A native environment gate owns promotion. Keep the prior policy active
+    // until paired held-out returns pass; diagnostic environment evaluation
+    // preserves the ordinary training auto-load behavior.
+    config.auto_load = request.auto_load
+        && !request
+            .environment_eval
+            .as_ref()
+            .is_some_and(|config| config.gate.is_some());
     config.behavior_policy = BehaviorPolicy::NoImportanceCorrection;
     config.base_adapter = if matches!(
         request.adapter.trim().to_ascii_lowercase().as_str(),
@@ -996,6 +1204,10 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
     } else {
         Some(request.adapter.clone())
     };
+    let environment_gate_pending = request
+        .environment_eval
+        .as_ref()
+        .is_some_and(|config| config.gate.is_some());
     let submission = super::training::submit_grpo_request(
         state,
         GrpoRequest {
@@ -1006,6 +1218,7 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
             config,
             post_eval: request.post_eval.clone(),
         },
+        environment_gate_pending,
     )
     .map_err(|error| {
         anyhow::anyhow!(
@@ -1033,11 +1246,15 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
         .metrics
         .openenv_training_queued
         .fetch_add(1, Ordering::Relaxed);
-    follow_openenv_training(state, run_id, &request, &submission.job_id, cancel).await?;
+    follow_openenv_training(state, run_id, &request, &submission.job_id, cancel.clone()).await?;
     state
         .metrics
         .openenv_training_completed
         .fetch_add(1, Ordering::Relaxed);
+    if request.environment_eval.is_some() {
+        run_openenv_environment_evaluation(state, run_id, &request, &submission.job_id, cancel)
+            .await?;
+    }
     tracing::info!(
         run_id,
         training_job_id = %submission.job_id,
@@ -1045,6 +1262,301 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
         rollouts = request.groups.saturating_mul(request.group_size),
         "OpenEnv training run completed"
     );
+    Ok(())
+}
+
+fn finish_followed_training(
+    state: &AppState,
+    run_id: &str,
+    request: &OpenEnvRunRequest,
+    training: OpenEnvTrainingStatus,
+    evals: Vec<OpenEnvPostEvalStatus>,
+) -> Result<()> {
+    state.openenv_runs.update(run_id, |status| {
+        status.state = if request.environment_eval.is_some() {
+            OpenEnvRunState::EnvironmentEvaluating
+        } else {
+            OpenEnvRunState::Completed
+        };
+        status.finished_unix_ms = request.environment_eval.is_none().then_some(now_unix_ms());
+        status.training = Some(training);
+        status.post_evaluations = evals;
+        status.error = None;
+    })?;
+    Ok(())
+}
+
+async fn run_openenv_environment_evaluation(
+    state: &AppState,
+    run_id: &str,
+    request: &OpenEnvRunRequest,
+    training_job_id: &str,
+    cancel: Arc<AtomicBool>,
+) -> Result<()> {
+    let config = request
+        .environment_eval
+        .clone()
+        .context("OpenEnv environment evaluation config disappeared")?;
+    let output_adapter = request
+        .output_adapter
+        .as_deref()
+        .context("OpenEnv environment evaluation has no candidate adapter")?;
+    let baseline = policy_identity(state, &request.adapter)?;
+    let candidate = policy_identity(state, output_adapter)?;
+    let run_dir = state.openenv_runs.run_dir(run_id);
+    let baseline_options =
+        environment_eval_rollout_options(request, &run_dir, &request.adapter, "baseline")
+            .map_err(anyhow::Error::msg)?;
+    let candidate_options =
+        environment_eval_rollout_options(request, &run_dir, output_adapter, "candidate")
+            .map_err(anyhow::Error::msg)?;
+    let rollouts_total = config
+        .groups
+        .checked_mul(config.group_size)
+        .context("OpenEnv environment evaluation rollout count overflow")?;
+    state.openenv_runs.update(run_id, |status| {
+        status.state = OpenEnvRunState::EnvironmentEvaluating;
+        status.finished_unix_ms = None;
+        status.environment_evaluation = Some(OpenEnvEnvironmentEvalStatus {
+            state: OpenEnvEnvironmentEvalState::CollectingBaseline,
+            seed_start: baseline_options.seed_start,
+            groups: config.groups,
+            group_size: config.group_size,
+            baseline: baseline.clone(),
+            candidate: candidate.clone(),
+            progress: OpenEnvEnvironmentEvalProgress {
+                state: OpenEnvEnvironmentEvalState::CollectingBaseline,
+                groups_completed: 0,
+                groups_total: config.groups,
+                rollouts_completed: 0,
+                rollouts_total,
+            },
+            evidence: None,
+            outcome: None,
+            verdict: None,
+        });
+        status.error = None;
+    })?;
+    state
+        .metrics
+        .openenv_environment_evaluations_started
+        .fetch_add(1, Ordering::Relaxed);
+
+    let registry = state.openenv_runs.clone();
+    let progress_run_id = run_id.to_string();
+    let progress = Arc::new(move |progress: OpenEnvEnvironmentEvalProgress| {
+        if let Err(error) = registry.update(&progress_run_id, |status| {
+            status.state = OpenEnvRunState::EnvironmentEvaluating;
+            if let Some(environment_evaluation) = status.environment_evaluation.as_mut() {
+                environment_evaluation.state = progress.state;
+                environment_evaluation.progress = progress;
+            }
+        }) {
+            tracing::warn!(
+                run_id = %progress_run_id,
+                error = %error,
+                "failed to persist OpenEnv environment evaluation progress"
+            );
+        }
+    });
+    let policy = OpenEnvPolicyTransport::InProcess(state.clone());
+    let collection = match collect_environment_evaluation(
+        &policy,
+        baseline_options.clone(),
+        candidate_options.clone(),
+        cancel.clone(),
+        progress,
+        config.gate.as_ref(),
+    )
+    .await
+    {
+        Ok(collection) => collection,
+        Err(error) => {
+            let cancelled = cancel.load(Ordering::Relaxed);
+            if !cancelled {
+                state
+                    .metrics
+                    .openenv_environment_evaluations_failed
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            let message = format!("{error:#}");
+            let _ = state.openenv_runs.update(run_id, |status| {
+                if let Some(environment_evaluation) = status.environment_evaluation.as_mut() {
+                    environment_evaluation.state = if cancelled {
+                        OpenEnvEnvironmentEvalState::Cancelled
+                    } else {
+                        OpenEnvEnvironmentEvalState::Failed
+                    };
+                    environment_evaluation.progress.state = environment_evaluation.state;
+                    environment_evaluation.outcome =
+                        (!cancelled).then_some(OpenEnvEnvironmentEvalOutcome::Error);
+                    environment_evaluation.verdict = Some(message.clone());
+                }
+            });
+            return Err(error);
+        }
+    };
+    state.metrics.openenv_episodes_collected.fetch_add(
+        u64::try_from(rollouts_total.saturating_mul(2)).unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
+    if cancel.load(Ordering::Relaxed) {
+        let _ = state.openenv_runs.update(run_id, |status| {
+            if let Some(environment_evaluation) = status.environment_evaluation.as_mut() {
+                environment_evaluation.state = OpenEnvEnvironmentEvalState::Cancelled;
+                environment_evaluation.progress.state = OpenEnvEnvironmentEvalState::Cancelled;
+                environment_evaluation.verdict =
+                    Some("OpenEnv run cancelled before environment evaluation promotion".into());
+            }
+        });
+        anyhow::bail!("OpenEnv run cancelled before environment evaluation promotion");
+    }
+
+    let mut terminal_error = None;
+    let (outcome, verdict) = match collection.evidence.decision {
+        OpenEnvEnvironmentEvalDecision::Diagnostic => (
+            OpenEnvEnvironmentEvalOutcome::Diagnostic,
+            format!(
+                "Diagnostic paired environment evaluation: {}",
+                collection.evidence.reason
+            ),
+        ),
+        OpenEnvEnvironmentEvalDecision::Rejected => (
+            OpenEnvEnvironmentEvalOutcome::Rejected,
+            format!(
+                "Environment promotion gate rejected the candidate: {}",
+                collection.evidence.reason
+            ),
+        ),
+        OpenEnvEnvironmentEvalDecision::Inconclusive => (
+            OpenEnvEnvironmentEvalOutcome::Inconclusive,
+            format!(
+                "Environment promotion gate was inconclusive; candidate remains unserved: {}",
+                collection.evidence.reason
+            ),
+        ),
+        OpenEnvEnvironmentEvalDecision::Passed if request.auto_load => {
+            let promotion = training_status_for(state, training_job_id)
+                .and_then(|training| training.adapter_path)
+                .map(PathBuf::from)
+                .context("OpenEnv environment gate passed but trainer published no adapter path")
+                .and_then(|adapter_path| {
+                    crate::adapter_swap::promote_trained_adapter(
+                        state,
+                        &adapter_path,
+                        output_adapter,
+                        true,
+                    )
+                    .map_err(anyhow::Error::msg)
+                });
+            match promotion {
+                Ok(()) => (
+                    OpenEnvEnvironmentEvalOutcome::Promoted,
+                    format!(
+                        "Environment promotion gate passed and adapter {output_adapter:?} was promoted: {}",
+                        collection.evidence.reason
+                    ),
+                ),
+                Err(error) => {
+                    let message = format!(
+                        "Environment promotion gate passed but adapter {output_adapter:?} could not be promoted: {error:#}"
+                    );
+                    terminal_error = Some(message.clone());
+                    (OpenEnvEnvironmentEvalOutcome::Error, message)
+                }
+            }
+        }
+        OpenEnvEnvironmentEvalDecision::Passed => (
+            OpenEnvEnvironmentEvalOutcome::Kept,
+            format!(
+                "Environment promotion gate passed; auto_load=false kept adapter {output_adapter:?} on disk: {}",
+                collection.evidence.reason
+            ),
+        ),
+    };
+
+    let receipt_path = run_dir.join("environment-evaluation").join("receipt.json");
+    let receipt = OpenEnvEnvironmentEvalReceipt {
+        schema: crate::openenv_evaluation::OPENENV_ENVIRONMENT_EVAL_RECEIPT_SCHEMA_V1.to_string(),
+        run_id: run_id.to_string(),
+        config,
+        seed_start: baseline_options.seed_start,
+        baseline: baseline.clone(),
+        candidate: candidate.clone(),
+        baseline_summary_sha256: summary_sha256(&baseline_options.summary_output)?,
+        candidate_summary_sha256: summary_sha256(&candidate_options.summary_output)?,
+        evidence: collection.evidence.clone(),
+        outcome,
+        verdict: verdict.clone(),
+    };
+    write_environment_evaluation_receipt(&receipt_path, &receipt)?;
+    let environment_artifacts = environment_evaluation_artifacts(run_id, &run_dir)?;
+    state.openenv_runs.update(run_id, |status| {
+        let evaluation_failed = outcome == OpenEnvEnvironmentEvalOutcome::Error;
+        status.state = if evaluation_failed {
+            OpenEnvRunState::EnvironmentEvaluating
+        } else {
+            OpenEnvRunState::Completed
+        };
+        status.finished_unix_ms = (!evaluation_failed).then_some(now_unix_ms());
+        status.artifacts.extend(environment_artifacts);
+        status.environment_evaluation = Some(OpenEnvEnvironmentEvalStatus {
+            state: if evaluation_failed {
+                OpenEnvEnvironmentEvalState::Failed
+            } else {
+                OpenEnvEnvironmentEvalState::Completed
+            },
+            seed_start: baseline_options.seed_start,
+            groups: receipt.config.groups,
+            group_size: receipt.config.group_size,
+            baseline,
+            candidate,
+            progress: OpenEnvEnvironmentEvalProgress {
+                state: if evaluation_failed {
+                    OpenEnvEnvironmentEvalState::Failed
+                } else {
+                    OpenEnvEnvironmentEvalState::Completed
+                },
+                groups_completed: receipt.config.groups,
+                groups_total: receipt.config.groups,
+                rollouts_completed: rollouts_total,
+                rollouts_total,
+            },
+            evidence: Some(collection.evidence),
+            outcome: Some(outcome),
+            verdict: Some(verdict),
+        });
+        status.error = None;
+    })?;
+    if terminal_error.is_some() {
+        state
+            .metrics
+            .openenv_environment_evaluations_failed
+            .fetch_add(1, Ordering::Relaxed);
+    } else {
+        state
+            .metrics
+            .openenv_environment_evaluations_completed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    match outcome {
+        OpenEnvEnvironmentEvalOutcome::Promoted | OpenEnvEnvironmentEvalOutcome::Kept => state
+            .metrics
+            .openenv_environment_gates_passed
+            .fetch_add(1, Ordering::Relaxed),
+        OpenEnvEnvironmentEvalOutcome::Rejected => state
+            .metrics
+            .openenv_environment_gates_rejected
+            .fetch_add(1, Ordering::Relaxed),
+        OpenEnvEnvironmentEvalOutcome::Inconclusive => state
+            .metrics
+            .openenv_environment_gates_inconclusive
+            .fetch_add(1, Ordering::Relaxed),
+        OpenEnvEnvironmentEvalOutcome::Diagnostic | OpenEnvEnvironmentEvalOutcome::Error => 0,
+    };
+    if let Some(error) = terminal_error {
+        anyhow::bail!(error);
+    }
     Ok(())
 }
 
@@ -1196,13 +1708,7 @@ async fn follow_openenv_training(
             }
             TrainingState::Completed => {
                 if request.post_eval.is_none() {
-                    state.openenv_runs.update(run_id, |status| {
-                        status.state = OpenEnvRunState::Completed;
-                        status.finished_unix_ms = Some(now_unix_ms());
-                        status.training = Some(training);
-                        status.post_evaluations = evals;
-                        status.error = None;
-                    })?;
+                    finish_followed_training(state, run_id, request, training, evals)?;
                     return Ok(());
                 }
 
@@ -1267,13 +1773,7 @@ async fn follow_openenv_training(
                     if evaluations_done && gate_done {
                         let final_training = training_status_for(state, training_job_id)
                             .context("OpenEnv training job disappeared at completion")?;
-                        state.openenv_runs.update(run_id, |status| {
-                            status.state = OpenEnvRunState::Completed;
-                            status.finished_unix_ms = Some(now_unix_ms());
-                            status.training = Some(final_training);
-                            status.post_evaluations = evals;
-                            status.error = None;
-                        })?;
+                        finish_followed_training(state, run_id, request, final_training, evals)?;
                         return Ok(());
                     }
                 }
@@ -1308,9 +1808,56 @@ fn artifacts_for(run_id: &str, summary: &OpenEnvRolloutSummary) -> Vec<OpenEnvAr
     ]
 }
 
+fn environment_evaluation_artifacts(run_id: &str, run_dir: &Path) -> Result<Vec<OpenEnvArtifact>> {
+    let root = run_dir.join("environment-evaluation");
+    [
+        (
+            "environment_eval_baseline_dataset",
+            root.join("baseline").join("rollouts.jsonl"),
+        ),
+        (
+            "environment_eval_baseline_replay",
+            root.join("baseline").join("replay.json"),
+        ),
+        (
+            "environment_eval_baseline_summary",
+            root.join("baseline").join("summary.json"),
+        ),
+        (
+            "environment_eval_candidate_dataset",
+            root.join("candidate").join("rollouts.jsonl"),
+        ),
+        (
+            "environment_eval_candidate_replay",
+            root.join("candidate").join("replay.json"),
+        ),
+        (
+            "environment_eval_candidate_summary",
+            root.join("candidate").join("summary.json"),
+        ),
+        ("environment_eval_receipt", root.join("receipt.json")),
+    ]
+    .into_iter()
+    .map(|(kind, path)| {
+        let bytes = std::fs::read(&path).with_context(|| {
+            format!(
+                "read OpenEnv environment evaluation artifact {}",
+                path.display()
+            )
+        })?;
+        Ok(OpenEnvArtifact {
+            kind: kind.to_string(),
+            url: format!("/v1/openenv/runs/{run_id}/artifacts/{kind}"),
+            sha256: crate::openenv_replay::sha256_bytes(&bytes),
+            bytes: bytes.len(),
+        })
+    })
+    .collect()
+}
+
 async fn list_runs(State(state): State<AppState>) -> Json<OpenEnvRunList> {
     Json(OpenEnvRunList {
-        schema: OPENENV_RUN_LIST_SCHEMA_V2,
+        schema: OPENENV_RUN_LIST_SCHEMA_V3,
         runs: state.openenv_runs.list(),
     })
 }
@@ -1493,6 +2040,7 @@ mod tests {
             training_config: None,
             auto_load: true,
             post_eval: None,
+            environment_eval: None,
         }
     }
 
@@ -1598,6 +2146,58 @@ mod tests {
         rollout.temperature = 1.0;
         rollout.adapter = "../escape".into();
         assert!(validate_run_request(&rollout, &policy).is_err());
+    }
+
+    #[test]
+    fn environment_eval_requires_disjoint_seeds_and_one_gate_owner() {
+        let policy = OpenEnvConfig::default();
+        let mut train = request(OpenEnvRunKind::Train);
+        train.environment_eval = Some(OpenEnvEnvironmentEvalConfig {
+            groups: 20,
+            group_size: 1,
+            seed_start: None,
+            gate: Some(crate::openenv_evaluation::OpenEnvEnvironmentEvalGate {
+                min_mean_return: None,
+                min_mean_improvement: 0.0,
+            }),
+        });
+        assert!(validate_run_request(&train, &policy).is_ok());
+        assert_eq!(
+            resolved_environment_eval_seed_start(&train),
+            Some(train.seed_start + train.groups as u64)
+        );
+
+        train.environment_eval.as_mut().unwrap().groups = 1;
+        train.environment_eval.as_mut().unwrap().group_size = 20;
+        assert!(validate_run_request(&train, &policy).is_err());
+        train.environment_eval.as_mut().unwrap().groups = 20;
+        train.environment_eval.as_mut().unwrap().group_size = 1;
+        train.environment_eval.as_mut().unwrap().seed_start = Some(1);
+        assert!(validate_run_request(&train, &policy).is_err());
+        train.environment_eval.as_mut().unwrap().seed_start = Some(100);
+        train.post_eval = Some(kiln_eval::PostEvalConfig {
+            suite: "held-out".into(),
+            data_scope: Default::default(),
+            generation: None,
+            min_accuracy: Some(0.8),
+            include_baseline: false,
+        });
+        assert!(validate_run_request(&train, &policy).is_err());
+    }
+
+    #[test]
+    fn environment_eval_preserves_a_distinct_baseline_revision() {
+        let policy = OpenEnvConfig::default();
+        let mut train = request(OpenEnvRunKind::Train);
+        train.adapter = "agent".into();
+        train.output_adapter = Some("agent".into());
+        train.environment_eval = Some(OpenEnvEnvironmentEvalConfig {
+            groups: 1,
+            group_size: 1,
+            seed_start: None,
+            gate: None,
+        });
+        assert!(validate_run_request(&train, &policy).is_err());
     }
 
     #[test]
@@ -1707,6 +2307,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_training_hands_off_to_native_environment_evaluation() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(&temp, OpenEnvConfig::default());
+        let mut run_request = request(OpenEnvRunKind::Train);
+        run_request.environment_eval = Some(OpenEnvEnvironmentEvalConfig {
+            groups: 20,
+            group_size: 1,
+            seed_start: None,
+            gate: None,
+        });
+        let (run, cancel) = state.openenv_runs.insert(run_request.clone()).unwrap();
+        state.training_jobs.write().unwrap().insert(
+            "train-environment-eval".into(),
+            training_job("train-environment-eval", TrainingState::Completed),
+        );
+        follow_openenv_training(
+            &state,
+            &run.run_id,
+            &run_request,
+            "train-environment-eval",
+            cancel,
+        )
+        .await
+        .unwrap();
+        let handed_off = state.openenv_runs.get(&run.run_id).unwrap();
+        assert_eq!(handed_off.state, OpenEnvRunState::EnvironmentEvaluating);
+        assert!(handed_off.finished_unix_ms.is_none());
+        assert!(!handed_off.terminal());
+        let evaluation = handed_off.environment_evaluation.unwrap();
+        assert_eq!(evaluation.seed_start, 2);
+        assert_eq!(evaluation.state, OpenEnvEnvironmentEvalState::Pending);
+    }
+
+    #[tokio::test]
     async fn openenv_run_waits_for_requested_post_evaluation() {
         let temp = tempfile::tempdir().unwrap();
         let state = test_state(&temp, OpenEnvConfig::default());
@@ -1791,7 +2425,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             serde_json::from_slice::<Value>(&body).unwrap()["schema"],
-            OPENENV_RUN_LIST_SCHEMA_V2
+            OPENENV_RUN_LIST_SCHEMA_V3
         );
 
         let mut invalid = request(OpenEnvRunKind::Rollout);

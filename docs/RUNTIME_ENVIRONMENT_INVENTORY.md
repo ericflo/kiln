@@ -34,10 +34,10 @@ turn those names into request-time policy or a device allowlist.
 
 ## Current baseline
 
-The scanner records **445 direct read call sites** and
+The scanner records **447 direct read call sites** and
 **19 process-mutation call sites**. It can
-statically name **36 distinct literal `KILN_*`
-read names** across **125 call sites**.
+statically name **37 distinct literal `KILN_*`
+read names** across **127 call sites**.
 Dynamically named reads remain listed separately and are classified by their owner
 boundary.
 
@@ -48,7 +48,7 @@ boundary.
 | Credential provider | 1 | 0 | 0 |
 | Experimental/debug migration | 0 | 0 | 0 |
 | Build time/provenance | 326 | 6 | 8 |
-| Test only | 111 | 29 | 11 |
+| Test only | 113 | 30 | 11 |
 
 The counts are call sites, not configuration-field counts. The central typed
 loader deliberately uses a small number of dynamic reads to resolve all public
@@ -101,7 +101,8 @@ asserted by a test. Paths are deduplicated; counts retain duplicate call sites.
 | `KILN_METAL_LORA_QKV_LINEAR_BENCH_WARMUP` | Test only | 1 | `crates/kiln-model/src/forward/tests/mod.rs` |
 | `KILN_MODEL_SERVED_MODEL_ID` | Test only | 1 | `crates/kiln-server/src/config.rs` |
 | `KILN_MTP_BYTE_EQ_MODEL` | Test only | 1 | `crates/kiln-model/tests/mtp_byte_eq.rs` |
-| `KILN_OPENENV_INTEROP_BANDIT_URL` | Test only | 3 | `crates/kiln-openenv/tests/miniopenenv_interop.rs`, `crates/kiln-server/tests/openenv_training_interop.rs` |
+| `KILN_OPENENV_INTEROP_ARCADE_URLS` | Test only | 1 | `crates/kiln-openenv/tests/miniopenenv_interop.rs` |
+| `KILN_OPENENV_INTEROP_BANDIT_URL` | Test only | 4 | `crates/kiln-openenv/tests/miniopenenv_interop.rs`, `crates/kiln-server/src/openenv_evaluation.rs`, `crates/kiln-server/tests/openenv_training_interop.rs` |
 | `KILN_OPENENV_INTEROP_CONNECT4_URL` | Test only | 1 | `crates/kiln-openenv/tests/miniopenenv_interop.rs` |
 | `KILN_OPENENV_INTEROP_COUNTER_URL` | Test only | 1 | `crates/kiln-openenv/tests/miniopenenv_interop.rs` |
 | `KILN_OPENENV_INTEROP_MAZE_URL` | Test only | 1 | `crates/kiln-openenv/tests/miniopenenv_interop.rs` |

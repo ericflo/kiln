@@ -40,6 +40,7 @@ result. The rest are properties of the capability and your harness.
 | **Teacher availability** | does a ≥30%-stronger model in the same family exist? | OPD is only available if yes. |
 | **Verifier presence** | can you write a programmatic `score_one()` over a complete response in `[0,1]`? | GRPO is only available if yes. |
 | **OpenEnv availability** | does the capability already exist as a stateful OpenEnv server with action schema, observations, `done`, and reward? Inspect it with `kiln openenv inspect` or Training → OpenEnv in the dashboard. | Prefer the native environment loop over duplicating state transitions or reward logic in `rollout.py`. |
+| **OpenEnv held-out plan** | reserve disjoint reset seeds and pin the environment deployment identity before training | OpenEnv promotion evidence must measure paired behavior-vs-candidate returns on unseen tasks, never the training episodes. |
 | **Reward variance** | sample 20 baseline rollouts on `datasets/train.tasks.jsonl`, compute group variance | < 0.03 → GRPO has no signal. ≥ 0.05 → strong signal filter applies. |
 | **Task is multi-turn tool-calling?** | is `rollout.py` driving pi or another agent loop? | If yes, agentic-GRPO with ECHO is mandatory; everything else is a sub-step. |
 | **Baseline distribution shape** | inspect 5 base responses on `datasets/eval.tasks.jsonl` | Sanity-check that C₀ matches reality — saturated *or* over-strict rubrics distort it. |
@@ -60,8 +61,9 @@ RULE A — Interactive environments and multi-turn tool-calling tasks
   IF a stateful OpenEnv environment exists:
     → use `kiln openenv rollout` or a rollout-only server run for the baseline variance probe
     → use `kiln openenv train` or a train server run for agentic-GRPO with ECHO on
-    → preserve the OpenEnv rollout summary and exact environment deployment
-      identity with the stage evidence
+    → request paired held-out environment evaluation on disjoint seeds
+    → promotion requires its exact sign-test gate; preserve both rollout
+      summaries, the environment-evaluation receipt, and deployment identity
   ELSE IF task is multi-turn tool-calling:
     → agentic-GRPO with ECHO on (always)
     → Sub-method choice still applies — you may still SFT-bootstrap or
@@ -202,9 +204,11 @@ See resources/grpo-mode.md §6.
 **Data:** For OpenEnv, seed-matched stateful WebSocket episodes collected as
 canonical `AgenticGroup` JSONL. For pi, session JSONLs normalized into
 ScoredRollout JSONL. Inspect before collection and retain the summary artifact
-from the CLI or server run plus its environment deployment identity; use
-`kiln trajectory inspect` for pi normalization and `rollout.py` only when no
-OpenEnv server owns the task.
+from the CLI or server run plus its environment deployment identity. For a
+kept OpenEnv adapter, also retain a native paired evaluation over disjoint
+seeds: baseline/candidate replay bundles, both summary digests, exact sign-test
+evidence, and the promotion receipt. Use `kiln trajectory inspect` for pi
+normalization and `rollout.py` only when no OpenEnv server owns the task.
 **Defaults:** GRPO defaults + ECHO λ=0.05, env_mask_mode=env_only,
 warning_filter=true.
 **ECHO is mandatory** — without it, env-token loss is silently masked and
@@ -215,7 +219,8 @@ gradient flows without policy gradient. Reference cap: `pi-script-fixup`.
 **Common failure modes:** stale pi sessions, schema drift (Pi 0.75.3 `toolResult`
 vs `tool` role), changed OpenEnv action schemas, non-deterministic seeded
 resets, capacity exhaustion, reward-scale mismatch across environments, and
-warning-prefix bleed into env mask. See
+warning-prefix bleed into env mask. Training-return lift alone is not promotion
+evidence. See
 resources/agentic-grpo-mode.md.
 
 ---

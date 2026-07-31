@@ -29,8 +29,8 @@
     },
     {
       "path": "crates/kiln-server/src/api/training.rs",
-      "max_lines": 6652,
-      "rationale": "Shared training and evaluation cancellation moved into job_cancellation.rs so workflow orchestrators use one executor-owned primitive without expanding the training API; this lower exact cap prevents ownership from drifting back."
+      "max_lines": 6602,
+      "rationale": "Queue-entry initialization is centralized with its training-queue owner while this API retains only bounded request admission, including the explicit server-owned promotion-gate flag; the lowered exact cap prevents orchestration from drifting back."
     },
     {
       "path": "crates/kiln-server/src/batching_engine.rs",
@@ -54,8 +54,8 @@
     },
     {
       "path": "crates/kiln-server/src/training_queue.rs",
-      "max_lines": 7813,
-      "rationale": "Training admission, execution, and publication are coupled by transactional invariants; the exception permits no growth while those owners are separated."
+      "max_lines": 7792,
+      "rationale": "Training admission, execution, and publication retain coupled transactional invariants, while adapter canary and activation mechanics now live with adapter_swap; this lowered exact cap permits no ownership drift."
     },
     {
       "path": "crates/kiln-tensor/src/cuda_storage.rs",

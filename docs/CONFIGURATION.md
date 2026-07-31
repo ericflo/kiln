@@ -1745,9 +1745,9 @@ policy.
 | TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
 | `openenv.enabled` | boolean; `true` | `KILN_OPENENV_ENABLED` (implemented) | none | Enables discovery and asynchronous run lifecycle routes. Disabling it does not remove the local CLI. |
-| `openenv.max_active_runs` | unsigned integer; `4` | `KILN_OPENENV_MAX_ACTIVE_RUNS` (implemented) | none | Must be greater than zero and no greater than `max_tracked_runs`. Bounds complete live OpenEnv workflows, including collection, queued or running GRPO, and requested post-evaluation; the underlying trainer and evaluator still use their normal bounded queues. |
+| `openenv.max_active_runs` | unsigned integer; `4` | `KILN_OPENENV_MAX_ACTIVE_RUNS` (implemented) | none | Must be greater than zero and no greater than `max_tracked_runs`. Bounds complete live OpenEnv workflows, including collection, queued or running GRPO, static post-evaluation, and paired held-out environment evaluation; underlying executors retain their own bounds. |
 | `openenv.max_tracked_runs` | unsigned integer; `128` | `KILN_OPENENV_MAX_TRACKED_RUNS` (implemented) | none | Must be greater than zero and at least `max_active_runs`. Bounds retained in-memory run records. |
-| `openenv.tracked_run_ttl_secs` | unsigned integer; `604800` | `KILN_OPENENV_TRACKED_RUN_TTL_SECS` (implemented) | none | Must be greater than zero. Terminal status records age out after this window; the content-addressed dataset, replay, and summary artifacts remain under `<adapter_dir>/.openenv/runs/`. |
+| `openenv.tracked_run_ttl_secs` | unsigned integer; `604800` | `KILN_OPENENV_TRACKED_RUN_TTL_SECS` (implemented) | none | Must be greater than zero. Terminal status records age out after this window; content-addressed rollout and paired-evaluation artifacts remain under `<adapter_dir>/.openenv/runs/`. |
 | `openenv.allow_remote_environments` | boolean; `false` | `KILN_OPENENV_ALLOW_REMOTE_ENVIRONMENTS` (implemented) | none | When false, server-launched discovery and runs reject non-loopback origins before network access. Enable only for trusted operators and origins; Kiln's HTTP API is unauthenticated unless protected by your deployment. |
 
 Each active run uses the selected resident policy through Kiln's authoritative

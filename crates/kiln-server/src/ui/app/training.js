@@ -1063,6 +1063,14 @@ function openEnvNumber(id, label, integer = true) {
   return value;
 }
 
+function openEnvOptionalNumber(id, label) {
+  const text = (document.getElementById(id)?.value || '').trim();
+  if (!text) return null;
+  const value = Number(text);
+  if (!Number.isFinite(value)) throw new Error(`${label} must be a finite number.`);
+  return value;
+}
+
 function openEnvObject(id, label) {
   const text = (document.getElementById(id)?.value || '').trim() || '{}';
   let value;
@@ -1088,6 +1096,9 @@ function openEnvOptimizerKind(config) {
 
 function syncOpenEnvKind() {
   const train = document.getElementById('openenv-kind')?.value === 'train';
+  const environmentEvalMode = document.getElementById('openenv-environment-eval-mode');
+  const environmentEvalEnabled = train && environmentEvalMode?.value !== 'off';
+  const environmentGateEnabled = environmentEvalEnabled && environmentEvalMode?.value === 'gate';
   const outputGroup = document.getElementById('openenv-output-group');
   const output = document.getElementById('openenv-output-adapter');
   const rank = document.getElementById('openenv-lora-rank');
@@ -1097,6 +1108,19 @@ function syncOpenEnvKind() {
     output.disabled = !train;
     output.required = train;
   }
+  if (environmentEvalMode) environmentEvalMode.disabled = !train;
+  ['openenv-environment-eval-groups', 'openenv-environment-eval-group-size'].forEach(id => {
+    const input = document.getElementById(id);
+    if (input) input.disabled = !environmentEvalEnabled;
+  });
+  ['openenv-environment-gate-floor', 'openenv-environment-gate-improvement'].forEach(id => {
+    const input = document.getElementById(id);
+    if (input) input.disabled = !environmentGateEnabled;
+  });
+  const floorGroup = document.getElementById('openenv-environment-gate-floor-group');
+  const improvementGroup = document.getElementById('openenv-environment-gate-improvement-group');
+  if (floorGroup) floorGroup.hidden = !environmentGateEnabled;
+  if (improvementGroup) improvementGroup.hidden = !environmentGateEnabled;
   const submit = document.querySelector('#openenv-form button[type="submit"]');
   if (!train) {
     if (rank) rank.disabled = true;
@@ -1177,6 +1201,7 @@ function openEnvRunCard(run) {
   const groupDone = Number(progress.groups_completed || 0);
   const training = run.training || null;
   const evaluations = Array.isArray(run.post_evaluations) ? run.post_evaluations : [];
+  const environmentEvaluation = run.environment_evaluation || null;
   const evalDone = evaluations.reduce((sum, item) => sum + Number(item.examples_completed || 0), 0);
   const evalTotal = evaluations.reduce((sum, item) => sum + Number(item.examples_total || 0), 0);
   let pct = groupTotal ? Math.min(100, Math.round(groupDone / groupTotal * 100)) : 0;
@@ -1194,6 +1219,13 @@ function openEnvRunCard(run) {
     pct = evalTotal ? Math.min(100, Math.round(evalDone / evalTotal * 100)) : 0;
     statValue = evalTotal ? `${evalDone}/${evalTotal}` : 'queued';
     statLabel = 'eval examples';
+  } else if (state === 'environment_evaluating' && environmentEvaluation) {
+    const environmentProgress = environmentEvaluation.progress || {};
+    const environmentDone = Number(environmentProgress.groups_completed || 0);
+    const environmentTotal = Number(environmentProgress.groups_total || 0);
+    pct = environmentTotal ? Math.min(100, Math.round(environmentDone / environmentTotal * 100)) : 0;
+    statValue = environmentTotal ? `${environmentDone}/${environmentTotal}` : 'queued';
+    statLabel = String(environmentEvaluation.state || 'environment eval').replaceAll('_', ' ');
   } else if (state === 'completed' || state === 'rollout_ready') {
     pct = 100;
   }
@@ -1213,8 +1245,13 @@ function openEnvRunCard(run) {
   const evalDetail = evaluations.length
     ? `<div class="training-card-meta">${evaluations.map(item => `${escapeHtml(item.suite_name)} · ${escapeHtml(String(item.state || 'unknown'))}${item.headline_accuracy != null ? ` · ${(Number(item.headline_accuracy) * 100).toFixed(1)}%` : ''}`).join('<br>')}</div>`
     : '';
-  const gate = training?.gate_outcome
-    ? `<span class="training-card-type">${escapeHtml(training.gate_outcome)}</span>`
+  const environmentEvidence = environmentEvaluation?.evidence || null;
+  const environmentDetail = environmentEvaluation
+    ? `<div class="training-card-meta">Held-out environment · ${escapeHtml(String(environmentEvaluation.state || 'pending').replaceAll('_', ' '))}${environmentEvidence ? ` · return ${Number(environmentEvidence.baseline_mean_return).toFixed(3)} → ${Number(environmentEvidence.candidate_mean_return).toFixed(3)} (${Number(environmentEvidence.mean_return_improvement) >= 0 ? '+' : ''}${Number(environmentEvidence.mean_return_improvement).toFixed(3)}) · exact p=${Number(environmentEvidence.exact_sign_test_p_value).toFixed(4)}` : ''}</div>`
+    : '';
+  const gateOutcome = environmentEvaluation?.outcome || training?.gate_outcome;
+  const gate = gateOutcome
+    ? `<span class="training-card-type">${escapeHtml(gateOutcome)}</span>`
     : '';
   const cardState = state === 'failed'
     ? 'training-card-failed'
@@ -1229,6 +1266,7 @@ function openEnvRunCard(run) {
     <div class="training-card-meta">${escapeHtml(run.request?.adapter || 'base')} policy · ${Number(progress.rollouts_completed || 0).toLocaleString()} / ${Number(progress.rollouts_total || 0).toLocaleString()} episodes${environments.length ? ` · ${escapeHtml(environments.join(', '))}` : ''}</div>
     ${trainingDetail}
     ${evalDetail}
+    ${environmentDetail}
     <div class="training-card-progress">
       <div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
       <div class="training-stat"><span class="training-stat-num">${escapeHtml(statValue)}</span><span class="training-stat-label">${escapeHtml(statLabel)}</span></div>
@@ -1263,6 +1301,7 @@ async function pollOpenEnvRuns(force = false) {
 document.getElementById('openenv-kind')?.addEventListener('change', syncOpenEnvKind);
 document.getElementById('openenv-lora-rank')?.addEventListener('input', syncOpenEnvKind);
 document.getElementById('openenv-training-config')?.addEventListener('input', syncOpenEnvKind);
+document.getElementById('openenv-environment-eval-mode')?.addEventListener('change', syncOpenEnvKind);
 document.getElementById('openenv-inspect')?.addEventListener('click', inspectOpenEnv);
 document.getElementById('openenv-refresh')?.addEventListener('click', () => pollOpenEnvRuns(true));
 document.getElementById('training-tab-openenv')?.addEventListener('click', () => pollOpenEnvRuns(true));
@@ -1326,6 +1365,20 @@ document.getElementById('openenv-form')?.addEventListener('submit', async event 
       request.output_adapter = document.getElementById('openenv-output-adapter').value.trim();
       if (!request.output_adapter) throw new Error('Choose an output adapter name.');
       request.training_config = training_config;
+      const environmentEvalMode = document.getElementById('openenv-environment-eval-mode').value;
+      if (environmentEvalMode !== 'off') {
+        request.environment_eval = {
+          groups: openEnvNumber('openenv-environment-eval-groups', 'Held-out seed groups'),
+          group_size: openEnvNumber('openenv-environment-eval-group-size', 'Held-out episodes per seed'),
+        };
+        if (environmentEvalMode === 'gate') {
+          const minMeanReturn = openEnvOptionalNumber('openenv-environment-gate-floor', 'Minimum mean return');
+          request.environment_eval.gate = {
+            min_mean_improvement: openEnvNumber('openenv-environment-gate-improvement', 'Minimum mean improvement', false),
+          };
+          if (minMeanReturn != null) request.environment_eval.gate.min_mean_return = minMeanReturn;
+        }
+      }
     }
     submit.disabled = true;
     if (status) status.textContent = 'Creating persisted OpenEnv run…';

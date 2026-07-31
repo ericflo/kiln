@@ -47,6 +47,37 @@ The summary is an audit receipt, not proof that an implementation behind the
 same URL has remained unchanged. Pin an environment image or binary and retain
 its deployment identity for serious experiments.
 
+### Paired held-out evaluation bundle
+
+A server train run with `environment_eval` adds:
+
+```text
+environment-evaluation/
+  baseline/{rollouts.jsonl,replay.json,summary.json}
+  candidate/{rollouts.jsonl,replay.json,summary.json}
+  receipt.json
+```
+
+Both sides use the production collector with identical URL rotation, reset
+payloads, held-out seeds, candidate indices, generation seeds, and bounds.
+Before comparison, Kiln requires identical discovered environment identities,
+reset payloads and observations, group/seed identities, and candidate indices.
+Drift fails the run instead of producing an unpaired estimate.
+
+`receipt.json` is `kiln.openenv-environment-evaluation.v1`. It binds exact
+baseline and candidate adapter content revisions, execution provenance, both
+summary SHA-256 values, mean returns, improved/regressed/tied counts, the
+two-sided exact sign-test result, fixed policy version, decision, and promotion
+outcome. The run status publishes every file with its own content digest.
+Run `kiln openenv verify` against each summary to validate its underlying
+dataset/replay bundle independently.
+
+Evaluation seeds cannot overlap the training interval. A promotion gate needs
+at least 20 paired seed groups and significant per-seed mean-return improvement
+at `p < 0.05`, plus configured point thresholds. Replications within one seed
+do not inflate significance. Rejection or inconclusive evidence leaves the
+candidate unserved; `auto_load=false` records a passed candidate as kept.
+
 ## Offline verification
 
 ```bash
@@ -150,17 +181,20 @@ Run the byte-real interoperability gate with:
 CARGO_BIN="$(command -v cargo)" scripts/check_miniopenenv_interop.sh
 ```
 
-The script pins and builds miniopenenv only as a fast OpenEnv protocol oracle.
-It launches its C99 counter, bandit, Connect Four, maze, and Wordle servers and
-tests:
+The script pins and rebuilds miniopenenv only as a fast OpenEnv protocol oracle.
+It launches its C99 counter and all fourteen arcade servers, then tests:
 
 - discovery, typed schema identity, and close;
+- the optional `input_text` profile across every arcade environment, without
+  making that downstream convention a protocol requirement;
 - integer and floating-point rewards;
 - object, integer, and string action shapes;
 - dynamic legal actions and procedural seeded state;
 - recoverable `EXECUTION_ERROR` followed by correction on the same socket; and
 - unsolicited terminal `CAPACITY_REACHED` followed by fresh-session
-  reacquisition.
+  reacquisition; and
+- paired held-out baseline/candidate collection whose environment-owned bandit
+  returns drive the exact sign-test gate.
 
 The end-to-end lane collects two candidates against a bandit limited to one
 session, forces a semantic action error and corrective turn, submits the

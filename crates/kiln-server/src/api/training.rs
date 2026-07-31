@@ -1692,15 +1692,7 @@ pub(crate) async fn admit_sft_request(
         &state,
         vec![(
             info,
-            QueueEntry {
-                job_id: job_id.clone(),
-                reserved_bytes: 0,
-                teacher_bindings: Vec::new(),
-                admitted_resume_checkpoint: None,
-                prepared_data: Default::default(),
-                prepared_data_permit: Default::default(),
-                job: QueuedJob::Sft(req),
-            },
+            QueueEntry::new(job_id.clone(), QueuedJob::Sft(req), false),
         )],
     )?;
     let stats = admission.sft_summaries.remove(&job_id).ok_or_else(|| {
@@ -1741,16 +1733,15 @@ async fn submit_grpo(
     payload: Result<Json<GrpoRequest>, JsonRejection>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
     let req = parse_training_json(payload, "GRPO request")?;
-    submit_grpo_request(&state, req).map(Json)
+    submit_grpo_request(&state, req, false).map(Json)
 }
 
-/// Admit a typed GRPO request through the same bounded queue path used by the
-/// public HTTP handler. Server-owned OpenEnv runs call this after collection,
-/// avoiding a loopback HTTP dependency without creating a second training
-/// implementation.
+/// Admit typed GRPO through the public endpoint's bounded queue path.
+/// Server-owned workflows call this directly without loopback HTTP.
 pub(crate) fn submit_grpo_request(
     state: &AppState,
     mut req: GrpoRequest,
+    external_promotion_gate_pending: bool,
 ) -> Result<TrainingResponse, ApiError> {
     ensure_training_backend_admission(&state)?;
     // Reject new jobs during shutdown
@@ -1878,17 +1869,11 @@ pub(crate) fn submit_grpo_request(
         &state,
         vec![(
             info,
-            QueueEntry {
-                job_id: job_id.clone(),
-                // The authoritative queue admission scans/materializes every
-                // job source and overwrites this estimate before publication.
-                reserved_bytes: 0,
-                teacher_bindings: Vec::new(),
-                admitted_resume_checkpoint: None,
-                prepared_data: Default::default(),
-                prepared_data_permit: Default::default(),
-                job: QueuedJob::Grpo(req),
-            },
+            QueueEntry::new(
+                job_id.clone(),
+                QueuedJob::Grpo(req),
+                external_promotion_gate_pending,
+            ),
         )],
     )?;
     let queue_position = admission.queue_position;
@@ -2086,15 +2071,7 @@ async fn submit_opd(
         &state,
         vec![(
             info,
-            QueueEntry {
-                job_id: job_id.clone(),
-                reserved_bytes: 0,
-                teacher_bindings: Vec::new(),
-                admitted_resume_checkpoint: None,
-                prepared_data: Default::default(),
-                prepared_data_permit: Default::default(),
-                job: QueuedJob::Opd(req),
-            },
+            QueueEntry::new(job_id.clone(), QueuedJob::Opd(req), false),
         )],
     )?;
     let queue_position = admission.queue_position;
@@ -2223,15 +2200,7 @@ async fn submit_distill_refresh(
         &state,
         vec![(
             info,
-            QueueEntry {
-                job_id: job_id.clone(),
-                reserved_bytes: 0,
-                teacher_bindings: Vec::new(),
-                admitted_resume_checkpoint: None,
-                prepared_data: Default::default(),
-                prepared_data_permit: Default::default(),
-                job: QueuedJob::DistillRefresh(req),
-            },
+            QueueEntry::new(job_id.clone(), QueuedJob::DistillRefresh(req), false),
         )],
     )?;
     let queue_position = admission.queue_position;
@@ -4152,18 +4121,7 @@ fn register_and_enqueue_distill(
     };
     let admission = admit_training_jobs_with_summary(
         state,
-        vec![(
-            info,
-            QueueEntry {
-                job_id: job_id.to_string(),
-                reserved_bytes: 0,
-                teacher_bindings: Vec::new(),
-                admitted_resume_checkpoint: None,
-                prepared_data: Default::default(),
-                prepared_data_permit: Default::default(),
-                job,
-            },
-        )],
+        vec![(info, QueueEntry::new(job_id.to_string(), job, false))],
     )?;
     admission.effective_seed(job_id)
 }
@@ -5344,15 +5302,7 @@ mod tests {
         };
         (
             info,
-            QueueEntry {
-                job_id,
-                reserved_bytes: 0,
-                teacher_bindings: Vec::new(),
-                admitted_resume_checkpoint: None,
-                prepared_data: Default::default(),
-                prepared_data_permit: Default::default(),
-                job: QueuedJob::Sft(request),
-            },
+            QueueEntry::new(job_id, QueuedJob::Sft(request), false),
         )
     }
 

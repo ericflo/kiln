@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ericflo.github.io/kiln/contracts/kiln-openenv-v1.schema.json",
-  "title": "Kiln OpenEnv rollout contract",
-  "description": "Environment discovery identity, canonical episode provenance, exact replay transcripts, offline verification reports, and the content-addressed summary published by `kiln openenv`.",
+  "title": "Kiln OpenEnv rollout and evaluation contract",
+  "description": "Environment discovery identity, canonical episode provenance, exact replay transcripts, paired held-out return evaluation receipts, offline verification reports, and content-addressed summaries published by `kiln openenv`.",
   "$ref": "#/$defs/OpenEnvRolloutSummary",
   "$defs": {
     "Sha256": {
@@ -391,6 +391,175 @@
           "items": { "$ref": "#/$defs/ReplayGroup" }
         }
       }
+    },
+    "EnvironmentEvalGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min_mean_improvement"],
+      "properties": {
+        "min_mean_return": { "type": "number" },
+        "min_mean_improvement": { "type": "number", "minimum": 0 }
+      }
+    },
+    "EnvironmentEvalConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["groups", "group_size"],
+      "properties": {
+        "groups": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "group_size": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "seed_start": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "gate": { "$ref": "#/$defs/EnvironmentEvalGate" }
+      }
+    },
+    "PolicyIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "adapter": { "type": "string", "minLength": 1 },
+        "adapter_content_revision": { "$ref": "#/$defs/Sha256" },
+        "execution_provenance_sha256": { "$ref": "#/$defs/Sha256" }
+      }
+    },
+    "EnvironmentEvalDecision": {
+      "type": "string",
+      "enum": ["diagnostic", "passed", "rejected", "inconclusive"]
+    },
+    "EnvironmentEvalOutcome": {
+      "type": "string",
+      "enum": ["diagnostic", "promoted", "kept", "rejected", "inconclusive", "error"]
+    },
+    "EnvironmentEvalEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_version",
+        "paired_groups",
+        "paired_episodes",
+        "minimum_paired_groups",
+        "baseline_mean_return",
+        "candidate_mean_return",
+        "mean_return_improvement",
+        "improved_groups",
+        "regressed_groups",
+        "tied_groups",
+        "exact_sign_test_p_value",
+        "exact_sign_test_alpha",
+        "decision",
+        "reason"
+      ],
+      "properties": {
+        "policy_version": { "const": "paired_return_sign_test_v1" },
+        "paired_groups": { "type": "integer", "minimum": 1 },
+        "paired_episodes": { "type": "integer", "minimum": 1 },
+        "minimum_paired_groups": { "const": 20 },
+        "baseline_mean_return": { "type": "number" },
+        "candidate_mean_return": { "type": "number" },
+        "mean_return_improvement": { "type": "number" },
+        "improved_groups": { "type": "integer", "minimum": 0 },
+        "regressed_groups": { "type": "integer", "minimum": 0 },
+        "tied_groups": { "type": "integer", "minimum": 0 },
+        "exact_sign_test_p_value": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "exact_sign_test_alpha": { "const": 0.05 },
+        "decision": { "$ref": "#/$defs/EnvironmentEvalDecision" },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "EnvironmentEvaluationReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "run_id",
+        "config",
+        "seed_start",
+        "baseline",
+        "candidate",
+        "baseline_summary_sha256",
+        "candidate_summary_sha256",
+        "evidence",
+        "outcome",
+        "verdict"
+      ],
+      "properties": {
+        "schema": { "const": "kiln.openenv-environment-evaluation.v1" },
+        "run_id": { "type": "string", "minLength": 1 },
+        "config": { "$ref": "#/$defs/EnvironmentEvalConfig" },
+        "seed_start": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "baseline": { "$ref": "#/$defs/PolicyIdentity" },
+        "candidate": { "$ref": "#/$defs/PolicyIdentity" },
+        "baseline_summary_sha256": { "$ref": "#/$defs/Sha256" },
+        "candidate_summary_sha256": { "$ref": "#/$defs/Sha256" },
+        "evidence": { "$ref": "#/$defs/EnvironmentEvalEvidence" },
+        "outcome": { "$ref": "#/$defs/EnvironmentEvalOutcome" },
+        "verdict": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "evidence": {
+                "properties": { "decision": { "const": "diagnostic" } },
+                "required": ["decision"]
+              }
+            },
+            "required": ["evidence"]
+          },
+          "then": { "properties": { "outcome": { "const": "diagnostic" } } }
+        },
+        {
+          "if": {
+            "properties": {
+              "evidence": {
+                "properties": { "decision": { "const": "passed" } },
+                "required": ["decision"]
+              }
+            },
+            "required": ["evidence"]
+          },
+          "then": {
+            "properties": {
+              "outcome": { "enum": ["promoted", "kept", "error"] }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "evidence": {
+                "properties": { "decision": { "const": "rejected" } },
+                "required": ["decision"]
+              }
+            },
+            "required": ["evidence"]
+          },
+          "then": { "properties": { "outcome": { "const": "rejected" } } }
+        },
+        {
+          "if": {
+            "properties": {
+              "evidence": {
+                "properties": { "decision": { "const": "inconclusive" } },
+                "required": ["decision"]
+              }
+            },
+            "required": ["evidence"]
+          },
+          "then": { "properties": { "outcome": { "const": "inconclusive" } } }
+        }
+      ]
     },
     "VerificationReport": {
       "type": "object",

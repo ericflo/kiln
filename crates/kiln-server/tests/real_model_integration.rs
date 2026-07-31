@@ -687,6 +687,7 @@ fn enqueue_empty_sft_job(state: &AppState, job_id: &str) {
     );
     state.training_queue.lock().unwrap().push(QueueEntry {
         job_id: job_id.to_string(),
+        external_promotion_gate_pending: false,
         reserved_bytes: 0,
         teacher_bindings: Vec::new(),
         admitted_resume_checkpoint: None,

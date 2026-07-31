@@ -6,11 +6,15 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'crates/kiln-openenv/**'
+      - 'crates/kiln-server/src/adapter_swap.rs'
       - 'crates/kiln-server/src/openenv_cli.rs'
+      - 'crates/kiln-server/src/openenv_evaluation.rs'
       - 'crates/kiln-server/src/openenv_replay.rs'
       - 'crates/kiln-server/src/api/openenv.rs'
+      - 'crates/kiln-server/src/api/training.rs'
       - 'crates/kiln-server/src/job_cancellation.rs'
       - 'crates/kiln-server/src/metrics.rs'
+      - 'crates/kiln-server/src/training_queue.rs'
       - 'crates/kiln-server/src/ui/app/training.js'
       - 'crates/kiln-server/src/ui/index.html'
       - 'crates/kiln-server/tests/openenv_training_interop.rs'
@@ -20,6 +24,7 @@ on:
       - 'scripts/check_openenv_contract.py'
       - 'scripts/generate_control_plane_schema.py'
       - 'contracts/kiln-control-plane-v1.schema.json'
+      - 'contracts/kiln-openenv-v1.schema.json'
       - '.github/workflows/openenv-interop.yml'
   push:
     branches: [main]
@@ -27,11 +32,15 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'crates/kiln-openenv/**'
+      - 'crates/kiln-server/src/adapter_swap.rs'
       - 'crates/kiln-server/src/openenv_cli.rs'
+      - 'crates/kiln-server/src/openenv_evaluation.rs'
       - 'crates/kiln-server/src/openenv_replay.rs'
       - 'crates/kiln-server/src/api/openenv.rs'
+      - 'crates/kiln-server/src/api/training.rs'
       - 'crates/kiln-server/src/job_cancellation.rs'
       - 'crates/kiln-server/src/metrics.rs'
+      - 'crates/kiln-server/src/training_queue.rs'
       - 'crates/kiln-server/src/ui/app/training.js'
       - 'crates/kiln-server/src/ui/index.html'
       - 'crates/kiln-server/tests/openenv_training_interop.rs'
@@ -41,6 +50,7 @@ on:
       - 'scripts/check_openenv_contract.py'
       - 'scripts/generate_control_plane_schema.py'
       - 'contracts/kiln-control-plane-v1.schema.json'
+      - 'contracts/kiln-openenv-v1.schema.json'
       - '.github/workflows/openenv-interop.yml'
   workflow_dispatch:
 
@@ -57,7 +67,7 @@ jobs:
       - name: Check out the pinned OpenEnv wire oracle
         run: |
           git clone https://github.com/ericflo/miniopenenv.git ../miniopenenv
-          git -C ../miniopenenv checkout 3ea585b2f853e7281e0f5fba845b3bd9bff45f03
+          git -C ../miniopenenv checkout 81e801614e9007eda3f5fbad227272e914fcbaa0
       - name: Test the typed client
         run: |
           python3 scripts/check_openenv_contract.py --self-test

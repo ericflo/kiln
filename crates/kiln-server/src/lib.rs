@@ -31,6 +31,7 @@ pub mod logging;
 pub(crate) mod memory_observability;
 pub mod metrics;
 pub mod openenv_cli;
+pub mod openenv_evaluation;
 pub mod openenv_replay;
 pub mod pi_rpc;
 pub mod recent_requests;

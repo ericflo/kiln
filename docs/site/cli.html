@@ -626,6 +626,18 @@ kiln openenv rollout \
         </div>
       </div>
       <div class="card p-5 mt-4">
+        <h3 class="font-semibold mb-2">Gate promotion on held-out environment returns</h3>
+<pre class="text-sm"><code>"environment_eval": {
+  "groups": 20,
+  "group_size": 1,
+  "gate": {
+    "min_mean_return": 0.5,
+    "min_mean_improvement": 0.05
+  }
+}</code></pre>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">Add this field to a <code>POST /v1/openenv/runs</code> train request, or choose the paired gate in Training &rarr; OpenEnv. Kiln evaluates behavior and candidate policies on identical, disjoint seeds and defers auto-load until at least 20 seed groups show a significant exact sign-test win over per-seed mean returns plus configured thresholds. Same-seed replications do not inflate significance. Status and <code>kiln.openenv-environment-evaluation.v1</code> preserve the evidence and outcome.</p>
+      </div>
+      <div class="card p-5 mt-4">
         <h3 class="font-semibold mb-2">Verify offline, replay live</h3>
 <pre class="text-sm"><code>kiln openenv verify --summary counter.rollout-summary.json
 kiln openenv replay --summary counter.rollout-summary.json</code></pre>
@@ -636,7 +648,7 @@ kiln openenv replay --summary counter.rollout-summary.json</code></pre>
 <pre class="text-sm"><code>kiln openenv runs
 kiln openenv status 80a26e21-8451-4a64-8666-890c06fd80bd --follow
 kiln openenv cancel 80a26e21-8451-4a64-8666-890c06fd80bd</code></pre>
-        <p class="text-sm mt-4" style="color: var(--fg-mute);">Dashboard and API runs remain authoritative through collection, native GRPO, requested post-evaluation, and promotion. <code>status --follow</code> reports trainer progress/loss and linked eval outcomes; <code>cancel</code> cooperatively stops whichever executor owns the active phase.</p>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">Dashboard and API runs remain authoritative through collection, native GRPO, static and environment evaluation, and promotion. <code>status --follow</code> reports trainer progress/loss, paired returns, and gate outcomes; <code>cancel</code> cooperatively stops whichever executor owns the active phase.</p>
       </div>
       <p class="text-sm mt-5" style="color: var(--fg-dim);">OpenEnv servers are untrusted inputs and Kiln adds no protocol authentication. Prefer loopback/private networks or HTTPS/WSS behind a trusted gateway. The production runtime depends only on OpenEnv-compatible discovery and WebSocket behavior; miniopenenv is used solely as a pinned byte-real CI oracle. See the complete <a href="docs/openenv/" class="link">OpenEnv Training Guide</a> for wire semantics, limits, reward typing, identity, interoperability, and troubleshooting.</p>
     </div>

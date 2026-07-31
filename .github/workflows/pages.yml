@@ -21,6 +21,7 @@ on:
       - 'crates/kiln-server/src/cli.rs'
       - 'crates/kiln-server/src/config.rs'
       - 'crates/kiln-server/src/openenv_cli.rs'
+      - 'crates/kiln-server/src/openenv_evaluation.rs'
       - 'crates/kiln-server/src/openenv_replay.rs'
       - 'crates/kiln-server/src/ui/**'
       - 'crates/kiln-vulkan-kernel/**'

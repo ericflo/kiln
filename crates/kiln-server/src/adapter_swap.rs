@@ -619,6 +619,78 @@ pub(crate) fn apply_default_update(state: &AppState, update: &DefaultAdapterUpda
     }
 }
 
+pub(crate) fn adapter_canary_allows_auto_load(
+    adapter_path: &Path,
+    adapter_name: &str,
+    job_id: &str,
+) -> bool {
+    match ensure_adapter_canary_allows_auto_load(adapter_path, adapter_name) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                job_id = %job_id,
+                adapter = %adapter_name,
+                error = %error,
+                "skipping post-training auto-load because adapter canary did not permit promotion"
+            );
+            false
+        }
+    }
+}
+
+pub(crate) fn ensure_adapter_canary_allows_auto_load(
+    adapter_path: &Path,
+    adapter_name: &str,
+) -> Result<(), String> {
+    match kiln_train::read_adapter_canary_status_from_adapter_dir(adapter_path) {
+        Ok(Some(status)) if status.is_quarantined() => Err(format!(
+            "adapter canary quarantined {adapter_name:?}: {}",
+            status
+                .failure_reason
+                .as_deref()
+                .unwrap_or("no failure reason was recorded")
+        )),
+        Ok(_) => Ok(()),
+        Err(error) => Err(format!(
+            "adapter canary status for {adapter_name:?} could not be read: {error}"
+        )),
+    }
+}
+
+/// Promote completed training bytes through the quarantine canary and the
+/// between-requests adapter revision barrier.
+pub(crate) fn promote_trained_adapter(
+    state: &AppState,
+    adapter_path: &Path,
+    adapter_name: &str,
+    content_changed: bool,
+) -> Result<(), String> {
+    ensure_adapter_canary_allows_auto_load(adapter_path, adapter_name)?;
+    activate_trained_adapter(state, adapter_path, adapter_name, content_changed)
+}
+
+/// Activate canary-checked training bytes at the between-requests barrier.
+pub(crate) fn activate_trained_adapter(
+    state: &AppState,
+    adapter_path: &Path,
+    adapter_name: &str,
+    content_changed: bool,
+) -> Result<(), String> {
+    swap_runtime_adapter_blocking(
+        state,
+        SwapRequest {
+            target: SwapTarget::Resolved {
+                active_name: adapter_name.to_string(),
+                dir: adapter_path.to_path_buf(),
+            },
+            content_changed,
+            default_adapter: DefaultAdapterUpdate::Replace(Some(adapter_name.to_string())),
+            reason: "training_auto_load",
+        },
+    )?;
+    Ok(())
+}
+
 fn log_transition(old: &Option<String>, new: &Option<String>, reason: &str) {
     tracing::info!(
         old_adapter = ?old,
@@ -631,6 +703,7 @@ fn log_transition(old: &Option<String>, new: &Option<String>, reason: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn directory_replacement_can_restore_both_sides_after_failed_weight_flip() {
@@ -657,5 +730,32 @@ mod tests {
         assert_eq!(std::fs::read(final_path.join("marker")).unwrap(), b"old");
         assert_eq!(std::fs::read(staged.join("marker")).unwrap(), b"new");
         assert!(!backup.exists());
+    }
+
+    #[test]
+    fn trained_adapter_promotion_fails_closed_on_quarantined_canary() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(kiln_train::ADAPTER_CANARY_STATUS_FILENAME),
+            json!({
+                "schema_version": 1,
+                "receipt_type": "kiln_adapter_canary_status",
+                "adapter_name": "candidate",
+                "produced_at": "2026-07-30T00:00:00Z",
+                "source": "adapter_smoke_test",
+                "status": "quarantined",
+                "passed": false,
+                "failure_reason": "non-finite logits",
+                "warnings": ["non-finite logits"],
+                "notes": [],
+                "checks": [],
+                "prompt_diagnostics": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let error = ensure_adapter_canary_allows_auto_load(tmp.path(), "candidate").unwrap_err();
+        assert!(error.contains("quarantined"));
+        assert!(error.contains("non-finite logits"));
     }
 }

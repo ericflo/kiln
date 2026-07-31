@@ -125,6 +125,18 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
 }
 
 async fn fake_chat(Json(body): Json<Value>) -> Json<Value> {
+    assert!(
+        body["messages"].as_array().is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message["content"].as_str().is_some_and(|content| {
+                    content.contains("OpenEnv input_text")
+                        && content.contains("Reply with one digit, the arm to pull")
+                        && content.contains("\"pulls\":0")
+                })
+            })
+        }),
+        "the generic policy prompt must foreground input_text and retain the complete wire observation"
+    );
     let recovering = body["messages"].as_array().is_some_and(|messages| {
         messages.iter().any(|message| {
             message["content"]

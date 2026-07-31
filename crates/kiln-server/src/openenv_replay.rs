@@ -692,30 +692,38 @@ fn verify_trajectory(
             "OpenEnv group {group_index} candidate {candidate_index} step {} has a malformed result segment",
             exchange.step_index
         );
-        let actual: Value = serde_json::from_str(&result.content).with_context(|| {
-            format!(
-                "decode OpenEnv group {group_index} candidate {candidate_index} step {} result segment",
-                exchange.step_index
-            )
-        })?;
-        let (expected, warning_prefix_len) = match &exchange.result {
+        match &exchange.result {
             OpenEnvReplayExchangeResult::Observation { observation } => {
-                (serde_json::to_value(observation)?, None)
+                let policy_content =
+                    crate::openenv_cli::model_observation_content("step result", observation)?;
+                let legacy_content = serde_json::to_string(observation)?;
+                anyhow::ensure!(
+                    (result.content == policy_content || result.content == legacy_content)
+                        && result.warning_prefix_len.is_none(),
+                    "OpenEnv group {group_index} candidate {candidate_index} step {} result differs from replay",
+                    exchange.step_index
+                );
             }
-            OpenEnvReplayExchangeResult::ProtocolError { error, continued } => (
-                serde_json::json!({
+            OpenEnvReplayExchangeResult::ProtocolError { error, continued } => {
+                let actual: Value =
+                    serde_json::from_str(&result.content).with_context(|| {
+                        format!(
+                            "decode OpenEnv group {group_index} candidate {candidate_index} step {} result segment",
+                            exchange.step_index
+                        )
+                    })?;
+                let expected = serde_json::json!({
                     "openenv_error": error,
                     "recoverable": continued,
                     "done": !continued,
-                }),
-                Some(result.content.len()),
-            ),
-        };
-        anyhow::ensure!(
-            actual == expected && result.warning_prefix_len == warning_prefix_len,
-            "OpenEnv group {group_index} candidate {candidate_index} step {} result differs from replay",
-            exchange.step_index
-        );
+                });
+                anyhow::ensure!(
+                    actual == expected && result.warning_prefix_len == Some(result.content.len()),
+                    "OpenEnv group {group_index} candidate {candidate_index} step {} result differs from replay",
+                    exchange.step_index
+                );
+            }
+        }
     }
 
     if invalid_tail == 1 {

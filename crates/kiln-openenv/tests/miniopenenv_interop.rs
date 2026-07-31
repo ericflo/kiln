@@ -55,6 +55,80 @@ async fn drives_a_stateful_miniopenenv_counter_episode() {
     episode.close().await.unwrap();
 }
 
+/// The pinned downstream matrix currently publishes an optional, generic
+/// text-observation profile. Kiln does not require this field from OpenEnv,
+/// but it must preserve and expose it when an environment offers one.
+#[tokio::test]
+#[ignore = "requires the live OpenEnv arcade matrix"]
+async fn discovers_and_resets_every_text_profiled_arcade_environment() {
+    let urls = std::env::var("KILN_OPENENV_INTEROP_ARCADE_URLS")
+        .expect("KILN_OPENENV_INTEROP_ARCADE_URLS must identify the live arcade matrix");
+    let urls = urls
+        .split(',')
+        .filter(|url| !url.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(urls.len(), 14, "the pinned arcade matrix must have 14 URLs");
+
+    for (index, url) in urls.into_iter().enumerate() {
+        let client = OpenEnvClient::new(url).unwrap();
+        let inspection = client.inspect().await.unwrap();
+        assert_eq!(
+            inspection
+                .schema
+                .observation
+                .pointer("/properties/input_text/type"),
+            Some(&json!("string")),
+            "{} did not advertise the optional text observation profile",
+            inspection.identity.metadata.name
+        );
+        let actionable = inspection
+            .schema
+            .action
+            .pointer("/properties")
+            .and_then(serde_json::Value::as_object)
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name.as_str() != "metadata")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actionable.len(),
+            1,
+            "{} must expose one schema-discoverable action field",
+            inspection.identity.metadata.name
+        );
+        assert!(
+            matches!(
+                actionable[0]
+                    .1
+                    .get("type")
+                    .and_then(serde_json::Value::as_str),
+                Some("integer" | "string")
+            ),
+            "{} action must be text-coercible in the pinned matrix",
+            inspection.identity.metadata.name
+        );
+
+        let mut episode = client.connect().await.unwrap();
+        let reset = episode
+            .reset(&json!({
+                "seed": 10_000 + index,
+                "difficulty": 2,
+                "episode_id": format!("kiln-text-profile-{index}")
+            }))
+            .await
+            .unwrap();
+        assert!(
+            reset.observation["input_text"]
+                .as_str()
+                .is_some_and(|text| !text.trim().is_empty()),
+            "{} returned an empty input_text",
+            inspection.identity.metadata.name
+        );
+        assert!(!reset.done);
+        episode.close().await.unwrap();
+    }
+}
+
 /// Representative downstream environments cover changing action spaces,
 /// semantic execution errors, procedural state, string actions, and all the
 /// stateful reset/step/state behavior used by training.

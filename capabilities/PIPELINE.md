@@ -43,8 +43,8 @@ A **stage** is one trained adapter produced by one method, with:
 - a falsifiable hypothesis stated up front
 - ≥ 3-seed eval evidence
 - a kept iter row in `capability.jsonl` with `status: "kept"`
-- for OpenEnv stages, the rollout-summary SHA-256 plus pinned environment
-  implementation/deployment identity
+- for OpenEnv stages, training rollout-summary SHA-256, native paired held-out
+  evaluation receipt and both summary digests, plus pinned deployment identity
 
 A stage corresponds to a `stages/stage-<N>-<slug>.json` file.
 
@@ -95,6 +95,11 @@ For a stage collected from OpenEnv, replace `openenv: null` with:
 {
   "rollout_summary": "evidence/openenv.rollout-summary.json",
   "dataset_sha256": "sha256:…",
+  "environment_evaluation_receipt": "evidence/environment-evaluation/receipt.json",
+  "baseline_summary_sha256": "sha256:…",
+  "candidate_summary_sha256": "sha256:…",
+  "paired_return_decision": "passed",
+  "paired_return_outcome": "promoted",
   "environment_schema_sha256": ["sha256:…"],
   "environment_deployment_identity": ["image-or-binary-sha256:…"]
 }
@@ -231,7 +236,8 @@ Before any GPU work in a stage N ≥ 2:
 
    - if Rule A selected OpenEnv, CLI or server inspection succeeds for every
      environment and its schema identity matches the planned stage; retain the
-     server `run_id` and linked `training_job_id` when using the control plane
+     server `run_id` and linked `training_job_id`; reserve disjoint held-out
+     seeds and configure the native paired-return gate before collection
 
 3. Verify hypothesis is falsifiable:
    - stage_transition_rationale names the sub-score(s) expected to move
@@ -272,6 +278,10 @@ An iter is promoted to a stage if ALL hold:
 5. **Prior-stage preservation** — the new adapter, evaluated against the
    *previous* stage's eval set, scores ≥ previous stage's composite − σ.
    (Prevents the new stage from clobbering the old stage's domain.)
+6. **OpenEnv return gate (OpenEnv stages only)** — at least 20 disjoint paired
+   seed groups produce `decision: passed`; configured point thresholds pass; the
+   environment-evaluation receipt, both replay bundles, and pinned deployment
+   identity are retained. Training returns cannot substitute for this gate.
 
 Promotion is mechanical once these pass. Skipping any of them is a process
 violation and the stage is invalid.
@@ -298,6 +308,9 @@ If a stage fails promotion criteria:
   - Use a method that adds capability rather than reshapes (OPD often adds;
     GRPO sometimes reshapes)
   - Stop the pipeline at the previous stage.
+- **#6 fails (held-out environment return):** rejected or inconclusive candidates
+  remain unserved. Fix reward/task quality or try a new hypothesis; never reuse
+  training seeds or weaken the fixed significance policy to force promotion.
 
 ---
 
@@ -321,7 +334,8 @@ Behavior:
 6. Run dry-run validation (`cuda_*_ablation --dry-run` where applicable).
 7. Real training, with `--install-adapter-dir` and `--adapter-smoke-test`.
 8. `kiln adapter verify`.
-9. 3-seed eval via `kiln eval-adapter`.
+9. 3-seed eval via `kiln eval-adapter`; OpenEnv stages additionally complete
+   the server-owned paired environment gate on disjoint held-out seeds.
 10. `integration/cross-cap-coherence/capability.oracle.sh <new-adapter>`.
 11. Append iter row to `capability.jsonl` with `stage` + `method` +
     `base_adapter` + `output_adapter`.

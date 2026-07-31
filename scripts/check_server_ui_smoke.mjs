@@ -387,6 +387,23 @@ function checkTrainingOptimizerSupportContract(appSource, indexSource, demoSourc
   ]) {
     if (!indexSource.includes(`id="${id}"`)) fail(`Training optimizer status node #${id} is missing`);
   }
+  for (const id of [
+    'openenv-environment-eval-mode',
+    'openenv-environment-eval-groups',
+    'openenv-environment-eval-group-size',
+    'openenv-environment-gate-floor',
+    'openenv-environment-gate-improvement',
+  ]) {
+    if (!indexSource.includes(`id="${id}"`)) fail(`OpenEnv held-out evaluation control #${id} is missing`);
+  }
+  for (const term of [
+    'request.environment_eval = {',
+    'environmentEvaluation?.evidence',
+    "state === 'environment_evaluating'",
+    'exact_sign_test_p_value',
+  ]) {
+    if (!appSource.includes(term)) fail(`OpenEnv held-out evaluation UI is missing ${term}`);
+  }
   for (const describedBy of [
     'aria-describedby="corr-optimizer-support"',
     'aria-describedby="sft-optimizer-support"',
@@ -1970,7 +1987,7 @@ async function startServer({
       return;
     }
     if (url.pathname === '/v1/openenv/runs' && req.method === 'GET') {
-      json(res, { schema: 'kiln.openenv-run-list.v2', runs: openEnvRuns });
+      json(res, { schema: 'kiln.openenv-run-list.v3', runs: openEnvRuns });
       return;
     }
     if (url.pathname === '/v1/openenv/inspect' && req.method === 'POST') {
@@ -2001,10 +2018,10 @@ async function startServer({
       const request = await readJsonBody(req);
       apiState.trainingSubmitRequests.openenv += 1;
       const status = {
-        schema: 'kiln.openenv-run.v2',
+        schema: 'kiln.openenv-run.v3',
         run_id: 'smoke-openenv-run',
         kind: request.kind,
-        state: 'collecting',
+        state: 'completed',
         request,
         submitted_unix_ms: 1_700_000_000_000,
         progress: {
@@ -2015,6 +2032,42 @@ async function startServer({
         },
         environments: [],
         artifacts: [],
+        environment_evaluation: {
+          state: 'completed',
+          seed_start: request.groups,
+          groups: request.environment_eval?.groups || 20,
+          group_size: request.environment_eval?.group_size || 1,
+          baseline: {},
+          candidate: {
+            adapter: request.output_adapter,
+            adapter_content_revision: `sha256:${'b'.repeat(64)}`,
+          },
+          progress: {
+            state: 'completed',
+            groups_completed: request.environment_eval?.groups || 20,
+            groups_total: request.environment_eval?.groups || 20,
+            rollouts_completed: (request.environment_eval?.groups || 20) * (request.environment_eval?.group_size || 1),
+            rollouts_total: (request.environment_eval?.groups || 20) * (request.environment_eval?.group_size || 1),
+          },
+          evidence: {
+            policy_version: 'paired_return_sign_test_v1',
+            paired_groups: 20,
+            paired_episodes: 20,
+            minimum_paired_groups: 20,
+            baseline_mean_return: 0.1,
+            candidate_mean_return: 0.8,
+            mean_return_improvement: 0.7,
+            improved_groups: 20,
+            regressed_groups: 0,
+            tied_groups: 0,
+            exact_sign_test_p_value: 0.0000019073486328125,
+            exact_sign_test_alpha: 0.05,
+            decision: 'passed',
+            reason: 'significant paired return improvement',
+          },
+          outcome: 'promoted',
+          verdict: 'Environment promotion gate passed.',
+        },
       };
       openEnvRuns.unshift(status);
       json(res, status, 202);
@@ -4641,6 +4694,9 @@ async function runSmoke(baseUrl, {
     await clickAndWait(page, '#openenv-inspect', 'Could not inspect the OpenEnv server');
     await inspectRequest.catch(() => fail('OpenEnv Inspect did not POST /v1/openenv/inspect'));
     await waitForPanelText(page, '#openenv-inspection', /smoke-bandit[\s\S]*schema sha256:aaaa/, 'OpenEnv inspection should render discovered identity and action schema');
+    await page.select('#openenv-environment-eval-mode', 'gate');
+    await page.$eval('#openenv-environment-gate-floor', input => { input.value = '0.5'; });
+    await page.$eval('#openenv-environment-gate-improvement', input => { input.value = '0.1'; });
     const openEnvSubmitRequest = page.waitForRequest(
       request => request.method() === 'POST' && request.url().endsWith('/v1/openenv/runs'),
       { timeout: 5000 },
@@ -4652,11 +4708,15 @@ async function runSmoke(baseUrl, {
       || openEnvBody.environment_urls?.[0] !== 'http://127.0.0.1:8990'
       || openEnvBody.adapter !== 'base'
       || openEnvBody.output_adapter !== 'openenv-agent'
-      || openEnvBody.training_config?.lora_rank !== 8) {
+      || openEnvBody.training_config?.lora_rank !== 8
+      || openEnvBody.environment_eval?.groups !== 20
+      || openEnvBody.environment_eval?.group_size !== 1
+      || openEnvBody.environment_eval?.gate?.min_mean_return !== 0.5
+      || openEnvBody.environment_eval?.gate?.min_mean_improvement !== 0.1) {
       fail(`OpenEnv train request lost its protocol or native-GRPO controls: ${JSON.stringify(openEnvBody)}`);
     }
     await expectTrainingToast(page, 'OpenEnv train run smoke-op started');
-    await waitForPanelText(page, '#openenv-runs', /OpenEnv train[\s\S]*smoke-op[\s\S]*collecting[\s\S]*8 \/ 32 episodes/, 'OpenEnv run history should render persisted lifecycle progress');
+    await waitForPanelText(page, '#openenv-runs', /OpenEnv train[\s\S]*smoke-op[\s\S]*completed[\s\S]*promoted[\s\S]*8 \/ 32 episodes[\s\S]*Held-out environment · completed · return 0\.100 → 0\.800 \(\+0\.700\) · exact p=0\.0000/, 'OpenEnv run history should render paired-return evidence and promotion outcome');
 
     await clickAndWait(page, '#training-tab-sft', 'Could not open SFT tab');
     await waitForVisiblePanel(page, '#tab-sft', 'SFT tab did not activate');
