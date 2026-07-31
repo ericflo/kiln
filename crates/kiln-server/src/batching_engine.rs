@@ -50,6 +50,11 @@ mod kv_pressure;
 const DEFAULT_ENGINE_CHANNEL: usize = 1024;
 const DEFAULT_RESPONSE_CHANNEL: usize = 64;
 const DEFAULT_MAX_DECODE_BATCH: usize = 8;
+/// Full-model forwards and native graph capture have substantially deeper
+/// host call stacks than ordinary async request handling. Keep model execution
+/// on explicitly sized threads instead of inheriting the platform's small
+/// default stack (commonly 2 MiB).
+pub const MODEL_EXECUTION_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
 /// Latency-oriented actors may prepare a small number of interactive prompts
 /// without widening the backend's decode cohort. Ordinary FIFO slots and this
 /// staging lane are accounted independently so staged arrivals cannot consume
@@ -2033,6 +2038,7 @@ impl BatchingEngineHandle {
         let actor_barrier_phases = actor.actor_barrier_phases.clone();
         thread::Builder::new()
             .name("kiln-batching-engine".to_string())
+            .stack_size(MODEL_EXECUTION_THREAD_STACK_BYTES)
             .spawn(move || actor.run())
             .expect("spawn batching engine actor");
         Self {

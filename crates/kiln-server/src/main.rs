@@ -1895,74 +1895,83 @@ fn spawn_backend_prewarm(
     Ok(Some(tokio::spawn(async move {
         tracing::info!("starting background inference prewarm");
         let prewarm_start = std::time::Instant::now();
-        let prewarm = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            // Pipeline compilation does not allocate KV/model working buffers, so
-            // keep it outside the opportunistic GPU lock. If the first live
-            // request wins the lock, it should still benefit from compiled
-            // custom kernels rather than paying lazy compile latency itself.
-            {
-                let runner_guard = runner.read().unwrap();
-                runner_guard.precompile_backend_startup_kernels()?;
-            }
+        let prewarm = spawn_model_execution_thread(
+            "kiln-inference-prewarm",
+            move || -> anyhow::Result<()> {
+                // Pipeline compilation does not allocate KV/model working buffers, so
+                // keep it outside the opportunistic GPU lock. If the first live
+                // request wins the lock, it should still benefit from compiled
+                // custom kernels rather than paying lazy compile latency itself.
+                {
+                    let runner_guard = runner.read().unwrap();
+                    runner_guard.precompile_backend_startup_kernels()?;
+                }
 
-            // Prewarm is opportunistic. If a live request or training job has
-            // the GPU first, skip prewarm rather than sitting in front of it.
-            let Ok(_gpu_guard) = gpu_lock.try_write() else {
-                tracing::info!("skipping inference prewarm because GPU is already busy");
-                return Ok(());
-            };
+                // Prewarm is opportunistic. If a live request or training job has
+                // the GPU first, skip prewarm rather than sitting in front of it.
+                let Ok(_gpu_guard) = gpu_lock.try_write() else {
+                    tracing::info!("skipping inference prewarm because GPU is already busy");
+                    return Ok(());
+                };
 
-            {
+                {
+                    let runner_guard = runner.read().unwrap();
+                    runner_guard.precompile_backend_startup_kernels()?;
+                }
+                // Weight prewarm populates backend caches without replacing the
+                // serving tensors; shared-tape training and portable fallback keep
+                // the same authoritative values.
                 let runner_guard = runner.read().unwrap();
-                runner_guard.precompile_backend_startup_kernels()?;
-            }
-            // Weight prewarm populates backend caches without replacing the
-            // serving tensors; shared-tape training and portable fallback keep
-            // the same authoritative values.
-            let runner_guard = runner.read().unwrap();
-            let policy = kiln_model::DecodeWeightPrewarmPolicy::paced(
-                max_bytes_per_second,
-                Arc::clone(&cancellation),
-            )?;
-            runner_guard
-                .prewarm_backend_decode_weights_with_policy(&policy)
-                .context("backend decode weight prewarm failed")?;
-            policy.ensure_active()?;
-            let params = SamplingParams {
-                temperature: 0.0,
-                top_p: 1.0,
-                top_k: 0,
-                // `max_tokens = 1` only runs prefill and samples the first
-                // token. Use two tokens so GPU backends also compile or tune
-                // the decode path before the first live request reaches it.
-                max_tokens: 2,
-                repetition_penalty: 1.0,
-                stop: Vec::new(),
-                seed: Some(42),
-                ..SamplingParams::default()
-            };
-            // Warm the base paged path used by every desktop request. Two
-            // prompt sizes cover the short-chat decode buckets and populate
-            // backend matmul autotune caches before the first live request.
-            let prewarm_prompts: [Vec<u32>; 2] = [
-                (1..=32).collect::<Vec<u32>>(),
-                (1..=64).collect::<Vec<u32>>(),
-            ];
-            for prompt_tokens in prewarm_prompts {
+                let policy = kiln_model::DecodeWeightPrewarmPolicy::paced(
+                    max_bytes_per_second,
+                    Arc::clone(&cancellation),
+                )?;
+                runner_guard
+                    .prewarm_backend_decode_weights_with_policy(&policy)
+                    .context("backend decode weight prewarm failed")?;
                 policy.ensure_active()?;
-                let prewarm_result = runner_guard.generate_paged_shared_tokens(
-                    &prompt_tokens,
-                    &params,
-                    &block_manager,
-                    &paged_cache,
-                    None,
-                );
+                let params = SamplingParams {
+                    temperature: 0.0,
+                    top_p: 1.0,
+                    top_k: 0,
+                    // `max_tokens = 1` only runs prefill and samples the first
+                    // token. Use two tokens so GPU backends also compile or tune
+                    // the decode path before the first live request reaches it.
+                    max_tokens: 2,
+                    repetition_penalty: 1.0,
+                    stop: Vec::new(),
+                    seed: Some(42),
+                    ..SamplingParams::default()
+                };
+                // Warm the base paged path used by every desktop request. Two
+                // prompt sizes cover the short-chat decode buckets and populate
+                // backend matmul autotune caches before the first live request.
+                let prewarm_prompts: [Vec<u32>; 2] = [
+                    (1..=32).collect::<Vec<u32>>(),
+                    (1..=64).collect::<Vec<u32>>(),
+                ];
+                for prompt_tokens in prewarm_prompts {
+                    policy.ensure_active()?;
+                    let prewarm_result = runner_guard.generate_paged_shared_tokens(
+                        &prompt_tokens,
+                        &params,
+                        &block_manager,
+                        &paged_cache,
+                        None,
+                    );
 
-                prewarm_result.context("base paged inference prewarm failed")?;
-            }
-            Ok(())
-        })
-        .await;
+                    prewarm_result.context("base paged inference prewarm failed")?;
+                }
+                Ok(())
+            },
+        );
+        let prewarm = match prewarm {
+            Ok(receiver) => receiver
+                .await
+                .map_err(|_| anyhow::anyhow!("inference prewarm worker exited without a result")),
+            Err(error) => Err(anyhow::Error::new(error)
+                .context("spawn inference prewarm worker with model execution stack")),
+        };
 
         match prewarm {
             Ok(Ok(())) => {
@@ -2013,30 +2022,41 @@ fn spawn_vulkan_decode_weight_prewarm(
     tokio::spawn(async move {
         tracing::info!("starting Vulkan decode weight prewarm");
         let prewarm_start = std::time::Instant::now();
-        let prewarm = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
-            // Pipeline compilation is cheap and independent of model working
-            // buffers, so do it even if a request wins the GPU lock.
-            {
-                let runner_guard = runner.read().unwrap();
-                runner_guard.precompile_backend_startup_kernels()?;
-            }
+        let prewarm = spawn_model_execution_thread(
+            "kiln-vulkan-weight-prewarm",
+            move || -> anyhow::Result<bool> {
+                // Pipeline compilation is cheap and independent of model working
+                // buffers, so do it even if a request wins the GPU lock.
+                {
+                    let runner_guard = runner.read().unwrap();
+                    runner_guard.precompile_backend_startup_kernels()?;
+                }
 
-            let Ok(_gpu_guard) = gpu_lock.try_write() else {
-                tracing::info!("skipping Vulkan decode weight prewarm because GPU is already busy");
-                return Ok(false);
-            };
+                let Ok(_gpu_guard) = gpu_lock.try_write() else {
+                    tracing::info!(
+                        "skipping Vulkan decode weight prewarm because GPU is already busy"
+                    );
+                    return Ok(false);
+                };
 
-            {
+                {
+                    let runner_guard = runner.read().unwrap();
+                    runner_guard.precompile_backend_startup_kernels()?;
+                }
                 let runner_guard = runner.read().unwrap();
-                runner_guard.precompile_backend_startup_kernels()?;
-            }
-            let runner_guard = runner.read().unwrap();
-            runner_guard
-                .prewarm_backend_decode_weights_with_policy(&policy)
-                .context("Vulkan decode weight prewarm failed")?;
-            Ok(true)
-        })
-        .await;
+                runner_guard
+                    .prewarm_backend_decode_weights_with_policy(&policy)
+                    .context("Vulkan decode weight prewarm failed")?;
+                Ok(true)
+            },
+        );
+        let prewarm = match prewarm {
+            Ok(receiver) => receiver.await.map_err(|_| {
+                anyhow::anyhow!("Vulkan decode weight prewarm worker exited without a result")
+            }),
+            Err(error) => Err(anyhow::Error::new(error)
+                .context("spawn Vulkan decode weight prewarm worker with model execution stack")),
+        };
 
         match prewarm {
             Ok(Ok(true)) => tracing::info!(
@@ -2062,6 +2082,24 @@ fn spawn_vulkan_decode_weight_prewarm(
         }
         prewarm_complete.store(true, Ordering::Release);
     })
+}
+
+fn spawn_model_execution_thread<T, F>(
+    name: &'static str,
+    work: F,
+) -> std::io::Result<tokio::sync::oneshot::Receiver<T>>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(kiln_server::batching_engine::MODEL_EXECUTION_THREAD_STACK_BYTES)
+        .spawn(move || {
+            let _ = result_tx.send(work());
+        })?;
+    Ok(result_rx)
 }
 
 fn native_training_enabled_for_startup(policy: StartupCapabilities) -> bool {
@@ -2172,6 +2210,21 @@ async fn shutdown_signal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn model_execution_worker_uses_the_production_stack_contract() {
+        assert_eq!(
+            kiln_server::batching_engine::MODEL_EXECUTION_THREAD_STACK_BYTES,
+            16 * 1024 * 1024
+        );
+        let result = spawn_model_execution_thread("kiln-stack-contract-test", || {
+            std::thread::current().name().map(str::to_owned)
+        })
+        .unwrap()
+        .await
+        .unwrap();
+        assert_eq!(result.as_deref(), Some("kiln-stack-contract-test"));
+    }
 
     #[test]
     fn maintenance_profile_forces_eager_runner() {
