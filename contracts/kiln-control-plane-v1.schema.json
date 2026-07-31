@@ -3449,6 +3449,8 @@
             "dataset",
             "replay",
             "summary",
+            "train_receipt",
+            "adapter_manifest",
             "environment_eval_baseline_dataset",
             "environment_eval_baseline_replay",
             "environment_eval_baseline_summary",
@@ -4943,6 +4945,9 @@
         "adapter_path": {
           "$ref": "#/$defs/String"
         },
+        "training_data": {
+          "$ref": "#/$defs/TrainingDataProvenance"
+        },
         "linked_eval_job_ids": {
           "type": "array",
           "items": {
@@ -4966,7 +4971,7 @@
           "$ref": "#/$defs/String"
         }
       },
-      "description": "Authoritative bounded projection of the native trainer owned by an OpenEnv run.",
+      "description": "Authoritative bounded projection of the native trainer and its admitted corpus lineage owned by an OpenEnv run.",
       "x-kiln-rust-type": "OpenEnvTrainingStatus",
       "x-kiln-field-schema-status": "complete"
     },
@@ -7897,6 +7902,20 @@
                 "schema_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
               }
             ],
+            "artifacts": [
+              {
+                "kind": "train_receipt",
+                "url": "/v1/openenv/runs/80a26e21-8451-4a64-8666-890c06fd80bd/artifacts/train_receipt",
+                "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+                "bytes": 4096
+              },
+              {
+                "kind": "adapter_manifest",
+                "url": "/v1/openenv/runs/80a26e21-8451-4a64-8666-890c06fd80bd/artifacts/adapter_manifest",
+                "sha256": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+                "bytes": 2048
+              }
+            ],
             "training_job_id": "grpo-openenv-1",
             "training_contract": {
               "schema": "kiln.openenv-training-contract.v1",
@@ -7919,7 +7938,46 @@
               "progress": 1.0,
               "current_loss": 0.31,
               "epoch": 3,
-              "adapter_path": "/srv/adapters/bandit-agent"
+              "adapter_path": "/srv/adapters/bandit-agent",
+              "training_data": {
+                "source": "inline",
+                "admitted_corpus_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                "rows": 8,
+                "openenv": {
+                  "schema": "kiln.openenv-training-data.v1",
+                  "groups": 8,
+                  "rollouts": 32,
+                  "unique_seeds": 8,
+                  "seed_min": "0",
+                  "seed_max": "7",
+                  "total_steps": 32,
+                  "terminations": {
+                    "done": 32,
+                    "max_steps": 0,
+                    "invalid_model_action": 0,
+                    "protocol_error": 0
+                  },
+                  "group_plan_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+                  "environments": [
+                    {
+                      "environment_name": "bandit",
+                      "environment_base_url": "http://127.0.0.1:8000",
+                      "openapi_version": "3.1.0",
+                      "environment_schema_sha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+                      "action_schema_sha256": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+                      "groups": 8,
+                      "rollouts": 32,
+                      "total_steps": 32,
+                      "terminations": {
+                        "done": 32,
+                        "max_steps": 0,
+                        "invalid_model_action": 0,
+                        "protocol_error": 0
+                      }
+                    }
+                  ]
+                }
+              }
             },
             "environment_evaluation": {
               "state": "collecting_candidate",
@@ -8079,6 +8137,20 @@
             "schema_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
           }
         ],
+        "artifacts": [
+          {
+            "kind": "train_receipt",
+            "url": "/v1/openenv/runs/80a26e21-8451-4a64-8666-890c06fd80bd/artifacts/train_receipt",
+            "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+            "bytes": 4096
+          },
+          {
+            "kind": "adapter_manifest",
+            "url": "/v1/openenv/runs/80a26e21-8451-4a64-8666-890c06fd80bd/artifacts/adapter_manifest",
+            "sha256": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+            "bytes": 2048
+          }
+        ],
         "training_job_id": "grpo-openenv-1",
         "training_contract": {
           "schema": "kiln.openenv-training-contract.v1",
@@ -8101,7 +8173,46 @@
           "progress": 1.0,
           "current_loss": 0.31,
           "epoch": 3,
-          "adapter_path": "/srv/adapters/bandit-agent"
+          "adapter_path": "/srv/adapters/bandit-agent",
+          "training_data": {
+            "source": "inline",
+            "admitted_corpus_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "rows": 8,
+            "openenv": {
+              "schema": "kiln.openenv-training-data.v1",
+              "groups": 8,
+              "rollouts": 32,
+              "unique_seeds": 8,
+              "seed_min": "0",
+              "seed_max": "7",
+              "total_steps": 32,
+              "terminations": {
+                "done": 32,
+                "max_steps": 0,
+                "invalid_model_action": 0,
+                "protocol_error": 0
+              },
+              "group_plan_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "environments": [
+                {
+                  "environment_name": "bandit",
+                  "environment_base_url": "http://127.0.0.1:8000",
+                  "openapi_version": "3.1.0",
+                  "environment_schema_sha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+                  "action_schema_sha256": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+                  "groups": 8,
+                  "rollouts": 32,
+                  "total_steps": 32,
+                  "terminations": {
+                    "done": 32,
+                    "max_steps": 0,
+                    "invalid_model_action": 0,
+                    "protocol_error": 0
+                  }
+                }
+              ]
+            }
+          }
         },
         "environment_evaluation": {
           "state": "collecting_candidate",

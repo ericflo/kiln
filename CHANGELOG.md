@@ -60,7 +60,13 @@
   reward/return disagreement fail admission. Environment identities, ordered
   group-plan digest, seed range, steps, and termination counts survive through
   training status, train receipts, adapter manifests, and the dashboard, while
-  checkpoint resume continues to bind the exact corpus bytes.
+  checkpoint resume continues to bind the exact corpus bytes. Completed
+  persisted OpenEnv runs now project that admitted lineage directly and retain
+  validated, content-addressed copies of the native train receipt and adapter
+  manifest. Receipt status, adapter identity, corpus digest, semantic task
+  plan, and manifest receipt hash must all agree before the run completes;
+  dashboard, CLI, schema, and download APIs expose the resulting evidence
+  without a second control-plane lookup.
   CI drives all twenty-two pinned
   text-profiled arcade and math servers plus a native
   collect/submit/verify/replay batch end to end.

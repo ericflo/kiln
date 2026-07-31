@@ -404,6 +404,29 @@ checks after collection and adds time-varying queue and live-memory capacity.
 This second gate remains authoritative because capacity can change while
 episodes run.
 
+### Retained trainer evidence
+
+A completed persisted train run is self-contained. Its
+`training.training_data.openenv` field carries the admitted
+`kiln.openenv-training-data.v1` lineage: exact corpus and ordered task-plan
+digests, endpoints and schema identities, seed range, steps, rewards, and
+termination counts. Clients do not need to join the run to `/v1/train/jobs` to
+identify what trained the adapter.
+
+Completion also adds `train_receipt` and `adapter_manifest` to the run's
+ordinary manifest-gated `artifacts` array. Kiln validates the native receipt,
+requires successful status and the requested adapter name, binds both files to
+the admission corpus and semantic OpenEnv lineage, verifies the manifest's
+receipt hash, then copies the exact bytes atomically into the run directory.
+Each source file has a 4 MiB limit and must be a regular non-symlink file. The
+run-owned evidence therefore survives adapter lifecycle operations and every
+download keeps the same length, ETag, SHA-256, and same-origin checks:
+
+```bash
+kiln openenv artifact <run-id> train_receipt --output evidence/train_receipt.json
+kiln openenv artifact <run-id> adapter_manifest --output evidence/adapter_manifest.json
+```
+
 The dashboard's **Prove it after training** control emits ordinary
 `post_eval`. The named suite must already be installed; Kiln follows adapter
 and optional baseline jobs to terminal outcomes. `train-set-eval` is diagnostic

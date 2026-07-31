@@ -676,6 +676,8 @@ def build_openenv_types() -> None:
                     "dataset",
                     "replay",
                     "summary",
+                    "train_receipt",
+                    "adapter_manifest",
                     "environment_eval_baseline_dataset",
                     "environment_eval_baseline_replay",
                     "environment_eval_baseline_summary",
@@ -701,6 +703,7 @@ def build_openenv_types() -> None:
             "current_loss": ref("FiniteNumber"),
             "epoch": ref("NonNegativeInteger"),
             "adapter_path": ref("String"),
+            "training_data": ref("TrainingDataProvenance"),
             "linked_eval_job_ids": array(ref("String")),
             "post_eval_verdict": ref("String"),
             "gate_outcome": {
@@ -715,11 +718,12 @@ def build_openenv_types() -> None:
             },
             "error": ref("String"),
         },
-        "Authoritative bounded projection of the native trainer owned by an OpenEnv run.",
+        "Authoritative bounded projection of the native trainer and its admitted corpus lineage owned by an OpenEnv run.",
         optional=(
             "current_loss",
             "epoch",
             "adapter_path",
+            "training_data",
             "linked_eval_job_ids",
             "post_eval_verdict",
             "gate_outcome",
@@ -1736,6 +1740,43 @@ def build_examples() -> dict[str, list[Any]]:
         },
         "post_eval": openenv_request["post_eval"],
     }
+    openenv_training_data = {
+        "source": "inline",
+        "admitted_corpus_sha256": "sha256:" + "3" * 64,
+        "rows": 8,
+        "openenv": {
+            "schema": "kiln.openenv-training-data.v1",
+            "groups": 8,
+            "rollouts": 32,
+            "unique_seeds": 8,
+            "seed_min": "0",
+            "seed_max": "7",
+            "total_steps": 32,
+            "terminations": {
+                "done": 32,
+                "max_steps": 0,
+                "invalid_model_action": 0,
+                "protocol_error": 0,
+            },
+            "group_plan_sha256": "sha256:" + "4" * 64,
+            "environments": [{
+                "environment_name": "bandit",
+                "environment_base_url": "http://127.0.0.1:8000",
+                "openapi_version": "3.1.0",
+                "environment_schema_sha256": "sha256:" + "5" * 64,
+                "action_schema_sha256": "sha256:" + "6" * 64,
+                "groups": 8,
+                "rollouts": 32,
+                "total_steps": 32,
+                "terminations": {
+                    "done": 32,
+                    "max_steps": 0,
+                    "invalid_model_action": 0,
+                    "protocol_error": 0,
+                },
+            }],
+        },
+    }
     openenv_status = {
         "schema": "kiln.openenv-run.v5",
         "run_id": "80a26e21-8451-4a64-8666-890c06fd80bd",
@@ -1756,6 +1797,20 @@ def build_examples() -> dict[str, list[Any]]:
             "rollouts_total": 32,
         },
         "environments": [openenv_inspection["identity"]],
+        "artifacts": [
+            {
+                "kind": "train_receipt",
+                "url": "/v1/openenv/runs/80a26e21-8451-4a64-8666-890c06fd80bd/artifacts/train_receipt",
+                "sha256": "sha256:" + "7" * 64,
+                "bytes": 4096,
+            },
+            {
+                "kind": "adapter_manifest",
+                "url": "/v1/openenv/runs/80a26e21-8451-4a64-8666-890c06fd80bd/artifacts/adapter_manifest",
+                "sha256": "sha256:" + "8" * 64,
+                "bytes": 2048,
+            },
+        ],
         "training_job_id": "grpo-openenv-1",
         "training_contract": openenv_training_contract,
         "training": {
@@ -1765,6 +1820,7 @@ def build_examples() -> dict[str, list[Any]]:
             "current_loss": 0.31,
             "epoch": 3,
             "adapter_path": "/srv/adapters/bandit-agent",
+            "training_data": openenv_training_data,
         },
         "environment_evaluation": {
             "state": "collecting_candidate",

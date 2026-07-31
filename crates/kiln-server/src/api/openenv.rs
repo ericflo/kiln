@@ -24,7 +24,10 @@ use axum::{Json, Router};
 use futures::{StreamExt, stream};
 use kiln_eval::EvalJobState;
 use kiln_openenv::{OpenEnvClientError, OpenEnvIdentity, OpenEnvInspection, OpenEnvTaskCatalog};
-use kiln_train::{BehaviorPolicy, GrpoConfig, GrpoRequest, TrainingResponse, TrainingState};
+use kiln_train::{
+    BehaviorPolicy, GrpoConfig, GrpoRequest, TrainingDataProvenance, TrainingResponse,
+    TrainingState,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio::io::AsyncReadExt;
@@ -65,6 +68,12 @@ const ARTIFACT_CHUNK_BYTES: usize = 64 * 1024;
 const LIFECYCLE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const POST_EVAL_PUBLICATION_GRACE: Duration = Duration::from_secs(5);
 const POST_EVAL_GATE_TIMEOUT: Duration = Duration::from_secs(300);
+
+mod training_evidence;
+
+use training_evidence::ensure_openenv_training_evidence;
+#[cfg(test)]
+use training_evidence::publish_openenv_training_evidence;
 
 fn default_groups() -> usize {
     8
@@ -316,6 +325,11 @@ pub struct OpenEnvTrainingStatus {
     pub epoch: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter_path: Option<String>,
+    /// Immutable corpus admitted by the native trainer. For OpenEnv GRPO this
+    /// includes the semantic endpoint/schema/task-plan identity in addition
+    /// to the exact byte-level corpus digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training_data: Option<TrainingDataProvenance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub linked_eval_job_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1190,6 +1204,8 @@ impl OpenEnvRunRegistry {
             "dataset" => ("rollouts.jsonl", "application/x-ndjson"),
             "replay" => ("replay.json", "application/json"),
             "summary" => ("summary.json", "application/json"),
+            "train_receipt" => (kiln_train::TRAIN_RECEIPT_FILENAME, "application/json"),
+            "adapter_manifest" => (kiln_train::ADAPTER_MANIFEST_FILENAME, "application/json"),
             "environment_eval_baseline_dataset" => (
                 "environment-evaluation/baseline/rollouts.jsonl",
                 "application/x-ndjson",
@@ -2700,6 +2716,7 @@ fn training_status_for(state: &AppState, job_id: &str) -> Option<OpenEnvTraining
             current_loss: job.loss,
             epoch: job.epoch,
             adapter_path: job.adapter_path.clone(),
+            training_data: job.training_data.clone(),
             linked_eval_job_ids: job.linked_eval_job_ids.clone(),
             post_eval_verdict: job.post_eval_verdict.clone(),
             gate_outcome: job.gate_outcome.clone(),
@@ -2835,6 +2852,7 @@ async fn follow_openenv_training(
                 );
             }
             TrainingState::Completed => {
+                ensure_openenv_training_evidence(state, run_id, request, &training)?;
                 if post_eval.is_none() {
                     finish_followed_training(state, run_id, request, training, evals)?;
                     return Ok(());
@@ -3266,7 +3284,104 @@ mod tests {
         registry.insert(request, training_contract)
     }
 
-    fn training_job(job_id: &str, state: TrainingState) -> TrainingJobInfo {
+    fn test_training_data() -> TrainingDataProvenance {
+        let groups = (0..2)
+            .map(|group_index| {
+                let provenance = kiln_train::OpenEnvRolloutProvenanceV1::new(
+                    "CounterEnvironment",
+                    "http://127.0.0.1:8000",
+                    Some("1.0".into()),
+                    format!("sha256:{}", "a".repeat(64)),
+                    format!("sha256:{}", "b".repeat(64)),
+                    format!("sha256:{}", "c".repeat(64)),
+                    17 + group_index,
+                    1,
+                    1.0,
+                    true,
+                    kiln_train::OpenEnvEpisodeTerminationV1::Done,
+                    None,
+                )
+                .unwrap();
+                kiln_train::AgenticGroup {
+                    messages: Vec::new(),
+                    completions: (0..3)
+                        .map(|_| {
+                            kiln_train::ScoredRollout::legacy("{\"amount\":1}".into(), 1.0)
+                                .with_openenv(provenance.clone())
+                        })
+                        .collect(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let admitted_corpus_sha256 =
+            kiln_eval::sha256_json(&serde_json::to_value(&groups).unwrap());
+        TrainingDataProvenance {
+            source: "inline".into(),
+            dataset: None,
+            split: None,
+            dataset_corpus_sha256: None,
+            split_manifest_sha256: None,
+            admitted_corpus_sha256,
+            rows: groups.len() as u64,
+            openenv: kiln_train::openenv_training_data_provenance(&groups).unwrap(),
+        }
+    }
+
+    fn test_adapter_path(temp: &tempfile::TempDir, job_id: &str) -> PathBuf {
+        temp.path().join(format!("adapter-{job_id}"))
+    }
+
+    fn write_test_training_evidence(
+        temp: &tempfile::TempDir,
+        job_id: &str,
+        training_data: &TrainingDataProvenance,
+    ) -> PathBuf {
+        let adapter_path = test_adapter_path(temp, job_id);
+        std::fs::create_dir_all(&adapter_path).unwrap();
+        std::fs::write(
+            adapter_path.join("adapter_config.json"),
+            br#"{"r":8,"lora_alpha":16.0}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            adapter_path.join("adapter_model.safetensors"),
+            b"test adapter weights",
+        )
+        .unwrap();
+        let mut receipt = kiln_train::TrainReceipt::new(
+            "agent",
+            "grpo",
+            &ModelConfig::qwen3_5_4b(),
+            &crate::api::test_tokenizer(),
+            kiln_train::train_receipt::HyperparameterReceipt {
+                mode: "grpo".into(),
+                rank: 8,
+                alpha: 16.0,
+                alpha_over_rank: Some(2.0),
+                learning_rate: 1e-4,
+                epochs: 1,
+                seed: Some(17),
+                shuffle: false,
+            },
+            json!({"output_name": "agent"}),
+        );
+        receipt.training_data = kiln_train::train_receipt::TrainingDataReceipt {
+            source: "inline_grpo_groups".into(),
+            path: None,
+            sha256: Some(training_data.admitted_corpus_sha256.clone()),
+            openenv: training_data.openenv.clone(),
+        };
+        receipt.write_to_adapter_dir(&adapter_path).unwrap();
+        adapter_path
+    }
+
+    fn training_job(
+        temp: &tempfile::TempDir,
+        job_id: &str,
+        state: TrainingState,
+    ) -> TrainingJobInfo {
+        let training_data = test_training_data();
+        let adapter_path = write_test_training_evidence(temp, job_id, &training_data);
         TrainingJobInfo {
             job_id: job_id.into(),
             adapter_name: "agent".into(),
@@ -3280,12 +3395,13 @@ mod tests {
             },
             loss: None,
             epoch: None,
-            adapter_path: None,
+            adapter_path: (state == TrainingState::Completed)
+                .then(|| adapter_path.display().to_string()),
             submitted_at: Instant::now(),
             submitted_unix_ms: now_unix_ms(),
             auto_load: false,
             consumed_correction_ids: Vec::new(),
-            training_data: None,
+            training_data: Some(training_data),
             finished_at: None,
             finished_unix_ms: None,
             error: None,
@@ -3993,7 +4109,7 @@ mod tests {
         let (run, cancel) = insert_created(&state.openenv_runs, request(OpenEnvRunKind::Train));
         state.training_jobs.write().unwrap().insert(
             "train-1".into(),
-            training_job("train-1", TrainingState::Queued),
+            training_job(&temp, "train-1", TrainingState::Queued),
         );
 
         let followed_state = state.clone();
@@ -4031,13 +4147,92 @@ mod tests {
             let job = jobs.get_mut("train-1").unwrap();
             job.state = TrainingState::Completed;
             job.progress = 1.0;
-            job.adapter_path = Some("/adapters/agent".into());
+            job.adapter_path = Some(test_adapter_path(&temp, "train-1").display().to_string());
         }
         follow.await.unwrap().unwrap();
         let completed = state.openenv_runs.get(&run.run_id).unwrap();
         assert_eq!(completed.state, OpenEnvRunState::Completed);
         assert!(completed.finished_unix_ms.is_some());
+        let training = completed.training.as_ref().unwrap();
+        let lineage = training
+            .training_data
+            .as_ref()
+            .and_then(|data| data.openenv.as_ref())
+            .unwrap();
+        assert_eq!(lineage.groups, 2);
+        assert_eq!(lineage.rollouts, 6);
+        assert_eq!(lineage.seed_min, 17);
+        assert_eq!(lineage.seed_max, 18);
+        assert_eq!(
+            completed
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["train_receipt", "adapter_manifest"]
+        );
+        for artifact in &completed.artifacts {
+            let (path, _, manifest) = state
+                .openenv_runs
+                .artifact_path(&run.run_id, &artifact.kind)
+                .unwrap();
+            let (sha256, bytes) = crate::openenv_replay::bounded_artifact_metadata(&path).unwrap();
+            assert_eq!(manifest, *artifact);
+            assert_eq!(sha256, artifact.sha256);
+            assert_eq!(bytes, artifact.bytes);
+        }
         assert!(completed.terminal());
+    }
+
+    #[test]
+    fn openenv_training_evidence_rejects_manifest_drift_before_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(&temp, OpenEnvConfig::default());
+        let (run, _) = insert_created(&state.openenv_runs, request(OpenEnvRunKind::Train));
+        let job = training_job(&temp, "train-tampered", TrainingState::Completed);
+        state
+            .training_jobs
+            .write()
+            .unwrap()
+            .insert(job.job_id.clone(), job);
+        let training = training_status_for(&state, "train-tampered").unwrap();
+        let manifest_path =
+            test_adapter_path(&temp, "train-tampered").join(kiln_train::ADAPTER_MANIFEST_FILENAME);
+        let mut manifest: Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["receipt_hash"] = json!(format!("sha256:{}", "0".repeat(64)));
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let error = publish_openenv_training_evidence(
+            &state,
+            &run.run_id,
+            &request(OpenEnvRunKind::Train),
+            &training,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("receipt hash differs"),
+            "{error:#}"
+        );
+        assert!(
+            state
+                .openenv_runs
+                .get(&run.run_id)
+                .unwrap()
+                .artifacts
+                .is_empty()
+        );
+        assert!(
+            !state
+                .openenv_runs
+                .run_dir(&run.run_id)
+                .join(kiln_train::TRAIN_RECEIPT_FILENAME)
+                .exists()
+        );
     }
 
     #[tokio::test]
@@ -4054,7 +4249,7 @@ mod tests {
         let (run, cancel) = insert_created(&state.openenv_runs, run_request.clone());
         state.training_jobs.write().unwrap().insert(
             "train-environment-eval".into(),
-            training_job("train-environment-eval", TrainingState::Completed),
+            training_job(&temp, "train-environment-eval", TrainingState::Completed),
         );
         follow_openenv_training(
             &state,
@@ -4088,7 +4283,7 @@ mod tests {
             include_baseline: false,
         });
         let (run, cancel) = insert_created(&state.openenv_runs, run_request.clone());
-        let mut training = training_job("train-eval", TrainingState::Completed);
+        let mut training = training_job(&temp, "train-eval", TrainingState::Completed);
         training.linked_eval_job_ids.push("eval-1".into());
         state
             .training_jobs
@@ -4122,9 +4317,17 @@ mod tests {
             .await
         });
         tokio::time::sleep(LIFECYCLE_POLL_INTERVAL + Duration::from_millis(50)).await;
-        assert_eq!(
-            state.openenv_runs.get(&run.run_id).unwrap().state,
-            OpenEnvRunState::PostEvaluating
+        let evaluating = state.openenv_runs.get(&run.run_id).unwrap();
+        assert_eq!(evaluating.state, OpenEnvRunState::PostEvaluating);
+        assert!(
+            ["train_receipt", "adapter_manifest"]
+                .into_iter()
+                .all(|kind| {
+                    evaluating
+                        .artifacts
+                        .iter()
+                        .any(|artifact| artifact.kind == kind)
+                })
         );
         {
             let mut evals = state.eval_jobs.write().unwrap();

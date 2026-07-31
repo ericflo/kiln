@@ -1674,7 +1674,7 @@ fn openenv_server_run_fingerprint(run: &Value) -> String {
         .filter_map(|evaluation| evaluation.get("examples_completed").and_then(Value::as_u64))
         .sum::<u64>();
     format!(
-        "{}:{}:{}:{}:{}:{}:{}",
+        "{}:{}:{}:{}:{}:{}:{}:{}:{}",
         run.get("state").and_then(Value::as_str).unwrap_or_default(),
         run.pointer("/training/state")
             .and_then(Value::as_str)
@@ -1689,6 +1689,13 @@ fn openenv_server_run_fingerprint(run: &Value) -> String {
             .unwrap_or_default(),
         run.pointer("/admission/queue_position")
             .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        run.pointer("/training/training_data/openenv/group_plan_sha256")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        run.get("artifacts")
+            .and_then(Value::as_array)
+            .map(Vec::len)
             .unwrap_or_default()
     )
 }
@@ -1773,6 +1780,40 @@ fn print_openenv_server_run(run: &Value) {
             "  Trainer: {training_state} · {:.1}%{loss}",
             training_progress * 100.0
         );
+        if let Some(lineage) = training.pointer("/training_data/openenv") {
+            let names = lineage
+                .get("environments")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|environment| environment.get("environment_name")?.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let groups = lineage
+                .get("groups")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            let rollouts = lineage
+                .get("rollouts")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            let seed_min = lineage
+                .get("seed_min")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let seed_max = lineage
+                .get("seed_max")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            println!(
+                "  Corpus: OpenEnv · {} · {groups} groups · {rollouts} rollouts · seeds {seed_min}–{seed_max}",
+                if names.is_empty() {
+                    "compatible environment"
+                } else {
+                    &names
+                }
+            );
+        }
         if let Some(outcome) = training.get("gate_outcome").and_then(Value::as_str) {
             println!("  Promotion gate: {outcome}");
         }
@@ -1861,6 +1902,25 @@ fn print_openenv_server_run(run: &Value) {
     }
     if let Some(error) = run.get("error").and_then(Value::as_str) {
         println!("  Error: {error}");
+    }
+    if let Some(artifacts) = run.get("artifacts").and_then(Value::as_array) {
+        for artifact in artifacts {
+            println!(
+                "  Artifact: {} · {} bytes · {}",
+                artifact
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown"),
+                artifact
+                    .get("bytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default(),
+                artifact
+                    .get("sha256")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unbound")
+            );
+        }
     }
 }
 
@@ -3854,6 +3914,36 @@ mod tests {
         assert_ne!(
             openenv_server_run_fingerprint(&queued_second),
             openenv_server_run_fingerprint(&queued_first)
+        );
+    }
+
+    #[test]
+    fn server_run_follow_fingerprint_tracks_corpus_and_evidence_publication() {
+        let before = json!({
+            "schema": "kiln.openenv-run.v5",
+            "state": "training_queued",
+            "training": {
+                "state": "running",
+                "training_data": {"openenv": {"group_plan_sha256": "sha256:before"}}
+            },
+            "artifacts": [{"kind": "dataset"}]
+        });
+        let after = json!({
+            "schema": "kiln.openenv-run.v5",
+            "state": "post_evaluating",
+            "training": {
+                "state": "completed",
+                "training_data": {"openenv": {"group_plan_sha256": "sha256:after"}}
+            },
+            "artifacts": [
+                {"kind": "dataset"},
+                {"kind": "train_receipt"},
+                {"kind": "adapter_manifest"}
+            ]
+        });
+        assert_ne!(
+            openenv_server_run_fingerprint(&before),
+            openenv_server_run_fingerprint(&after)
         );
     }
 

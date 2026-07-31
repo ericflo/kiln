@@ -1411,6 +1411,13 @@ function openEnvRunCard(run) {
   const trainingDetail = training
     ? `<div class="training-card-meta">Trainer · ${escapeHtml(String(training.state || 'unknown'))} · ${Math.round(Number(training.progress || 0) * 100)}%${training.current_loss != null ? ` · loss ${Number(training.current_loss).toFixed(4)}` : ''}${training.epoch != null ? ` · epoch ${Number(training.epoch).toLocaleString()}` : ''}</div>`
     : '';
+  const trainingLineage = training?.training_data?.openenv || null;
+  const lineageEnvironmentNames = Array.isArray(trainingLineage?.environments)
+    ? trainingLineage.environments.map(environment => environment.environment_name).filter(Boolean).join(', ')
+    : '';
+  const lineageDetail = trainingLineage
+    ? `<div class="training-card-data" title="Admitted corpus ${escapeHtml(training.training_data.admitted_corpus_sha256 || '')}; OpenEnv task plan ${escapeHtml(trainingLineage.group_plan_sha256 || '')}">${icon('stack', 'icn-sm')} OpenEnv corpus · ${escapeHtml(lineageEnvironmentNames || 'compatible environment')} · ${Number(trainingLineage.groups || 0).toLocaleString()} groups · ${Number(trainingLineage.rollouts || 0).toLocaleString()} rollouts · seeds ${escapeHtml(String(trainingLineage.seed_min ?? 'unknown'))}–${escapeHtml(String(trainingLineage.seed_max ?? 'unknown'))}</div>`
+    : '';
   const evalDetail = evaluations.length
     ? `<div class="training-card-meta">${evaluations.map(item => `${escapeHtml(item.suite_name)} · ${escapeHtml(String(item.state || 'unknown'))}${item.headline_accuracy != null ? ` · ${(Number(item.headline_accuracy) * 100).toFixed(1)}%` : ''}`).join('<br>')}</div>`
     : '';
@@ -1437,6 +1444,7 @@ function openEnvRunCard(run) {
     ${contractDetail}
     ${admissionDetail}
     ${trainingDetail}
+    ${lineageDetail}
     ${evalDetail}
     ${environmentDetail}
     <div class="training-card-progress">

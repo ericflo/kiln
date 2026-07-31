@@ -109,7 +109,16 @@ kiln openenv artifact <run-id> summary \
   --output evidence/openenv.rollout-summary.json
 kiln openenv artifact <run-id> environment_eval_receipt \
   --output evidence/environment-evaluation/receipt.json --json
+kiln openenv artifact <run-id> train_receipt \
+  --output evidence/train_receipt.json
+kiln openenv artifact <run-id> adapter_manifest \
+  --output evidence/adapter_manifest.json
 ```
+
+For completed training runs, first require typed admitted lineage at
+`training.training_data.openenv`. The two trainer-evidence artifacts above are
+validated against that lineage and copied into run ownership, so a capability
+record does not depend on the adapter directory remaining in place.
 
 ## Eval
 

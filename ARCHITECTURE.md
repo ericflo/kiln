@@ -453,6 +453,9 @@ AgenticGroup JSONL
         │
         ▼
 ordinary /v1/train/grpo admission and training queue
+        │
+        ▼
+run-owned corpus lineage + train receipt + adapter manifest
 ```
 
 `kiln-openenv` owns the protocol boundary and has no model or optimizer
@@ -513,6 +516,13 @@ trainer and linked evaluators.
 machine. `kiln openenv artifact` consumes only an exact manifest entry, disables
 redirects, verifies response headers, length, and SHA-256 while staging beside
 the destination, and publishes atomically only after the independent check.
+When its trainer completes, the run projects the admitted
+`TrainingDataProvenance` and atomically retains the validated native
+`train_receipt.json` and `adapter_manifest.json`. Publication proves successful
+status, output-adapter identity, exact corpus digest, semantic OpenEnv plan, and
+the manifest-to-receipt hash link. These small records are capped at 4 MiB each
+and become ordinary run-manifest artifacts, so the OpenEnv lifecycle remains
+self-contained after adapter retention or installation changes.
 
 The WebSocket path is load-bearing. OpenEnv's HTTP `/reset` and `/step` routes
 construct a fresh environment for each request and cannot carry episode state.

@@ -225,7 +225,11 @@ control emits this same contract.
 **Data:** For OpenEnv, seed-matched stateful WebSocket episodes collected as
 canonical `AgenticGroup` JSONL. For pi, session JSONLs normalized into
 ScoredRollout JSONL. Inspect before collection and retain the summary artifact
-from the CLI or server run plus its environment deployment identity. For a
+from the CLI or server run plus its environment deployment identity. Completed
+persisted runs expose admitted corpus identity at
+`training.training_data.openenv`; retain the run-owned `train_receipt` and
+`adapter_manifest` artifacts rather than depending on the mutable adapter path
+or joining a second status API. For a
 kept OpenEnv adapter, also retain a native paired evaluation over disjoint
 seeds: baseline/candidate replay bundles, both summary digests, exact sign-test
 evidence, and the promotion receipt. Materialize server-run evidence only with

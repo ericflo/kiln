@@ -3368,6 +3368,8 @@
                 "dataset",
                 "replay",
                 "summary",
+                "train_receipt",
+                "adapter_manifest",
                 "environment_eval_baseline_dataset",
                 "environment_eval_baseline_replay",
                 "environment_eval_baseline_summary",

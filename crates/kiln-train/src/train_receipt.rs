@@ -1171,7 +1171,10 @@ impl TrainReceipt {
         self
     }
 
-    pub fn write_to_adapter_dir(&self, adapter_dir: &Path) -> Result<PathBuf> {
+    /// Validate a parsed receipt without performing another filesystem read.
+    /// Callers that already own bounded, integrity-checked bytes can therefore
+    /// prove that validation and subsequent use cover the same content.
+    pub fn validate(&self) -> Result<()> {
         self.validate_envelope()
             .context("validate train-receipt envelope")?;
         self.validate_training_chat_template_identity()
@@ -1204,6 +1207,11 @@ impl TrainReceipt {
                 .map_err(anyhow::Error::msg)
                 .context("validate train-receipt OpenEnv training-data provenance")?;
         }
+        Ok(())
+    }
+
+    pub fn write_to_adapter_dir(&self, adapter_dir: &Path) -> Result<PathBuf> {
+        self.validate()?;
         std::fs::create_dir_all(adapter_dir).with_context(|| {
             format!(
                 "create adapter dir {} for train receipt",

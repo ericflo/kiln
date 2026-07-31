@@ -239,6 +239,11 @@ Drift, replacement, symlinks, truncation, or growth fail closed; successful
 responses expose the digest as a strong `ETag` and forbid intermediary caches.
 The persisted CLI lifecycle follows those returned links, rechecks response
 length, headers, and SHA-256, and atomically publishes no partial destination.
+Completed train runs also retain the native `train_receipt` and
+`adapter_manifest` beside the collection bundle, and project their admitted
+`kiln.openenv-training-data.v1` lineage directly in run status. The run remains
+auditable without joining another API or depending on the adapter directory's
+lifetime.
 When an observation offers a non-empty `input_text`, Kiln foregrounds that
 generic environment-provided decision text while retaining the complete wire
 observation and discovered JSON action schema; it remains optional, never a

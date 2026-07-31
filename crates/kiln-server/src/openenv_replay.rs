@@ -386,8 +386,22 @@ fn format_sha256(digest: &[u8]) -> String {
 /// bytes read are capped. This is the publication boundary used before a run
 /// advertises an artifact through its durable status manifest.
 pub(crate) fn bounded_artifact_metadata(path: &Path) -> Result<(String, usize)> {
-    let mut file = open_bounded_artifact(path, MAX_OPENENV_ARTIFACT_BYTES)?;
-    hash_bounded_artifact(&mut file, path, MAX_OPENENV_ARTIFACT_BYTES)
+    bounded_artifact_metadata_with_limit(path, MAX_OPENENV_ARTIFACT_BYTES)
+}
+
+/// Hash one server-owned artifact under a stricter caller-specific cap.
+/// Metadata is checked against that cap before hashing begins and the same cap
+/// bounds growth while the descriptor is read.
+pub(crate) fn bounded_artifact_metadata_with_limit(
+    path: &Path,
+    limit: usize,
+) -> Result<(String, usize)> {
+    anyhow::ensure!(
+        limit <= MAX_OPENENV_ARTIFACT_BYTES,
+        "OpenEnv artifact caller limit {limit} exceeds the service limit {MAX_OPENENV_ARTIFACT_BYTES}"
+    );
+    let mut file = open_bounded_artifact(path, limit)?;
+    hash_bounded_artifact(&mut file, path, limit)
 }
 
 /// Open and rewind the exact artifact named by a published manifest entry.
@@ -1375,6 +1389,18 @@ mod tests {
         let (sha256, bytes) = bounded_artifact_metadata(file.path()).unwrap();
         assert_eq!(sha256, expected);
         assert_eq!(bytes, contents.len());
+        assert_eq!(
+            bounded_artifact_metadata_with_limit(file.path(), contents.len()).unwrap(),
+            (expected.clone(), contents.len())
+        );
+        let error =
+            bounded_artifact_metadata_with_limit(file.path(), contents.len() - 1).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("limit is {}", contents.len() - 1)),
+            "{error:#}"
+        );
 
         let mut verified = open_verified_artifact(file.path(), &expected, bytes).unwrap();
         let mut round_trip = Vec::new();

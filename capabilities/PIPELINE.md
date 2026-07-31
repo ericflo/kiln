@@ -98,6 +98,9 @@ For a stage collected from OpenEnv, replace `openenv: null` with:
 {
   "rollout_summary": "evidence/openenv.rollout-summary.json",
   "dataset_sha256": "sha256:…",
+  "training_data": "kiln.openenv-training-data.v1",
+  "train_receipt": "evidence/train_receipt.json",
+  "adapter_manifest": "evidence/adapter_manifest.json",
   "environment_evaluation_receipt": "evidence/environment-evaluation/receipt.json",
   "baseline_summary_sha256": "sha256:…",
   "candidate_summary_sha256": "sha256:…",
@@ -254,7 +257,10 @@ Before any GPU work in a stage N ≥ 2:
      bind one stable non-secret `idempotency_key` to the stage so a
      lost response recovers the same retained run; require v5 train status to
      expose the sealed training contract, and if it is `queued`, record its FIFO
-     position and follow that run ID; Task API catalogs may document coverage but never imply a
+     position and follow that run ID; on completion require
+     `training.training_data.openenv`, then materialize the run's
+     `train_receipt` and `adapter_manifest` artifacts as immutable trainer
+     evidence; Task API catalogs may document coverage but never imply a
      reset binding
 
 3. Verify hypothesis is falsifiable:
@@ -301,7 +307,9 @@ An iter is promoted to a stage if ALL hold:
    environment-evaluation receipt, both replay bundles, and pinned deployment
    identity are retained. Materialize each server artifact with
    `kiln openenv artifact <run-id> <kind> --output <path>` so manifest identity,
-   length, and SHA-256 are independently checked. Training returns cannot
+   length, and SHA-256 are independently checked. This includes the run-owned
+   `train_receipt` and `adapter_manifest`, whose lineage must agree with
+   `training.training_data.openenv`. Training returns cannot
    substitute for this gate.
 
 Promotion is mechanical once these pass. Skipping any of them is a process

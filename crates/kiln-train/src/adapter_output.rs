@@ -58,6 +58,43 @@ pub struct AdapterManifestFiles {
     pub train_receipt: Option<String>,
 }
 
+impl AdapterManifest {
+    /// Validate a parsed manifest without reopening its path. This is useful
+    /// at bounded content-addressed publication boundaries where the exact
+    /// descriptor bytes have already been verified.
+    pub fn validate(&self) -> Result<()> {
+        validate_training_chat_template_identity(
+            self.training_chat_template_hash.as_deref(),
+            self.execution_provenance
+                .as_ref()
+                .and_then(|provenance| provenance.model.training_chat_template_sha256.as_deref()),
+        )
+        .context("validate adapter-manifest training chat template identity")?;
+        if let Some(base_weights) = self.base_weight_shard_manifest.as_ref() {
+            base_weights
+                .validate()
+                .context("validate adapter-manifest base-weight provenance")?;
+        }
+        if let Some(provenance) = self.execution_provenance.as_ref() {
+            provenance
+                .validate()
+                .context("validate adapter-manifest execution provenance")?;
+        }
+        if let Some(precision) = self.training_precision.as_ref() {
+            precision
+                .validate()
+                .context("validate adapter-manifest training precision")?;
+        }
+        if let Some(openenv) = self.openenv_training_data.as_ref() {
+            openenv
+                .validate()
+                .map_err(anyhow::Error::msg)
+                .context("validate adapter-manifest OpenEnv training-data provenance")?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AdapterRestoreOptions {
     pub manifest_path: PathBuf,

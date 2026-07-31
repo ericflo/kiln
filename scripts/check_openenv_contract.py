@@ -363,9 +363,14 @@ def main() -> int:
     cli = (ROOT / "crates" / "kiln-server" / "src" / "openenv_cli.rs").read_text(
         encoding="utf-8"
     )
-    api_source = (
-        ROOT / "crates" / "kiln-server" / "src" / "api" / "openenv.rs"
-    ).read_text(encoding="utf-8")
+    openenv_api_root = ROOT / "crates" / "kiln-server" / "src" / "api"
+    api_source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in [
+            openenv_api_root / "openenv.rs",
+            openenv_api_root / "openenv" / "training_evidence.rs",
+        ]
+    )
     client = (ROOT / "crates" / "kiln-openenv" / "src" / "client.rs").read_text(
         encoding="utf-8"
     )
@@ -382,6 +387,9 @@ def main() -> int:
         ROOT / "crates" / "kiln-train" / "src" / "adapter_output.rs"
     ).read_text(encoding="utf-8")
     guide = (ROOT / "docs" / "OPENENV_GUIDE.md").read_text(encoding="utf-8")
+    replay_reference = (ROOT / "docs" / "OPENENV_REPLAY_REFERENCE.md").read_text(
+        encoding="utf-8"
+    )
     http_api = json.loads(
         (ROOT / "contracts" / "kiln-http-api-v1.openapi.json").read_text(
             encoding="utf-8"
@@ -408,6 +416,14 @@ def main() -> int:
         "$ref": "#/$defs/OpenEnvTrainingDataProvenanceV1"
     }:
         failures.append("training status does not expose typed OpenEnv corpus provenance")
+    openenv_run_training_data = (
+        control_plane.get("$defs", {})
+        .get("OpenEnvTrainingStatus", {})
+        .get("properties", {})
+        .get("training_data")
+    )
+    if openenv_run_training_data != {"$ref": "#/$defs/TrainingDataProvenance"}:
+        failures.append("OpenEnv run status does not project admitted corpus provenance")
     required_source_terms = [
         "kiln.openenv-replay.v1",
         "kiln.openenv-verification.v1",
@@ -447,9 +463,14 @@ def main() -> int:
         'HeaderValue::from_static("private, no-store")',
         "CONTENT_LENGTH",
         "ETAG",
+        "publish_openenv_training_evidence",
+        "MAX_OPENENV_TRAINING_EVIDENCE_BYTES",
+        "TRAIN_RECEIPT_FILENAME",
+        "ADAPTER_MANIFEST_FILENAME",
+        "semantic corpus lineage differs from admission",
     ]:
         if term not in api_source:
-            failures.append(f"api/openenv.rs is missing manifest-bound artifact term {term}")
+            failures.append(f"api/openenv module is missing manifest-bound artifact term {term}")
     for term in [
         '"/v1/openenv/training/preflight"',
         "preflight_training_inner",
@@ -514,6 +535,8 @@ def main() -> int:
         "dataset",
         "replay",
         "summary",
+        "train_receipt",
+        "adapter_manifest",
         "environment_eval_baseline_dataset",
         "environment_eval_baseline_replay",
         "environment_eval_baseline_summary",
@@ -597,11 +620,20 @@ def main() -> int:
     ]:
         if command not in guide:
             failures.append(f"OpenEnv guide is missing {command!r}")
+    for term in [
+        "training.training_data.openenv",
+        "train_receipt",
+        "adapter_manifest",
+        "survives adapter lifecycle operations",
+        "4 MiB",
+    ]:
+        if term not in replay_reference:
+            failures.append(f"OpenEnv replay reference is missing {term!r}")
 
     if failures:
         raise SystemExit("\n".join(failures))
     print(
-        "OpenEnv training preflight, bounded collection, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, and live-replay contracts match"
+        "OpenEnv training preflight, bounded collection, self-contained trainer evidence, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, and live-replay contracts match"
     )
     return 0
 

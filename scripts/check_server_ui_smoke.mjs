@@ -2109,12 +2109,27 @@ async function startServer({
           rollouts_total: request.groups * request.group_size,
         },
         environments: [],
-        artifacts: [{
-          kind: 'dataset',
-          url: '/v1/openenv/runs/smoke-openenv-run/artifacts/dataset',
-          sha256: `sha256:${'a'.repeat(64)}`,
-          bytes: 1024,
-        }],
+        artifacts: [
+          {
+            kind: 'dataset',
+            url: '/v1/openenv/runs/smoke-openenv-run/artifacts/dataset',
+            sha256: `sha256:${'a'.repeat(64)}`,
+            bytes: 1024,
+          },
+          {
+            kind: 'train_receipt',
+            url: '/v1/openenv/runs/smoke-openenv-run/artifacts/train_receipt',
+            sha256: `sha256:${'c'.repeat(64)}`,
+            bytes: 4096,
+          },
+          {
+            kind: 'adapter_manifest',
+            url: '/v1/openenv/runs/smoke-openenv-run/artifacts/adapter_manifest',
+            sha256: `sha256:${'d'.repeat(64)}`,
+            bytes: 2048,
+          },
+        ],
+        training_job_id: 'smoke-openenv-training',
         training_contract: {
           schema: 'kiln.openenv-training-contract.v1',
           effective_config: {
@@ -2126,6 +2141,18 @@ async function startServer({
             behavior_policy: 'no_importance_correction',
           },
           ...(request.post_eval ? { post_eval: request.post_eval } : {}),
+        },
+        training: {
+          job_id: 'smoke-openenv-training',
+          state: 'completed',
+          progress: 1,
+          adapter_path: '/srv/adapters/openenv-agent',
+          training_data: {
+            source: 'inline',
+            admitted_corpus_sha256: `sha256:${'e'.repeat(64)}`,
+            rows: 2,
+            openenv: smokeOpenEnvTrainingData,
+          },
         },
         environment_evaluation: {
           state: 'completed',
@@ -4904,6 +4931,8 @@ async function runSmoke(baseUrl, {
     await waitForPanelText(page, '#openenv-runs', /smoke-op[\s\S]*Admitted contract · muon · rank 8 · output openenv-agent · auto-load off/, 'OpenEnv run history should expose the immutable admitted trainer contract');
     await waitForPanelText(page, '#openenv-runs', /smoke-op[\s\S]*Execution admitted after 250 ms/, 'OpenEnv run history should retain admission wait evidence');
     await waitForPanelText(page, '#openenv-runs', /dataset[\s\S]*aaaaaaaaaaaa/, 'OpenEnv artifact controls should expose the manifest digest identity');
+    await waitForPanelText(page, '#openenv-runs', /OpenEnv corpus · math-env · 2 groups · 4 rollouts · seeds 7–8/, 'OpenEnv run history should expose admitted corpus lineage without opening a second control plane');
+    await waitForPanelText(page, '#openenv-runs', /train_receipt[\s\S]*adapter_manifest/, 'OpenEnv run history should expose retained native training evidence');
     if (setEvalSuites) setEvalSuites([]);
 
     await clickAndWait(page, '#training-tab-sft', 'Could not open SFT tab');
