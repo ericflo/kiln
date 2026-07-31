@@ -857,14 +857,30 @@ mod tests {
     }
 
     async fn fake_bandit_policy(Json(body): Json<Value>) -> Json<Value> {
+        assert_eq!(body["rollout_provenance"], true);
         let seed = body["seed"].as_u64().unwrap();
         let (best, worst) = bandit_extreme_arms(seed);
         let candidate = body["adapter"].as_str() == Some("candidate");
+        let adapter = candidate.then(|| {
+            json!({
+                "name": "candidate",
+                "content_sha256": format!("sha256:{}", "c".repeat(64))
+            })
+        });
         Json(json!({
             "choices": [{
                 "message": {
                     "role": "assistant",
                     "content": format!(r#"{{"arm":{}}}"#, if candidate { best } else { worst })
+                },
+                "rollout_provenance": {
+                    "behavior_policy": {
+                        "served_model_id": "fake-bandit-policy",
+                        "base_model_sha256": format!("sha256:{}", "a".repeat(64)),
+                        "adapter": adapter,
+                        "inference_config_sha256": format!("sha256:{}", "b".repeat(64)),
+                        "implementation": "kiln/fake-openenv-evaluation-test"
+                    }
                 }
             }],
             "usage": {"total_tokens": 1}

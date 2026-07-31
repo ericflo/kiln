@@ -375,6 +375,7 @@ def build_grpo_types() -> None:
             "openapi_version": ref("NonEmptyString"),
             "environment_schema_sha256": ref("Sha256"),
             "action_schema_sha256": ref("Sha256"),
+            "behavior_policy": external_ref(INFERENCE_SCHEMA, "RolloutBehaviorPolicyIdentityV1"),
             "reset_sha256": ref("Sha256"),
             "seed": ref("NonNegativeInteger"),
             "steps": ref("NonNegativeInteger"),
@@ -384,7 +385,7 @@ def build_grpo_types() -> None:
             "protocol_error_code": ref("NonEmptyString"),
         },
         "Fail-closed environment, task, and outcome identity attached to a native OpenEnv rollout.",
-        optional=("openapi_version", "protocol_error_code"),
+        optional=("openapi_version", "behavior_policy", "protocol_error_code"),
         extra={
             "x-kiln-semantic-constraints": [
                 "terminal_done is true exactly when termination is done",
@@ -850,9 +851,10 @@ def build_openenv_types() -> None:
             "schema": {"const": "kiln.openenv-training-contract.v1"},
             "effective_config": ref("GrpoConfig"),
             "post_eval": ref("PostEvalConfig"),
+            "behavior_policy": external_ref(INFERENCE_SCHEMA, "RolloutBehaviorPolicyIdentityV1"),
         },
         "Immutable materialized native GRPO and optional post-evaluation settings admitted before OpenEnv collection.",
-        optional=("post_eval",),
+        optional=("post_eval", "behavior_policy"),
     )
     add_object(
         "OpenEnvTrainingPreflightReceipt",
@@ -861,6 +863,7 @@ def build_openenv_types() -> None:
             "schema": {"const": "kiln.openenv-training-preflight.v1"},
             "effective_config": ref("GrpoConfig"),
             "post_eval": ref("PostEvalConfig"),
+            "behavior_policy": external_ref(INFERENCE_SCHEMA, "RolloutBehaviorPolicyIdentityV1"),
             "capacity": ref("OpenEnvTrainingCapacitySnapshot"),
             "capacity_reserved": {"const": False},
         },
@@ -1422,6 +1425,7 @@ def build_training_responses() -> None:
             "total_steps": ref("NonNegativeInteger"),
             "terminations": ref("OpenEnvTerminationCountsV1"),
             "group_plan_sha256": ref("Sha256"),
+            "behavior_policy": external_ref(INFERENCE_SCHEMA, "RolloutBehaviorPolicyIdentityV1"),
             "environments": array(ref("OpenEnvTrainingEnvironmentV1"), min_items=1),
         },
         "Validated semantic identity for an all-OpenEnv GRPO training corpus.",
@@ -1430,9 +1434,11 @@ def build_training_responses() -> None:
                 "every completion has OpenEnv provenance",
                 "all candidates in a group share endpoint, schema, reset hash, and seed",
                 "completion reward equals OpenEnv episode_return",
+                "when present, one behavior-policy identity is shared by every completion",
                 "per-environment and termination totals equal corpus totals",
             ]
         },
+        optional=("behavior_policy",),
     )
     add_object(
         "TrainingDataProvenance",
@@ -1805,6 +1811,12 @@ def build_examples() -> dict[str, list[Any]]:
             },
         },
     }
+    openenv_behavior_policy = {
+        "served_model_id": "Qwen3.5-4B",
+        "base_model_sha256": "sha256:" + "1" * 64,
+        "inference_config_sha256": "sha256:" + "2" * 64,
+        "implementation": "kiln-native",
+    }
     openenv_training_contract = {
         "schema": "kiln.openenv-training-contract.v1",
         "effective_config": {
@@ -1815,6 +1827,7 @@ def build_examples() -> dict[str, list[Any]]:
             "lora_rank": 8,
         },
         "post_eval": openenv_request["post_eval"],
+        "behavior_policy": openenv_behavior_policy,
     }
     openenv_training_data = {
         "source": "inline",
@@ -1835,6 +1848,7 @@ def build_examples() -> dict[str, list[Any]]:
                 "protocol_error": 0,
             },
             "group_plan_sha256": "sha256:" + "4" * 64,
+            "behavior_policy": openenv_behavior_policy,
             "environments": [{
                 "environment_name": "bandit",
                 "environment_base_url": "http://127.0.0.1:8000",
@@ -1928,6 +1942,7 @@ def build_examples() -> dict[str, list[Any]]:
         "schema": "kiln.openenv-training-preflight.v1",
         "effective_config": openenv_training_contract["effective_config"]
         | {"auto_load": True},
+        "behavior_policy": openenv_behavior_policy,
         "capacity": {
             "checked_unix_ms": 1_700_000_000_000,
             "queued_jobs": 1,

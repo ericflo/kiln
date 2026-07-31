@@ -589,12 +589,14 @@ pub fn verify_openenv_artifacts(
             summary.reset_options_sha256.is_some() && summary.reset_plan_sha256.is_none(),
             "OpenEnv v2 summary must contain reset_options_sha256 and omit reset_plan_sha256"
         ),
-        "kiln.openenv-rollout-summary.v3" | "kiln.openenv-rollout-summary.v4" => anyhow::ensure!(
+        "kiln.openenv-rollout-summary.v3"
+        | "kiln.openenv-rollout-summary.v4"
+        | "kiln.openenv-rollout-summary.v5" => anyhow::ensure!(
             summary.reset_options_sha256.is_none() && summary.reset_plan_sha256.is_some(),
-            "OpenEnv v3/v4 summary must contain reset_plan_sha256 and omit reset_options_sha256"
+            "OpenEnv v3/v4/v5 summary must contain reset_plan_sha256 and omit reset_options_sha256"
         ),
         schema => anyhow::bail!(
-            "OpenEnv replay verification requires kiln.openenv-rollout-summary.v2, .v3, or .v4, got {schema:?}"
+            "OpenEnv replay verification requires kiln.openenv-rollout-summary.v2, .v3, .v4, or .v5, got {schema:?}"
         ),
     }
     match summary.schema.as_str() {
@@ -605,37 +607,71 @@ pub fn verify_openenv_artifacts(
                 summary.schema
             );
         }
-        "kiln.openenv-rollout-summary.v4" => match summary.training_contract.as_ref() {
-            Some(contract) => {
-                anyhow::ensure!(
-                    contract.schema == crate::openenv_cli::OPENENV_TRAINING_CONTRACT_SCHEMA_V1,
-                    "OpenEnv summary has unsupported training contract schema {:?}",
-                    contract.schema
-                );
-                anyhow::ensure!(
-                    contract.effective_config.behavior_policy
-                        == kiln_train::BehaviorPolicy::NoImportanceCorrection,
-                    "OpenEnv training contract must disable importance correction"
-                );
-                anyhow::ensure!(
-                    contract.effective_config.base_adapter == summary.adapter,
-                    "OpenEnv training contract behavior adapter differs from the collected policy"
-                );
-                anyhow::ensure!(
-                    contract
-                        .effective_config
-                        .output_name
-                        .as_deref()
-                        .is_some_and(|name| !name.is_empty()),
-                    "OpenEnv training contract has no output adapter"
-                );
+        "kiln.openenv-rollout-summary.v4" | "kiln.openenv-rollout-summary.v5" => {
+            match summary.training_contract.as_ref() {
+                Some(contract) => {
+                    anyhow::ensure!(
+                        contract.schema == crate::openenv_cli::OPENENV_TRAINING_CONTRACT_SCHEMA_V1,
+                        "OpenEnv summary has unsupported training contract schema {:?}",
+                        contract.schema
+                    );
+                    anyhow::ensure!(
+                        contract.effective_config.behavior_policy
+                            == kiln_train::BehaviorPolicy::NoImportanceCorrection,
+                        "OpenEnv training contract must disable importance correction"
+                    );
+                    anyhow::ensure!(
+                        contract.effective_config.base_adapter == summary.adapter,
+                        "OpenEnv training contract behavior adapter differs from the collected policy"
+                    );
+                    if summary.schema == "kiln.openenv-rollout-summary.v5" {
+                        if let Some(contract_policy) = contract.behavior_policy.as_ref() {
+                            anyhow::ensure!(
+                                Some(contract_policy) == summary.behavior_policy.as_ref(),
+                                "OpenEnv training contract behavior-policy revision differs from the collected policy"
+                            );
+                        }
+                    }
+                    anyhow::ensure!(
+                        contract
+                            .effective_config
+                            .output_name
+                            .as_deref()
+                            .is_some_and(|name| !name.is_empty()),
+                        "OpenEnv training contract has no output adapter"
+                    );
+                }
+                None => anyhow::ensure!(
+                    summary.training_submission.is_none(),
+                    "OpenEnv training submission has no admitted training contract"
+                ),
             }
-            None => anyhow::ensure!(
-                summary.training_submission.is_none(),
-                "OpenEnv training submission has no admitted training contract"
-            ),
-        },
+        }
         _ => unreachable!("summary schema was validated above"),
+    }
+    if summary.schema == "kiln.openenv-rollout-summary.v5" {
+        let behavior_policy = summary
+            .behavior_policy
+            .as_ref()
+            .context("OpenEnv v5 summary has no behavior-policy identity")?;
+        behavior_policy
+            .validate()
+            .map_err(anyhow::Error::msg)
+            .context("OpenEnv v5 summary has an invalid behavior-policy identity")?;
+        anyhow::ensure!(
+            behavior_policy
+                .adapter
+                .as_ref()
+                .map(|adapter| adapter.name.as_str())
+                == summary.adapter.as_deref(),
+            "OpenEnv summary behavior-policy adapter differs from its adapter selector"
+        );
+    } else {
+        anyhow::ensure!(
+            summary.behavior_policy.is_none(),
+            "OpenEnv summary {} predates behavior-policy binding",
+            summary.schema
+        );
     }
 
     let dataset_path = resolve_artifact_path(
@@ -699,7 +735,9 @@ pub fn verify_openenv_artifacts(
     );
     if matches!(
         summary.schema.as_str(),
-        "kiln.openenv-rollout-summary.v3" | "kiln.openenv-rollout-summary.v4"
+        "kiln.openenv-rollout-summary.v3"
+            | "kiln.openenv-rollout-summary.v4"
+            | "kiln.openenv-rollout-summary.v5"
     ) {
         verify_reset_plan(summary.reset_plan_sha256.as_deref(), &replay)?;
     }
@@ -781,6 +819,12 @@ pub fn verify_openenv_artifacts(
                     && provenance.reset_sha256 == sha256_json(&replay_group.reset_payload)?,
                 "OpenEnv group {group_index} candidate {candidate_index} provenance differs from replay"
             );
+            if summary.schema == "kiln.openenv-rollout-summary.v5" {
+                anyhow::ensure!(
+                    provenance.behavior_policy.as_ref() == summary.behavior_policy.as_ref(),
+                    "OpenEnv group {group_index} candidate {candidate_index} behavior policy differs from the summary receipt"
+                );
+            }
             verify_trajectory(group_index, candidate_index, rollout, replay_candidate)?;
             let record_index = group_index
                 .checked_mul(summary.group_size)

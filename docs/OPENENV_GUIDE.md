@@ -57,23 +57,17 @@ kiln openenv artifact 80a26e21-8451-4a64-8666-890c06fd80bd environment_eval_rece
 kiln openenv cancel 80a26e21-8451-4a64-8666-890c06fd80bd
 ```
 
-`start` reads one regular, non-symlink JSON object ≤1 MiB. Bind each attempt to a non-secret
-`idempotency_key` or `--idempotency-key`: exact retries recover the retained run; changed reuse fails.
-`artifact` follows same-server manifest URLs, verifies length, ETag, and hash, then
-publishes atomically; `--force` replaces. `status --follow --json` emits one terminal snapshot.
-Run records v5 keep the cancellable FIFO and seal accepted training as an immutable
-`kiln.openenv-training-contract.v1`; resume, execution, CLI, and dashboard share it.
-Admission precedes persistence and discovery, so failures spend no episodes and
-rollouts reject train-only fields. `[openenv]` bounds capacity, origins, credentials,
-and TTL. See the [admission reference](OPENENV_REPLAY_REFERENCE.md#training-admission).
+Bind each attempt to a non-secret idempotency key: exact retries recover the
+retained run; changed reuse fails. Run records v5 keep the cancellable FIFO and
+sealed `kiln.openenv-training-contract.v1`. Admission precedes discovery, so
+rejection spends no episodes. See the [admission reference](OPENENV_REPLAY_REFERENCE.md#training-admission)
+for request, artifact-integrity, capacity, and retention details.
 
 ### Protected environments
 
-Protected deployments use exact-origin bearer credentials without putting a secret in a URL,
-request body, run record, metric, or artifact. Server and dashboard requests align opaque
-`credential_ids` with URLs; CLI commands align `--credential-env`, using `-` for a public slot.
-Kiln authenticates discovery and WebSocket upgrade, requires HTTPS/WSS outside loopback, and
-records only `none` or `bearer`. See the [authentication and replay reference](OPENENV_REPLAY_REFERENCE.md#authentication-boundary).
+Protected deployments use exact-origin bearer credentials without persisting
+secrets. Align server `credential_ids` or CLI `--credential-env` with URLs; use
+`-` for a public slot. See the [authentication boundary](OPENENV_REPLAY_REFERENCE.md#authentication-boundary).
 
 ### Inspect
 
@@ -116,13 +110,9 @@ kiln openenv verify --summary counter.rollout-summary.json
 kiln openenv replay --summary counter.rollout-summary.json
 ```
 
-`verify` is network-free. It checks byte digests and counts, canonical GRPO groups,
-fail-closed provenance, replay transcript, returns, and receipt totals.
-
-`replay` verifies offline first, then inspects each live target and compares the captured reset,
-action, result, and final state. Move or archive all three files together; use `--dataset` and
-`--replay` when paths change. See the [replay and recovery reference](OPENENV_REPLAY_REFERENCE.md)
-for verification, drift, and prefix-only semantics.
+`verify` is network-free. `replay` verifies first, then compares live reset,
+action, result, and final state. Archive all three files together. See the
+[replay reference](OPENENV_REPLAY_REFERENCE.md) for drift and prefix semantics.
 
 Protected replay repeats aligned `--credential-env`; it matches auth method but permits rotation.
 
@@ -139,9 +129,16 @@ kiln openenv train \
 ```
 
 `--adapter` selects behavior (`base`, `none`, or `null` mean the base model);
-`--output-adapter` names the LoRA. Chat lacks exact per-action log probabilities, so Kiln sets `behavior_policy: "no_importance_correction"`, never `recorded`.
+`--output-adapter` names the LoRA. Every action retains its content-addressed
+base model, inference runtime, and optional adapter revision. Multi-turn
+episodes cannot supply one append-stable probability trace, so Kiln uses
+`no_importance_correction` and proves the corpus is on-policy instead.
 
-Before discovery, direct training gets the same contract from `POST /v1/openenv/training/preflight`; summary v4 embeds it before artifacts. Rejection writes none; `capacity_reserved: false` requires rechecking. See the [admission reference](OPENENV_REPLAY_REFERENCE.md#training-admission).
+`POST /v1/openenv/training/preflight` seals that policy in the contract and
+summary v5; `capacity_reserved: false` means final capacity is rechecked. Drift
+during collection or before training fails closed; named behavior adapters are
+privately snapshotted under the mutation barrier. See the
+[admission reference](OPENENV_REPLAY_REFERENCE.md#training-admission).
 
 Subsequent admission, checkpoints, cancellation, publication, and status are ordinary native GRPO; use `kiln train status`, the dashboard, and `train_receipt.json`.
 
@@ -152,13 +149,9 @@ may accompany paired evaluation, but only one gate can own promotion.
 
 `environment_eval` compares behavior and candidate policies on identical URLs, resets, seeds, candidate indices, generation seeds, and bounds. Training-seed overlap and identity drift fail closed; both sides retain canonical artifacts.
 
-Without `gate`, results are diagnostic and `auto_load` remains. A gate defers
-loading and requires 20 seed groups, a two-sided exact sign-test win (`p <
-0.05`), and configured thresholds. Replications do not inflate significance;
-`post_eval.min_accuracy` cannot coexist.
-
-The evaluation receipt binds policy identities, execution, summary hashes,
-evidence, decision, and promotion. Status and dashboard show both phases.
+Without `gate`, results are diagnostic. A gate defers loading and requires 20
+seed groups, an exact sign-test win, and configured thresholds. Its receipt
+binds policies, execution, summaries, evidence, and promotion.
 
 ## Reset tasks and multiple environments
 
@@ -197,12 +190,14 @@ adapter; their text actions flow unchanged end to end.
 
 ## Identity and artifacts
 
-Each scored rollout may carry `kiln.openenv-rollout.v1` provenance: environment
-name and URL, schema and reset hashes, seed, steps, return, termination, and an
-optional protocol-error code. This identity participates in the scored-rollout
-payload hash and fails closed when malformed.
+Each rollout carries `kiln.openenv-rollout.v1`: environment, schema, reset,
+seed, outcome, and exact behavior policy. Native collection rejects policy
+drift, and malformed identity fails closed.
 
-Native GRPO lifts episode records into `kiln.openenv-training-data.v1`. One validator covers inline and JSONL data: provenance must be complete; group endpoint, schema, reset, and seed must agree; reward must equal return; and an endpoint cannot drift schema. Status, receipts, and manifests expose the ordered plan digest, environments, seeds, steps, and termination counts. Checkpoint resume separately binds input bytes.
+Native GRPO lifts episodes into `kiln.openenv-training-data.v1`. Inline and
+JSONL validators require coherent group identity, rewards, schemas, and one
+behavior policy. Admission checks it against live model and adapter bytes;
+status, receipts, and manifests expose the result.
 
 JSONL trains; replay retains exchanges; summary binds config, stats, hashes,
 and submission. Collection charges each turn against a
@@ -214,19 +209,12 @@ Exhaustion publishes no partial bundle. Pin deployments. See the
 
 ## Failure and capacity semantics
 
-Kiln assigns every protocol error `--protocol-error-reward` (default `-1`).
-Recoverable errors become observation feedback and the policy may try again on
-the same socket up to `--max-recoverable-errors` (default `3`). A terminal
-error, or the next recoverable error after that budget is spent, ends the
-candidate as `protocol_error`.
-
-On `CAPACITY_REACHED`, Kiln closes that socket and retries a fresh session with
-bounded backoff until `--capacity-wait-seconds` expires. Invalid model JSON and
-`max_steps` remain distinct outcomes. Timeouts, unsolicited or unreadable
-frames, transport failures, and wrong response types poison the socket
-permanently; lock-step cannot resynchronize. The
-[replay and recovery reference](OPENENV_REPLAY_REFERENCE.md) lists every
-recoverable and terminal code, retry rule, and resource bound.
+Recoverable errors become feedback on the same socket within a bounded budget;
+terminal errors end the candidate. Capacity saturation retries a fresh session.
+Invalid JSON and `max_steps` remain distinct outcomes. Timeouts and malformed
+frames poison the socket; lock-step cannot resynchronize. The
+[recovery reference](OPENENV_REPLAY_REFERENCE.md) lists
+codes, rewards, retry rules, and bounds.
 
 ## Security boundary
 

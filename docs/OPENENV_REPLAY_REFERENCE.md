@@ -418,13 +418,15 @@ It overrides rollout-owned `behavior_policy`, `base_adapter`, `output_name`,
 and `auto_load`, then validates the environment-token loss and policy contract,
 LoRA scale, checkpoint interval, behavior-adapter layout, installed
 `post_eval` suite, serving profile, backend GRPO workload, optimizer, and model
-rank ceiling. Persisted `kind=train` does this before creating its run
+rank ceiling. It also seals the exact base-model, inference-runtime, and
+optional adapter content revision that must generate the corpus and initialize
+the trainer. Persisted `kind=train` does this before creating its run
 directory and atomically stores the result as
 `kiln.openenv-training-contract.v1` in v5 status. Collection, restart, trainer
 submission, static evaluation, CLI, and dashboard all consume that exact
 contract rather than reapplying current defaults. Direct `kiln openenv train` first calls
 `POST /v1/openenv/training/preflight`, validates the v1 receipt, and later
-submits its exact `effective_config` and returned optional `post_eval`;
+submits its exact `effective_config`, behavior-policy identity, and returned optional `post_eval`;
 rejection contacts no environment and writes no artifacts. Both paths increment
 `kiln_openenv_training_preflights_total{status="accepted"|"rejected"}`;
 persisted rejection also increments
@@ -432,7 +434,7 @@ persisted rejection also increments
 requests reject `output_adapter`, `training_config`, `post_eval`, and
 `environment_eval` instead of ignoring them.
 
-Summary v4 embeds the same contract before the dataset/replay/summary bundle is
+Summary v5 embeds the same contract and exact policy identity before the dataset/replay/summary bundle is
 first published. It therefore remains auditable if final native queue or memory
 admission rejects after collection. A summary containing a training submission
 without its contract fails schema and offline verification; legacy v2/v3
@@ -443,6 +445,14 @@ Direct preflight returns the exact current queue/tracked-job snapshot with
 checks after collection and adds time-varying queue and live-memory capacity.
 This second gate remains authoritative because capacity can change while
 episodes run.
+
+Current collection requests exact rollout provenance for each separately
+sampled action. It rejects a policy revision change within an episode or across
+the corpus. Native no-importance-correction admission then requires that same
+identity to match the selected base policy. If behavior used a LoRA, execution
+revalidates and copies those exact bytes into the private trainer staging root
+while holding the adapter mutation barrier; later same-name disk rewrites
+cannot change the optimizer's starting weights.
 
 ### Retained trainer evidence
 

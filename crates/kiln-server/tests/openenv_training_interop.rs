@@ -74,7 +74,11 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
     .await
     .unwrap();
 
-    assert_eq!(summary.schema, "kiln.openenv-rollout-summary.v4");
+    assert_eq!(summary.schema, "kiln.openenv-rollout-summary.v5");
+    assert_eq!(
+        serde_json::to_value(summary.behavior_policy.as_ref().unwrap()).unwrap(),
+        fake_behavior_policy()
+    );
     assert_eq!(summary.rollout_count, 4);
     assert_eq!(summary.stats.recoverable_protocol_error_count, 4);
     assert_eq!(summary.stats.protocol_error_count, 0);
@@ -165,6 +169,7 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
     legacy_summary.reset_plan_sha256 = None;
     legacy_summary.training_contract = None;
     legacy_summary.training_submission = None;
+    legacy_summary.behavior_policy = None;
     std::fs::write(
         &legacy_summary_path,
         serde_json::to_vec_pretty(&legacy_summary).unwrap(),
@@ -273,6 +278,7 @@ async fn fake_preflight(
     let mut receipt = json!({
         "schema": "kiln.openenv-training-preflight.v1",
         "effective_config": config,
+        "behavior_policy": fake_behavior_policy(),
         "capacity": {
             "checked_unix_ms": 1,
             "queued_jobs": 0,
@@ -297,12 +303,22 @@ fn fake_effective_config(body: &Value) -> Value {
     config
 }
 
+fn fake_behavior_policy() -> Value {
+    json!({
+        "served_model_id": "fake-kiln-model",
+        "base_model_sha256": format!("sha256:{}", "a".repeat(64)),
+        "inference_config_sha256": format!("sha256:{}", "b".repeat(64)),
+        "implementation": "kiln/fake-openenv-test"
+    })
+}
+
 async fn fake_chat(State(state): State<FakeKilnState>, Json(body): Json<Value>) -> Json<Value> {
     assert!(
         state.training_preflight.lock().unwrap().is_some(),
         "OpenEnv training must preflight before its first policy request"
     );
     state.chat_requests.fetch_add(1, Ordering::Relaxed);
+    assert_eq!(body["rollout_provenance"], true);
     assert!(
         body["messages"].as_array().is_some_and(|messages| {
             messages.iter().any(|message| {
@@ -328,7 +344,10 @@ async fn fake_chat(State(state): State<FakeKilnState>, Json(body): Json<Value>) 
         r#"{"arm":99}"#
     };
     Json(json!({
-        "choices": [{"message": {"role": "assistant", "content": action}}],
+        "choices": [{
+            "message": {"role": "assistant", "content": action},
+            "rollout_provenance": {"behavior_policy": fake_behavior_policy()}
+        }],
         "usage": {"total_tokens": 4}
     }))
 }

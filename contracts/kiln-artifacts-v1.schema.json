@@ -2089,6 +2089,9 @@
         "group_plan_sha256": {
           "$ref": "#/$defs/Sha256"
         },
+        "behavior_policy": {
+          "$ref": "kiln-inference-v1.schema.json#/$defs/RolloutBehaviorPolicyIdentityV1"
+        },
         "environments": {
           "type": "array",
           "items": {
@@ -2101,6 +2104,7 @@
         "every completion has OpenEnv provenance",
         "all candidates in a group share endpoint, schema, reset hash, and seed",
         "completion reward equals OpenEnv episode_return",
+        "when present, one behavior-policy identity is shared by every completion",
         "per-environment and termination totals equal corpus totals"
       ],
       "description": "Validated semantic identity for an all-OpenEnv GRPO training corpus.",

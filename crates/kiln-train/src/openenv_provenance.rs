@@ -9,7 +9,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{GrpoGroup, OpenEnvEpisodeTerminationV1, OpenEnvRolloutProvenanceV1};
+use crate::{
+    GrpoGroup, OpenEnvEpisodeTerminationV1, OpenEnvRolloutProvenanceV1,
+    RolloutBehaviorPolicyIdentityV1,
+};
 
 pub const OPENENV_TRAINING_DATA_PROVENANCE_SCHEMA_V1: &str = "kiln.openenv-training-data.v1";
 
@@ -100,6 +103,10 @@ pub struct OpenEnvTrainingDataProvenanceV1 {
     pub total_steps: usize,
     pub terminations: OpenEnvTerminationCountsV1,
     pub group_plan_sha256: String,
+    /// One immutable behavior-policy revision for the complete corpus. Legacy
+    /// v1 corpora may omit it; current native collection always includes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior_policy: Option<RolloutBehaviorPolicyIdentityV1>,
     pub environments: Vec<OpenEnvTrainingEnvironmentV1>,
 }
 
@@ -120,6 +127,8 @@ impl<'de> Deserialize<'de> for OpenEnvTrainingDataProvenanceV1 {
             total_steps: usize,
             terminations: OpenEnvTerminationCountsV1,
             group_plan_sha256: String,
+            #[serde(default)]
+            behavior_policy: Option<RolloutBehaviorPolicyIdentityV1>,
             environments: Vec<OpenEnvTrainingEnvironmentV1>,
         }
 
@@ -136,6 +145,7 @@ impl<'de> Deserialize<'de> for OpenEnvTrainingDataProvenanceV1 {
             total_steps: wire.total_steps,
             terminations: wire.terminations,
             group_plan_sha256: wire.group_plan_sha256,
+            behavior_policy: wire.behavior_policy,
             environments: wire.environments,
         };
         provenance.validate().map_err(serde::de::Error::custom)?;
@@ -171,6 +181,9 @@ impl OpenEnvTrainingDataProvenanceV1 {
             "openenv_training_data.group_plan_sha256",
             &self.group_plan_sha256,
         )?;
+        if let Some(behavior_policy) = &self.behavior_policy {
+            behavior_policy.validate()?;
+        }
         if self.terminations.total() != Some(self.rollouts) {
             return Err(
                 "OpenEnv training-data termination counts do not equal rollouts".to_string(),
@@ -251,6 +264,7 @@ pub struct OpenEnvTrainingDataAccumulator {
     total_steps: usize,
     terminations: OpenEnvTerminationCountsV1,
     environments: BTreeMap<String, EnvironmentAccumulator>,
+    behavior_policy: Option<Option<RolloutBehaviorPolicyIdentityV1>>,
     plan_hasher: Sha256,
 }
 
@@ -268,6 +282,7 @@ impl Default for OpenEnvTrainingDataAccumulator {
             total_steps: 0,
             terminations: OpenEnvTerminationCountsV1::default(),
             environments: BTreeMap::new(),
+            behavior_policy: None,
             plan_hasher,
         }
     }
@@ -336,6 +351,16 @@ impl OpenEnvTrainingDataAccumulator {
                     completion.reward,
                     provenance.episode_return
                 ));
+            }
+            match &self.behavior_policy {
+                None => self.behavior_policy = Some(provenance.behavior_policy.clone()),
+                Some(expected) if expected == &provenance.behavior_policy => {}
+                Some(_) => {
+                    return Err(format!(
+                        "OpenEnv corpus behavior policy changed at group {group_index} candidate {}",
+                        candidate_index + 1
+                    ));
+                }
             }
         }
 
@@ -443,6 +468,7 @@ impl OpenEnvTrainingDataAccumulator {
             total_steps: self.total_steps,
             terminations: self.terminations,
             group_plan_sha256: format_sha256(&digest),
+            behavior_policy: self.behavior_policy.flatten(),
             environments: self
                 .environments
                 .into_values()
@@ -578,6 +604,16 @@ mod tests {
         format!("sha256:{}", byte.to_string().repeat(64))
     }
 
+    fn behavior_policy(byte: char) -> RolloutBehaviorPolicyIdentityV1 {
+        RolloutBehaviorPolicyIdentityV1 {
+            served_model_id: "test-model".to_string(),
+            base_model_sha256: hash(byte),
+            adapter: None,
+            inference_config_sha256: hash('d'),
+            implementation: "kiln/test".to_string(),
+        }
+    }
+
     fn completion(seed: u64, reward: f64) -> ScoredCompletion {
         let provenance = OpenEnvRolloutProvenanceV1::new(
             "math-env",
@@ -593,6 +629,8 @@ mod tests {
             OpenEnvEpisodeTerminationV1::Done,
             None,
         )
+        .unwrap()
+        .with_behavior_policy(behavior_policy('e'))
         .unwrap();
         ScoredCompletion::legacy("answer".to_string(), reward).with_openenv(provenance)
     }
@@ -617,6 +655,7 @@ mod tests {
         assert_eq!(first.total_steps, 8);
         assert_eq!(first.terminations.done, 4);
         assert_eq!(first.environments.len(), 1);
+        assert_eq!(first.behavior_policy, Some(behavior_policy('e')));
     }
 
     #[test]
@@ -650,6 +689,27 @@ mod tests {
                 .unwrap_err()
                 .contains("differs from episode_return")
         );
+    }
+
+    #[test]
+    fn corpus_rejects_behavior_policy_drift_or_missing_identity() {
+        let mut changed = group(7);
+        changed.completions[1]
+            .openenv
+            .as_mut()
+            .unwrap()
+            .behavior_policy = Some(behavior_policy('f'));
+        let error = openenv_training_data_provenance(&[changed]).unwrap_err();
+        assert!(error.contains("behavior policy changed"), "{error}");
+
+        let mut missing = group(7);
+        missing.completions[1]
+            .openenv
+            .as_mut()
+            .unwrap()
+            .behavior_policy = None;
+        let error = openenv_training_data_provenance(&[missing]).unwrap_err();
+        assert!(error.contains("behavior policy changed"), "{error}");
     }
 
     #[test]

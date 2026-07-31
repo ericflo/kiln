@@ -14,15 +14,20 @@ from json_schema_subset import validate_instance as validate_schema_instance
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "contracts" / "kiln-openenv-v1.schema.json"
 CONTROL_PLANE_SCHEMA_PATH = ROOT / "contracts" / "kiln-control-plane-v1.schema.json"
+INFERENCE_SCHEMA_PATH = ROOT / "contracts" / "kiln-inference-v1.schema.json"
 
 
 def validate_instance(value: object, schema: dict, root: dict) -> list[str]:
     control_plane = json.loads(CONTROL_PLANE_SCHEMA_PATH.read_text(encoding="utf-8"))
+    inference = json.loads(INFERENCE_SCHEMA_PATH.read_text(encoding="utf-8"))
     return validate_schema_instance(
         value,
         schema,
         root,
-        registry={"kiln-control-plane-v1.schema.json": control_plane},
+        registry={
+            "kiln-control-plane-v1.schema.json": control_plane,
+            "kiln-inference-v1.schema.json": inference,
+        },
     )
 
 
@@ -31,6 +36,12 @@ def hash_value(character: str) -> str:
 
 
 def fixtures() -> dict[str, dict]:
+    behavior_policy = {
+        "served_model_id": "Qwen3.5-4B",
+        "base_model_sha256": hash_value("8"),
+        "inference_config_sha256": hash_value("9"),
+        "implementation": "kiln/0.5.1/cpu/binary-sha256:test",
+    }
     inspection = {
         "identity": {
             "schema": "kiln.openenv-identity.v1",
@@ -90,10 +101,11 @@ def fixtures() -> dict[str, dict]:
         "mean_model_latency_ms": 1.5,
     }
     summary = {
-        "schema": "kiln.openenv-rollout-summary.v4",
+        "schema": "kiln.openenv-rollout-summary.v5",
         "kiln_url": "http://127.0.0.1:8420",
         "adapter": None,
         "adapter_label": "base",
+        "behavior_policy": behavior_policy,
         "environments": [inspection],
         "groups": 1,
         "group_size": 1,
@@ -126,6 +138,7 @@ def fixtures() -> dict[str, dict]:
                 "behavior_policy": "no_importance_correction",
                 "lora_rank": 8,
             },
+            "behavior_policy": behavior_policy,
         },
         "training_submission": {"job_id": "grpo-openenv-1"},
     }
@@ -280,7 +293,7 @@ def main() -> int:
         if not validate_instance(
             missing_reset_plan, schema["$defs"]["OpenEnvRolloutSummary"], schema
         ):
-            failures.append("self-test: v4 summary without reset_plan_sha256 was accepted")
+            failures.append("self-test: v5 summary without reset_plan_sha256 was accepted")
 
         missing_training_contract = copy.deepcopy(values["OpenEnvRolloutSummary"])
         del missing_training_contract["training_contract"]
@@ -642,8 +655,25 @@ def main() -> int:
         "X-Content-Type-Options",
     }:
         failures.append("OpenEnv artifact OpenAPI integrity headers are incomplete")
-    if "kiln.openenv-rollout-summary.v4" not in cli:
-        failures.append("openenv_cli.rs is missing summary v4")
+    if "kiln.openenv-rollout-summary.v5" not in cli:
+        failures.append("openenv_cli.rs is missing summary v5")
+    for term in ["rollout_provenance", "behavior_policy", "with_behavior_policy"]:
+        if term not in cli:
+            failures.append(f"openenv_cli.rs is missing behavior-policy binding term {term}")
+    behavior_binding_sources = {
+        "state.rs": (ROOT / "crates/kiln-server/src/state.rs", "openenv_behavior_policy_identity"),
+        "api/training.rs": (
+            ROOT / "crates/kiln-server/src/api/training.rs",
+            "validate_openenv_behavior_policy_binding",
+        ),
+        "training_queue.rs": (
+            ROOT / "crates/kiln-server/src/training_queue.rs",
+            "snapshot_openenv_behavior_adapter_locked",
+        ),
+    }
+    for label, (path, term) in behavior_binding_sources.items():
+        if term not in path.read_text():
+            failures.append(f"{label} is missing OpenEnv behavior-policy binding term {term}")
     for term in [
         "OPENENV_TRAINING_CONTRACT_SCHEMA_V1",
         "OpenEnvTrainingContract",

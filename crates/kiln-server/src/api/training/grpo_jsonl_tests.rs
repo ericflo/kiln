@@ -13,6 +13,13 @@ fn grpo_group() -> GrpoGroup {
 }
 
 fn openenv_grpo_group(seed: u64) -> GrpoGroup {
+    let behavior_policy = kiln_train::RolloutBehaviorPolicyIdentityV1 {
+        served_model_id: "test-model".to_string(),
+        base_model_sha256: format!("sha256:{}", "d".repeat(64)),
+        adapter: None,
+        inference_config_sha256: format!("sha256:{}", "e".repeat(64)),
+        implementation: "kiln/test".to_string(),
+    };
     let episode = kiln_train::OpenEnvRolloutProvenanceV1::new(
         "math-env",
         "https://env.test",
@@ -27,6 +34,8 @@ fn openenv_grpo_group(seed: u64) -> GrpoGroup {
         kiln_train::OpenEnvEpisodeTerminationV1::Done,
         None,
     )
+    .unwrap()
+    .with_behavior_policy(behavior_policy)
     .unwrap();
     GrpoGroup {
         messages: vec![ChatMessage::new("user", "a")],
@@ -166,4 +175,12 @@ fn grpo_dataset_path_admission_preserves_openenv_corpus_identity() {
     assert_eq!(openenv.unique_seeds, 2);
     assert_eq!(openenv.total_steps, 2);
     assert_eq!(openenv.environments[0].environment_name, "math-env");
+    assert_eq!(
+        openenv
+            .behavior_policy
+            .as_ref()
+            .expect("OpenEnv behavior-policy identity")
+            .implementation,
+        "kiln/test"
+    );
 }

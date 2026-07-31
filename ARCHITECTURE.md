@@ -428,7 +428,7 @@ OpenEnv is the environment-facing half of native reinforcement learning:
 ```text
 CLI train/start/status/artifact · dashboard · /v1/openenv/*
         │
-        ├── train preflight → effective GRPO config · adapter · suite · backend/optimizer
+        ├── train preflight → effective GRPO config · exact policy · suite · backend/optimizer
         │                     (before persistence or direct discovery/episodes/GPU work)
         │
         ├── bounded GET health · metadata · schema · environments · OpenAPI
@@ -448,7 +448,7 @@ one WS /ws connection per candidate episode
 AgenticGroup JSONL
         ├── Action segments → GRPO policy loss
         ├── Observation segments → ECHO environment loss
-        ├── OpenEnv identity → scored-payload hash and rollout receipt
+        ├── environment + behavior-policy identity → scored-payload hash and receipt
         └── exact typed protocol transcript → offline verification and live replay
         │
         ▼
@@ -489,9 +489,14 @@ parts of the same owned lifecycle.
 The admitted values become one typed `kiln.openenv-training-contract.v1`.
 Persisted v5 status writes it to `run.json` atomically with queue admission and
 the executor submits from that field, not from request defaults. Direct train
-builds the identical type from its preflight receipt. Summary v4 embeds the
-contract before the first artifact publication, so failed handoff is still
-auditable and a successful submission can be checked against admitted intent.
+builds the identical type from its preflight receipt. Every sampled action
+returns the exact base-model, inference-config/runtime, and optional adapter
+content revision. Collection rejects identity drift within an episode or
+corpus; native admission compares that identity with the selected policy.
+Summary v5 embeds both contract and identity before the first artifact
+publication, so failed handoff is still auditable. Under the adapter-mutation
+barrier, execution revalidates the identity and privately snapshots a distinct
+behavior adapter before GPU work.
 
 Server-owned runs are bounded by `[openenv]` policy and persisted below
 `<adapter_dir>/.openenv/runs/<run-id>/`. `run.json` records request, immutable

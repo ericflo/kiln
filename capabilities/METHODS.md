@@ -43,6 +43,7 @@ result. The rest are properties of the capability and your harness.
 | **OpenEnv task catalog** | does `kiln openenv tasks` report provider-backed splits and bounded rows, or a conforming unsupported result? | Use rows only to inventory dataset coverage. OpenEnv defines no row-to-reset binding; schedule portable training with explicit reset options and deterministic seeds. |
 | **OpenEnv trust boundary** | is the environment public, loopback, or protected by a bearer credential, and is that credential exact-origin scoped? | Use `--credential-env` for direct CLI work or a server-owned `[openenv.credentials.<id>]` handle. Never place tokens in task payloads, manifests, recipes, or receipts. |
 | **OpenEnv held-out plan** | reserve disjoint reset seeds and pin the environment deployment identity before training | OpenEnv promotion evidence must measure paired behavior-vs-candidate returns on unseen tasks, never the training episodes. |
+| **OpenEnv behavior policy** | does preflight name the exact base-model, inference-config, runtime implementation, and optional adapter content revision that will collect every action? | Keep one identity across the corpus. Kiln rejects drift and revalidates or snapshots the behavior adapter before training, so `no_importance_correction` means demonstrably on-policy rather than merely assumed on-policy. |
 | **OpenEnv terminal diagnosis** | does a failed persisted run expose `kiln.openenv-run-failure.v1` with a closed code, stage, retryability, and hint? | Branch pipeline recovery on the typed failure. `retryable=true` permits a corrected new attempt, never episode resume or reuse of the terminal attempt's idempotency key. |
 | **Reward variance** | sample 20 baseline rollouts on `datasets/train.tasks.jsonl`, compute group variance | < 0.03 → GRPO has no signal. ≥ 0.05 → strong signal filter applies. |
 | **Task is multi-turn tool-calling?** | is `rollout.py` driving pi or another agent loop? | If yes, agentic-GRPO with ECHO is mandatory; everything else is a sub-step. |
@@ -210,7 +211,10 @@ Assign one non-secret `idempotency_key` to each persisted hypothesis. Exact
 retained retries recover the same run across concurrency and restart; never
 change request semantics under that key. New v5 train status seals the exact
 `kiln.openenv-training-contract.v1`; verify it before following work and retain
-summary v4 with the stage evidence. Treat `queued` plus an admission
+summary v5 with the stage evidence. Its `behavior_policy` must agree with every
+episode and with `training.training_data.openenv`: base model, inference config,
+runtime implementation, and adapter content revision are all part of the
+identity. Treat `queued` plus an admission
 position as accepted work, retain the run ID, and cancel obsolete hypotheses.
 Attach an installed static `post_eval` suite when the stage also has a
 capability-level blind eval. Kiln preflights the exact effective GRPO config,
@@ -234,7 +238,11 @@ from the CLI or server run plus its environment deployment identity. Completed
 persisted runs expose admitted corpus identity at
 `training.training_data.openenv`; retain the run-owned `train_receipt` and
 `adapter_manifest` artifacts rather than depending on the mutable adapter path
-or joining a second status API. For a
+or joining a second status API. Before GPU work Kiln checks that this exact
+behavior policy still exists under the adapter-mutation barrier and snapshots a
+distinct behavior adapter into trainer staging. A policy-revision mismatch is
+a failed attempt, not an invitation to train on a silently off-policy corpus.
+For a
 kept OpenEnv adapter, also retain a native paired evaluation over disjoint
 seeds: baseline/candidate replay bundles, both summary digests, exact sign-test
 evidence, and the promotion receipt. Materialize server-run evidence only with

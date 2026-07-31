@@ -245,6 +245,7 @@
         "kiln_url",
         "adapter",
         "adapter_label",
+        "behavior_policy",
         "environments",
         "groups",
         "group_size",
@@ -270,10 +271,13 @@
         "rollouts"
       ],
       "properties": {
-        "schema": { "const": "kiln.openenv-rollout-summary.v4" },
+        "schema": { "const": "kiln.openenv-rollout-summary.v5" },
         "kiln_url": { "type": "string", "minLength": 1 },
         "adapter": { "type": ["string", "null"] },
         "adapter_label": { "type": "string", "minLength": 1 },
+        "behavior_policy": {
+          "$ref": "kiln-inference-v1.schema.json#/$defs/RolloutBehaviorPolicyIdentityV1"
+        },
         "environments": {
           "type": "array",
           "minItems": 1,

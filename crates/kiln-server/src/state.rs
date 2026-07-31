@@ -2871,6 +2871,62 @@ impl AppState {
         self.loaded_adapter_identity().map(|identity| identity.name)
     }
 
+    /// Resolve the immutable behavior-policy identity used by OpenEnv
+    /// collection and no-importance-correction GRPO admission. Adapter names
+    /// are operator-facing selectors; the returned identity binds the exact
+    /// config and safetensor bytes present on disk.
+    pub(crate) fn openenv_behavior_policy_identity(
+        &self,
+        adapter_name: Option<&str>,
+    ) -> Result<kiln_train::RolloutBehaviorPolicyIdentityV1, String> {
+        let base = if let Some(base) = self.base_teacher_identity.as_deref() {
+            kiln_train::RolloutBehaviorPolicyIdentityV1 {
+                served_model_id: base.served_model_id().to_string(),
+                base_model_sha256: prefixed_sha256(base.base_model_sha256()),
+                adapter: None,
+                inference_config_sha256: prefixed_sha256(base.inference_config_sha256()),
+                implementation: base.implementation().to_string(),
+            }
+        } else {
+            #[cfg(test)]
+            {
+                if matches!(self.backend.as_ref(), ModelBackend::Mock { .. }) {
+                    kiln_train::RolloutBehaviorPolicyIdentityV1 {
+                        served_model_id: self.served_model_id.clone(),
+                        base_model_sha256: format!("sha256:{}", "0".repeat(64)),
+                        adapter: None,
+                        inference_config_sha256: format!("sha256:{}", "1".repeat(64)),
+                        implementation: "kiln/mock-test-policy".to_string(),
+                    }
+                } else {
+                    return Err("server base behavior-policy identity is unavailable".to_string());
+                }
+            }
+            #[cfg(not(test))]
+            {
+                return Err("server base behavior-policy identity is unavailable".to_string());
+            }
+        };
+
+        let mut identity = base;
+        if let Some(name) = adapter_name {
+            let source = kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(
+                &self.adapter_dir.join(name),
+            )
+            .map_err(|error| {
+                format!(
+                    "resolve behavior adapter `{name}` content identity before OpenEnv collection: {error:#}"
+                )
+            })?;
+            identity.adapter = Some(kiln_train::RolloutAdapterIdentityV1 {
+                name: name.to_string(),
+                content_sha256: prefixed_sha256(&source.content_revision()),
+            });
+        }
+        identity.validate()?;
+        Ok(identity)
+    }
+
     pub(crate) fn deterministic_cache_key(
         &self,
         adapter: Option<LoadedAdapterIdentity>,
@@ -4492,6 +4548,14 @@ impl AppState {
             max_tracked_eval_jobs: 1024,
             eval_webhook_url: None,
         })
+    }
+}
+
+fn prefixed_sha256(value: &str) -> String {
+    if value.starts_with("sha256:") {
+        value.to_string()
+    } else {
+        format!("sha256:{value}")
     }
 }
 

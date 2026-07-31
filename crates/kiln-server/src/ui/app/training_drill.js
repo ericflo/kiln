@@ -182,6 +182,10 @@ function renderTrainMetadata(j) {
   const openenvTerminations = openenv?.terminations
     ? `done=${openenv.terminations.done || 0}, max_steps=${openenv.terminations.max_steps || 0}, invalid=${openenv.terminations.invalid_model_action || 0}, protocol=${openenv.terminations.protocol_error || 0}`
     : null;
+  const openenvPolicy = openenv?.behavior_policy || null;
+  const openenvPolicyLabel = openenvPolicy
+    ? `${openenvPolicy.adapter?.name || 'base'} @ ${openenvPolicy.adapter?.content_sha256 || openenvPolicy.base_model_sha256}`
+    : null;
   const config = replay?.request_body?.config || null;
   const rows = [
     renderDrillKv('Mode', hp.mode || replay?.kind || j.job_type),
@@ -208,6 +212,8 @@ function renderTrainMetadata(j) {
     renderDrillKv('OpenEnv total steps', openenv?.total_steps),
     renderDrillKv('OpenEnv terminations', openenvTerminations),
     renderDrillKv('OpenEnv group plan SHA-256', openenv?.group_plan_sha256),
+    renderDrillKv('OpenEnv behavior policy', openenvPolicyLabel),
+    renderDrillKv('OpenEnv inference config SHA-256', openenvPolicy?.inference_config_sha256),
   ].join('');
   const receiptRaw = receipt
     ? `<details style="margin-top:12px;"><summary>Raw train receipt</summary><pre class="req-pre">${escapeHtml(JSON.stringify(receipt, null, 2))}</pre></details>`

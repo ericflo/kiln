@@ -3701,6 +3701,9 @@ fn prepare_training_entry_admission(
                         admitted_openenv,
                     )
                 };
+            if let Some(openenv) = admitted_openenv.as_ref() {
+                validate_openenv_behavior_policy_binding(state, &req.config, openenv)?;
+            }
             info.training_data = Some(if let Some(source) = named_source.as_ref() {
                 named_training_provenance(
                     source,
@@ -3982,6 +3985,30 @@ fn prepare_training_entry_admission(
             entry.reserved_bytes = admission.reserved_bytes;
             entry.prepared_data = PreparedTrainingData::None;
         }
+    }
+    Ok(())
+}
+
+fn validate_openenv_behavior_policy_binding(
+    state: &AppState,
+    config: &kiln_train::GrpoConfig,
+    provenance: &kiln_train::OpenEnvTrainingDataProvenanceV1,
+) -> Result<(), ApiError> {
+    if config.behavior_policy != kiln_train::BehaviorPolicy::NoImportanceCorrection {
+        return Ok(());
+    }
+    let observed = provenance.behavior_policy.as_ref().ok_or_else(|| {
+        ApiError::training_invalid_request(
+            "OpenEnv no-importance-correction GRPO requires an exact behavior-policy identity on every rollout; recollect the corpus with a current Kiln OpenEnv client",
+        )
+    })?;
+    let expected = state
+        .openenv_behavior_policy_identity(config.base_adapter.as_deref())
+        .map_err(ApiError::training_invalid_request)?;
+    if observed != &expected {
+        return Err(ApiError::training_invalid_request(format!(
+            "OpenEnv corpus behavior policy does not match the exact policy selected for training: collected={observed:?}, current={expected:?}"
+        )));
     }
     Ok(())
 }
@@ -6299,6 +6326,52 @@ mod tests {
     fn grpo_dataset_path_submission_allows_generic_streaming_route() {
         let req = grpo_req(Some("/tmp/grpo.jsonl"), Vec::new());
         validate_grpo_submission_source(&req, None).unwrap();
+    }
+
+    #[test]
+    fn openenv_no_correction_admission_requires_the_current_behavior_policy() {
+        let state = teacher_binding_test_state();
+        let expected = state.openenv_behavior_policy_identity(None).unwrap();
+        let episode = kiln_train::OpenEnvRolloutProvenanceV1::new(
+            "math-env",
+            "https://env.test",
+            Some("3.1.0".to_string()),
+            format!("sha256:{}", "a".repeat(64)),
+            format!("sha256:{}", "b".repeat(64)),
+            format!("sha256:{}", "c".repeat(64)),
+            7,
+            1,
+            1.0,
+            true,
+            kiln_train::OpenEnvEpisodeTerminationV1::Done,
+            None,
+        )
+        .unwrap()
+        .with_behavior_policy(expected)
+        .unwrap();
+        let group = kiln_train::GrpoGroup {
+            messages: vec![ChatMessage::new("user", "solve")],
+            completions: vec![ScoredCompletion::legacy("answer".into(), 1.0).with_openenv(episode)],
+        };
+        let provenance = kiln_train::openenv_training_data_provenance(&[group])
+            .unwrap()
+            .unwrap();
+        validate_openenv_behavior_policy_binding(&state, &GrpoConfig::default(), &provenance)
+            .unwrap();
+
+        let mut missing = provenance.clone();
+        missing.behavior_policy = None;
+        let error =
+            validate_openenv_behavior_policy_binding(&state, &GrpoConfig::default(), &missing)
+                .unwrap_err();
+        assert!(error.message.contains("exact behavior-policy identity"));
+
+        let mut changed = provenance;
+        changed.behavior_policy.as_mut().unwrap().implementation = "different/runtime".into();
+        let error =
+            validate_openenv_behavior_policy_binding(&state, &GrpoConfig::default(), &changed)
+                .unwrap_err();
+        assert!(error.message.contains("does not match the exact policy"));
     }
 
     #[test]

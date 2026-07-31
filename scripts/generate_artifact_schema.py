@@ -229,6 +229,7 @@ def build_adapter_definitions() -> None:
             "total_steps": ref("NonNegativeInteger"),
             "terminations": ref("OpenEnvTerminationCountsV1"),
             "group_plan_sha256": ref("Sha256"),
+            "behavior_policy": external_ref(INFERENCE_SCHEMA, "RolloutBehaviorPolicyIdentityV1"),
             "environments": array(ref("OpenEnvTrainingEnvironmentV1"), min_items=1),
         },
         "Validated semantic identity for an all-OpenEnv GRPO training corpus.",
@@ -237,9 +238,11 @@ def build_adapter_definitions() -> None:
                 "every completion has OpenEnv provenance",
                 "all candidates in a group share endpoint, schema, reset hash, and seed",
                 "completion reward equals OpenEnv episode_return",
+                "when present, one behavior-policy identity is shared by every completion",
                 "per-environment and termination totals equal corpus totals",
             ]
         },
+        optional=("behavior_policy",),
     )
     add_object(
         "LoadedAdapterIdentity",

@@ -44,7 +44,8 @@ A **stage** is one trained adapter produced by one method, with:
 - ≥ 3-seed eval evidence
 - a kept iter row in `capability.jsonl` with `status: "kept"`
 - for OpenEnv stages, training rollout-summary SHA-256, native paired held-out
-  evaluation receipt and both summary digests, plus pinned deployment identity
+  evaluation receipt and both summary digests, pinned deployment identity, and
+  the exact behavior-policy identity that collected every action
 - for protected OpenEnv stages, the non-secret `authentication: bearer`
   identity and operator-owned credential-handle policy; secret values and
   variable names never enter the stage manifest
@@ -99,6 +100,7 @@ For a stage collected from OpenEnv, replace `openenv: null` with:
   "rollout_summary": "evidence/openenv.rollout-summary.json",
   "dataset_sha256": "sha256:…",
   "training_data": "kiln.openenv-training-data.v1",
+  "behavior_policy_sha256": "sha256:…",
   "train_receipt": "evidence/train_receipt.json",
   "adapter_manifest": "evidence/adapter_manifest.json",
   "environment_evaluation_receipt": "evidence/environment-evaluation/receipt.json",
@@ -114,6 +116,13 @@ For a stage collected from OpenEnv, replace `openenv: null` with:
 The URL and schema hash in a rollout identify what Kiln observed; they do not
 prove that an implementation behind the URL stayed unchanged. The deployment
 identity closes that evidence gap.
+
+The behavior-policy digest closes a separate model-lineage gap. It covers the
+base-model revision, inference configuration, serving implementation, and
+optional adapter content revision. It must match the rollout summary, admitted
+corpus, sealed training contract, train receipt, and adapter manifest. Kiln
+revalidates that identity under the adapter-mutation barrier and snapshots a
+distinct behavior adapter before training begins.
 
 ### §2.4 stages/ directory invariant
 
@@ -251,7 +260,8 @@ Before any GPU work in a stage N ≥ 2:
      its effective-GRPO/adapter/suite/backend/optimizer contract before retry;
      if an explicitly direct stage uses `kiln openenv train`, require its
      `/v1/openenv/training/preflight` receipt before collection and preserve the
-     returned effective config through final submission and summary v4's
+     returned effective config and exact behavior-policy identity through final
+     submission and summary v5's
      `kiln.openenv-training-contract.v1`; treat its capacity
      snapshot as evidence rather than a reservation;
      bind one stable non-secret `idempotency_key` to the stage so a

@@ -106,6 +106,41 @@ pub struct RolloutBehaviorPolicyIdentityV1 {
     pub implementation: String,
 }
 
+impl RolloutBehaviorPolicyIdentityV1 {
+    /// Validate the immutable policy identity independently of a token-level
+    /// rollout. OpenEnv episodes use this smaller identity because one episode
+    /// can contain several separately sampled assistant turns.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_identity_text(
+            "behavior_policy.served_model_id",
+            &self.served_model_id,
+            MAX_ROLLOUT_IDENTITY_TEXT_BYTES,
+        )?;
+        validate_sha256("behavior_policy.base_model_sha256", &self.base_model_sha256)?;
+        validate_sha256(
+            "behavior_policy.inference_config_sha256",
+            &self.inference_config_sha256,
+        )?;
+        validate_identity_text(
+            "behavior_policy.implementation",
+            &self.implementation,
+            MAX_ROLLOUT_IDENTITY_TEXT_BYTES,
+        )?;
+        if let Some(adapter) = &self.adapter {
+            validate_identity_text(
+                "behavior_policy.adapter.name",
+                &adapter.name,
+                MAX_ROLLOUT_IDENTITY_TEXT_BYTES,
+            )?;
+            validate_sha256(
+                "behavior_policy.adapter.content_sha256",
+                &adapter.content_sha256,
+            )?;
+        }
+        Ok(())
+    }
+}
+
 /// Exact tokenizer and chat-template identities used to build model inputs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -427,35 +462,7 @@ impl RolloutProvenanceV1 {
             );
         }
 
-        validate_identity_text(
-            "behavior_policy.served_model_id",
-            &self.behavior_policy.served_model_id,
-            MAX_ROLLOUT_IDENTITY_TEXT_BYTES,
-        )?;
-        validate_sha256(
-            "behavior_policy.base_model_sha256",
-            &self.behavior_policy.base_model_sha256,
-        )?;
-        validate_sha256(
-            "behavior_policy.inference_config_sha256",
-            &self.behavior_policy.inference_config_sha256,
-        )?;
-        validate_identity_text(
-            "behavior_policy.implementation",
-            &self.behavior_policy.implementation,
-            MAX_ROLLOUT_IDENTITY_TEXT_BYTES,
-        )?;
-        if let Some(adapter) = &self.behavior_policy.adapter {
-            validate_identity_text(
-                "behavior_policy.adapter.name",
-                &adapter.name,
-                MAX_ROLLOUT_IDENTITY_TEXT_BYTES,
-            )?;
-            validate_sha256(
-                "behavior_policy.adapter.content_sha256",
-                &adapter.content_sha256,
-            )?;
-        }
+        self.behavior_policy.validate()?;
         validate_sha256("tokenizer.vocab_sha256", &self.tokenizer.vocab_sha256)?;
         validate_sha256("tokenizer.config_sha256", &self.tokenizer.config_sha256)?;
         validate_sha256(
@@ -656,6 +663,12 @@ pub struct OpenEnvRolloutProvenanceV1 {
     pub openapi_version: Option<String>,
     pub environment_schema_sha256: String,
     pub action_schema_sha256: String,
+    /// Exact immutable policy revision that sampled every action in this
+    /// episode. Older v1 artifacts omit it; current native OpenEnv collection
+    /// always supplies it and training admission requires it for an on-policy
+    /// no-importance-correction run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior_policy: Option<RolloutBehaviorPolicyIdentityV1>,
     pub reset_sha256: String,
     pub seed: u64,
     pub steps: usize,
@@ -681,6 +694,8 @@ impl<'de> Deserialize<'de> for OpenEnvRolloutProvenanceV1 {
             openapi_version: Option<String>,
             environment_schema_sha256: String,
             action_schema_sha256: String,
+            #[serde(default)]
+            behavior_policy: Option<RolloutBehaviorPolicyIdentityV1>,
             reset_sha256: String,
             seed: u64,
             steps: usize,
@@ -699,6 +714,7 @@ impl<'de> Deserialize<'de> for OpenEnvRolloutProvenanceV1 {
             openapi_version: wire.openapi_version,
             environment_schema_sha256: wire.environment_schema_sha256,
             action_schema_sha256: wire.action_schema_sha256,
+            behavior_policy: wire.behavior_policy,
             reset_sha256: wire.reset_sha256,
             seed: wire.seed,
             steps: wire.steps,
@@ -735,6 +751,7 @@ impl OpenEnvRolloutProvenanceV1 {
             openapi_version,
             environment_schema_sha256,
             action_schema_sha256,
+            behavior_policy: None,
             reset_sha256,
             seed,
             steps,
@@ -749,6 +766,15 @@ impl OpenEnvRolloutProvenanceV1 {
 
     pub fn schema(&self) -> &str {
         &self.schema
+    }
+
+    pub fn with_behavior_policy(
+        mut self,
+        behavior_policy: RolloutBehaviorPolicyIdentityV1,
+    ) -> Result<Self, String> {
+        self.behavior_policy = Some(behavior_policy);
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -780,6 +806,9 @@ impl OpenEnvRolloutProvenanceV1 {
             &self.environment_schema_sha256,
         )?;
         validate_sha256("openenv.action_schema_sha256", &self.action_schema_sha256)?;
+        if let Some(behavior_policy) = &self.behavior_policy {
+            behavior_policy.validate()?;
+        }
         validate_sha256("openenv.reset_sha256", &self.reset_sha256)?;
         if !self.episode_return.is_finite() {
             return Err(format!(

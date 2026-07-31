@@ -913,8 +913,6 @@ impl OpenEnvRunRegistry {
         training_contract: Option<OpenEnvTrainingContract>,
     ) -> Result<OpenEnvRunInsertOutcome> {
         anyhow::ensure!(self.policy.enabled, "OpenEnv control plane is disabled");
-        let exactly_materialized = serde_json::to_value(&training_contract)?
-            == serde_json::to_value(materialized_openenv_training_contract(&request)?)?;
         let contract_kind_valid = match (request.kind, training_contract.as_ref()) {
             (OpenEnvRunKind::Rollout, None) => true,
             (OpenEnvRunKind::Train, Some(contract)) => {
@@ -923,7 +921,7 @@ impl OpenEnvRunRegistry {
             _ => false,
         };
         anyhow::ensure!(
-            contract_kind_valid && exactly_materialized,
+            contract_kind_valid,
             "OpenEnv run kind, request, and admitted training contract disagree"
         );
         let mut runs = self.runs.write().unwrap();
@@ -1546,6 +1544,7 @@ fn materialized_openenv_training_contract(
         schema: OPENENV_TRAINING_CONTRACT_SCHEMA_V1.to_string(),
         effective_config: effective_openenv_grpo_config(request, output_adapter),
         post_eval: request.post_eval.clone(),
+        behavior_policy: None,
     }))
 }
 
@@ -1553,21 +1552,21 @@ fn openenv_training_contract_matches_request(
     request: &OpenEnvRunRequest,
     contract: &OpenEnvTrainingContract,
 ) -> bool {
-    let expected_output = request.output_adapter.as_deref();
-    let expected_auto_load = request.auto_load
-        && !request
-            .environment_eval
-            .as_ref()
-            .is_some_and(|config| config.gate.is_some());
+    let Some(expected_output) = request.output_adapter.as_deref() else {
+        return false;
+    };
+    let expected_config = effective_openenv_grpo_config(request, expected_output);
     contract.schema == OPENENV_TRAINING_CONTRACT_SCHEMA_V1
         && request.kind == OpenEnvRunKind::Train
-        && contract.effective_config.output_name.as_deref() == expected_output
-        && contract.effective_config.base_adapter.as_deref()
-            == normalized_adapter(&request.adapter).as_deref()
-        && contract.effective_config.behavior_policy == BehaviorPolicy::NoImportanceCorrection
-        && contract.effective_config.auto_load == expected_auto_load
+        && serde_json::to_value(&contract.effective_config).ok()
+            == serde_json::to_value(&expected_config).ok()
         && serde_json::to_value(&contract.post_eval).ok()
             == serde_json::to_value(&request.post_eval).ok()
+        && contract.behavior_policy.as_ref().is_none_or(|policy| {
+            policy.validate().is_ok()
+                && policy.adapter.as_ref().map(|adapter| adapter.name.as_str())
+                    == normalized_adapter(&request.adapter).as_deref()
+        })
 }
 
 fn validate_openenv_training_contract(
@@ -1575,7 +1574,7 @@ fn validate_openenv_training_contract(
     behavior_adapter: &str,
     config: &GrpoConfig,
     post_eval: Option<&kiln_eval::PostEvalConfig>,
-) -> Result<(), ApiError> {
+) -> Result<kiln_train::RolloutBehaviorPolicyIdentityV1, ApiError> {
     // OpenEnv trajectories always carry explicit observation segments, so
     // validate the environment-token branch of the native kt-tape contract.
     super::training::validate_grpo_config_at_submit(config, true)?;
@@ -1593,7 +1592,16 @@ fn validate_openenv_training_contract(
         config.optimizer,
         config.lora_rank,
     )?;
-    Ok(())
+    state
+        .openenv_behavior_policy_identity(config.base_adapter.as_deref())
+        .map_err(|error| {
+            openenv_error(
+                StatusCode::CONFLICT,
+                "openenv_behavior_policy_unavailable",
+                error,
+                "Use a loadable immutable adapter revision and a real-model Kiln server, then retry.",
+            )
+        })
 }
 
 /// Reject a doomed OpenEnv train workflow before it is persisted or opens an
@@ -1616,7 +1624,7 @@ fn validate_openenv_training_preflight(
         )
     })?;
     let config = effective_openenv_grpo_config(request, output_adapter);
-    validate_openenv_training_contract(
+    let behavior_policy = validate_openenv_training_contract(
         state,
         &request.adapter,
         &config,
@@ -1626,6 +1634,7 @@ fn validate_openenv_training_preflight(
         schema: OPENENV_TRAINING_CONTRACT_SCHEMA_V1.to_string(),
         effective_config: config,
         post_eval: request.post_eval.clone(),
+        behavior_policy: Some(behavior_policy),
     }))
 }
 
@@ -1679,7 +1688,8 @@ fn preflight_training_inner(
         false,
     );
     let post_eval = request.post_eval;
-    validate_openenv_training_contract(state, &request.adapter, &config, post_eval.as_ref())?;
+    let behavior_policy =
+        validate_openenv_training_contract(state, &request.adapter, &config, post_eval.as_ref())?;
     let capacity = openenv_training_capacity_snapshot(state)?;
     tracing::info!(
         behavior_adapter = %request.adapter,
@@ -1694,6 +1704,7 @@ fn preflight_training_inner(
         schema: OPENENV_TRAINING_PREFLIGHT_SCHEMA_V1.to_string(),
         effective_config: config,
         post_eval,
+        behavior_policy: Some(behavior_policy),
         capacity,
         capacity_reserved: false,
     })
@@ -2313,6 +2324,17 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
             "OpenEnv train run has no valid admitted training contract"
         ),
     }
+    if let Some(contract) = training_contract.as_ref() {
+        if let Some(expected) = contract.behavior_policy.as_ref() {
+            let current = state
+                .openenv_behavior_policy_identity(contract.effective_config.base_adapter.as_deref())
+                .map_err(anyhow::Error::msg)?;
+            anyhow::ensure!(
+                expected == &current,
+                "OpenEnv behavior policy changed after training preflight and before collection began"
+            );
+        }
+    }
     let run_dir = state.openenv_runs.run_dir(run_id);
     let credential_envs = state
         .openenv_runs
@@ -2334,6 +2356,15 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
     let control = OpenEnvCollectionControl::new(cancel.clone(), Some(progress), Some(discovered));
     let policy = OpenEnvPolicyTransport::InProcess(state.clone());
     let mut collection = collect_openenv_rollouts_with_policy(&options, &policy, &control).await?;
+    if let Some(expected) = training_contract
+        .as_ref()
+        .and_then(|contract| contract.behavior_policy.as_ref())
+    {
+        anyhow::ensure!(
+            collection.summary.behavior_policy.as_ref() == Some(expected),
+            "OpenEnv behavior policy changed after training preflight and before collection completed"
+        );
+    }
     collection.summary.training_contract = training_contract.clone();
     anyhow::ensure!(!cancel.load(Ordering::Relaxed), "OpenEnv run cancelled");
     write_openenv_outputs(
@@ -3730,6 +3761,20 @@ mod tests {
                 .insert(submitted.clone(), Some(mismatched))
                 .is_err(),
             "persistence must reject a contract that disagrees with its owned request fields"
+        );
+        let mut malformed_policy = expected.clone();
+        malformed_policy.behavior_policy = Some(kiln_train::RolloutBehaviorPolicyIdentityV1 {
+            served_model_id: "test-model".into(),
+            base_model_sha256: "not-a-digest".into(),
+            adapter: None,
+            inference_config_sha256: format!("sha256:{}", "a".repeat(64)),
+            implementation: "kiln/test".into(),
+        });
+        assert!(
+            registry
+                .insert(submitted.clone(), Some(malformed_policy))
+                .is_err(),
+            "persistence must reject a malformed behavior-policy identity"
         );
         let (created, _) = insert_created(&registry, submitted);
         assert_eq!(created.schema, OPENENV_RUN_SCHEMA_V5);

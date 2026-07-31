@@ -123,7 +123,10 @@ a dependency, configuration namespace, or special execution path.
 Native GRPO admission preserves a validated OpenEnv corpus identity through
 live job status, the train receipt, and the installed adapter manifest. Its
 ordered plan digest binds each endpoint, schema, reset hash, seed, and candidate
-count; checkpoint resume separately binds every exact input byte.
+count. Every action also carries one content-addressed behavior-policy identity
+covering the base model, inference config/runtime, and optional adapter bytes;
+drift fails collection or admission instead of silently becoming off-policy.
+Checkpoint resume separately binds every exact input byte.
 
 OpenEnv is also native to the embedded dashboard and control plane. Use
 **Training → OpenEnv** in `/ui/`, submit `POST /v1/openenv/runs`, or use
@@ -148,8 +151,10 @@ trainer submission, CLI, dashboard, and the summary receipt consume that sealed
 contract instead of recomputing defaults. One-shot `kiln openenv train` calls
 `POST /v1/openenv/training/preflight` before discovery, accepts the returned
 effective config as authoritative, and submits those exact values after
-collection; summary v4 preserves the same contract even if submission later
-fails. The capacity snapshot is evidence, not a reservation, so final
+collection; summary v5 preserves that contract and policy identity even if
+submission later fails. Before GPU work Kiln revalidates the policy under the
+adapter-mutation barrier and privately snapshots a named behavior adapter. The
+capacity snapshot is evidence, not a reservation, so final
 native queue and memory admission still recheck live conditions. The
 `kiln_openenv_training_preflights_total{status="accepted"|"rejected"}` metric
 covers both paths; persisted rejection also retains its run-specific metric.
@@ -217,7 +222,7 @@ shared reset object can be replaced by an ordered object per environment for
 heterogeneous portfolios. Kiln strips caller-supplied seeds, assigns groups
 round-robin, and publishes a receipt-verifiable reset-plan digest; every listed
 endpoint must be exercised. Rollouts carry environment name, URL,
-action-schema hash, reset hash, seed,
+action-schema hash, reset hash, exact behavior-policy revision, seed,
 steps, return, and termination identity directly into Kiln's scored-payload
 hash.
 

@@ -27,7 +27,8 @@ use kiln_openenv::{
 };
 use kiln_train::{
     AgenticGroup, BehaviorPolicy, ChatMessage, GrpoConfig, OpenEnvEpisodeTerminationV1,
-    OpenEnvRolloutProvenanceV1, ScoredRollout, TurnKind, TurnSegment,
+    OpenEnvRolloutProvenanceV1, RolloutBehaviorPolicyIdentityV1, ScoredRollout, TurnKind,
+    TurnSegment,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -86,7 +87,8 @@ pub(crate) enum OpenEnvPolicyTransport {
 }
 
 impl OpenEnvPolicyTransport {
-    async fn complete(&self, body: Value) -> Result<Value> {
+    #[allow(unused_mut)] // test-only mock transport removes provenance before dispatch
+    async fn complete(&self, mut body: Value) -> Result<Value> {
         match self {
             Self::Http { client, kiln_url } => {
                 let response = client
@@ -109,6 +111,23 @@ impl OpenEnvPolicyTransport {
                 Ok(response_body)
             }
             Self::InProcess(state) => {
+                #[cfg(test)]
+                if matches!(
+                    state.backend.as_ref(),
+                    crate::state::ModelBackend::Mock { .. }
+                ) {
+                    body["rollout_provenance"] = Value::Bool(false);
+                    let adapter = body.get("adapter").and_then(Value::as_str);
+                    let behavior_policy = state
+                        .openenv_behavior_policy_identity(adapter)
+                        .map_err(anyhow::Error::msg)?;
+                    let mut response =
+                        crate::api::completions::openenv_chat_completion(state, body).await?;
+                    response["choices"][0]["rollout_provenance"] = json!({
+                        "behavior_policy": behavior_policy
+                    });
+                    return Ok(response);
+                }
                 crate::api::completions::openenv_chat_completion(state, body).await
             }
         }
@@ -676,6 +695,9 @@ pub struct OpenEnvTrainingPreflightReceipt {
     pub effective_config: GrpoConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_eval: Option<kiln_eval::PostEvalConfig>,
+    /// Immutable policy revision admitted before the first environment reset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior_policy: Option<RolloutBehaviorPolicyIdentityV1>,
     pub capacity: OpenEnvTrainingCapacitySnapshot,
     /// Always false in v1. Collection does not hold scarce trainer capacity.
     pub capacity_reserved: bool,
@@ -693,6 +715,10 @@ pub struct OpenEnvTrainingContract {
     pub effective_config: GrpoConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_eval: Option<kiln_eval::PostEvalConfig>,
+    /// Immutable policy revision that collection must retain through final
+    /// native trainer admission. Absent only on legacy persisted v1 records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior_policy: Option<RolloutBehaviorPolicyIdentityV1>,
 }
 
 impl OpenEnvTrainingPreflightReceipt {
@@ -701,6 +727,7 @@ impl OpenEnvTrainingPreflightReceipt {
             schema: OPENENV_TRAINING_CONTRACT_SCHEMA_V1.to_string(),
             effective_config: self.effective_config.clone(),
             post_eval: self.post_eval.clone(),
+            behavior_policy: self.behavior_policy.clone(),
         }
     }
 }
@@ -712,6 +739,10 @@ pub struct OpenEnvRolloutSummary {
     pub kiln_url: String,
     pub adapter: Option<String>,
     pub adapter_label: String,
+    /// Exact base-model/runtime/adapter revision that sampled every action in
+    /// this collection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior_policy: Option<RolloutBehaviorPolicyIdentityV1>,
     pub environments: Vec<OpenEnvInspection>,
     pub groups: usize,
     pub group_size: usize,
@@ -969,6 +1000,7 @@ struct ModelAction {
     action: Value,
     total_tokens: usize,
     latency_ms: f64,
+    behavior_policy: RolloutBehaviorPolicyIdentityV1,
 }
 
 #[derive(Debug)]
@@ -978,6 +1010,7 @@ enum ModelActionFailure {
         raw: Option<String>,
         total_tokens: usize,
         latency_ms: f64,
+        behavior_policy: RolloutBehaviorPolicyIdentityV1,
     },
     Request(anyhow::Error),
 }
@@ -2121,6 +2154,10 @@ pub async fn run_openenv_train(options: OpenEnvTrainOptions) -> Result<OpenEnvRo
     validate_options(&options.rollout)?;
     let preflight = preflight_openenv_training(&options).await?;
     let mut collection = collect_openenv_rollouts(&options.rollout).await?;
+    anyhow::ensure!(
+        collection.summary.behavior_policy == preflight.behavior_policy,
+        "Kiln behavior policy changed after OpenEnv training preflight and before collection completed"
+    );
     collection.summary.training_contract = Some(preflight.training_contract());
     write_openenv_outputs(
         &options.rollout,
@@ -2370,11 +2407,17 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
     let replay_bytes = replay_encoded.len();
     drop(replay_encoded);
     let stats = summarize_rollouts(&records);
+    let behavior_policy = kiln_train::openenv_training_data_provenance(&groups)
+        .map_err(anyhow::Error::msg)
+        .context("validate completed OpenEnv corpus policy identity")?
+        .and_then(|provenance| provenance.behavior_policy)
+        .context("current OpenEnv collection omitted its behavior-policy identity")?;
     let summary = OpenEnvRolloutSummary {
-        schema: "kiln.openenv-rollout-summary.v4".to_string(),
+        schema: "kiln.openenv-rollout-summary.v5".to_string(),
         kiln_url: options.kiln_url.trim_end_matches('/').to_string(),
         adapter: adapter.request_value.as_str().map(ToOwned::to_owned),
         adapter_label: adapter.label,
+        behavior_policy: Some(behavior_policy),
         environments: summary_environments,
         groups: options.groups,
         group_size: options.group_size,
@@ -2476,6 +2519,7 @@ async fn run_candidate_episode(
     let mut recoverable_protocol_errors = 0usize;
     let mut replay_exchanges = Vec::new();
     let mut terminal_protocol_error = false;
+    let mut behavior_policy: Option<RolloutBehaviorPolicyIdentityV1> = None;
 
     for step_index in 0..options.max_steps {
         control.ensure_active()?;
@@ -2506,7 +2550,15 @@ async fn run_candidate_episode(
                 raw,
                 total_tokens,
                 latency_ms,
+                behavior_policy: action_behavior_policy,
             }) => {
+                observe_openenv_behavior_policy(
+                    &mut behavior_policy,
+                    action_behavior_policy,
+                    group_index,
+                    candidate_index,
+                    step_index,
+                )?;
                 total_model_tokens = total_model_tokens.saturating_add(total_tokens);
                 total_model_latency_ms += latency_ms;
                 let raw = raw.unwrap_or_else(|| invalid_action_raw(&message));
@@ -2543,7 +2595,15 @@ async fn run_candidate_episode(
             action,
             total_tokens,
             latency_ms,
+            behavior_policy: action_behavior_policy,
         } = model_action;
+        observe_openenv_behavior_policy(
+            &mut behavior_policy,
+            action_behavior_policy,
+            group_index,
+            candidate_index,
+            step_index,
+        )?;
         total_model_tokens = total_model_tokens.saturating_add(total_tokens);
         total_model_latency_ms += latency_ms;
         let action_turn = action_segment(raw);
@@ -2682,7 +2742,12 @@ async fn run_candidate_episode(
         protocol_error_code.clone(),
     )
     .map_err(anyhow::Error::msg)
-    .context("build OpenEnv rollout provenance")?;
+    .context("build OpenEnv rollout provenance")?
+    .with_behavior_policy(
+        behavior_policy.context("OpenEnv episode completed without a behavior-policy identity")?,
+    )
+    .map_err(anyhow::Error::msg)
+    .context("bind OpenEnv rollout to its exact behavior policy")?;
     let rollout = ScoredRollout::from_trajectory(trajectory, episode_return).with_openenv(openenv);
     let replay = OpenEnvReplayCandidate {
         candidate_index,
@@ -2763,6 +2828,7 @@ async fn generate_model_action(
         "seed": seed,
         "max_tokens": max_tokens,
         "temperature": temperature,
+        "rollout_provenance": true,
         "chat_template_kwargs": {
             "enable_thinking": thinking
         }
@@ -2779,6 +2845,19 @@ async fn generate_model_action(
         .and_then(Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
         .unwrap_or_default();
+    let behavior_policy: RolloutBehaviorPolicyIdentityV1 = response_body
+        .pointer("/choices/0/rollout_provenance/behavior_policy")
+        .cloned()
+        .context("Kiln response choices[0].rollout_provenance.behavior_policy is missing")
+        .and_then(|value| {
+            serde_json::from_value(value)
+                .context("Kiln response behavior-policy identity is malformed")
+        })
+        .and_then(|identity: RolloutBehaviorPolicyIdentityV1| {
+            identity.validate().map_err(anyhow::Error::msg)?;
+            Ok(identity)
+        })
+        .map_err(ModelActionFailure::Request)?;
     let raw = response_body
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
@@ -2787,6 +2866,7 @@ async fn generate_model_action(
             raw: None,
             total_tokens,
             latency_ms,
+            behavior_policy: behavior_policy.clone(),
         })?
         .to_string();
     let action = parse_model_action(&raw).map_err(|message| ModelActionFailure::Invalid {
@@ -2794,13 +2874,33 @@ async fn generate_model_action(
         raw: Some(raw.clone()),
         total_tokens,
         latency_ms,
+        behavior_policy: behavior_policy.clone(),
     })?;
     Ok(ModelAction {
         raw,
         action,
         total_tokens,
         latency_ms,
+        behavior_policy,
     })
+}
+
+fn observe_openenv_behavior_policy(
+    episode_policy: &mut Option<RolloutBehaviorPolicyIdentityV1>,
+    observed: RolloutBehaviorPolicyIdentityV1,
+    group_index: usize,
+    candidate_index: usize,
+    step_index: usize,
+) -> Result<()> {
+    if let Some(expected) = episode_policy.as_ref() {
+        anyhow::ensure!(
+            expected == &observed,
+            "OpenEnv behavior policy changed during group {group_index} candidate {candidate_index} at step {step_index}: expected {expected:?}, observed {observed:?}"
+        );
+    } else {
+        *episode_policy = Some(observed);
+    }
+    Ok(())
 }
 
 pub(crate) fn initial_messages(
@@ -3285,6 +3385,22 @@ fn validate_openenv_training_preflight_receipt(
     anyhow::ensure!(
         serde_json::to_value(&receipt.post_eval)? == serde_json::to_value(&request.post_eval)?,
         "Kiln OpenEnv training preflight changed the requested post-evaluation contract"
+    );
+    let behavior_policy = receipt
+        .behavior_policy
+        .as_ref()
+        .context("Kiln OpenEnv training preflight omitted its behavior-policy identity")?;
+    behavior_policy
+        .validate()
+        .map_err(anyhow::Error::msg)
+        .context("Kiln OpenEnv training preflight returned an invalid behavior-policy identity")?;
+    anyhow::ensure!(
+        behavior_policy
+            .adapter
+            .as_ref()
+            .map(|adapter| adapter.name.as_str())
+            == expected_base,
+        "Kiln OpenEnv training preflight behavior policy differs from the requested adapter"
     );
     Ok(())
 }
@@ -3895,6 +4011,16 @@ mod tests {
             schema: OPENENV_TRAINING_PREFLIGHT_SCHEMA_V1.into(),
             effective_config,
             post_eval: None,
+            behavior_policy: Some(RolloutBehaviorPolicyIdentityV1 {
+                served_model_id: "test-model".into(),
+                base_model_sha256: format!("sha256:{}", "a".repeat(64)),
+                adapter: Some(kiln_train::RolloutAdapterIdentityV1 {
+                    name: "behavior-agent".into(),
+                    content_sha256: format!("sha256:{}", "b".repeat(64)),
+                }),
+                inference_config_sha256: format!("sha256:{}", "c".repeat(64)),
+                implementation: "kiln/test".into(),
+            }),
             capacity: OpenEnvTrainingCapacitySnapshot {
                 checked_unix_ms: 17,
                 queued_jobs: 1,

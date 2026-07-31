@@ -1023,6 +1023,26 @@ impl QueueEntry {
     }
 }
 
+fn admitted_openenv_behavior_policy(
+    job: &QueuedJob,
+    prepared: &PreparedTrainingData,
+) -> Result<Option<kiln_train::RolloutBehaviorPolicyIdentityV1>, String> {
+    let provenance = match (job, prepared) {
+        (QueuedJob::Grpo(request), PreparedTrainingData::None) => {
+            kiln_train::openenv_training_data_provenance(&request.groups)?
+        }
+        (QueuedJob::Grpo(_), PreparedTrainingData::GrpoJsonl(receipt)) => receipt.openenv.clone(),
+        _ => None,
+    };
+    let Some(provenance) = provenance else {
+        return Ok(None);
+    };
+    provenance.behavior_policy.map(Some).ok_or_else(|| {
+        "OpenEnv training corpus lost its admitted behavior-policy identity before execution"
+            .to_string()
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumeCheckpointIdentity {
     checkpoint_id: String,
@@ -4150,6 +4170,8 @@ fn prepare_training_publication(
     state: &AppState,
     adapter_name: &str,
     allow_loaded_reload: bool,
+    base_adapter: Option<&str>,
+    openenv_behavior_policy: Option<&kiln_train::RolloutBehaviorPolicyIdentityV1>,
 ) -> Result<PreparedTrainingPublication, String> {
     let staging_root = tempfile::Builder::new()
         .prefix(".training-tmp-")
@@ -4164,6 +4186,14 @@ fn prepare_training_publication(
     }
     let expected_revision =
         crate::adapter_swap::capture_adapter_disk_revision_locked(&final_path, &serial)?;
+    snapshot_openenv_behavior_adapter_locked(
+        state,
+        adapter_name,
+        base_adapter,
+        openenv_behavior_policy,
+        staging_root.path(),
+        &serial,
+    )?;
     snapshot_starting_adapter_locked(
         &final_path,
         staging_root.path(),
@@ -4175,6 +4205,61 @@ fn prepare_training_publication(
         final_path,
         expected_revision,
     })
+}
+
+fn snapshot_openenv_behavior_adapter_locked(
+    state: &AppState,
+    output_adapter: &str,
+    base_adapter: Option<&str>,
+    expected: Option<&kiln_train::RolloutBehaviorPolicyIdentityV1>,
+    staging_root: &std::path::Path,
+    _serial: &crate::adapter_swap::AdapterMutationGuard<'_>,
+) -> Result<(), String> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let current = state.openenv_behavior_policy_identity(base_adapter)?;
+    if &current != expected {
+        return Err(format!(
+            "openenv_behavior_policy_changed: collected {expected:?}, current {current:?}; no training weights were changed"
+        ));
+    }
+    let expected_adapter = expected.adapter.as_ref();
+    if expected_adapter.map(|adapter| adapter.name.as_str()) != base_adapter {
+        return Err(
+            "OpenEnv behavior-policy adapter does not match the queued GRPO base_adapter"
+                .to_string(),
+        );
+    }
+    let Some(adapter) = expected_adapter else {
+        return Ok(());
+    };
+    // Same-name continuation is already copied to the trainer's special
+    // starting snapshot below. A distinct behavior adapter is copied into the
+    // staging root under its selector, which the trainer resolves before the
+    // mutable durable adapter directory.
+    if adapter.name == output_adapter {
+        return Ok(());
+    }
+    let source = state.adapter_dir.join(&adapter.name);
+    let snapshot = staging_root.join(&adapter.name);
+    snapshot_adapter_tree(&source, &snapshot)?;
+    let actual = kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(&snapshot).map_err(
+        |error| {
+            format!(
+                "validate pinned OpenEnv behavior adapter at {}: {error:#}",
+                snapshot.display()
+            )
+        },
+    )?;
+    let actual = format!("sha256:{}", actual.content_revision());
+    if actual != adapter.content_sha256 {
+        return Err(format!(
+            "pinned OpenEnv behavior-adapter revision mismatch: expected {}, found {actual}",
+            adapter.content_sha256
+        ));
+    }
+    Ok(())
 }
 
 fn snapshot_starting_adapter_locked(
@@ -4513,7 +4598,24 @@ fn execute_job(state: AppState, mut entry: QueueEntry) {
         },
     );
     let promotion_gate_pending = automatic_gate_count > 0 || external_promotion_gate_pending;
-    let publication = prepare_training_publication(&state, &adapter_name, !promotion_gate_pending);
+    let base_adapter = match &entry.job {
+        QueuedJob::Grpo(request) => request.config.base_adapter.as_deref(),
+        _ => None,
+    };
+    let openenv_behavior_policy =
+        admitted_openenv_behavior_policy(&entry.job, &entry.prepared_data);
+    let publication = openenv_behavior_policy
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|policy| {
+            prepare_training_publication(
+                &state,
+                &adapter_name,
+                !promotion_gate_pending,
+                base_adapter,
+                policy.as_ref(),
+            )
+        });
 
     let metric_type = match job_type {
         TrainingJobType::Sft => TrainingMetricType::Sft,
@@ -5813,7 +5915,7 @@ mod tests {
         )
         .unwrap()
         .content_revision();
-        let publication = prepare_training_publication(&state, "target", true).unwrap();
+        let publication = prepare_training_publication(&state, "target", true, None, None).unwrap();
         write_revisioned_adapter(publication.output_root(), "target", 2.0);
 
         // Simulate a delete/upload or another serialized publisher winning
@@ -5874,7 +5976,7 @@ mod tests {
                 .content_revision();
         let source_bytes = std::fs::read(&source_model).unwrap();
 
-        let publication = prepare_training_publication(&state, "target", true).unwrap();
+        let publication = prepare_training_publication(&state, "target", true, None, None).unwrap();
         let snapshot_dir = publication
             .output_root()
             .join(kiln_train::trainer::STARTING_ADAPTER_SNAPSHOT_DIR);
@@ -5915,6 +6017,57 @@ mod tests {
     }
 
     #[test]
+    fn openenv_behavior_adapter_is_revision_checked_and_pinned_for_training() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = mock_state_in(tmp.path());
+        write_revisioned_adapter(tmp.path(), "behavior", 1.0);
+        let expected = state
+            .openenv_behavior_policy_identity(Some("behavior"))
+            .unwrap();
+        let source_bytes =
+            std::fs::read(tmp.path().join("behavior/adapter_model.safetensors")).unwrap();
+
+        let publication = prepare_training_publication(
+            &state,
+            "candidate",
+            true,
+            Some("behavior"),
+            Some(&expected),
+        )
+        .unwrap();
+        let pinned = publication.output_root().join("behavior");
+        assert_eq!(
+            kiln_model::lora_loader::LoraSourceIdentity::from_adapter_dir(&pinned)
+                .unwrap()
+                .content_revision(),
+            expected
+                .adapter
+                .as_ref()
+                .unwrap()
+                .content_sha256
+                .strip_prefix("sha256:")
+                .unwrap()
+        );
+
+        write_revisioned_adapter(tmp.path(), "behavior", 2.0);
+        assert_eq!(
+            std::fs::read(pinned.join("adapter_model.safetensors")).unwrap(),
+            source_bytes,
+            "the trainer input must not follow later behavior-adapter rewrites"
+        );
+        let error = prepare_training_publication(
+            &state,
+            "another-candidate",
+            true,
+            Some("behavior"),
+            Some(&expected),
+        )
+        .err()
+        .expect("a stale collected behavior policy must fail before training");
+        assert!(error.contains("openenv_behavior_policy_changed"), "{error}");
+    }
+
+    #[test]
     fn staged_training_publication_replaces_idle_revision_and_checkpoints() {
         let tmp = tempfile::tempdir().unwrap();
         let state = mock_state_in(tmp.path());
@@ -5926,7 +6079,7 @@ mod tests {
             .join("target-checkpoint-step-00000001.kiln-checkpoint");
         std::fs::create_dir_all(&resumable).unwrap();
         std::fs::write(resumable.join("marker"), b"immutable").unwrap();
-        let publication = prepare_training_publication(&state, "target", true).unwrap();
+        let publication = prepare_training_publication(&state, "target", true, None, None).unwrap();
         write_revisioned_adapter(publication.output_root(), "target", 2.0);
         std::fs::create_dir_all(publication.output_root().join("target-checkpoint-2")).unwrap();
         std::fs::write(
@@ -5980,7 +6133,7 @@ mod tests {
         *state.loaded_adapter.write().unwrap() = Some(
             crate::state::LoadedAdapterIdentity::from_source("target", &old_source),
         );
-        let publication = prepare_training_publication(&state, "target", true).unwrap();
+        let publication = prepare_training_publication(&state, "target", true, None, None).unwrap();
         write_revisioned_adapter(publication.output_root(), "target", 2.0);
 
         let error = publish_training_output(
@@ -6017,7 +6170,7 @@ mod tests {
             crate::state::LoadedAdapterIdentity::from_source("target", &old_source),
         );
 
-        let error = prepare_training_publication(&state, "target", false)
+        let error = prepare_training_publication(&state, "target", false, None, None)
             .err()
             .expect("a gated rewrite cannot reload unapproved bytes");
         assert!(error.contains("adapter_revision_conflict"), "{error}");
