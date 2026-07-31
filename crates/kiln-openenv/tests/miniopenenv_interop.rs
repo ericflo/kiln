@@ -63,9 +63,11 @@ async fn drives_a_stateful_miniopenenv_counter_episode() {
     episode.close().await.unwrap();
 }
 
-/// The pinned downstream matrix currently publishes an optional, generic
-/// text-observation profile. Kiln does not require this field from OpenEnv,
-/// but it must preserve and expose it when an environment offers one.
+/// Every environment published by the selected downstream oracle currently
+/// offers an optional, generic text-observation profile. The harness derives
+/// this matrix from that checkout rather than duplicating its inventory here.
+/// Kiln does not require this field from OpenEnv, but it must preserve and
+/// expose it when an environment offers one.
 #[tokio::test]
 #[ignore = "requires the live OpenEnv arcade matrix"]
 async fn discovers_and_resets_every_text_profiled_arcade_environment() {
@@ -75,7 +77,10 @@ async fn discovers_and_resets_every_text_profiled_arcade_environment() {
         .split(',')
         .filter(|url| !url.trim().is_empty())
         .collect::<Vec<_>>();
-    assert_eq!(urls.len(), 22, "the pinned arcade matrix must have 22 URLs");
+    assert!(
+        !urls.is_empty(),
+        "the selected OpenEnv oracle must publish at least one matrix URL"
+    );
 
     for (index, url) in urls.into_iter().enumerate() {
         let client = OpenEnvClient::new(url).unwrap();
@@ -137,10 +142,11 @@ async fn discovers_and_resets_every_text_profiled_arcade_environment() {
     }
 }
 
-/// Exact-verifier text environments exercise the one-step RL shape used by
-/// generated math tasks without teaching the client any environment names.
-/// A schema-invalid action must remain recoverable, a wrong answer must receive
-/// an environment-owned integer reward, and terminal state must be immutable.
+/// Every exact-verifier text environment published by the selected oracle
+/// exercises the one-step RL shape used by generated math tasks without
+/// teaching the client any environment names. A schema-invalid action must
+/// remain recoverable, a wrong answer must receive an environment-owned integer
+/// reward, and terminal state must be immutable.
 #[tokio::test]
 #[ignore = "requires live exact-verifier OpenEnv text environments"]
 async fn drives_every_exact_verifier_text_environment() {
@@ -150,10 +156,9 @@ async fn drives_every_exact_verifier_text_environment() {
         .split(',')
         .filter(|url| !url.trim().is_empty())
         .collect::<Vec<_>>();
-    assert_eq!(
-        urls.len(),
-        8,
-        "the pinned exact-verifier text matrix must have 8 URLs"
+    assert!(
+        !urls.is_empty(),
+        "the selected OpenEnv oracle must publish at least one exact-text URL"
     );
 
     for (index, url) in urls.into_iter().enumerate() {

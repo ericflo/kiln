@@ -413,6 +413,12 @@ def main() -> int:
     capability_pipeline = (ROOT / "capabilities" / "PIPELINE.md").read_text(
         encoding="utf-8"
     )
+    interop_harness = (ROOT / "scripts" / "check_miniopenenv_interop.sh").read_text(
+        encoding="utf-8"
+    )
+    interop_workflow = (
+        ROOT / ".github" / "workflows" / "openenv-interop.yml"
+    ).read_text(encoding="utf-8")
     http_api = json.loads(
         (ROOT / "contracts" / "kiln-http-api-v1.openapi.json").read_text(
             encoding="utf-8"
@@ -748,11 +754,34 @@ def main() -> int:
     ]:
         if term not in capability_methods and term not in capability_pipeline:
             failures.append(f"capability pipeline is missing failure term {term!r}")
+    for term in [
+        "make -C \"$oracle_root\" --no-print-directory -pn",
+        "ARCADE_GAMES",
+        "ARCADE_TASKS",
+        "ARCADE_MATH",
+        "matrix_names",
+    ]:
+        if term not in interop_harness:
+            failures.append(
+                f"OpenEnv interoperability harness is missing dynamic inventory term {term!r}"
+            )
+    for term in [
+        "schedule:",
+        "workflow_dispatch:",
+        "OPENENV_INTEROP_PIN:",
+        "revision=origin/main",
+        "revision=\"$OPENENV_INTEROP_PIN\"",
+        "checkout --detach \"$revision\"",
+    ]:
+        if term not in interop_workflow:
+            failures.append(
+                f"OpenEnv interoperability workflow is missing pinned/edge term {term!r}"
+            )
 
     if failures:
         raise SystemExit("\n".join(failures))
     print(
-        "OpenEnv typed failures, training preflight, bounded collection, self-contained trainer evidence, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, and live-replay contracts match"
+        "OpenEnv typed failures, training preflight, bounded collection, self-contained trainer evidence, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, live replay, and continuous pinned/edge interoperability contracts match"
     )
     return 0
 

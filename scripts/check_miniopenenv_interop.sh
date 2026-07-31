@@ -5,19 +5,57 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 oracle_root=${OPENENV_INTEROP_ROOT:-"$repo_root/../miniopenenv"}
 cargo_bin=${CARGO_BIN:-cargo}
 base_port=${KILN_OPENENV_INTEROP_PORT:-18990}
-declare -a exact_text_names=(
-    measure algebra change space discrete chance evidence reason
+declare -a arcade_game_names=()
+declare -a arcade_task_names=()
+declare -a exact_text_names=()
+oracle_inventory=$(
+    make -C "$oracle_root" --no-print-directory -pn |
+        awk '
+            /^ARCADE_GAMES = / { sub(/^ARCADE_GAMES = /, ""); print "games\t" $0 }
+            /^ARCADE_TASKS = / { sub(/^ARCADE_TASKS = /, ""); print "tasks\t" $0 }
+            /^ARCADE_MATH = / { sub(/^ARCADE_MATH = /, ""); print "math\t" $0 }
+        '
 )
-declare -a server_names=(
-    counter bandit cartpole snake g2048 wordle blackjack maze pong connect4 kuhn
-    dyna inducto logic filtro "${exact_text_names[@]}"
+while IFS=$'\t' read -r category values; do
+    case "$category" in
+        games) read -r -a arcade_game_names <<<"$values" ;;
+        tasks) read -r -a arcade_task_names <<<"$values" ;;
+        math) read -r -a exact_text_names <<<"$values" ;;
+    esac
+done <<<"$oracle_inventory"
+if (( ${#arcade_game_names[@]} == 0 || ${#arcade_task_names[@]} == 0 || ${#exact_text_names[@]} == 0 )); then
+    echo "OpenEnv interoperability oracle did not publish non-empty ARCADE_GAMES, ARCADE_TASKS, and ARCADE_MATH inventories" >&2
+    exit 1
+fi
+declare -a matrix_names=(
+    "${arcade_game_names[@]}" "${arcade_task_names[@]}" "${exact_text_names[@]}"
 )
+declare -a server_names=(counter "${matrix_names[@]}")
 declare -a server_pids=()
 declare -a log_files=()
 declare -a arcade_urls=()
 declare -a exact_text_urls=()
 declare -A server_urls=()
 declare -A exact_text_name_set=()
+declare -A server_name_set=()
+for name in "${server_names[@]}"; do
+    if [[ ! "$name" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        echo "OpenEnv interoperability oracle published unsafe server name $name" >&2
+        exit 1
+    fi
+    if [[ -n ${server_name_set[$name]:-} ]]; then
+        echo "OpenEnv interoperability oracle published duplicate server name $name" >&2
+        exit 1
+    fi
+    server_name_set["$name"]=1
+done
+for required_name in bandit connect4 maze wordle; do
+    if [[ -z ${server_name_set[$required_name]:-} ]]; then
+        echo "OpenEnv interoperability oracle no longer publishes representative server $required_name" >&2
+        exit 1
+    fi
+done
+echo "OpenEnv interoperability inventory: ${#matrix_names[@]} published environments (${#arcade_game_names[@]} games, ${#arcade_task_names[@]} synthesis tasks, ${#exact_text_names[@]} exact-text tasks)"
 for name in "${exact_text_names[@]}"; do
     exact_text_name_set["$name"]=1
 done

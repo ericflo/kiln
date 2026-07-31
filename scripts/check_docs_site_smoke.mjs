@@ -1683,7 +1683,9 @@ function validateSftLossRouteDocumentationSourceContract() {
     'every request rechecks exact byte count and SHA-256 on the same descriptor before streaming',
     'kiln openenv start',
     'kiln openenv artifact',
-    'all twenty-two text-profiled arcade and math servers strictly as byte-real interoperability oracles',
+    'Reproducible CI derives the complete published environment matrix from a pinned oracle checkout',
+    'a scheduled edge lane repeats that byte-real gate against upstream main',
+    'The oracle inventory is never production policy',
   ]);
   if (missingArchitectureTerms.length > 0) {
     fail(`docs/site/architecture.html: reader architecture contract missing terms: ${missingArchitectureTerms.join(', ')}`);

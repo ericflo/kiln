@@ -509,10 +509,15 @@ Run the byte-real interoperability gate with:
 CARGO_BIN="$(command -v cargo)" scripts/check_miniopenenv_interop.sh
 ```
 
-The script pins and rebuilds miniopenenv only as a fast OpenEnv protocol oracle.
-It launches its C99 counter and all twenty-two text-profiled environment
-servers—the original fourteen arcade environments plus eight text-first math
-families—then tests:
+The script rebuilds whichever oracle checkout `OPENENV_INTEROP_ROOT` names and
+derives its complete games, synthesis-task, and exact-text inventories from
+that checkout's published build graph. It does not duplicate environment names
+inside Kiln. Pull-request and push CI select a fixed revision for reproducible
+gating; a weekly and manually dispatched edge lane selects the oracle's current
+`main`, so upstream protocol or environment drift becomes visible without a
+Kiln commit. The current pin publishes a C99 counter plus twenty-two
+text-profiled servers—fourteen arcade/synthesis environments and eight
+text-first math families—then tests:
 
 - discovery, typed schema identity, and close;
 - the optional `input_text` profile across every environment in the matrix, without
@@ -536,8 +541,9 @@ replays every environment exchange.
 
 Miniopenenv is deliberately confined to this test-oracle boundary. The gate
 rejects miniopenenv-named production environment variables, and production Rust
-sources contain no miniopenenv-specific runtime branch. The same client and
-training path accepts every implementation that satisfies the OpenEnv protocol.
+sources contain no miniopenenv-specific runtime branch. Dynamic test inventory
+is not runtime discovery policy: the same client and training path accepts
+every implementation that satisfies the OpenEnv protocol.
 
 ## Troubleshooting
 

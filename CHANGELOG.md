@@ -67,9 +67,12 @@
   plan, and manifest receipt hash must all agree before the run completes;
   dashboard, CLI, schema, and download APIs expose the resulting evidence
   without a second control-plane lookup.
-  CI drives all twenty-two pinned
-  text-profiled arcade and math servers plus a native
-  collect/submit/verify/replay batch end to end.
+  Reproducible CI derives and drives every environment published by its pinned
+  oracle checkout—currently twenty-two text-profiled arcade, synthesis, and
+  math servers—plus a native collect/submit/verify/replay batch end to end. A
+  scheduled edge lane repeats the dynamically discovered matrix against
+  upstream `main`, surfacing additions and protocol drift without putting
+  oracle-specific names or policy into production Kiln.
 - Corrected the v0.5.1 Vulkan recovery architecture. The recovered route set
   is no longer installed as a renamed global machine-tuned default. Policy v6
   is derived from the selected physical device's reported workgroup geometry,

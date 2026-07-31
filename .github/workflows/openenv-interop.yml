@@ -1,6 +1,11 @@
 name: OpenEnv interoperability
 
 on:
+  schedule:
+    # Keep the reproducible push gate pinned, but exercise the current oracle
+    # every week so upstream protocol and environment drift becomes visible
+    # without waiting for a Kiln change or a manual reminder.
+    - cron: '17 13 * * 1'
   pull_request:
     paths:
       - 'Cargo.toml'
@@ -70,6 +75,9 @@ on:
       - '.github/workflows/openenv-interop.yml'
   workflow_dispatch:
 
+env:
+  OPENENV_INTEROP_PIN: 74bc7def050d520399cc2410d5a6f34598589558
+
 permissions:
   contents: read
 
@@ -80,10 +88,27 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - name: Check out the pinned OpenEnv wire oracle
+      - name: Check out the reproducible or upstream OpenEnv wire oracle
+        env:
+          EDGE_ORACLE: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         run: |
           git clone https://github.com/ericflo/miniopenenv.git ../miniopenenv
-          git -C ../miniopenenv checkout 74bc7def050d520399cc2410d5a6f34598589558
+          if [ "$EDGE_ORACLE" = "true" ]; then
+            revision=origin/main
+            mode=upstream-head
+          else
+            revision="$OPENENV_INTEROP_PIN"
+            mode=pinned
+          fi
+          git -C ../miniopenenv checkout --detach "$revision"
+          oracle_sha=$(git -C ../miniopenenv rev-parse HEAD)
+          echo "OPENENV_INTEROP_ORACLE_SHA=$oracle_sha" >> "$GITHUB_ENV"
+          {
+            echo "### OpenEnv interoperability oracle"
+            echo
+            echo "- Mode: \`$mode\`"
+            echo "- Revision: \`$oracle_sha\`"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Test the typed client
         run: |
           python3 scripts/check_openenv_contract.py --self-test

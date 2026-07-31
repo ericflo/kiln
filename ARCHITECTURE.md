@@ -591,11 +591,12 @@ are compacted into group/replay/receipt ownership by move, reset files are
 bounded before read, group hashing streams, and replay encoding refuses the
 next write at its 256 MiB cap. A hostile but protocol-legal group therefore
 fails without publishing partial artifacts instead of accumulating the full
-candidate-count × step-count × frame-size product in memory. The pinned
-miniopenenv counter plus all twenty-two text-profiled arcade and math servers
-are live interoperability oracles in CI only. No production setting, type, or
-runtime branch identifies that implementation; every server follows the same
-OpenEnv contract.
+candidate-count × step-count × frame-size product in memory. Reproducible CI
+uses a pinned miniopenenv counter and derives every published arcade, synthesis,
+and math server from that checkout's build graph; a scheduled edge lane repeats
+the same matrix against upstream `main`. This oracle inventory remains CI-only.
+No production setting, type, or runtime branch identifies that implementation;
+every server follows the same OpenEnv contract.
 
 See the [OpenEnv training guide](docs/OPENENV_GUIDE.md) for the operator
 workflow and artifact contract.

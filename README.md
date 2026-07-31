@@ -261,13 +261,15 @@ lifetime.
 When an observation offers a non-empty `input_text`, Kiln foregrounds that
 generic environment-provided decision text while retaining the complete wire
 observation and discovered JSON action schema; it remains optional, never a
-protocol requirement. CI discovers and resets all twenty-two text-profiled
-environment servers from the pinned oracle. That matrix includes eight
-one-step math families whose discovered string actions, exact integer rewards,
-deterministic resets, and frozen terminal observations are exercised over real
-WebSockets, alongside representative multi-step episodes and
-collect/train/verify/replay end to end. See the
-[OpenEnv Training Guide](docs/OPENENV_GUIDE.md)
+protocol requirement. Reproducible pull-request and push lanes discover and
+reset every environment published by the pinned oracle—currently twenty-two
+text-profiled servers, including eight one-step math families. A weekly edge
+lane derives the inventory again from upstream `main`, making additions and
+protocol drift visible without hard-coded Kiln environment lists. Discovered
+string actions, exact integer rewards, deterministic resets, and frozen
+terminal observations are exercised over real WebSockets alongside
+representative multi-step episodes and collect/train/verify/replay end to end.
+See the [OpenEnv Training Guide](docs/OPENENV_GUIDE.md)
 for multi-environment training, reset tasks, security, ECHO behavior, artifacts,
 and troubleshooting.
 
