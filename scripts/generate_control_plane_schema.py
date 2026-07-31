@@ -767,6 +767,17 @@ def build_openenv_types() -> None:
         "Point-in-time native trainer capacity observed during OpenEnv preflight; it is not a reservation.",
     )
     add_object(
+        "OpenEnvTrainingContract",
+        "OpenEnvTrainingContract",
+        {
+            "schema": {"const": "kiln.openenv-training-contract.v1"},
+            "effective_config": ref("GrpoConfig"),
+            "post_eval": ref("PostEvalConfig"),
+        },
+        "Immutable materialized native GRPO and optional post-evaluation settings admitted before OpenEnv collection.",
+        optional=("post_eval",),
+    )
+    add_object(
         "OpenEnvTrainingPreflightReceipt",
         "OpenEnvTrainingPreflightReceipt",
         {
@@ -873,6 +884,7 @@ def build_openenv_types() -> None:
                     "kiln.openenv-run.v2",
                     "kiln.openenv-run.v3",
                     "kiln.openenv-run.v4",
+                    "kiln.openenv-run.v5",
                 ]
             },
             "run_id": ref("String"),
@@ -886,19 +898,21 @@ def build_openenv_types() -> None:
             "environments": array(ref("OpenEnvIdentity")),
             "artifacts": array(ref("OpenEnvArtifact")),
             "training_job_id": ref("String"),
+            "training_contract": ref("OpenEnvTrainingContract"),
             "training_submission": ref("TrainingResponse"),
             "training": ref("OpenEnvTrainingStatus"),
             "post_evaluations": array(ref("OpenEnvPostEvalStatus")),
             "environment_evaluation": ref("OpenEnvEnvironmentEvalStatus"),
             "error": ref("String"),
         },
-        "Persisted status, collection artifacts, and authoritative training and evaluation lifecycle for one OpenEnv run. Version 1 records may retain the historical terminal training_queued handoff; version 2 follows learning to completion; version 3 includes paired held-out environment evaluation; version 4 adds bounded FIFO execution admission.",
+        "Persisted status, collection artifacts, immutable admitted training contract, and authoritative training and evaluation lifecycle for one OpenEnv run. Version 1 records may retain the historical terminal training_queued handoff; version 2 follows learning to completion; version 3 includes paired held-out environment evaluation; version 4 adds bounded FIFO execution admission; version 5 seals exact trainer settings before collection.",
         optional=(
             "admission",
             "finished_unix_ms",
             "environments",
             "artifacts",
             "training_job_id",
+            "training_contract",
             "training_submission",
             "training",
             "post_evaluations",
@@ -910,7 +924,11 @@ def build_openenv_types() -> None:
                 {
                     "if": {
                         "required": ["schema"],
-                        "properties": {"schema": {"const": "kiln.openenv-run.v4"}},
+                        "properties": {
+                            "schema": {
+                                "enum": ["kiln.openenv-run.v4", "kiln.openenv-run.v5"]
+                            }
+                        },
                     },
                     "then": {"required": ["admission"]},
                 },
@@ -918,7 +936,9 @@ def build_openenv_types() -> None:
                     "if": {
                         "required": ["schema", "state"],
                         "properties": {
-                            "schema": {"const": "kiln.openenv-run.v4"},
+                            "schema": {
+                                "enum": ["kiln.openenv-run.v4", "kiln.openenv-run.v5"]
+                            },
                             "state": {"const": "queued"},
                         },
                     },
@@ -928,12 +948,51 @@ def build_openenv_types() -> None:
                         }
                     },
                 },
+                {
+                    "if": {
+                        "required": ["schema", "kind"],
+                        "properties": {
+                            "schema": {"const": "kiln.openenv-run.v5"},
+                            "kind": {"const": "train"},
+                        },
+                    },
+                    "then": {"required": ["training_contract"]},
+                },
+                {
+                    "if": {
+                        "required": ["schema", "kind"],
+                        "properties": {
+                            "schema": {"const": "kiln.openenv-run.v5"},
+                            "kind": {"const": "rollout"},
+                        },
+                    },
+                    "then": {"not": {"required": ["training_contract"]}},
+                },
+                {
+                    "if": {
+                        "required": ["schema"],
+                        "properties": {
+                            "schema": {
+                                "enum": [
+                                    "kiln.openenv-run.v1",
+                                    "kiln.openenv-run.v2",
+                                    "kiln.openenv-run.v3",
+                                    "kiln.openenv-run.v4",
+                                ]
+                            }
+                        },
+                    },
+                    "then": {"not": {"required": ["training_contract"]}},
+                },
             ],
             "x-kiln-semantic-constraints": [
-                "v4 status always includes admission",
+                "v4 and v5 status always include admission",
                 "admission.sequence is stable and determines exact FIFO order across restart",
-                "v4 queued status includes a live one-based queue_position",
+                "v4 and v5 queued status include a live one-based queue_position",
                 "after admission, queue_position is omitted and admitted_unix_ms plus queue_wait_ms remain stable",
+                "v5 train status contains the immutable preflighted training_contract and executes from it",
+                "v5 rollout status omits training_contract",
+                "v1 through v4 status predates training_contract and omits it",
             ],
         },
     )
@@ -941,7 +1000,7 @@ def build_openenv_types() -> None:
         "OpenEnvRunList",
         "OpenEnvRunList",
         {
-            "schema": {"const": "kiln.openenv-run-list.v4"},
+            "schema": {"const": "kiln.openenv-run-list.v5"},
             "runs": array(ref("OpenEnvRunStatus")),
         },
         "Newest-first retained OpenEnv run records.",
@@ -1612,8 +1671,19 @@ def build_examples() -> dict[str, list[Any]]:
             },
         },
     }
+    openenv_training_contract = {
+        "schema": "kiln.openenv-training-contract.v1",
+        "effective_config": {
+            "base_adapter": None,
+            "output_name": "bandit-agent",
+            "auto_load": False,
+            "behavior_policy": "no_importance_correction",
+            "lora_rank": 8,
+        },
+        "post_eval": openenv_request["post_eval"],
+    }
     openenv_status = {
-        "schema": "kiln.openenv-run.v4",
+        "schema": "kiln.openenv-run.v5",
         "run_id": "80a26e21-8451-4a64-8666-890c06fd80bd",
         "kind": "train",
         "state": "environment_evaluating",
@@ -1633,6 +1703,7 @@ def build_examples() -> dict[str, list[Any]]:
         },
         "environments": [openenv_inspection["identity"]],
         "training_job_id": "grpo-openenv-1",
+        "training_contract": openenv_training_contract,
         "training": {
             "job_id": "grpo-openenv-1",
             "state": "completed",
@@ -1669,13 +1740,8 @@ def build_examples() -> dict[str, list[Any]]:
     }
     openenv_training_preflight_receipt = {
         "schema": "kiln.openenv-training-preflight.v1",
-        "effective_config": {
-            "base_adapter": None,
-            "output_name": "bandit-agent",
-            "auto_load": True,
-            "behavior_policy": "no_importance_correction",
-            "lora_rank": 8,
-        },
+        "effective_config": openenv_training_contract["effective_config"]
+        | {"auto_load": True},
         "capacity": {
             "checked_unix_ms": 1_700_000_000_000,
             "queued_jobs": 1,
@@ -1724,7 +1790,7 @@ def build_examples() -> dict[str, list[Any]]:
         "OpdRequest": [opd],
         "OpenEnvInspectRequest": [{"environment_urls": ["http://127.0.0.1:8000"], "credential_ids": ["local-arcade"]}],
         "OpenEnvInspectResponse": [{"schema": "kiln.openenv-inspection.v1", "environments": [openenv_inspection]}],
-        "OpenEnvRunList": [{"schema": "kiln.openenv-run-list.v4", "runs": [openenv_status]}],
+        "OpenEnvRunList": [{"schema": "kiln.openenv-run-list.v5", "runs": [openenv_status]}],
         "OpenEnvRunRequest": [openenv_request],
         "OpenEnvRunStatus": [openenv_status],
         "OpenEnvTaskCatalogRequest": [{"environment_urls": ["http://127.0.0.1:8000"], "credential_ids": ["local-arcade"], "split": "train", "start": 0, "limit": 2}],

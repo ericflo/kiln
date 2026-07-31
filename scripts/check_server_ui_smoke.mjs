@@ -1189,7 +1189,7 @@ async function startServer({
   let activeAdapter = availableAdapters.find((adapter) => adapter.active)?.name || null;
   const completedTrainingJobs = [];
   const openEnvRuns = [{
-    schema: 'kiln.openenv-run.v4',
+    schema: 'kiln.openenv-run.v5',
     run_id: 'queue-openenv-run',
     kind: 'rollout',
     state: 'queued',
@@ -2003,7 +2003,7 @@ async function startServer({
       return;
     }
     if (url.pathname === '/v1/openenv/runs' && req.method === 'GET') {
-      json(res, { schema: 'kiln.openenv-run-list.v4', runs: openEnvRuns });
+      json(res, { schema: 'kiln.openenv-run-list.v5', runs: openEnvRuns });
       return;
     }
     if (url.pathname === '/v1/openenv/inspect' && req.method === 'POST') {
@@ -2068,7 +2068,7 @@ async function startServer({
         return;
       }
       const status = {
-        schema: 'kiln.openenv-run.v4',
+        schema: 'kiln.openenv-run.v5',
         run_id: 'smoke-openenv-run',
         kind: request.kind,
         state: 'completed',
@@ -2093,6 +2093,18 @@ async function startServer({
           sha256: `sha256:${'a'.repeat(64)}`,
           bytes: 1024,
         }],
+        training_contract: {
+          schema: 'kiln.openenv-training-contract.v1',
+          effective_config: {
+            optimizer: request.training_config?.optimizer || { kind: 'muon' },
+            lora_rank: request.training_config?.lora_rank || 8,
+            base_adapter: null,
+            output_name: request.output_adapter,
+            auto_load: false,
+            behavior_policy: 'no_importance_correction',
+          },
+          ...(request.post_eval ? { post_eval: request.post_eval } : {}),
+        },
         environment_evaluation: {
           state: 'completed',
           seed_start: request.groups,
@@ -4856,6 +4868,7 @@ async function runSmoke(baseUrl, {
     await expectTrainingToast(page, 'OpenEnv train run smoke-op started');
     await waitForPanelText(page, '#openenv-runs', /OpenEnv train[\s\S]*smoke-op[\s\S]*completed[\s\S]*promoted[\s\S]*8 \/ 32 episodes[\s\S]*Held-out environment · completed · return 0\.100 → 0\.800 \(\+0\.700\) · exact p=0\.0000/, 'OpenEnv run history should render paired-return evidence and promotion outcome');
     await waitForPanelText(page, '#openenv-runs', /smoke-op[\s\S]*Retry key · [0-9a-f-]{36}/, 'OpenEnv run history should expose the persisted retry key');
+    await waitForPanelText(page, '#openenv-runs', /smoke-op[\s\S]*Admitted contract · muon · rank 8 · output openenv-agent · auto-load off/, 'OpenEnv run history should expose the immutable admitted trainer contract');
     await waitForPanelText(page, '#openenv-runs', /smoke-op[\s\S]*Execution admitted after 250 ms/, 'OpenEnv run history should retain admission wait evidence');
     await waitForPanelText(page, '#openenv-runs', /dataset[\s\S]*aaaaaaaaaaaa/, 'OpenEnv artifact controls should expose the manifest digest identity');
     if (setEvalSuites) setEvalSuites([]);

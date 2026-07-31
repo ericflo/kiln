@@ -138,10 +138,14 @@ loss and checkpoint contract, installed static eval suite, serving profile,
 backend workload, optimizer, and LoRA rank. The dashboard's **Prove it after
 training** control uses that same `post_eval` path; rollout-only requests reject
 all training fields instead of silently ignoring them. Persisted runs do this
-before persistence. One-shot `kiln openenv train` calls
+before persistence and store the fully materialized
+`kiln.openenv-training-contract.v1` in v5 status and `run.json`; queue resume,
+trainer submission, CLI, dashboard, and the summary receipt consume that sealed
+contract instead of recomputing defaults. One-shot `kiln openenv train` calls
 `POST /v1/openenv/training/preflight` before discovery, accepts the returned
 effective config as authoritative, and submits those exact values after
-collection. The capacity snapshot is evidence, not a reservation, so final
+collection; summary v4 preserves the same contract even if submission later
+fails. The capacity snapshot is evidence, not a reservation, so final
 native queue and memory admission still recheck live conditions. The
 `kiln_openenv_training_preflights_total{status="accepted"|"rejected"}` metric
 covers both paths; persisted rejection also retains its run-specific metric.

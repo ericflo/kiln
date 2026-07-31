@@ -74,7 +74,7 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
     .await
     .unwrap();
 
-    assert_eq!(summary.schema, "kiln.openenv-rollout-summary.v3");
+    assert_eq!(summary.schema, "kiln.openenv-rollout-summary.v4");
     assert_eq!(summary.rollout_count, 4);
     assert_eq!(summary.stats.recoverable_protocol_error_count, 4);
     assert_eq!(summary.stats.protocol_error_count, 0);
@@ -125,6 +125,18 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
         "no_importance_correction"
     );
     assert_eq!(submitted["config"]["output_name"], "bandit-e2e");
+    assert_eq!(
+        serde_json::to_value(
+            &summary
+                .training_contract
+                .as_ref()
+                .expect("direct train summary must retain its admitted contract")
+                .effective_config
+        )
+        .unwrap(),
+        submitted["config"],
+        "the artifact contract must match the exact submitted native config"
+    );
     assert_eq!(submitted["groups"].as_array().unwrap().len(), 2);
     assert!(
         submitted["groups"][0]["completions"]
@@ -151,6 +163,8 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
     legacy_summary.schema = "kiln.openenv-rollout-summary.v2".to_string();
     legacy_summary.reset_options_sha256 = Some(format!("sha256:{}", "0".repeat(64)));
     legacy_summary.reset_plan_sha256 = None;
+    legacy_summary.training_contract = None;
+    legacy_summary.training_submission = None;
     std::fs::write(
         &legacy_summary_path,
         serde_json::to_vec_pretty(&legacy_summary).unwrap(),

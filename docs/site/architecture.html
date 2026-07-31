@@ -355,7 +355,8 @@ OpenEnv RL
           admission path as every other job. <code>kiln openenv start</code> enters that persisted
           state machine from a bounded request file. A strict FIFO admits at most the configured
           number of complete workflows; queued runs hold no environment or model capacity and remain
-          position-visible and immediately cancellable. Never-admitted v4 entries resume after restart;
+          position-visible and immediately cancellable. Never-admitted v5 entries resume after restart;
+          pristine v4 entries are first sealed once into v5;
           admitted stateful work fails explicitly rather than guessing at recovery. A bounded persisted
           idempotency key atomically maps identical retries to the original retained run and rejects drift.
         </p>
@@ -365,10 +366,17 @@ OpenEnv RL
   -> inspect identity and action schema
   -> round-robin seed-matched candidate episodes
   -> environment-owned returns
-  -> dataset + exact replay + summary v3 receipt
+  -> immutable admitted training contract
+  -> dataset + exact replay + summary v4 receipt
   -> native GRPO
   -> paired held-out environment evaluation
   -> promote, retain, or reject adapter</code></pre>
+        <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
+          Train admission atomically persists <code>kiln.openenv-training-contract.v1</code> with the
+          effective GRPO config and optional post-eval suite. Restart, trainer submission, CLI, and
+          dashboard consume that sealed value instead of recomputing defaults; summary v4 embeds it
+          before first artifact publication so a later handoff failure remains auditable.
+        </p>
         <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
           One reset object may be shared, or a heterogeneous portfolio may align one object with each
           endpoint. Kiln removes caller-supplied seeds, inserts deterministic group seeds, and requires

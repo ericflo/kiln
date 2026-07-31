@@ -20,10 +20,11 @@ Every successful collection publishes three files:
    group's exact reset payload and reset observation, then every candidate's
    ordered action/result exchanges and final state. It links to the canonical
    JSONL digest instead of creating a second training representation.
-3. `openenv.rollout-summary.json` is the collection receipt. Summary v3 binds
+3. `openenv.rollout-summary.json` is the collection receipt. Summary v4 binds
    the other files plus the ordered, seed-free per-environment reset plan by
-   SHA-256 and records schemas, controls, statistics, and any submission.
-   Offline verification still accepts legacy v2 receipts.
+   SHA-256 and records schemas, controls, statistics, any immutable admitted
+   training contract, and any submission. Offline verification still accepts
+   legacy v2 and v3 receipts.
 
 Move, retain, or archive the three files together. If the receipt's paths no
 longer resolve, provide `--dataset` and `--replay` overrides to verification or
@@ -32,14 +33,15 @@ live replay.
 The summary records every discovered identity and typed schema; behavior
 adapter; seed, sampling, concurrency, recovery, capacity, and reset-plan
 controls; group, rollout, step, model-token, and latency counts; returns,
-outcomes, artifact identities, and the response from `openenv train`.
+outcomes, artifact identities, the exact `kiln.openenv-training-contract.v1`,
+and the response from `openenv train`.
 
 Server-owned runs publish the same three representations below
 `<adapter_dir>/.openenv/runs/<run-id>/` and expose them as `dataset`, `replay`,
 and `summary` artifact links in `GET /v1/openenv/runs/<run-id>`. The adjacent
 `run.json` is the durable orchestration record, not a fourth training
-representation. It records lifecycle progress, failure or cancellation, and
-the linked native training job. An interrupted active run is marked failed
+representation. It records lifecycle progress, failure or cancellation, the
+immutable admitted training contract, and the linked native training job. An interrupted active run is marked failed
 after restart because a stateful environment session cannot be assumed
 resumable.
 
@@ -335,8 +337,10 @@ Operators can alert on `kiln_openenv_runs_active`,
 admission and restart counts use
 `kiln_openenv_runs_total{status="admitted"|"resumed"}`, and
 `kiln_openenv_run_queue_wait_seconds_total` records aggregate queue delay.
-The v4 admission sequence is stable; on restart, entries that never acquired a
-slot resume in that exact FIFO order. Any admitted non-terminal workflow fails
+The v5 admission sequence is stable; on restart, entries that never acquired a
+slot resume in that exact FIFO order. A pristine queued v4 entry is first
+materialized once into a v5 contract; it is never recomputed after that
+migration. Any admitted non-terminal workflow fails
 explicitly because an external
 episode, trainer, or evaluator cannot be assumed resumable.
 
@@ -375,7 +379,10 @@ and `auto_load`, then validates the environment-token loss and policy contract,
 LoRA scale, checkpoint interval, behavior-adapter layout, installed
 `post_eval` suite, serving profile, backend GRPO workload, optimizer, and model
 rank ceiling. Persisted `kind=train` does this before creating its run
-directory. Direct `kiln openenv train` first calls
+directory and atomically stores the result as
+`kiln.openenv-training-contract.v1` in v5 status. Collection, restart, trainer
+submission, static evaluation, CLI, and dashboard all consume that exact
+contract rather than reapplying current defaults. Direct `kiln openenv train` first calls
 `POST /v1/openenv/training/preflight`, validates the v1 receipt, and later
 submits its exact `effective_config` and returned optional `post_eval`;
 rejection contacts no environment and writes no artifacts. Both paths increment
@@ -384,6 +391,12 @@ persisted rejection also increments
 `kiln_openenv_runs_total{status="training_preflight_rejected"}`. Rollout-only
 requests reject `output_adapter`, `training_config`, `post_eval`, and
 `environment_eval` instead of ignoring them.
+
+Summary v4 embeds the same contract before the dataset/replay/summary bundle is
+first published. It therefore remains auditable if final native queue or memory
+admission rejects after collection. A summary containing a training submission
+without its contract fails schema and offline verification; legacy v2/v3
+receipts may not claim the new field.
 
 Direct preflight returns the exact current queue/tracked-job snapshot with
 `capacity_reserved: false`. The final native GRPO admission repeats immutable

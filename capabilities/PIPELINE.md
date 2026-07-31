@@ -248,11 +248,13 @@ Before any GPU work in a stage N ≥ 2:
      its effective-GRPO/adapter/suite/backend/optimizer contract before retry;
      if an explicitly direct stage uses `kiln openenv train`, require its
      `/v1/openenv/training/preflight` receipt before collection and preserve the
-     returned effective config through final submission; treat its capacity
+     returned effective config through final submission and summary v4's
+     `kiln.openenv-training-contract.v1`; treat its capacity
      snapshot as evidence rather than a reservation;
      bind one stable non-secret `idempotency_key` to the stage so a
-     lost response recovers the same retained run; if v4 status is `queued`,
-     record its FIFO position and follow that run ID; Task API catalogs may document coverage but never imply a
+     lost response recovers the same retained run; require v5 train status to
+     expose the sealed training contract, and if it is `queued`, record its FIFO
+     position and follow that run ID; Task API catalogs may document coverage but never imply a
      reset binding
 
 3. Verify hypothesis is falsifiable:

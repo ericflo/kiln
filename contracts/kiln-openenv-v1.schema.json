@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ericflo.github.io/kiln/contracts/kiln-openenv-v1.schema.json",
   "title": "Kiln OpenEnv rollout, evaluation, and artifact contract",
-  "description": "Environment discovery identity, canonical episode provenance, exact replay transcripts, paired held-out return evaluation receipts, offline verification reports, verified artifact-download receipts, and content-addressed summaries published by `kiln openenv`.",
+  "description": "Environment discovery identity, canonical episode provenance, exact replay transcripts, immutable admitted native-training contracts, paired held-out return evaluation receipts, offline verification reports, verified artifact-download receipts, and content-addressed summaries published by `kiln openenv`.",
   "$ref": "#/$defs/OpenEnvRolloutSummary",
   "$defs": {
     "Sha256": {
@@ -234,6 +234,9 @@
         "mean_model_latency_ms": { "type": "number", "minimum": 0 }
       }
     },
+    "OpenEnvTrainingContract": {
+      "$ref": "kiln-control-plane-v1.schema.json#/$defs/OpenEnvTrainingContract"
+    },
     "OpenEnvRolloutSummary": {
       "type": "object",
       "additionalProperties": false,
@@ -267,7 +270,7 @@
         "rollouts"
       ],
       "properties": {
-        "schema": { "const": "kiln.openenv-rollout-summary.v3" },
+        "schema": { "const": "kiln.openenv-rollout-summary.v4" },
         "kiln_url": { "type": "string", "minLength": 1 },
         "adapter": { "type": ["string", "null"] },
         "adapter_label": { "type": "string", "minLength": 1 },
@@ -306,11 +309,20 @@
           "minItems": 1,
           "items": { "$ref": "#/$defs/RolloutRecord" }
         },
+        "training_contract": {
+          "$ref": "#/$defs/OpenEnvTrainingContract"
+        },
         "training_submission": {
           "type": "object",
           "additionalProperties": true
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["training_submission"] },
+          "then": { "required": ["training_contract"] }
+        }
+      ]
     },
     "ReplayExchangeResult": {
       "oneOf": [

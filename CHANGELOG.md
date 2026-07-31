@@ -45,7 +45,13 @@
   submits the returned effective config unchanged. Its capacity snapshot is
   explicitly non-reserving, so final native admission remains authoritative;
   rejected preflights consume no episodes or artifacts and both paths are
-  separately metered. Rollout requests fail closed
+  separately metered. Accepted persisted train runs now atomically seal that
+  result as `kiln.openenv-training-contract.v1` in v5 status and `run.json`;
+  queue restart, trainer submission, CLI, and dashboard use the sealed values
+  instead of recomputing defaults. Pristine v4 queue entries migrate once.
+  Direct and persisted summary v4 receipts embed the same typed contract before
+  first artifact publication, and offline verification rejects submissions
+  without it while retaining v2/v3 compatibility. Rollout requests fail closed
   on every training-only field. Training → OpenEnv now exposes the same
   **Prove it after training** static-suite workflow as native SFT and GRPO.
   CI drives all twenty-two pinned

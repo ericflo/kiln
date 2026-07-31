@@ -206,8 +206,10 @@ See resources/grpo-mode.md §6.
 `POST /v1/openenv/runs` for OpenEnv tasks; otherwise
 `cuda_grpo_ablation` with the ECHO env-mask layer.
 Assign one non-secret `idempotency_key` to each persisted hypothesis. Exact
-retained retries recover the same v4 run across concurrency and restart; never
-change request semantics under that key. Treat `queued` plus an admission
+retained retries recover the same run across concurrency and restart; never
+change request semantics under that key. New v5 train status seals the exact
+`kiln.openenv-training-contract.v1`; verify it before following work and retain
+summary v4 with the stage evidence. Treat `queued` plus an admission
 position as accepted work, retain the run ID, and cancel obsolete hypotheses.
 Attach an installed static `post_eval` suite when the stage also has a
 capability-level blind eval. Kiln preflights the exact effective GRPO config,

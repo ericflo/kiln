@@ -4076,7 +4076,7 @@
       ],
       "properties": {
         "schema": {
-          "const": "kiln.openenv-run-list.v4"
+          "const": "kiln.openenv-run-list.v5"
         },
         "runs": {
           "type": "array",
@@ -4275,7 +4275,8 @@
             "kiln.openenv-run.v1",
             "kiln.openenv-run.v2",
             "kiln.openenv-run.v3",
-            "kiln.openenv-run.v4"
+            "kiln.openenv-run.v4",
+            "kiln.openenv-run.v5"
           ]
         },
         "run_id": {
@@ -4317,6 +4318,9 @@
         "training_job_id": {
           "$ref": "#/$defs/String"
         },
+        "training_contract": {
+          "$ref": "#/$defs/OpenEnvTrainingContract"
+        },
         "training_submission": {
           "$ref": "#/$defs/TrainingResponse"
         },
@@ -4344,7 +4348,10 @@
             ],
             "properties": {
               "schema": {
-                "const": "kiln.openenv-run.v4"
+                "enum": [
+                  "kiln.openenv-run.v4",
+                  "kiln.openenv-run.v5"
+                ]
               }
             }
           },
@@ -4362,7 +4369,10 @@
             ],
             "properties": {
               "schema": {
-                "const": "kiln.openenv-run.v4"
+                "enum": [
+                  "kiln.openenv-run.v4",
+                  "kiln.openenv-run.v5"
+                ]
               },
               "state": {
                 "const": "queued"
@@ -4378,15 +4388,86 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "required": [
+              "schema",
+              "kind"
+            ],
+            "properties": {
+              "schema": {
+                "const": "kiln.openenv-run.v5"
+              },
+              "kind": {
+                "const": "train"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "training_contract"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "schema",
+              "kind"
+            ],
+            "properties": {
+              "schema": {
+                "const": "kiln.openenv-run.v5"
+              },
+              "kind": {
+                "const": "rollout"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "required": [
+                "training_contract"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "schema"
+            ],
+            "properties": {
+              "schema": {
+                "enum": [
+                  "kiln.openenv-run.v1",
+                  "kiln.openenv-run.v2",
+                  "kiln.openenv-run.v3",
+                  "kiln.openenv-run.v4"
+                ]
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "required": [
+                "training_contract"
+              ]
+            }
+          }
         }
       ],
       "x-kiln-semantic-constraints": [
-        "v4 status always includes admission",
+        "v4 and v5 status always include admission",
         "admission.sequence is stable and determines exact FIFO order across restart",
-        "v4 queued status includes a live one-based queue_position",
-        "after admission, queue_position is omitted and admitted_unix_ms plus queue_wait_ms remain stable"
+        "v4 and v5 queued status include a live one-based queue_position",
+        "after admission, queue_position is omitted and admitted_unix_ms plus queue_wait_ms remain stable",
+        "v5 train status contains the immutable preflighted training_contract and executes from it",
+        "v5 rollout status omits training_contract",
+        "v1 through v4 status predates training_contract and omits it"
       ],
-      "description": "Persisted status, collection artifacts, and authoritative training and evaluation lifecycle for one OpenEnv run. Version 1 records may retain the historical terminal training_queued handoff; version 2 follows learning to completion; version 3 includes paired held-out environment evaluation; version 4 adds bounded FIFO execution admission.",
+      "description": "Persisted status, collection artifacts, immutable admitted training contract, and authoritative training and evaluation lifecycle for one OpenEnv run. Version 1 records may retain the historical terminal training_queued handoff; version 2 follows learning to completion; version 3 includes paired held-out environment evaluation; version 4 adds bounded FIFO execution admission; version 5 seals exact trainer settings before collection.",
       "x-kiln-rust-type": "OpenEnvRunStatus",
       "x-kiln-field-schema-status": "complete"
     },
@@ -4620,6 +4701,28 @@
       },
       "description": "Point-in-time native trainer capacity observed during OpenEnv preflight; it is not a reservation.",
       "x-kiln-rust-type": "OpenEnvTrainingCapacitySnapshot",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvTrainingContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "effective_config"
+      ],
+      "properties": {
+        "schema": {
+          "const": "kiln.openenv-training-contract.v1"
+        },
+        "effective_config": {
+          "$ref": "#/$defs/GrpoConfig"
+        },
+        "post_eval": {
+          "$ref": "#/$defs/PostEvalConfig"
+        }
+      },
+      "description": "Immutable materialized native GRPO and optional post-evaluation settings admitted before OpenEnv collection.",
+      "x-kiln-rust-type": "OpenEnvTrainingContract",
       "x-kiln-field-schema-status": "complete"
     },
     "OpenEnvTrainingPreflightReceipt": {
@@ -7569,10 +7672,10 @@
     ],
     "OpenEnvRunList": [
       {
-        "schema": "kiln.openenv-run-list.v4",
+        "schema": "kiln.openenv-run-list.v5",
         "runs": [
           {
-            "schema": "kiln.openenv-run.v4",
+            "schema": "kiln.openenv-run.v5",
             "run_id": "80a26e21-8451-4a64-8666-890c06fd80bd",
             "kind": "train",
             "state": "environment_evaluating",
@@ -7658,6 +7761,21 @@
               }
             ],
             "training_job_id": "grpo-openenv-1",
+            "training_contract": {
+              "schema": "kiln.openenv-training-contract.v1",
+              "effective_config": {
+                "base_adapter": null,
+                "output_name": "bandit-agent",
+                "auto_load": false,
+                "behavior_policy": "no_importance_correction",
+                "lora_rank": 8
+              },
+              "post_eval": {
+                "suite": "qwen3.5-agentic-core",
+                "data_scope": "held-out",
+                "include_baseline": true
+              }
+            },
             "training": {
               "job_id": "grpo-openenv-1",
               "state": "completed",
@@ -7739,7 +7857,7 @@
     ],
     "OpenEnvRunStatus": [
       {
-        "schema": "kiln.openenv-run.v4",
+        "schema": "kiln.openenv-run.v5",
         "run_id": "80a26e21-8451-4a64-8666-890c06fd80bd",
         "kind": "train",
         "state": "environment_evaluating",
@@ -7825,6 +7943,21 @@
           }
         ],
         "training_job_id": "grpo-openenv-1",
+        "training_contract": {
+          "schema": "kiln.openenv-training-contract.v1",
+          "effective_config": {
+            "base_adapter": null,
+            "output_name": "bandit-agent",
+            "auto_load": false,
+            "behavior_policy": "no_importance_correction",
+            "lora_rank": 8
+          },
+          "post_eval": {
+            "suite": "qwen3.5-agentic-core",
+            "data_scope": "held-out",
+            "include_baseline": true
+          }
+        },
         "training": {
           "job_id": "grpo-openenv-1",
           "state": "completed",

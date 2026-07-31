@@ -1343,6 +1343,7 @@ function openEnvRunCard(run) {
   const groupTotal = Number(progress.groups_total || 0);
   const groupDone = Number(progress.groups_completed || 0);
   const training = run.training || null;
+  const trainingContract = run.training_contract || null;
   const admission = run.admission || null;
   const evaluations = Array.isArray(run.post_evaluations) ? run.post_evaluations : [];
   const environmentEvaluation = run.environment_evaluation || null;
@@ -1399,6 +1400,10 @@ function openEnvRunCard(run) {
   const submissionDetail = run.request?.idempotency_key
     ? `<div class="training-card-meta">Retry key · <code>${escapeHtml(run.request.idempotency_key)}</code></div>`
     : '';
+  const effectiveConfig = trainingContract?.effective_config || null;
+  const contractDetail = effectiveConfig
+    ? `<div class="training-card-meta">Admitted contract · ${escapeHtml(effectiveConfig.optimizer?.kind || 'muon')} · rank ${Number(effectiveConfig.lora_rank || 8).toLocaleString()} · output <code>${escapeHtml(effectiveConfig.output_name || 'unknown')}</code> · auto-load ${effectiveConfig.auto_load === false ? 'off' : 'on'}${trainingContract.post_eval?.suite ? ` · post-eval ${escapeHtml(trainingContract.post_eval.suite)}` : ''}</div>`
+    : '';
   const trainingDetail = training
     ? `<div class="training-card-meta">Trainer · ${escapeHtml(String(training.state || 'unknown'))} · ${Math.round(Number(training.progress || 0) * 100)}%${training.current_loss != null ? ` · loss ${Number(training.current_loss).toFixed(4)}` : ''}${training.epoch != null ? ` · epoch ${Number(training.epoch).toLocaleString()}` : ''}</div>`
     : '';
@@ -1425,6 +1430,7 @@ function openEnvRunCard(run) {
     </div>
     <div class="training-card-meta">${escapeHtml(run.request?.adapter || 'base')} policy · ${Number(progress.rollouts_completed || 0).toLocaleString()} / ${Number(progress.rollouts_total || 0).toLocaleString()} episodes${environments.length ? ` · ${escapeHtml(environments.join(', '))}` : ''}</div>
     ${submissionDetail}
+    ${contractDetail}
     ${admissionDetail}
     ${trainingDetail}
     ${evalDetail}

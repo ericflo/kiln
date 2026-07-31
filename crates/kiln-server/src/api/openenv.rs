@@ -34,9 +34,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::config::OpenEnvConfig;
 use crate::error::ApiError;
 use crate::openenv_cli::{
-    MAX_OPENENV_TASK_PAGE_SIZE, OPENENV_TRAINING_PREFLIGHT_SCHEMA_V1, OpenEnvCollectionControl,
-    OpenEnvCollectionProgress, OpenEnvPolicyTransport, OpenEnvRolloutOptions,
-    OpenEnvRolloutSummary, OpenEnvTrainingCapacitySnapshot, OpenEnvTrainingPreflightReceipt,
+    MAX_OPENENV_TASK_PAGE_SIZE, OPENENV_TRAINING_CONTRACT_SCHEMA_V1,
+    OPENENV_TRAINING_PREFLIGHT_SCHEMA_V1, OpenEnvCollectionControl, OpenEnvCollectionProgress,
+    OpenEnvPolicyTransport, OpenEnvRolloutOptions, OpenEnvRolloutSummary,
+    OpenEnvTrainingCapacitySnapshot, OpenEnvTrainingContract, OpenEnvTrainingPreflightReceipt,
     OpenEnvTrainingPreflightRequest, collect_openenv_rollouts_with_policy, validate_options,
     write_openenv_outputs, write_summary_atomic,
 };
@@ -52,7 +53,8 @@ use crate::state::{AppState, TrainingWorkload};
 
 const OPENENV_RUN_SCHEMA_V1: &str = "kiln.openenv-run.v1";
 const OPENENV_RUN_SCHEMA_V4: &str = "kiln.openenv-run.v4";
-const OPENENV_RUN_LIST_SCHEMA_V4: &str = "kiln.openenv-run-list.v4";
+const OPENENV_RUN_SCHEMA_V5: &str = "kiln.openenv-run.v5";
+const OPENENV_RUN_LIST_SCHEMA_V5: &str = "kiln.openenv-run-list.v5";
 const OPENENV_INSPECTION_SCHEMA_V1: &str = "kiln.openenv-inspection.v1";
 const OPENENV_TASK_CATALOG_SCHEMA_V1: &str = "kiln.openenv-task-catalog.v1";
 const OPENENV_API_BODY_LIMIT: usize = 1024 * 1024;
@@ -357,6 +359,11 @@ pub struct OpenEnvRunStatus {
     pub artifacts: Vec<OpenEnvArtifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub training_job_id: Option<String>,
+    /// Exact materialized trainer settings admitted before collection. New
+    /// train runs retain this contract for their full lifecycle and execute
+    /// from it rather than re-reading defaults from the original request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training_contract: Option<OpenEnvTrainingContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub training_submission: Option<TrainingResponse>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -380,9 +387,8 @@ impl OpenEnvRunStatus {
                 && self.state == OpenEnvRunState::TrainingQueued)
     }
 
-    fn safely_restartable_queued(&self) -> bool {
-        self.schema == OPENENV_RUN_SCHEMA_V4
-            && self.state == OpenEnvRunState::Queued
+    fn pristine_queued(&self) -> bool {
+        self.state == OpenEnvRunState::Queued
             && self.admission.as_ref().is_some_and(|admission| {
                 admission.admitted_unix_ms.is_none() && admission.queue_wait_ms.is_none()
             })
@@ -394,6 +400,23 @@ impl OpenEnvRunStatus {
             && self.training_submission.is_none()
             && self.training.is_none()
             && self.post_evaluations.is_empty()
+    }
+
+    fn safely_migratable_v4_queued(&self) -> bool {
+        self.schema == OPENENV_RUN_SCHEMA_V4
+            && self.training_contract.is_none()
+            && self.pristine_queued()
+    }
+
+    fn safely_restartable_queued(&self) -> bool {
+        self.schema == OPENENV_RUN_SCHEMA_V5
+            && self.pristine_queued()
+            && match self.kind {
+                OpenEnvRunKind::Rollout => self.training_contract.is_none(),
+                OpenEnvRunKind::Train => self.training_contract.as_ref().is_some_and(|contract| {
+                    openenv_training_contract_matches_request(&self.request, contract)
+                }),
+            }
     }
 }
 
@@ -632,6 +655,31 @@ impl OpenEnvRunRegistry {
                 .with_context(|| format!("read OpenEnv status {}", status_path.display()))?;
             let mut status: OpenEnvRunStatus = serde_json::from_slice(&bytes)
                 .with_context(|| format!("decode OpenEnv status {}", status_path.display()))?;
+            // v4 was the first restartable FIFO format, but it predated a
+            // persisted effective trainer contract. Seal a pristine queued v4
+            // request exactly once under the current deployment, then resume
+            // only the resulting v5 record. Started or terminal history is
+            // never rewritten.
+            if status.safely_migratable_v4_queued() {
+                match materialized_openenv_training_contract(&status.request) {
+                    Ok(training_contract) => {
+                        status.schema = OPENENV_RUN_SCHEMA_V5.to_string();
+                        status.training_contract = training_contract;
+                        persist_status_to(&status_path, &status)?;
+                    }
+                    Err(error) => {
+                        status.state = OpenEnvRunState::Failed;
+                        status.finished_unix_ms = Some(now);
+                        status.error = Some(format!(
+                            "Kiln could not migrate this queued OpenEnv v4 training contract: {error:#}"
+                        ));
+                        if let Some(admission) = status.admission.as_mut() {
+                            admission.queue_position = None;
+                        }
+                        persist_status_to(&status_path, &status)?;
+                    }
+                }
+            }
             if !status.terminal() && !status.safely_restartable_queued() {
                 status.state = OpenEnvRunState::Failed;
                 status.finished_unix_ms = Some(now_unix_ms());
@@ -808,8 +856,25 @@ impl OpenEnvRunRegistry {
         Ok(status.map(|status| self.project_admission(status)))
     }
 
-    fn insert(&self, request: OpenEnvRunRequest) -> Result<OpenEnvRunInsertOutcome> {
+    fn insert(
+        &self,
+        request: OpenEnvRunRequest,
+        training_contract: Option<OpenEnvTrainingContract>,
+    ) -> Result<OpenEnvRunInsertOutcome> {
         anyhow::ensure!(self.policy.enabled, "OpenEnv control plane is disabled");
+        let exactly_materialized = serde_json::to_value(&training_contract)?
+            == serde_json::to_value(materialized_openenv_training_contract(&request)?)?;
+        let contract_kind_valid = match (request.kind, training_contract.as_ref()) {
+            (OpenEnvRunKind::Rollout, None) => true,
+            (OpenEnvRunKind::Train, Some(contract)) => {
+                openenv_training_contract_matches_request(&request, contract)
+            }
+            _ => false,
+        };
+        anyhow::ensure!(
+            contract_kind_valid && exactly_materialized,
+            "OpenEnv run kind, request, and admitted training contract disagree"
+        );
         let mut runs = self.runs.write().unwrap();
         self.prune_locked(&mut runs);
         if let Some(status) = Self::idempotent_status_locked(&runs, &request)? {
@@ -846,7 +911,7 @@ impl OpenEnvRunRegistry {
         let sequence = admission.next_sequence;
         let queue_position = admission.queued.len().saturating_add(1);
         let status = OpenEnvRunStatus {
-            schema: OPENENV_RUN_SCHEMA_V4.to_string(),
+            schema: OPENENV_RUN_SCHEMA_V5.to_string(),
             run_id: run_id.clone(),
             kind: request.kind,
             state: OpenEnvRunState::Queued,
@@ -869,6 +934,7 @@ impl OpenEnvRunRegistry {
             environments: Vec::new(),
             artifacts: Vec::new(),
             training_job_id: None,
+            training_contract,
             training_submission: None,
             training: None,
             post_evaluations: Vec::new(),
@@ -1411,6 +1477,44 @@ fn effective_openenv_grpo_config(request: &OpenEnvRunRequest, output_adapter: &s
     )
 }
 
+fn materialized_openenv_training_contract(
+    request: &OpenEnvRunRequest,
+) -> Result<Option<OpenEnvTrainingContract>> {
+    if request.kind == OpenEnvRunKind::Rollout {
+        return Ok(None);
+    }
+    let output_adapter = request
+        .output_adapter
+        .as_deref()
+        .context("OpenEnv train run has no output adapter")?;
+    Ok(Some(OpenEnvTrainingContract {
+        schema: OPENENV_TRAINING_CONTRACT_SCHEMA_V1.to_string(),
+        effective_config: effective_openenv_grpo_config(request, output_adapter),
+        post_eval: request.post_eval.clone(),
+    }))
+}
+
+fn openenv_training_contract_matches_request(
+    request: &OpenEnvRunRequest,
+    contract: &OpenEnvTrainingContract,
+) -> bool {
+    let expected_output = request.output_adapter.as_deref();
+    let expected_auto_load = request.auto_load
+        && !request
+            .environment_eval
+            .as_ref()
+            .is_some_and(|config| config.gate.is_some());
+    contract.schema == OPENENV_TRAINING_CONTRACT_SCHEMA_V1
+        && request.kind == OpenEnvRunKind::Train
+        && contract.effective_config.output_name.as_deref() == expected_output
+        && contract.effective_config.base_adapter.as_deref()
+            == normalized_adapter(&request.adapter).as_deref()
+        && contract.effective_config.behavior_policy == BehaviorPolicy::NoImportanceCorrection
+        && contract.effective_config.auto_load == expected_auto_load
+        && serde_json::to_value(&contract.post_eval).ok()
+            == serde_json::to_value(&request.post_eval).ok()
+}
+
 fn validate_openenv_training_contract(
     state: &AppState,
     behavior_adapter: &str,
@@ -1444,9 +1548,9 @@ fn validate_openenv_training_contract(
 fn validate_openenv_training_preflight(
     state: &AppState,
     request: &OpenEnvRunRequest,
-) -> Result<(), ApiError> {
+) -> Result<Option<OpenEnvTrainingContract>, ApiError> {
     if request.kind != OpenEnvRunKind::Train {
-        return Ok(());
+        return Ok(None);
     }
     let output_adapter = request.output_adapter.as_deref().ok_or_else(|| {
         openenv_error(
@@ -1457,7 +1561,17 @@ fn validate_openenv_training_preflight(
         )
     })?;
     let config = effective_openenv_grpo_config(request, output_adapter);
-    validate_openenv_training_contract(state, &request.adapter, &config, request.post_eval.as_ref())
+    validate_openenv_training_contract(
+        state,
+        &request.adapter,
+        &config,
+        request.post_eval.as_ref(),
+    )?;
+    Ok(Some(OpenEnvTrainingContract {
+        schema: OPENENV_TRAINING_CONTRACT_SCHEMA_V1.to_string(),
+        effective_config: config,
+        post_eval: request.post_eval.clone(),
+    }))
 }
 
 fn openenv_training_capacity_snapshot(
@@ -1956,17 +2070,20 @@ async fn create_run(
         return Ok((StatusCode::OK, Json(status)));
     }
     validate_run_request(&request, state.openenv_runs.policy())?;
-    if let Err(error) = validate_openenv_training_preflight(&state, &request) {
-        state
-            .metrics
-            .openenv_training_preflight_rejected
-            .fetch_add(1, Ordering::Relaxed);
-        state
-            .metrics
-            .openenv_training_preflights_rejected
-            .fetch_add(1, Ordering::Relaxed);
-        return Err(error);
-    }
+    let training_contract = match validate_openenv_training_preflight(&state, &request) {
+        Ok(contract) => contract,
+        Err(error) => {
+            state
+                .metrics
+                .openenv_training_preflight_rejected
+                .fetch_add(1, Ordering::Relaxed);
+            state
+                .metrics
+                .openenv_training_preflights_rejected
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(error);
+        }
+    };
     if request.kind == OpenEnvRunKind::Train {
         state
             .metrics
@@ -1976,7 +2093,7 @@ async fn create_run(
     let authenticated = request.credential_ids.iter().any(Option::is_some);
     let outcome = state
         .openenv_runs
-        .insert(request)
+        .insert(request, training_contract)
         .map_err(openenv_run_insert_error)?;
     let (status, control) = match outcome {
         OpenEnvRunInsertOutcome::Created { status, control } => (status, control),
@@ -2088,11 +2205,24 @@ async fn execute_run(state: AppState, run_id: String, cancel: Arc<AtomicBool>) {
 
 async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBool>) -> Result<()> {
     anyhow::ensure!(!cancel.load(Ordering::Relaxed), "OpenEnv run cancelled");
-    let request = state
+    let admitted = state
         .openenv_runs
         .get(run_id)
-        .context("OpenEnv run disappeared before execution")?
-        .request;
+        .context("OpenEnv run disappeared before execution")?;
+    let request = admitted.request;
+    let training_contract = admitted.training_contract;
+    match request.kind {
+        OpenEnvRunKind::Rollout => anyhow::ensure!(
+            training_contract.is_none(),
+            "OpenEnv rollout unexpectedly carries a training contract"
+        ),
+        OpenEnvRunKind::Train => anyhow::ensure!(
+            training_contract.as_ref().is_some_and(|contract| {
+                openenv_training_contract_matches_request(&request, contract)
+            }),
+            "OpenEnv train run has no valid admitted training contract"
+        ),
+    }
     let run_dir = state.openenv_runs.run_dir(run_id);
     let credential_envs = state
         .openenv_runs
@@ -2114,6 +2244,7 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
     let control = OpenEnvCollectionControl::new(cancel.clone(), Some(progress), Some(discovered));
     let policy = OpenEnvPolicyTransport::InProcess(state.clone());
     let mut collection = collect_openenv_rollouts_with_policy(&options, &policy, &control).await?;
+    collection.summary.training_contract = training_contract.clone();
     anyhow::ensure!(!cancel.load(Ordering::Relaxed), "OpenEnv run cancelled");
     write_openenv_outputs(
         &options,
@@ -2170,11 +2301,13 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
         status.error = None;
     })?;
     anyhow::ensure!(!cancel.load(Ordering::Relaxed), "OpenEnv run cancelled");
-    let output_adapter = request
-        .output_adapter
-        .as_ref()
-        .context("OpenEnv train run has no output adapter")?;
-    let config = effective_openenv_grpo_config(&request, output_adapter);
+    let training_contract =
+        training_contract.context("OpenEnv train run has no admitted training contract")?;
+    anyhow::ensure!(
+        training_contract.schema == OPENENV_TRAINING_CONTRACT_SCHEMA_V1,
+        "OpenEnv train run has unsupported training contract schema {:?}",
+        training_contract.schema
+    );
     let environment_gate_pending = request
         .environment_eval
         .as_ref()
@@ -2186,8 +2319,8 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
             dataset_path: None,
             dataset: None,
             dataset_split: None,
-            config,
-            post_eval: request.post_eval.clone(),
+            config: training_contract.effective_config.clone(),
+            post_eval: training_contract.post_eval.clone(),
         },
         environment_gate_pending,
     )
@@ -2217,7 +2350,15 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
         .metrics
         .openenv_training_queued
         .fetch_add(1, Ordering::Relaxed);
-    follow_openenv_training(state, run_id, &request, &submission.job_id, cancel.clone()).await?;
+    follow_openenv_training(
+        state,
+        run_id,
+        &request,
+        training_contract.post_eval.as_ref(),
+        &submission.job_id,
+        cancel.clone(),
+    )
+    .await?;
     state
         .metrics
         .openenv_training_completed
@@ -2651,6 +2792,7 @@ async fn follow_openenv_training(
     state: &AppState,
     run_id: &str,
     request: &OpenEnvRunRequest,
+    post_eval: Option<&kiln_eval::PostEvalConfig>,
     training_job_id: &str,
     cancel: Arc<AtomicBool>,
 ) -> Result<()> {
@@ -2693,18 +2835,14 @@ async fn follow_openenv_training(
                 );
             }
             TrainingState::Completed => {
-                if request.post_eval.is_none() {
+                if post_eval.is_none() {
                     finish_followed_training(state, run_id, request, training, evals)?;
                     return Ok(());
                 }
 
                 let completed_at = training_completed_at.get_or_insert_with(Instant::now);
-                let expected_evals = 1 + usize::from(
-                    request
-                        .post_eval
-                        .as_ref()
-                        .is_some_and(|cfg| cfg.include_baseline),
-                );
+                let expected_evals =
+                    1 + usize::from(post_eval.is_some_and(|cfg| cfg.include_baseline));
                 publish_training_phase(
                     state,
                     run_id,
@@ -2743,10 +2881,7 @@ async fn follow_openenv_training(
                     let evaluations_done = evals
                         .iter()
                         .all(|eval| eval.state == EvalJobState::Completed);
-                    let gate_done = request
-                        .post_eval
-                        .as_ref()
-                        .is_none_or(|cfg| cfg.min_accuracy.is_none())
+                    let gate_done = post_eval.is_none_or(|cfg| cfg.min_accuracy.is_none())
                         || training.gate_outcome.is_some();
                     if evaluations_done && !gate_done {
                         let started = gate_wait_started.get_or_insert_with(Instant::now);
@@ -2860,7 +2995,7 @@ fn environment_evaluation_artifacts(run_id: &str, run_dir: &Path) -> Result<Vec<
 
 async fn list_runs(State(state): State<AppState>) -> Json<OpenEnvRunList> {
     Json(OpenEnvRunList {
-        schema: OPENENV_RUN_LIST_SCHEMA_V4,
+        schema: OPENENV_RUN_LIST_SCHEMA_V5,
         runs: state.openenv_runs.list(),
     })
 }
@@ -3115,12 +3250,20 @@ mod tests {
         registry: &OpenEnvRunRegistry,
         request: OpenEnvRunRequest,
     ) -> (OpenEnvRunStatus, OpenEnvRunControl) {
-        match registry.insert(request).unwrap() {
+        match insert_test_run(registry, request).unwrap() {
             OpenEnvRunInsertOutcome::Created { status, control } => (status, control),
             OpenEnvRunInsertOutcome::Replayed(_) => {
                 panic!("test expected a newly created OpenEnv run")
             }
         }
+    }
+
+    fn insert_test_run(
+        registry: &OpenEnvRunRegistry,
+        request: OpenEnvRunRequest,
+    ) -> Result<OpenEnvRunInsertOutcome> {
+        let training_contract = materialized_openenv_training_contract(&request)?;
+        registry.insert(request, training_contract)
     }
 
     fn training_job(job_id: &str, state: TrainingState) -> TrainingJobInfo {
@@ -3212,7 +3355,7 @@ mod tests {
         let (first, first_control) = insert_created(&registry, request(OpenEnvRunKind::Rollout));
         let (second, second_control) = insert_created(&registry, request(OpenEnvRunKind::Rollout));
         let (third, third_control) = insert_created(&registry, request(OpenEnvRunKind::Rollout));
-        assert!(registry.insert(request(OpenEnvRunKind::Rollout)).is_err());
+        assert!(insert_test_run(&registry, request(OpenEnvRunKind::Rollout)).is_err());
         assert_eq!(
             registry
                 .get(&first.run_id)
@@ -3298,8 +3441,7 @@ mod tests {
             restored.get(&first.run_id).unwrap().state,
             OpenEnvRunState::RolloutReady
         );
-        restored
-            .insert(request(OpenEnvRunKind::Rollout))
+        insert_test_run(&restored, request(OpenEnvRunKind::Rollout))
             .expect("the oldest terminal status should be evicted to admit new work");
         assert!(restored.get(&first.run_id).is_none());
     }
@@ -3320,7 +3462,7 @@ mod tests {
             let submitted = submitted.clone();
             handles.push(std::thread::spawn(move || {
                 barrier.wait();
-                match registry.insert(submitted).unwrap() {
+                match insert_test_run(&registry, submitted).unwrap() {
                     OpenEnvRunInsertOutcome::Created { status, .. } => (true, status.run_id),
                     OpenEnvRunInsertOutcome::Replayed(status) => (false, status.run_id),
                 }
@@ -3365,6 +3507,65 @@ mod tests {
         let error = OpenEnvRunRegistry::open(temp.path().to_path_buf(), OpenEnvConfig::default())
             .unwrap_err();
         assert!(error.to_string().contains("share idempotency key"));
+    }
+
+    #[test]
+    fn admitted_training_contract_is_persisted_and_migrates_pristine_v4_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        let policy = OpenEnvConfig::default();
+        let registry = OpenEnvRunRegistry::open(temp.path().to_path_buf(), policy.clone()).unwrap();
+        let mut submitted = request(OpenEnvRunKind::Train);
+        submitted.auto_load = false;
+        submitted.training_config = Some(GrpoConfig {
+            learning_rate: Some(3e-5),
+            lora_rank: 16,
+            output_name: Some("ignored-request-output".into()),
+            behavior_policy: BehaviorPolicy::Recorded,
+            ..GrpoConfig::default()
+        });
+        let expected = materialized_openenv_training_contract(&submitted)
+            .unwrap()
+            .unwrap();
+        let mut mismatched = expected.clone();
+        mismatched.effective_config.lora_rank += 1;
+        assert!(
+            registry
+                .insert(submitted.clone(), Some(mismatched))
+                .is_err(),
+            "persistence must reject a contract that disagrees with its owned request fields"
+        );
+        let (created, _) = insert_created(&registry, submitted);
+        assert_eq!(created.schema, OPENENV_RUN_SCHEMA_V5);
+        assert_eq!(
+            serde_json::to_value(created.training_contract.as_ref().unwrap()).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        let persisted: OpenEnvRunStatus =
+            serde_json::from_slice(&std::fs::read(registry.status_path(&created.run_id)).unwrap())
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(persisted.training_contract.as_ref().unwrap()).unwrap(),
+            serde_json::to_value(&expected).unwrap(),
+            "run.json must retain the exact admitted config before collection"
+        );
+
+        registry
+            .update(&created.run_id, |status| {
+                status.schema = OPENENV_RUN_SCHEMA_V4.into();
+                status.training_contract = None;
+            })
+            .unwrap();
+        drop(registry);
+
+        let restored = OpenEnvRunRegistry::open(temp.path().to_path_buf(), policy).unwrap();
+        let migrated = restored.get(&created.run_id).unwrap();
+        assert_eq!(migrated.schema, OPENENV_RUN_SCHEMA_V5);
+        assert!(migrated.safely_restartable_queued());
+        assert_eq!(
+            serde_json::to_value(migrated.training_contract.unwrap()).unwrap(),
+            serde_json::to_value(expected).unwrap(),
+            "a pristine v4 queue entry must be sealed exactly once before resume"
+        );
     }
 
     #[test]
@@ -3774,7 +3975,7 @@ mod tests {
             .unwrap();
         assert_eq!(registry.counts().0, 0);
         assert!(
-            registry.insert(request(OpenEnvRunKind::Train)).is_ok(),
+            insert_test_run(&registry, request(OpenEnvRunKind::Train)).is_ok(),
             "a historical v1 handoff must not consume v2 active-run capacity"
         );
         let restored =
@@ -3802,6 +4003,7 @@ mod tests {
                 &followed_state,
                 &followed_run_id,
                 &request(OpenEnvRunKind::Train),
+                None,
                 "train-1",
                 cancel.cancel,
             )
@@ -3858,6 +4060,7 @@ mod tests {
             &state,
             &run.run_id,
             &run_request,
+            None,
             "train-environment-eval",
             cancel.cancel,
         )
@@ -3906,11 +4109,13 @@ mod tests {
 
         let followed_state = state.clone();
         let followed_run_id = run.run_id.clone();
+        let post_eval = run_request.post_eval.clone();
         let follow = tokio::spawn(async move {
             follow_openenv_training(
                 &followed_state,
                 &followed_run_id,
                 &run_request,
+                post_eval.as_ref(),
                 "train-eval",
                 cancel.cancel,
             )
@@ -3972,7 +4177,7 @@ mod tests {
             .await
             .unwrap();
         let queued: OpenEnvRunStatus = serde_json::from_slice(&body).unwrap();
-        assert_eq!(queued.schema, OPENENV_RUN_SCHEMA_V4);
+        assert_eq!(queued.schema, OPENENV_RUN_SCHEMA_V5);
         assert_eq!(queued.state, OpenEnvRunState::Queued);
         assert_eq!(queued.admission.as_ref().unwrap().queue_position, Some(1));
         assert_eq!(state.openenv_runs.counts(), (1, 1, 2));
@@ -4069,7 +4274,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             serde_json::from_slice::<Value>(&body).unwrap()["schema"],
-            OPENENV_RUN_LIST_SCHEMA_V4
+            OPENENV_RUN_LIST_SCHEMA_V5
         );
 
         let mut invalid = request(OpenEnvRunKind::Rollout);

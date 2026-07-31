@@ -483,15 +483,23 @@ requests reject every training-only field. Both the dashboard's static
 **Prove it after training** suite and paired `environment_eval` remain ordinary
 parts of the same owned lifecycle.
 
+The admitted values become one typed `kiln.openenv-training-contract.v1`.
+Persisted v5 status writes it to `run.json` atomically with queue admission and
+the executor submits from that field, not from request defaults. Direct train
+builds the identical type from its preflight receipt. Summary v4 embeds the
+contract before the first artifact publication, so failed handoff is still
+auditable and a successful submission can be checked against admitted intent.
+
 Server-owned runs are bounded by `[openenv]` policy and persisted below
-`<adapter_dir>/.openenv/runs/<run-id>/`. `run.json` records request, discovery
-identity, progress, lifecycle state, artifacts, error, and optional training
+`<adapter_dir>/.openenv/runs/<run-id>/`. `run.json` records request, immutable
+training contract, discovery identity, progress, lifecycle state, artifacts, error, and optional training
 job. `max_active_runs` admits complete workflows in strict FIFO order; excess
 valid submissions remain bounded by `max_tracked_runs`, expose one-based queue
 position, stable admission sequence, and admission wait, and can be cancelled without touching an
 environment or model. The execution permit spans collection, training, static
-evaluation, and paired environment evaluation. A restart resumes v4 FIFO
-entries that provably never acquired a slot; it converts interrupted admitted
+evaluation, and paired environment evaluation. A restart resumes v5 FIFO
+entries that provably never acquired a slot; pristine v4 entries are sealed
+once into v5 first. It converts interrupted admitted
 work into explicit terminal failure and never guesses whether a stateful
 external episode can resume. An optional bounded `idempotency_key` is part of
 the persisted normalized request. While its run is retained, atomic concurrent
@@ -528,7 +536,7 @@ backs off and opens a fresh socket under an explicit wait deadline.
 Reset configuration is either one shared object or an ordered object per
 environment. The collector removes any caller-supplied `seed`, inserts its
 deterministic group seed, and assigns whole groups round-robin. It requires at
-least one group per configured endpoint. Summary v3 hashes the ordered,
+least one group per configured endpoint. Summary v4 hashes the ordered,
 seed-free plan; offline verification reconstructs that plan from replay groups
 and rejects missing environments, per-environment drift, or a digest mismatch.
 

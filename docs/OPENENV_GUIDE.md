@@ -61,13 +61,11 @@ kiln openenv cancel 80a26e21-8451-4a64-8666-890c06fd80bd
 `idempotency_key` or `--idempotency-key`: exact retries recover the retained run; changed reuse fails.
 `artifact` follows same-server manifest URLs, verifies length, ETag, and hash, then
 publishes atomically; `--force` replaces. `status --follow --json` emits one terminal snapshot.
-Version 4 adds a position-visible, cancellable FIFO. `[openenv]` bounds run capacity, remote
-origins, credentials, and TTL. See the [recovery reference](OPENENV_REPLAY_REFERENCE.md) and
-[configuration reference](CONFIGURATION.md).
-
-Before persistence or discovery, train creation preflights its effective GRPO
-config, adapter, suite, and backend; failures spend no episodes. Rollouts reject
-train-only fields. See the [admission reference](OPENENV_REPLAY_REFERENCE.md#training-admission).
+Run records v5 keep the cancellable FIFO and seal accepted training as an immutable
+`kiln.openenv-training-contract.v1`; resume, execution, CLI, and dashboard share it.
+Admission precedes persistence and discovery, so failures spend no episodes and
+rollouts reject train-only fields. `[openenv]` bounds capacity, origins, credentials,
+and TTL. See the [admission reference](OPENENV_REPLAY_REFERENCE.md#training-admission).
 
 ### Protected environments
 
@@ -143,7 +141,7 @@ kiln openenv train \
 `--adapter` selects behavior (`base`, `none`, or `null` mean the base model);
 `--output-adapter` names the LoRA. Chat lacks exact per-action log probabilities, so Kiln sets `behavior_policy: "no_importance_correction"`, never `recorded`.
 
-Before discovery, direct training obtains its exact GRPO/post-eval contract from `POST /v1/openenv/training/preflight`. Rejection writes no artifacts; `capacity_reserved: false` means final queue and live-memory admission rechecks. See the [admission reference](OPENENV_REPLAY_REFERENCE.md#training-admission).
+Before discovery, direct training gets the same contract from `POST /v1/openenv/training/preflight`; summary v4 embeds it before artifacts. Rejection writes none; `capacity_reserved: false` requires rechecking. See the [admission reference](OPENENV_REPLAY_REFERENCE.md#training-admission).
 
 Subsequent admission, checkpoints, cancellation, publication, and status are ordinary native GRPO; use `kiln train status`, the dashboard, and `train_receipt.json`.
 

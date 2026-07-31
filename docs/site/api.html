@@ -1082,13 +1082,16 @@ curl -fsS http://localhost:8420/v1/train/opd \
           Public loopback environments need no credentials; protected origins use server-owned opaque
           credential IDs aligned with their URLs so secrets never enter requests, run records, or artifacts.
           Valid runs are accepted into a bounded FIFO when every complete-workflow slot is occupied;
-          v4 status reports one-based queue position, admission timestamp, and wait duration. A restart
+          v5 status reports one-based queue position, admission timestamp, and wait duration. A restart
           resumes only never-admitted FIFO entries; interrupted executors fail explicitly. Optional
           bounded <code>idempotency_key</code> values make concurrent and post-restart submission retries
           atomic while the original run is retained. Every training entrance materializes the exact effective
           GRPO config and preflights its behavior adapter, static <code>post_eval</code> suite,
           backend/workload, optimizer, and rank before persistence or environment discovery. Direct clients
           receive that config from a side-effect-free preflight and must submit it unchanged after collection.
+          Accepted train status atomically retains <code>kiln.openenv-training-contract.v1</code>;
+          restart and execution use it without recomputing defaults, and summary v4 embeds the same
+          settings before artifact publication.
           Rejections therefore spend no episodes or artifacts. Training &rarr; OpenEnv exposes that suite as <strong>Prove it after
           training</strong>; collect-only requests reject every training-only field.
         </p>

@@ -187,7 +187,7 @@ CONTROL_COMPONENT_TYPES = {name: name for name in CONTROL_ENTRYPOINTS}
 CONTROL_COMPONENT_TYPES["CorrectionRowInput"] = "CorrectionRow"
 CONTROL_COMPONENT_TYPES["Vec_TrainingStatus"] = "Vec<TrainingStatus>"
 EXPECTED_OBSERVABILITY_DEFINITION_COUNT = 172
-EXPECTED_CONTROL_PLANE_DEFINITION_COUNT = 155
+EXPECTED_CONTROL_PLANE_DEFINITION_COUNT = 156
 EXPECTED_COMPONENT_SCHEMA_COUNTS = {
     "complete": 144,
     "migration_pending": 0,
@@ -1807,6 +1807,7 @@ def validate_control_schema(
         "OpenEnvEnvironmentEvalStatus": ("crates/kiln-server/src/openenv_evaluation.rs", "OpenEnvEnvironmentEvalStatus", set(), set()),
         "OpenEnvRunRequest": ("crates/kiln-server/src/api/openenv.rs", "OpenEnvRunRequest", set(), set()),
         "OpenEnvRunStatus": ("crates/kiln-server/src/api/openenv.rs", "OpenEnvRunStatus", set(), set()),
+        "OpenEnvTrainingContract": ("crates/kiln-server/src/openenv_cli.rs", "OpenEnvTrainingContract", set(), set()),
         "OpenEnvRunList": ("crates/kiln-server/src/api/openenv.rs", "OpenEnvRunList", set(), set()),
         "OpenEnvInspectRequest": ("crates/kiln-server/src/api/openenv.rs", "OpenEnvInspectRequest", set(), set()),
         "OpenEnvInspectResponse": ("crates/kiln-server/src/api/openenv.rs", "OpenEnvInspectResponse", set(), set()),

@@ -58,11 +58,18 @@ const MAX_OPENENV_SUMMARY_BYTES: usize = 256 * 1024 * 1024;
 /// protocol turns arrive so one legal but adversarial group cannot accumulate
 /// an enormous working set before artifact serialization.
 const MAX_OPENENV_RETAINED_BYTES: usize = 512 * 1024 * 1024;
+// Reserve one complete control-plane request for the materialized training
+// contract that train workflows attach after collection. The request endpoint
+// enforces this same bound, so collection + contract remains within the public
+// aggregate budget even at the artifact limit.
+const MAX_OPENENV_COLLECTION_RETAINED_BYTES: usize =
+    MAX_OPENENV_RETAINED_BYTES - MAX_OPENENV_RUN_REQUEST_BYTES;
 const MAX_OPENENV_RESET_OPTIONS_BYTES: usize = OPENENV_MAX_CLIENT_MESSAGE_BYTES - 1024;
 const MAX_OPENENV_RUN_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_KILN_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const CHAT_TIMEOUT: Duration = Duration::from_secs(180);
 pub const OPENENV_TRAINING_PREFLIGHT_SCHEMA_V1: &str = "kiln.openenv-training-preflight.v1";
+pub const OPENENV_TRAINING_CONTRACT_SCHEMA_V1: &str = "kiln.openenv-training-contract.v1";
 
 /// Policy inference used while an OpenEnv episode is live.
 ///
@@ -674,6 +681,30 @@ pub struct OpenEnvTrainingPreflightReceipt {
     pub capacity_reserved: bool,
 }
 
+/// Immutable native-training intent admitted before OpenEnv collection.
+///
+/// Persisted workflows and direct CLI receipts use this same wire type so the
+/// exact materialized GRPO and post-evaluation settings survive queue waits,
+/// process restarts, and artifact handoff without being recomputed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenEnvTrainingContract {
+    pub schema: String,
+    pub effective_config: GrpoConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_eval: Option<kiln_eval::PostEvalConfig>,
+}
+
+impl OpenEnvTrainingPreflightReceipt {
+    pub fn training_contract(&self) -> OpenEnvTrainingContract {
+        OpenEnvTrainingContract {
+            schema: OPENENV_TRAINING_CONTRACT_SCHEMA_V1.to_string(),
+            effective_config: self.effective_config.clone(),
+            post_eval: self.post_eval.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenEnvRolloutSummary {
@@ -710,6 +741,11 @@ pub struct OpenEnvRolloutSummary {
     pub replay_bytes: usize,
     pub stats: OpenEnvRolloutStats,
     pub rollouts: Vec<OpenEnvRolloutRecord>,
+    /// Exact native training settings admitted before collection. Rollout-only
+    /// receipts omit this field; train receipts retain it even if final trainer
+    /// submission fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training_contract: Option<OpenEnvTrainingContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub training_submission: Option<Value>,
 }
@@ -1699,6 +1735,26 @@ fn print_openenv_server_run(run: &Value) {
     {
         println!("  Submission: retry key {key}");
     }
+    if let Some(contract) = run.get("training_contract") {
+        let config = contract.get("effective_config").unwrap_or(&Value::Null);
+        let optimizer = config
+            .pointer("/optimizer/kind")
+            .and_then(Value::as_str)
+            .unwrap_or("muon");
+        let rank = config.get("lora_rank").and_then(Value::as_u64).unwrap_or(8);
+        let output = config
+            .get("output_name")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let auto_load = config
+            .get("auto_load")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        println!("  Contract: {optimizer} · rank {rank} · output {output} · auto-load {auto_load}");
+        if let Some(suite) = contract.pointer("/post_eval/suite").and_then(Value::as_str) {
+            println!("  Contract eval: {suite}");
+        }
+    }
     if let Some(training) = run.get("training") {
         let training_state = training
             .get("state")
@@ -1879,6 +1935,21 @@ fn print_openenv_summary(summary: &OpenEnvRolloutSummary, submitted_training: bo
             summary.stats.recoverable_protocol_error_count, summary.stats.capacity_retry_count
         );
     }
+    if let Some(contract) = summary.training_contract.as_ref() {
+        let config = &contract.effective_config;
+        println!(
+            "  Training:    {:?} · rank {} · output {} · auto-load {}{}",
+            config.optimizer.kind(),
+            config.lora_rank,
+            config.output_name.as_deref().unwrap_or("n/a"),
+            config.auto_load,
+            contract
+                .post_eval
+                .as_ref()
+                .map(|post_eval| format!(" · post-eval {}", post_eval.suite))
+                .unwrap_or_default()
+        );
+    }
     if submitted_training {
         let submission = summary
             .training_submission
@@ -1950,6 +2021,7 @@ pub async fn run_openenv_train(options: OpenEnvTrainOptions) -> Result<OpenEnvRo
     validate_options(&options.rollout)?;
     let preflight = preflight_openenv_training(&options).await?;
     let mut collection = collect_openenv_rollouts(&options.rollout).await?;
+    collection.summary.training_contract = Some(preflight.training_contract());
     write_openenv_outputs(
         &options.rollout,
         &collection.groups,
@@ -1994,7 +2066,7 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
     control.ensure_active()?;
     let reset_plan = read_reset_plan(options)?;
     let reset_plan_sha256 = sha256_json(&reset_plan)?;
-    let retained_budget = OpenEnvRetainedByteBudget::new(MAX_OPENENV_RETAINED_BYTES);
+    let retained_budget = OpenEnvRetainedByteBudget::new(MAX_OPENENV_COLLECTION_RETAINED_BYTES);
     let reset_plan_bytes = serialized_len(&reset_plan, "reset plan")?;
     retained_budget.charge(reset_plan_bytes, "the ordered reset plan")?;
     let adapter = parse_adapter_selection(&options.adapter);
@@ -2199,7 +2271,7 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
     drop(replay_encoded);
     let stats = summarize_rollouts(&records);
     let summary = OpenEnvRolloutSummary {
-        schema: "kiln.openenv-rollout-summary.v3".to_string(),
+        schema: "kiln.openenv-rollout-summary.v4".to_string(),
         kiln_url: options.kiln_url.trim_end_matches('/').to_string(),
         adapter: adapter.request_value.as_str().map(ToOwned::to_owned),
         adapter_label: adapter.label,
@@ -2227,6 +2299,7 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
         replay_bytes,
         stats,
         rollouts: records,
+        training_contract: None,
         training_submission: None,
     };
     let summary_bytes = pretty_serialized_len(&summary, "summary")?
@@ -3732,6 +3805,12 @@ mod tests {
             capacity_reserved: false,
         };
         validate_openenv_training_preflight_receipt(&request, &receipt).unwrap();
+        let contract = receipt.training_contract();
+        assert_eq!(contract.schema, OPENENV_TRAINING_CONTRACT_SCHEMA_V1);
+        assert_eq!(
+            serde_json::to_value(&contract.effective_config).unwrap(),
+            serde_json::to_value(&receipt.effective_config).unwrap()
+        );
 
         receipt.effective_config.output_name = Some("wrong-agent".into());
         assert!(
@@ -3762,12 +3841,12 @@ mod tests {
     #[test]
     fn server_run_follow_fingerprint_tracks_fifo_position_changes() {
         let queued_second = json!({
-            "schema": "kiln.openenv-run.v4",
+            "schema": "kiln.openenv-run.v5",
             "state": "queued",
             "admission": {"max_active_runs": 1, "sequence": 2, "queue_position": 2}
         });
         let queued_first = json!({
-            "schema": "kiln.openenv-run.v4",
+            "schema": "kiln.openenv-run.v5",
             "state": "queued",
             "admission": {"max_active_runs": 1, "sequence": 2, "queue_position": 1}
         });

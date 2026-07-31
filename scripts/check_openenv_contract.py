@@ -8,11 +8,22 @@ import copy
 import json
 from pathlib import Path
 
-from json_schema_subset import validate_instance
+from json_schema_subset import validate_instance as validate_schema_instance
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "contracts" / "kiln-openenv-v1.schema.json"
+CONTROL_PLANE_SCHEMA_PATH = ROOT / "contracts" / "kiln-control-plane-v1.schema.json"
+
+
+def validate_instance(value: object, schema: dict, root: dict) -> list[str]:
+    control_plane = json.loads(CONTROL_PLANE_SCHEMA_PATH.read_text(encoding="utf-8"))
+    return validate_schema_instance(
+        value,
+        schema,
+        root,
+        registry={"kiln-control-plane-v1.schema.json": control_plane},
+    )
 
 
 def hash_value(character: str) -> str:
@@ -79,7 +90,7 @@ def fixtures() -> dict[str, dict]:
         "mean_model_latency_ms": 1.5,
     }
     summary = {
-        "schema": "kiln.openenv-rollout-summary.v3",
+        "schema": "kiln.openenv-rollout-summary.v4",
         "kiln_url": "http://127.0.0.1:8420",
         "adapter": None,
         "adapter_label": "base",
@@ -106,6 +117,17 @@ def fixtures() -> dict[str, dict]:
         "replay_bytes": 1024,
         "stats": stats,
         "rollouts": [record],
+        "training_contract": {
+            "schema": "kiln.openenv-training-contract.v1",
+            "effective_config": {
+                "base_adapter": None,
+                "output_name": "counter-agent",
+                "auto_load": True,
+                "behavior_policy": "no_importance_correction",
+                "lora_rank": 8,
+            },
+        },
+        "training_submission": {"job_id": "grpo-openenv-1"},
     }
     replay = {
         "schema": "kiln.openenv-replay.v1",
@@ -258,7 +280,27 @@ def main() -> int:
         if not validate_instance(
             missing_reset_plan, schema["$defs"]["OpenEnvRolloutSummary"], schema
         ):
-            failures.append("self-test: v3 summary without reset_plan_sha256 was accepted")
+            failures.append("self-test: v4 summary without reset_plan_sha256 was accepted")
+
+        missing_training_contract = copy.deepcopy(values["OpenEnvRolloutSummary"])
+        del missing_training_contract["training_contract"]
+        if not validate_instance(
+            missing_training_contract,
+            schema["$defs"]["OpenEnvRolloutSummary"],
+            schema,
+        ):
+            failures.append(
+                "self-test: training summary without its admitted contract was accepted"
+            )
+
+        wrong_training_contract = copy.deepcopy(values["OpenEnvRolloutSummary"])
+        wrong_training_contract["training_contract"]["schema"] = "unknown"
+        if not validate_instance(
+            wrong_training_contract,
+            schema["$defs"]["OpenEnvRolloutSummary"],
+            schema,
+        ):
+            failures.append("self-test: unknown training contract schema was accepted")
 
         missing_digest = copy.deepcopy(values["OpenEnvRolloutSummary"])
         del missing_digest["replay_sha256"]
@@ -450,8 +492,15 @@ def main() -> int:
         "X-Content-Type-Options",
     }:
         failures.append("OpenEnv artifact OpenAPI integrity headers are incomplete")
-    if "kiln.openenv-rollout-summary.v3" not in cli:
-        failures.append("openenv_cli.rs is missing summary v3")
+    if "kiln.openenv-rollout-summary.v4" not in cli:
+        failures.append("openenv_cli.rs is missing summary v4")
+    for term in [
+        "OPENENV_TRAINING_CONTRACT_SCHEMA_V1",
+        "OpenEnvTrainingContract",
+        "training_contract",
+    ]:
+        if term not in cli or term not in api_source:
+            failures.append(f"OpenEnv runtime is missing shared training-contract term {term}")
     for term in [
         "MAX_OPENENV_RETAINED_BYTES",
         "MAX_OPENENV_RESET_OPTIONS_BYTES",
@@ -495,6 +544,7 @@ def main() -> int:
         "Exhaustion publishes no partial bundle",
         "POST /v1/openenv/training/preflight",
         "capacity_reserved: false",
+        "kiln.openenv-training-contract.v1",
     ]:
         if command not in guide:
             failures.append(f"OpenEnv guide is missing {command!r}")
