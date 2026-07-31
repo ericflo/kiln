@@ -1111,7 +1111,7 @@
           "x-kiln-type-and-default": "unsigned integer; 4",
           "x-kiln-canonical-env": "KILN_OPENENV_MAX_ACTIVE_RUNS (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-validation": "Must be greater than zero and no greater than max_tracked_runs. Bounds concurrent live rollout collectors; submitted GRPO jobs subsequently use the normal training queue."
+          "x-kiln-validation": "Must be greater than zero and no greater than max_tracked_runs. Bounds complete live OpenEnv workflows, including collection, queued or running GRPO, and requested post-evaluation; the underlying trainer and evaluator still use their normal bounded queues."
         },
         "max_tracked_runs": {
           "type": "integer",
