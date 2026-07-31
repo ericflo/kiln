@@ -71,7 +71,7 @@ same shape.
 
 ## OpenEnv persisted training and evidence
 
-### `kiln openenv start --request <file> --follow`
+### `kiln openenv start --request <file> --idempotency-key <attempt-key> --follow`
 
 Submit the complete server-owned `OpenEnvRunRequest`: rollout-only or native
 GRPO, optional static post-eval, and paired held-out environment evaluation.
@@ -80,13 +80,16 @@ produce one durable `run_id`. The file must be one regular, non-symlink JSON
 object up to 1 MiB; the server remains authoritative for request validation.
 
 ```bash
-kiln openenv start --request openenv-run.json --follow
+kiln openenv start --request openenv-run.json \
+  --idempotency-key cap-json-schema-h7-seed17 --follow
 kiln openenv status <run-id> --follow --json
 ```
 
-Run-status v4 exposes bounded FIFO admission. `queued` with
+Bind one stable non-secret idempotency key to each hypothesis attempt. An exact
+retained retry recovers its original run; changed semantics under that key fail
+closed. Run-status v4 exposes bounded FIFO admission. `queued` with
 `admission.queue_position` is accepted work, not a retry signal. Preserve the
-run ID; cancel a superseded queued attempt instead of duplicating it.
+run ID and cancel a superseded queued attempt.
 
 Keep training and held-out seeds disjoint. A kept stage requires the native
 paired-return gate; training returns never substitute for it.

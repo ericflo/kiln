@@ -56,6 +56,7 @@ const OPENENV_INSPECTION_SCHEMA_V1: &str = "kiln.openenv-inspection.v1";
 const OPENENV_TASK_CATALOG_SCHEMA_V1: &str = "kiln.openenv-task-catalog.v1";
 const OPENENV_API_BODY_LIMIT: usize = 1024 * 1024;
 const MAX_ENVIRONMENTS: usize = 64;
+const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
 const MAX_PERSISTED_STATUS_BYTES: u64 = 2 * 1024 * 1024;
 const ARTIFACT_CHUNK_BYTES: usize = 64 * 1024;
 const LIFECYCLE_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -201,6 +202,11 @@ impl OpenEnvRunState {
 pub struct OpenEnvRunRequest {
     #[serde(default)]
     pub kind: OpenEnvRunKind,
+    /// Optional opaque retry identity. While the resulting run remains
+    /// retained, the same key plus normalized request returns that run and the
+    /// same key with different semantics fails closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
     #[serde(alias = "environments")]
     pub environment_urls: Vec<String>,
     /// Optional server-configured credential handle aligned with each
@@ -445,6 +451,20 @@ struct TrackedOpenEnvRun {
     control: OpenEnvRunControl,
 }
 
+enum OpenEnvRunInsertOutcome {
+    Created {
+        status: OpenEnvRunStatus,
+        control: OpenEnvRunControl,
+    },
+    Replayed(OpenEnvRunStatus),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("OpenEnv idempotency key {key:?} is already bound to a different normalized request")]
+struct OpenEnvIdempotencyConflict {
+    key: String,
+}
+
 #[derive(Clone)]
 struct OpenEnvRunControl {
     cancel: Arc<AtomicBool>,
@@ -525,6 +545,29 @@ impl std::fmt::Debug for OpenEnvRunRegistry {
             )
             .finish()
     }
+}
+
+fn normalized_run_requests_match(
+    left: &OpenEnvRunRequest,
+    right: &OpenEnvRunRequest,
+) -> Result<bool> {
+    let left = serde_json::to_value(left).context("normalize submitted OpenEnv run request")?;
+    let right = serde_json::to_value(right).context("normalize retained OpenEnv run request")?;
+    Ok(left == right)
+}
+
+pub(crate) fn validate_openenv_idempotency_key(key: &str) -> Result<()> {
+    anyhow::ensure!(
+        !key.is_empty() && key.len() <= MAX_IDEMPOTENCY_KEY_BYTES,
+        "OpenEnv idempotency_key must contain 1..={MAX_IDEMPOTENCY_KEY_BYTES} ASCII bytes"
+    );
+    anyhow::ensure!(
+        key.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
+        }),
+        "OpenEnv idempotency_key may contain only ASCII letters, digits, '.', '_', ':', or '-'"
+    );
+    Ok(())
 }
 
 impl OpenEnvRunRegistry {
@@ -647,6 +690,31 @@ impl OpenEnvRunRegistry {
             }
         }
         restored.truncate(self.policy.max_tracked_runs);
+        // Historical run directories are intentionally durable even after
+        // their statuses fall outside the bounded registry. Validate key
+        // uniqueness only after applying that retention boundary: an evicted
+        // terminal run no longer owns its key, while two actually retained
+        // records with one key remain a startup-failing invariant violation.
+        let mut restored_idempotency_keys = HashMap::new();
+        for status in &restored {
+            let Some(key) = status.request.idempotency_key.as_deref() else {
+                continue;
+            };
+            validate_openenv_idempotency_key(key).with_context(|| {
+                format!(
+                    "validate retained OpenEnv idempotency key for run {}",
+                    status.run_id
+                )
+            })?;
+            if let Some(previous_run_id) =
+                restored_idempotency_keys.insert(key.to_string(), status.run_id.clone())
+            {
+                anyhow::bail!(
+                    "retained OpenEnv runs {previous_run_id} and {} share idempotency key {key:?}",
+                    status.run_id
+                );
+            }
+        }
         let mut restored_queue = VecDeque::new();
         let mut runs = self.runs.write().unwrap();
         for mut status in restored {
@@ -709,10 +777,46 @@ impl OpenEnvRunRegistry {
         }
     }
 
-    fn insert(&self, request: OpenEnvRunRequest) -> Result<(OpenEnvRunStatus, OpenEnvRunControl)> {
+    fn idempotent_status_locked(
+        runs: &HashMap<String, TrackedOpenEnvRun>,
+        request: &OpenEnvRunRequest,
+    ) -> Result<Option<OpenEnvRunStatus>> {
+        let Some(key) = request.idempotency_key.as_deref() else {
+            return Ok(None);
+        };
+        let Some(existing) = runs
+            .values()
+            .find(|tracked| tracked.status.request.idempotency_key.as_deref() == Some(key))
+        else {
+            return Ok(None);
+        };
+        if !normalized_run_requests_match(request, &existing.status.request)? {
+            return Err(OpenEnvIdempotencyConflict {
+                key: key.to_string(),
+            }
+            .into());
+        }
+        Ok(Some(existing.status.clone()))
+    }
+
+    fn replay_idempotent(&self, request: &OpenEnvRunRequest) -> Result<Option<OpenEnvRunStatus>> {
+        let mut runs = self.runs.write().unwrap();
+        self.prune_locked(&mut runs);
+        let status = Self::idempotent_status_locked(&runs, request)?;
+        drop(runs);
+        Ok(status.map(|status| self.project_admission(status)))
+    }
+
+    fn insert(&self, request: OpenEnvRunRequest) -> Result<OpenEnvRunInsertOutcome> {
         anyhow::ensure!(self.policy.enabled, "OpenEnv control plane is disabled");
         let mut runs = self.runs.write().unwrap();
         self.prune_locked(&mut runs);
+        if let Some(status) = Self::idempotent_status_locked(&runs, &request)? {
+            drop(runs);
+            return Ok(OpenEnvRunInsertOutcome::Replayed(
+                self.project_admission(status),
+            ));
+        }
         self.make_room_locked(&mut runs);
         anyhow::ensure!(
             runs.len() < self.policy.max_tracked_runs,
@@ -782,7 +886,7 @@ impl OpenEnvRunRegistry {
         );
         drop(admission);
         self.admission_changed.notify_waiters();
-        Ok((status, control))
+        Ok(OpenEnvRunInsertOutcome::Created { status, control })
     }
 
     fn get(&self, run_id: &str) -> Option<OpenEnvRunStatus> {
@@ -1160,10 +1264,25 @@ fn resolve_credential_envs(
         })
 }
 
+fn validate_run_idempotency_key(request: &OpenEnvRunRequest) -> Result<(), ApiError> {
+    let Some(key) = request.idempotency_key.as_deref() else {
+        return Ok(());
+    };
+    validate_openenv_idempotency_key(key).map_err(|error| {
+        openenv_error(
+            StatusCode::BAD_REQUEST,
+            "openenv_invalid_idempotency_key",
+            error,
+            "Use 1..=128 ASCII letters, digits, '.', '_', ':', or '-'; do not place a secret in this persisted field.",
+        )
+    })
+}
+
 fn validate_run_request(
     request: &OpenEnvRunRequest,
     policy: &OpenEnvConfig,
 ) -> Result<(), ApiError> {
+    validate_run_idempotency_key(request)?;
     validate_environment_urls(&request.environment_urls, policy.allow_remote_environments)?;
     let credential_envs =
         resolve_credential_envs(policy, &request.credential_ids, &request.environment_urls)?;
@@ -1605,6 +1724,35 @@ pub fn resume_queued_runs(state: &AppState) -> usize {
     count
 }
 
+fn openenv_run_insert_error(error: anyhow::Error) -> ApiError {
+    let conflict = error.downcast_ref::<OpenEnvIdempotencyConflict>().is_some();
+    let capacity = error.to_string().contains("capacity is full");
+    openenv_error(
+        if conflict {
+            StatusCode::CONFLICT
+        } else if capacity {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        },
+        if conflict {
+            "openenv_run_idempotency_conflict"
+        } else if capacity {
+            "openenv_run_capacity_full"
+        } else {
+            "openenv_run_create_failed"
+        },
+        error,
+        if conflict {
+            "Reuse an idempotency key only with the same normalized request, or choose a new non-secret key for distinct work."
+        } else if capacity {
+            "Cancel an unneeded queued run or wait for retained capacity, then retry."
+        } else {
+            "Check Kiln's adapter directory permissions and server logs."
+        },
+    )
+}
+
 async fn create_run(
     State(state): State<AppState>,
     Json(request): Json<OpenEnvRunRequest>,
@@ -1617,29 +1765,34 @@ async fn create_run(
             "Set [openenv] enabled=true and restart Kiln, or use the kiln openenv CLI.",
         ));
     }
+    validate_run_idempotency_key(&request)?;
+    if let Some(status) = state
+        .openenv_runs
+        .replay_idempotent(&request)
+        .map_err(openenv_run_insert_error)?
+    {
+        state
+            .metrics
+            .openenv_run_idempotent_replays
+            .fetch_add(1, Ordering::Relaxed);
+        return Ok((StatusCode::OK, Json(status)));
+    }
     validate_run_request(&request, state.openenv_runs.policy())?;
     let authenticated = request.credential_ids.iter().any(Option::is_some);
-    let (status, control) = state.openenv_runs.insert(request).map_err(|error| {
-        let capacity = error.to_string().contains("capacity is full");
-        openenv_error(
-            if capacity {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            },
-            if capacity {
-                "openenv_run_capacity_full"
-            } else {
-                "openenv_run_create_failed"
-            },
-            error,
-            if capacity {
-                "Cancel an unneeded queued run or wait for retained capacity, then retry."
-            } else {
-                "Check Kiln's adapter directory permissions and server logs."
-            },
-        )
-    })?;
+    let outcome = state
+        .openenv_runs
+        .insert(request)
+        .map_err(openenv_run_insert_error)?;
+    let (status, control) = match outcome {
+        OpenEnvRunInsertOutcome::Created { status, control } => (status, control),
+        OpenEnvRunInsertOutcome::Replayed(status) => {
+            state
+                .metrics
+                .openenv_run_idempotent_replays
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok((StatusCode::OK, Json(status)));
+        }
+    };
     state
         .metrics
         .openenv_runs_started
@@ -2752,6 +2905,7 @@ mod tests {
     fn request(kind: OpenEnvRunKind) -> OpenEnvRunRequest {
         OpenEnvRunRequest {
             kind,
+            idempotency_key: None,
             environment_urls: vec!["http://127.0.0.1:8000".into()],
             credential_ids: Vec::new(),
             adapter: "base".into(),
@@ -2773,6 +2927,18 @@ mod tests {
             auto_load: true,
             post_eval: None,
             environment_eval: None,
+        }
+    }
+
+    fn insert_created(
+        registry: &OpenEnvRunRegistry,
+        request: OpenEnvRunRequest,
+    ) -> (OpenEnvRunStatus, OpenEnvRunControl) {
+        match registry.insert(request).unwrap() {
+            OpenEnvRunInsertOutcome::Created { status, control } => (status, control),
+            OpenEnvRunInsertOutcome::Replayed(_) => {
+                panic!("test expected a newly created OpenEnv run")
+            }
         }
     }
 
@@ -2862,9 +3028,9 @@ mod tests {
         };
         let registry =
             Arc::new(OpenEnvRunRegistry::open(temp.path().to_path_buf(), policy.clone()).unwrap());
-        let (first, first_control) = registry.insert(request(OpenEnvRunKind::Rollout)).unwrap();
-        let (second, second_control) = registry.insert(request(OpenEnvRunKind::Rollout)).unwrap();
-        let (third, third_control) = registry.insert(request(OpenEnvRunKind::Rollout)).unwrap();
+        let (first, first_control) = insert_created(&registry, request(OpenEnvRunKind::Rollout));
+        let (second, second_control) = insert_created(&registry, request(OpenEnvRunKind::Rollout));
+        let (third, third_control) = insert_created(&registry, request(OpenEnvRunKind::Rollout));
         assert!(registry.insert(request(OpenEnvRunKind::Rollout)).is_err());
         assert_eq!(
             registry
@@ -2957,6 +3123,102 @@ mod tests {
         assert!(restored.get(&first.run_id).is_none());
     }
 
+    #[test]
+    fn run_registry_idempotency_is_atomic_conflict_safe_and_restart_durable() {
+        let temp = tempfile::tempdir().unwrap();
+        let policy = OpenEnvConfig::default();
+        let registry =
+            Arc::new(OpenEnvRunRegistry::open(temp.path().to_path_buf(), policy.clone()).unwrap());
+        let mut submitted = request(OpenEnvRunKind::Rollout);
+        submitted.idempotency_key = Some("experiment:counter:17".into());
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let registry = registry.clone();
+            let barrier = barrier.clone();
+            let submitted = submitted.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                match registry.insert(submitted).unwrap() {
+                    OpenEnvRunInsertOutcome::Created { status, .. } => (true, status.run_id),
+                    OpenEnvRunInsertOutcome::Replayed(status) => (false, status.run_id),
+                }
+            }));
+        }
+        barrier.wait();
+        let first = handles.remove(0).join().unwrap();
+        let second = handles.remove(0).join().unwrap();
+        assert_ne!(first.0, second.0, "exactly one caller must create the run");
+        assert_eq!(first.1, second.1);
+        assert_eq!(registry.counts(), (0, 1, 1));
+        assert_eq!(
+            registry
+                .replay_idempotent(&submitted)
+                .unwrap()
+                .unwrap()
+                .run_id,
+            first.1
+        );
+
+        let mut conflict = submitted.clone();
+        conflict.groups += 1;
+        let error = registry.replay_idempotent(&conflict).unwrap_err();
+        assert!(error.downcast_ref::<OpenEnvIdempotencyConflict>().is_some());
+        drop(registry);
+
+        let restored = OpenEnvRunRegistry::open(temp.path().to_path_buf(), policy).unwrap();
+        assert_eq!(
+            restored
+                .replay_idempotent(&submitted)
+                .unwrap()
+                .unwrap()
+                .run_id,
+            first.1
+        );
+        let mut duplicate = restored.get(&first.1).unwrap();
+        duplicate.run_id = uuid::Uuid::new_v4().to_string();
+        duplicate.admission.as_mut().unwrap().sequence += 1;
+        std::fs::create_dir(restored.run_dir(&duplicate.run_id)).unwrap();
+        persist_status_to(&restored.status_path(&duplicate.run_id), &duplicate).unwrap();
+        drop(restored);
+        let error = OpenEnvRunRegistry::open(temp.path().to_path_buf(), OpenEnvConfig::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("share idempotency key"));
+    }
+
+    #[test]
+    fn capacity_eviction_releases_idempotency_key_across_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let policy = OpenEnvConfig {
+            max_tracked_runs: 1,
+            ..Default::default()
+        };
+        let registry = OpenEnvRunRegistry::open(temp.path().to_path_buf(), policy.clone()).unwrap();
+        let mut first_request = request(OpenEnvRunKind::Rollout);
+        first_request.idempotency_key = Some("reusable:attempt".into());
+        let (first, _) = insert_created(&registry, first_request.clone());
+        registry.cancel(&first.run_id).unwrap();
+
+        let mut displacement = request(OpenEnvRunKind::Rollout);
+        displacement.idempotency_key = Some("displacement".into());
+        let (second, _) = insert_created(&registry, displacement);
+        registry.cancel(&second.run_id).unwrap();
+
+        let (replacement, _) = insert_created(&registry, first_request.clone());
+        assert_ne!(replacement.run_id, first.run_id);
+        drop(registry);
+
+        let restored = OpenEnvRunRegistry::open(temp.path().to_path_buf(), policy).unwrap();
+        assert_eq!(
+            restored
+                .replay_idempotent(&first_request)
+                .unwrap()
+                .unwrap()
+                .run_id,
+            replacement.run_id
+        );
+    }
+
     #[tokio::test]
     async fn queued_run_cancels_immediately_without_consuming_execution_capacity() {
         let temp = tempfile::tempdir().unwrap();
@@ -2967,8 +3229,8 @@ mod tests {
         };
         let registry =
             Arc::new(OpenEnvRunRegistry::open(temp.path().to_path_buf(), policy).unwrap());
-        let (first, first_control) = registry.insert(request(OpenEnvRunKind::Rollout)).unwrap();
-        let (second, second_control) = registry.insert(request(OpenEnvRunKind::Rollout)).unwrap();
+        let (first, first_control) = insert_created(&registry, request(OpenEnvRunKind::Rollout));
+        let (second, second_control) = insert_created(&registry, request(OpenEnvRunKind::Rollout));
         let first_permit = registry
             .acquire(&first.run_id, &first_control)
             .await
@@ -3002,9 +3264,9 @@ mod tests {
         };
         let registry =
             Arc::new(OpenEnvRunRegistry::open(temp.path().to_path_buf(), policy.clone()).unwrap());
-        let (active, active_control) = registry.insert(request(OpenEnvRunKind::Rollout)).unwrap();
-        let (queued_first, _) = registry.insert(request(OpenEnvRunKind::Rollout)).unwrap();
-        let (queued_second, _) = registry.insert(request(OpenEnvRunKind::Rollout)).unwrap();
+        let (active, active_control) = insert_created(&registry, request(OpenEnvRunKind::Rollout));
+        let (queued_first, _) = insert_created(&registry, request(OpenEnvRunKind::Rollout));
+        let (queued_second, _) = insert_created(&registry, request(OpenEnvRunKind::Rollout));
         assert!(
             queued_first.admission.as_ref().unwrap().sequence
                 < queued_second.admission.as_ref().unwrap().sequence
@@ -3047,6 +3309,22 @@ mod tests {
         assert!(
             validate_environment_urls(&["http://user:secret@127.0.0.1:1".into()], true).is_err()
         );
+    }
+
+    #[test]
+    fn idempotency_keys_are_bounded_non_secret_opaque_tokens() {
+        for key in ["experiment-17", "client.retry_2", "capability:math:003"] {
+            assert!(validate_openenv_idempotency_key(key).is_ok());
+        }
+        for key in ["", "contains space", "secret/token", "line\nbreak"] {
+            assert!(validate_openenv_idempotency_key(key).is_err(), "{key:?}");
+        }
+        assert!(validate_openenv_idempotency_key(&"a".repeat(128)).is_ok());
+        assert!(validate_openenv_idempotency_key(&"a".repeat(129)).is_err());
+
+        let mut invalid = request(OpenEnvRunKind::Rollout);
+        invalid.idempotency_key = Some("bad key".into());
+        assert!(validate_run_request(&invalid, &OpenEnvConfig::default()).is_err());
     }
 
     #[test]
@@ -3180,7 +3458,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let registry =
             OpenEnvRunRegistry::open(temp.path().to_path_buf(), OpenEnvConfig::default()).unwrap();
-        let (status, _) = registry.insert(request(OpenEnvRunKind::Train)).unwrap();
+        let (status, _) = insert_created(&registry, request(OpenEnvRunKind::Train));
         registry
             .update(&status.run_id, |status| {
                 status.state = OpenEnvRunState::Submitting;
@@ -3204,7 +3482,7 @@ mod tests {
             ..Default::default()
         };
         let registry = OpenEnvRunRegistry::open(temp.path().to_path_buf(), policy.clone()).unwrap();
-        let (legacy, _) = registry.insert(request(OpenEnvRunKind::Train)).unwrap();
+        let (legacy, _) = insert_created(&registry, request(OpenEnvRunKind::Train));
         registry
             .update(&legacy.run_id, |status| {
                 status.schema = OPENENV_RUN_SCHEMA_V1.into();
@@ -3229,10 +3507,7 @@ mod tests {
     async fn openenv_run_follows_trainer_to_actual_completion() {
         let temp = tempfile::tempdir().unwrap();
         let state = test_state(&temp, OpenEnvConfig::default());
-        let (run, cancel) = state
-            .openenv_runs
-            .insert(request(OpenEnvRunKind::Train))
-            .unwrap();
+        let (run, cancel) = insert_created(&state.openenv_runs, request(OpenEnvRunKind::Train));
         state.training_jobs.write().unwrap().insert(
             "train-1".into(),
             training_job("train-1", TrainingState::Queued),
@@ -3292,7 +3567,7 @@ mod tests {
             seed_start: None,
             gate: None,
         });
-        let (run, cancel) = state.openenv_runs.insert(run_request.clone()).unwrap();
+        let (run, cancel) = insert_created(&state.openenv_runs, run_request.clone());
         state.training_jobs.write().unwrap().insert(
             "train-environment-eval".into(),
             training_job("train-environment-eval", TrainingState::Completed),
@@ -3327,7 +3602,7 @@ mod tests {
             min_accuracy: None,
             include_baseline: false,
         });
-        let (run, cancel) = state.openenv_runs.insert(run_request.clone()).unwrap();
+        let (run, cancel) = insert_created(&state.openenv_runs, run_request.clone());
         let mut training = training_job("train-eval", TrainingState::Completed);
         training.linked_eval_job_ids.push("eval-1".into());
         state
@@ -3387,16 +3662,16 @@ mod tests {
             ..Default::default()
         };
         let state = test_state(&temp, policy);
-        let (active, active_control) = state
-            .openenv_runs
-            .insert(request(OpenEnvRunKind::Rollout))
-            .unwrap();
+        let (active, active_control) =
+            insert_created(&state.openenv_runs, request(OpenEnvRunKind::Rollout));
         let active_permit = state
             .openenv_runs
             .acquire(&active.run_id, &active_control)
             .await
             .unwrap();
         let app = routes().with_state(state.clone());
+        let mut submitted = request(OpenEnvRunKind::Rollout);
+        submitted.idempotency_key = Some("ui:retry:17".into());
 
         let response = app
             .clone()
@@ -3405,9 +3680,7 @@ mod tests {
                     .method("POST")
                     .uri("/v1/openenv/runs")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        serde_json::to_vec(&request(OpenEnvRunKind::Rollout)).unwrap(),
-                    ))
+                    .body(Body::from(serde_json::to_vec(&submitted).unwrap()))
                     .unwrap(),
             )
             .await
@@ -3421,6 +3694,56 @@ mod tests {
         assert_eq!(queued.state, OpenEnvRunState::Queued);
         assert_eq!(queued.admission.as_ref().unwrap().queue_position, Some(1));
         assert_eq!(state.openenv_runs.counts(), (1, 1, 2));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/openenv/runs")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&submitted).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let replayed: OpenEnvRunStatus = serde_json::from_slice(&body).unwrap();
+        assert_eq!(replayed.run_id, queued.run_id);
+        assert_eq!(state.openenv_runs.counts(), (1, 1, 2));
+        assert_eq!(
+            state
+                .metrics
+                .openenv_run_idempotent_replays
+                .load(Ordering::Relaxed),
+            1
+        );
+
+        let mut conflict = submitted.clone();
+        conflict.groups += 1;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/openenv/runs")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&conflict).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"],
+            "openenv_run_idempotency_conflict"
+        );
 
         let response = app
             .oneshot(
@@ -3496,10 +3819,7 @@ mod tests {
     async fn artifact_downloads_require_publication_and_reverify_the_manifest() {
         let temp = tempfile::tempdir().unwrap();
         let state = test_state(&temp, OpenEnvConfig::default());
-        let (run, _) = state
-            .openenv_runs
-            .insert(request(OpenEnvRunKind::Rollout))
-            .unwrap();
+        let (run, _) = insert_created(&state.openenv_runs, request(OpenEnvRunKind::Rollout));
         let artifact_bytes = b"{\"group\":1}\n";
         let artifact_path = state
             .openenv_runs

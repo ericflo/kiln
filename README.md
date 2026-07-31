@@ -123,14 +123,16 @@ a dependency, configuration namespace, or special execution path.
 
 OpenEnv is also native to the embedded dashboard and control plane. Use
 **Training → OpenEnv** in `/ui/`, submit `POST /v1/openenv/runs`, or use
-`kiln openenv start --request openenv-run.json --follow`; Kiln persists
+`kiln openenv start --request openenv-run.json --idempotency-key <attempt-key> --follow`; Kiln persists
 discovery and collection progress,
 canonical artifact links, native GRPO progress and loss, linked evaluation
 results, promotion-gate outcomes, failures, and cancellation across browser
 refreshes. Valid submissions enter a bounded FIFO when all configured OpenEnv
 workflow slots are occupied; CLI and dashboard expose live queue position,
 admission wait, immediate cancellation before execution, and safe restart of
-entries that never acquired a slot. After training,
+entries that never acquired a slot. Persisted non-secret idempotency keys make
+submission retry-safe: an identical retained request recovers its original run,
+while changed semantics under that key fail closed. After training,
 it can pair behavior and candidate policies on
 identical, disjoint held-out environment seeds, compare environment-owned
 returns with an exact sign test, and defer auto-load until the candidate earns

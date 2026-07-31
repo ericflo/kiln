@@ -473,7 +473,10 @@ environment or model. The execution permit spans collection, training, static
 evaluation, and paired environment evaluation. A restart resumes v4 FIFO
 entries that provably never acquired a slot; it converts interrupted admitted
 work into explicit terminal failure and never guesses whether a stateful
-external episode can resume.
+external episode can resume. An optional bounded `idempotency_key` is part of
+the persisted normalized request. While its run is retained, atomic concurrent
+retries return the original status without adding queue work; reuse with any
+changed request field returns a conflict.
 Dataset, replay, and summary downloads stream from those owned paths. Collection
 is cooperatively cancellable through capacity backoff and episode boundaries;
 after handoff, the workflow forwards cancellation to the authoritative native

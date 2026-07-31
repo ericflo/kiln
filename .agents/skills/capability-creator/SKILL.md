@@ -408,7 +408,7 @@ Full reference in `resources/kiln-cli-reference.md`.
 | `kiln trajectory inspect <jsonl>` | Mask + token-count diagnostic | 10 |
 | `kiln eval-adapter --adapter ... --seeds N` | Multi-seed paired eval | 33 |
 | `kiln rollout --adapter ... --tasks ...` | Direct HTTP rollout | 34 |
-| `kiln openenv start --request ... --follow` | Persisted environment collect/train/eval lifecycle | native |
+| `kiln openenv start --request ... --idempotency-key <attempt-key> --follow` | Retry-safe persisted environment collect/train/eval lifecycle | native |
 | `kiln openenv artifact <run-id> <kind> --output ...` | Manifest-bound verified evidence materialization | native |
 | `cuda_grpo_ablation --dry-run` | Pre-GPU validation | 9 |
 | `cuda_grpo_ablation --filter-var-min` | Strong-signal filter | 22 |

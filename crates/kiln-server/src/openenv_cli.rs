@@ -197,10 +197,10 @@ pub(crate) const OPENENV_EXAMPLES: &str = r#"Examples:
       List server-owned OpenEnv workflows, including live trainer and linked
       post-evaluation state.
 
-  kiln openenv start --request openenv-run.json --follow
-      Submit a bounded persisted server-run request and follow collection,
-      native GRPO, static evaluation, and paired held-out evaluation through
-      their shared terminal outcome.
+  kiln openenv start --request openenv-run.json --idempotency-key experiment:wordle:17 --follow
+      Submit a retry-safe persisted server-run request and follow collection,
+      native GRPO, static evaluation, and paired held-out evaluation. Exact
+      retained retries recover the original run.
 
   kiln openenv status 80a26e21-8451-4a64-8666-890c06fd80bd --follow
       Follow one persisted server workflow through collection, native GRPO,
@@ -422,6 +422,10 @@ pub enum OpenEnvCommands {
         /// Regular non-symlink JSON object (max 1 MiB) matching OpenEnvRunRequest
         #[arg(long, value_name = "FILE")]
         request: PathBuf,
+
+        /// Stable non-secret retry key; must match any idempotency_key in FILE
+        #[arg(long, value_name = "KEY")]
+        idempotency_key: Option<String>,
 
         /// Running Kiln server URL
         #[arg(long = "url", default_value_t = default_server_url())]
@@ -1023,11 +1027,13 @@ pub async fn run_openenv(command: &OpenEnvCommands) -> Result<()> {
         }
         OpenEnvCommands::Start {
             request,
+            idempotency_key,
             kiln_url,
             follow,
             json,
         } => {
-            let request = read_openenv_run_request(request)?;
+            let mut request = read_openenv_run_request(request)?;
+            apply_openenv_idempotency_key(&mut request, idempotency_key.as_deref())?;
             let started = start_openenv_control_plane_run(kiln_url, &request).await?;
             let run_id = validated_openenv_server_run_id(&started, None)?.to_string();
             watch_openenv_server_run(kiln_url, &run_id, *follow, *json, Some(started)).await?;
@@ -1242,6 +1248,26 @@ fn openenv_control_plane_client() -> Result<reqwest::Client> {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("build OpenEnv control-plane client")
+}
+
+fn apply_openenv_idempotency_key(request: &mut Value, key: Option<&str>) -> Result<()> {
+    let Some(key) = key else {
+        return Ok(());
+    };
+    crate::api::openenv::validate_openenv_idempotency_key(key)?;
+    let object = request
+        .as_object_mut()
+        .context("OpenEnv run request must be a JSON object")?;
+    if let Some(existing) = object.get("idempotency_key") {
+        anyhow::ensure!(
+            existing.as_str() == Some(key),
+            "--idempotency-key {key:?} does not match request idempotency_key {}",
+            serde_json::to_string(existing).unwrap_or_default()
+        );
+    } else {
+        object.insert("idempotency_key".into(), Value::String(key.into()));
+    }
+    Ok(())
 }
 
 async fn start_openenv_control_plane_run(kiln_url: &str, request: &Value) -> Result<Value> {
@@ -1614,6 +1640,12 @@ fn print_openenv_server_run(run: &Value) {
         } else if let Some(wait_ms) = admission.get("queue_wait_ms").and_then(Value::as_u64) {
             println!("  Admission: execution started after {wait_ms} ms");
         }
+    }
+    if let Some(key) = run
+        .pointer("/request/idempotency_key")
+        .and_then(Value::as_str)
+    {
+        println!("  Submission: retry key {key}");
     }
     if let Some(training) = run.get("training") {
         let training_state = training
@@ -3411,6 +3443,8 @@ mod tests {
             "start",
             "--request",
             "run.json",
+            "--idempotency-key",
+            "experiment:counter:17",
             "--follow",
             "--json",
         ])
@@ -3419,10 +3453,11 @@ mod tests {
             start.command,
             Some(Commands::Openenv(OpenEnvCommands::Start {
                 request,
+                idempotency_key: Some(idempotency_key),
                 follow: true,
                 json: true,
                 ..
-            })) if request == PathBuf::from("run.json")
+            })) if request == PathBuf::from("run.json") && idempotency_key == "experiment:counter:17"
         ));
 
         let status = Cli::try_parse_from([
@@ -3584,6 +3619,19 @@ mod tests {
                 .to_string()
                 .contains("limit")
         );
+    }
+
+    #[test]
+    fn persisted_start_injects_one_matching_retry_key() {
+        let mut request = json!({
+            "kind": "rollout",
+            "environment_urls": ["http://127.0.0.1:8990"]
+        });
+        apply_openenv_idempotency_key(&mut request, Some("experiment:counter:17")).unwrap();
+        assert_eq!(request["idempotency_key"], "experiment:counter:17");
+        apply_openenv_idempotency_key(&mut request, Some("experiment:counter:17")).unwrap();
+        assert!(apply_openenv_idempotency_key(&mut request, Some("different-key")).is_err());
+        assert!(apply_openenv_idempotency_key(&mut request, Some("not secret")).is_err());
     }
 
     #[cfg(unix)]

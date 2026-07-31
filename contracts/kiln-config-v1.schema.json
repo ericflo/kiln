@@ -1117,23 +1117,23 @@
           "type": "integer",
           "minimum": 1,
           "default": 128,
-          "description": "Maximum retained OpenEnv run records across active, FIFO-queued, and terminal runs.",
+          "description": "Maximum retained OpenEnv run records across active, FIFO-queued, and terminal runs, including optional idempotency-key bindings.",
           "x-kiln-path": "openenv.max_tracked_runs",
           "x-kiln-type-and-default": "unsigned integer; 128",
           "x-kiln-canonical-env": "KILN_OPENENV_MAX_TRACKED_RUNS (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-validation": "Must be greater than zero and at least max_active_runs. This is the hard admission bound for active plus FIFO-queued work and retained terminal history."
+          "x-kiln-validation": "Must be greater than zero and at least max_active_runs. This is the hard admission bound for active plus FIFO-queued work and retained terminal history. A retained record also owns its optional idempotency-key binding."
         },
         "tracked_run_ttl_secs": {
           "type": "integer",
           "minimum": 1,
           "default": 604800,
-          "description": "Retention window for terminal OpenEnv run records. Replay artifacts remain under the adapter root.",
+          "description": "Retention window for terminal OpenEnv run records and idempotency-key bindings. Replay artifacts remain under the adapter root.",
           "x-kiln-path": "openenv.tracked_run_ttl_secs",
           "x-kiln-type-and-default": "unsigned integer; 604800",
           "x-kiln-canonical-env": "KILN_OPENENV_TRACKED_RUN_TTL_SECS (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-validation": "Must be greater than zero. Terminal status records age out after this window; content-addressed rollout and paired-evaluation artifacts remain under <adapter_dir>/.openenv/runs/."
+          "x-kiln-validation": "Must be greater than zero. Terminal status and idempotency bindings age out after this window; content-addressed rollout and paired-evaluation artifacts remain under <adapter_dir>/.openenv/runs/."
         },
         "allow_remote_environments": {
           "type": "boolean",

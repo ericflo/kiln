@@ -356,9 +356,11 @@ OpenEnv RL
           state machine from a bounded request file. A strict FIFO admits at most the configured
           number of complete workflows; queued runs hold no environment or model capacity and remain
           position-visible and immediately cancellable. Never-admitted v4 entries resume after restart;
-          admitted stateful work fails explicitly rather than guessing at recovery.
+          admitted stateful work fails explicitly rather than guessing at recovery. A bounded persisted
+          idempotency key atomically maps identical retries to the original retained run and rejects drift.
         </p>
         <pre class="mt-5"><code>persisted run request + environment URLs + aligned credentials/reset plan
+  -> idempotent persisted creation
   -> bounded FIFO workflow admission
   -> inspect identity and action schema
   -> round-robin seed-matched candidate episodes

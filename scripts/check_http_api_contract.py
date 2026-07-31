@@ -499,31 +499,35 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
             ) if explicit_errors else None
             if error_schema != {"$ref": "#/components/schemas/ApiError"}:
                 errors.append(f"{label}: unavailable operation must use the structured ApiError schema")
-        elif len(success) != 1:
-            errors.append(f"{label}: exactly one success response is required")
+        elif operation.get("x-kiln-multiple-success-responses") is True and len(success) < 2:
+            errors.append(f"{label}: declared multiple-success operation needs at least two success responses")
+        elif operation.get("x-kiln-multiple-success-responses") is not True and len(success) != 1:
+            errors.append(f"{label}: exactly one success response is required unless explicitly declared")
         else:
-            response = responses[success[0]]
-            if not isinstance(response, dict):
-                errors.append(f"{label}: success response must be an object")
-            else:
+            for success_code in success:
+                response = responses[success_code]
+                response_label = f"{label} {success_code}"
+                if not isinstance(response, dict):
+                    errors.append(f"{response_label}: success response must be an object")
+                    continue
                 rust_type = response.get("x-kiln-rust-type")
                 content = response.get("content")
                 media_types = content_media_types(content)
                 if not media_types or any(value not in ALLOWED_MEDIA_TYPES for value in media_types):
-                    errors.append(f"{label}: success response media types are missing or unsupported")
+                    errors.append(f"{response_label}: response media types are missing or unsupported")
                 for media_type in media_types:
                     media = content.get(media_type)
                     if not isinstance(media, dict) or not isinstance(media.get("schema"), dict):
-                        errors.append(f"{label}: {media_type} response must declare a schema")
+                        errors.append(f"{response_label}: {media_type} response must declare a schema")
                 if len(media_types) == 1:
                     actual = schema_rust_type(document, content[media_types[0]]["schema"])
                     if actual != rust_type:
-                        errors.append(f"{label}: response schema does not match x-kiln-rust-type")
+                        errors.append(f"{response_label}: response schema does not match x-kiln-rust-type")
                 headers = response.get("headers", {})
                 if not isinstance(headers, dict) or any(
                     value != {"schema": {"type": "string"}} for value in headers.values()
                 ):
-                    errors.append(f"{label}: response headers must be string schemas")
+                    errors.append(f"{response_label}: response headers must be string schemas")
         if path.startswith("/v1/") and path not in EXPLICIT_ERROR_PATHS and responses.get("default") != {
             "$ref": "#/components/responses/ApiError"
         }:
@@ -849,6 +853,17 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
             errors.append(
                 f"{method.upper()} {path} {status}: control-plane response schema must be {expected_response_ref}"
             )
+
+    openenv_create = paths.get("/v1/openenv/runs", {}).get("post", {})
+    openenv_success = {
+        code
+        for code in openenv_create.get("responses", {})
+        if code.isdigit() and 200 <= int(code) < 400
+    }
+    if openenv_create.get("x-kiln-multiple-success-responses") is not True:
+        errors.append("POST /v1/openenv/runs: idempotent creation must declare multiple success responses")
+    if openenv_success != {"200", "202"}:
+        errors.append("POST /v1/openenv/runs: success responses must be exactly 200 replay and 202 creation")
 
     for reference in collect_references(document):
         try:
@@ -2285,6 +2300,18 @@ def run_self_tests(
         document["paths"]["/v1/train/status/{job_id}"]["get"]["responses"]["200"]
     )
     mutations.append((fake_unavailable_success, "unavailable operations require"))
+
+    undeclared_multiple_success = copy.deepcopy(document)
+    undeclared_multiple_success["paths"]["/v1/openenv/runs"]["post"].pop(
+        "x-kiln-multiple-success-responses"
+    )
+    mutations.append((undeclared_multiple_success, "exactly one success response is required"))
+
+    falsely_declared_multiple_success = copy.deepcopy(document)
+    falsely_declared_multiple_success["paths"]["/v1/models"]["get"][
+        "x-kiln-multiple-success-responses"
+    ] = True
+    mutations.append((falsely_declared_multiple_success, "needs at least two success responses"))
 
     errors = []
     for mutated, expected_fragment in mutations:

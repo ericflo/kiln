@@ -61,9 +61,9 @@ that fired in `pipeline.md` stage rationale.
 ```
 RULE A — Interactive environments and multi-turn tool-calling tasks
   IF a stateful OpenEnv environment exists:
-    → use `kiln openenv rollout` or `kiln openenv start --request baseline.json --follow`
+    → use `kiln openenv rollout` or `kiln openenv start --request baseline.json --idempotency-key <baseline-attempt> --follow`
       for the baseline variance probe
-    → use `kiln openenv train` or `kiln openenv start --request train.json --follow`
+    → use `kiln openenv train` or `kiln openenv start --request train.json --idempotency-key <train-attempt> --follow`
       for agentic-GRPO with ECHO on
     → put paired held-out evaluation on disjoint seeds in the persisted train request
     → promotion requires its exact sign-test gate; preserve both rollout
@@ -202,12 +202,13 @@ See resources/grpo-mode.md §6.
 ### §3.4 Agentic-GRPO
 
 **Trainer:** native `kiln openenv train`, persisted
-`kiln openenv start --request <run.json> --follow`, Training → OpenEnv, or
+`kiln openenv start --request <run.json> --idempotency-key <attempt-key> --follow`, Training → OpenEnv, or
 `POST /v1/openenv/runs` for OpenEnv tasks; otherwise
 `cuda_grpo_ablation` with the ECHO env-mask layer.
-Persisted v4 runs may wait in Kiln's bounded FIFO: treat `queued` plus an
-admission position as accepted work, retain the run ID, and cancel obsolete
-queued hypotheses instead of submitting duplicates.
+Assign one non-secret `idempotency_key` to each persisted hypothesis. Exact
+retained retries recover the same v4 run across concurrency and restart; never
+change request semantics under that key. Treat `queued` plus an admission
+position as accepted work, retain the run ID, and cancel obsolete hypotheses.
 **Use when:** Rule A. Stateful OpenEnv tasks or multi-turn tool-calling tasks.
 **Data:** For OpenEnv, seed-matched stateful WebSocket episodes collected as
 canonical `AgenticGroup` JSONL. For pi, session JSONLs normalized into

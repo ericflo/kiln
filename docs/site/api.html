@@ -1083,12 +1083,14 @@ curl -fsS http://localhost:8420/v1/train/opd \
           credential IDs aligned with their URLs so secrets never enter requests, run records, or artifacts.
           Valid runs are accepted into a bounded FIFO when every complete-workflow slot is occupied;
           v4 status reports one-based queue position, admission timestamp, and wait duration. A restart
-          resumes only never-admitted FIFO entries; interrupted executors fail explicitly.
+          resumes only never-admitted FIFO entries; interrupted executors fail explicitly. Optional
+          bounded <code>idempotency_key</code> values make concurrent and post-restart submission retries
+          atomic while the original run is retained.
         </p>
         <div class="endpoint-list" style="color: var(--fg-dim);">
           <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/inspect</code> &mdash; discover and normalize the protocol metadata, action schema, and observation schema for one compatible environment.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/tasks</code> &mdash; list the environment&rsquo;s reset-task catalog through the same origin and credential policy.</div>
-          <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/runs</code> &mdash; accept a collect-only or collect-and-train run into bounded FIFO execution across one or more compatible environment URLs.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/runs</code> &mdash; accept a collect-only or collect-and-train run into bounded FIFO execution. A new run returns 202; the same retained idempotency key and normalized request return the original status with 200; changed reuse returns 409.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/openenv/runs</code> &mdash; list retained runs with progress, terminal evidence, gates, and published artifact manifests.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/openenv/runs/{run_id}</code> &mdash; retrieve one durable run snapshot across collection, training, paired evaluation, completion, failure, or cancellation.</div>
           <div class="endpoint"><span class="method">DELETE</span> <code>/v1/openenv/runs/{run_id}</code> &mdash; immediately cancel queued work or request cooperative cancellation from the active collector, trainer, or evaluator while retaining completed evidence.</div>
@@ -1096,13 +1098,15 @@ curl -fsS http://localhost:8420/v1/train/opd \
         </div>
         <div class="code-block mt-4"><pre><code>curl -fsS http://localhost:8420/v1/openenv/runs \
   -H 'content-type: application/json' \
-  -d '{"kind":"train","environment_urls":["http://127.0.0.1:8990"],
+  -d '{"kind":"train","idempotency_key":"experiment:math:17",
+       "environment_urls":["http://127.0.0.1:8990"],
        "adapter":"base","output_adapter":"math-agent",
        "groups":8,"group_size":4,"max_steps":8,
        "environment_eval":{"groups":20,"group_size":1}}'
 
 curl -fsS http://localhost:8420/v1/openenv/runs | python3 -m json.tool</code></pre></div>
-        <div class="code-block mt-4"><pre><code>kiln openenv start --request openenv-run.json --follow
+        <div class="code-block mt-4"><pre><code>kiln openenv start --request openenv-run.json \
+  --idempotency-key experiment:math:17 --follow
 kiln openenv artifact &lt;run-id&gt; environment_eval_receipt --output receipt.json</code></pre></div>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
           The CLI submits that same JSON object and independently materializes returned artifacts. Follow

@@ -34,7 +34,10 @@
   occupied; v4 status, CLI, dashboard, and metrics expose queue position,
   admission time, and wait duration across the complete collection/training/
   evaluation lifecycle. Restart resumes only entries proven never admitted;
-  interrupted stateful work still fails explicitly. CI drives all twenty-two pinned
+  interrupted stateful work still fails explicitly. Optional bounded,
+  non-secret idempotency keys atomically recover identical retained submissions
+  across concurrency and restart, while conflicting reuse returns HTTP 409.
+  CI drives all twenty-two pinned
   text-profiled arcade and math servers plus a native
   collect/submit/verify/replay batch end to end.
 - Corrected the v0.5.1 Vulkan recovery architecture. The recovered route set

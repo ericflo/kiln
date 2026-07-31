@@ -744,6 +744,12 @@ def build_openenv_types() -> None:
         "OpenEnvRunRequest",
         {
             "kind": ref("OpenEnvRunKind"),
+            "idempotency_key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9._:-]+$",
+            },
             "environment_urls": array(ref("NonEmptyString"), min_items=1),
             "credential_ids": array(
                 {
@@ -777,6 +783,7 @@ def build_openenv_types() -> None:
         "A persisted OpenEnv rollout or rollout-and-train request with optional paired held-out environment evaluation. `environments` is accepted as an input alias for `environment_urls`.",
         optional=(
             "kind",
+            "idempotency_key",
             "credential_ids",
             "adapter",
             "groups",
@@ -803,6 +810,8 @@ def build_openenv_types() -> None:
             "x-kiln-semantic-constraints": [
                 "kind=train requires output_adapter",
                 "kind=rollout rejects output_adapter and environment_eval",
+                "while retained, an idempotency_key plus the same normalized request returns the original run; changed semantics with that key fail",
+                "idempotency_key is a non-secret opaque client token and is persisted in status",
                 "credential_ids is empty for unauthenticated endpoints or has exactly one origin-scoped handle/null entry per environment_urls item",
                 "environment_reset_options is empty or has exactly one object per environment_urls item and is mutually exclusive with non-empty reset_options",
                 "groups is at least environment_urls length so every endpoint is exercised and receipt-verifiable",
@@ -1528,6 +1537,7 @@ def build_examples() -> dict[str, list[Any]]:
     }
     openenv_request = {
         "kind": "train",
+        "idempotency_key": "experiment:arcade:17",
         "environment_urls": ["http://127.0.0.1:8000"],
         "credential_ids": ["local-arcade"],
         "adapter": "base",

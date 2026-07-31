@@ -3215,9 +3215,10 @@
         "tags": [
           "openenv"
         ],
-        "summary": "Start a persisted OpenEnv rollout or rollout-and-train run",
+        "summary": "Create or idempotently recover a persisted OpenEnv rollout or rollout-and-train run",
         "operationId": "openenv_create_run_post_v1_openenv_runs",
         "x-kiln-handler": "openenv::create_run",
+        "x-kiln-multiple-success-responses": true,
         "x-kiln-rust-signature": "async fn create_run(State(state): State<AppState>, Json(request): Json<OpenEnvRunRequest>) -> Result<impl IntoResponse, ApiError>",
         "x-kiln-transport": "http",
         "requestBody": {
@@ -3232,8 +3233,19 @@
           "x-kiln-rust-type": "OpenEnvRunRequest"
         },
         "responses": {
+          "200": {
+            "description": "An identical retained request with this idempotency_key already exists; the original run is returned without spawning work.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenEnvRunStatus"
+                }
+              }
+            },
+            "x-kiln-rust-type": "OpenEnvRunStatus"
+          },
           "202": {
-            "description": "The bounded run was persisted and accepted for asynchronous execution.",
+            "description": "The bounded run was newly persisted and accepted for asynchronous execution.",
             "content": {
               "application/json": {
                 "schema": {

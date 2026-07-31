@@ -1047,6 +1047,16 @@ refreshProveRows();
    sessions, reward capture, replay artifacts, training, post-evaluation, and
    cancellation. The OpenEnv run remains authoritative until learning ends. */
 let openEnvRunsKey = null;
+let openEnvPendingSubmission = null;
+
+function openEnvIdempotencyKey() {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 function openEnvUrls() {
   return (document.getElementById('openenv-environments')?.value || '')
@@ -1367,6 +1377,9 @@ function openEnvRunCard(run) {
         ? `<div class="training-card-meta">Execution admitted after ${escapeHtml(fmtMsShort(Number(admission.queue_wait_ms)))}</div>`
         : ''
     : '';
+  const submissionDetail = run.request?.idempotency_key
+    ? `<div class="training-card-meta">Retry key · <code>${escapeHtml(run.request.idempotency_key)}</code></div>`
+    : '';
   const trainingDetail = training
     ? `<div class="training-card-meta">Trainer · ${escapeHtml(String(training.state || 'unknown'))} · ${Math.round(Number(training.progress || 0) * 100)}%${training.current_loss != null ? ` · loss ${Number(training.current_loss).toFixed(4)}` : ''}${training.epoch != null ? ` · epoch ${Number(training.epoch).toLocaleString()}` : ''}</div>`
     : '';
@@ -1392,6 +1405,7 @@ function openEnvRunCard(run) {
       <span class="training-card-type">${escapeHtml(openEnvStateLabel(state))}</span>${gate}
     </div>
     <div class="training-card-meta">${escapeHtml(run.request?.adapter || 'base')} policy · ${Number(progress.rollouts_completed || 0).toLocaleString()} / ${Number(progress.rollouts_total || 0).toLocaleString()} episodes${environments.length ? ` · ${escapeHtml(environments.join(', '))}` : ''}</div>
+    ${submissionDetail}
     ${admissionDetail}
     ${trainingDetail}
     ${evalDetail}
@@ -1524,6 +1538,14 @@ document.getElementById('openenv-form')?.addEventListener('submit', async event 
         }
       }
     }
+    const requestFingerprint = JSON.stringify(request);
+    if (!openEnvPendingSubmission || openEnvPendingSubmission.fingerprint !== requestFingerprint) {
+      openEnvPendingSubmission = {
+        fingerprint: requestFingerprint,
+        key: openEnvIdempotencyKey(),
+      };
+    }
+    request.idempotency_key = openEnvPendingSubmission.key;
     submit.disabled = true;
     if (status) status.textContent = 'Creating persisted OpenEnv run…';
     const run = await api('/v1/openenv/runs', {
@@ -1531,6 +1553,7 @@ document.getElementById('openenv-form')?.addEventListener('submit', async event 
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify(request),
     });
+    openEnvPendingSubmission = null;
     if (status) status.textContent = `Run ${run.run_id.slice(0, 8)} accepted. Kiln owns it through collection, training, and requested evaluation.`;
     toast(`OpenEnv ${kind} run ${run.run_id.slice(0, 8)} started`, 'ok');
     pollOpenEnvRuns(true);

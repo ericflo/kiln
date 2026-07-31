@@ -46,7 +46,7 @@ All three surfaces share one collector, trainer, evaluator, and artifact store. 
 **Training → OpenEnv**. Save the `POST /v1/openenv/runs` body as `openenv-run.json`:
 
 ```json
-{"kind":"train","environment_urls":["http://127.0.0.1:8990"],
+{"kind":"train","idempotency_key":"experiment:counter:17","environment_urls":["http://127.0.0.1:8990"],
  "adapter":"base","output_adapter":"counter-agent","groups":8,"group_size":4,
  "environment_eval":{"groups":20,"group_size":1,
    "gate":{"min_mean_improvement":0.05}}}
@@ -60,12 +60,12 @@ kiln openenv artifact 80a26e21-8451-4a64-8666-890c06fd80bd environment_eval_rece
 kiln openenv cancel 80a26e21-8451-4a64-8666-890c06fd80bd
 ```
 
-`start` accepts one regular, non-symlink JSON object up to 1 MiB. `artifact` follows only the
-returned same-server manifest URL, requires its length and ETag, rehashes the bounded stream,
-and publishes atomically without replacement; use `--force`. `status --follow --json` emits one
-terminal snapshot. Version 4 adds a position-visible, cancellable FIFO before training and evals.
-`[openenv]` bounds active and tracked runs, remote origins, credentials, retention, and TTL. See
-the [recovery reference](OPENENV_REPLAY_REFERENCE.md) and
+`start` reads one regular, non-symlink JSON object ≤1 MiB. Bind each attempt to a non-secret
+`idempotency_key` or `--idempotency-key`: exact retries recover the retained run; changed reuse fails.
+`artifact` follows same-server manifest URLs, verifies length, ETag, and hash, then
+publishes atomically; `--force` replaces. `status --follow --json` emits one terminal snapshot.
+Version 4 adds a position-visible, cancellable FIFO. `[openenv]` bounds run capacity, remote
+origins, credentials, and TTL. See the [recovery reference](OPENENV_REPLAY_REFERENCE.md) and
 [configuration reference](CONFIGURATION.md).
 
 ### Protected environments

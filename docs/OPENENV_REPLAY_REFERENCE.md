@@ -47,7 +47,8 @@ The CLI can own this complete persisted lifecycle without reconstructing HTTP
 requests or artifact paths:
 
 ```bash
-kiln openenv start --request openenv-run.json --follow
+kiln openenv start --request openenv-run.json \
+  --idempotency-key experiment:counter:17 --follow
 kiln openenv artifact <run-id> summary --output openenv.rollout-summary.json
 kiln openenv artifact <run-id> environment_eval_receipt \
   --output evidence/environment-evaluation/receipt.json
@@ -66,6 +67,32 @@ published only after all checks pass. Existing files are preserved unless
 `--force` explicitly requests replacement; failures leave no partial output.
 `--json` emits a `kiln.openenv-artifact-download.v1` local receipt without
 embedding the configured Kiln base URL or its possible credentials.
+
+### Retry-safe workflow creation
+
+`OpenEnvRunRequest.idempotency_key` is an optional 1..=128-byte opaque token
+using ASCII letters, digits, `.`, `_`, `:`, or `-`. A new request returns HTTP
+202. While that run remains retained, an exact retry returns its current or
+terminal status with HTTP 200 and the original run ID; it creates no second
+queue entry, environment session, model request, trainer, or evaluation. The
+binding and normalized request survive restart. Concurrent identical POSTs are
+atomic, so exactly one creates work.
+
+Normalization occurs through the typed request: input aliases and omitted
+defaults therefore compare by effective meaning rather than raw JSON bytes.
+Reusing a key with any changed field returns HTTP 409
+`openenv_run_idempotency_conflict`. Omitting the key deliberately creates a new
+run. Bind one key to one experiment attempt, and never place a credential or
+private payload in it because the key persists in `run.json` and public status.
+
+`kiln openenv start --idempotency-key <key>` inserts the key into its bounded
+request file and refuses to disagree with an existing body field. The dashboard
+generates a UUID and reuses it while an identical submission remains unresolved,
+so a lost response can recover the accepted workflow. Idempotency retention is
+bounded by the same terminal TTL and `max_tracked_runs` history policy; once a
+record is no longer retained, that key can create new work. The fixed-cardinality
+`kiln_openenv_runs_total{status="idempotent_replay"}` counter measures recovered
+submissions without exposing keys as labels.
 
 A pathname is not publication. The download route accepts only artifact kinds
 present in that run's persisted `artifacts` manifest, so staged or partially

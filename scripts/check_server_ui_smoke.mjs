@@ -526,8 +526,8 @@ function chromiumPath() {
   return path;
 }
 
-function json(res, body) {
-  res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+function json(res, body, status = 200) {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(body));
 }
 
@@ -1193,6 +1193,7 @@ async function startServer({
     admission: { max_active_runs: 1, sequence: 2, queue_position: 2 },
     progress: { groups_completed: 0, groups_total: 8, rollouts_completed: 0, rollouts_total: 32 },
   }];
+  let openEnvDroppedAcceptedResponse = false;
   const smokeTeacherRevision = `sha256:${'7'.repeat(64)}`;
   const smokeTeacherContentRevision = `sha256:${'6'.repeat(64)}`;
   const smokeTeachers = [{
@@ -2052,6 +2053,15 @@ async function startServer({
     if (url.pathname === '/v1/openenv/runs' && req.method === 'POST') {
       const request = await readJsonBody(req);
       apiState.trainingSubmitRequests.openenv += 1;
+      const retained = openEnvRuns.find(run => run.request?.idempotency_key === request.idempotency_key);
+      if (retained) {
+        if (JSON.stringify(retained.request) !== JSON.stringify(request)) {
+          json(res, { error: { code: 'openenv_run_idempotency_conflict', message: 'retry key changed request semantics' } }, 409);
+        } else {
+          json(res, retained, 200);
+        }
+        return;
+      }
       const status = {
         schema: 'kiln.openenv-run.v4',
         run_id: 'smoke-openenv-run',
@@ -2116,6 +2126,17 @@ async function startServer({
         },
       };
       openEnvRuns.unshift(status);
+      if (!openEnvDroppedAcceptedResponse) {
+        openEnvDroppedAcceptedResponse = true;
+        json(res, {
+          error: {
+            code: 'smoke_openenv_acceptance_response_lost',
+            message: 'The simulated OpenEnv acceptance response was lost',
+            hint: 'Retry the identical request',
+          },
+        }, 503);
+        return;
+      }
       json(res, status, 202);
       return;
     }
@@ -4783,6 +4804,7 @@ async function runSmoke(baseUrl, {
       || openEnvBody.credential_ids?.[1] !== null
       || openEnvBody.environment_reset_options?.[0]?.difficulty !== 'hard'
       || openEnvBody.environment_reset_options?.[1]?.split !== 'train'
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(openEnvBody.idempotency_key || '')
       || openEnvBody.adapter !== 'base'
       || openEnvBody.output_adapter !== 'openenv-agent'
       || openEnvBody.training_config?.lora_rank !== 8
@@ -4792,8 +4814,22 @@ async function runSmoke(baseUrl, {
       || openEnvBody.environment_eval?.gate?.min_mean_improvement !== 0.1) {
       fail(`OpenEnv train request lost its protocol or native-GRPO controls: ${JSON.stringify(openEnvBody)}`);
     }
+    await waitForPanelText(page, '#openenv-submit-state', /acceptance response was lost/, 'OpenEnv submit should report the simulated lost acceptance response');
+    await page.waitForFunction(() => !document.querySelector('#openenv-form button[type="submit"]')?.disabled, { timeout: 5000 });
+    const openEnvRetryRequest = page.waitForRequest(
+      request => request.method() === 'POST' && request.url().endsWith('/v1/openenv/runs'),
+      { timeout: 5000 },
+    );
+    await clickAndWait(page, '#openenv-form button[type="submit"]', 'Could not retry the unresolved OpenEnv train run');
+    const retryRequest = await openEnvRetryRequest.catch(() => fail('OpenEnv form did not retry POST /v1/openenv/runs'));
+    const retryBody = JSON.parse(retryRequest.postData() || '{}');
+    if (retryBody.idempotency_key !== openEnvBody.idempotency_key
+      || JSON.stringify(retryBody) !== JSON.stringify(openEnvBody)) {
+      fail(`OpenEnv lost-response retry changed its idempotent request: ${JSON.stringify({ first: openEnvBody, retry: retryBody })}`);
+    }
     await expectTrainingToast(page, 'OpenEnv train run smoke-op started');
     await waitForPanelText(page, '#openenv-runs', /OpenEnv train[\s\S]*smoke-op[\s\S]*completed[\s\S]*promoted[\s\S]*8 \/ 32 episodes[\s\S]*Held-out environment · completed · return 0\.100 → 0\.800 \(\+0\.700\) · exact p=0\.0000/, 'OpenEnv run history should render paired-return evidence and promotion outcome');
+    await waitForPanelText(page, '#openenv-runs', /smoke-op[\s\S]*Retry key · [0-9a-f-]{36}/, 'OpenEnv run history should expose the persisted retry key');
     await waitForPanelText(page, '#openenv-runs', /smoke-op[\s\S]*Execution admitted after 250 ms/, 'OpenEnv run history should retain admission wait evidence');
     await waitForPanelText(page, '#openenv-runs', /dataset[\s\S]*aaaaaaaaaaaa/, 'OpenEnv artifact controls should expose the manifest digest identity');
 

@@ -240,10 +240,11 @@ Before any GPU work in a stage N ≥ 2:
    - if Rule A selected OpenEnv, CLI or server inspection succeeds for every
      environment and its schema identity matches the planned stage; retain the
      server `run_id` and linked `training_job_id`; submit the complete request
-     with `kiln openenv start --request <run.json> --follow`; reserve disjoint
+     with `kiln openenv start --request <run.json> --idempotency-key <attempt-key> --follow`; reserve disjoint
      held-out seeds and configure the native paired-return gate before
-     collection; if v4 status is `queued`, record its FIFO position and follow
-     the same run ID rather than resubmitting; Task API catalogs may document coverage but never imply a
+     collection; bind one stable non-secret `idempotency_key` to the stage so a
+     lost response recovers the same retained run; if v4 status is `queued`,
+     record its FIFO position and follow that run ID; Task API catalogs may document coverage but never imply a
      reset binding
 
 3. Verify hypothesis is falsifiable:

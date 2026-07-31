@@ -25,9 +25,10 @@ pub struct OpenEnvConfig {
     /// runs wait in the bounded FIFO tracked-run queue; submitted training
     /// jobs also retain the normal native training-queue limits.
     pub max_active_runs: usize,
-    /// Maximum in-memory tracked run records, including terminal runs.
+    /// Maximum tracked active, queued, and terminal records. A retained record
+    /// also owns its optional idempotency-key binding.
     pub max_tracked_runs: usize,
-    /// Retention window for terminal run records.
+    /// Retention window for terminal records and idempotency-key bindings.
     pub tracked_run_ttl_secs: u64,
     /// Permit the server control plane to connect to non-loopback OpenEnv
     /// origins. Disabled by default to make the HTTP API safe against SSRF;
