@@ -1285,6 +1285,7 @@ const expectedCliSections = [
 const expectedCliCodeExamples = [
   { label: 'serve command', terms: ['kiln_model_path=./Qwen3.5-4B', 'kiln serve'] },
   { label: 'health commands', terms: ['kiln health', 'kiln health --json'] },
+  { label: 'OpenEnv commands', terms: ['kiln openenv inspect', 'kiln openenv train', '--environment http://127.0.0.1:8990'] },
   { label: 'pi setup command', terms: ['kiln pi-setup', '--kiln-url http://office-kiln:8420'] },
   { label: 'SFT training command', terms: ['kiln train sft', '--file corrections.jsonl', '--adapter support-bot', '--checkpoint-interval 25'] },
   { label: 'GRPO training command', terms: ['kiln train grpo', '--file scored-groups.jsonl', '--adapter support-bot', '--checkpoint-interval 25', '--resume-checkpoint'] },
@@ -1311,6 +1312,7 @@ const expectedCliReaderSections = [
   { label: 'startup policy', terms: ['advanced startup policy'] },
   { label: 'health', terms: ['check server readiness'] },
   { label: 'agent clients', terms: ['point pi or opencode at kiln'] },
+  { label: 'OpenEnv', terms: ['act, observe, reward, and train in one command'] },
   { label: 'training', terms: ['run native jobs or move a verified hf/trl handoff'] },
   { label: 'evals', terms: ['run, compare, and strictly replay evals'] },
   { label: 'offline tools', terms: ['configure benchmark runs explicitly'] },
@@ -1321,6 +1323,7 @@ const expectedCliReaderSections = [
 const expectedCliReaderCodeExamples = [
   { label: 'serve command', terms: ['kiln_model_path=./qwen3.5-4b', 'kiln serve'] },
   { label: 'health commands', terms: ['kiln health', 'kiln health --json'] },
+  { label: 'OpenEnv commands', terms: ['kiln openenv inspect', 'kiln openenv train', '--environment http://127.0.0.1:8990'] },
   { label: 'pi setup command', terms: ['kiln pi-setup', '--kiln-url http://office-kiln:8420'] },
   { label: 'SFT training command', terms: ['kiln train sft', '--file corrections.jsonl', '--adapter support-bot'] },
   { label: 'GRPO training command', terms: ['kiln train grpo', '--file scored-groups.jsonl', '--adapter support-bot'] },
@@ -1344,6 +1347,7 @@ const expectedCliHeroFragments = [
   { label: 'Start the server', href: '#serve' },
   { label: 'Check health', href: '#health' },
   { label: 'Configure pi', href: '#pi-setup' },
+  { label: 'Train with OpenEnv', href: '#openenv' },
   { label: 'Submit training', href: '#training' },
   { label: 'Run evals', href: '#evals' },
   { label: 'Run offline tools', href: '#benchmarks' },
@@ -1353,6 +1357,7 @@ const expectedCliHeroFragments = [
 const expectedCliPageFragments = [
   '#serve',
   '#health',
+  '#openenv',
   '#training',
   '#benchmarks',
   '#adapters',
