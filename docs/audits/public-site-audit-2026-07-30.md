@@ -20,6 +20,10 @@ Primary editor: Codex, working from the repository source and rendered site.
 The repository maintainer must assign an independent reviewer before checking
 FP. The primary editor must not clear that gate.
 
+Production deployment and the primary editor's live technical audit are
+complete. The campaign remains open only because independent final proof is a
+separate editorial gate.
+
 The canonical inventory comprises nine hand-authored product routes, the
 documentation home, and 56 manifest-driven document routes. The custom
 `404.html` is audited as a noncanonical recovery surface, not counted as a
@@ -114,12 +118,52 @@ accessibility fixes:
 The measurements used a local static server and are comparative template
 checks, not production latency measurements.
 
+## Production deployment and live audit
+
+Pull request
+[`#1605`](https://github.com/ericflo/kiln/pull/1605) merged to `main` as
+[`00aac0f8f9`](https://github.com/ericflo/kiln/commit/00aac0f8f940cef417e2f42dae3a034ea8d2465d).
+Pages
+[run `30595820500`](https://github.com/ericflo/kiln/actions/runs/30595820500)
+built the site from that exact commit and completed the production deployment
+on 2026-07-30 PDT (2026-07-31 UTC).
+
+The post-deployment audit fetched and rendered the public origin rather than
+reusing the local build:
+
+- all 66 sitemap routes returned HTTP 200;
+- every route exposed one H1, a nonempty title and description, the exact
+  canonical URL, English document language, a main landmark, and a skip link;
+- every route fit a 390×844 viewport without horizontal overflow, duplicate
+  IDs, missing image alternatives, or unnamed interactive roles in Chromium's
+  accessibility tree;
+- every generated documentation route kept its closed mobile sidebar inert;
+- the live documentation menu opened interactively, closed on Escape, restored
+  focus, and returned the sidebar to its inert state;
+- live search for `thinking budget` opened and returned Thinking budget
+  schema, Thinking budgets, and Architecture deep dive in that order;
+- `docs/search-index.json` returned HTTP 200 with exactly 64 entries;
+- `sitemap.xml` returned HTTP 200 with exactly 66 canonical URLs;
+- a deliberately missing route returned HTTP 404 with the custom
+  “That Kiln page isn’t here.” recovery page and `noindex, follow`;
+- the home, documentation hub, quickstart, benchmarks, and demo were captured
+  and visually rechecked at 390×844 and 1440×900;
+- all responsive product-tour and dashboard images decoded in isolated
+  network-idle checks; their production assets returned HTTP 200;
+- representative HTML, JSON, XML, and WebP responses carried the expected
+  content types, ETags, Last-Modified values, and GitHub Pages cache policy.
+
+One concurrent crawl observed an aborted responsive-image request while a
+worker navigated away from `/docs/architecture/`. An isolated network-idle
+reload returned the asset with HTTP 200, decoded the rendered images, and
+produced no request failure. The event was navigation cancellation, not an
+open site finding.
+
 ## Remaining gates and scheduled follow-up
 
 | Item | Severity | Owner | Due or trigger |
 |---|---|---|---|
 | Read every deployed route from beginning to end and clear FP only where no issue remains. | release gate | Independent reviewer, not the primary editor | Before this campaign is declared complete |
-| Fetch and inspect the production Pages deployment, including canonical URLs, assets, navigation, search, 404 behavior, and representative cache headers. | release gate | Primary editor | After merge and Pages deployment |
 | Re-run entry/task freshness, links, search, contract, and rendered-shell checks. | recurring | Documentation owner | 2026-08-30, then monthly |
 | Re-run all 66 route journeys and independent final proof. | recurring | Documentation owner plus independent reviewer | 2026-10-30, then quarterly |
 | Import broader device and workload receipts before making cross-device Vulkan performance claims. | product evidence, not a documentation defect | Backend/performance owner | New qualification evidence or performance claim |
