@@ -240,7 +240,8 @@ Before any GPU work in a stage N ≥ 2:
    - if Rule A selected OpenEnv, CLI or server inspection succeeds for every
      environment and its schema identity matches the planned stage; retain the
      server `run_id` and linked `training_job_id`; reserve disjoint held-out
-     seeds and configure the native paired-return gate before collection
+     seeds and configure the native paired-return gate before collection; Task
+     API catalogs may document coverage but never imply a reset binding
 
 3. Verify hypothesis is falsifiable:
    - stage_transition_rationale names the sub-score(s) expected to move

@@ -23,7 +23,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::{StreamExt, stream};
 use kiln_eval::EvalJobState;
-use kiln_openenv::{OpenEnvIdentity, OpenEnvInspection};
+use kiln_openenv::{OpenEnvClientError, OpenEnvIdentity, OpenEnvInspection, OpenEnvTaskCatalog};
 use kiln_train::{BehaviorPolicy, GrpoConfig, GrpoRequest, TrainingResponse, TrainingState};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -34,9 +34,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::config::OpenEnvConfig;
 use crate::error::ApiError;
 use crate::openenv_cli::{
-    OpenEnvCollectionControl, OpenEnvCollectionProgress, OpenEnvPolicyTransport,
-    OpenEnvRolloutOptions, OpenEnvRolloutSummary, collect_openenv_rollouts_with_policy,
-    validate_options, write_openenv_outputs, write_summary_atomic,
+    MAX_OPENENV_TASK_PAGE_SIZE, OpenEnvCollectionControl, OpenEnvCollectionProgress,
+    OpenEnvPolicyTransport, OpenEnvRolloutOptions, OpenEnvRolloutSummary,
+    collect_openenv_rollouts_with_policy, validate_options, write_openenv_outputs,
+    write_summary_atomic,
 };
 use crate::openenv_evaluation::{
     OpenEnvEnvironmentEvalConfig, OpenEnvEnvironmentEvalDecision, OpenEnvEnvironmentEvalOutcome,
@@ -52,6 +53,7 @@ const OPENENV_RUN_SCHEMA_V1: &str = "kiln.openenv-run.v1";
 const OPENENV_RUN_SCHEMA_V3: &str = "kiln.openenv-run.v3";
 const OPENENV_RUN_LIST_SCHEMA_V3: &str = "kiln.openenv-run-list.v3";
 const OPENENV_INSPECTION_SCHEMA_V1: &str = "kiln.openenv-inspection.v1";
+const OPENENV_TASK_CATALOG_SCHEMA_V1: &str = "kiln.openenv-task-catalog.v1";
 const OPENENV_API_BODY_LIMIT: usize = 1024 * 1024;
 const MAX_ENVIRONMENTS: usize = 64;
 const MAX_PERSISTED_STATUS_BYTES: u64 = 2 * 1024 * 1024;
@@ -102,6 +104,10 @@ fn default_adapter() -> String {
 
 fn default_auto_load() -> bool {
     true
+}
+
+fn default_task_page_limit() -> usize {
+    50
 }
 
 fn default_reset_options() -> Value {
@@ -362,6 +368,35 @@ struct OpenEnvInspectRequest {
 struct OpenEnvInspectResponse {
     schema: &'static str,
     environments: Vec<OpenEnvInspection>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenEnvTaskCatalogRequest {
+    #[serde(alias = "environments")]
+    environment_urls: Vec<String>,
+    #[serde(default)]
+    credential_ids: Vec<Option<String>>,
+    #[serde(default)]
+    environment_name: Option<String>,
+    #[serde(default)]
+    split: Option<String>,
+    #[serde(default)]
+    start: u64,
+    #[serde(default = "default_task_page_limit")]
+    limit: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenEnvTaskCatalogEntry {
+    base_url: String,
+    catalog: OpenEnvTaskCatalog,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenEnvTaskCatalogResponse {
+    schema: &'static str,
+    catalogs: Vec<OpenEnvTaskCatalogEntry>,
 }
 
 struct TrackedOpenEnvRun {
@@ -1073,6 +1108,128 @@ async fn inspect(
         schema: OPENENV_INSPECTION_SCHEMA_V1,
         environments,
     }))
+}
+
+async fn inspect_tasks(
+    State(state): State<AppState>,
+    Json(request): Json<OpenEnvTaskCatalogRequest>,
+) -> Result<Json<OpenEnvTaskCatalogResponse>, ApiError> {
+    state
+        .metrics
+        .openenv_task_catalog_inspections_started
+        .fetch_add(1, Ordering::Relaxed);
+    let result = inspect_tasks_inner(&state, request).await;
+    if result.is_ok() {
+        state
+            .metrics
+            .openenv_task_catalog_inspections_completed
+            .fetch_add(1, Ordering::Relaxed);
+    } else {
+        state
+            .metrics
+            .openenv_task_catalog_inspections_failed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    result.map(Json)
+}
+
+async fn inspect_tasks_inner(
+    state: &AppState,
+    request: OpenEnvTaskCatalogRequest,
+) -> Result<OpenEnvTaskCatalogResponse, ApiError> {
+    if !state.openenv_runs.policy().enabled {
+        return Err(openenv_error(
+            StatusCode::NOT_FOUND,
+            "openenv_disabled",
+            "OpenEnv control plane is disabled",
+            "Set [openenv] enabled=true and restart Kiln, or use the kiln openenv CLI.",
+        ));
+    }
+    validate_environment_urls(
+        &request.environment_urls,
+        state.openenv_runs.policy().allow_remote_environments,
+    )?;
+    if !(1..=MAX_OPENENV_TASK_PAGE_SIZE).contains(&request.limit) {
+        return Err(openenv_error(
+            StatusCode::BAD_REQUEST,
+            "openenv_invalid_task_page",
+            format!(
+                "limit must be in 1..={}, got {}",
+                MAX_OPENENV_TASK_PAGE_SIZE, request.limit
+            ),
+            "Use a bounded Task API page; request another page with start.",
+        ));
+    }
+    let credential_envs = resolve_credential_envs(
+        state.openenv_runs.policy(),
+        &request.credential_ids,
+        &request.environment_urls,
+    )?;
+    if credential_envs.iter().any(Option::is_some) {
+        state
+            .metrics
+            .openenv_authenticated_task_catalog_inspections
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    let environment_name = request.environment_name;
+    let split = request.split;
+    let start = request.start;
+    let limit = request.limit;
+    let catalogs = stream::iter(request.environment_urls)
+        .zip(stream::iter(credential_envs))
+        .map(|(url, credential_env)| {
+            let environment_name = environment_name.clone();
+            let split = split.clone();
+            async move {
+                let client = crate::openenv_cli::openenv_client(&url, credential_env.as_deref())?;
+                let base_url = client.base_url().to_string();
+                let catalog = client
+                    .task_catalog(environment_name.as_deref(), split.as_deref(), start, limit)
+                    .await
+                    .with_context(|| format!("inspect OpenEnv Task API at {base_url}"))?;
+                Ok::<_, anyhow::Error>(OpenEnvTaskCatalogEntry { base_url, catalog })
+            }
+        })
+        .buffered(MAX_ENVIRONMENTS)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>>>()
+        .map_err(openenv_task_catalog_error)?;
+    Ok(OpenEnvTaskCatalogResponse {
+        schema: OPENENV_TASK_CATALOG_SCHEMA_V1,
+        catalogs,
+    })
+}
+
+fn openenv_task_catalog_error(error: anyhow::Error) -> ApiError {
+    let invalid_selection = error
+        .downcast_ref::<OpenEnvClientError>()
+        .is_some_and(|error| {
+            matches!(
+                error,
+                OpenEnvClientError::InvalidTaskSelector { .. }
+                    | OpenEnvClientError::TaskEnvironmentRequired { .. }
+                    | OpenEnvClientError::UnknownTaskEnvironment { .. }
+                    | OpenEnvClientError::UnknownTaskSplit { .. }
+                    | OpenEnvClientError::InvalidTaskPageLimit { .. }
+            )
+        });
+    if invalid_selection {
+        openenv_error(
+            StatusCode::BAD_REQUEST,
+            "openenv_invalid_task_selection",
+            error,
+            "Choose one advertised environment and split name, then request a bounded page.",
+        )
+    } else {
+        openenv_error(
+            StatusCode::BAD_GATEWAY,
+            "openenv_task_catalog_failed",
+            error,
+            "Check the OpenEnv Task API provider, advertised split, and network reachability. Environments without a provider should return HTTP 501 and are reported as unsupported.",
+        )
+    }
 }
 
 async fn create_run(
@@ -2062,6 +2219,10 @@ pub fn routes() -> Router<AppState> {
             post(inspect).layer(DefaultBodyLimit::max(OPENENV_API_BODY_LIMIT)),
         )
         .route(
+            "/v1/openenv/tasks",
+            post(inspect_tasks).layer(DefaultBodyLimit::max(OPENENV_API_BODY_LIMIT)),
+        )
+        .route(
             "/v1/openenv/runs",
             get(list_runs)
                 .post(create_run)
@@ -2080,10 +2241,14 @@ mod tests {
     use crate::eval::queue::{EvalJobInfo, EvalSubmissionKind};
     use crate::state::{TrainingJobInfo, TrainingJobType};
     use axum::body::Body;
+    use axum::extract::Path as AxumPath;
     use axum::http::Request;
+    use axum::response::Response as AxumResponse;
+    use axum::routing::{get as axum_get, post as axum_post};
     use kiln_core::config::ModelConfig;
     use kiln_model::engine::MockEngine;
     use kiln_scheduler::{Scheduler, SchedulerConfig};
+    use serde_json::json;
     use tower::ServiceExt;
 
     fn test_state(temp: &tempfile::TempDir, policy: OpenEnvConfig) -> AppState {
@@ -2158,6 +2323,50 @@ mod tests {
             cancel_requested: Default::default(),
             loss_history: Vec::new(),
         }
+    }
+
+    async fn task_fixture_post(
+        AxumPath((_environment, operation)): AxumPath<(String, String)>,
+        Json(body): Json<Value>,
+    ) -> AxumResponse {
+        match operation.as_str() {
+            "num_tasks" => {
+                assert_eq!(body, json!({"split": "train"}));
+                Json(json!({"num_tasks": 3})).into_response()
+            }
+            "task_range" => {
+                assert_eq!(body, json!({"split": "train", "start": 1, "stop": 2}));
+                Json(json!({
+                    "tasks": [{"id": 1, "prompt": "2 + 2", "answer": "4"}]
+                }))
+                .into_response()
+            }
+            _ => StatusCode::NOT_FOUND.into_response(),
+        }
+    }
+
+    async fn task_fixture() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route(
+                "/list_environments",
+                axum_get(|| async { Json(json!(["task_env"])) }),
+            )
+            .route(
+                "/{environment}/splits",
+                axum_get(|| async {
+                    Json(json!([
+                        {"name": "train", "type": "train"},
+                        {"name": "holdout", "type": "validation"}
+                    ]))
+                }),
+            )
+            .route("/{environment}/{operation}", axum_post(task_fixture_post));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}"), server)
     }
 
     #[test]
@@ -2553,6 +2762,87 @@ mod tests {
                 .next()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn task_catalog_surface_pages_reference_shaped_tasks_and_tracks_outcomes() {
+        let (environment_url, server) = task_fixture().await;
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(&temp, OpenEnvConfig::default());
+        let metrics = state.metrics.clone();
+        let app = routes().with_state(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/openenv/tasks")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "environment_urls": [environment_url],
+                            "split": "TRAIN",
+                            "start": 1,
+                            "limit": 1
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let catalog: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(catalog["schema"], OPENENV_TASK_CATALOG_SCHEMA_V1);
+        assert_eq!(catalog["catalogs"][0]["catalog"]["task_api"], "available");
+        assert_eq!(catalog["catalogs"][0]["catalog"]["selected_split"], "train");
+        assert_eq!(catalog["catalogs"][0]["catalog"]["num_tasks"], 3);
+        assert_eq!(
+            catalog["catalogs"][0]["catalog"]["tasks"][0],
+            json!({"id": 1, "prompt": "2 + 2", "answer": "4"})
+        );
+        assert_eq!(
+            metrics
+                .openenv_task_catalog_inspections_started
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            metrics
+                .openenv_task_catalog_inspections_completed
+                .load(Ordering::Relaxed),
+            1
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/openenv/tasks")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "environment_urls": ["http://127.0.0.1:1"],
+                            "limit": MAX_OPENENV_TASK_PAGE_SIZE + 1
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            metrics
+                .openenv_task_catalog_inspections_failed
+                .load(Ordering::Relaxed),
+            1
+        );
+        server.abort();
     }
 
     #[tokio::test]

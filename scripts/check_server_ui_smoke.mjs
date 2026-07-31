@@ -2015,6 +2015,31 @@ async function startServer({
       });
       return;
     }
+    if (url.pathname === '/v1/openenv/tasks' && req.method === 'POST') {
+      const request = await readJsonBody(req);
+      json(res, {
+        schema: 'kiln.openenv-task-catalog.v1',
+        catalogs: [{
+          base_url: 'http://127.0.0.1:8990',
+          catalog: {
+            environment_name: 'smoke-bandit',
+            task_api: 'available',
+            splits: [
+              { name: 'train', type: 'train' },
+              { name: 'holdout', type: 'validation' },
+            ],
+            ...(request.split ? {
+              selected_split: 'train',
+              num_tasks: 3,
+              start: request.start,
+              stop: Math.min(request.start + request.limit, 3),
+              tasks: [{ id: 1, prompt: '2 + 2', answer: '4' }],
+            } : {}),
+          },
+        }],
+      });
+      return;
+    }
     if (url.pathname === '/v1/openenv/runs' && req.method === 'POST') {
       const request = await readJsonBody(req);
       apiState.trainingSubmitRequests.openenv += 1;
@@ -4700,6 +4725,23 @@ async function runSmoke(baseUrl, {
       fail(`OpenEnv Inspect lost its origin-scoped credential handle: ${JSON.stringify(openEnvInspectBody)}`);
     }
     await waitForPanelText(page, '#openenv-inspection', /smoke-bandit[\s\S]*schema sha256:aaaa/, 'OpenEnv inspection should render discovered identity and action schema');
+    await page.$eval('#openenv-task-split', input => { input.value = 'train'; });
+    await page.$eval('#openenv-task-start', input => { input.value = '1'; });
+    await page.$eval('#openenv-task-limit', input => { input.value = '1'; });
+    const taskCatalogRequest = page.waitForRequest(
+      request => request.method() === 'POST' && request.url().endsWith('/v1/openenv/tasks'),
+      { timeout: 5000 },
+    );
+    await clickAndWait(page, '#openenv-task-inspect', 'Could not inspect the OpenEnv task catalog');
+    const openEnvTaskRequest = await taskCatalogRequest.catch(() => fail('OpenEnv task catalog did not POST /v1/openenv/tasks'));
+    const openEnvTaskBody = JSON.parse(openEnvTaskRequest.postData() || '{}');
+    if (openEnvTaskBody.credential_ids?.[0] !== 'smoke-arcade'
+      || openEnvTaskBody.split !== 'train'
+      || openEnvTaskBody.start !== 1
+      || openEnvTaskBody.limit !== 1) {
+      fail(`OpenEnv task catalog lost its bounded selection or credential handle: ${JSON.stringify(openEnvTaskBody)}`);
+    }
+    await waitForPanelText(page, '#openenv-task-catalog', /smoke-bandit[\s\S]*train[\s\S]*tasks 1\.\.2 of 3[\s\S]*2 \+ 2/, 'OpenEnv task catalog should render the bounded arbitrary task page');
     await page.select('#openenv-environment-eval-mode', 'gate');
     await page.$eval('#openenv-environment-gate-floor', input => { input.value = '0.5'; });
     await page.$eval('#openenv-environment-gate-improvement', input => { input.value = '0.1'; });

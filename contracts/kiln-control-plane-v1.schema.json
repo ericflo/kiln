@@ -46,6 +46,8 @@
     "OpenEnvRunList",
     "OpenEnvRunRequest",
     "OpenEnvRunStatus",
+    "OpenEnvTaskCatalogRequest",
+    "OpenEnvTaskCatalogResponse",
     "PublishPayload",
     "PublishToLibraryResponse",
     "QueueResponse",
@@ -190,6 +192,12 @@
     },
     {
       "$ref": "#/$defs/OpenEnvRunStatus"
+    },
+    {
+      "$ref": "#/$defs/OpenEnvTaskCatalogRequest"
+    },
+    {
+      "$ref": "#/$defs/OpenEnvTaskCatalogResponse"
     },
     {
       "$ref": "#/$defs/PublishPayload"
@@ -4297,6 +4305,184 @@
       "x-kiln-rust-type": "kiln_openenv::OpenEnvSchema",
       "x-kiln-field-schema-status": "complete"
     },
+    "OpenEnvTaskApiSupport": {
+      "type": "string",
+      "enum": [
+        "available",
+        "unsupported"
+      ],
+      "description": "Whether the selected environment exposes a TaskProvider. HTTP 501 maps to unsupported without making the environment incompatible.",
+      "x-kiln-rust-type": "kiln_openenv::OpenEnvTaskApiSupport",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvTaskCatalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "environment_name",
+        "task_api",
+        "splits"
+      ],
+      "properties": {
+        "environment_name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "task_api": {
+          "$ref": "#/$defs/OpenEnvTaskApiSupport"
+        },
+        "splits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpenEnvTaskSplit"
+          }
+        },
+        "selected_split": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "num_tasks": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "start": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "stop": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "maxItems": 200
+        }
+      },
+      "x-kiln-semantic-constraints": [
+        "unsupported catalogs have no selected split or task page",
+        "task rows are never automatically mapped into WebSocket reset data"
+      ],
+      "description": "Bounded Task API catalog. Arbitrary task rows are untrusted discovery data and have no protocol-defined reset semantics.",
+      "x-kiln-rust-type": "kiln_openenv::OpenEnvTaskCatalog",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvTaskCatalogEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_url",
+        "catalog"
+      ],
+      "properties": {
+        "base_url": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "catalog": {
+          "$ref": "#/$defs/OpenEnvTaskCatalog"
+        }
+      },
+      "description": "One canonical OpenEnv origin and its bounded Task API result.",
+      "x-kiln-rust-type": "OpenEnvTaskCatalogEntry",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvTaskCatalogRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "environment_urls"
+      ],
+      "properties": {
+        "environment_urls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NonEmptyString"
+          },
+          "minItems": 1
+        },
+        "credential_ids": {
+          "type": "array",
+          "items": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "not": {
+              "const": "-"
+            }
+          }
+        },
+        "environment_name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "split": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "start": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 50
+        }
+      },
+      "x-kiln-input-aliases": {
+        "environments": "environment_urls"
+      },
+      "x-kiln-semantic-constraints": [
+        "credential_ids is empty or has exactly one handle/null entry per environment_urls item",
+        "environment_name may be omitted only when each server advertises exactly one environment",
+        "omitting split returns split discovery without task rows"
+      ],
+      "description": "Discover Task API support and optionally request one bounded task page from each OpenEnv server. `environments` is accepted as an input alias.",
+      "x-kiln-rust-type": "OpenEnvTaskCatalogRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvTaskCatalogResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "catalogs"
+      ],
+      "properties": {
+        "schema": {
+          "const": "kiln.openenv-task-catalog.v1"
+        },
+        "catalogs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpenEnvTaskCatalogEntry"
+          },
+          "minItems": 1
+        }
+      },
+      "description": "Bounded Task API discovery results for the requested OpenEnv servers.",
+      "x-kiln-rust-type": "OpenEnvTaskCatalogResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvTaskSplit": {
+      "type": "object",
+      "additionalProperties": {},
+      "required": [
+        "name",
+        "type"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "type": {
+          "$ref": "#/$defs/NonEmptyString"
+        }
+      },
+      "x-kiln-unknown-field-policy": "preserved",
+      "description": "One provider-authored OpenEnv Task API split. Unknown provider fields are preserved.",
+      "x-kiln-rust-type": "kiln_openenv::OpenEnvTaskSplit",
+      "x-kiln-field-schema-status": "complete"
+    },
     "OpenEnvTrainingStatus": {
       "type": "object",
       "additionalProperties": false,
@@ -7425,6 +7611,59 @@
             "rollouts_total": 20
           }
         }
+      }
+    ],
+    "OpenEnvTaskCatalogRequest": [
+      {
+        "environment_urls": [
+          "http://127.0.0.1:8000"
+        ],
+        "credential_ids": [
+          "local-arcade"
+        ],
+        "split": "train",
+        "start": 0,
+        "limit": 2
+      }
+    ],
+    "OpenEnvTaskCatalogResponse": [
+      {
+        "schema": "kiln.openenv-task-catalog.v1",
+        "catalogs": [
+          {
+            "base_url": "http://127.0.0.1:8000",
+            "catalog": {
+              "environment_name": "bandit",
+              "task_api": "available",
+              "splits": [
+                {
+                  "name": "train",
+                  "type": "train"
+                },
+                {
+                  "name": "holdout",
+                  "type": "validation"
+                }
+              ],
+              "selected_split": "train",
+              "num_tasks": 3,
+              "start": 0,
+              "stop": 2,
+              "tasks": [
+                {
+                  "id": 0,
+                  "prompt": "Choose an arm.",
+                  "difficulty": "easy"
+                },
+                {
+                  "id": 1,
+                  "prompt": "Choose again.",
+                  "difficulty": "easy"
+                }
+              ]
+            }
+          }
+        ]
       }
     ],
     "PublishPayload": [

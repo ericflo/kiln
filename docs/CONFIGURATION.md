@@ -1744,7 +1744,7 @@ policy.
 
 | TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
 |---|---|---|---|---|
-| `openenv.enabled` | boolean; `true` | `KILN_OPENENV_ENABLED` (implemented) | none | Enables discovery and asynchronous run lifecycle routes. Disabling it does not remove the local CLI. |
+| `openenv.enabled` | boolean; `true` | `KILN_OPENENV_ENABLED` (implemented) | none | Enables protocol discovery, bounded Task API catalogs, and asynchronous run lifecycle routes. Disabling it does not remove the local CLI. |
 | `openenv.max_active_runs` | unsigned integer; `4` | `KILN_OPENENV_MAX_ACTIVE_RUNS` (implemented) | none | Must be greater than zero and no greater than `max_tracked_runs`. Bounds complete live OpenEnv workflows, including collection, queued or running GRPO, static post-evaluation, and paired held-out environment evaluation; underlying executors retain their own bounds. |
 | `openenv.max_tracked_runs` | unsigned integer; `128` | `KILN_OPENENV_MAX_TRACKED_RUNS` (implemented) | none | Must be greater than zero and at least `max_active_runs`. Bounds retained in-memory run records. |
 | `openenv.tracked_run_ttl_secs` | unsigned integer; `604800` | `KILN_OPENENV_TRACKED_RUN_TTL_SECS` (implemented) | none | Must be greater than zero. Terminal status records age out after this window; content-addressed rollout and paired-evaluation artifacts remain under `<adapter_dir>/.openenv/runs/`. |
@@ -1762,11 +1762,11 @@ origin = "https://arcade.example.com"
 bearer_token_env = "ARCADE_OPENENV_TOKEN"
 ```
 
-`POST /v1/openenv/inspect` and `POST /v1/openenv/runs` accept
+`POST /v1/openenv/inspect`, `POST /v1/openenv/tasks`, and `POST /v1/openenv/runs` accept
 `"credential_ids":["production-arcade"]`, aligned positionally with
 `environment_urls`. Use `null` for an unauthenticated slot in a mixed list.
 Kiln resolves the handle only after URL and origin validation, applies the
-bearer header to both HTTP discovery and the WebSocket upgrade, and never
+bearer header to HTTP discovery, Task API requests, and the WebSocket upgrade, and never
 places the token in typed config, run status, logs, metrics, summaries, replay
 manifests, or receipts.
 

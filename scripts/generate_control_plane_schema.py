@@ -56,6 +56,8 @@ ENTRYPOINTS = (
     "OpenEnvRunList",
     "OpenEnvRunRequest",
     "OpenEnvRunStatus",
+    "OpenEnvTaskCatalogRequest",
+    "OpenEnvTaskCatalogResponse",
     "PublishPayload",
     "PublishToLibraryResponse",
     "QueueResponse",
@@ -876,6 +878,96 @@ def build_openenv_types() -> None:
         },
         "Complete discovery results for the requested OpenEnv servers.",
     )
+    add_object(
+        "OpenEnvTaskSplit",
+        "kiln_openenv::OpenEnvTaskSplit",
+        {
+            "name": ref("NonEmptyString"),
+            "type": ref("NonEmptyString"),
+        },
+        "One provider-authored OpenEnv Task API split. Unknown provider fields are preserved.",
+        open_input=True,
+        extra={
+            "additionalProperties": {},
+            "x-kiln-unknown-field-policy": "preserved",
+        },
+    )
+    add_enum(
+        "OpenEnvTaskApiSupport",
+        "kiln_openenv::OpenEnvTaskApiSupport",
+        ["available", "unsupported"],
+        "Whether the selected environment exposes a TaskProvider. HTTP 501 maps to unsupported without making the environment incompatible.",
+    )
+    add_object(
+        "OpenEnvTaskCatalog",
+        "kiln_openenv::OpenEnvTaskCatalog",
+        {
+            "environment_name": ref("NonEmptyString"),
+            "task_api": ref("OpenEnvTaskApiSupport"),
+            "splits": array(ref("OpenEnvTaskSplit")),
+            "selected_split": ref("NonEmptyString"),
+            "num_tasks": ref("NonNegativeInteger"),
+            "start": ref("NonNegativeInteger"),
+            "stop": ref("NonNegativeInteger"),
+            "tasks": {"type": "array", "items": ref("AnyJson"), "maxItems": 200},
+        },
+        "Bounded Task API catalog. Arbitrary task rows are untrusted discovery data and have no protocol-defined reset semantics.",
+        optional=("selected_split", "num_tasks", "start", "stop", "tasks"),
+        extra={
+            "x-kiln-semantic-constraints": [
+                "unsupported catalogs have no selected split or task page",
+                "task rows are never automatically mapped into WebSocket reset data",
+            ]
+        },
+    )
+    add_object(
+        "OpenEnvTaskCatalogRequest",
+        "OpenEnvTaskCatalogRequest",
+        {
+            "environment_urls": array(ref("NonEmptyString"), min_items=1),
+            "credential_ids": array(
+                {
+                    "type": ["string", "null"],
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9_-]+$",
+                    "not": {"const": "-"},
+                }
+            ),
+            "environment_name": ref("NonEmptyString"),
+            "split": ref("NonEmptyString"),
+            "start": ref("NonNegativeInteger"),
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+        },
+        "Discover Task API support and optionally request one bounded task page from each OpenEnv server. `environments` is accepted as an input alias.",
+        optional=("credential_ids", "environment_name", "split", "start", "limit"),
+        extra={
+            "x-kiln-input-aliases": {"environments": "environment_urls"},
+            "x-kiln-semantic-constraints": [
+                "credential_ids is empty or has exactly one handle/null entry per environment_urls item",
+                "environment_name may be omitted only when each server advertises exactly one environment",
+                "omitting split returns split discovery without task rows",
+            ],
+        },
+    )
+    add_object(
+        "OpenEnvTaskCatalogEntry",
+        "OpenEnvTaskCatalogEntry",
+        {
+            "base_url": ref("NonEmptyString"),
+            "catalog": ref("OpenEnvTaskCatalog"),
+        },
+        "One canonical OpenEnv origin and its bounded Task API result.",
+    )
+    add_object(
+        "OpenEnvTaskCatalogResponse",
+        "OpenEnvTaskCatalogResponse",
+        {
+            "schema": {"const": "kiln.openenv-task-catalog.v1"},
+            "catalogs": array(ref("OpenEnvTaskCatalogEntry"), min_items=1),
+        },
+        "Bounded Task API discovery results for the requested OpenEnv servers.",
+    )
 
 
 def build_opd_types() -> None:
@@ -1367,6 +1459,22 @@ def build_examples() -> dict[str, list[Any]]:
             "state": {"type": "object"},
         },
     }
+    openenv_task_catalog = {
+        "environment_name": "bandit",
+        "task_api": "available",
+        "splits": [
+            {"name": "train", "type": "train"},
+            {"name": "holdout", "type": "validation"},
+        ],
+        "selected_split": "train",
+        "num_tasks": 3,
+        "start": 0,
+        "stop": 2,
+        "tasks": [
+            {"id": 0, "prompt": "Choose an arm.", "difficulty": "easy"},
+            {"id": 1, "prompt": "Choose again.", "difficulty": "easy"},
+        ],
+    }
     openenv_request = {
         "kind": "train",
         "environment_urls": ["http://127.0.0.1:8000"],
@@ -1481,6 +1589,8 @@ def build_examples() -> dict[str, list[Any]]:
         "OpenEnvRunList": [{"schema": "kiln.openenv-run-list.v3", "runs": [openenv_status]}],
         "OpenEnvRunRequest": [openenv_request],
         "OpenEnvRunStatus": [openenv_status],
+        "OpenEnvTaskCatalogRequest": [{"environment_urls": ["http://127.0.0.1:8000"], "credential_ids": ["local-arcade"], "split": "train", "start": 0, "limit": 2}],
+        "OpenEnvTaskCatalogResponse": [{"schema": "kiln.openenv-task-catalog.v1", "catalogs": [{"base_url": "http://127.0.0.1:8000", "catalog": openenv_task_catalog}]}],
         "PublishPayload": [{"description": "Math adapter", "uploader": "local-user"}],
         "PublishToLibraryResponse": [{"status": "ready_to_publish", "backend": "https://library.kiln.run", "intended_id": "math-v1@2026-07-14", "uploader": "local-user", "description": "Math adapter", "receipt_schema_version": 1, "note": "Local validation passed; no remote upload occurred."}],
         "QueueResponse": [{"running": None, "queued": [{"job_id": "train-1", "job_type": "sft", "adapter_name": "math-v1", "position": 1}], "completed": []}],

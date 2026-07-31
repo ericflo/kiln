@@ -6,12 +6,12 @@ use std::sync::{
 use axum::{
     Json, Router,
     extract::{
-        State, WebSocketUpgrade,
+        Path, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
     http::{HeaderMap, StatusCode, header::AUTHORIZATION},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use futures::StreamExt;
 use kiln_openenv::{OpenEnvAuthentication, OpenEnvClient, OpenEnvReward};
@@ -93,6 +93,38 @@ async fn openapi(headers: HeaderMap) -> Response {
     )
 }
 
+async fn task_splits(Path(environment): Path<String>, headers: HeaderMap) -> Response {
+    assert_eq!(environment, "authenticated_env");
+    protected_json(&headers, json!([{"name": "train", "type": "train"}]))
+}
+
+async fn task_post(
+    Path((environment, operation)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    assert_eq!(environment, "authenticated_env");
+    match operation.as_str() {
+        "num_tasks" => {
+            assert_eq!(body, json!({"split": "train"}));
+            protected_json(&headers, json!({"num_tasks": 1}))
+        }
+        "task_range" => {
+            assert_eq!(body, json!({"split": "train", "start": 0, "stop": 1}));
+            let prompt = if bearer_token(&headers) == Some(REFLECTED_HTTP_TOKEN) {
+                REFLECTED_HTTP_TOKEN
+            } else {
+                "2 + 2"
+            };
+            protected_json(
+                &headers,
+                json!({"tasks": [{"prompt": prompt, "answer": "4"}]}),
+            )
+        }
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 fn protected_json(headers: &HeaderMap, value: Value) -> Response {
     if authorized(headers) {
         Json(value).into_response()
@@ -166,7 +198,7 @@ async fn serve_episode(mut socket: WebSocket, reflect_credential: bool) {
 }
 
 #[tokio::test]
-async fn bearer_auth_covers_discovery_and_the_websocket_upgrade() {
+async fn bearer_auth_covers_discovery_task_api_and_the_websocket_upgrade() {
     let websocket_authenticated = Arc::new(AtomicBool::new(false));
     let state = AuthState {
         websocket_authenticated: websocket_authenticated.clone(),
@@ -177,6 +209,8 @@ async fn bearer_auth_covers_discovery_and_the_websocket_upgrade() {
         .route("/schema", get(schema))
         .route("/list_environments", get(environments))
         .route("/openapi.json", get(openapi))
+        .route("/{environment}/splits", get(task_splits))
+        .route("/{environment}/{operation}", post(task_post))
         .route("/ws", get(websocket))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -210,6 +244,16 @@ async fn bearer_auth_covers_discovery_and_the_websocket_upgrade() {
         "{reflected_http_error}"
     );
     assert!(reflected_http_error.contains("reflected"));
+    let reflected_task_error = reflected_http
+        .task_catalog(None, Some("train"), 0, 1)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        !reflected_task_error.contains(REFLECTED_HTTP_TOKEN),
+        "{reflected_task_error}"
+    );
+    assert!(reflected_task_error.contains("reflected"));
 
     let reflected_websocket = OpenEnvClient::new(format!("http://{address}"))
         .unwrap()
@@ -239,6 +283,15 @@ async fn bearer_auth_covers_discovery_and_the_websocket_upgrade() {
     assert_eq!(
         inspection.identity.authentication,
         OpenEnvAuthentication::Bearer
+    );
+    let task_catalog = authenticated
+        .task_catalog(None, Some("train"), 0, 1)
+        .await
+        .unwrap();
+    assert_eq!(task_catalog.num_tasks, Some(1));
+    assert_eq!(
+        task_catalog.tasks,
+        [json!({"prompt": "2 + 2", "answer": "4"})]
     );
     let mut episode = authenticated.connect().await.unwrap();
     let reset = episode.reset(&json!({"seed": 7})).await.unwrap();

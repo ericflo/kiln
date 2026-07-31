@@ -136,6 +136,9 @@ an outcome; restart-interrupted active work fails explicitly.
 # Inspect the environment's health, metadata, schemas, and content identity.
 kiln openenv inspect --environment http://127.0.0.1:8990
 
+# Page an optional dataset-backed Task API without loading the full catalog.
+kiln openenv tasks --environment http://127.0.0.1:8990 --split train
+
 # Run seed-matched candidate episodes and immediately train a LoRA.
 kiln openenv train \
   --environment http://127.0.0.1:8990 \
@@ -147,6 +150,12 @@ kiln openenv train \
 # Follow a dashboard/API-owned workflow through training and evaluation.
 kiln openenv status 80a26e21-8451-4a64-8666-890c06fd80bd --follow
 ```
+
+Task catalogs are native in the CLI, dashboard, and `POST /v1/openenv/tasks`.
+Provider-less HTTP 501 is reported as unsupported, not incompatible. OpenEnv
+does not define how a catalog row selects a WebSocket episode, so Kiln keeps
+rows as bounded, untrusted discovery data and uses explicit reset options plus
+deterministic seeds for portable training and exact replay.
 
 Protected deployments are native too. Direct CLI commands accept
 `--credential-env TOKEN_VARIABLE`; dashboard/API runs name an origin-scoped

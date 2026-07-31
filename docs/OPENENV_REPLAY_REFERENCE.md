@@ -88,10 +88,10 @@ kiln openenv train \
 ```
 
 Repeat `--credential-env` in environment order and use `-` for a public slot.
-The sensitive header is applied uniformly to `/health`, discovery, and the
+The sensitive header is applied uniformly to `/health`, discovery, Task API, and the
 WebSocket upgrade. Remote credentials require HTTPS/WSS; loopback HTTP remains
 available for local development. The
-`kiln_openenv_authenticated_operations_total{operation="inspect"|"run"}` metric
+`kiln_openenv_authenticated_operations_total{operation="inspect"|"task_catalog"|"run"}` metric
 counts protected operations without credential, origin, or token labels.
 Authenticated response bodies and episode frames are checked for direct token
 reflection before parsing so a peer cannot place the configured credential in
@@ -107,6 +107,42 @@ content-addressed artifact boundary.
 kiln openenv replay --summary protected.rollout-summary.json \
   --credential-env ARCADE_OPENENV_TOKEN
 ```
+
+### Task API catalogs are discovery, not reset
+
+Dataset-backed OpenEnv servers may expose `GET /{environment}/splits` plus
+`POST /{environment}/{tasks|num_tasks|task|task_range}`. HTTP 501 on a
+provider-backed route is a conforming declaration that the environment has no
+TaskProvider; it does not disable seeded rollout or training.
+
+```bash
+# List split names and their provider-authored types.
+kiln openenv tasks --environment http://127.0.0.1:8990
+
+# Read a bounded page without fetching the provider's complete task list.
+kiln openenv tasks --environment http://127.0.0.1:8990 \
+  --split train --start 100 --limit 25 --json
+```
+
+The dashboard exposes the same catalog beside protocol inspection. Server
+clients use `POST /v1/openenv/tasks` with `environment_urls`, optional aligned
+`credential_ids`, optional `environment_name` and `split`, and `start`/`limit`.
+The response schema is `kiln.openenv-task-catalog.v1`.
+
+Task rows are arbitrary, untrusted JSON. Kiln preserves open split types and
+provider fields, percent-encodes advertised environment names as one URL
+segment, limits discovery bodies to 2 MiB, limits raw client collections to
+16,384 items, and limits CLI/API/dashboard pages to 200 rows. The server metric
+`kiln_openenv_task_catalog_inspections_total{status="started"|"completed"|"failed"}`
+has fixed-cardinality labels.
+
+OpenEnv defines no operation that selects a Task API row for a WebSocket
+session, and a provider's `reset` need not consult its task catalog. Kiln
+therefore never copies a row into reset data, run records, replay manifests, or
+training receipts. Portable scheduling remains the explicit reset object plus
+Kiln's deterministic group seed. If an environment defines its own row/reset
+convention, bind it explicitly through reset options; that resulting reset
+payload is then hashed and replayed under the normal artifact contract.
 
 ### Paired held-out evaluation bundle
 

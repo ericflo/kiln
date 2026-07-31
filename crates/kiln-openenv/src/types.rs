@@ -5,6 +5,7 @@
 //! rewards remain tagged because `null`, booleans, integers, and floats are
 //! observably distinct on `WS /ws`.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -14,6 +15,12 @@ pub const OPENENV_CLIENT_PROFILE: &str = "openenv-http/1.x";
 pub const OPENENV_MAX_SERVER_MESSAGE_BYTES: usize = 512 * 1024;
 pub const OPENENV_MAX_CLIENT_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const OPENENV_MAX_DISCOVERY_BYTES: usize = 2 * 1024 * 1024;
+/// Independent logical bound for Task API arrays. The byte bound above still
+/// applies first; this prevents tiny JSON values from expanding into an
+/// unbounded number of in-memory task or split entries.
+pub const OPENENV_MAX_TASK_ITEMS: usize = 16_384;
+pub const OPENENV_MAX_TASK_CATALOG_NAMES: usize = 256;
+pub const OPENENV_MAX_TASK_SELECTOR_BYTES: usize = 1_024;
 
 /// The tagged reward accepted on the OpenEnv WebSocket.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -118,6 +125,84 @@ pub struct OpenEnvMetadata {
     pub author: Option<String>,
     #[serde(default)]
     pub documentation_url: Option<String>,
+}
+
+/// One split advertised by `GET /{environment}/splits`.
+///
+/// OpenEnv normalizes common split names but leaves the `type` vocabulary
+/// open, so Kiln preserves it as a string rather than inventing a closed enum.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OpenEnvTaskSplit {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub split_type: String,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Response from `POST /{environment}/tasks`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OpenEnvTaskList {
+    pub tasks: Vec<Value>,
+    pub env_name: String,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Response from `POST /{environment}/num_tasks`.
+///
+/// This remains signed to preserve the protocol's JSON `int` exactly. Product
+/// surfaces reject negative provider counts before using them for pagination.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OpenEnvTaskCount {
+    pub num_tasks: i64,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Response from `POST /{environment}/task`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OpenEnvTask {
+    pub task: Value,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Response from `POST /{environment}/task_range`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OpenEnvTaskRange {
+    pub tasks: Vec<Value>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenEnvTaskApiSupport {
+    Available,
+    Unsupported,
+}
+
+/// Bounded, implementation-neutral projection of OpenEnv's optional Task API.
+///
+/// Task objects are discovery data only. OpenEnv defines no task-to-reset
+/// binding, so this catalog intentionally carries no episode scheduling
+/// semantics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OpenEnvTaskCatalog {
+    pub environment_name: String,
+    pub task_api: OpenEnvTaskApiSupport,
+    pub splits: Vec<OpenEnvTaskSplit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_split: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_tasks: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

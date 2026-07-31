@@ -1214,6 +1214,76 @@ async function inspectOpenEnv() {
   }
 }
 
+async function inspectOpenEnvTasks() {
+  const result = document.getElementById('openenv-task-catalog');
+  const button = document.getElementById('openenv-task-inspect');
+  const environment_urls = openEnvUrls();
+  if (!environment_urls.length) {
+    if (result) result.textContent = 'Add at least one environment URL first.';
+    return;
+  }
+  let credential_ids;
+  try {
+    credential_ids = openEnvCredentialIds(environment_urls.length);
+  } catch (error) {
+    if (result) result.textContent = error.message;
+    toast(error.message, 'err');
+    return;
+  }
+  const environment_name = document.getElementById('openenv-task-environment-name')?.value.trim() || '';
+  const split = document.getElementById('openenv-task-split')?.value.trim() || '';
+  const start = Number(document.getElementById('openenv-task-start')?.value || 0);
+  const limit = Number(document.getElementById('openenv-task-limit')?.value || 20);
+  if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+    const message = 'Task page requires a non-negative safe-integer start and a page size from 1 to 200.';
+    if (result) result.textContent = message;
+    toast(message, 'err');
+    return;
+  }
+  if (button) button.disabled = true;
+  if (result) result.textContent = split
+    ? 'Reading the bounded OpenEnv task page…'
+    : 'Discovering OpenEnv Task API splits…';
+  try {
+    const response = await api('/v1/openenv/tasks', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        environment_urls,
+        ...(credential_ids.length ? {credential_ids} : {}),
+        ...(environment_name ? {environment_name} : {}),
+        ...(split ? {split} : {}),
+        start,
+        limit,
+      }),
+    });
+    if (result) {
+      result.innerHTML = (response.catalogs || []).map(entry => {
+        const catalog = entry.catalog || {};
+        const name = catalog.environment_name || entry.base_url || 'OpenEnv';
+        if (catalog.task_api === 'unsupported') {
+          return `<span><strong>${escapeHtml(name)}</strong> · Task API unsupported · seeded reset/options training remains available</span>`;
+        }
+        const splits = (catalog.splits || []).map(item =>
+          `<code>${escapeHtml(item.name || '')}</code> (${escapeHtml(item.type || '')})`
+        ).join(', ');
+        if (!catalog.selected_split) {
+          return `<span><strong>${escapeHtml(name)}</strong> · Task API available · ${splits || 'no splits advertised'}</span>`;
+        }
+        const rows = (catalog.tasks || []).map((task, offset) =>
+          `<span><code>[${Number(catalog.start || 0) + offset}]</code> <code>${escapeHtml(JSON.stringify(task))}</code></span>`
+        ).join('<br>');
+        return `<span><strong>${escapeHtml(name)}</strong> · <code>${escapeHtml(catalog.selected_split)}</code> tasks ${Number(catalog.start || 0)}..${Number(catalog.stop || 0)} of ${Number(catalog.num_tasks || 0)}${rows ? `<br>${rows}` : '<br>No tasks in this page.'}</span>`;
+      }).join('<br>');
+    }
+  } catch (error) {
+    if (result) result.textContent = error.message;
+    toast(error.message, 'err');
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 function openEnvStateLabel(state) {
   return String(state || 'unknown').replaceAll('_', ' ');
 }
@@ -1327,6 +1397,7 @@ document.getElementById('openenv-lora-rank')?.addEventListener('input', syncOpen
 document.getElementById('openenv-training-config')?.addEventListener('input', syncOpenEnvKind);
 document.getElementById('openenv-environment-eval-mode')?.addEventListener('change', syncOpenEnvKind);
 document.getElementById('openenv-inspect')?.addEventListener('click', inspectOpenEnv);
+document.getElementById('openenv-task-inspect')?.addEventListener('click', inspectOpenEnvTasks);
 document.getElementById('openenv-refresh')?.addEventListener('click', () => pollOpenEnvRuns(true));
 document.getElementById('training-tab-openenv')?.addEventListener('click', () => pollOpenEnvRuns(true));
 document.getElementById('openenv-adv-toggle')?.addEventListener('click', event => {

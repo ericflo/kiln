@@ -20,6 +20,7 @@ use console::style;
 use futures::{StreamExt, stream};
 use kiln_openenv::{
     OpenEnvClient, OpenEnvClientError, OpenEnvInspection, OpenEnvObservation, OpenEnvProtocolError,
+    OpenEnvTaskApiSupport, OpenEnvTaskCatalog,
 };
 use kiln_train::{
     AgenticGroup, ChatMessage, OpenEnvEpisodeTerminationV1, OpenEnvRolloutProvenanceV1,
@@ -46,6 +47,7 @@ const MAX_OPENENV_CONCURRENCY: usize = 256;
 const MAX_OPENENV_ACTION_TOKENS: usize = 16_384;
 const MAX_OPENENV_RECOVERABLE_ERRORS: usize = 64;
 const MAX_OPENENV_CAPACITY_WAIT_SECONDS: u64 = 3_600;
+pub(crate) const MAX_OPENENV_TASK_PAGE_SIZE: usize = 200;
 const MAX_OPENENV_DATASET_BYTES: usize = 256 * 1024 * 1024;
 const MAX_KILN_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const CHAT_TIMEOUT: Duration = Duration::from_secs(180);
@@ -154,7 +156,7 @@ impl OpenEnvCollectionControl {
 
 pub(crate) const OPENENV_OVERVIEW: &str = r#"Inspect OpenEnv servers, collect grouped stateful episodes, and train a Kiln LoRA directly from environment-owned rewards.
 
-Kiln discovers each environment over HTTP, opens one WebSocket session per episode, resets every candidate in a GRPO group with the same deterministic seed, asks the selected Kiln policy for schema-shaped JSON actions, and records every action, observation, reward, termination, environment identity, and content hash in canonical agentic trajectory JSONL.
+Kiln discovers each environment over HTTP, including its optional bounded Task API catalog, opens one WebSocket session per episode, resets every candidate in a GRPO group with the same deterministic seed, asks the selected Kiln policy for schema-shaped JSON actions, and records every action, observation, reward, termination, environment identity, and content hash in canonical agentic trajectory JSONL. Task rows are discovery data: OpenEnv defines no automatic task-to-reset mapping, so portable training continues to use explicit reset options and seeds.
 
 `rollout` writes the exact reusable GRPO corpus, an exact replay transcript, and a detailed summary receipt. `verify` validates the three-artifact bundle without contacting a server; `replay` re-executes the captured reset/action protocol against the content-addressed environments. `train` writes those artifacts and submits the in-memory groups to `/v1/train/grpo` with the explicit native on-policy behavior-policy contract. Protected environments use `--credential-env`; only the non-secret authentication method enters environment identity. Start `kiln serve` first.
 "#;
@@ -163,6 +165,10 @@ pub(crate) const OPENENV_EXAMPLES: &str = r#"Examples:
   kiln openenv inspect --environment http://127.0.0.1:8000
       Check health and print the environment metadata, schemas, protocol
       profile, WebSocket URL, and content-addressed schema identity.
+
+  kiln openenv tasks --environment http://127.0.0.1:8000 --split train
+      Discover the optional Task API and print a bounded page of arbitrary
+      dataset-backed task rows without treating them as reset payloads.
 
   kiln openenv rollout --environment http://127.0.0.1:8000 --groups 8 --group-size 4
       Collect 32 live episodes as eight seed-matched GRPO groups and write
@@ -307,6 +313,37 @@ pub enum OpenEnvCommands {
         credential_env: Option<String>,
 
         /// Emit the complete inspection as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Inspect an optional dataset-backed OpenEnv Task API catalog
+    Tasks {
+        /// OpenEnv HTTP base URL
+        #[arg(long, value_name = "URL")]
+        environment: String,
+
+        /// Registered environment name; optional when exactly one is advertised
+        #[arg(long = "environment-name", value_name = "NAME")]
+        environment_name: Option<String>,
+
+        /// Split to page; omit to list the advertised splits only
+        #[arg(long, value_name = "SPLIT")]
+        split: Option<String>,
+
+        /// Zero-based first task in the requested page
+        #[arg(long, default_value_t = 0)]
+        start: u64,
+
+        /// Maximum task rows to return (1..=200)
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+
+        /// Environment variable containing this origin's bearer token
+        #[arg(long = "credential-env", value_name = "ENV")]
+        credential_env: Option<String>,
+
+        /// Emit the complete bounded catalog as JSON
         #[arg(long)]
         json: bool,
     },
@@ -640,6 +677,69 @@ pub async fn run_openenv(command: &OpenEnvCommands) -> Result<()> {
                 println!("  Action schema:");
                 for line in serde_json::to_string_pretty(&inspection.schema.action)?.lines() {
                     println!("    {line}");
+                }
+            }
+        }
+        OpenEnvCommands::Tasks {
+            environment,
+            environment_name,
+            split,
+            start,
+            limit,
+            credential_env,
+            json,
+        } => {
+            let catalog = inspect_openenv_tasks(
+                environment,
+                environment_name.as_deref(),
+                split.as_deref(),
+                *start,
+                *limit,
+                credential_env.as_deref(),
+            )
+            .await?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&catalog)?);
+            } else if catalog.task_api == OpenEnvTaskApiSupport::Unsupported {
+                println!(
+                    "{} {} does not expose the optional OpenEnv Task API",
+                    style("○").yellow().bold(),
+                    style(&catalog.environment_name).cyan().bold()
+                );
+                println!(
+                    "  Seeded reset/options training remains fully available; no task adapter is required."
+                );
+            } else if catalog.selected_split.is_none() {
+                println!(
+                    "{} OpenEnv task catalog for {}",
+                    style("✓").green().bold(),
+                    style(&catalog.environment_name).cyan().bold()
+                );
+                if catalog.splits.is_empty() {
+                    println!("  No splits are advertised.");
+                }
+                for split in &catalog.splits {
+                    println!("  {} ({})", split.name, split.split_type);
+                }
+                println!("  Choose a page with --split NAME.");
+            } else {
+                let split = catalog.selected_split.as_deref().unwrap_or_default();
+                println!(
+                    "{} {} / {} tasks {}..{} of {}",
+                    style("✓").green().bold(),
+                    style(&catalog.environment_name).cyan().bold(),
+                    style(split).cyan(),
+                    catalog.start.unwrap_or_default(),
+                    catalog.stop.unwrap_or_default(),
+                    catalog.num_tasks.unwrap_or_default()
+                );
+                let first = catalog.start.unwrap_or_default();
+                for (offset, task) in catalog.tasks.iter().enumerate() {
+                    println!(
+                        "  [{}] {}",
+                        first.saturating_add(offset as u64),
+                        serde_json::to_string(task)?
+                    );
                 }
             }
         }
@@ -1109,6 +1209,29 @@ pub async fn inspect_openenv(
         .inspect()
         .await
         .with_context(|| format!("inspect OpenEnv server {}", client.base_url()))
+}
+
+pub async fn inspect_openenv_tasks(
+    environment_url: &str,
+    environment_name: Option<&str>,
+    split: Option<&str>,
+    start: u64,
+    limit: usize,
+    credential_env: Option<&str>,
+) -> Result<OpenEnvTaskCatalog> {
+    anyhow::ensure!(
+        (1..=MAX_OPENENV_TASK_PAGE_SIZE).contains(&limit),
+        "OpenEnv task page limit must be in 1..={}, got {limit}",
+        MAX_OPENENV_TASK_PAGE_SIZE
+    );
+    if let Some(name) = credential_env {
+        validate_credential_envs(&[Some(name.to_owned())], 1)?;
+    }
+    let client = openenv_client(environment_url, credential_env)?;
+    client
+        .task_catalog(environment_name, split, start, limit)
+        .await
+        .with_context(|| format!("inspect OpenEnv Task API at {}", client.base_url()))
 }
 
 pub async fn run_openenv_rollout(options: OpenEnvRolloutOptions) -> Result<OpenEnvRolloutSummary> {
@@ -2269,6 +2392,38 @@ mod tests {
                 ..
             })) if environment == "127.0.0.1:8990"
                 && credential_env.as_deref() == Some("OPENENV_TEST_TOKEN")
+        ));
+
+        let tasks = Cli::try_parse_from([
+            "kiln",
+            "openenv",
+            "tasks",
+            "--environment",
+            "127.0.0.1:8990",
+            "--environment-name",
+            "math_env",
+            "--split",
+            "train",
+            "--start",
+            "20",
+            "--limit",
+            "10",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            tasks.command,
+            Some(Commands::Openenv(OpenEnvCommands::Tasks {
+                environment,
+                environment_name,
+                split,
+                start: 20,
+                limit: 10,
+                json: true,
+                ..
+            })) if environment == "127.0.0.1:8990"
+                && environment_name.as_deref() == Some("math_env")
+                && split.as_deref() == Some("train")
         ));
 
         let rollout = Cli::try_parse_from([

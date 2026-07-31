@@ -55,10 +55,8 @@ curl -sS localhost:8420/v1/openenv/runs \
          "gate":{"min_mean_improvement":0.05}}}'
 ```
 
-Use `POST /v1/openenv/inspect` for discovery, `GET /v1/openenv/runs` for status, and
-`DELETE /v1/openenv/runs/{run_id}` to cancel. Version 3 continues through `training_running`,
-optional `post_evaluating`, `environment_evaluating`, and `completed`. Cancellation reaches
-the active collector, trainer, or evaluator. Artifacts persist under `<adapter_dir>/.openenv/runs/<run_id>/`.
+Use `POST /v1/openenv/inspect` for discovery, `POST /v1/openenv/tasks` for task catalogs, `GET /v1/openenv/runs` for status, and `DELETE /v1/openenv/runs/{run_id}` to cancel.
+Version 3 continues through `training_running`, `post_evaluating`, `environment_evaluating`, and `completed`. Cancellation reaches collector, trainer, or evaluator; artifacts persist under `<adapter_dir>/.openenv/runs/<run_id>/`.
 
 The CLI exposes the same lifecycle:
 
@@ -87,14 +85,16 @@ records only `none` or `bearer`. See the [authentication and replay reference](O
 ```bash
 kiln openenv inspect --environment http://127.0.0.1:8990
 kiln openenv inspect --environment http://127.0.0.1:8990 --json
+kiln openenv tasks --environment http://127.0.0.1:8990 --split train
 ```
 
 Inspection checks `/health`, then reads `/metadata`, `/schema`, `/list_environments`, and
 `/openapi.json`. It reports the WebSocket URL, client profile, OpenAPI version, and a SHA-256
 over the typed action/observation/state schema.
 
-Run inspection before a long collection. It catches an unavailable server, unexpected
-discovery document, or changed environment schema without spending model tokens.
+Run inspection before a long collection. It catches unavailable or changed servers without
+spending model tokens. `tasks` reports conforming 501 as unsupported and otherwise pages
+arbitrary provider rows; OpenEnv defines no row-to-reset mapping, so Kiln never invents one.
 
 ### Collect without training
 

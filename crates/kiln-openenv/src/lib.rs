@@ -15,6 +15,9 @@ pub use client::{
 };
 pub use types::{
     OPENENV_CLIENT_PROFILE, OPENENV_MAX_CLIENT_MESSAGE_BYTES, OPENENV_MAX_DISCOVERY_BYTES,
-    OPENENV_MAX_SERVER_MESSAGE_BYTES, OpenEnvErrorCode, OpenEnvMetadata, OpenEnvObservation,
-    OpenEnvProtocolError, OpenEnvReward, OpenEnvSchema, OpenEnvServerMessage,
+    OPENENV_MAX_SERVER_MESSAGE_BYTES, OPENENV_MAX_TASK_CATALOG_NAMES, OPENENV_MAX_TASK_ITEMS,
+    OPENENV_MAX_TASK_SELECTOR_BYTES, OpenEnvErrorCode, OpenEnvMetadata, OpenEnvObservation,
+    OpenEnvProtocolError, OpenEnvReward, OpenEnvSchema, OpenEnvServerMessage, OpenEnvTask,
+    OpenEnvTaskApiSupport, OpenEnvTaskCatalog, OpenEnvTaskCount, OpenEnvTaskList, OpenEnvTaskRange,
+    OpenEnvTaskSplit,
 };

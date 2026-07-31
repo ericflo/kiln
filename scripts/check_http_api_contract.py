@@ -162,6 +162,8 @@ CONTROL_ENTRYPOINTS = (
     "OpenEnvRunList",
     "OpenEnvRunRequest",
     "OpenEnvRunStatus",
+    "OpenEnvTaskCatalogRequest",
+    "OpenEnvTaskCatalogResponse",
     "PublishPayload",
     "PublishToLibraryResponse",
     "QueueResponse",
@@ -183,14 +185,14 @@ CONTROL_COMPONENT_TYPES = {name: name for name in CONTROL_ENTRYPOINTS}
 CONTROL_COMPONENT_TYPES["CorrectionRowInput"] = "CorrectionRow"
 CONTROL_COMPONENT_TYPES["Vec_TrainingStatus"] = "Vec<TrainingStatus>"
 EXPECTED_OBSERVABILITY_DEFINITION_COUNT = 172
-EXPECTED_CONTROL_PLANE_DEFINITION_COUNT = 145
+EXPECTED_CONTROL_PLANE_DEFINITION_COUNT = 151
 EXPECTED_COMPONENT_SCHEMA_COUNTS = {
-    "complete": 139,
+    "complete": 141,
     "migration_pending": 0,
-    "total": 139,
+    "total": 141,
 }
 HTTP_METHODS = ("get", "post", "put", "patch", "delete")
-EXPECTED_METHOD_COUNTS = {"DELETE": 13, "GET": 57, "POST": 50, "PUT": 1}
+EXPECTED_METHOD_COUNTS = {"DELETE": 13, "GET": 57, "POST": 51, "PUT": 1}
 EXPECTED_TAG_COUNTS = {
     "adapters": 9,
     "agents": 16,
@@ -200,7 +202,7 @@ EXPECTED_TAG_COUNTS = {
     "inference": 3,
     "library": 3,
     "observability": 8,
-    "openenv": 6,
+    "openenv": 7,
     "preflight": 5,
     "recipes": 2,
     "teachers": 5,
@@ -314,8 +316,8 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
     expected_root = {
         "openapi": "3.1.1",
         "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
-        "x-kiln-path-count": 107,
-        "x-kiln-operation-count": 121,
+        "x-kiln-path-count": 108,
+        "x-kiln-operation-count": 122,
         "x-kiln-method-counts": EXPECTED_METHOD_COUNTS,
         "x-kiln-tag-counts": EXPECTED_TAG_COUNTS,
         "x-kiln-field-schema-status": "complete",
@@ -365,8 +367,8 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
     if not isinstance(paths, dict):
         errors.append("paths must be an object")
         return errors
-    if len(paths) != 107:
-        errors.append(f"paths must contain 107 entries, got {len(paths)}")
+    if len(paths) != 108:
+        errors.append(f"paths must contain 108 entries, got {len(paths)}")
     if list(paths) != sorted(paths):
         errors.append("paths must be sorted lexicographically")
 
@@ -529,8 +531,8 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
         if path in EXPLICIT_ERROR_PATHS and "default" in responses:
             errors.append(f"{label}: explicit error responses must not retain a fictitious default error")
 
-    if operation_count != 121:
-        errors.append(f"operation count must be 121, got {operation_count}")
+    if operation_count != 122:
+        errors.append(f"operation count must be 122, got {operation_count}")
     if dict(sorted(method_counts.items())) != EXPECTED_METHOD_COUNTS:
         errors.append(f"observed method counts drifted: {dict(sorted(method_counts.items()))}")
     if dict(sorted(tag_counts.items())) != EXPECTED_TAG_COUNTS:
@@ -796,6 +798,7 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
         ("post", "/v1/library/install/{id}"): (None, "400", "ApiError"),
         ("post", "/v1/library/publish/{name}"): ("PublishPayload", "200", "PublishToLibraryResponse"),
         ("post", "/v1/openenv/inspect"): ("OpenEnvInspectRequest", "200", "OpenEnvInspectResponse"),
+        ("post", "/v1/openenv/tasks"): ("OpenEnvTaskCatalogRequest", "200", "OpenEnvTaskCatalogResponse"),
         ("get", "/v1/openenv/runs"): (None, "200", "OpenEnvRunList"),
         ("post", "/v1/openenv/runs"): ("OpenEnvRunRequest", "202", "OpenEnvRunStatus"),
         ("delete", "/v1/openenv/runs/{run_id}"): (None, "200", "OpenEnvRunStatus"),
@@ -1628,6 +1631,7 @@ def validate_control_schema(
         "TrainingChatMessageInput",
         "TurnSegmentInput",
     }
+    preserved_open_objects = {"OpenEnvTaskSplit"}
     for name, definition in definitions.items():
         if not isinstance(definition, dict):
             errors.append(f"control-plane definition {name} must be an object")
@@ -1637,6 +1641,16 @@ def validate_control_schema(
         if not isinstance(definition.get("x-kiln-rust-type"), str):
             errors.append(f"control-plane definition {name} must bind a Rust wire type")
         if definition.get("type") == "object":
+            if name in preserved_open_objects:
+                if definition.get("additionalProperties") != {}:
+                    errors.append(
+                        f"control-plane preserved object definition {name} must accept arbitrary JSON fields"
+                    )
+                if definition.get("x-kiln-unknown-field-policy") != "preserved":
+                    errors.append(
+                        f"control-plane preserved object definition {name} must name its preservation policy"
+                    )
+                continue
             expected_open = name in open_input_objects
             if definition.get("additionalProperties") is not expected_open:
                 state = "open" if expected_open else "closed"
@@ -1702,6 +1716,7 @@ def validate_control_schema(
         "CompatibilityResponse", "CorrectionRow", "DeleteCorrectionResponse",
         "DeleteTrainingJobResponse", "DiscoverResponse", "FrontDoorResponse",
         "JudgeDistillResponse", "LibraryListResponse", "ListResponse", "MarkTrainedResponse",
+        "OpenEnvTaskCatalogResponse",
         "PublishToLibraryResponse", "QueueResponse", "RecipeRunResponse", "RecipesListResponse",
         "SelfImproveResponse", "TerminalStatusResponse", "TierDefaultsListResponse",
         "TierDefaultsResponse", "TrainingJobDetail", "TrainingResponse", "TrainingStatus",
@@ -1778,6 +1793,10 @@ def validate_control_schema(
         "OpenEnvRunList": ("crates/kiln-server/src/api/openenv.rs", "OpenEnvRunList", set(), set()),
         "OpenEnvInspectRequest": ("crates/kiln-server/src/api/openenv.rs", "OpenEnvInspectRequest", set(), set()),
         "OpenEnvInspectResponse": ("crates/kiln-server/src/api/openenv.rs", "OpenEnvInspectResponse", set(), set()),
+        "OpenEnvTaskCatalog": ("crates/kiln-openenv/src/types.rs", "OpenEnvTaskCatalog", set(), set()),
+        "OpenEnvTaskCatalogRequest": ("crates/kiln-server/src/api/openenv.rs", "OpenEnvTaskCatalogRequest", set(), set()),
+        "OpenEnvTaskCatalogEntry": ("crates/kiln-server/src/api/openenv.rs", "OpenEnvTaskCatalogEntry", set(), set()),
+        "OpenEnvTaskCatalogResponse": ("crates/kiln-server/src/api/openenv.rs", "OpenEnvTaskCatalogResponse", set(), set()),
         "OpdPrompt": ("crates/kiln-train/src/opd.rs", "OpdPrompt", set(), set()),
         "OpdConfig": ("crates/kiln-train/src/opd.rs", "OpdConfig", set(), set()),
         "OpdRequest": ("crates/kiln-train/src/opd.rs", "OpdRequest", set(), set()),

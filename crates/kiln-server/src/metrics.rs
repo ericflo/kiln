@@ -226,6 +226,10 @@ pub struct Metrics {
     pub openenv_runs_cancelled: AtomicU64,
     pub openenv_episodes_collected: AtomicU64,
     pub openenv_authenticated_inspections: AtomicU64,
+    pub openenv_task_catalog_inspections_started: AtomicU64,
+    pub openenv_task_catalog_inspections_completed: AtomicU64,
+    pub openenv_task_catalog_inspections_failed: AtomicU64,
+    pub openenv_authenticated_task_catalog_inspections: AtomicU64,
     pub openenv_authenticated_runs_started: AtomicU64,
     pub openenv_environment_evaluations_started: AtomicU64,
     pub openenv_environment_evaluations_completed: AtomicU64,
@@ -287,6 +291,10 @@ impl Metrics {
             openenv_runs_cancelled: AtomicU64::new(0),
             openenv_episodes_collected: AtomicU64::new(0),
             openenv_authenticated_inspections: AtomicU64::new(0),
+            openenv_task_catalog_inspections_started: AtomicU64::new(0),
+            openenv_task_catalog_inspections_completed: AtomicU64::new(0),
+            openenv_task_catalog_inspections_failed: AtomicU64::new(0),
+            openenv_authenticated_task_catalog_inspections: AtomicU64::new(0),
             openenv_authenticated_runs_started: AtomicU64::new(0),
             openenv_environment_evaluations_started: AtomicU64::new(0),
             openenv_environment_evaluations_completed: AtomicU64::new(0),
@@ -3109,12 +3117,44 @@ impl Metrics {
                 self.openenv_episodes_collected.load(Ordering::Relaxed)
             ),
         );
+        out.push_str("# HELP kiln_openenv_task_catalog_inspections_total Bounded OpenEnv Task API catalog inspections by lifecycle outcome.\n");
+        out.push_str("# TYPE kiln_openenv_task_catalog_inspections_total counter\n");
+        for (status, value) in [
+            (
+                "started",
+                self.openenv_task_catalog_inspections_started
+                    .load(Ordering::Relaxed),
+            ),
+            (
+                "completed",
+                self.openenv_task_catalog_inspections_completed
+                    .load(Ordering::Relaxed),
+            ),
+            (
+                "failed",
+                self.openenv_task_catalog_inspections_failed
+                    .load(Ordering::Relaxed),
+            ),
+        ] {
+            prom_counter(
+                &mut out,
+                "kiln_openenv_task_catalog_inspections_total",
+                "status",
+                status,
+                value,
+            );
+        }
         out.push_str("# HELP kiln_openenv_authenticated_operations_total Accepted OpenEnv control-plane operations using at least one origin-scoped bearer credential.\n");
         out.push_str("# TYPE kiln_openenv_authenticated_operations_total counter\n");
         for (operation, value) in [
             (
                 "inspect",
                 self.openenv_authenticated_inspections
+                    .load(Ordering::Relaxed),
+            ),
+            (
+                "task_catalog",
+                self.openenv_authenticated_task_catalog_inspections
                     .load(Ordering::Relaxed),
             ),
             (

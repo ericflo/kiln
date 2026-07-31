@@ -1,5 +1,6 @@
 use kiln_openenv::{
     OPENENV_CLIENT_PROFILE, OpenEnvClient, OpenEnvClientError, OpenEnvErrorCode, OpenEnvReward,
+    OpenEnvTaskApiSupport,
 };
 use serde_json::json;
 
@@ -21,6 +22,13 @@ async fn drives_a_stateful_miniopenenv_counter_episode() {
     assert_eq!(
         inspection.schema.action.pointer("/properties/amount/type"),
         Some(&json!("integer"))
+    );
+    let task_catalog = client.task_catalog(None, None, 0, 50).await.unwrap();
+    assert_eq!(task_catalog.environment_name, "counter_env");
+    assert_eq!(
+        task_catalog.task_api,
+        OpenEnvTaskApiSupport::Unsupported,
+        "HTTP 501 must be classified as a conforming provider-less Task API"
     );
 
     let mut episode = client.connect().await.unwrap();

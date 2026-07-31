@@ -559,6 +559,31 @@
             <textarea id="openenv-credential-ids" rows="2" spellcheck="false" autocomplete="off" placeholder="production-arcade"></textarea>
             <div class="form-help">Leave the whole field empty for public environments. When mixing protected and public URLs, provide one line per URL and use <code>-</code> for a public slot. Bearer values remain in server-owned environment variables.</div>
           </div>
+          <div class="form-group">
+            <label>Task catalog <span class="hint">— optional dataset-backed OpenEnv protocol surface</span></label>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="openenv-task-environment-name">Environment name</label>
+                <input id="openenv-task-environment-name" autocomplete="off" spellcheck="false" placeholder="auto when one is advertised">
+              </div>
+              <div class="form-group">
+                <label for="openenv-task-split">Split</label>
+                <input id="openenv-task-split" autocomplete="off" spellcheck="false" placeholder="omit to list splits">
+              </div>
+              <div class="form-group">
+                <label for="openenv-task-start">First task</label>
+                <input id="openenv-task-start" type="number" value="0" min="0" max="9007199254740991">
+              </div>
+              <div class="form-group">
+                <label for="openenv-task-limit">Page size</label>
+                <input id="openenv-task-limit" type="number" value="20" min="1" max="200">
+              </div>
+            </div>
+            <div style="display:flex;gap:var(--space-2);align-items:center;">
+              <button class="btn btn-sm" id="openenv-task-inspect" type="button">Inspect task catalog</button>
+              <span id="openenv-task-catalog" class="form-help" role="status" aria-live="polite">Task providers are optional. Catalog rows are untrusted discovery data and are never automatically treated as reset payloads.</span>
+            </div>
+          </div>
           <div class="form-row">
             <div class="form-group">
               <label for="openenv-kind">Outcome</label>

@@ -19,8 +19,10 @@ use tokio_tungstenite::{
 
 use crate::types::{
     OPENENV_CLIENT_PROFILE, OPENENV_MAX_CLIENT_MESSAGE_BYTES, OPENENV_MAX_DISCOVERY_BYTES,
-    OPENENV_MAX_SERVER_MESSAGE_BYTES, OpenEnvClientMessage, OpenEnvMetadata, OpenEnvObservation,
-    OpenEnvProtocolError, OpenEnvSchema, OpenEnvServerMessage,
+    OPENENV_MAX_SERVER_MESSAGE_BYTES, OPENENV_MAX_TASK_CATALOG_NAMES, OPENENV_MAX_TASK_ITEMS,
+    OPENENV_MAX_TASK_SELECTOR_BYTES, OpenEnvClientMessage, OpenEnvMetadata, OpenEnvObservation,
+    OpenEnvProtocolError, OpenEnvSchema, OpenEnvServerMessage, OpenEnvTask, OpenEnvTaskApiSupport,
+    OpenEnvTaskCatalog, OpenEnvTaskCount, OpenEnvTaskList, OpenEnvTaskRange, OpenEnvTaskSplit,
 };
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -43,6 +45,42 @@ pub enum OpenEnvClientError {
     },
     #[error("OpenEnv endpoint {endpoint} exceeded the {limit} byte discovery limit")]
     HttpBodyTooLarge { endpoint: String, limit: usize },
+    #[error("OpenEnv Task API {selector} must contain 1..={limit} UTF-8 bytes, got {actual}")]
+    InvalidTaskSelector {
+        selector: &'static str,
+        actual: usize,
+        limit: usize,
+    },
+    #[error("OpenEnv Task API {collection} returned {count} items; limit is {limit}")]
+    TaskCollectionTooLarge {
+        collection: &'static str,
+        count: usize,
+        limit: usize,
+    },
+    #[error(
+        "OpenEnv Task API environment name is required because the server advertised {available:?}"
+    )]
+    TaskEnvironmentRequired { available: Vec<String> },
+    #[error(
+        "OpenEnv Task API environment {requested:?} was not advertised; available names: {available:?}"
+    )]
+    UnknownTaskEnvironment {
+        requested: String,
+        available: Vec<String>,
+    },
+    #[error(
+        "OpenEnv Task API split {requested:?} was not advertised; available names: {available:?}"
+    )]
+    UnknownTaskSplit {
+        requested: String,
+        available: Vec<String>,
+    },
+    #[error("OpenEnv Task API provider returned invalid task count {0}")]
+    InvalidTaskCount(i64),
+    #[error("OpenEnv Task API page limit must be in 1..={max}, got {actual}")]
+    InvalidTaskPageLimit { actual: usize, max: usize },
+    #[error("OpenEnv Task API provider returned {actual} tasks for a requested page of {limit}")]
+    InvalidTaskPage { actual: usize, limit: usize },
     #[error("OpenEnv WebSocket failed: {0}")]
     WebSocket(#[from] tungstenite::Error),
     #[error("authenticated OpenEnv WebSocket upgrade returned HTTP {0}; response redacted")]
@@ -199,6 +237,191 @@ impl OpenEnvClient {
         self.get_json("list_environments").await
     }
 
+    /// Build a bounded catalog from OpenEnv's optional Task API.
+    ///
+    /// The selected task values are never interpreted as reset data. OpenEnv
+    /// does not define that relationship; portable episode scheduling remains
+    /// an explicit reset payload plus deterministic seed.
+    pub async fn task_catalog(
+        &self,
+        requested_environment: Option<&str>,
+        requested_split: Option<&str>,
+        start: u64,
+        limit: usize,
+    ) -> Result<OpenEnvTaskCatalog, OpenEnvClientError> {
+        if limit == 0 || limit > OPENENV_MAX_TASK_ITEMS {
+            return Err(OpenEnvClientError::InvalidTaskPageLimit {
+                actual: limit,
+                max: OPENENV_MAX_TASK_ITEMS,
+            });
+        }
+        if let Some(environment) = requested_environment {
+            validate_task_selector("environment name", environment)?;
+        }
+        if let Some(split) = requested_split {
+            validate_task_selector("split name", split)?;
+        }
+
+        let environments = self.list_environments().await?;
+        ensure_task_collection_limit("environment names", environments.len())?;
+        ensure_task_catalog_name_limit("environment names", environments.len())?;
+        for environment in &environments {
+            validate_task_selector("advertised environment name", environment)?;
+        }
+        let environment_name = select_task_name(
+            requested_environment,
+            &environments,
+            TaskNameKind::Environment,
+        )?;
+        let splits = match self.list_task_splits(&environment_name).await {
+            Ok(splits) => splits,
+            Err(error) if error.is_task_api_unsupported() => {
+                return Ok(OpenEnvTaskCatalog {
+                    environment_name,
+                    task_api: OpenEnvTaskApiSupport::Unsupported,
+                    splits: Vec::new(),
+                    selected_split: None,
+                    num_tasks: None,
+                    start: None,
+                    stop: None,
+                    tasks: Vec::new(),
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        ensure_task_catalog_name_limit("split names", splits.len())?;
+        for split in &splits {
+            validate_task_selector("advertised split name", &split.name)?;
+        }
+        let Some(requested_split) = requested_split else {
+            return Ok(OpenEnvTaskCatalog {
+                environment_name,
+                task_api: OpenEnvTaskApiSupport::Available,
+                splits,
+                selected_split: None,
+                num_tasks: None,
+                start: None,
+                stop: None,
+                tasks: Vec::new(),
+            });
+        };
+        let split_names = splits
+            .iter()
+            .map(|split| split.name.clone())
+            .collect::<Vec<_>>();
+        let selected_split =
+            select_task_name(Some(requested_split), &split_names, TaskNameKind::Split)?;
+        let count = self.num_tasks(&environment_name, &selected_split).await?;
+        let num_tasks = u64::try_from(count.num_tasks)
+            .map_err(|_| OpenEnvClientError::InvalidTaskCount(count.num_tasks))?;
+        let stop = start.saturating_add(limit as u64).min(num_tasks);
+        let tasks = if start >= stop {
+            Vec::new()
+        } else {
+            let start_i64 =
+                i64::try_from(start).map_err(|_| OpenEnvClientError::InvalidTaskCount(i64::MAX))?;
+            let stop_i64 =
+                i64::try_from(stop).map_err(|_| OpenEnvClientError::InvalidTaskCount(i64::MAX))?;
+            self.get_task_range(
+                &environment_name,
+                &selected_split,
+                Some(start_i64),
+                Some(stop_i64),
+            )
+            .await?
+            .tasks
+        };
+        if tasks.len() > limit {
+            return Err(OpenEnvClientError::InvalidTaskPage {
+                actual: tasks.len(),
+                limit,
+            });
+        }
+        Ok(OpenEnvTaskCatalog {
+            environment_name,
+            task_api: OpenEnvTaskApiSupport::Available,
+            splits,
+            selected_split: Some(selected_split),
+            num_tasks: Some(num_tasks),
+            start: Some(start),
+            stop: Some(stop),
+            tasks,
+        })
+    }
+
+    /// List the dataset splits advertised by an optional OpenEnv TaskProvider.
+    ///
+    /// HTTP 501 is a conforming result for environments without a task
+    /// provider and remains available through `OpenEnvClientError`.
+    pub async fn list_task_splits(
+        &self,
+        environment: &str,
+    ) -> Result<Vec<OpenEnvTaskSplit>, OpenEnvClientError> {
+        validate_task_selector("environment name", environment)?;
+        let endpoint = self.endpoint_segments(&[environment, "splits"])?;
+        let splits: Vec<OpenEnvTaskSplit> = self.get_json_endpoint(endpoint).await?;
+        ensure_task_collection_limit("splits", splits.len())?;
+        Ok(splits)
+    }
+
+    /// Fetch every task in a split. Prefer `num_tasks` plus `get_task_range`
+    /// for interactive or control-plane use so a provider cannot force a large
+    /// catalog transfer.
+    pub async fn list_tasks(
+        &self,
+        environment: &str,
+        split: &str,
+    ) -> Result<OpenEnvTaskList, OpenEnvClientError> {
+        validate_task_selectors(environment, split)?;
+        let endpoint = self.endpoint_segments(&[environment, "tasks"])?;
+        let response: OpenEnvTaskList = self
+            .post_json_endpoint(endpoint, &TaskSplitRequest { split })
+            .await?;
+        ensure_task_collection_limit("tasks", response.tasks.len())?;
+        Ok(response)
+    }
+
+    pub async fn num_tasks(
+        &self,
+        environment: &str,
+        split: &str,
+    ) -> Result<OpenEnvTaskCount, OpenEnvClientError> {
+        validate_task_selectors(environment, split)?;
+        let endpoint = self.endpoint_segments(&[environment, "num_tasks"])?;
+        self.post_json_endpoint(endpoint, &TaskSplitRequest { split })
+            .await
+    }
+
+    pub async fn get_task(
+        &self,
+        environment: &str,
+        split: &str,
+        index: i64,
+    ) -> Result<OpenEnvTask, OpenEnvClientError> {
+        validate_task_selectors(environment, split)?;
+        let endpoint = self.endpoint_segments(&[environment, "task"])?;
+        self.post_json_endpoint(endpoint, &TaskIndexRequest { split, index })
+            .await
+    }
+
+    /// Fetch one bounded Python-style task slice. Signed optional bounds are
+    /// preserved because negative indexes are observable OpenEnv behavior.
+    pub async fn get_task_range(
+        &self,
+        environment: &str,
+        split: &str,
+        start: Option<i64>,
+        stop: Option<i64>,
+    ) -> Result<OpenEnvTaskRange, OpenEnvClientError> {
+        validate_task_selectors(environment, split)?;
+        let endpoint = self.endpoint_segments(&[environment, "task_range"])?;
+        let response: OpenEnvTaskRange = self
+            .post_json_endpoint(endpoint, &TaskRangeRequest { split, start, stop })
+            .await?;
+        ensure_task_collection_limit("task range", response.tasks.len())?;
+        Ok(response)
+    }
+
     pub async fn openapi(&self) -> Result<Value, OpenEnvClientError> {
         self.get_json("openapi.json").await
     }
@@ -292,6 +515,23 @@ impl OpenEnvClient {
         format!("{}/{}", self.base_url, path.trim_start_matches('/'))
     }
 
+    fn endpoint_segments(&self, segments: &[&str]) -> Result<String, OpenEnvClientError> {
+        let mut endpoint = reqwest::Url::parse(&format!("{}/", self.base_url))
+            .map_err(|error| OpenEnvClientError::InvalidBaseUrl(error.to_string()))?;
+        {
+            let mut path = endpoint.path_segments_mut().map_err(|_| {
+                OpenEnvClientError::InvalidBaseUrl(
+                    "OpenEnv base URL cannot hold path segments".to_string(),
+                )
+            })?;
+            path.pop_if_empty();
+            for segment in segments {
+                path.push(segment);
+            }
+        }
+        Ok(endpoint.into())
+    }
+
     fn authenticate(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.authorization {
             Some(authorization) => request.header(AUTHORIZATION, authorization.clone()),
@@ -304,6 +544,13 @@ impl OpenEnvClient {
         T: serde::de::DeserializeOwned,
     {
         let endpoint = self.endpoint(path);
+        self.get_json_endpoint(endpoint).await
+    }
+
+    async fn get_json_endpoint<T>(&self, endpoint: String) -> Result<T, OpenEnvClientError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
         let response = self.authenticate(self.http.get(&endpoint)).send().await?;
         if !response.status().is_success() {
             return Err(http_status_error(endpoint, response, self.authorization.is_some()).await);
@@ -315,6 +562,146 @@ impl OpenEnvClient {
         serde_json::from_slice(&bytes)
             .map_err(|error| OpenEnvClientError::InvalidMessage(error.to_string()))
     }
+
+    async fn post_json_endpoint<T, B>(
+        &self,
+        endpoint: String,
+        body: &B,
+    ) -> Result<T, OpenEnvClientError>
+    where
+        T: serde::de::DeserializeOwned,
+        B: Serialize + ?Sized,
+    {
+        let response = self
+            .authenticate(self.http.post(&endpoint).json(body))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(http_status_error(endpoint, response, self.authorization.is_some()).await);
+        }
+        let bytes = read_http_body_bounded(&endpoint, response).await?;
+        if credential_reflected(&bytes, self.authorization.as_ref()) {
+            return Err(OpenEnvClientError::CredentialReflected);
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|error| OpenEnvClientError::InvalidMessage(error.to_string()))
+    }
+}
+
+impl OpenEnvClientError {
+    pub fn http_status_code(&self) -> Option<u16> {
+        match self {
+            Self::HttpStatus { status, .. } => Some(status.as_u16()),
+            _ => None,
+        }
+    }
+
+    /// A provider-less Task API route is explicitly conforming OpenEnv
+    /// behavior, not evidence that the server itself is incompatible.
+    pub fn is_task_api_unsupported(&self) -> bool {
+        self.http_status_code() == Some(StatusCode::NOT_IMPLEMENTED.as_u16())
+    }
+}
+
+#[derive(Serialize)]
+struct TaskSplitRequest<'a> {
+    split: &'a str,
+}
+
+#[derive(Serialize)]
+struct TaskIndexRequest<'a> {
+    split: &'a str,
+    index: i64,
+}
+
+#[derive(Serialize)]
+struct TaskRangeRequest<'a> {
+    split: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop: Option<i64>,
+}
+
+#[derive(Clone, Copy)]
+enum TaskNameKind {
+    Environment,
+    Split,
+}
+
+fn select_task_name(
+    requested: Option<&str>,
+    available: &[String],
+    kind: TaskNameKind,
+) -> Result<String, OpenEnvClientError> {
+    if let Some(requested) = requested {
+        let requested_lower = requested.to_lowercase();
+        return available
+            .iter()
+            .find(|name| name.to_lowercase() == requested_lower)
+            .cloned()
+            .ok_or_else(|| match kind {
+                TaskNameKind::Environment => OpenEnvClientError::UnknownTaskEnvironment {
+                    requested: requested.to_string(),
+                    available: available.to_vec(),
+                },
+                TaskNameKind::Split => OpenEnvClientError::UnknownTaskSplit {
+                    requested: requested.to_string(),
+                    available: available.to_vec(),
+                },
+            });
+    }
+    if available.len() == 1 {
+        return Ok(available[0].clone());
+    }
+    Err(OpenEnvClientError::TaskEnvironmentRequired {
+        available: available.to_vec(),
+    })
+}
+
+fn validate_task_selectors(environment: &str, split: &str) -> Result<(), OpenEnvClientError> {
+    validate_task_selector("environment name", environment)?;
+    validate_task_selector("split name", split)
+}
+
+fn validate_task_selector(selector: &'static str, value: &str) -> Result<(), OpenEnvClientError> {
+    let actual = value.len();
+    if actual == 0 || actual > OPENENV_MAX_TASK_SELECTOR_BYTES {
+        return Err(OpenEnvClientError::InvalidTaskSelector {
+            selector,
+            actual,
+            limit: OPENENV_MAX_TASK_SELECTOR_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn ensure_task_collection_limit(
+    collection: &'static str,
+    count: usize,
+) -> Result<(), OpenEnvClientError> {
+    if count > OPENENV_MAX_TASK_ITEMS {
+        return Err(OpenEnvClientError::TaskCollectionTooLarge {
+            collection,
+            count,
+            limit: OPENENV_MAX_TASK_ITEMS,
+        });
+    }
+    Ok(())
+}
+
+fn ensure_task_catalog_name_limit(
+    collection: &'static str,
+    count: usize,
+) -> Result<(), OpenEnvClientError> {
+    if count > OPENENV_MAX_TASK_CATALOG_NAMES {
+        return Err(OpenEnvClientError::TaskCollectionTooLarge {
+            collection,
+            count,
+            limit: OPENENV_MAX_TASK_CATALOG_NAMES,
+        });
+    }
+    Ok(())
 }
 
 pub struct OpenEnvSession {
@@ -615,6 +1002,97 @@ fn normalize_urls(input: &str) -> Result<(String, String), OpenEnvClientError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        Json, Router,
+        extract::Path,
+        http::StatusCode as AxumStatusCode,
+        response::{IntoResponse, Response},
+        routing::{get, post},
+    };
+    use serde_json::json;
+
+    async fn task_splits(Path(environment): Path<String>) -> Response {
+        if environment == "unsupported" {
+            return (
+                AxumStatusCode::NOT_IMPLEMENTED,
+                Json(json!({
+                    "detail": "list_splits is not supported for this environment"
+                })),
+            )
+                .into_response();
+        }
+        Json(json!([
+            {"name": "train", "type": "train"},
+            {"name": "test", "type": "test"},
+            {"name": "holdout", "type": "validation", "provider": "reference"}
+        ]))
+        .into_response()
+    }
+
+    async fn task_post(
+        Path((_environment, operation)): Path<(String, String)>,
+        Json(body): Json<Value>,
+    ) -> Response {
+        match operation.as_str() {
+            "tasks" => {
+                assert_eq!(body, json!({"split": "train"}));
+                Json(json!({
+                    "tasks": [
+                        {"id": 0, "prompt": "1 + 1", "answer": "2"},
+                        {"id": 1, "prompt": "2 + 2", "answer": "4"},
+                        {"id": 2, "prompt": "3 + 3", "answer": "6"}
+                    ],
+                    "env_name": "task_env"
+                }))
+                .into_response()
+            }
+            "num_tasks" => {
+                assert_eq!(body, json!({"split": "train"}));
+                Json(json!({"num_tasks": 3})).into_response()
+            }
+            "task" => {
+                if body == json!({"split": "train", "index": 99}) {
+                    return (
+                        AxumStatusCode::BAD_REQUEST,
+                        Json(json!({"detail": "Invalid task index"})),
+                    )
+                        .into_response();
+                }
+                assert_eq!(body, json!({"split": "train", "index": 1}));
+                Json(json!({
+                    "task": {"id": 1, "prompt": "2 + 2", "answer": "4"}
+                }))
+                .into_response()
+            }
+            "task_range" => {
+                assert_eq!(body, json!({"split": "train", "start": 1, "stop": 3}));
+                Json(json!({
+                    "tasks": [
+                        {"id": 1, "prompt": "2 + 2", "answer": "4"},
+                        {"id": 2, "prompt": "3 + 3", "answer": "6"}
+                    ]
+                }))
+                .into_response()
+            }
+            _ => AxumStatusCode::NOT_FOUND.into_response(),
+        }
+    }
+
+    async fn task_fixture() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route(
+                "/prefix/list_environments",
+                get(|| async { Json(json!(["task_env"])) }),
+            )
+            .route("/prefix/{environment}/splits", get(task_splits))
+            .route("/prefix/{environment}/{operation}", post(task_post));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}/prefix"), server)
+    }
 
     #[test]
     fn url_derivation_matches_openenv_client_requirement() {
@@ -676,5 +1154,86 @@ mod tests {
                 .with_bearer_token(secret)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn task_paths_encode_untrusted_environment_names_as_one_segment() {
+        let client = OpenEnvClient::new("https://example.test/prefix").unwrap();
+        assert_eq!(
+            client
+                .endpoint_segments(&["task env/β?#", "splits"])
+                .unwrap(),
+            "https://example.test/prefix/task%20env%2F%CE%B2%3F%23/splits"
+        );
+        assert!(matches!(
+            validate_task_selector("environment name", ""),
+            Err(OpenEnvClientError::InvalidTaskSelector { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn task_api_preserves_reference_success_shapes_and_unsupported_status() {
+        let (base_url, server) = task_fixture().await;
+        let client = OpenEnvClient::new(base_url).unwrap();
+
+        let splits = client.list_task_splits("task_env").await.unwrap();
+        assert_eq!(
+            splits
+                .iter()
+                .map(|split| (split.name.as_str(), split.split_type.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("train", "train"),
+                ("test", "test"),
+                ("holdout", "validation"),
+            ]
+        );
+        assert_eq!(splits[2].extra["provider"], "reference");
+
+        let tasks = client.list_tasks("task_env", "train").await.unwrap();
+        assert_eq!(tasks.env_name, "task_env");
+        assert_eq!(tasks.tasks.len(), 3);
+        assert_eq!(
+            client
+                .num_tasks("task_env", "train")
+                .await
+                .unwrap()
+                .num_tasks,
+            3
+        );
+        assert_eq!(
+            client.get_task("task_env", "train", 1).await.unwrap().task,
+            json!({"id": 1, "prompt": "2 + 2", "answer": "4"})
+        );
+        let invalid_index = client.get_task("task_env", "train", 99).await.unwrap_err();
+        assert_eq!(invalid_index.http_status_code(), Some(400));
+        assert!(invalid_index.to_string().contains("Invalid task index"));
+        assert_eq!(
+            client
+                .get_task_range("task_env", "train", Some(1), Some(3))
+                .await
+                .unwrap()
+                .tasks,
+            [
+                json!({"id": 1, "prompt": "2 + 2", "answer": "4"}),
+                json!({"id": 2, "prompt": "3 + 3", "answer": "6"}),
+            ]
+        );
+
+        let unsupported = client.list_task_splits("unsupported").await.unwrap_err();
+        assert_eq!(unsupported.http_status_code(), Some(501));
+        assert!(unsupported.is_task_api_unsupported());
+
+        let catalog = client
+            .task_catalog(None, Some("TRAIN"), 1, 50)
+            .await
+            .unwrap();
+        assert_eq!(catalog.environment_name, "task_env");
+        assert_eq!(catalog.task_api, OpenEnvTaskApiSupport::Available);
+        assert_eq!(catalog.selected_split.as_deref(), Some("train"));
+        assert_eq!(catalog.num_tasks, Some(3));
+        assert_eq!((catalog.start, catalog.stop), (Some(1), Some(3)));
+        assert_eq!(catalog.tasks.len(), 2);
+        server.abort();
     }
 }

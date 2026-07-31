@@ -314,7 +314,11 @@ def main() -> int:
             failures.append(
                 f"openenv_evaluation.rs is missing contract identifier {term}"
             )
-    for command in ["kiln openenv verify", "kiln openenv replay"]:
+    for command in [
+        "kiln openenv tasks",
+        "kiln openenv verify",
+        "kiln openenv replay",
+    ]:
         if command not in guide:
             failures.append(f"OpenEnv guide is missing {command}")
 
