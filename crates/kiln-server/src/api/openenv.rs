@@ -4,12 +4,12 @@
 //! around the same protocol client, collector, chat handler, artifact writer,
 //! and GRPO queue admission used by Kiln's CLI and training APIs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, RwLock,
+    Arc, Mutex, RwLock,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -28,7 +28,7 @@ use kiln_train::{BehaviorPolicy, GrpoConfig, GrpoRequest, TrainingResponse, Trai
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio::io::AsyncReadExt;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::config::OpenEnvConfig;
@@ -50,8 +50,8 @@ use crate::recent_requests::now_unix_ms;
 use crate::state::AppState;
 
 const OPENENV_RUN_SCHEMA_V1: &str = "kiln.openenv-run.v1";
-const OPENENV_RUN_SCHEMA_V3: &str = "kiln.openenv-run.v3";
-const OPENENV_RUN_LIST_SCHEMA_V3: &str = "kiln.openenv-run-list.v3";
+const OPENENV_RUN_SCHEMA_V4: &str = "kiln.openenv-run.v4";
+const OPENENV_RUN_LIST_SCHEMA_V4: &str = "kiln.openenv-run-list.v4";
 const OPENENV_INSPECTION_SCHEMA_V1: &str = "kiln.openenv-inspection.v1";
 const OPENENV_TASK_CATALOG_SCHEMA_V1: &str = "kiln.openenv-task-catalog.v1";
 const OPENENV_API_BODY_LIMIT: usize = 1024 * 1024;
@@ -265,6 +265,24 @@ pub struct OpenEnvRunProgress {
     pub rollouts_total: usize,
 }
 
+/// Bounded server admission state for one persisted OpenEnv workflow.
+///
+/// Queue position is a live one-based projection and is omitted immediately
+/// after the run acquires an execution slot. The admitted timestamp and wait
+/// duration remain stable for the rest of the run and in retained history.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenEnvRunAdmission {
+    pub max_active_runs: usize,
+    /// Stable monotonic FIFO order assigned by this persisted registry.
+    pub sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_position: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_wait_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OpenEnvArtifact {
     pub kind: String,
@@ -322,6 +340,8 @@ pub struct OpenEnvRunStatus {
     pub request: OpenEnvRunRequest,
     pub submitted_unix_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<OpenEnvRunAdmission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_unix_ms: Option<u64>,
     pub progress: OpenEnvRunProgress,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -351,6 +371,22 @@ impl OpenEnvRunStatus {
             // following every requested phase to a real terminal outcome.
             || (self.schema == OPENENV_RUN_SCHEMA_V1
                 && self.state == OpenEnvRunState::TrainingQueued)
+    }
+
+    fn safely_restartable_queued(&self) -> bool {
+        self.schema == OPENENV_RUN_SCHEMA_V4
+            && self.state == OpenEnvRunState::Queued
+            && self.admission.as_ref().is_some_and(|admission| {
+                admission.admitted_unix_ms.is_none() && admission.queue_wait_ms.is_none()
+            })
+            && self.progress.groups_completed == 0
+            && self.progress.rollouts_completed == 0
+            && self.environments.is_empty()
+            && self.artifacts.is_empty()
+            && self.training_job_id.is_none()
+            && self.training_submission.is_none()
+            && self.training.is_none()
+            && self.post_evaluations.is_empty()
     }
 }
 
@@ -406,7 +442,61 @@ struct OpenEnvTaskCatalogResponse {
 
 struct TrackedOpenEnvRun {
     status: OpenEnvRunStatus,
+    control: OpenEnvRunControl,
+}
+
+#[derive(Clone)]
+struct OpenEnvRunControl {
     cancel: Arc<AtomicBool>,
+    cancelled: Arc<Notify>,
+}
+
+impl OpenEnvRunControl {
+    fn new() -> Self {
+        Self {
+            cancel: Arc::new(AtomicBool::new(false)),
+            cancelled: Arc::new(Notify::new()),
+        }
+    }
+
+    fn request_cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.cancelled.notify_one();
+    }
+
+    async fn wait_cancelled(&self) {
+        loop {
+            let notified = self.cancelled.notified();
+            if self.cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[derive(Default)]
+struct OpenEnvAdmissionQueue {
+    active: usize,
+    next_sequence: u64,
+    queued: VecDeque<String>,
+}
+
+struct OpenEnvRunPermit {
+    registry: Arc<OpenEnvRunRegistry>,
+}
+
+impl Drop for OpenEnvRunPermit {
+    fn drop(&mut self) {
+        let mut admission = self
+            .registry
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        admission.active = admission.active.saturating_sub(1);
+        drop(admission);
+        self.registry.admission_changed.notify_waiters();
+    }
 }
 
 /// Bounded, persisted registry for server-owned OpenEnv rollout runs.
@@ -414,6 +504,8 @@ pub struct OpenEnvRunRegistry {
     root: PathBuf,
     policy: OpenEnvConfig,
     runs: RwLock<HashMap<String, TrackedOpenEnvRun>>,
+    admission: Mutex<OpenEnvAdmissionQueue>,
+    admission_changed: Notify,
 }
 
 impl std::fmt::Debug for OpenEnvRunRegistry {
@@ -423,6 +515,14 @@ impl std::fmt::Debug for OpenEnvRunRegistry {
             .field("root", &self.root)
             .field("policy", &self.policy)
             .field("tracked_runs", &self.runs.read().unwrap().len())
+            .field(
+                "active_runs",
+                &self
+                    .admission
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .active,
+            )
             .finish()
     }
 }
@@ -433,6 +533,8 @@ impl OpenEnvRunRegistry {
             root: adapter_dir.join(".openenv").join("runs"),
             policy: OpenEnvConfig::default(),
             runs: RwLock::new(HashMap::new()),
+            admission: Mutex::new(OpenEnvAdmissionQueue::default()),
+            admission_changed: Notify::new(),
         }
     }
 
@@ -444,6 +546,8 @@ impl OpenEnvRunRegistry {
             root,
             policy,
             runs: RwLock::new(HashMap::new()),
+            admission: Mutex::new(OpenEnvAdmissionQueue::default()),
+            admission_changed: Notify::new(),
         };
         registry.restore()?;
         Ok(registry)
@@ -455,6 +559,8 @@ impl OpenEnvRunRegistry {
 
     fn restore(&self) -> Result<()> {
         let mut restored = Vec::new();
+        let now = now_unix_ms();
+        let ttl_ms = self.policy.tracked_run_ttl_secs.saturating_mul(1000);
         for entry in std::fs::read_dir(&self.root)
             .with_context(|| format!("scan OpenEnv run root {}", self.root.display()))?
         {
@@ -482,35 +588,91 @@ impl OpenEnvRunRegistry {
                 .with_context(|| format!("read OpenEnv status {}", status_path.display()))?;
             let mut status: OpenEnvRunStatus = serde_json::from_slice(&bytes)
                 .with_context(|| format!("decode OpenEnv status {}", status_path.display()))?;
-            if !status.terminal() {
+            if !status.terminal() && !status.safely_restartable_queued() {
                 status.state = OpenEnvRunState::Failed;
                 status.finished_unix_ms = Some(now_unix_ms());
                 status.error =
                     Some("Kiln restarted before this OpenEnv run reached a terminal state".into());
+                if let Some(admission) = status.admission.as_mut() {
+                    admission.queue_position = None;
+                }
                 persist_status_to(&status_path, &status)?;
             }
-            restored.push(status);
-        }
-        restored.sort_by_key(|status| std::cmp::Reverse(status.submitted_unix_ms));
-        restored.truncate(self.policy.max_tracked_runs);
-        let now = now_unix_ms();
-        let ttl_ms = self.policy.tracked_run_ttl_secs.saturating_mul(1000);
-        let mut runs = self.runs.write().unwrap();
-        for status in restored {
             if status
                 .finished_unix_ms
                 .is_some_and(|finished| now.saturating_sub(finished) > ttl_ms)
             {
                 continue;
             }
+            restored.push(status);
+        }
+        restored.sort_by(|left, right| {
+            match (
+                left.safely_restartable_queued(),
+                right.safely_restartable_queued(),
+            ) {
+                (true, true) => left
+                    .admission
+                    .as_ref()
+                    .map(|admission| admission.sequence)
+                    .cmp(&right.admission.as_ref().map(|admission| admission.sequence))
+                    .then_with(|| left.run_id.cmp(&right.run_id)),
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                (false, false) => right.submitted_unix_ms.cmp(&left.submitted_unix_ms),
+            }
+        });
+        let next_sequence = restored
+            .iter()
+            .filter_map(|status| {
+                status
+                    .admission
+                    .as_ref()
+                    .map(|admission| admission.sequence)
+            })
+            .max()
+            .unwrap_or_default();
+        for status in restored.iter_mut().skip(self.policy.max_tracked_runs) {
+            if status.safely_restartable_queued() {
+                status.state = OpenEnvRunState::Failed;
+                status.finished_unix_ms = Some(now);
+                status.error = Some(format!(
+                    "Kiln restarted with openenv.max_tracked_runs={} before this queued run could be restored",
+                    self.policy.max_tracked_runs
+                ));
+                if let Some(admission) = status.admission.as_mut() {
+                    admission.queue_position = None;
+                }
+                persist_status_to(&self.status_path(&status.run_id), status)?;
+            }
+        }
+        restored.truncate(self.policy.max_tracked_runs);
+        let mut restored_queue = VecDeque::new();
+        let mut runs = self.runs.write().unwrap();
+        for mut status in restored {
+            if status.safely_restartable_queued() {
+                restored_queue.push_back(status.run_id.clone());
+                if let Some(admission) = status.admission.as_mut() {
+                    admission.max_active_runs = self.policy.max_active_runs;
+                    admission.queue_position = Some(restored_queue.len());
+                }
+                persist_status_to(&self.status_path(&status.run_id), &status)?;
+            }
             runs.insert(
                 status.run_id.clone(),
                 TrackedOpenEnvRun {
                     status,
-                    cancel: Arc::new(AtomicBool::new(false)),
+                    control: OpenEnvRunControl::new(),
                 },
             );
         }
+        drop(runs);
+        let mut admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        admission.next_sequence = next_sequence;
+        admission.queued = restored_queue;
         Ok(())
     }
 
@@ -547,20 +709,11 @@ impl OpenEnvRunRegistry {
         }
     }
 
-    fn insert(&self, request: OpenEnvRunRequest) -> Result<(OpenEnvRunStatus, Arc<AtomicBool>)> {
+    fn insert(&self, request: OpenEnvRunRequest) -> Result<(OpenEnvRunStatus, OpenEnvRunControl)> {
         anyhow::ensure!(self.policy.enabled, "OpenEnv control plane is disabled");
         let mut runs = self.runs.write().unwrap();
         self.prune_locked(&mut runs);
         self.make_room_locked(&mut runs);
-        let active = runs
-            .values()
-            .filter(|tracked| !tracked.status.terminal())
-            .count();
-        anyhow::ensure!(
-            active < self.policy.max_active_runs,
-            "OpenEnv active-run capacity is full ({})",
-            self.policy.max_active_runs
-        );
         anyhow::ensure!(
             runs.len() < self.policy.max_tracked_runs,
             "OpenEnv tracked-run capacity is full ({})",
@@ -576,12 +729,30 @@ impl OpenEnvRunRegistry {
             .checked_mul(request.group_size)
             .context("OpenEnv rollout count overflow")?;
         let environment_evaluation = pending_environment_evaluation(&request);
+        let submitted_unix_ms = now_unix_ms();
+        let mut admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        admission.next_sequence = admission
+            .next_sequence
+            .checked_add(1)
+            .context("OpenEnv FIFO admission sequence exhausted")?;
+        let sequence = admission.next_sequence;
+        let queue_position = admission.queued.len().saturating_add(1);
         let status = OpenEnvRunStatus {
-            schema: OPENENV_RUN_SCHEMA_V3.to_string(),
+            schema: OPENENV_RUN_SCHEMA_V4.to_string(),
             run_id: run_id.clone(),
             kind: request.kind,
             state: OpenEnvRunState::Queued,
-            submitted_unix_ms: now_unix_ms(),
+            submitted_unix_ms,
+            admission: Some(OpenEnvRunAdmission {
+                max_active_runs: self.policy.max_active_runs,
+                sequence,
+                queue_position: Some(queue_position),
+                admitted_unix_ms: None,
+                queue_wait_ms: None,
+            }),
             finished_unix_ms: None,
             progress: OpenEnvRunProgress {
                 groups_completed: 0,
@@ -600,23 +771,28 @@ impl OpenEnvRunRegistry {
             error: None,
         };
         persist_status_to(&run_dir.join("run.json"), &status)?;
-        let cancel = Arc::new(AtomicBool::new(false));
+        let control = OpenEnvRunControl::new();
+        admission.queued.push_back(run_id.clone());
         runs.insert(
             run_id,
             TrackedOpenEnvRun {
                 status: status.clone(),
-                cancel: cancel.clone(),
+                control: control.clone(),
             },
         );
-        Ok((status, cancel))
+        drop(admission);
+        self.admission_changed.notify_waiters();
+        Ok((status, control))
     }
 
     fn get(&self, run_id: &str) -> Option<OpenEnvRunStatus> {
-        self.runs
+        let status = self
+            .runs
             .read()
             .unwrap()
             .get(run_id)
-            .map(|tracked| tracked.status.clone())
+            .map(|tracked| tracked.status.clone())?;
+        Some(self.project_admission(status))
     }
 
     fn list(&self) -> Vec<OpenEnvRunStatus> {
@@ -627,18 +803,106 @@ impl OpenEnvRunRegistry {
             .map(|tracked| tracked.status.clone())
             .collect::<Vec<_>>();
         runs.sort_by_key(|status| std::cmp::Reverse(status.submitted_unix_ms));
-        runs
+        runs.into_iter()
+            .map(|status| self.project_admission(status))
+            .collect()
     }
 
-    pub fn counts(&self) -> (usize, usize) {
+    pub fn counts(&self) -> (usize, usize, usize) {
         let mut runs = self.runs.write().unwrap();
         self.prune_locked(&mut runs);
-        (
-            runs.values()
-                .filter(|tracked| !tracked.status.terminal())
-                .count(),
-            runs.len(),
-        )
+        let tracked = runs.len();
+        drop(runs);
+        let admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (admission.active, admission.queued.len(), tracked)
+    }
+
+    fn queued_controls(&self) -> Vec<(String, OpenEnvRunControl)> {
+        let queued = self
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .queued
+            .clone();
+        let runs = self.runs.read().unwrap();
+        queued
+            .into_iter()
+            .filter_map(|run_id| {
+                runs.get(&run_id)
+                    .map(|tracked| (run_id, tracked.control.clone()))
+            })
+            .collect()
+    }
+
+    fn project_admission(&self, mut status: OpenEnvRunStatus) -> OpenEnvRunStatus {
+        if let Some(admission_status) = status.admission.as_mut() {
+            let admission = self
+                .admission
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            admission_status.queue_position = admission
+                .queued
+                .iter()
+                .position(|queued| queued == &status.run_id)
+                .map(|position| position.saturating_add(1));
+        }
+        status
+    }
+
+    async fn acquire(
+        self: &Arc<Self>,
+        run_id: &str,
+        control: &OpenEnvRunControl,
+    ) -> Result<OpenEnvRunPermit> {
+        loop {
+            let changed = self.admission_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let admitted = {
+                let mut admission = self
+                    .admission
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let at_front = admission
+                    .queued
+                    .front()
+                    .is_some_and(|queued| queued == run_id);
+                if !control.cancel.load(Ordering::Relaxed)
+                    && at_front
+                    && admission.active < self.policy.max_active_runs
+                {
+                    admission.queued.pop_front();
+                    admission.active = admission.active.saturating_add(1);
+                    true
+                } else {
+                    false
+                }
+            };
+            if admitted {
+                let permit = OpenEnvRunPermit {
+                    registry: self.clone(),
+                };
+                let admitted_unix_ms = now_unix_ms();
+                self.update(run_id, |status| {
+                    status.state = OpenEnvRunState::Discovering;
+                    if let Some(admission) = status.admission.as_mut() {
+                        admission.queue_position = None;
+                        admission.admitted_unix_ms = Some(admitted_unix_ms);
+                        admission.queue_wait_ms =
+                            Some(admitted_unix_ms.saturating_sub(status.submitted_unix_ms));
+                    }
+                })?;
+                self.admission_changed.notify_waiters();
+                return Ok(permit);
+            }
+            tokio::select! {
+                _ = &mut changed => {}
+                _ = control.wait_cancelled() => anyhow::bail!("OpenEnv run cancelled while queued"),
+            }
+        }
     }
 
     fn update_progress(&self, run_id: &str, progress: OpenEnvCollectionProgress) {
@@ -692,24 +956,52 @@ impl OpenEnvRunRegistry {
         Ok(status)
     }
 
-    fn cancel(&self, run_id: &str) -> Result<OpenEnvRunStatus> {
+    fn cancel(&self, run_id: &str) -> Result<(OpenEnvRunStatus, bool)> {
         let tracked = self
             .runs
             .read()
             .unwrap()
             .get(run_id)
-            .map(|tracked| (tracked.status.clone(), tracked.cancel.clone()))
+            .map(|tracked| (tracked.status.clone(), tracked.control.clone()))
             .with_context(|| format!("OpenEnv run {run_id} was not found"))?;
         anyhow::ensure!(
             !tracked.0.terminal(),
             "OpenEnv run {run_id} cannot be cancelled from state {:?}",
             tracked.0.state
         );
-        tracked.1.store(true, Ordering::Relaxed);
-        self.update(run_id, |status| {
-            status.error =
-                Some("Cancellation requested; the active protocol boundary will stop".into());
-        })
+        tracked.1.request_cancel();
+        let queued = {
+            let admission = self
+                .admission
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            admission.queued.iter().any(|queued| queued == run_id)
+        };
+        let status = self.update(run_id, |status| {
+            if queued {
+                status.state = OpenEnvRunState::Cancelled;
+                status.finished_unix_ms = Some(now_unix_ms());
+                status.error =
+                    Some("OpenEnv run cancelled while waiting for execution capacity".into());
+                if let Some(admission) = status.admission.as_mut() {
+                    admission.queue_position = None;
+                }
+            } else {
+                status.error =
+                    Some("Cancellation requested; the active protocol boundary will stop".into());
+            }
+        })?;
+        if queued {
+            let mut admission = self
+                .admission
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(position) = admission.queued.iter().position(|queued| queued == run_id) {
+                admission.queued.remove(position);
+            }
+        }
+        self.admission_changed.notify_waiters();
+        Ok((self.project_admission(status), queued))
     }
 
     fn artifact_path(
@@ -1289,6 +1581,30 @@ fn openenv_task_catalog_error(error: anyhow::Error) -> ApiError {
     }
 }
 
+/// Restart v4 FIFO entries that provably never acquired workflow capacity.
+///
+/// Admitted work is never resumed: discovery and every later state may own a
+/// non-resumable external episode, trainer, or evaluator and is failed during
+/// registry restoration instead.
+pub fn resume_queued_runs(state: &AppState) -> usize {
+    if !state.openenv_runs.policy().enabled {
+        return 0;
+    }
+    let queued = state.openenv_runs.queued_controls();
+    let count = queued.len();
+    for (run_id, control) in queued {
+        state
+            .metrics
+            .openenv_runs_resumed
+            .fetch_add(1, Ordering::Relaxed);
+        let state = state.clone();
+        tokio::spawn(async move {
+            admit_and_execute_run(state, run_id, control).await;
+        });
+    }
+    count
+}
+
 async fn create_run(
     State(state): State<AppState>,
     Json(request): Json<OpenEnvRunRequest>,
@@ -1303,7 +1619,7 @@ async fn create_run(
     }
     validate_run_request(&request, state.openenv_runs.policy())?;
     let authenticated = request.credential_ids.iter().any(Option::is_some);
-    let (status, cancel) = state.openenv_runs.insert(request).map_err(|error| {
+    let (status, control) = state.openenv_runs.insert(request).map_err(|error| {
         let capacity = error.to_string().contains("capacity is full");
         openenv_error(
             if capacity {
@@ -1318,7 +1634,7 @@ async fn create_run(
             },
             error,
             if capacity {
-                "Wait for an active run to finish or for terminal history to expire, then retry."
+                "Cancel an unneeded queued run or wait for retained capacity, then retry."
             } else {
                 "Check Kiln's adapter directory permissions and server logs."
             },
@@ -1336,9 +1652,51 @@ async fn create_run(
     }
     let run_id = status.run_id.clone();
     tokio::spawn(async move {
-        execute_run(state, run_id, cancel).await;
+        admit_and_execute_run(state, run_id, control).await;
     });
     Ok((StatusCode::ACCEPTED, Json(status)))
+}
+
+async fn admit_and_execute_run(state: AppState, run_id: String, control: OpenEnvRunControl) {
+    let permit = match state.openenv_runs.acquire(&run_id, &control).await {
+        Ok(permit) => permit,
+        Err(_) if control.cancel.load(Ordering::Relaxed) => return,
+        Err(error) => {
+            let error_message = format!("OpenEnv run admission failed: {error:#}");
+            tracing::error!(
+                run_id = %run_id,
+                error = %error_message,
+                "OpenEnv run could not acquire execution capacity"
+            );
+            let _ = state.openenv_runs.update(&run_id, |status| {
+                status.state = OpenEnvRunState::Failed;
+                status.finished_unix_ms = Some(now_unix_ms());
+                status.error = Some(error_message);
+            });
+            state
+                .metrics
+                .openenv_runs_failed
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    };
+    state
+        .metrics
+        .openenv_runs_admitted
+        .fetch_add(1, Ordering::Relaxed);
+    if let Some(queue_wait_ms) = state
+        .openenv_runs
+        .get(&run_id)
+        .and_then(|status| status.admission)
+        .and_then(|admission| admission.queue_wait_ms)
+    {
+        state
+            .metrics
+            .openenv_run_queue_wait_ms_total
+            .fetch_add(queue_wait_ms, Ordering::Relaxed);
+    }
+    execute_run(state, run_id, control.cancel).await;
+    drop(permit);
 }
 
 async fn execute_run(state: AppState, run_id: String, cancel: Arc<AtomicBool>) {
@@ -1381,6 +1739,7 @@ async fn execute_run(state: AppState, run_id: String, cancel: Arc<AtomicBool>) {
 }
 
 async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBool>) -> Result<()> {
+    anyhow::ensure!(!cancel.load(Ordering::Relaxed), "OpenEnv run cancelled");
     let request = state
         .openenv_runs
         .get(run_id)
@@ -2171,7 +2530,7 @@ fn environment_evaluation_artifacts(run_id: &str, run_dir: &Path) -> Result<Vec<
 
 async fn list_runs(State(state): State<AppState>) -> Json<OpenEnvRunList> {
     Json(OpenEnvRunList {
-        schema: OPENENV_RUN_LIST_SCHEMA_V3,
+        schema: OPENENV_RUN_LIST_SCHEMA_V4,
         runs: state.openenv_runs.list(),
     })
 }
@@ -2194,31 +2553,34 @@ async fn cancel_run(
     State(state): State<AppState>,
     AxumPath(run_id): AxumPath<String>,
 ) -> Result<Json<OpenEnvRunStatus>, ApiError> {
-    state
-        .openenv_runs
-        .cancel(&run_id)
-        .map(Json)
-        .map_err(|error| {
-            let missing = state.openenv_runs.get(&run_id).is_none();
-            openenv_error(
-                if missing {
-                    StatusCode::NOT_FOUND
-                } else {
-                    StatusCode::CONFLICT
-                },
-                if missing {
-                    "openenv_run_not_found"
-                } else {
-                    "openenv_run_not_cancellable"
-                },
-                error,
-                if missing {
-                    "List retained runs with GET /v1/openenv/runs."
-                } else {
-                    "Only non-terminal OpenEnv runs can be cancelled."
-                },
-            )
-        })
+    let (status, settled_queued) = state.openenv_runs.cancel(&run_id).map_err(|error| {
+        let missing = state.openenv_runs.get(&run_id).is_none();
+        openenv_error(
+            if missing {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::CONFLICT
+            },
+            if missing {
+                "openenv_run_not_found"
+            } else {
+                "openenv_run_not_cancellable"
+            },
+            error,
+            if missing {
+                "List retained runs with GET /v1/openenv/runs."
+            } else {
+                "Only non-terminal OpenEnv runs can be cancelled."
+            },
+        )
+    })?;
+    if settled_queued {
+        state
+            .metrics
+            .openenv_runs_cancelled
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    Ok(Json(status))
 }
 
 async fn download_artifact(
@@ -2490,41 +2852,190 @@ mod tests {
         (format!("http://{address}"), server)
     }
 
-    #[test]
-    fn run_registry_is_bounded_persisted_and_restored() {
+    #[tokio::test]
+    async fn run_registry_admits_fifo_and_remains_bounded_persisted_and_restored() {
         let temp = tempfile::tempdir().unwrap();
         let policy = OpenEnvConfig {
             max_active_runs: 1,
-            max_tracked_runs: 2,
+            max_tracked_runs: 3,
             ..Default::default()
         };
-        let registry = OpenEnvRunRegistry::open(temp.path().to_path_buf(), policy.clone()).unwrap();
-        let (status, _) = registry.insert(request(OpenEnvRunKind::Rollout)).unwrap();
+        let registry =
+            Arc::new(OpenEnvRunRegistry::open(temp.path().to_path_buf(), policy.clone()).unwrap());
+        let (first, first_control) = registry.insert(request(OpenEnvRunKind::Rollout)).unwrap();
+        let (second, second_control) = registry.insert(request(OpenEnvRunKind::Rollout)).unwrap();
+        let (third, third_control) = registry.insert(request(OpenEnvRunKind::Rollout)).unwrap();
         assert!(registry.insert(request(OpenEnvRunKind::Rollout)).is_err());
+        assert_eq!(
+            registry
+                .get(&first.run_id)
+                .unwrap()
+                .admission
+                .unwrap()
+                .queue_position,
+            Some(1)
+        );
+        assert_eq!(
+            registry
+                .get(&third.run_id)
+                .unwrap()
+                .admission
+                .unwrap()
+                .queue_position,
+            Some(3)
+        );
+
+        let first_permit = registry
+            .acquire(&first.run_id, &first_control)
+            .await
+            .unwrap();
+        assert_eq!(registry.counts(), (1, 2, 3));
+        let third_registry = registry.clone();
+        let third_run_id = third.run_id.clone();
+        let third_wait =
+            tokio::spawn(
+                async move { third_registry.acquire(&third_run_id, &third_control).await },
+            );
+        let second_registry = registry.clone();
+        let second_run_id = second.run_id.clone();
+        let second_wait = tokio::spawn(async move {
+            second_registry
+                .acquire(&second_run_id, &second_control)
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!second_wait.is_finished());
+        assert!(!third_wait.is_finished());
+
         registry
-            .update(&status.run_id, |status| {
+            .update(&first.run_id, |status| {
                 status.state = OpenEnvRunState::RolloutReady;
+                status.submitted_unix_ms = 1;
                 status.finished_unix_ms = Some(now_unix_ms());
             })
             .unwrap();
-        let restored = OpenEnvRunRegistry::open(temp.path().to_path_buf(), policy).unwrap();
-        assert_eq!(
-            restored.get(&status.run_id).unwrap().state,
-            OpenEnvRunState::RolloutReady
+        drop(first_permit);
+        let second_permit = tokio::time::timeout(Duration::from_secs(1), second_wait)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            !third_wait.is_finished(),
+            "the third run must not bypass FIFO order"
         );
-        let (second, _) = restored.insert(request(OpenEnvRunKind::Rollout)).unwrap();
-        let first_submitted = status.submitted_unix_ms;
-        restored
+        registry
             .update(&second.run_id, |status| {
                 status.state = OpenEnvRunState::RolloutReady;
-                status.submitted_unix_ms = first_submitted.saturating_add(1);
+                status.submitted_unix_ms = 2;
                 status.finished_unix_ms = Some(now_unix_ms());
             })
             .unwrap();
+        drop(second_permit);
+        let third_permit = tokio::time::timeout(Duration::from_secs(1), third_wait)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        registry
+            .update(&third.run_id, |status| {
+                status.state = OpenEnvRunState::RolloutReady;
+                status.submitted_unix_ms = 3;
+                status.finished_unix_ms = Some(now_unix_ms());
+            })
+            .unwrap();
+        drop(third_permit);
+
+        let restored = OpenEnvRunRegistry::open(temp.path().to_path_buf(), policy).unwrap();
+        assert_eq!(
+            restored.get(&first.run_id).unwrap().state,
+            OpenEnvRunState::RolloutReady
+        );
         restored
             .insert(request(OpenEnvRunKind::Rollout))
             .expect("the oldest terminal status should be evicted to admit new work");
-        assert!(restored.get(&status.run_id).is_none());
+        assert!(restored.get(&first.run_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn queued_run_cancels_immediately_without_consuming_execution_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let policy = OpenEnvConfig {
+            max_active_runs: 1,
+            max_tracked_runs: 3,
+            ..Default::default()
+        };
+        let registry =
+            Arc::new(OpenEnvRunRegistry::open(temp.path().to_path_buf(), policy).unwrap());
+        let (first, first_control) = registry.insert(request(OpenEnvRunKind::Rollout)).unwrap();
+        let (second, second_control) = registry.insert(request(OpenEnvRunKind::Rollout)).unwrap();
+        let first_permit = registry
+            .acquire(&first.run_id, &first_control)
+            .await
+            .unwrap();
+
+        let (cancelled, settled_queued) = registry.cancel(&second.run_id).unwrap();
+        assert!(settled_queued);
+        assert_eq!(cancelled.state, OpenEnvRunState::Cancelled);
+        assert!(cancelled.finished_unix_ms.is_some());
+        assert_eq!(cancelled.admission.unwrap().queue_position, None);
+        assert_eq!(registry.counts(), (1, 0, 2));
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                registry.acquire(&second.run_id, &second_control)
+            )
+            .await
+            .unwrap()
+            .is_err()
+        );
+        drop(first_permit);
+    }
+
+    #[tokio::test]
+    async fn restart_resumes_only_fifo_entries_that_never_acquired_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let policy = OpenEnvConfig {
+            max_active_runs: 1,
+            max_tracked_runs: 3,
+            ..Default::default()
+        };
+        let registry =
+            Arc::new(OpenEnvRunRegistry::open(temp.path().to_path_buf(), policy.clone()).unwrap());
+        let (active, active_control) = registry.insert(request(OpenEnvRunKind::Rollout)).unwrap();
+        let (queued_first, _) = registry.insert(request(OpenEnvRunKind::Rollout)).unwrap();
+        let (queued_second, _) = registry.insert(request(OpenEnvRunKind::Rollout)).unwrap();
+        assert!(
+            queued_first.admission.as_ref().unwrap().sequence
+                < queued_second.admission.as_ref().unwrap().sequence
+        );
+        let permit = registry
+            .acquire(&active.run_id, &active_control)
+            .await
+            .unwrap();
+        drop(permit);
+        drop(registry);
+
+        let restored = OpenEnvRunRegistry::open(temp.path().to_path_buf(), policy).unwrap();
+        let interrupted = restored.get(&active.run_id).unwrap();
+        assert_eq!(interrupted.state, OpenEnvRunState::Failed);
+        assert!(interrupted.error.as_deref().unwrap().contains("restarted"));
+        let safe = restored.get(&queued_first.run_id).unwrap();
+        assert_eq!(safe.state, OpenEnvRunState::Queued);
+        assert_eq!(safe.admission.unwrap().queue_position, Some(1));
+        assert_eq!(
+            restored
+                .get(&queued_second.run_id)
+                .unwrap()
+                .admission
+                .unwrap()
+                .queue_position,
+            Some(2)
+        );
+        let queued_controls = restored.queued_controls();
+        assert_eq!(queued_controls.len(), 2);
+        assert_eq!(queued_controls[0].0, queued_first.run_id);
+        assert_eq!(queued_controls[1].0, queued_second.run_id);
     }
 
     #[test]
@@ -2735,7 +3246,7 @@ mod tests {
                 &followed_run_id,
                 &request(OpenEnvRunKind::Train),
                 "train-1",
-                cancel,
+                cancel.cancel,
             )
             .await
         });
@@ -2791,7 +3302,7 @@ mod tests {
             &run.run_id,
             &run_request,
             "train-environment-eval",
-            cancel,
+            cancel.cancel,
         )
         .await
         .unwrap();
@@ -2844,7 +3355,7 @@ mod tests {
                 &followed_run_id,
                 &run_request,
                 "train-eval",
-                cancel,
+                cancel.cancel,
             )
             .await
         });
@@ -2865,6 +3376,70 @@ mod tests {
         let completed = state.openenv_runs.get(&run.run_id).unwrap();
         assert_eq!(completed.state, OpenEnvRunState::Completed);
         assert_eq!(completed.post_evaluations[0].headline_accuracy, Some(0.9));
+    }
+
+    #[tokio::test]
+    async fn http_surface_accepts_fifo_work_when_execution_capacity_is_occupied() {
+        let temp = tempfile::tempdir().unwrap();
+        let policy = OpenEnvConfig {
+            max_active_runs: 1,
+            max_tracked_runs: 3,
+            ..Default::default()
+        };
+        let state = test_state(&temp, policy);
+        let (active, active_control) = state
+            .openenv_runs
+            .insert(request(OpenEnvRunKind::Rollout))
+            .unwrap();
+        let active_permit = state
+            .openenv_runs
+            .acquire(&active.run_id, &active_control)
+            .await
+            .unwrap();
+        let app = routes().with_state(state.clone());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/openenv/runs")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&request(OpenEnvRunKind::Rollout)).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let queued: OpenEnvRunStatus = serde_json::from_slice(&body).unwrap();
+        assert_eq!(queued.schema, OPENENV_RUN_SCHEMA_V4);
+        assert_eq!(queued.state, OpenEnvRunState::Queued);
+        assert_eq!(queued.admission.as_ref().unwrap().queue_position, Some(1));
+        assert_eq!(state.openenv_runs.counts(), (1, 1, 2));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/openenv/runs/{}", queued.run_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let cancelled: OpenEnvRunStatus = serde_json::from_slice(&body).unwrap();
+        assert_eq!(cancelled.state, OpenEnvRunState::Cancelled);
+        assert_eq!(state.openenv_runs.counts(), (1, 0, 2));
+        drop(active_permit);
     }
 
     #[tokio::test]
@@ -2889,7 +3464,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             serde_json::from_slice::<Value>(&body).unwrap()["schema"],
-            OPENENV_RUN_LIST_SCHEMA_V3
+            OPENENV_RUN_LIST_SCHEMA_V4
         );
 
         let mut invalid = request(OpenEnvRunKind::Rollout);

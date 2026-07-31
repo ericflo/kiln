@@ -4021,6 +4021,34 @@
       "x-kiln-rust-type": "kiln_train::OpenEnvRolloutProvenanceV1",
       "x-kiln-field-schema-status": "complete"
     },
+    "OpenEnvRunAdmission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_active_runs",
+        "sequence"
+      ],
+      "properties": {
+        "max_active_runs": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "sequence": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "queue_position": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "admitted_unix_ms": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "queue_wait_ms": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "description": "Bounded FIFO execution admission for one persisted OpenEnv workflow. Sequence is stable across restart; queue position is one-based and present only while waiting.",
+      "x-kiln-rust-type": "OpenEnvRunAdmission",
+      "x-kiln-field-schema-status": "complete"
+    },
     "OpenEnvRunKind": {
       "type": "string",
       "enum": [
@@ -4040,7 +4068,7 @@
       ],
       "properties": {
         "schema": {
-          "const": "kiln.openenv-run-list.v3"
+          "const": "kiln.openenv-run-list.v4"
         },
         "runs": {
           "type": "array",
@@ -4229,7 +4257,8 @@
           "enum": [
             "kiln.openenv-run.v1",
             "kiln.openenv-run.v2",
-            "kiln.openenv-run.v3"
+            "kiln.openenv-run.v3",
+            "kiln.openenv-run.v4"
           ]
         },
         "run_id": {
@@ -4246,6 +4275,9 @@
         },
         "submitted_unix_ms": {
           "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "admission": {
+          "$ref": "#/$defs/OpenEnvRunAdmission"
         },
         "finished_unix_ms": {
           "$ref": "#/$defs/NonNegativeInteger"
@@ -4287,7 +4319,57 @@
           "$ref": "#/$defs/String"
         }
       },
-      "description": "Persisted status, collection artifacts, and authoritative training and evaluation lifecycle for one OpenEnv run. Version 1 records may retain the historical terminal training_queued handoff; version 2 follows learning to completion; version 3 includes paired held-out environment evaluation.",
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "schema"
+            ],
+            "properties": {
+              "schema": {
+                "const": "kiln.openenv-run.v4"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "admission"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "schema",
+              "state"
+            ],
+            "properties": {
+              "schema": {
+                "const": "kiln.openenv-run.v4"
+              },
+              "state": {
+                "const": "queued"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "admission": {
+                "required": [
+                  "queue_position"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "x-kiln-semantic-constraints": [
+        "v4 status always includes admission",
+        "admission.sequence is stable and determines exact FIFO order across restart",
+        "v4 queued status includes a live one-based queue_position",
+        "after admission, queue_position is omitted and admitted_unix_ms plus queue_wait_ms remain stable"
+      ],
+      "description": "Persisted status, collection artifacts, and authoritative training and evaluation lifecycle for one OpenEnv run. Version 1 records may retain the historical terminal training_queued handoff; version 2 follows learning to completion; version 3 includes paired held-out environment evaluation; version 4 adds bounded FIFO execution admission.",
       "x-kiln-rust-type": "OpenEnvRunStatus",
       "x-kiln-field-schema-status": "complete"
     },
@@ -7382,10 +7464,10 @@
     ],
     "OpenEnvRunList": [
       {
-        "schema": "kiln.openenv-run-list.v3",
+        "schema": "kiln.openenv-run-list.v4",
         "runs": [
           {
-            "schema": "kiln.openenv-run.v3",
+            "schema": "kiln.openenv-run.v4",
             "run_id": "80a26e21-8451-4a64-8666-890c06fd80bd",
             "kind": "train",
             "state": "environment_evaluating",
@@ -7430,6 +7512,12 @@
               }
             },
             "submitted_unix_ms": 1700000000000,
+            "admission": {
+              "max_active_runs": 4,
+              "sequence": 17,
+              "admitted_unix_ms": 1700000000250,
+              "queue_wait_ms": 250
+            },
             "progress": {
               "groups_completed": 3,
               "groups_total": 8,
@@ -7534,7 +7622,7 @@
     ],
     "OpenEnvRunStatus": [
       {
-        "schema": "kiln.openenv-run.v3",
+        "schema": "kiln.openenv-run.v4",
         "run_id": "80a26e21-8451-4a64-8666-890c06fd80bd",
         "kind": "train",
         "state": "environment_evaluating",
@@ -7579,6 +7667,12 @@
           }
         },
         "submitted_unix_ms": 1700000000000,
+        "admission": {
+          "max_active_runs": 4,
+          "sequence": 17,
+          "admitted_unix_ms": 1700000000250,
+          "queue_wait_ms": 250
+        },
         "progress": {
           "groups_completed": 3,
           "groups_total": 8,

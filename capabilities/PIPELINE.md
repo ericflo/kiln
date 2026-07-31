@@ -242,7 +242,8 @@ Before any GPU work in a stage N ≥ 2:
      server `run_id` and linked `training_job_id`; submit the complete request
      with `kiln openenv start --request <run.json> --follow`; reserve disjoint
      held-out seeds and configure the native paired-return gate before
-     collection; Task API catalogs may document coverage but never imply a
+     collection; if v4 status is `queued`, record its FIFO position and follow
+     the same run ID rather than resubmitting; Task API catalogs may document coverage but never imply a
      reset binding
 
 3. Verify hypothesis is falsifiable:

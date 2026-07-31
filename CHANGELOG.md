@@ -29,7 +29,12 @@
   complete persisted run contract, including paired held-out evaluation;
   `openenv artifact` consumes only returned same-origin manifest entries,
   independently verifies headers, length, and SHA-256, and atomically publishes
-  no partial or accidental replacement. CI drives all twenty-two pinned
+  no partial or accidental replacement. Persisted runs now enter a bounded,
+  cancellable FIFO instead of rejecting valid work when execution slots are
+  occupied; v4 status, CLI, dashboard, and metrics expose queue position,
+  admission time, and wait duration across the complete collection/training/
+  evaluation lifecycle. Restart resumes only entries proven never admitted;
+  interrupted stateful work still fails explicitly. CI drives all twenty-two pinned
   text-profiled arcade and math servers plus a native
   collect/submit/verify/replay batch end to end.
 - Corrected the v0.5.1 Vulkan recovery architecture. The recovered route set

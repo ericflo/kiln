@@ -297,6 +297,22 @@ can never be consumed as the answer to a later action.
 
 ## Capacity acquisition
 
+Kiln's persisted control plane first applies its own bounded FIFO admission.
+At most `openenv.max_active_runs` complete workflows execute; additional valid
+runs remain cancellable and position-visible until a slot opens, with total
+active, queued, and retained records exported as fixed-cardinality metrics.
+The queue consumes no OpenEnv session or model capacity. `max_tracked_runs` is
+the hard combined bound for active, queued, and retained terminal records.
+Operators can alert on `kiln_openenv_runs_active`,
+`kiln_openenv_runs_queued`, and `kiln_openenv_runs_tracked`; cumulative
+admission and restart counts use
+`kiln_openenv_runs_total{status="admitted"|"resumed"}`, and
+`kiln_openenv_run_queue_wait_seconds_total` records aggregate queue delay.
+The v4 admission sequence is stable; on restart, entries that never acquired a
+slot resume in that exact FIFO order. Any admitted non-terminal workflow fails
+explicitly because an external
+episode, trainer, or evaluator cannot be assumed resumable.
+
 OpenEnv servers may cap active sessions and can send `CAPACITY_REACHED` as the
 first WebSocket application frame. That result is terminal for the attempted
 socket, not necessarily for the collection. Kiln closes it, waits with bounded

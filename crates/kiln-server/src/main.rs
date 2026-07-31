@@ -1671,6 +1671,14 @@ async fn main() -> Result<()> {
     state.http_send_buffer_preflight_effective_bytes =
         http_send_buffer_preflight.map(|application| application.effective_bytes);
 
+    let resumed_openenv_runs = kiln_server::api::openenv::resume_queued_runs(&state);
+    if resumed_openenv_runs > 0 {
+        tracing::info!(
+            runs = resumed_openenv_runs,
+            "resumed persisted OpenEnv FIFO entries that had not acquired execution capacity"
+        );
+    }
+
     let tokenizer_prewarm = state.tokenizer.clone();
     let prewarm_state = state.clone();
     // Cheap clones so the shutdown handler can reach the batching engine

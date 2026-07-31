@@ -353,9 +353,13 @@ OpenEnv RL
           <code>kiln-server</code> composes those sessions with the ordinary in-process chat handler,
           persists run lifecycle, and submits canonical scored groups through the same native GRPO
           admission path as every other job. <code>kiln openenv start</code> enters that persisted
-          state machine from a bounded request file.
+          state machine from a bounded request file. A strict FIFO admits at most the configured
+          number of complete workflows; queued runs hold no environment or model capacity and remain
+          position-visible and immediately cancellable. Never-admitted v4 entries resume after restart;
+          admitted stateful work fails explicitly rather than guessing at recovery.
         </p>
         <pre class="mt-5"><code>persisted run request + environment URLs + aligned credentials/reset plan
+  -> bounded FIFO workflow admission
   -> inspect identity and action schema
   -> round-robin seed-matched candidate episodes
   -> environment-owned returns

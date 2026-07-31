@@ -1314,6 +1314,7 @@ function openEnvRunCard(run) {
   const groupTotal = Number(progress.groups_total || 0);
   const groupDone = Number(progress.groups_completed || 0);
   const training = run.training || null;
+  const admission = run.admission || null;
   const evaluations = Array.isArray(run.post_evaluations) ? run.post_evaluations : [];
   const environmentEvaluation = run.environment_evaluation || null;
   const evalDone = evaluations.reduce((sum, item) => sum + Number(item.examples_completed || 0), 0);
@@ -1321,7 +1322,11 @@ function openEnvRunCard(run) {
   let pct = groupTotal ? Math.min(100, Math.round(groupDone / groupTotal * 100)) : 0;
   let statValue = `${groupDone}/${groupTotal}`;
   let statLabel = 'seed groups';
-  if (state === 'training_queued') {
+  if (state === 'queued') {
+    pct = 0;
+    statValue = admission?.queue_position ? `#${Number(admission.queue_position).toLocaleString()}` : 'queued';
+    statLabel = 'execution queue';
+  } else if (state === 'training_queued') {
     pct = 0;
     statValue = 'queued';
     statLabel = 'native GRPO';
@@ -1355,6 +1360,13 @@ function openEnvRunCard(run) {
     : '';
   const cancel = terminal ? '' : `<button class="btn btn-sm btn-danger" type="button" data-openenv-cancel="${escapeHtml(run.run_id)}">Cancel</button>`;
   const error = run.error ? `<div class="training-card-error">${escapeHtml(run.error)}</div>` : '';
+  const admissionDetail = admission
+    ? state === 'queued'
+      ? `<div class="training-card-meta">FIFO execution queue · position ${Number(admission.queue_position || 0).toLocaleString()} · ${Number(admission.max_active_runs || 0).toLocaleString()} active slot${Number(admission.max_active_runs || 0) === 1 ? '' : 's'}</div>`
+      : admission.queue_wait_ms != null
+        ? `<div class="training-card-meta">Execution admitted after ${escapeHtml(fmtMsShort(Number(admission.queue_wait_ms)))}</div>`
+        : ''
+    : '';
   const trainingDetail = training
     ? `<div class="training-card-meta">Trainer · ${escapeHtml(String(training.state || 'unknown'))} · ${Math.round(Number(training.progress || 0) * 100)}%${training.current_loss != null ? ` · loss ${Number(training.current_loss).toFixed(4)}` : ''}${training.epoch != null ? ` · epoch ${Number(training.epoch).toLocaleString()}` : ''}</div>`
     : '';
@@ -1380,6 +1392,7 @@ function openEnvRunCard(run) {
       <span class="training-card-type">${escapeHtml(openEnvStateLabel(state))}</span>${gate}
     </div>
     <div class="training-card-meta">${escapeHtml(run.request?.adapter || 'base')} policy · ${Number(progress.rollouts_completed || 0).toLocaleString()} / ${Number(progress.rollouts_total || 0).toLocaleString()} episodes${environments.length ? ` · ${escapeHtml(environments.join(', '))}` : ''}</div>
+    ${admissionDetail}
     ${trainingDetail}
     ${evalDetail}
     ${environmentDetail}

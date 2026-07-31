@@ -21,8 +21,9 @@ use std::collections::BTreeMap;
 pub struct OpenEnvConfig {
     /// Enable OpenEnv discovery and run lifecycle API routes.
     pub enabled: bool,
-    /// Maximum concurrent rollout collectors. Training jobs submitted by a
-    /// run subsequently use the normal bounded training queue.
+    /// Maximum concurrent complete OpenEnv workflows. Additional accepted
+    /// runs wait in the bounded FIFO tracked-run queue; submitted training
+    /// jobs also retain the normal native training-queue limits.
     pub max_active_runs: usize,
     /// Maximum in-memory tracked run records, including terminal runs.
     pub max_tracked_runs: usize,

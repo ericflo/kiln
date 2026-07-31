@@ -1560,7 +1560,7 @@ fn openenv_server_run_fingerprint(run: &Value) -> String {
         .filter_map(|evaluation| evaluation.get("examples_completed").and_then(Value::as_u64))
         .sum::<u64>();
     format!(
-        "{}:{}:{}:{}:{}:{}",
+        "{}:{}:{}:{}:{}:{}:{}",
         run.get("state").and_then(Value::as_str).unwrap_or_default(),
         run.pointer("/training/state")
             .and_then(Value::as_str)
@@ -1571,6 +1571,9 @@ fn openenv_server_run_fingerprint(run: &Value) -> String {
             .and_then(Value::as_str)
             .unwrap_or_default(),
         run.pointer("/environment_evaluation/progress/groups_completed")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        run.pointer("/admission/queue_position")
             .and_then(Value::as_u64)
             .unwrap_or_default()
     )
@@ -1601,6 +1604,17 @@ fn print_openenv_server_run(run: &Value) {
         style(kind).bold(),
         state.replace('_', " ")
     );
+    if let Some(admission) = run.get("admission") {
+        if let Some(position) = admission.get("queue_position").and_then(Value::as_u64) {
+            let slots = admission
+                .get("max_active_runs")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            println!("  Admission: FIFO queue position {position} · {slots} active slots");
+        } else if let Some(wait_ms) = admission.get("queue_wait_ms").and_then(Value::as_u64) {
+            println!("  Admission: execution started after {wait_ms} ms");
+        }
+    }
     if let Some(training) = run.get("training") {
         let training_state = training
             .get("state")
@@ -3521,6 +3535,25 @@ mod tests {
         assert!(openenv_server_run_terminal(
             &json!({"schema":"kiln.openenv-run.v1","state":"training_queued"})
         ));
+    }
+
+    #[test]
+    fn server_run_follow_fingerprint_tracks_fifo_position_changes() {
+        let queued_second = json!({
+            "schema": "kiln.openenv-run.v4",
+            "state": "queued",
+            "admission": {"max_active_runs": 1, "sequence": 2, "queue_position": 2}
+        });
+        let queued_first = json!({
+            "schema": "kiln.openenv-run.v4",
+            "state": "queued",
+            "admission": {"max_active_runs": 1, "sequence": 2, "queue_position": 1}
+        });
+        assert!(!openenv_server_run_terminal(&queued_second));
+        assert_ne!(
+            openenv_server_run_fingerprint(&queued_second),
+            openenv_server_run_fingerprint(&queued_first)
+        );
     }
 
     #[test]

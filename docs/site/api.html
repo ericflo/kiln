@@ -1081,14 +1081,17 @@ curl -fsS http://localhost:8420/v1/train/opd \
           training, and can compare the base and candidate policies on held-out environment returns.
           Public loopback environments need no credentials; protected origins use server-owned opaque
           credential IDs aligned with their URLs so secrets never enter requests, run records, or artifacts.
+          Valid runs are accepted into a bounded FIFO when every complete-workflow slot is occupied;
+          v4 status reports one-based queue position, admission timestamp, and wait duration. A restart
+          resumes only never-admitted FIFO entries; interrupted executors fail explicitly.
         </p>
         <div class="endpoint-list" style="color: var(--fg-dim);">
           <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/inspect</code> &mdash; discover and normalize the protocol metadata, action schema, and observation schema for one compatible environment.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/tasks</code> &mdash; list the environment&rsquo;s reset-task catalog through the same origin and credential policy.</div>
-          <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/runs</code> &mdash; start a collect-only or collect-and-train run across one or more compatible environment URLs.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/runs</code> &mdash; accept a collect-only or collect-and-train run into bounded FIFO execution across one or more compatible environment URLs.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/openenv/runs</code> &mdash; list retained runs with progress, terminal evidence, gates, and published artifact manifests.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/openenv/runs/{run_id}</code> &mdash; retrieve one durable run snapshot across collection, training, paired evaluation, completion, failure, or cancellation.</div>
-          <div class="endpoint"><span class="method">DELETE</span> <code>/v1/openenv/runs/{run_id}</code> &mdash; request cancellation in the collector, trainer, or evaluator while retaining completed evidence.</div>
+          <div class="endpoint"><span class="method">DELETE</span> <code>/v1/openenv/runs/{run_id}</code> &mdash; immediately cancel queued work or request cooperative cancellation from the active collector, trainer, or evaluator while retaining completed evidence.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/openenv/runs/{run_id}/artifacts/{kind}</code> &mdash; download a published training or paired held-out evaluation artifact by the exact link returned in <code>artifacts</code>.</div>
         </div>
         <div class="code-block mt-4"><pre><code>curl -fsS http://localhost:8420/v1/openenv/runs \

@@ -22,10 +22,10 @@ KILN_SERVER_SERVING_PROFILE=experimental KILN_MODEL_PATH=./Qwen3.5-4B ./kiln ser
 ```
 
 Keep the pre-training JSONL, replay, and summary with `train_receipt.json`;
-held-out evaluation also retains paired bundles and a decision receipt.
+held-out evaluation retains paired bundles and a decision receipt.
 
-**Training → OpenEnv** in `/ui/` persists artifacts, GRPO progress, evaluations,
-gates, failures, and cancellation. Restarts fail interrupted work explicitly.
+**Training → OpenEnv** persists artifacts, GRPO progress, evaluations,
+gates, failures, and cancellation. Restarts resume queued work; interrupted executors fail explicitly.
 
 ## How the loop works
 
@@ -62,10 +62,10 @@ kiln openenv cancel 80a26e21-8451-4a64-8666-890c06fd80bd
 
 `start` accepts one regular, non-symlink JSON object up to 1 MiB. `artifact` follows only the
 returned same-server manifest URL, requires its length and ETag, rehashes the bounded stream,
-and publishes atomically without replacement; use `--force` deliberately. `status --follow
---json` emits one terminal snapshot. Version 3 follows training and both evaluations to outcome.
-Server runs default to loopback; `[openenv]` controls remote origins, credentials, capacity,
-retention, and TTL. See the [recovery reference](OPENENV_REPLAY_REFERENCE.md) and
+and publishes atomically without replacement; use `--force`. `status --follow --json` emits one
+terminal snapshot. Version 4 adds a position-visible, cancellable FIFO before training and evals.
+`[openenv]` bounds active and tracked runs, remote origins, credentials, retention, and TTL. See
+the [recovery reference](OPENENV_REPLAY_REFERENCE.md) and
 [configuration reference](CONFIGURATION.md).
 
 ### Protected environments

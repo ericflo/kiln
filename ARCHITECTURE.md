@@ -466,11 +466,18 @@ representation.
 Server-owned runs are bounded by `[openenv]` policy and persisted below
 `<adapter_dir>/.openenv/runs/<run-id>/`. `run.json` records request, discovery
 identity, progress, lifecycle state, artifacts, error, and optional training
-job. A restart converts an interrupted active run into an explicit terminal
-failure; it never guesses whether a stateful external episode can resume.
+job. `max_active_runs` admits complete workflows in strict FIFO order; excess
+valid submissions remain bounded by `max_tracked_runs`, expose one-based queue
+position, stable admission sequence, and admission wait, and can be cancelled without touching an
+environment or model. The execution permit spans collection, training, static
+evaluation, and paired environment evaluation. A restart resumes v4 FIFO
+entries that provably never acquired a slot; it converts interrupted admitted
+work into explicit terminal failure and never guesses whether a stateful
+external episode can resume.
 Dataset, replay, and summary downloads stream from those owned paths. Collection
-is cooperatively cancellable through capacity backoff and episode boundaries,
-but cancellation closes once the run enters the native training handoff.
+is cooperatively cancellable through capacity backoff and episode boundaries;
+after handoff, the workflow forwards cancellation to the authoritative native
+trainer and linked evaluators.
 `kiln openenv start` submits the same bounded run request and follows that state
 machine. `kiln openenv artifact` consumes only an exact manifest entry, disables
 redirects, verifies response headers, length, and SHA-256 while staging beside

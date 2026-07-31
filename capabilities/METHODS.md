@@ -205,6 +205,9 @@ See resources/grpo-mode.md §6.
 `kiln openenv start --request <run.json> --follow`, Training → OpenEnv, or
 `POST /v1/openenv/runs` for OpenEnv tasks; otherwise
 `cuda_grpo_ablation` with the ECHO env-mask layer.
+Persisted v4 runs may wait in Kiln's bounded FIFO: treat `queued` plus an
+admission position as accepted work, retain the run ID, and cancel obsolete
+queued hypotheses instead of submitting duplicates.
 **Use when:** Rule A. Stateful OpenEnv tasks or multi-turn tool-calling tasks.
 **Data:** For OpenEnv, seed-matched stateful WebSocket episodes collected as
 canonical `AgenticGroup` JSONL. For pi, session JSONLs normalized into

@@ -84,6 +84,10 @@ kiln openenv start --request openenv-run.json --follow
 kiln openenv status <run-id> --follow --json
 ```
 
+Run-status v4 exposes bounded FIFO admission. `queued` with
+`admission.queue_position` is accepted work, not a retry signal. Preserve the
+run ID; cancel a superseded queued attempt instead of duplicating it.
+
 Keep training and held-out seeds disjoint. A kept stage requires the native
 paired-return gate; training returns never substitute for it.
 

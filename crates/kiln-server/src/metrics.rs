@@ -219,6 +219,9 @@ pub struct Metrics {
 
     // OpenEnv orchestration counters
     pub openenv_runs_started: AtomicU64,
+    pub openenv_runs_resumed: AtomicU64,
+    pub openenv_runs_admitted: AtomicU64,
+    pub openenv_run_queue_wait_ms_total: AtomicU64,
     pub openenv_rollouts_ready: AtomicU64,
     pub openenv_training_queued: AtomicU64,
     pub openenv_training_completed: AtomicU64,
@@ -284,6 +287,9 @@ impl Metrics {
             training_opd_failed: AtomicU64::new(0),
             training_opd_cancelled: AtomicU64::new(0),
             openenv_runs_started: AtomicU64::new(0),
+            openenv_runs_resumed: AtomicU64::new(0),
+            openenv_runs_admitted: AtomicU64::new(0),
+            openenv_run_queue_wait_ms_total: AtomicU64::new(0),
             openenv_rollouts_ready: AtomicU64::new(0),
             openenv_training_queued: AtomicU64::new(0),
             openenv_training_completed: AtomicU64::new(0),
@@ -3086,6 +3092,11 @@ impl Metrics {
         out.push_str("# TYPE kiln_openenv_runs_total counter\n");
         for (status, value) in [
             ("started", self.openenv_runs_started.load(Ordering::Relaxed)),
+            ("resumed", self.openenv_runs_resumed.load(Ordering::Relaxed)),
+            (
+                "admitted",
+                self.openenv_runs_admitted.load(Ordering::Relaxed),
+            ),
             (
                 "rollout_ready",
                 self.openenv_rollouts_ready.load(Ordering::Relaxed),
@@ -3106,6 +3117,15 @@ impl Metrics {
         ] {
             prom_counter(&mut out, "kiln_openenv_runs_total", "status", status, value);
         }
+        out.push_str("# HELP kiln_openenv_run_queue_wait_seconds_total Total time accepted OpenEnv runs spent waiting for bounded execution admission.\n");
+        out.push_str("# TYPE kiln_openenv_run_queue_wait_seconds_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_openenv_run_queue_wait_seconds_total {:.3}",
+                self.openenv_run_queue_wait_ms_total.load(Ordering::Relaxed) as f64 / 1000.0
+            ),
+        );
         out.push_str(
             "# HELP kiln_openenv_episodes_collected_total Completed OpenEnv episodes persisted into canonical rollout artifacts.\n",
         );
@@ -3232,6 +3252,14 @@ impl Metrics {
         push_line(
             &mut out,
             &format!("kiln_openenv_runs_active {}", gauges.openenv_runs_active),
+        );
+        out.push_str(
+            "# HELP kiln_openenv_runs_queued Accepted server-owned OpenEnv runs waiting for execution capacity.\n",
+        );
+        out.push_str("# TYPE kiln_openenv_runs_queued gauge\n");
+        push_line(
+            &mut out,
+            &format!("kiln_openenv_runs_queued {}", gauges.openenv_runs_queued),
         );
         out.push_str("# HELP kiln_openenv_runs_tracked Retained OpenEnv run records.\n");
         out.push_str("# TYPE kiln_openenv_runs_tracked gauge\n");
@@ -3553,6 +3581,7 @@ pub struct SnapshotGauges {
     pub batching_engine: BatchingEngineSnapshot,
     pub training_active: u8,
     pub openenv_runs_active: usize,
+    pub openenv_runs_queued: usize,
     pub openenv_runs_tracked: usize,
     pub active_adapter: Option<String>,
 }
@@ -3869,6 +3898,10 @@ mod tests {
         m.dec_active();
         m.request_prefill_tokens_completed
             .store(8192, std::sync::atomic::Ordering::Relaxed);
+        m.openenv_runs_resumed.store(2, Ordering::Relaxed);
+        m.openenv_runs_admitted.store(3, Ordering::Relaxed);
+        m.openenv_run_queue_wait_ms_total
+            .store(1_250, Ordering::Relaxed);
 
         let mut token_closed = test_thinking_budget(true, "request", "server_default");
         token_closed.max_tokens = Some(64);
@@ -4288,8 +4321,9 @@ mod tests {
                 ..BatchingEngineSnapshot::default()
             },
             training_active: 0,
-            openenv_runs_active: 0,
-            openenv_runs_tracked: 0,
+            openenv_runs_active: 2,
+            openenv_runs_queued: 3,
+            openenv_runs_tracked: 7,
             active_adapter: Some("my-adapter".to_string()),
         };
 
@@ -4316,6 +4350,12 @@ mod tests {
         assert!(output.contains("kiln_active_requests_peak 2"));
         assert!(output.contains("kiln_request_prefill_tokens_completed 8192"));
         assert!(output.contains("kiln_scheduler_waiting 3"));
+        assert!(output.contains("kiln_openenv_runs_total{status=\"admitted\"} 3"));
+        assert!(output.contains("kiln_openenv_runs_total{status=\"resumed\"} 2"));
+        assert!(output.contains("kiln_openenv_run_queue_wait_seconds_total 1.250"));
+        assert!(output.contains("kiln_openenv_runs_active 2"));
+        assert!(output.contains("kiln_openenv_runs_queued 3"));
+        assert!(output.contains("kiln_openenv_runs_tracked 7"));
         assert!(output.contains("kiln_blocks_total 256"));
         assert!(output.contains("kiln_vram_total_bytes 24000000000"));
         assert!(output.contains("kiln_vram_model_bytes 9000000000"));
@@ -4777,6 +4817,7 @@ mod tests {
             batching_engine: BatchingEngineSnapshot::default(),
             training_active: 0,
             openenv_runs_active: 0,
+            openenv_runs_queued: 0,
             openenv_runs_tracked: 0,
             active_adapter: None,
         };

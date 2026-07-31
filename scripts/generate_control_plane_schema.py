@@ -544,6 +544,19 @@ def build_openenv_types() -> None:
         "Bounded group and episode progress for one OpenEnv run.",
     )
     add_object(
+        "OpenEnvRunAdmission",
+        "OpenEnvRunAdmission",
+        {
+            "max_active_runs": ref("PositiveInteger"),
+            "sequence": ref("PositiveInteger"),
+            "queue_position": ref("PositiveInteger"),
+            "admitted_unix_ms": ref("NonNegativeInteger"),
+            "queue_wait_ms": ref("NonNegativeInteger"),
+        },
+        "Bounded FIFO execution admission for one persisted OpenEnv workflow. Sequence is stable across restart; queue position is one-based and present only while waiting.",
+        optional=("queue_position", "admitted_unix_ms", "queue_wait_ms"),
+    )
+    add_object(
         "OpenEnvEnvironmentEvalGate",
         "OpenEnvEnvironmentEvalGate",
         {
@@ -809,6 +822,7 @@ def build_openenv_types() -> None:
                     "kiln.openenv-run.v1",
                     "kiln.openenv-run.v2",
                     "kiln.openenv-run.v3",
+                    "kiln.openenv-run.v4",
                 ]
             },
             "run_id": ref("String"),
@@ -816,6 +830,7 @@ def build_openenv_types() -> None:
             "state": ref("OpenEnvRunState"),
             "request": ref("OpenEnvRunRequest"),
             "submitted_unix_ms": ref("NonNegativeInteger"),
+            "admission": ref("OpenEnvRunAdmission"),
             "finished_unix_ms": ref("NonNegativeInteger"),
             "progress": ref("OpenEnvRunProgress"),
             "environments": array(ref("OpenEnvIdentity")),
@@ -827,8 +842,9 @@ def build_openenv_types() -> None:
             "environment_evaluation": ref("OpenEnvEnvironmentEvalStatus"),
             "error": ref("String"),
         },
-        "Persisted status, collection artifacts, and authoritative training and evaluation lifecycle for one OpenEnv run. Version 1 records may retain the historical terminal training_queued handoff; version 2 follows learning to completion; version 3 includes paired held-out environment evaluation.",
+        "Persisted status, collection artifacts, and authoritative training and evaluation lifecycle for one OpenEnv run. Version 1 records may retain the historical terminal training_queued handoff; version 2 follows learning to completion; version 3 includes paired held-out environment evaluation; version 4 adds bounded FIFO execution admission.",
         optional=(
+            "admission",
             "finished_unix_ms",
             "environments",
             "artifacts",
@@ -839,12 +855,43 @@ def build_openenv_types() -> None:
             "environment_evaluation",
             "error",
         ),
+        extra={
+            "allOf": [
+                {
+                    "if": {
+                        "required": ["schema"],
+                        "properties": {"schema": {"const": "kiln.openenv-run.v4"}},
+                    },
+                    "then": {"required": ["admission"]},
+                },
+                {
+                    "if": {
+                        "required": ["schema", "state"],
+                        "properties": {
+                            "schema": {"const": "kiln.openenv-run.v4"},
+                            "state": {"const": "queued"},
+                        },
+                    },
+                    "then": {
+                        "properties": {
+                            "admission": {"required": ["queue_position"]}
+                        }
+                    },
+                },
+            ],
+            "x-kiln-semantic-constraints": [
+                "v4 status always includes admission",
+                "admission.sequence is stable and determines exact FIFO order across restart",
+                "v4 queued status includes a live one-based queue_position",
+                "after admission, queue_position is omitted and admitted_unix_ms plus queue_wait_ms remain stable",
+            ],
+        },
     )
     add_object(
         "OpenEnvRunList",
         "OpenEnvRunList",
         {
-            "schema": {"const": "kiln.openenv-run-list.v3"},
+            "schema": {"const": "kiln.openenv-run-list.v4"},
             "runs": array(ref("OpenEnvRunStatus")),
         },
         "Newest-first retained OpenEnv run records.",
@@ -1510,12 +1557,18 @@ def build_examples() -> dict[str, list[Any]]:
         },
     }
     openenv_status = {
-        "schema": "kiln.openenv-run.v3",
+        "schema": "kiln.openenv-run.v4",
         "run_id": "80a26e21-8451-4a64-8666-890c06fd80bd",
         "kind": "train",
         "state": "environment_evaluating",
         "request": openenv_request,
         "submitted_unix_ms": 1_700_000_000_000,
+        "admission": {
+            "max_active_runs": 4,
+            "sequence": 17,
+            "admitted_unix_ms": 1_700_000_000_250,
+            "queue_wait_ms": 250,
+        },
         "progress": {
             "groups_completed": 3,
             "groups_total": 8,
@@ -1591,7 +1644,7 @@ def build_examples() -> dict[str, list[Any]]:
         "OpdRequest": [opd],
         "OpenEnvInspectRequest": [{"environment_urls": ["http://127.0.0.1:8000"], "credential_ids": ["local-arcade"]}],
         "OpenEnvInspectResponse": [{"schema": "kiln.openenv-inspection.v1", "environments": [openenv_inspection]}],
-        "OpenEnvRunList": [{"schema": "kiln.openenv-run-list.v3", "runs": [openenv_status]}],
+        "OpenEnvRunList": [{"schema": "kiln.openenv-run-list.v4", "runs": [openenv_status]}],
         "OpenEnvRunRequest": [openenv_request],
         "OpenEnvRunStatus": [openenv_status],
         "OpenEnvTaskCatalogRequest": [{"environment_urls": ["http://127.0.0.1:8000"], "credential_ids": ["local-arcade"], "split": "train", "start": 0, "limit": 2}],

@@ -1183,7 +1183,16 @@ async function startServer({
   availableAdapters = availableAdapters.map((adapter) => ({ ...adapter }));
   let activeAdapter = availableAdapters.find((adapter) => adapter.active)?.name || null;
   const completedTrainingJobs = [];
-  const openEnvRuns = [];
+  const openEnvRuns = [{
+    schema: 'kiln.openenv-run.v4',
+    run_id: 'queue-openenv-run',
+    kind: 'rollout',
+    state: 'queued',
+    request: { adapter: 'base' },
+    submitted_unix_ms: 1_700_000_000_000,
+    admission: { max_active_runs: 1, sequence: 2, queue_position: 2 },
+    progress: { groups_completed: 0, groups_total: 8, rollouts_completed: 0, rollouts_total: 32 },
+  }];
   const smokeTeacherRevision = `sha256:${'7'.repeat(64)}`;
   const smokeTeacherContentRevision = `sha256:${'6'.repeat(64)}`;
   const smokeTeachers = [{
@@ -1988,7 +1997,7 @@ async function startServer({
       return;
     }
     if (url.pathname === '/v1/openenv/runs' && req.method === 'GET') {
-      json(res, { schema: 'kiln.openenv-run-list.v3', runs: openEnvRuns });
+      json(res, { schema: 'kiln.openenv-run-list.v4', runs: openEnvRuns });
       return;
     }
     if (url.pathname === '/v1/openenv/inspect' && req.method === 'POST') {
@@ -2044,12 +2053,18 @@ async function startServer({
       const request = await readJsonBody(req);
       apiState.trainingSubmitRequests.openenv += 1;
       const status = {
-        schema: 'kiln.openenv-run.v3',
+        schema: 'kiln.openenv-run.v4',
         run_id: 'smoke-openenv-run',
         kind: request.kind,
         state: 'completed',
         request,
         submitted_unix_ms: 1_700_000_000_000,
+        admission: {
+          max_active_runs: 1,
+          sequence: 3,
+          admitted_unix_ms: 1_700_000_000_250,
+          queue_wait_ms: 250,
+        },
         progress: {
           groups_completed: 2,
           groups_total: request.groups,
@@ -4715,6 +4730,7 @@ async function runSmoke(baseUrl, {
 
     await clickAndWait(page, '#training-tab-openenv', 'Could not open OpenEnv training tab');
     await waitForVisiblePanel(page, '#tab-openenv', 'OpenEnv training tab did not activate');
+    await waitForPanelText(page, '#openenv-runs', /queue-op[\s\S]*queued[\s\S]*FIFO execution queue · position 2 · 1 active slot/, 'OpenEnv history should render live FIFO admission position and capacity');
     await waitForPanelText(page, '#openenv-optimizer-support', /Muon · bf16 LoRA · round-to-nearest · rank 8 \(supported 2–32\)/, 'OpenEnv train should render the native GRPO optimizer tuple');
     await expectDisabled(page, '#openenv-form button[type="submit"]', false, 'OpenEnv train should enable after native GRPO capability admission');
     await page.$eval('#openenv-environments', input => { input.value = 'http://127.0.0.1:8990'; });
@@ -4778,6 +4794,7 @@ async function runSmoke(baseUrl, {
     }
     await expectTrainingToast(page, 'OpenEnv train run smoke-op started');
     await waitForPanelText(page, '#openenv-runs', /OpenEnv train[\s\S]*smoke-op[\s\S]*completed[\s\S]*promoted[\s\S]*8 \/ 32 episodes[\s\S]*Held-out environment · completed · return 0\.100 → 0\.800 \(\+0\.700\) · exact p=0\.0000/, 'OpenEnv run history should render paired-return evidence and promotion outcome');
+    await waitForPanelText(page, '#openenv-runs', /smoke-op[\s\S]*Execution admitted after 250 ms/, 'OpenEnv run history should retain admission wait evidence');
     await waitForPanelText(page, '#openenv-runs', /dataset[\s\S]*aaaaaaaaaaaa/, 'OpenEnv artifact controls should expose the manifest digest identity');
 
     await clickAndWait(page, '#training-tab-sft', 'Could not open SFT tab');
