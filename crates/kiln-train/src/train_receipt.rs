@@ -402,10 +402,15 @@ impl GrpoPolicyAuditAccumulator {
         if policy_log_probs.is_empty() {
             return Ok(());
         }
-        anyhow::ensure!(
-            policy_log_probs.iter().all(|value| value.is_finite()),
-            "GRPO policy audit received a non-finite policy log-probability"
-        );
+        if let Some((index, value)) = policy_log_probs
+            .iter()
+            .enumerate()
+            .find(|(_, value)| !value.is_finite())
+        {
+            anyhow::bail!(
+                "GRPO policy audit received a non-finite policy log-probability at selected action index {index}: {value}"
+            );
+        }
         anyhow::ensure!(
             clip_low.is_finite() && clip_high.is_finite(),
             "GRPO policy audit received non-finite clip bounds"

@@ -350,7 +350,7 @@ bounded to closed keywords and JSON Pointer paths rather than model values or
 environment-authored schema content.
 
 OpenEnv has no request IDs or episode resume. Kiln therefore pumps only
-Ping/Pong control frames while policy inference is pending and rejects any
+Ping/Pong control frames plus periodic read-only `state` exchanges while policy inference is pending and rejects any
 unsolicited application message. A timeout, socket failure, binary, malformed
 or oversized response, credential reflection, or wrong response type
 permanently poisons the session. The action is not resent and a late response
@@ -542,6 +542,9 @@ text-first math families—then tests:
 - health-gated connection, canonical complete-discovery identity, typed schema identity, and close;
 - the optional `input_text` profile across every environment in the matrix, without
   making that downstream convention a protocol requirement;
+- thinking-on action collection where separated reasoning is retained in the
+  trainable trajectory, the prompt-owned opener is excluded from the action
+  mask, and only the final schema-valid answer reaches the environment;
 - schema-discovered answer strings, deterministic seeded prompts, recoverable
   wrong-type actions, exact integer rewards, and frozen post-`done`
   observations across all eight one-step math environments;
@@ -600,8 +603,10 @@ of computing misleading relative advantages.
 **Most outcomes are `invalid_model_action`.** Inspect the action schema and the
 retained harness code. `INVALID_MODEL_ACTION` means the reply was absent or was
 not one JSON object; `ACTION_SCHEMA_VALIDATION_FAILED` means its shape or values
-missed the advertised schema. Reduce thinking, increase `--max-action-tokens`
-only for truncation, and consider an SFT bootstrap for the JSON action format.
+missed the advertised schema. Increase `--max-action-tokens` when a reasoning
+trajectory is truncated, and consider an SFT bootstrap for the JSON final-action
+format. Disable thinking only when you intentionally want to train
+final-action-only trajectories.
 
 **Rewards have no variance.** GRPO has no within-group signal. Use harder tasks,
 more policy sampling, a more informative reward, or an SFT/OPD bootstrap.

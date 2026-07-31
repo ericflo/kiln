@@ -832,6 +832,7 @@ mod tests {
                 max_steps: 1,
                 concurrency: 1,
                 max_action_tokens: 16,
+                thinking_budget_tokens: None,
                 temperature: 0.0,
                 thinking: false,
                 protocol_error_reward: -1.0,

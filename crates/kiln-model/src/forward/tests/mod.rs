@@ -1837,6 +1837,93 @@ fn test_swiglu_zero_gate_gives_zero() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "rocm")]
+#[test]
+fn rocm_chunked_swiglu_tape_reaches_every_mlp_lora_leaf() -> Result<()> {
+    if !kiln_tensor::rocm_is_available() {
+        eprintln!("skip rocm_chunked_swiglu_tape_reaches_every_mlp_lora_leaf: no ROCm device");
+        return Ok(());
+    }
+
+    let device = Device::Rocm(0);
+    let hidden = 4usize;
+    let intermediate = 8usize;
+    let rank = 2usize;
+    let seq_len = 5usize;
+    let chunk_tokens = 2usize;
+    let patterned = |shape: &[usize], scale: f32| -> Result<Tensor> {
+        let count = shape.iter().product();
+        let values = (0..count)
+            .map(|index| (((index * 17 + 3) % 41) as f32 - 20.0) * scale)
+            .collect::<Vec<_>>();
+        Ok(Tensor::from_vec_on(device, values, shape.to_vec())?.contiguous()?)
+    };
+
+    let gate_proj = patterned(&[intermediate, hidden], 0.01)?;
+    let up_proj = patterned(&[intermediate, hidden], 0.008)?;
+    let down_proj = patterned(&[hidden, intermediate], 0.006)?;
+    let mlp = GpuFfnWeights {
+        gate_proj_t: gate_proj.t()?.contiguous()?,
+        up_proj_t: up_proj.t()?.contiguous()?,
+        down_proj_t: down_proj.t()?.contiguous()?,
+        gate_proj,
+        up_proj,
+        down_proj,
+        gate_up_proj_t: None,
+        gate_proj_marlin: None,
+        up_proj_marlin: None,
+        down_proj_marlin: None,
+        gate_up_proj_w8: None,
+        down_proj_w8: None,
+    };
+    let lora = LoraLayerWeights {
+        gate_proj: Some(LoraProjectionWeights {
+            a: patterned(&[rank, hidden], 0.02)?,
+            b: patterned(&[intermediate, rank], 0.015)?,
+        }),
+        up_proj: Some(LoraProjectionWeights {
+            a: patterned(&[rank, hidden], 0.018)?,
+            b: patterned(&[intermediate, rank], 0.013)?,
+        }),
+        down_proj: Some(LoraProjectionWeights {
+            a: patterned(&[rank, intermediate], 0.012)?,
+            b: patterned(&[hidden, rank], 0.011)?,
+        }),
+        ..Default::default()
+    };
+    let mut lora_leaf_ids = Vec::new();
+    lora.for_each_projection(|projection| {
+        lora_leaf_ids.push(projection.a.id());
+        lora_leaf_ids.push(projection.b.id());
+    });
+    let x = patterned(&[1, seq_len, hidden], 0.025)?;
+
+    let (out, tape) = kiln_autograd::with_thread_local_tape(|| {
+        swiglu_ffn_impl_chunked(None, &x, &mlp, Some((&lora, 1.0)), false, chunk_tokens)
+    });
+    let out = out?;
+    let reachable = tape.reachable_from(out.id());
+    for leaf_id in &lora_leaf_ids {
+        assert!(
+            reachable.contains(leaf_id),
+            "chunked SwiGLU output must remain structurally connected to LoRA leaf {leaf_id:?}"
+        );
+    }
+
+    let seed = Tensor::ones(out.shape().to_vec(), out.dtype(), &device)?;
+    let grads = tape.backward(out.id(), seed, kiln_tensor::ops::add)?;
+    for leaf_id in lora_leaf_ids {
+        let grad = grads
+            .get(leaf_id)
+            .unwrap_or_else(|| panic!("missing chunked SwiGLU gradient for LoRA leaf {leaf_id:?}"));
+        assert!(
+            grad.all_finite()?,
+            "chunked SwiGLU produced a non-finite LoRA gradient for {leaf_id:?}"
+        );
+    }
+    Ok(())
+}
+
 /// Parity test for the CUDA prefill fused `gate_up_proj_t` GEMM.
 ///
 /// The fast path replaces two `[B*T, hidden] @ [hidden, intermediate]`

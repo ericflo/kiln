@@ -73,6 +73,23 @@ pub fn gated_deltanet_forward_streaming(
         let allow_prefill_recurrent_kernel = allow_forward_only_fastpaths;
         let mut run_tile = || -> Result<Tensor> {
             let tile_in = x.narrow(1, cursor, len)?;
+            #[cfg(any(
+                feature = "cuda",
+                feature = "metal",
+                feature = "vulkan",
+                feature = "rocm"
+            ))]
+            let tile_in = if crate::tape_forward::tape_scope_active() {
+                require_active_tape_output(
+                    crate::tape_forward::try_tape_narrow_kt(x, 1, cursor, len, &tile_in)
+                        .with_context(|| {
+                            format!("streaming GDN input tile [{cursor}, {end}) tape narrow")
+                        })?,
+                    "streaming GDN input narrow",
+                )?
+            } else {
+                tile_in
+            };
             gated_deltanet_forward_decode_if(
                 backend,
                 &tile_in,

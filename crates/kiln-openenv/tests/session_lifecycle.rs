@@ -114,6 +114,61 @@ async fn policy_work_pumps_ping_pong_without_consuming_the_next_exchange() {
 }
 
 #[tokio::test]
+async fn policy_work_uses_read_only_state_exchanges_to_maintain_idle_sessions() {
+    let (base_url, server) = websocket_fixture(|mut socket| async move {
+        assert_eq!(
+            receive_json(&mut socket).await,
+            json!({"type": "reset", "data": {"seed": 9}})
+        );
+        socket.send(observation(0, false)).await.unwrap();
+
+        let mut state_requests = 0;
+        loop {
+            let request = receive_json(&mut socket).await;
+            match request.get("type").and_then(Value::as_str) {
+                Some("state") => {
+                    state_requests += 1;
+                    socket
+                        .send(Message::Text(
+                            json!({"type": "state", "data": {"step_count": 0}})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await
+                        .unwrap();
+                }
+                Some("step") => {
+                    assert_eq!(request["data"], json!({"answer": "42"}));
+                    break;
+                }
+                other => panic!("unexpected OpenEnv request during policy work: {other:?}"),
+            }
+        }
+        assert!(state_requests >= 2, "expected repeated state maintenance");
+        socket.send(observation(1, true)).await.unwrap();
+        assert_eq!(receive_json(&mut socket).await, json!({"type": "close"}));
+    })
+    .await;
+
+    let client = OpenEnvClient::new(base_url)
+        .unwrap()
+        .with_request_timeout(Duration::from_millis(200));
+    let mut session = client.connect().await.unwrap();
+    session.reset(&json!({"seed": 9})).await.unwrap();
+    let output = session
+        .keep_alive_while(async {
+            tokio::time::sleep(Duration::from_millis(170)).await;
+            "ready"
+        })
+        .await
+        .unwrap();
+    assert_eq!(output, "ready");
+    assert!(session.step(&json!({"answer": "42"})).await.unwrap().done);
+    session.close().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn timed_out_exchange_permanently_poisons_the_lock_step_session() {
     let (base_url, server) = websocket_fixture(|mut socket| async move {
         assert_eq!(

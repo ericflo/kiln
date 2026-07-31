@@ -46,6 +46,14 @@ use crate::lora_loader::LoraProjectionWeights;
 // model forward call sites and integration tests.
 pub use kiln_autograd::{tape_scope_active, with_active_tape, with_thread_local_tape};
 
+/// Whether the active authoritative training tape requested expensive anomaly
+/// diagnostics. Forward code uses this to localize the first non-finite layer
+/// instead of reporting only the downstream loss symptom. Outside a tape
+/// scope this is always false, so inference pays no scan or synchronization.
+pub(crate) fn tape_detect_anomaly_active() -> bool {
+    with_active_tape(|tape: &mut Tape| tape.options().detect_anomaly).unwrap_or(false)
+}
+
 fn tape_forward_device_supported(device: kiln_tensor::Device) -> bool {
     // Inference shares these forward helpers but never installs a tape. Check
     // the thread-local scope before consulting backend capability policy: the

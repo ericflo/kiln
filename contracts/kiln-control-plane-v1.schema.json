@@ -4364,6 +4364,9 @@
         "max_action_tokens": {
           "$ref": "#/$defs/PositiveInteger"
         },
+        "thinking_budget_tokens": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
         "temperature": {
           "$ref": "#/$defs/FiniteNumber"
         },
@@ -4514,6 +4517,12 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/OpenEnvPostEvalStatus"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NonEmptyString"
           }
         },
         "environment_evaluation": {

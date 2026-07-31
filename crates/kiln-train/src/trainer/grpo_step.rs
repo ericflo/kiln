@@ -1954,13 +1954,27 @@ pub(super) fn tokenize_grpo_group_timed(
                 env_mask,
                 segment_spans: _,
             } = masked;
+            // The full trajectory render is authoritative for agentic data.
+            // A separately rendered inference prompt can end in a different
+            // template suffix (for example Qwen's enable_thinking=false
+            // close sequence versus its default open <think> block). The
+            // first action-mask token is the exact boundary between shared
+            // policy context and model-produced trajectory tokens.
+            let prompt_token_count = action_mask
+                .iter()
+                .position(|&active| active)
+                .with_context(|| {
+                    format!(
+                        "trajectory completion {completion_idx} has no action token from which to derive its prompt boundary"
+                    )
+                })?;
             anyhow::ensure!(
-                input_ids.len() >= prompt_ids.len() && input_ids[..prompt_ids.len()] == prompt_ids,
-                "trajectory completion {completion_idx} does not preserve the rendered group prompt token prefix"
+                prompt_token_count > 0,
+                "trajectory completion {completion_idx} action mask starts before any prompt token"
             );
             completions.push(TokenizedGrpoCompletion {
                 input_ids,
-                prompt_token_count: prompt_ids.len(),
+                prompt_token_count,
                 action_mask,
                 env_mask,
                 total_obs_len,

@@ -622,12 +622,13 @@
           </div>
           <div class="adv-row">
             <button type="button" class="btn btn-sm btn-ghost" id="openenv-adv-toggle" aria-expanded="false" aria-controls="openenv-advanced"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-gear"></use></svg> Advanced</button>
-            <span class="adv-summary">JSON actions · temperature 1 · LoRA rank 8 · thinking off · exact replay on</span>
+            <span class="adv-summary">reasoning trajectories · unlimited thinking unless explicitly budgeted · temperature 1 · LoRA rank 8 · exact replay</span>
           </div>
           <div class="adv-body" id="openenv-advanced" hidden>
             <div class="form-row">
               <div class="form-group"><label for="openenv-temperature">Action temperature</label><input id="openenv-temperature" type="number" value="1" min="0" step="0.1"></div>
               <div class="form-group"><label for="openenv-max-action-tokens">Max action tokens</label><input id="openenv-max-action-tokens" type="number" value="256" min="1" max="16384"></div>
+              <div class="form-group"><label for="openenv-thinking-budget-tokens">Thinking budget <span class="hint">— optional</span></label><input id="openenv-thinking-budget-tokens" type="number" min="0" max="16383" placeholder="unlimited"><div class="form-help">When blank, Kiln never force-closes thinking. Rollouts that emit no final action are retained for diagnosis and discarded from GRPO.</div></div>
               <div class="form-group"><label for="openenv-lora-rank">LoRA rank</label><input id="openenv-lora-rank" type="number" value="8" min="1" max="128" disabled aria-describedby="openenv-optimizer-support"></div>
               <div class="form-group"><label for="openenv-protocol-error-reward">Protocol-error reward</label><input id="openenv-protocol-error-reward" type="number" value="-1" step="0.1"></div>
               <div class="form-group"><label for="openenv-max-recoverable-errors">Recoverable errors</label><input id="openenv-max-recoverable-errors" type="number" value="3" min="0" max="64"></div>
@@ -669,7 +670,7 @@
                 <input id="openenv-environment-gate-improvement" type="number" value="0" min="0" step="any">
               </div>
             </div>
-            <label style="display:inline-flex;gap:var(--space-2);align-items:center;text-transform:none;font-weight:500;"><input id="openenv-thinking" type="checkbox"> Enable policy thinking</label>
+            <label style="display:inline-flex;gap:var(--space-2);align-items:center;text-transform:none;font-weight:500;"><input id="openenv-thinking" type="checkbox" checked> Train policy reasoning trajectories</label>
             <label style="display:inline-flex;gap:var(--space-2);align-items:center;text-transform:none;font-weight:500;margin-left:var(--space-4);"><input id="openenv-auto-load" type="checkbox" checked> Auto-load trained adapter</label>
           </div>
           <div class="form-help" id="openenv-optimizer-support">Optimizer capability details are still loading. Training remains disabled.</div>

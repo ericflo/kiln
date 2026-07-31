@@ -1416,6 +1416,9 @@ function openEnvRunCard(run) {
     : run.error
       ? `<div class="training-card-error">${escapeHtml(run.error)}</div>`
       : '';
+  const warnings = Array.isArray(run.warnings) && run.warnings.length
+    ? `<div class="training-card-meta" role="status"><strong>Warning</strong><br>${run.warnings.map(warning => escapeHtml(String(warning))).join('<br>')}</div>`
+    : '';
   const admissionDetail = admission
     ? state === 'queued'
       ? `<div class="training-card-meta">FIFO execution queue · position ${Number(admission.queue_position || 0).toLocaleString()} · ${Number(admission.max_active_runs || 0).toLocaleString()} active slot${Number(admission.max_active_runs || 0) === 1 ? '' : 's'}</div>`
@@ -1492,6 +1495,7 @@ function openEnvRunCard(run) {
     ${evalDetail}
     ${environmentDetail}
     ${environmentStatsDetail}
+    ${warnings}
     <div class="training-card-progress">
       <div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
       <div class="training-stat"><span class="training-stat-num">${escapeHtml(statValue)}</span><span class="training-stat-label">${escapeHtml(statLabel)}</span></div>
@@ -1596,6 +1600,17 @@ document.getElementById('openenv-form')?.addEventListener('submit', async event 
       capacity_wait_seconds: openEnvNumber('openenv-capacity-wait', 'Capacity wait'),
       auto_load: document.getElementById('openenv-auto-load').checked,
     };
+    const thinkingBudgetTokens = openEnvOptionalNumber('openenv-thinking-budget-tokens', 'Thinking budget');
+    if (thinkingBudgetTokens != null) {
+      if (!Number.isInteger(thinkingBudgetTokens) || thinkingBudgetTokens < 0) {
+        throw new Error('Thinking budget must be a non-negative integer.');
+      }
+      if (!request.thinking) throw new Error('Thinking budget requires reasoning trajectories to be enabled.');
+      if (thinkingBudgetTokens >= request.max_action_tokens) {
+        throw new Error('Thinking budget must be smaller than max action tokens so an explicitly budgeted request can emit an environment action.');
+      }
+      request.thinking_budget_tokens = thinkingBudgetTokens;
+    }
     if (credential_ids.length) request.credential_ids = credential_ids;
     if (environment_reset_options.length) request.environment_reset_options = environment_reset_options;
     if (request.groups < environment_urls.length) {

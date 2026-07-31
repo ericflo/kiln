@@ -1633,6 +1633,32 @@ pub fn model_forward_segment_with_policy(
                 linear_attn_idx += 1;
             }
         }
+
+        #[cfg(any(
+            feature = "cuda",
+            feature = "metal",
+            feature = "vulkan",
+            feature = "rocm"
+        ))]
+        {
+            // ROCm tape training treats every transformer-layer output as an
+            // authoritative numerical/readiness boundary. This is validation,
+            // never repair: non-finite activations fail at their producing layer.
+            let validate_layer_output = crate::tape_forward::tape_detect_anomaly_active()
+                || (tape_scope_active && matches!(hidden.device(), Device::Rocm(_)));
+            if validate_layer_output && !hidden.all_finite()? {
+                let attention_kind = match &layer.attention {
+                    GpuAttentionWeights::Full(_) => "full_attention",
+                    GpuAttentionWeights::Linear(_) => "gated_deltanet",
+                };
+                anyhow::bail!(
+                    "training forward produced a non-finite hidden activation after layer {i} ({attention_kind}); shape={:?} dtype={:?} device={}",
+                    hidden.shape(),
+                    hidden.dtype(),
+                    hidden.device()
+                );
+            }
+        }
     }
 
     Ok(hidden)
@@ -1799,6 +1825,27 @@ pub fn model_forward_no_head_with_policy(
         kiln_nvtx::range!(c"kiln/final_rmsnorm");
         rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?
     };
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
+    if crate::tape_forward::tape_scope_active() {
+        // The fused vocabulary tail consumes this tensor after the model
+        // forward has released all layer-local owners. Make that handoff an
+        // authoritative numerical/readiness boundary on every tape-training
+        // pass, not only in anomaly mode. This neither changes nor repairs
+        // values: a non-finite model output remains a hard training error.
+        if !normed.all_finite()? {
+            anyhow::bail!(
+                "training forward produced a non-finite activation in final RMSNorm; shape={:?} dtype={:?} device={}",
+                normed.shape(),
+                normed.dtype(),
+                normed.device()
+            );
+        }
+    }
     Ok(normed)
 }
 

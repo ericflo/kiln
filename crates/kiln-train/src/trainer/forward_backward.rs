@@ -795,6 +795,68 @@ pub(super) fn grpo_step_forward_backward_tape_authoritative_kt(
                 let loss_val = loss.to_scalar::<f32>().map_err(|e| {
                     kiln_kt_bridge::BridgeError::new(format!("GRPO(kt) loss.to_scalar: {e}"))
                 })? as f64;
+                let policy_finite = policy_log_probs.all_finite().map_err(|error| {
+                    kiln_kt_bridge::BridgeError::new(format!(
+                        "GRPO policy log-probability finite check before backward failed: {error}"
+                    ))
+                })?;
+                if !policy_finite {
+                    let host = policy_log_probs
+                        .to_dtype(DType::F32)
+                        .and_then(|values| values.flatten_all())
+                        .and_then(|values| values.to_device(cpu_device()))
+                        .and_then(|values| values.to_vec1::<f32>())
+                        .map_err(|error| {
+                            kiln_kt_bridge::BridgeError::new(format!(
+                                "read non-finite GRPO policy log-probabilities before backward: {error}"
+                            ))
+                        })?;
+                    let active_targets = action_mask
+                        .get(1..)
+                        .into_iter()
+                        .flatten()
+                        .enumerate()
+                        .filter_map(|(prediction_position, &active)| {
+                            active.then_some(prediction_position + 1)
+                        })
+                        .collect::<Vec<_>>();
+                    let failures = host
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, value)| !value.is_finite())
+                        .take(8)
+                        .map(|(selected_index, value)| {
+                            let target_position = active_targets.get(selected_index).copied();
+                            let target_token_id = target_position
+                                .and_then(|position| input_ids.get(position))
+                                .copied();
+                            format!(
+                                "selected_index={selected_index} target_position={target_position:?} target_token_id={target_token_id:?} value={value}"
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let failure_count = host.iter().filter(|value| !value.is_finite()).count();
+                    return Err(kiln_kt_bridge::BridgeError::new(format!(
+                        "GRPO policy log-probabilities were non-finite before backward: count={failure_count}/{} failures=[{}]",
+                        host.len(),
+                        failures.join(", ")
+                    )));
+                }
+                if !loss_val.is_finite() {
+                    return Err(kiln_kt_bridge::BridgeError::new(format!(
+                        "GRPO tape-authoritative(kt) produced a non-finite scalar loss before backward despite finite policy log-probabilities: loss={loss_val} behavior_log_probs_finite={:?} kl_reference_log_probs_finite={:?} advantage={} clip_low={} clip_high={} kl_coeff={} kl_estimator={:?} loss_normalizer={} is_level={:?} reinforce={}",
+                        behavior_log_probs.all_finite(),
+                        kl_reference_log_probs.all_finite(),
+                        loss_params.advantage,
+                        loss_params.clip_low,
+                        loss_params.clip_high,
+                        loss_params.kl_coeff,
+                        loss_params.kl_estimator,
+                        loss_params.loss_normalizer,
+                        loss_params.is_level,
+                        loss_params.reinforce,
+                    )));
+                }
                 Ok(((loss_val, env_ce, policy_log_probs), loss))
             },
         )

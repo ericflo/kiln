@@ -390,6 +390,14 @@ OpenEnv RL
           keyword/JSON-Pointer evidence and <code>ACTION_SCHEMA_VALIDATION_FAILED</code>.
         </p>
         <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
+          Thinking-on is the native OpenEnv default. A non-empty observation
+          <code>input_text</code> is pasted verbatim as the user turn. Kiln retains separated model
+          reasoning plus the final answer as the trainable GRPO Action trajectory, while only the
+          independently parsed, schema-valid final answer reaches the environment. The template-owned
+          thinking opener remains prompt context; the action mask begins on the first generated
+          reasoning token.
+        </p>
+        <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
           Train admission atomically persists <code>kiln.openenv-training-contract.v1</code> with the
           effective GRPO config and optional post-eval suite. Restart, trainer submission, CLI, and
           dashboard consume that sealed value instead of recomputing defaults; summary v5 embeds it
@@ -419,7 +427,7 @@ OpenEnv RL
         </p>
         <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
           Policy generation may be slower than an environment server&rsquo;s WebSocket idle timeout. Kiln
-          pumps Ping/Pong control frames while the model thinks without consuming application data.
+          pumps Ping/Pong control frames and periodic read-only <code>state</code> exchanges while the model thinks.
           A timeout, malformed or unsolicited frame, transport failure, or wrong response type poisons
           the session permanently&mdash;lock-step has no request ID with which to resynchronize.
         </p>

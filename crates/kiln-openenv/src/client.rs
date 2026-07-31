@@ -27,6 +27,8 @@ use crate::types::{
 use crate::{OpenEnvActionSchemaError, OpenEnvActionValidator};
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_SESSION_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
+const MIN_SESSION_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, thiserror::Error)]
 pub enum OpenEnvClientError {
@@ -891,8 +893,10 @@ impl OpenEnvSession {
     /// strictly lock-step. Long model inference can exceed a server's ping
     /// timeout, so callers should wrap that work here between an observation
     /// and the next action. Ping frames are answered, Pong frames are absorbed,
-    /// and any unsolicited application message poisons the session because it
-    /// cannot be correlated with a request.
+    /// and periodic read-only `state` exchanges also maintain servers whose
+    /// resource deadline is deliberately re-armed only by application data.
+    /// Any other unsolicited application message poisons the session because
+    /// it cannot be correlated with a request.
     pub async fn keep_alive_while<F>(&mut self, work: F) -> Result<F::Output, OpenEnvClientError>
     where
         F: Future,
@@ -900,7 +904,10 @@ impl OpenEnvSession {
         if self.closed {
             return Err(OpenEnvClientError::Closed);
         }
+        let maintenance_interval = session_maintenance_interval(self.request_timeout);
+        let maintenance = tokio::time::sleep(maintenance_interval);
         tokio::pin!(work);
+        tokio::pin!(maintenance);
         loop {
             tokio::select! {
                 // If policy completion and a buffered peer frame become ready
@@ -950,6 +957,13 @@ impl OpenEnvSession {
                     }
                 }
                 output = &mut work => return Ok(output),
+                _ = &mut maintenance => {
+                    // OpenEnv has no no-op message. `state` is the portable,
+                    // read-only lock-step exchange that proves this client is
+                    // still using the session without mutating the episode.
+                    let _ = self.state().await?;
+                    maintenance.as_mut().reset(tokio::time::Instant::now() + maintenance_interval);
+                }
             }
         }
     }
@@ -1061,6 +1075,13 @@ impl OpenEnvSession {
         self.closed = true;
         Err(error)
     }
+}
+
+fn session_maintenance_interval(request_timeout: Duration) -> Duration {
+    (request_timeout / 4).clamp(
+        MIN_SESSION_MAINTENANCE_INTERVAL,
+        MAX_SESSION_MAINTENANCE_INTERVAL,
+    )
 }
 
 fn bearer_token_bytes(authorization: Option<&HeaderValue>) -> Option<&[u8]> {

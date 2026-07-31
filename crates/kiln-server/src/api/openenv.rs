@@ -105,6 +105,10 @@ fn default_temperature() -> f32 {
     1.0
 }
 
+fn default_thinking() -> bool {
+    true
+}
+
 fn default_protocol_error_reward() -> f64 {
     -1.0
 }
@@ -256,9 +260,13 @@ pub struct OpenEnvRunRequest {
     pub concurrency: usize,
     #[serde(default = "default_max_action_tokens")]
     pub max_action_tokens: usize,
+    /// Explicit reasoning-token limit. Omit for unlimited thinking; Kiln does
+    /// not infer a final-answer reserve for OpenEnv rollouts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget_tokens: Option<usize>,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
-    #[serde(default)]
+    #[serde(default = "default_thinking")]
     pub thinking: bool,
     #[serde(default = "default_protocol_error_reward")]
     pub protocol_error_reward: f64,
@@ -397,6 +405,10 @@ pub struct OpenEnvRunStatus {
     pub training: Option<OpenEnvTrainingStatus>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub post_evaluations: Vec<OpenEnvPostEvalStatus>,
+    /// Non-fatal collection/training decisions that materially affect this
+    /// run, such as discarded no-output completions or zero-gradient groups.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment_evaluation: Option<OpenEnvEnvironmentEvalStatus>,
     /// Stable, bounded terminal diagnosis for new failed runs. `error` remains
@@ -432,6 +444,7 @@ impl OpenEnvRunStatus {
             && self.training_submission.is_none()
             && self.training.is_none()
             && self.post_evaluations.is_empty()
+            && self.warnings.is_empty()
             && self.failure.is_none()
     }
 
@@ -998,6 +1011,7 @@ impl OpenEnvRunRegistry {
             training_submission: None,
             training: None,
             post_evaluations: Vec::new(),
+            warnings: Vec::new(),
             environment_evaluation,
             failure: None,
             error: None,
@@ -1842,6 +1856,7 @@ fn rollout_options_for(
         max_steps: request.max_steps,
         concurrency: request.concurrency,
         max_action_tokens: request.max_action_tokens,
+        thinking_budget_tokens: request.thinking_budget_tokens,
         temperature: request.temperature,
         thinking: request.thinking,
         protocol_error_reward: request.protocol_error_reward,
@@ -1884,6 +1899,7 @@ fn environment_eval_rollout_options(
         max_steps: request.max_steps,
         concurrency: request.concurrency.min(config.group_size),
         max_action_tokens: request.max_action_tokens,
+        thinking_budget_tokens: request.thinking_budget_tokens,
         temperature: request.temperature,
         thinking: request.thinking,
         protocol_error_reward: request.protocol_error_reward,
@@ -2380,6 +2396,20 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
         );
     }
     collection.summary.training_contract = training_contract.clone();
+    let training_groups = if request.kind == OpenEnvRunKind::Train {
+        Some(crate::openenv_cli::select_openenv_training_groups(
+            &collection.groups,
+            &mut collection.summary,
+        ))
+    } else {
+        None
+    };
+    let training_warnings = collection
+        .summary
+        .training_selection
+        .as_ref()
+        .map(|selection| selection.warnings.clone())
+        .unwrap_or_default();
     anyhow::ensure!(!cancel.load(Ordering::Relaxed), "OpenEnv run cancelled");
     write_openenv_outputs(
         &options,
@@ -2406,6 +2436,7 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
                 .map(|inspection| inspection.identity.clone())
                 .collect();
             status.artifacts = artifacts;
+            status.warnings.clear();
             status.failure = None;
             status.error = None;
         })?;
@@ -2418,6 +2449,33 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
             groups = request.groups,
             rollouts = request.groups.saturating_mul(request.group_size),
             "OpenEnv rollout run completed"
+        );
+        return Ok(());
+    }
+
+    let training_groups = training_groups.expect("train run prepared GRPO selection");
+    if training_groups.is_empty() {
+        state.openenv_runs.update(run_id, |status| {
+            status.state = OpenEnvRunState::Completed;
+            status.finished_unix_ms = Some(now_unix_ms());
+            status.progress.groups_completed = request.groups;
+            status.progress.rollouts_completed = request.groups.saturating_mul(request.group_size);
+            status.rollout_stats = Some(collection.summary.stats.clone());
+            status.environments = collection
+                .summary
+                .environments
+                .iter()
+                .map(|inspection| inspection.identity.clone())
+                .collect();
+            status.artifacts = artifacts;
+            status.warnings = training_warnings.clone();
+            status.failure = None;
+            status.error = None;
+        })?;
+        tracing::warn!(
+            run_id,
+            groups_collected = collection.groups.len(),
+            "OpenEnv run completed without GRPO because every collected group was unusable or had zero reward gradient"
         );
         return Ok(());
     }
@@ -2435,6 +2493,7 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
             .map(|inspection| inspection.identity.clone())
             .collect();
         status.artifacts = artifacts;
+        status.warnings = training_warnings.clone();
         status.failure = None;
         status.error = None;
     })?;
@@ -2453,7 +2512,7 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
     let submission = super::training::submit_grpo_request(
         state,
         GrpoRequest {
-            groups: collection.groups,
+            groups: training_groups,
             dataset_path: None,
             dataset: None,
             dataset_split: None,
@@ -3384,6 +3443,7 @@ mod tests {
             max_steps: 8,
             concurrency: 2,
             max_action_tokens: 128,
+            thinking_budget_tokens: None,
             temperature: 1.0,
             thinking: false,
             protocol_error_reward: -1.0,
@@ -3395,6 +3455,16 @@ mod tests {
             post_eval: None,
             environment_eval: None,
         }
+    }
+
+    #[test]
+    fn openenv_run_request_defaults_to_thinking_trajectories() {
+        let request: OpenEnvRunRequest = serde_json::from_value(json!({
+            "environment_urls": ["http://127.0.0.1:8000"]
+        }))
+        .unwrap();
+        assert!(request.thinking);
+        assert_eq!(request.thinking_budget_tokens, None);
     }
 
     fn insert_created(

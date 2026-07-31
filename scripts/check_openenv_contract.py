@@ -116,7 +116,7 @@ def fixtures() -> dict[str, dict]:
         "concurrency": 1,
         "max_action_tokens": 32,
         "temperature": 1.0,
-        "thinking": False,
+        "thinking": True,
         "protocol_error_reward": -1.0,
         "max_recoverable_errors": 3,
         "capacity_wait_seconds": 300,
@@ -737,6 +737,8 @@ def main() -> int:
             failures.append(f"openenv_cli.rs is missing bounded-collection term {term}")
     for term in [
         "keep_alive_while",
+        "session_maintenance_interval",
+        "periodic read-only `state` exchanges",
         "UnsolicitedApplicationMessage",
         "fail_closed",
         "ensure_unchanged",
@@ -794,7 +796,7 @@ def main() -> int:
         if term not in cli:
             failures.append(f"openenv_cli.rs is missing identity-revalidation term {term}")
     if "keep_alive_while" not in cli:
-        failures.append("openenv_cli.rs does not pump control frames during policy generation")
+        failures.append("openenv_cli.rs does not maintain sessions during policy generation")
     for term in [
         "kiln.openenv-environment-evaluation.v1",
         "paired_return_sign_test_v1",
@@ -810,6 +812,7 @@ def main() -> int:
         "kiln openenv verify",
         "kiln openenv replay",
         "pumps Ping/Pong control frames",
+        "periodic read-only `state` exchanges",
         "poison the socket",
         "lock-step cannot resynchronize",
         "512 MiB aggregate retained-representation budget",

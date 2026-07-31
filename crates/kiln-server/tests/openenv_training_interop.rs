@@ -15,9 +15,9 @@ struct FakeKilnState {
     chat_requests: Arc<AtomicUsize>,
 }
 
-/// End-to-end proof that the native collector can learn from recoverable
-/// OpenEnv feedback, queue through remote capacity, emit a verifiable bundle,
-/// submit canonical GRPO, and replay the environment transcript exactly.
+/// End-to-end proof that the native collector preserves exact current OpenEnv
+/// text prompts, emits a verifiable mixed-reward bundle, submits canonical
+/// thinking-on GRPO, and replays the environment transcript exactly.
 #[tokio::test]
 #[ignore = "requires a live max-sessions=1 miniopenenv bandit server"]
 async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
@@ -55,11 +55,12 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
                 serde_json::json!({"difficulty": "hard"}),
                 serde_json::json!({"split": "train"}),
             ],
-            max_steps: 2,
+            max_steps: 1,
             concurrency: 2,
             max_action_tokens: 32,
+            thinking_budget_tokens: Some(16),
             temperature: 0.0,
-            thinking: false,
+            thinking: true,
             protocol_error_reward: -1.0,
             max_recoverable_errors: 1,
             capacity_wait_seconds: 10,
@@ -80,18 +81,18 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
         fake_behavior_policy()
     );
     assert_eq!(summary.rollout_count, 4);
-    assert_eq!(summary.stats.recoverable_protocol_error_count, 4);
+    assert_eq!(summary.stats.recoverable_protocol_error_count, 0);
     assert_eq!(summary.stats.protocol_error_count, 0);
     assert!(state.chat_requests.load(Ordering::Relaxed) > 0);
-    assert!(
-        summary.stats.capacity_retry_count >= 1,
-        "max-sessions=1 must exercise capacity-aware acquisition"
+    assert_eq!(summary.stats.invalid_model_action_count, 2);
+    assert_eq!(
+        summary
+            .rollouts
+            .iter()
+            .filter(|record| record.termination == OpenEnvEpisodeTerminationV1::MaxSteps)
+            .count(),
+        2
     );
-    assert!(summary.rollouts.iter().all(|record| {
-        record.termination == OpenEnvEpisodeTerminationV1::MaxSteps
-            && record.steps == 2
-            && record.recoverable_protocol_errors == 1
-    }));
     assert_eq!(
         state.training_preflight.lock().unwrap().as_ref().unwrap()["training_config"]["lora_rank"],
         8
@@ -149,6 +150,19 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
             .iter()
             .all(|rollout| rollout["openenv"]["environment_name"] == "BanditEnvironment")
     );
+    assert!(
+        submitted["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|group| group["completions"].as_array().unwrap())
+            .flat_map(|rollout| rollout["trajectory"].as_array().unwrap())
+            .filter(|segment| segment["kind"] == "action")
+            .all(|segment| segment["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("</think>"))),
+        "thinking-on OpenEnv collection must retain reasoning and the final environment action"
+    );
 
     let verified = verify_openenv_artifacts(&summary_path, None, None).unwrap();
     assert_eq!(
@@ -160,7 +174,7 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
         serde_json::json!({"seed": 72, "split": "train"})
     );
     assert_eq!(verified.report.rollouts, 4);
-    assert_eq!(verified.report.environment_exchanges, 8);
+    assert_eq!(verified.report.environment_exchanges, 2);
 
     let legacy_summary_path = directory.path().join("legacy-summary.json");
     let mut legacy_summary = summary.clone();
@@ -194,9 +208,7 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
     .await
     .unwrap();
     assert_eq!(replay_report.rollouts, 4);
-    assert_eq!(replay_report.environment_exchanges, 8);
-    assert!(replay_report.capacity_retries >= 1);
-    assert_eq!(replay_report.environment_prefix_only_rollouts, 0);
+    assert_eq!(replay_report.environment_exchanges, 2);
 
     server.abort();
 }
@@ -242,6 +254,7 @@ async fn direct_train_rejection_happens_before_environment_contact_or_artifacts(
             max_steps: 1,
             concurrency: 1,
             max_action_tokens: 16,
+            thinking_budget_tokens: None,
             temperature: 0.0,
             thinking: false,
             protocol_error_reward: -1.0,
@@ -319,33 +332,37 @@ async fn fake_chat(State(state): State<FakeKilnState>, Json(body): Json<Value>) 
     );
     state.chat_requests.fetch_add(1, Ordering::Relaxed);
     assert_eq!(body["rollout_provenance"], true);
-    assert!(
-        body["messages"].as_array().is_some_and(|messages| {
-            messages.iter().any(|message| {
-                message["content"].as_str().is_some_and(|content| {
-                    content.contains("OpenEnv input_text")
-                        && content.contains("Reply with one digit, the arm to pull")
-                        && content.contains("\"pulls\":0")
-                })
-            })
-        }),
-        "the generic policy prompt must foreground input_text and retain the complete wire observation"
+    assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
+    assert_eq!(
+        body["thinking_budget_tokens"], 16,
+        "only the explicitly configured OpenEnv thinking budget may close reasoning"
     );
-    let recovering = body["messages"].as_array().is_some_and(|messages| {
-        messages.iter().any(|message| {
-            message["content"]
-                .as_str()
-                .is_some_and(|content| content.contains("\"openenv_error\""))
-        })
-    });
-    let action = if recovering {
-        r#"{"arm":0}"#
+    let decision_prompt = body["messages"]
+        .as_array()
+        .and_then(|messages| messages.get(1))
+        .and_then(|message| message["content"].as_str())
+        .expect("OpenEnv reset input_text must be the first user message");
+    assert!(
+        decision_prompt.starts_with("Ten arms, 0 to 9.")
+            && decision_prompt.ends_with("Reply with one digit, the arm to pull: 0 to 9.")
+            && !decision_prompt.contains("Choose the next action")
+            && !decision_prompt.contains("OpenEnv input_text"),
+        "the current environment input_text must be the complete, unprefixed, unsuffixed user prompt: {decision_prompt:?}"
+    );
+    let valid = body["seed"].as_u64().unwrap_or_default() % 2 == 0;
+    let action = if valid { r#"{"arm":0}"# } else { "not json" };
+    let reasoning = if valid {
+        "Emit a schema-valid arm so the environment owns this candidate's reward."
     } else {
-        r#"{"arm":99}"#
+        "Emit a deliberately malformed final action for a deterministic negative candidate."
     };
     Json(json!({
         "choices": [{
-            "message": {"role": "assistant", "content": action},
+            "message": {
+                "role": "assistant",
+                "reasoning_content": reasoning,
+                "content": action
+            },
             "rollout_provenance": {"behavior_policy": fake_behavior_policy()}
         }],
         "usage": {"total_tokens": 4}

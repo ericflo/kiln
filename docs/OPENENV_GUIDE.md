@@ -186,10 +186,42 @@ one JSON object; Kiln compiles the schema during inspection and validates before
 protocol error. A mismatch never contacts `step`: it becomes
 `invalid_model_action` with `protocol_error_reward` and bounded
 `ACTION_SCHEMA_VALIDATION_FAILED` keyword/JSON-Pointer evidence. Optional
-observation `input_text` is foregrounded while the complete wire observation
-remains present. Recoverable environment errors remain same-episode feedback.
+observation `input_text` is pasted verbatim as the model-facing prompt, while
+the complete wire observation remains in rollout and replay provenance.
+Observations without that optional profile use the complete wire JSON.
+Recoverable environment errors remain same-episode feedback.
 
-Actions and observations become `TurnKind` segments. GRPO trains actions; ECHO trains observation tokens, excluding full-warning harness errors. Prompts retain reset and turn history, and Kiln pumps Ping/Pong control frames while the policy thinks. One-step exact-verifier environments—including eight math families—need no adapter; their text actions flow unchanged end to end.
+Thinking is the default for CLI, API, and dashboard OpenEnv runs. Kiln keeps
+separated `reasoning_content` and the final answer together as the model's
+trainable Action segment. Only the independently parsed, schema-valid final
+`content` is sent to `step`; hidden reasoning never changes the environment
+action. The action mask starts at the first model-generated reasoning token,
+after the template-owned `<think>` opener, and includes the closing delimiter
+and final answer. Kiln does not infer a reasoning cutoff or reserve final-answer
+tokens. Thinking is unlimited unless the run explicitly sets
+`--thinking-budget-tokens N` (or API `thinking_budget_tokens`); an omitted run
+budget also disables inherited server-wide token and time limits. Set
+`--thinking false` only when deliberately collecting a final-action-only
+policy.
+
+If generation ends while the policy is still thinking, there is no OpenEnv
+action to score or train. Kiln keeps the unfinished reasoning and the stable
+`MODEL_ACTION_NO_OUTPUT` diagnosis in the exact artifacts, but discards that
+completion from optimizer input without inventing a `</think>` close. Before
+submission, Kiln also skips any group with no remaining usable completion or
+with identical remaining rewards, because its group-normalized advantages are
+uniformly zero. These decisions are warnings in the summary and persisted run
+status; if every group is skipped, the run completes without creating a
+training job.
+
+Actions and observations become `TurnKind` segments. GRPO trains complete
+reasoning-and-answer actions; ECHO trains observation tokens, excluding
+full-warning harness errors. Prompts retain reset and turn history. While the
+policy thinks, Kiln pumps Ping/Pong control frames and periodic read-only `state` exchanges,
+which also maintains servers that renew resource leases
+only for application data. One-step exact-verifier environments—including
+eight math families—need no adapter; their text actions flow unchanged end to
+end.
 
 ## Identity and artifacts
 

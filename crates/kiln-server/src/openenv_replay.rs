@@ -1015,7 +1015,8 @@ fn verify_trajectory(
             exchange.step_index
         );
         anyhow::ensure!(
-            crate::openenv_cli::parse_model_action(&action.content).map_err(anyhow::Error::msg)?
+            crate::openenv_cli::parse_trajectory_model_action(&action.content)
+                .map_err(anyhow::Error::msg)?
                 == exchange.action,
             "OpenEnv group {group_index} candidate {candidate_index} step {} action differs from replay",
             exchange.step_index
@@ -1073,8 +1074,12 @@ fn verify_trajectory(
                 && error.role == "tool"
                 && error.kind == TurnKind::Observation
                 && error.warning_prefix_len == Some(error.content.len())
-                && error_value.pointer("/openenv_harness_error/code")
-                    == Some(&Value::String("INVALID_MODEL_ACTION".to_string()))
+                && error_value
+                    .pointer("/openenv_harness_error/code")
+                    .and_then(Value::as_str)
+                    .is_some_and(|code| {
+                        matches!(code, "INVALID_MODEL_ACTION" | "MODEL_ACTION_NO_OUTPUT")
+                    })
                 && error_value.get("done") == Some(&Value::Bool(true)),
             "OpenEnv group {group_index} candidate {candidate_index} invalid-model-action tail is malformed"
         );

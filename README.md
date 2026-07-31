@@ -244,8 +244,10 @@ OpenEnv error vocabulary. Recoverable protocol errors become corrective policy
 turns, while capacity saturation triggers bounded fresh-session acquisition.
 Every session connection repeats OpenEnv's status-only `/health` precondition
 immediately before the WebSocket upgrade.
-Kiln continues pumping Ping/Pong control frames while the model is generating
-an action, so slow policies do not lose their non-resumable episode. A timeout,
+Kiln continues pumping Ping/Pong control frames and periodic read-only `state`
+exchanges while the model is generating an action, so slow policies do not
+lose their non-resumable episode even when a server renews resource leases only
+for application data. A timeout,
 malformed or unsolicited application frame, wrong response type, or transport
 failure permanently poisons that socket; Kiln never risks assigning a late
 lock-step response to the wrong action.
@@ -277,10 +279,23 @@ Completed train runs also retain the native `train_receipt` and
 `kiln.openenv-training-data.v1` lineage directly in run status. The run remains
 auditable without joining another API or depending on the adapter directory's
 lifetime.
-When an observation offers a non-empty `input_text`, Kiln foregrounds that
-generic environment-provided decision text while retaining the complete wire
-observation and discovered JSON action schema; it remains optional, never a
-protocol requirement. Reproducible pull-request and push lanes discover and
+When an observation offers a non-empty `input_text`, Kiln pastes it verbatim as
+the model-facing prompt; the complete wire observation remains in rollout and
+replay provenance, and the discovered JSON action schema still governs the
+response. `input_text` remains an optional profile, never a protocol
+requirement; observations without it use the complete wire JSON. OpenEnv GRPO
+defaults to thinking mode: Kiln retains the generated `reasoning_content` plus
+the final answer as the trainable action trajectory, but parses and sends only
+the final `content` JSON to the environment. The template-owned `<think>`
+opener stays in the prompt mask, so gradients begin on the model's first
+reasoning token. Kiln does not infer or manufacture a thinking cutoff: an
+OpenEnv run omits the budget by default and explicitly disables inherited
+server limits. Set `thinking_budget_tokens` (API/dashboard) or
+`--thinking-budget-tokens` (CLI) only when an intentional cutoff is part of the
+experiment. If the policy never exits thinking, Kiln retains the unfinished
+reasoning for diagnosis but discards that completion from GRPO. Groups with no
+usable final actions or no reward variation are skipped with explicit warnings;
+they cannot contribute a policy-gradient update. Reproducible pull-request and push lanes discover and
 reset every environment published by the pinned oracle—currently twenty-two
 text-profiled servers, including eight one-step math families. A weekly edge
 lane derives the inventory again from upstream `main`, making additions and

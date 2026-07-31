@@ -33,7 +33,7 @@
 ))]
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use kiln_autograd::{Tape, TapeOptions, with_thread_local_tape_options};
 use kiln_tensor::TensorId as KtTensorId;
@@ -89,6 +89,75 @@ fn build_deposit_grad_map(
         }
     }
     Ok(out)
+}
+
+/// Compact structural evidence for a disconnected authoritative tape.
+///
+/// This is deliberately computed only after the strict gradient-deposit gate
+/// fails. It does not alter gradient semantics or turn missing gradients into
+/// zeros; it identifies which recorded operation boundary stopped connecting
+/// the scalar loss to the registered trainable leaves.
+fn tape_reachability_diagnostic(
+    tape: &Tape,
+    loss_id: KtTensorId,
+    input_map: &[(u64, usize)],
+) -> String {
+    let reachable = tape.reachable_from(loss_id);
+    let mapped_input_ids = input_map
+        .iter()
+        .map(|(input_id, _)| KtTensorId::from_raw(*input_id))
+        .collect::<HashSet<_>>();
+    let reachable_mapped_inputs = mapped_input_ids.intersection(&reachable).count();
+
+    let mut reachable_ops = BTreeMap::<&'static str, usize>::new();
+    let mut unreachable_ops = BTreeMap::<&'static str, usize>::new();
+    let mut reachable_indices = Vec::new();
+    for (index, node) in tape.nodes().iter().enumerate() {
+        let counts = if reachable.contains(&node.output_id) {
+            reachable_indices.push(index);
+            &mut reachable_ops
+        } else {
+            &mut unreachable_ops
+        };
+        *counts.entry(node.op.name()).or_default() += 1;
+    }
+
+    let first_reachable = reachable_indices.first().copied();
+    let last_reachable = reachable_indices.last().copied();
+    let frontier = first_reachable.map(|index| {
+        let start = index.saturating_sub(3);
+        let end = (index + 4).min(tape.nodes().len());
+        tape.nodes()[start..end]
+            .iter()
+            .enumerate()
+            .map(|(offset, node)| {
+                let node_index = start + offset;
+                format!(
+                    "{}:{}:{}",
+                    node_index,
+                    node.op.name(),
+                    if reachable.contains(&node.output_id) {
+                        "reachable"
+                    } else {
+                        "disconnected"
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    });
+
+    format!(
+        "tape reachability: nodes={} reachable_nodes={} reachable_ids={} mapped_inputs={} \
+         reachable_mapped_inputs={} first_reachable_node={first_reachable:?} \
+         last_reachable_node={last_reachable:?} frontier={frontier:?} \
+         reachable_ops={reachable_ops:?} disconnected_ops={unreachable_ops:?}",
+        tape.len(),
+        reachable_indices.len(),
+        reachable.len(),
+        mapped_input_ids.len(),
+        reachable_mapped_inputs,
+    )
 }
 
 /// One side of the bridge's per-thread mapping state.
@@ -286,7 +355,15 @@ where
                 })
                 .unwrap_or_default()
         });
-        let out = build_deposit_grad_map(input_map, &kt_grads, "authoritative grad map")?;
+        let diagnostic_input_map = input_map.clone();
+        let out = build_deposit_grad_map(input_map, &kt_grads, "authoritative grad map").map_err(
+            |error| {
+                BridgeError::new(format!(
+                    "{error}; {}",
+                    tape_reachability_diagnostic(&tape, loss_kt.id(), &diagnostic_input_map)
+                ))
+            },
+        )?;
         Ok((payload, loss_kt, out))
     })
 }

@@ -277,7 +277,10 @@ fn count_supervised_segments(trajectory: &[TurnSegment]) -> usize {
 /// `/workspace/Qwen3.5-4B/chat_template.jinja` on 2026-05-18):
 ///
 /// - **Standard ChatML role** (`system` / `user` / `assistant`):
-///   `<|im_start|>{role}\n{content}<|im_end|>`
+///   `<|im_start|>{role}\n{content}<|im_end|>`. Assistant templates may
+///   inject prompt-owned wrappers (notably Qwen's `<think>\n` opener), so
+///   Action masks cover the exact generated segment content inside the
+///   rendered message instead of every byte after the role marker.
 /// - **Qwen tool result** (`role == "tool"`): rendered *inside* a
 ///   `<|im_start|>user` block as `<tool_response>\n{content}\n</tool_response>`.
 ///   The masker therefore looks for the `<tool_response>` / `</tool_response>`
@@ -317,18 +320,20 @@ fn byte_search_strategy(
 
         // For Observation segments, look for the <tool_response>...</tool_response>
         // wrapper (Qwen-style) rather than a <|im_start|>tool marker.
-        let (content_start, content_end_abs, advance_to) =
-            if matches!(seg.kind, TurnKind::Observation) {
-                let open_rel = full_text[cursor..]
-                    .find(TOOL_RESPONSE_OPEN)
-                    .with_context(|| {
-                        format!(
-                            "byte-search: could not locate {:?} for tool result after cursor {}",
-                            TOOL_RESPONSE_OPEN, cursor
-                        )
-                    })?;
-                let content_start = cursor + open_rel + TOOL_RESPONSE_OPEN.len();
-                let close_rel = full_text[content_start..]
+        let (content_start, content_end_abs, advance_to) = if matches!(
+            seg.kind,
+            TurnKind::Observation
+        ) {
+            let open_rel = full_text[cursor..]
+                .find(TOOL_RESPONSE_OPEN)
+                .with_context(|| {
+                    format!(
+                        "byte-search: could not locate {:?} for tool result after cursor {}",
+                        TOOL_RESPONSE_OPEN, cursor
+                    )
+                })?;
+            let content_start = cursor + open_rel + TOOL_RESPONSE_OPEN.len();
+            let close_rel = full_text[content_start..]
                 .find(TOOL_RESPONSE_CLOSE)
                 .with_context(|| {
                     format!(
@@ -336,34 +341,45 @@ fn byte_search_strategy(
                         TOOL_RESPONSE_CLOSE, content_start
                     )
                 })?;
-                let content_end_abs = content_start + close_rel;
-                // Advance past the closing </tool_response>; surrounding
-                // <|im_end|> handled on the next iteration if any.
-                let advance = content_end_abs + TOOL_RESPONSE_CLOSE.len();
-                (content_start, content_end_abs, advance)
-            } else {
-                // Action / standard role: <|im_start|>{role}\n{content}<|im_end|>
-                let role_marker = format!("<|im_start|>{}\n", seg.role);
-                let role_start = full_text[cursor..].find(&role_marker).with_context(|| {
+            let content_end_abs = content_start + close_rel;
+            // Advance past the closing </tool_response>; surrounding
+            // <|im_end|> handled on the next iteration if any.
+            let advance = content_end_abs + TOOL_RESPONSE_CLOSE.len();
+            (content_start, content_end_abs, advance)
+        } else {
+            // Action / standard role: <|im_start|>{role}\n{content}<|im_end|>
+            let role_marker = format!("<|im_start|>{}\n", seg.role);
+            let role_start = full_text[cursor..].find(&role_marker).with_context(|| {
+                format!(
+                    "byte-search: could not locate role marker {:?} after cursor {}",
+                    role_marker, cursor
+                )
+            })?;
+            let rendered_content_start = cursor + role_start + role_marker.len();
+            let rendered_content_end_rel = full_text[rendered_content_start..]
+                .find(MESSAGE_END)
+                .with_context(|| {
                     format!(
-                        "byte-search: could not locate role marker {:?} after cursor {}",
-                        role_marker, cursor
+                        "byte-search: could not locate {} after content start {}",
+                        MESSAGE_END, rendered_content_start
                     )
                 })?;
-                let content_start = cursor + role_start + role_marker.len();
-                let content_end_rel =
-                    full_text[content_start..]
-                        .find(MESSAGE_END)
-                        .with_context(|| {
-                            format!(
-                                "byte-search: could not locate {} after content start {}",
-                                MESSAGE_END, content_start
-                            )
-                        })?;
-                let content_end_abs = content_start + content_end_rel;
-                let advance = content_end_abs + MESSAGE_END.len();
-                (content_start, content_end_abs, advance)
+            let rendered_content_end = rendered_content_start + rendered_content_end_rel;
+            let (content_start, content_end_abs) = if matches!(seg.kind, TurnKind::Action) {
+                let rendered_content = &full_text[rendered_content_start..rendered_content_end];
+                let exact_start = rendered_content.find(&seg.content).with_context(|| {
+                        format!(
+                            "byte-search: rendered assistant turn does not preserve exact generated action content after cursor {cursor}"
+                        )
+                    })?;
+                let content_start = rendered_content_start + exact_start;
+                (content_start, content_start + seg.content.len())
+            } else {
+                (rendered_content_start, rendered_content_end)
             };
+            let advance = rendered_content_end + MESSAGE_END.len();
+            (content_start, content_end_abs, advance)
+        };
 
         // Apply warning_filter for Observation segments. `effective_start`
         // is where the env_mask is allowed to begin; `content_start` is the
@@ -882,9 +898,7 @@ mod tests {
         let traj = vec![
             TurnSegment {
                 role: "assistant".into(),
-                content:
-                    "<tool_call>{\"name\":\"bash\",\"arguments\":{\"cmd\":\"ls /tmp\"}}</tool_call>"
-                        .into(),
+                content: "I should inspect the directory first.\n</think>\n\n<tool_call>{\"name\":\"bash\",\"arguments\":{\"cmd\":\"ls /tmp\"}}</tool_call>".into(),
                 kind: TurnKind::Action,
                 tool_call_id: None,
                 warning_prefix_len: None,
@@ -898,7 +912,7 @@ mod tests {
             },
             TurnSegment {
                 role: "assistant".into(),
-                content: "Found two files: file1.txt and file2.txt.".into(),
+                content: "The tool returned exactly two names.\n</think>\n\nFound two files: file1.txt and file2.txt.".into(),
                 kind: TurnKind::Action,
                 tool_call_id: None,
                 warning_prefix_len: None,
@@ -939,6 +953,25 @@ mod tests {
         assert!(
             n_action >= 5,
             "expected at least 5 action tokens (covers both assistant turns); got {n_action}"
+        );
+        let action_ids = result
+            .input_ids
+            .iter()
+            .zip(&result.action_mask)
+            .filter_map(|(&token, &active)| active.then_some(token))
+            .collect::<Vec<_>>();
+        let decoded_action = tok.decode(&action_ids)?;
+        assert!(
+            decoded_action.contains("I should inspect the directory first."),
+            "real Qwen action mask omitted generated reasoning: {decoded_action:?}"
+        );
+        assert!(
+            decoded_action.contains("</think>"),
+            "real Qwen action mask omitted thinking terminator: {decoded_action:?}"
+        );
+        assert!(
+            !decoded_action.trim_start().starts_with("<think>"),
+            "real Qwen action mask included prompt-owned thinking opener: {decoded_action:?}"
         );
         assert!(
             n_env >= 3,

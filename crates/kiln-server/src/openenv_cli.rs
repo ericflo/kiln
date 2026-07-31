@@ -316,6 +316,11 @@ pub struct OpenEnvRolloutArgs {
     #[arg(long = "max-action-tokens", default_value_t = 256)]
     max_action_tokens: usize,
 
+    /// Explicit maximum reasoning tokens before Kiln closes thinking. Omit
+    /// for unlimited thinking; unfinished reasoning is discarded from GRPO.
+    #[arg(long = "thinking-budget-tokens")]
+    thinking_budget_tokens: Option<usize>,
+
     /// Policy sampling temperature
     #[arg(long, default_value_t = 1.0)]
     temperature: f32,
@@ -325,7 +330,7 @@ pub struct OpenEnvRolloutArgs {
         long,
         action = clap::ArgAction::Set,
         value_parser = clap::value_parser!(bool),
-        default_value_t = false
+        default_value_t = true
     )]
     thinking: bool,
 
@@ -606,6 +611,9 @@ pub struct OpenEnvRolloutOptions {
     pub max_steps: usize,
     pub concurrency: usize,
     pub max_action_tokens: usize,
+    /// Explicit reasoning limit for this collection. `None` means unlimited;
+    /// Kiln does not infer a reserve or inherit a server default.
+    pub thinking_budget_tokens: Option<usize>,
     pub temperature: f32,
     pub thinking: bool,
     pub protocol_error_reward: f64,
@@ -637,6 +645,7 @@ impl std::fmt::Debug for OpenEnvRolloutOptions {
             .field("max_steps", &self.max_steps)
             .field("concurrency", &self.concurrency)
             .field("max_action_tokens", &self.max_action_tokens)
+            .field("thinking_budget_tokens", &self.thinking_budget_tokens)
             .field("thinking", &self.thinking)
             .finish_non_exhaustive()
     }
@@ -752,6 +761,10 @@ pub struct OpenEnvRolloutSummary {
     pub max_steps: usize,
     pub concurrency: usize,
     pub max_action_tokens: usize,
+    /// Explicit reasoning limit used by policy requests. Omitted means
+    /// unlimited thinking, not an inferred final-answer reserve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget_tokens: Option<usize>,
     pub temperature: f32,
     pub thinking: bool,
     pub protocol_error_reward: f64,
@@ -773,6 +786,11 @@ pub struct OpenEnvRolloutSummary {
     pub replay_bytes: usize,
     pub stats: OpenEnvRolloutStats,
     pub rollouts: Vec<OpenEnvRolloutRecord>,
+    /// Present when the collection was considered for native GRPO. The
+    /// artifact bundle retains every observed episode; this projection names
+    /// exactly which groups/completions were eligible for optimizer work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training_selection: Option<OpenEnvTrainingSelection>,
     /// Exact native training settings admitted before collection. Rollout-only
     /// receipts omit this field; train receipts retain it even if final trainer
     /// submission fails.
@@ -780,6 +798,18 @@ pub struct OpenEnvRolloutSummary {
     pub training_contract: Option<OpenEnvTrainingContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub training_submission: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OpenEnvTrainingSelection {
+    pub groups_submitted: usize,
+    pub rollouts_submitted: usize,
+    pub no_output_rollouts_discarded: usize,
+    pub no_usable_output_groups_skipped: usize,
+    pub no_reward_gradient_groups_skipped: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -997,7 +1027,7 @@ fn charge_serialized(
 
 #[derive(Debug)]
 struct ModelAction {
-    raw: String,
+    trajectory_content: String,
     action: Value,
     total_tokens: usize,
     latency_ms: f64,
@@ -1006,10 +1036,18 @@ struct ModelAction {
 
 #[derive(Debug)]
 enum ModelActionFailure {
+    NoOutput {
+        message: String,
+        reasoning: Option<String>,
+        total_tokens: usize,
+        latency_ms: f64,
+        behavior_policy: RolloutBehaviorPolicyIdentityV1,
+    },
     Invalid {
         code: &'static str,
         message: String,
         raw: Option<String>,
+        trajectory_content: Option<String>,
         total_tokens: usize,
         latency_ms: f64,
         behavior_policy: RolloutBehaviorPolicyIdentityV1,
@@ -2083,6 +2121,7 @@ fn openenv_rollout_options(args: &OpenEnvRolloutArgs) -> OpenEnvRolloutOptions {
         max_steps: args.max_steps,
         concurrency: args.concurrency,
         max_action_tokens: args.max_action_tokens,
+        thinking_budget_tokens: args.thinking_budget_tokens,
         temperature: args.temperature,
         thinking: args.thinking,
         protocol_error_reward: args.protocol_error_reward,
@@ -2149,20 +2188,34 @@ fn print_openenv_summary(summary: &OpenEnvRolloutSummary, submitted_training: bo
                 .unwrap_or_default()
         );
     }
-    if submitted_training {
-        let submission = summary
-            .training_submission
-            .as_ref()
-            .context("OpenEnv train completed without a training submission receipt")?;
+    if let Some(selection) = summary.training_selection.as_ref() {
         println!(
-            "{} GRPO training submitted{}",
-            style("✓").green().bold(),
-            submission
-                .get("job_id")
-                .and_then(Value::as_str)
-                .map(|job_id| format!(" as {job_id}"))
-                .unwrap_or_default()
+            "  GRPO input:  {} groups · {} rollouts · {} no-output rollouts discarded",
+            selection.groups_submitted,
+            selection.rollouts_submitted,
+            selection.no_output_rollouts_discarded
         );
+        for warning in &selection.warnings {
+            println!("{} {warning}", style("!").yellow().bold());
+        }
+    }
+    if submitted_training {
+        if let Some(submission) = summary.training_submission.as_ref() {
+            println!(
+                "{} GRPO training submitted{}",
+                style("✓").green().bold(),
+                submission
+                    .get("job_id")
+                    .and_then(Value::as_str)
+                    .map(|job_id| format!(" as {job_id}"))
+                    .unwrap_or_default()
+            );
+        } else {
+            println!(
+                "{} GRPO submission skipped because the collected batch had no trainable reward group",
+                style("!").yellow().bold()
+            );
+        }
     }
     Ok(())
 }
@@ -2225,15 +2278,24 @@ pub async fn run_openenv_train(options: OpenEnvTrainOptions) -> Result<OpenEnvRo
         "Kiln behavior policy changed after OpenEnv training preflight and before collection completed"
     );
     collection.summary.training_contract = Some(preflight.training_contract());
+    let training_groups =
+        select_openenv_training_groups(&collection.groups, &mut collection.summary);
     write_openenv_outputs(
         &options.rollout,
         &collection.groups,
         &collection.replay,
         &collection.summary,
     )?;
+    if training_groups.is_empty() {
+        tracing::warn!(
+            groups_collected = collection.groups.len(),
+            "OpenEnv batch has no trainable reward group; skipping GRPO submission"
+        );
+        return Ok(collection.summary);
+    }
     let submission = submit_openenv_training(
         &options.rollout.kiln_url,
-        &collection.groups,
+        &training_groups,
         &preflight.effective_config,
         preflight.post_eval.as_ref(),
     )
@@ -2241,6 +2303,102 @@ pub async fn run_openenv_train(options: OpenEnvTrainOptions) -> Result<OpenEnvRo
     collection.summary.training_submission = Some(submission);
     write_summary_atomic(&options.rollout.summary_output, &collection.summary)?;
     Ok(collection.summary)
+}
+
+fn rollout_has_no_model_output(rollout: &ScoredRollout) -> bool {
+    rollout.trajectory.last().is_some_and(|segment| {
+        serde_json::from_str::<Value>(&segment.content)
+            .ok()
+            .and_then(|value| {
+                value
+                    .pointer("/openenv_harness_error/code")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .as_deref()
+            == Some("MODEL_ACTION_NO_OUTPUT")
+    })
+}
+
+/// Produce the exact optimizer input from a complete diagnostic collection.
+/// No-output completions are discarded individually. A group is submitted
+/// only when at least two remaining rewards differ, because otherwise its
+/// group-normalized advantage is uniformly zero.
+pub(crate) fn select_openenv_training_groups(
+    groups: &[AgenticGroup],
+    summary: &mut OpenEnvRolloutSummary,
+) -> Vec<AgenticGroup> {
+    let (selected, selection) = openenv_training_group_selection(groups);
+    summary.training_selection = Some(selection);
+    selected
+}
+
+fn openenv_training_group_selection(
+    groups: &[AgenticGroup],
+) -> (Vec<AgenticGroup>, OpenEnvTrainingSelection) {
+    let mut selected = Vec::with_capacity(groups.len());
+    let mut selection = OpenEnvTrainingSelection::default();
+
+    for (group_index, group) in groups.iter().enumerate() {
+        let mut completions = Vec::with_capacity(group.completions.len());
+        let mut group_no_output = 0usize;
+        for rollout in &group.completions {
+            if rollout_has_no_model_output(rollout) {
+                group_no_output = group_no_output.saturating_add(1);
+                selection.no_output_rollouts_discarded =
+                    selection.no_output_rollouts_discarded.saturating_add(1);
+            } else {
+                completions.push(rollout.clone());
+            }
+        }
+
+        let warning = if completions.is_empty() {
+            selection.no_usable_output_groups_skipped =
+                selection.no_usable_output_groups_skipped.saturating_add(1);
+            Some(format!(
+                "OpenEnv group {group_index} produced no final model actions; discarded every completion and skipped training for the group"
+            ))
+        } else {
+            if group_no_output > 0 {
+                selection.warnings.push(format!(
+                    "OpenEnv group {group_index} discarded {group_no_output} completion(s) that produced no final model action before GRPO"
+                ));
+            }
+            let first_reward = completions[0].reward;
+            if completions
+                .iter()
+                .skip(1)
+                .all(|rollout| rollout.reward == first_reward)
+            {
+                selection.no_reward_gradient_groups_skipped = selection
+                    .no_reward_gradient_groups_skipped
+                    .saturating_add(1);
+                Some(format!(
+                    "OpenEnv group {group_index} has no reward variation across its {} usable completion(s); skipped zero-gradient GRPO work",
+                    completions.len()
+                ))
+            } else {
+                None
+            }
+        };
+
+        if let Some(warning) = warning {
+            tracing::warn!(group_index, warning = %warning, "skipping OpenEnv GRPO group");
+            selection.warnings.push(warning);
+            continue;
+        }
+
+        selection.rollouts_submitted = selection
+            .rollouts_submitted
+            .saturating_add(completions.len());
+        selected.push(AgenticGroup {
+            messages: group.messages.clone(),
+            completions,
+        });
+    }
+
+    selection.groups_submitted = selected.len();
+    (selected, selection)
 }
 
 pub async fn collect_openenv_rollouts(
@@ -2517,6 +2675,7 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
         max_steps: options.max_steps,
         concurrency: options.concurrency,
         max_action_tokens: options.max_action_tokens,
+        thinking_budget_tokens: options.thinking_budget_tokens,
         temperature: options.temperature,
         thinking: options.thinking,
         protocol_error_reward: options.protocol_error_reward,
@@ -2533,6 +2692,7 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
         replay_bytes,
         stats,
         rollouts: records,
+        training_selection: None,
         training_contract: None,
         training_submission: None,
     };
@@ -2637,6 +2797,7 @@ async fn run_candidate_episode(
                 adapter_label,
                 generation_seed,
                 options.max_action_tokens,
+                options.thinking_budget_tokens,
                 options.temperature,
                 options.thinking,
             ))
@@ -2649,10 +2810,9 @@ async fn run_candidate_episode(
             })?;
         let model_action = match model_action {
             Ok(action) => action,
-            Err(ModelActionFailure::Invalid {
-                code,
+            Err(ModelActionFailure::NoOutput {
                 message,
-                raw,
+                reasoning,
                 total_tokens,
                 latency_ms,
                 behavior_policy: action_behavior_policy,
@@ -2666,8 +2826,58 @@ async fn run_candidate_episode(
                 )?;
                 total_model_tokens = total_model_tokens.saturating_add(total_tokens);
                 total_model_latency_ms += latency_ms;
-                let raw = raw.unwrap_or_else(|| invalid_action_raw(&message));
-                let action_turn = action_segment(raw);
+                // Preserve unfinished reasoning exactly for diagnosis, but do
+                // not invent a closing </think> marker. Training selection
+                // recognizes this stable code and discards the completion.
+                let action_turn = action_segment(reasoning.unwrap_or_default());
+                let error_turn = harness_error_segment(&json!({
+                    "openenv_harness_error": {
+                        "code": "MODEL_ACTION_NO_OUTPUT",
+                        "message": message
+                    },
+                    "done": true
+                }))?;
+                charge_serialized(
+                    retained_budget,
+                    &mut retained_bytes,
+                    &action_turn,
+                    "no-output model action turn",
+                )?;
+                charge_serialized(
+                    retained_budget,
+                    &mut retained_bytes,
+                    &error_turn,
+                    "no-output model action error turn",
+                )?;
+                trajectory.push(action_turn);
+                trajectory.push(error_turn);
+                episode_return += options.protocol_error_reward;
+                termination = OpenEnvEpisodeTerminationV1::InvalidModelAction;
+                break;
+            }
+            Err(ModelActionFailure::Invalid {
+                code,
+                message,
+                raw,
+                trajectory_content,
+                total_tokens,
+                latency_ms,
+                behavior_policy: action_behavior_policy,
+            }) => {
+                observe_openenv_behavior_policy(
+                    &mut behavior_policy,
+                    action_behavior_policy,
+                    group_index,
+                    candidate_index,
+                    step_index,
+                )?;
+                total_model_tokens = total_model_tokens.saturating_add(total_tokens);
+                total_model_latency_ms += latency_ms;
+                let action_turn = action_segment(
+                    trajectory_content
+                        .or(raw)
+                        .unwrap_or_else(|| invalid_action_raw(&message)),
+                );
                 let error_turn = harness_error_segment(&json!({
                     "openenv_harness_error": {
                         "code": code,
@@ -2696,7 +2906,7 @@ async fn run_candidate_episode(
             Err(ModelActionFailure::Request(error)) => return Err(error),
         };
         let ModelAction {
-            raw,
+            trajectory_content,
             action,
             total_tokens,
             latency_ms,
@@ -2711,7 +2921,7 @@ async fn run_candidate_episode(
         )?;
         total_model_tokens = total_model_tokens.saturating_add(total_tokens);
         total_model_latency_ms += latency_ms;
-        let action_turn = action_segment(raw);
+        let action_turn = action_segment(trajectory_content);
         charge_serialized(
             retained_budget,
             &mut retained_bytes,
@@ -2921,6 +3131,7 @@ async fn generate_model_action(
     adapter_label: &str,
     seed: u64,
     max_tokens: usize,
+    thinking_budget_tokens: Option<usize>,
     temperature: f32,
     thinking: bool,
 ) -> std::result::Result<ModelAction, ModelActionFailure> {
@@ -2931,7 +3142,7 @@ async fn generate_model_action(
         tool_call_id: segment.tool_call_id.clone(),
         ..Default::default()
     }));
-    let body = json!({
+    let mut body = json!({
         "messages": request_messages,
         "adapter": adapter,
         "stream": false,
@@ -2944,6 +3155,13 @@ async fn generate_model_action(
             "enable_thinking": thinking
         }
     });
+    // OpenEnv collection owns its reasoning semantics. An omitted run budget
+    // is sent as explicit `null` so a server-wide default cannot silently
+    // truncate a rollout; a numeric value is applied only when the caller set
+    // it. Time budgeting is likewise explicitly disabled for this token-only
+    // contract.
+    body["thinking_budget_tokens"] = thinking_budget_tokens.map_or(Value::Null, Value::from);
+    body["thinking_budget_ms"] = Value::Null;
     let started = Instant::now();
     let response_body = policy.complete(body).await.map_err(|error| {
         ModelActionFailure::Request(error.context(format!(
@@ -2969,31 +3187,45 @@ async fn generate_model_action(
             Ok(identity)
         })
         .map_err(ModelActionFailure::Request)?;
+    let reasoning = response_body
+        .pointer("/choices/0/message/reasoning_content")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
     let raw = response_body
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
-        .ok_or_else(|| ModelActionFailure::Invalid {
-            code: "INVALID_MODEL_ACTION",
-            message: "Kiln response choices[0].message.content is missing or not text".to_string(),
-            raw: None,
+        .unwrap_or_default()
+        .to_string();
+    if raw.trim().is_empty() {
+        let finish_reason = response_body
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+            .unwrap_or("unspecified");
+        return Err(ModelActionFailure::NoOutput {
+            message: format!(
+                "policy produced no final environment action (finish_reason={finish_reason}); unfinished thinking is diagnostic data and is not eligible for GRPO"
+            ),
+            reasoning: reasoning.map(ToOwned::to_owned),
             total_tokens,
             latency_ms,
-            behavior_policy: behavior_policy.clone(),
-        })?
-        .to_string();
+            behavior_policy,
+        });
+    }
+    let trajectory_content = model_action_trajectory_content(&raw, reasoning, thinking);
     let action =
         parse_and_validate_model_action(&raw, action_validator).map_err(|(code, message)| {
             ModelActionFailure::Invalid {
                 code,
                 message,
                 raw: Some(raw.clone()),
+                trajectory_content: Some(trajectory_content.clone()),
                 total_tokens,
                 latency_ms,
                 behavior_policy: behavior_policy.clone(),
             }
         })?;
     Ok(ModelAction {
-        raw,
+        trajectory_content,
         action,
         total_tokens,
         latency_ms,
@@ -3035,18 +3267,15 @@ pub(crate) fn initial_messages(
                  Environment description: {description}\n\
                  At every turn, reply with exactly one JSON object that validates against this action schema:\n\
                  {action_schema}\n\
-                 Do not use Markdown, commentary, or a code fence. If the observation includes an \
-                 input_text field, treat it as environment-provided decision text, but still encode \
-                 your answer as the JSON object required by the action schema. The complete \
-                 environment observation will follow.",
+                 Do not use Markdown, commentary, or a code fence. A non-empty input_text field is \
+                 pasted verbatim as the environment's decision prompt; otherwise the complete \
+                 environment observation follows as JSON. In either case, encode your answer as \
+                 the JSON object required by the action schema.",
                 name = metadata.name,
                 description = metadata.description
             ),
         ),
-        ChatMessage::new(
-            "user",
-            format!("{observation}\n\nChoose the next action as one JSON object."),
-        ),
+        ChatMessage::new("user", observation),
     ])
 }
 
@@ -3058,6 +3287,27 @@ fn action_segment(content: String) -> TurnSegment {
         tool_call_id: None,
         warning_prefix_len: None,
     }
+}
+
+/// Preserve the generated reasoning stream while keeping the environment
+/// action independently parseable. Qwen's prompt already supplies
+/// `<think>\n`; retaining the reasoning plus closing suffix (without another
+/// opening tag) lets the chat template reconstruct the exact prior assistant
+/// turn and makes the trajectory action mask start at the first generated
+/// reasoning token rather than at prompt-owned scaffolding.
+fn model_action_trajectory_content(
+    action: &str,
+    reasoning: Option<&str>,
+    thinking: bool,
+) -> String {
+    if !thinking {
+        return action.to_string();
+    }
+    // The completion splitter returns the exact bytes before and after the
+    // generated close tag. Joining those parts around only the removed tag
+    // reconstructs the model output byte-for-byte, including whitespace and
+    // the valid immediate-close case where reasoning_content is absent.
+    format!("{}</think>{action}", reasoning.unwrap_or_default())
 }
 
 fn observation_segment(observation: &OpenEnvObservation) -> Result<TurnSegment> {
@@ -3082,11 +3332,7 @@ pub(crate) fn model_observation_content(
         .and_then(Value::as_str)
         .filter(|text| !text.trim().is_empty());
     Ok(match input_text {
-        Some(input_text) => format!(
-            "OpenEnv input_text (environment-provided decision text):\n{input_text}\n\n\
-             Complete OpenEnv {label} (authoritative observation, reward, done, and optional metadata JSON):\n\
-             {complete}"
-        ),
+        Some(input_text) => input_text.to_string(),
         None => format!(
             "OpenEnv {label} (observation, reward, done, and optional metadata JSON):\n{complete}"
         ),
@@ -3147,6 +3393,16 @@ pub(crate) fn parse_model_action(raw: &str) -> std::result::Result<Value, String
         ));
     }
     Ok(value)
+}
+
+/// Parse the final environment action from a retained assistant trajectory.
+/// Thinking-on trajectories contain generated reasoning and a real closing
+/// delimiter before the independently parseable `content` JSON.
+pub(crate) fn parse_trajectory_model_action(raw: &str) -> std::result::Result<Value, String> {
+    let final_action = raw
+        .split_once("</think>")
+        .map_or(raw, |(_, final_action)| final_action);
+    parse_model_action(final_action)
 }
 
 fn parse_and_validate_model_action(
@@ -3388,6 +3644,17 @@ pub(crate) fn validate_options(options: &OpenEnvRolloutOptions) -> Result<()> {
         options.max_action_tokens > 0 && options.max_action_tokens <= MAX_OPENENV_ACTION_TOKENS,
         "OpenEnv max action tokens must be in 1..={MAX_OPENENV_ACTION_TOKENS}"
     );
+    anyhow::ensure!(
+        options.thinking || options.thinking_budget_tokens.is_none(),
+        "OpenEnv thinking-budget-tokens requires thinking=true"
+    );
+    if let Some(budget) = options.thinking_budget_tokens {
+        anyhow::ensure!(
+            budget < options.max_action_tokens,
+            "OpenEnv thinking-budget-tokens ({budget}) must be smaller than max-action-tokens ({}) so an explicitly budgeted request can still emit an environment action",
+            options.max_action_tokens
+        );
+    }
     anyhow::ensure!(
         options.temperature.is_finite() && options.temperature >= 0.0,
         "OpenEnv action temperature must be finite and non-negative"
@@ -3847,6 +4114,8 @@ fn json_type_name(value: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
     use axum::Json;
     use axum::Router;
     use axum::body::Body;
@@ -3973,14 +4242,20 @@ mod tests {
             "false",
         ])
         .unwrap();
-        assert!(matches!(
-            train.command,
-            Some(Commands::Openenv(OpenEnvCommands::Train {
-                output_adapter,
-                auto_load: false,
-                ..
-            })) if output_adapter == "agent-v2"
-        ));
+        let Some(Commands::Openenv(OpenEnvCommands::Train {
+            rollout,
+            output_adapter,
+            auto_load: false,
+            ..
+        })) = train.command
+        else {
+            panic!("expected openenv train command");
+        };
+        assert_eq!(output_adapter, "agent-v2");
+        assert!(
+            rollout.thinking,
+            "OpenEnv training must default to reasoning trajectories"
+        );
 
         let start = Cli::try_parse_from([
             "kiln",
@@ -4514,6 +4789,18 @@ mod tests {
         assert!(parse_model_action("answer B").is_err());
         assert!(parse_model_action("[1,2]").is_err());
         assert!(parse_model_action("{} trailing").is_err());
+        assert_eq!(
+            parse_trajectory_model_action("reason carefully\n</think>\n\n{\"answer\":\"B\"}")
+                .unwrap(),
+            json!({"answer": "B"})
+        );
+        assert_eq!(
+            parse_trajectory_model_action(
+                "reason carefully</think>{\"answer\":\"literal </think> text\"}"
+            )
+            .unwrap(),
+            json!({"answer": "literal </think> text"})
+        );
     }
 
     #[test]
@@ -4621,7 +4908,7 @@ mod tests {
     }
 
     #[test]
-    fn optional_input_text_is_foregrounded_without_hiding_the_wire_observation() {
+    fn optional_input_text_is_the_exact_prompt_with_generic_json_fallback() {
         let observation = OpenEnvObservation {
             observation: json!({
                 "input_text": "Board here. Reply with one digit.",
@@ -4632,11 +4919,7 @@ mod tests {
             metadata: None,
         };
         let content = model_observation_content("step result", &observation).unwrap();
-        assert!(content.starts_with("OpenEnv input_text"));
-        assert!(content.contains("Board here. Reply with one digit."));
-        assert!(content.contains("Complete OpenEnv step result"));
-        assert!(content.contains(r#""legal_actions":[0,2]"#));
-        assert!(content.contains(r#""reward":1"#));
+        assert_eq!(content, "Board here. Reply with one digit.");
 
         let ordinary = OpenEnvObservation {
             observation: json!({"position": 7}),
@@ -4645,8 +4928,167 @@ mod tests {
             metadata: None,
         };
         let content = model_observation_content("reset result", &ordinary).unwrap();
-        assert!(!content.contains("OpenEnv input_text"));
+        assert!(content.starts_with("OpenEnv reset result"));
         assert!(content.contains(r#""position":7"#));
+    }
+
+    #[test]
+    fn reasoning_is_retained_as_generated_action_without_duplicating_prompt_think_open() {
+        assert_eq!(
+            model_action_trajectory_content(
+                r#"{"answer":"42"}"#,
+                Some(" Work through the equation. "),
+                true,
+            ),
+            " Work through the equation. </think>{\"answer\":\"42\"}"
+        );
+        assert_eq!(
+            model_action_trajectory_content(r#"{"answer":"42"}"#, None, false),
+            r#"{"answer":"42"}"#
+        );
+        assert_eq!(
+            model_action_trajectory_content("\n\nanswer", None, true),
+            "</think>\n\nanswer",
+            "an immediate thinking close is generated output even when its interior is empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn omitted_openenv_thinking_budget_is_explicitly_unlimited_and_no_output_stays_open() {
+        let observed = Arc::new(Mutex::new(None));
+        let observed_request = observed.clone();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let observed_request = observed_request.clone();
+                async move {
+                    *observed_request.lock().unwrap() = Some(body);
+                    Json(json!({
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "reasoning_content": "unfinished reasoning exactly as generated",
+                                "content": ""
+                            },
+                            "finish_reason": "length",
+                            "rollout_provenance": {
+                                "behavior_policy": {
+                                    "served_model_id": "test-policy",
+                                    "base_model_sha256": format!("sha256:{}", "a".repeat(64)),
+                                    "inference_config_sha256": format!("sha256:{}", "b".repeat(64)),
+                                    "implementation": "kiln/test"
+                                }
+                            }
+                        }],
+                        "usage": {"total_tokens": 32}
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let policy = OpenEnvPolicyTransport::Http {
+            client: reqwest::Client::new(),
+            kiln_url: format!("http://{address}"),
+        };
+        let validator = OpenEnvActionValidator::compile(&json!({
+            "type": "object",
+            "required": ["answer"],
+            "properties": {"answer": {"type": "string"}},
+            "additionalProperties": false
+        }))
+        .unwrap();
+        let adapter = Value::Null;
+
+        let failure = generate_model_action(
+            &policy,
+            &validator,
+            &[ChatMessage::new("user", "environment prompt verbatim")],
+            &[],
+            &adapter,
+            "base",
+            7,
+            32,
+            None,
+            1.0,
+            true,
+        )
+        .await
+        .unwrap_err();
+
+        let request = observed.lock().unwrap().clone().unwrap();
+        assert_eq!(request["thinking_budget_tokens"], Value::Null);
+        assert_eq!(request["thinking_budget_ms"], Value::Null);
+        assert_eq!(request["chat_template_kwargs"]["enable_thinking"], true);
+        match failure {
+            ModelActionFailure::NoOutput { reasoning, .. } => assert_eq!(
+                reasoning.as_deref(),
+                Some("unfinished reasoning exactly as generated")
+            ),
+            other => panic!("expected a no-output diagnostic, got {other:?}"),
+        }
+        server.abort();
+    }
+
+    #[test]
+    fn training_discards_no_output_and_skips_zero_gradient_groups() {
+        let no_output = || {
+            ScoredRollout::from_trajectory(
+                vec![
+                    action_segment("unfinished reasoning".to_string()),
+                    harness_error_segment(&json!({
+                        "openenv_harness_error": {
+                            "code": "MODEL_ACTION_NO_OUTPUT",
+                            "message": "no final action"
+                        },
+                        "done": true
+                    }))
+                    .unwrap(),
+                ],
+                -1.0,
+            )
+        };
+        let prompt = vec![ChatMessage::new("user", "exact environment prompt")];
+        let groups = vec![
+            AgenticGroup {
+                messages: prompt.clone(),
+                completions: vec![no_output(), no_output()],
+            },
+            AgenticGroup {
+                messages: prompt.clone(),
+                completions: vec![
+                    ScoredRollout::legacy("a".to_string(), 0.0),
+                    ScoredRollout::legacy("b".to_string(), 0.0),
+                ],
+            },
+            AgenticGroup {
+                messages: prompt,
+                completions: vec![
+                    no_output(),
+                    ScoredRollout::legacy("a".to_string(), 0.0),
+                    ScoredRollout::legacy("b".to_string(), 1.0),
+                ],
+            },
+        ];
+
+        let (selected, selection) = openenv_training_group_selection(&groups);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].completions.len(), 2);
+        assert_eq!(selection.groups_submitted, 1);
+        assert_eq!(selection.rollouts_submitted, 2);
+        assert_eq!(selection.no_output_rollouts_discarded, 3);
+        assert_eq!(selection.no_usable_output_groups_skipped, 1);
+        assert_eq!(selection.no_reward_gradient_groups_skipped, 1);
+        assert_eq!(selection.warnings.len(), 3);
+        assert!(
+            selection
+                .warnings
+                .iter()
+                .any(|warning| { warning.contains("group 2 discarded 1 completion(s)") })
+        );
     }
 
     #[test]

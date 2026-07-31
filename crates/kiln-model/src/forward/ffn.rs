@@ -254,6 +254,21 @@ pub(super) fn swiglu_ffn_impl_chunked(
                 start + len
             )
         })?;
+        let x_chunk = if crate::tape_forward::tape_scope_active() {
+            require_active_tape_output(
+                crate::tape_forward::try_tape_narrow_kt(x, 1, start, len, &x_chunk).with_context(
+                    || {
+                        format!(
+                            "chunked GPU training MLP input tile [{start}, {}) tape narrow",
+                            start + len
+                        )
+                    },
+                )?,
+                "chunked GPU training MLP input narrow",
+            )?
+        } else {
+            x_chunk
+        };
         let out = swiglu_ffn_impl_no_chunk(backend, &x_chunk, mlp, lora, use_metal_decode_gemv)
             .with_context(|| {
                 format!("chunked CUDA training MLP tile [{start}, {})", start + len)
@@ -279,6 +294,13 @@ pub(super) fn swiglu_ffn_impl_chunked(
     #[cfg(not(feature = "cuda"))]
     let out = Tensor::cat(&output_refs, 1).context("chunked GPU training MLP cat")?;
     synchronize_tensor_ready_for_model_handoff("chunked GPU training MLP cat", &out)?;
+    if crate::tape_forward::tape_scope_active() {
+        return require_active_tape_output(
+            crate::tape_forward::try_tape_concat_kt(&output_refs, 1, &out)
+                .context("chunked GPU training MLP output tape concat")?,
+            "chunked GPU training MLP output concatenation",
+        );
+    }
     Ok(out)
 }
 

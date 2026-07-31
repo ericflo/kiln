@@ -6509,6 +6509,149 @@ fn make_echo_smoke_tokenizer() -> Result<KilnTokenizer> {
     Ok(tok)
 }
 
+/// Qwen-shaped template that owns the `<think>\n` generation opener and
+/// expands assistant messages into a thinking block plus final answer.
+fn make_thinking_suffix_tokenizer() -> Result<KilnTokenizer> {
+    let mut vocab = ('\n'..='~')
+        .enumerate()
+        .map(|(id, ch)| (ch.to_string(), id as u32))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    vocab.insert("\n\n".to_string(), vocab.len() as u32);
+    let tokenizer_json = serde_json::json!({
+        "version": "1.0",
+        "model": {"type": "BPE", "vocab": vocab, "merges": ["\n \n"]}
+    })
+    .to_string();
+    let template = "{% for message in messages -%}\
+{% if message.role == 'tool' %}\
+<|im_start|>user\n<tool_response>\n{{ message.content }}\n</tool_response><|im_end|>\n\
+{% elif message.role == 'assistant' %}\
+{% if '</think>' in message.content %}\
+<|im_start|>assistant\n<think>\n{{ message.content.split('</think>')[0]|trim }}\n</think>\n\n{{ message.content.split('</think>')[-1]|trim }}<|im_end|>\n\
+{% else %}\
+<|im_start|>assistant\n<think>\n\n</think>\n\n{{ message.content }}<|im_end|>\n\
+{% endif %}\
+{% else %}\
+<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n\
+{% endif %}\
+{% endfor %}\
+{% if add_generation_prompt %}<|im_start|>assistant\n<think>\n{% endif %}";
+    Ok(KilnTokenizer::from_bytes(tokenizer_json.as_bytes())
+        .map_err(|error| anyhow::anyhow!("{error}"))?
+        .with_chat_template(template.to_string()))
+}
+
+#[test]
+fn thinking_trajectory_masks_generated_reasoning_after_prompt_owned_opener() -> Result<()> {
+    let tokenizer = make_thinking_suffix_tokenizer()?;
+    let group = GrpoGroup {
+        messages: vec![ChatMessage::new("user", "choose")],
+        completions: ["x", "y"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, action)| {
+                crate::ScoredRollout::from_trajectory(
+                    vec![
+                        dry_run_action(&format!("reason toward {action}\n</think>\n\n{action}")),
+                        dry_run_observation("result"),
+                    ],
+                    index as f64,
+                )
+            })
+            .collect(),
+    };
+
+    let prompt_text = tokenizer.apply_chat_template(&group.messages)?;
+    let prompt_ids = tokenizer.encode(&prompt_text)?;
+    let tokenized = tokenize_grpo_group(&group, &tokenizer)?;
+    assert_eq!(tokenized.completions.len(), 2);
+    for completion in &tokenized.completions {
+        let first_action = completion
+            .action_mask
+            .iter()
+            .position(|&active| active)
+            .context("fixture action mask")?;
+        assert_eq!(completion.prompt_token_count, first_action);
+        let action_ids = completion
+            .input_ids
+            .iter()
+            .zip(&completion.action_mask)
+            .filter_map(|(&token, &active)| active.then_some(token))
+            .collect::<Vec<_>>();
+        let rendered_action = tokenizer.decode(&action_ids)?;
+        let rendered_full = tokenizer.decode(&completion.input_ids)?;
+        let compact_action = rendered_action
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>();
+        assert!(
+            compact_action.starts_with("reasontoward"),
+            "masked action omitted reasoning: action={rendered_action:?}, full={rendered_full:?}, first_action={first_action}, prompt_tokens={}",
+            completion.prompt_token_count
+        );
+        assert!(
+            compact_action.contains("</think>"),
+            "masked action omitted thinking terminator: action={rendered_action:?}, full={rendered_full:?}"
+        );
+        assert!(
+            !compact_action.starts_with("<think>"),
+            "prompt-owned thinking opener leaked into action mask: action={rendered_action:?}"
+        );
+        assert_eq!(
+            &completion.input_ids[..prompt_ids.len()],
+            prompt_ids.as_slice(),
+            "the thinking generation opener belongs to the prompt prefix"
+        );
+    }
+    let prompt_len = tokenized.completions[0].prompt_token_count;
+    assert_eq!(
+        &tokenized.completions[0].input_ids[..prompt_len],
+        &tokenized.completions[1].input_ids[..prompt_len]
+    );
+    Ok(())
+}
+
+#[test]
+fn trajectory_prompt_boundary_comes_from_first_action_not_inference_suffix() -> Result<()> {
+    let tokenizer = make_thinking_suffix_tokenizer()?;
+    let group = GrpoGroup {
+        messages: vec![ChatMessage::new("user", "choose")],
+        completions: ["x", "y"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, action)| {
+                crate::ScoredRollout::from_trajectory(
+                    vec![dry_run_action(action), dry_run_observation("result")],
+                    index as f64,
+                )
+            })
+            .collect(),
+    };
+
+    let prompt_text = tokenizer.apply_chat_template(&group.messages)?;
+    let prompt_ids = tokenizer.encode(&prompt_text)?;
+    let tokenized = tokenize_grpo_group(&group, &tokenizer)?;
+    for completion in &tokenized.completions {
+        let first_action = completion
+            .action_mask
+            .iter()
+            .position(|&active| active)
+            .context("fixture action mask")?;
+        assert_eq!(completion.prompt_token_count, first_action);
+        assert_ne!(
+            &completion.input_ids[..prompt_ids.len()],
+            prompt_ids.as_slice(),
+            "the fixture must retain the independently rendered suffix mismatch"
+        );
+    }
+    let prompt_len = tokenized.completions[0].prompt_token_count;
+    assert_eq!(
+        &tokenized.completions[0].input_ids[..prompt_len],
+        &tokenized.completions[1].input_ids[..prompt_len]
+    );
+    Ok(())
+}
+
 #[test]
 fn checkpoint_config_uses_immutable_runtime() {
     let runtime = crate::TrainingRuntimeContext::new(
