@@ -3,7 +3,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::Context as _;
 use clap::{Parser, Subcommand, ValueEnum};
 use console::style;
 pub use kiln_core::thinking_budget::ExplicitThinkingBudget as ThinkingBudgetArg;
@@ -17,6 +16,7 @@ use crate::adapter_verify::{
     DETERMINISTIC_GREEDY_TEXT_NOTE, finalize_status, push_check, verify_adapter_offline,
 };
 use crate::config::default_server_url;
+use crate::openenv_cli::{OPENENV_EXAMPLES, OPENENV_OVERVIEW, OpenEnvCommands};
 
 const TOP_LEVEL_OVERVIEW: &str = r#"Kiln serves Qwen3.5-4B from one Rust process and lets you adapt it with live LoRA training.
 
@@ -134,32 +134,6 @@ Add --adapter-smoke-test to record a small base-vs-adapter canary check in train
 Use `kiln train hf export-sft` or `kiln train hf export-grpo` to create, download, and verify an immutable handoff bundle for the pinned Hugging Face TRL/PEFT correctness runner. Export source paths are read by the server process, not uploaded by the CLI. After external training, use `kiln train hf import-peft` to verify the completed local bundle and stream only its model-identity and PEFT result envelope back to the server.
 
 Prefer http://127.0.0.1:8420/ui/ for guided submission and status. See docs/GRPO_GUIDE.md or docs/site/grpo.html for reward-loop examples.
-"#;
-
-const OPENENV_OVERVIEW: &str = r#"Inspect OpenEnv servers, collect grouped stateful episodes, and train a Kiln LoRA directly from environment-owned rewards.
-
-Kiln discovers each environment over HTTP, opens one WebSocket session per episode, resets every candidate in a GRPO group with the same deterministic seed, asks the selected Kiln policy for schema-shaped JSON actions, and records every action, observation, reward, termination, environment identity, and content hash in canonical agentic trajectory JSONL.
-
-`rollout` writes the exact reusable GRPO corpus and a detailed summary receipt. `train` writes those same artifacts and submits the in-memory groups to `/v1/train/grpo` with the explicit native on-policy behavior-policy contract. Start `kiln serve` first.
-"#;
-
-const OPENENV_EXAMPLES: &str = r#"Examples:
-  kiln openenv inspect --environment http://127.0.0.1:8000
-      Check health and print the environment metadata, schemas, protocol
-      profile, WebSocket URL, and content-addressed schema identity.
-
-  kiln openenv rollout --environment http://127.0.0.1:8000 --groups 8 --group-size 4
-      Collect 32 live episodes as eight seed-matched GRPO groups and write
-      openenv.rollouts.jsonl plus openenv.rollout-summary.json.
-
-  kiln openenv train --environment http://127.0.0.1:8000 --output-adapter wordle-agent
-      Collect a native on-policy batch, submit GRPO training, and auto-load the
-      completed adapter.
-
-  kiln openenv train --environment http://127.0.0.1:8000 --environment http://127.0.0.1:8001 --adapter wordle-agent --output-adapter arcade-agent --groups 16
-      Continue training an existing policy across multiple environments,
-      assigning groups round-robin while preserving one environment and seed
-      per comparison group.
 "#;
 
 const TRAIN_SFT_OVERVIEW: &str = r#"Train from SFT JSONL: one chat correction example per line with a messages array.
@@ -772,120 +746,6 @@ pub enum Commands {
         /// same outcomes with fewer tokens).
         #[arg(long, default_value_t = false)]
         no_crisp: bool,
-    },
-}
-
-#[derive(clap::Args, Debug, Clone)]
-pub struct OpenEnvRolloutArgs {
-    /// OpenEnv HTTP base URL. Repeat to assign groups round-robin across environments.
-    #[arg(long = "environment", value_name = "URL", required = true)]
-    environment_urls: Vec<String>,
-
-    /// Running Kiln server URL used for policy generation and training
-    #[arg(long = "url", default_value_t = default_server_url())]
-    kiln_url: String,
-
-    /// Behavior adapter, or `base`/`none`/`null` for the base model
-    #[arg(long, default_value = "base")]
-    adapter: String,
-
-    /// Number of independent task/seed comparison groups
-    #[arg(long, default_value_t = 8)]
-    groups: usize,
-
-    /// Candidate episodes sharing each group's environment reset and seed
-    #[arg(long = "group-size", default_value_t = 4)]
-    group_size: usize,
-
-    /// First deterministic environment seed; later groups increment by one
-    #[arg(long = "seed-start", default_value_t = 0)]
-    seed_start: u64,
-
-    /// JSON object merged into every reset request; Kiln always sets `seed`
-    #[arg(long = "reset-options", value_name = "JSON")]
-    reset_options: Option<PathBuf>,
-
-    /// Maximum model actions in one episode
-    #[arg(long = "max-steps", default_value_t = 8)]
-    max_steps: usize,
-
-    /// Maximum simultaneous candidate sessions within a group
-    #[arg(long, default_value_t = 4)]
-    concurrency: usize,
-
-    /// Maximum tokens generated for one JSON action
-    #[arg(long = "max-action-tokens", default_value_t = 256)]
-    max_action_tokens: usize,
-
-    /// Policy sampling temperature
-    #[arg(long, default_value_t = 1.0)]
-    temperature: f32,
-
-    /// Explicitly enable or disable Qwen thinking for action generation
-    #[arg(
-        long,
-        action = clap::ArgAction::Set,
-        value_parser = clap::value_parser!(bool),
-        default_value_t = false
-    )]
-    thinking: bool,
-
-    /// Terminal reward assigned to malformed model actions or protocol errors
-    #[arg(long = "protocol-error-reward", default_value_t = -1.0)]
-    protocol_error_reward: f64,
-
-    /// Canonical GRPO JSONL output
-    #[arg(long, default_value = "openenv.rollouts.jsonl")]
-    output: PathBuf,
-
-    /// Content-addressed rollout summary and provenance receipt
-    #[arg(
-        long = "summary-output",
-        default_value = "openenv.rollout-summary.json"
-    )]
-    summary_output: PathBuf,
-}
-
-#[derive(Subcommand, Debug, Clone)]
-pub enum OpenEnvCommands {
-    /// Discover and content-address one OpenEnv server
-    Inspect {
-        /// OpenEnv HTTP base URL
-        #[arg(long, value_name = "URL")]
-        environment: String,
-
-        /// Emit the complete inspection as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Collect seed-matched stateful episodes as canonical GRPO JSONL
-    Rollout {
-        #[command(flatten)]
-        rollout: OpenEnvRolloutArgs,
-    },
-
-    /// Collect live episodes and immediately submit native on-policy GRPO
-    Train {
-        #[command(flatten)]
-        rollout: OpenEnvRolloutArgs,
-
-        /// LoRA adapter created by this training job
-        #[arg(long = "output-adapter")]
-        output_adapter: String,
-
-        /// LoRA rank for the trained adapter
-        #[arg(long)]
-        lora_rank: Option<usize>,
-
-        /// Auto-load the new adapter after successful training
-        #[arg(
-            long,
-            action = clap::ArgAction::Set,
-            value_parser = clap::value_parser!(bool),
-            default_value_t = true
-        )]
-        auto_load: bool,
     },
 }
 
@@ -1766,133 +1626,6 @@ pub async fn run_health(url: &str, json: bool) -> anyhow::Result<()> {
         );
         eprintln!("{}", serde_json::to_string_pretty(&body)?);
         std::process::exit(1);
-    }
-    Ok(())
-}
-
-/// Run native OpenEnv discovery, rollout collection, or rollout-and-train.
-pub async fn run_openenv(command: &OpenEnvCommands) -> anyhow::Result<()> {
-    match command {
-        OpenEnvCommands::Inspect { environment, json } => {
-            let inspection = crate::openenv_cli::inspect_openenv(environment).await?;
-            if *json {
-                println!("{}", serde_json::to_string_pretty(&inspection)?);
-            } else {
-                let identity = &inspection.identity;
-                println!(
-                    "{} OpenEnv environment {} is ready",
-                    style("✓").green().bold(),
-                    style(&identity.metadata.name).cyan().bold()
-                );
-                println!("  Base URL:       {}", identity.base_url);
-                println!("  WebSocket:      {}", identity.websocket_url);
-                println!("  Client profile: {}", identity.client_profile);
-                println!(
-                    "  OpenAPI version: {}",
-                    identity.openapi_version.as_deref().unwrap_or("unspecified")
-                );
-                println!("  Schema SHA-256: {}", identity.schema_sha256);
-                println!("  Description:    {}", identity.metadata.description.trim());
-                println!();
-                println!("  Action schema:");
-                for line in serde_json::to_string_pretty(&inspection.schema.action)?.lines() {
-                    println!("    {line}");
-                }
-            }
-        }
-        OpenEnvCommands::Rollout { rollout } => {
-            let summary =
-                crate::openenv_cli::run_openenv_rollout(openenv_rollout_options(rollout)).await?;
-            print_openenv_summary(&summary, false)?;
-        }
-        OpenEnvCommands::Train {
-            rollout,
-            output_adapter,
-            lora_rank,
-            auto_load,
-        } => {
-            let summary =
-                crate::openenv_cli::run_openenv_train(crate::openenv_cli::OpenEnvTrainOptions {
-                    rollout: openenv_rollout_options(rollout),
-                    output_adapter: output_adapter.clone(),
-                    lora_rank: *lora_rank,
-                    auto_load: *auto_load,
-                })
-                .await?;
-            print_openenv_summary(&summary, true)?;
-        }
-    }
-    Ok(())
-}
-
-fn openenv_rollout_options(args: &OpenEnvRolloutArgs) -> crate::openenv_cli::OpenEnvRolloutOptions {
-    crate::openenv_cli::OpenEnvRolloutOptions {
-        kiln_url: args.kiln_url.clone(),
-        environment_urls: args.environment_urls.clone(),
-        adapter: args.adapter.clone(),
-        groups: args.groups,
-        group_size: args.group_size,
-        seed_start: args.seed_start,
-        reset_options: args.reset_options.clone(),
-        max_steps: args.max_steps,
-        concurrency: args.concurrency,
-        max_action_tokens: args.max_action_tokens,
-        temperature: args.temperature,
-        thinking: args.thinking,
-        protocol_error_reward: args.protocol_error_reward,
-        output: args.output.clone(),
-        summary_output: args.summary_output.clone(),
-    }
-}
-
-fn print_openenv_summary(
-    summary: &crate::openenv_cli::OpenEnvRolloutSummary,
-    submitted_training: bool,
-) -> anyhow::Result<()> {
-    println!(
-        "{} Collected {} OpenEnv episodes in {} seed-matched groups",
-        style("✓").green().bold(),
-        summary.rollout_count,
-        summary.groups
-    );
-    println!("  Dataset:    {}", summary.output_path);
-    println!("  Receipt:    {}", summary.summary_output_path);
-    println!("  SHA-256:    {}", summary.dataset_sha256);
-    println!(
-        "  Return:     mean {:.6}, min {}, max {}",
-        summary.stats.mean_episode_return,
-        summary
-            .stats
-            .min_episode_return
-            .map(|value| format!("{value:.6}"))
-            .unwrap_or_else(|| "n/a".to_string()),
-        summary
-            .stats
-            .max_episode_return
-            .map(|value| format!("{value:.6}"))
-            .unwrap_or_else(|| "n/a".to_string())
-    );
-    println!(
-        "  Outcomes:   {} done, {} max-steps, {} invalid actions, {} protocol errors",
-        summary.stats.done_count,
-        summary.stats.max_steps_count,
-        summary.stats.invalid_model_action_count,
-        summary.stats.protocol_error_count
-    );
-    if submitted_training {
-        let submission = summary
-            .training_submission
-            .as_ref()
-            .context("OpenEnv train completed without a training submission receipt")?;
-        println!(
-            "{} GRPO training submitted{}",
-            style("✓").green().bold(),
-            submission
-                .get("job_id")
-                .and_then(serde_json::Value::as_str)
-                .map(|job_id| format!(" as {job_id}"))
-                .unwrap_or_default()
-        );
     }
     Ok(())
 }
@@ -4530,79 +4263,6 @@ mod tests {
             verbose,
             quiet,
         }
-    }
-
-    #[test]
-    fn openenv_cli_parses_inspect_rollout_and_train_as_first_class_commands() {
-        let inspect = Cli::try_parse_from([
-            "kiln",
-            "openenv",
-            "inspect",
-            "--environment",
-            "127.0.0.1:8990",
-            "--json",
-        ])
-        .unwrap();
-        assert!(matches!(
-            inspect.command,
-            Some(Commands::Openenv(OpenEnvCommands::Inspect {
-                environment,
-                json: true,
-            })) if environment == "127.0.0.1:8990"
-        ));
-
-        let rollout = Cli::try_parse_from([
-            "kiln",
-            "openenv",
-            "rollout",
-            "--environment",
-            "http://127.0.0.1:8000",
-            "--environment",
-            "http://127.0.0.1:8001",
-            "--groups",
-            "12",
-            "--group-size",
-            "6",
-            "--thinking",
-            "true",
-        ])
-        .unwrap();
-        let Some(Commands::Openenv(OpenEnvCommands::Rollout { rollout })) = rollout.command else {
-            panic!("expected openenv rollout command");
-        };
-        assert_eq!(rollout.environment_urls.len(), 2);
-        assert_eq!(rollout.groups, 12);
-        assert_eq!(rollout.group_size, 6);
-        assert!(rollout.thinking);
-        assert_eq!(rollout.protocol_error_reward, -1.0);
-
-        let train = Cli::try_parse_from([
-            "kiln",
-            "openenv",
-            "train",
-            "--environment",
-            "http://127.0.0.1:8000",
-            "--adapter",
-            "agent-v1",
-            "--output-adapter",
-            "agent-v2",
-            "--auto-load",
-            "false",
-        ])
-        .unwrap();
-        assert!(matches!(
-            train.command,
-            Some(Commands::Openenv(OpenEnvCommands::Train {
-                output_adapter,
-                auto_load: false,
-                ..
-            })) if output_adapter == "agent-v2"
-        ));
-
-        assert!(
-            Cli::try_parse_from(["kiln", "openenv", "rollout", "--groups", "2"]).is_err(),
-            "an OpenEnv command without an environment must fail during parsing"
-        );
     }
 
     #[test]

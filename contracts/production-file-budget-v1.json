@@ -39,8 +39,8 @@
     },
     {
       "path": "crates/kiln-server/src/cli.rs",
-      "max_lines": 6317,
-      "rationale": "The command-line product currently centralizes command schemas and dispatch; this non-growth cap requires new command families to use owned modules."
+      "max_lines": 6331,
+      "rationale": "OpenEnv command schemas, dispatch, and tests live in their owned module; this exact ceiling adds only the central top-level registration and user-facing navigation."
     },
     {
       "path": "crates/kiln-server/src/config.rs",

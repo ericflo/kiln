@@ -1447,6 +1447,19 @@
     },
     {
       "api": "var",
+      "argument": "KILN_MINIOPENENV_URL",
+      "argument_kind": "literal",
+      "classification": "test_only",
+      "classification_basis": "unit-test source surface",
+      "count": 1,
+      "language": "rust",
+      "operation": "read",
+      "path": "crates/kiln-openenv/tests/miniopenenv_interop.rs",
+      "phase": "runtime",
+      "surface": "unit-test"
+    },
+    {
+      "api": "var",
       "argument": "var",
       "argument_kind": "expression",
       "classification": "build_time",
@@ -3006,15 +3019,15 @@
   ],
   "source_root": "crates",
   "summary": {
-    "literal_kiln_read_call_sites": 118,
-    "literal_kiln_read_names": 31,
+    "literal_kiln_read_call_sites": 119,
+    "literal_kiln_read_names": 32,
     "literal_kiln_read_names_by_classification": {
       "build_time": 6,
       "credential_provider": 0,
       "experimental_debug": 0,
       "public_stable": 1,
       "startup_safety": 0,
-      "test_only": 24
+      "test_only": 25
     },
     "process_mutation_call_sites": 19,
     "process_mutation_call_sites_by_classification": {
@@ -3026,15 +3039,15 @@
       "test_only": 11
     },
     "process_mutation_entries": 16,
-    "read_call_sites": 438,
+    "read_call_sites": 439,
     "read_call_sites_by_classification": {
       "build_time": 326,
       "credential_provider": 1,
       "experimental_debug": 0,
       "public_stable": 6,
       "startup_safety": 1,
-      "test_only": 104
+      "test_only": 105
     },
-    "read_entries": 214
+    "read_entries": 215
   }
 }

@@ -52,6 +52,7 @@ DESKTOP_SURFACES = [
 
 
 CLI_SOURCE = ROOT / "crates/kiln-server/src/cli.rs"
+OPENENV_CLI_SOURCE = ROOT / "crates/kiln-server/src/openenv_cli.rs"
 CLI_EXAMPLE_SURFACES = [
     ROOT / "README.md",
     ROOT / "QUICKSTART.md",
@@ -168,7 +169,7 @@ def parse_arg_fields(block: str) -> tuple[set[str], int]:
         field_name = field_match.group(1)
         attrs = " ".join(pending_attrs)
         pending_attrs = []
-        if "command(subcommand)" in attrs:
+        if "command(subcommand)" in attrs or "command(flatten)" in attrs:
             continue
         field_flags = arg_flags(attrs, field_name)
         if field_flags:
@@ -196,6 +197,7 @@ def parse_variant_blocks(enum_block: str) -> dict[str, str]:
 
 def parse_cli_surface() -> CliSurface:
     text = CLI_SOURCE.read_text()
+    openenv_text = OPENENV_CLI_SOURCE.read_text()
     global_flags, _ = parse_arg_fields(extract_block_after(text, "pub struct Cli"))
 
     command_variants = parse_variant_blocks(extract_block_after(text, "pub enum Commands"))
@@ -203,6 +205,12 @@ def parse_cli_surface() -> CliSurface:
     hf_train_variants = parse_variant_blocks(extract_block_after(text, "pub enum HfTrainCommands"))
     adapter_variants = parse_variant_blocks(extract_block_after(text, "pub enum AdapterCommands"))
     judge_variants = parse_variant_blocks(extract_block_after(text, "pub enum JudgeCommands"))
+    openenv_variants = parse_variant_blocks(
+        extract_block_after(openenv_text, "pub enum OpenEnvCommands")
+    )
+    openenv_rollout_flags, openenv_rollout_positionals = parse_arg_fields(
+        extract_block_after(openenv_text, "pub struct OpenEnvRolloutArgs")
+    )
 
     commands: dict[tuple[str, ...], CommandSpec] = {}
     for variant, block in command_variants.items():
@@ -230,6 +238,17 @@ def parse_cli_surface() -> CliSurface:
     for variant, block in judge_variants.items():
         flags, positionals = parse_arg_fields(block)
         commands[("judge", variant_name_to_cli(variant))] = CommandSpec(frozenset(flags), positionals)
+
+    commands[("openenv",)] = CommandSpec(frozenset())
+    for variant, block in openenv_variants.items():
+        flags, positionals = parse_arg_fields(block)
+        if variant in {"Rollout", "Train"}:
+            flags.update(openenv_rollout_flags)
+            positionals += openenv_rollout_positionals
+        commands[("openenv", variant_name_to_cli(variant))] = CommandSpec(
+            frozenset(flags),
+            positionals,
+        )
 
     return CliSurface(frozenset(global_flags), commands)
 

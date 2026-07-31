@@ -274,7 +274,7 @@ async fn main() -> Result<()> {
             return cli::run_health(url, json).await;
         }
         Some(Commands::Openenv(ref command)) => {
-            return cli::run_openenv(command).await;
+            return kiln_server::openenv_cli::run_openenv(command).await;
         }
         Some(Commands::EvalAdapter {
             ref url,
