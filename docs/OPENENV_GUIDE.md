@@ -198,10 +198,10 @@ default. Harness-generated error observations carry a full warning prefix so
 the default warning filter does not teach the model to imitate Kiln's
 diagnostic prose.
 
-The prompt for turn N contains the reset prompt plus every prior action and
-observation. One WebSocket connection remains open for the whole episode. Do
-not substitute OpenEnv's stateless HTTP `/reset` and `/step` routes: they cannot
-represent an episode.
+The prompt for turn N contains the reset prompt plus every prior action and observation. One WebSocket connection remains open for the whole episode.
+Do not substitute OpenEnv's stateless HTTP `/reset` and `/step` routes: they cannot represent an episode.
+One-step exact-verifier text environments, including all eight math families in the live matrix, need no adapter.
+Discovered string actions, `input_text`, integer rewards, and terminal observations flow unchanged through collection, GRPO, verification, replay, and held-out evaluation.
 
 ## Identity and artifacts
 

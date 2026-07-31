@@ -77,12 +77,12 @@ jobs:
       - name: Check out the pinned OpenEnv wire oracle
         run: |
           git clone https://github.com/ericflo/miniopenenv.git ../miniopenenv
-          git -C ../miniopenenv checkout 81e801614e9007eda3f5fbad227272e914fcbaa0
+          git -C ../miniopenenv checkout 0e5e945fe2f80615ea714d25bef8c8bceb73ad11
       - name: Test the typed client
         run: |
           python3 scripts/check_openenv_contract.py --self-test
           cargo test -p kiln-openenv
-      - name: Drive real stateful counter and arcade episodes
+      - name: Drive real stateful counter, arcade, and math episodes
         env:
           OPENENV_INTEROP_ROOT: ${{ github.workspace }}/../miniopenenv
         run: scripts/check_miniopenenv_interop.sh

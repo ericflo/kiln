@@ -243,11 +243,16 @@ CARGO_BIN="$(command -v cargo)" scripts/check_miniopenenv_interop.sh
 ```
 
 The script pins and rebuilds miniopenenv only as a fast OpenEnv protocol oracle.
-It launches its C99 counter and all fourteen arcade servers, then tests:
+It launches its C99 counter and all twenty-two text-profiled environment
+servers—the original fourteen arcade environments plus eight text-first math
+families—then tests:
 
 - discovery, typed schema identity, and close;
-- the optional `input_text` profile across every arcade environment, without
+- the optional `input_text` profile across every environment in the matrix, without
   making that downstream convention a protocol requirement;
+- schema-discovered answer strings, deterministic seeded prompts, recoverable
+  wrong-type actions, exact integer rewards, and frozen post-`done`
+  observations across all eight one-step math environments;
 - integer and floating-point rewards;
 - object, integer, and string action shapes;
 - dynamic legal actions and procedural seeded state;

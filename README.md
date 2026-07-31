@@ -179,9 +179,12 @@ turns, while capacity saturation triggers bounded fresh-session acquisition.
 When an observation offers a non-empty `input_text`, Kiln foregrounds that
 generic environment-provided decision text while retaining the complete wire
 observation and discovered JSON action schema; it remains optional, never a
-protocol requirement. CI discovers and resets all fourteen text-profiled
-arcade environments from the pinned oracle, then drives representative
-episodes plus collect/train/verify/replay end to end. See the
+protocol requirement. CI discovers and resets all twenty-two text-profiled
+environment servers from the pinned oracle. That matrix includes eight
+one-step math families whose discovered string actions, exact integer rewards,
+deterministic resets, and frozen terminal observations are exercised over real
+WebSockets, alongside representative multi-step episodes and
+collect/train/verify/replay end to end. See the
 [OpenEnv Training Guide](docs/OPENENV_GUIDE.md)
 for multi-environment training, reset tasks, security, ECHO behavior, artifacts,
 and troubleshooting.

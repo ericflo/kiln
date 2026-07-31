@@ -5,14 +5,22 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 oracle_root=${OPENENV_INTEROP_ROOT:-"$repo_root/../miniopenenv"}
 cargo_bin=${CARGO_BIN:-cargo}
 base_port=${KILN_OPENENV_INTEROP_PORT:-18990}
+declare -a exact_text_names=(
+    measure algebra change space discrete chance evidence reason
+)
 declare -a server_names=(
     counter bandit cartpole snake g2048 wordle blackjack maze pong connect4 kuhn
-    dyna inducto logic filtro
+    dyna inducto logic filtro "${exact_text_names[@]}"
 )
 declare -a server_pids=()
 declare -a log_files=()
 declare -a arcade_urls=()
+declare -a exact_text_urls=()
 declare -A server_urls=()
+declare -A exact_text_name_set=()
+for name in "${exact_text_names[@]}"; do
+    exact_text_name_set["$name"]=1
+done
 forbidden_oracle_namespace='MINI''OPENENV'
 
 if rg --quiet --fixed-strings "$forbidden_oracle_namespace" "$repo_root/crates"; then
@@ -70,6 +78,9 @@ for index in "${!server_names[@]}"; do
     if [[ "$name" != counter ]]; then
         arcade_urls+=("http://127.0.0.1:$port")
     fi
+    if [[ -n ${exact_text_name_set[$name]:-} ]]; then
+        exact_text_urls+=("http://127.0.0.1:$port")
+    fi
 done
 
 (
@@ -81,6 +92,7 @@ done
     "$cargo_bin" test -p kiln-server --no-default-features \
         openenv_credentials::tests --lib
     KILN_OPENENV_INTEROP_ARCADE_URLS="$(IFS=,; echo "${arcade_urls[*]}")" \
+    KILN_OPENENV_INTEROP_EXACT_TEXT_URLS="$(IFS=,; echo "${exact_text_urls[*]}")" \
     KILN_OPENENV_INTEROP_COUNTER_URL="${server_urls[counter]}" \
     KILN_OPENENV_INTEROP_BANDIT_URL="${server_urls[bandit]}" \
     KILN_OPENENV_INTEROP_CONNECT4_URL="${server_urls[connect4]}" \

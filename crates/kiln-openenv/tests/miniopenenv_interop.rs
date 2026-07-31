@@ -67,7 +67,7 @@ async fn discovers_and_resets_every_text_profiled_arcade_environment() {
         .split(',')
         .filter(|url| !url.trim().is_empty())
         .collect::<Vec<_>>();
-    assert_eq!(urls.len(), 14, "the pinned arcade matrix must have 14 URLs");
+    assert_eq!(urls.len(), 22, "the pinned arcade matrix must have 22 URLs");
 
     for (index, url) in urls.into_iter().enumerate() {
         let client = OpenEnvClient::new(url).unwrap();
@@ -126,6 +126,123 @@ async fn discovers_and_resets_every_text_profiled_arcade_environment() {
         );
         assert!(!reset.done);
         episode.close().await.unwrap();
+    }
+}
+
+/// Exact-verifier text environments exercise the one-step RL shape used by
+/// generated math tasks without teaching the client any environment names.
+/// A schema-invalid action must remain recoverable, a wrong answer must receive
+/// an environment-owned integer reward, and terminal state must be immutable.
+#[tokio::test]
+#[ignore = "requires live exact-verifier OpenEnv text environments"]
+async fn drives_every_exact_verifier_text_environment() {
+    let urls = std::env::var("KILN_OPENENV_INTEROP_EXACT_TEXT_URLS")
+        .expect("KILN_OPENENV_INTEROP_EXACT_TEXT_URLS must identify the live exact-text matrix");
+    let urls = urls
+        .split(',')
+        .filter(|url| !url.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        urls.len(),
+        8,
+        "the pinned exact-verifier text matrix must have 8 URLs"
+    );
+
+    for (index, url) in urls.into_iter().enumerate() {
+        let client = OpenEnvClient::new(url).unwrap();
+        let inspection = client.inspect().await.unwrap();
+        assert_eq!(
+            inspection.schema.action.pointer("/properties/answer/type"),
+            Some(&json!("string")),
+            "{} must advertise its answer string through discovery",
+            inspection.identity.metadata.name
+        );
+
+        let reset_data = json!({
+            "seed": 20_000 + index,
+            "difficulty": 3
+        });
+        let mut episode = client.connect().await.unwrap();
+        let reset = episode.reset(&reset_data).await.unwrap();
+        let input_text = reset.observation["input_text"]
+            .as_str()
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} returned an empty input_text",
+                    inspection.identity.metadata.name
+                )
+            })
+            .to_owned();
+        assert_eq!(reset.reward, OpenEnvReward::Null);
+        assert!(!reset.done);
+
+        let error = episode.step(&json!({"answer": 7})).await.unwrap_err();
+        let OpenEnvClientError::Protocol(error) = error else {
+            panic!(
+                "{} did not return a protocol error for a wrong JSON type",
+                inspection.identity.metadata.name
+            );
+        };
+        assert_eq!(error.code, OpenEnvErrorCode::ValidationError);
+        assert!(!error.code.is_terminal());
+
+        let terminal = episode
+            .step(&json!({
+                "answer": "FINAL: kiln intentionally incorrect interop answer"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(terminal.reward, OpenEnvReward::Integer(0));
+        assert!(terminal.done);
+        let expected_answer = terminal.observation["answer"]
+            .as_str()
+            .filter(|answer| !answer.is_empty())
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} did not reveal its canonical answer after done",
+                    inspection.identity.metadata.name
+                )
+            })
+            .to_owned();
+
+        let post_done = episode
+            .step(&json!({
+                "answer": "FINAL: kiln intentionally incorrect interop answer"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(post_done.reward, OpenEnvReward::Null);
+        assert!(post_done.done);
+        assert_eq!(
+            post_done.observation, terminal.observation,
+            "{} changed its terminal observation after done",
+            inspection.identity.metadata.name
+        );
+        episode.close().await.unwrap();
+
+        let mut repeated_episode = client.connect().await.unwrap();
+        let repeated = repeated_episode.reset(&reset_data).await.unwrap();
+        assert_eq!(
+            repeated.observation["input_text"].as_str(),
+            Some(input_text.as_str()),
+            "{} did not reproduce input_text for the same seed and difficulty",
+            inspection.identity.metadata.name
+        );
+        assert!(
+            repeated.observation["answer"]
+                .as_str()
+                .is_none_or(str::is_empty),
+            "{} revealed its answer before done",
+            inspection.identity.metadata.name
+        );
+        let accepted = repeated_episode
+            .step(&json!({"answer": expected_answer}))
+            .await
+            .unwrap();
+        assert_eq!(accepted.reward, OpenEnvReward::Integer(1));
+        assert!(accepted.done);
+        repeated_episode.close().await.unwrap();
     }
 }
 
