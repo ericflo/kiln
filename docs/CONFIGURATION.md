@@ -1776,7 +1776,12 @@ metrics, and limits apply. A `train` run then enters the same bounded native
 GRPO queue as `POST /v1/train/grpo`; it does not create a second trainer. The
 OpenEnv run remains the workflow-level owner, projects the trainer and linked
 post-evaluation state, forwards cancellation to those authoritative executors,
-and becomes terminal only when the complete requested workflow does.
+and becomes terminal only when the complete requested workflow does. New
+failed runs retain `kiln.openenv-run-failure.v1` with a closed stage and code,
+retryability, a bounded detail, an actionable hint, and exact protocol/HTTP
+evidence when available. Alert on the fixed-cardinality
+`kiln_openenv_run_failures_total{stage,retryable}` metric; its labels never
+contain endpoints, run IDs, or peer messages.
 
 ## `[logging]`
 

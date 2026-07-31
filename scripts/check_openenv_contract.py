@@ -368,9 +368,13 @@ def main() -> int:
         path.read_text(encoding="utf-8")
         for path in [
             openenv_api_root / "openenv.rs",
+            openenv_api_root / "openenv" / "failure.rs",
             openenv_api_root / "openenv" / "training_evidence.rs",
         ]
     )
+    metrics_source = (
+        ROOT / "crates" / "kiln-server" / "src" / "metrics.rs"
+    ).read_text(encoding="utf-8")
     client = (ROOT / "crates" / "kiln-openenv" / "src" / "client.rs").read_text(
         encoding="utf-8"
     )
@@ -388,6 +392,12 @@ def main() -> int:
     ).read_text(encoding="utf-8")
     guide = (ROOT / "docs" / "OPENENV_GUIDE.md").read_text(encoding="utf-8")
     replay_reference = (ROOT / "docs" / "OPENENV_REPLAY_REFERENCE.md").read_text(
+        encoding="utf-8"
+    )
+    capability_methods = (ROOT / "capabilities" / "METHODS.md").read_text(
+        encoding="utf-8"
+    )
+    capability_pipeline = (ROOT / "capabilities" / "PIPELINE.md").read_text(
         encoding="utf-8"
     )
     http_api = json.loads(
@@ -424,6 +434,57 @@ def main() -> int:
     )
     if openenv_run_training_data != {"$ref": "#/$defs/TrainingDataProvenance"}:
         failures.append("OpenEnv run status does not project admitted corpus provenance")
+    failure_schema = control_plane.get("$defs", {}).get("OpenEnvRunFailure", {})
+    if failure_schema.get("properties", {}).get("schema", {}).get("const") != (
+        "kiln.openenv-run-failure.v1"
+    ):
+        failures.append("control-plane schema is missing OpenEnv run failure v1")
+    if (
+        control_plane.get("$defs", {})
+        .get("OpenEnvRunStatus", {})
+        .get("properties", {})
+        .get("failure")
+        != {"$ref": "#/$defs/OpenEnvRunFailure"}
+    ):
+        failures.append("OpenEnv run status does not expose typed failure semantics")
+    expected_failure_codes = {
+        "run_admission_failed",
+        "run_interrupted",
+        "persisted_contract_invalid",
+        "environment_unavailable",
+        "environment_capacity_exhausted",
+        "environment_protocol_error",
+        "collection_failed",
+        "artifact_publication_failed",
+        "training_submission_failed",
+        "training_failed",
+        "training_evidence_invalid",
+        "post_evaluation_failed",
+        "environment_evaluation_failed",
+        "internal_error",
+    }
+    if set(
+        control_plane.get("$defs", {})
+        .get("OpenEnvRunFailureCode", {})
+        .get("enum", [])
+    ) != expected_failure_codes:
+        failures.append("OpenEnv run failure code taxonomy is incomplete")
+    failure_fixture = {
+        "schema": "kiln.openenv-run-failure.v1",
+        "code": "environment_capacity_exhausted",
+        "stage": "collection",
+        "retryable": True,
+        "message": "environment remained at capacity",
+        "hint": "retry after capacity is available",
+        "occurred_unix_ms": 17,
+        "protocol_code": "CAPACITY_REACHED",
+    }
+    failures.extend(
+        f"OpenEnv failure fixture: {error}"
+        for error in validate_instance(
+            failure_fixture, failure_schema, control_plane
+        )
+    )
     required_source_terms = [
         "kiln.openenv-replay.v1",
         "kiln.openenv-verification.v1",
@@ -471,6 +532,23 @@ def main() -> int:
     ]:
         if term not in api_source:
             failures.append(f"api/openenv module is missing manifest-bound artifact term {term}")
+    for term in [
+        "kiln.openenv-run-failure.v1",
+        "EnvironmentCapacityExhausted",
+        "TrainingEvidenceInvalid",
+        "protocol_code",
+        "http_status",
+        "MAX_FAILURE_MESSAGE_BYTES",
+    ]:
+        if term not in api_source:
+            failures.append(f"api/openenv module is missing failure-semantic term {term}")
+    for term in [
+        "kiln_openenv_run_failures_total",
+        "OPENENV_FAILURE_STAGES",
+        "retryable",
+    ]:
+        if term not in metrics_source:
+            failures.append(f"metrics.rs is missing OpenEnv failure metric term {term}")
     for term in [
         '"/v1/openenv/training/preflight"',
         "preflight_training_inner",
@@ -626,14 +704,25 @@ def main() -> int:
         "adapter_manifest",
         "survives adapter lifecycle operations",
         "4 MiB",
+        "kiln.openenv-run-failure.v1",
+        "kiln_openenv_run_failures_total",
     ]:
         if term not in replay_reference:
             failures.append(f"OpenEnv replay reference is missing {term!r}")
+    for term in [
+        "kiln.openenv-run-failure.v1",
+        "failure.code",
+        "failure.retryable=true",
+        "new idempotency key",
+        "legacy `error`",
+    ]:
+        if term not in capability_methods and term not in capability_pipeline:
+            failures.append(f"capability pipeline is missing failure term {term!r}")
 
     if failures:
         raise SystemExit("\n".join(failures))
     print(
-        "OpenEnv training preflight, bounded collection, self-contained trainer evidence, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, and live-replay contracts match"
+        "OpenEnv typed failures, training preflight, bounded collection, self-contained trainer evidence, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, and live-replay contracts match"
     )
     return 0
 

@@ -3711,6 +3711,21 @@
       "x-kiln-rust-type": "kiln_train::OpenEnvEpisodeTerminationV1",
       "x-kiln-field-schema-status": "complete"
     },
+    "OpenEnvErrorCode": {
+      "type": "string",
+      "enum": [
+        "INVALID_JSON",
+        "UNKNOWN_TYPE",
+        "VALIDATION_ERROR",
+        "EXECUTION_ERROR",
+        "CAPACITY_REACHED",
+        "FACTORY_ERROR",
+        "SESSION_ERROR"
+      ],
+      "description": "Exact error code supplied by an OpenEnv WebSocket peer.",
+      "x-kiln-rust-type": "kiln_openenv::OpenEnvErrorCode",
+      "x-kiln-field-schema-status": "complete"
+    },
     "OpenEnvIdentity": {
       "type": "object",
       "additionalProperties": false,
@@ -4059,6 +4074,94 @@
       "x-kiln-rust-type": "OpenEnvRunAdmission",
       "x-kiln-field-schema-status": "complete"
     },
+    "OpenEnvRunFailure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "code",
+        "stage",
+        "retryable",
+        "message",
+        "hint",
+        "occurred_unix_ms"
+      ],
+      "properties": {
+        "schema": {
+          "const": "kiln.openenv-run-failure.v1"
+        },
+        "code": {
+          "$ref": "#/$defs/OpenEnvRunFailureCode"
+        },
+        "stage": {
+          "$ref": "#/$defs/OpenEnvRunFailureStage"
+        },
+        "retryable": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "hint": {
+          "$ref": "#/$defs/String"
+        },
+        "occurred_unix_ms": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "protocol_code": {
+          "$ref": "#/$defs/OpenEnvErrorCode"
+        },
+        "http_status": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599
+        }
+      },
+      "description": "Bounded, self-contained terminal diagnosis retained with an OpenEnv run. Protocol and HTTP evidence are present only when supplied by the environment.",
+      "x-kiln-rust-type": "OpenEnvRunFailure",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvRunFailureCode": {
+      "type": "string",
+      "enum": [
+        "run_admission_failed",
+        "run_interrupted",
+        "persisted_contract_invalid",
+        "environment_unavailable",
+        "environment_capacity_exhausted",
+        "environment_protocol_error",
+        "collection_failed",
+        "artifact_publication_failed",
+        "training_submission_failed",
+        "training_failed",
+        "training_evidence_invalid",
+        "post_evaluation_failed",
+        "environment_evaluation_failed",
+        "internal_error"
+      ],
+      "description": "Stable, automation-safe terminal reason for an OpenEnv workflow failure.",
+      "x-kiln-rust-type": "OpenEnvRunFailureCode",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvRunFailureStage": {
+      "type": "string",
+      "enum": [
+        "restoration",
+        "admission",
+        "discovery",
+        "collection",
+        "artifact_publication",
+        "training_submission",
+        "training",
+        "post_evaluation",
+        "environment_evaluation",
+        "orchestration"
+      ],
+      "description": "Closed workflow boundary that owned an operation when an OpenEnv run failed.",
+      "x-kiln-rust-type": "OpenEnvRunFailureStage",
+      "x-kiln-field-schema-status": "complete"
+    },
     "OpenEnvRunKind": {
       "type": "string",
       "enum": [
@@ -4338,6 +4441,9 @@
         "environment_evaluation": {
           "$ref": "#/$defs/OpenEnvEnvironmentEvalStatus"
         },
+        "failure": {
+          "$ref": "#/$defs/OpenEnvRunFailure"
+        },
         "error": {
           "$ref": "#/$defs/String"
         }
@@ -4467,7 +4573,8 @@
         "after admission, queue_position is omitted and admitted_unix_ms plus queue_wait_ms remain stable",
         "v5 train status contains the immutable preflighted training_contract and executes from it",
         "v5 rollout status omits training_contract",
-        "v1 through v4 status predates training_contract and omits it"
+        "v1 through v4 status predates training_contract and omits it",
+        "new failed runs carry failure as the stable diagnosis while error remains a compatibility projection"
       ],
       "description": "Persisted status, collection artifacts, immutable admitted training contract, and authoritative training and evaluation lifecycle for one OpenEnv run. Version 1 records may retain the historical terminal training_queued handoff; version 2 follows learning to completion; version 3 includes paired held-out environment evaluation; version 4 adds bounded FIFO execution admission; version 5 seals exact trainer settings before collection.",
       "x-kiln-rust-type": "OpenEnvRunStatus",

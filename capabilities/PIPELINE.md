@@ -260,7 +260,11 @@ Before any GPU work in a stage N ≥ 2:
      position and follow that run ID; on completion require
      `training.training_data.openenv`, then materialize the run's
      `train_receipt` and `adapter_manifest` artifacts as immutable trainer
-     evidence; Task API catalogs may document coverage but never imply a
+     evidence; on failure require `kiln.openenv-run-failure.v1`, preserve its
+     closed code/stage/retryability/hint in stage evidence, and permit a
+     corrected new attempt with a new idempotency key only when
+     `failure.retryable=true`; never route recovery from the legacy `error`
+     string; Task API catalogs may document coverage but never imply a
      reset binding
 
 3. Verify hypothesis is falsifiable:

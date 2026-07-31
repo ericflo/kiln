@@ -43,6 +43,7 @@ result. The rest are properties of the capability and your harness.
 | **OpenEnv task catalog** | does `kiln openenv tasks` report provider-backed splits and bounded rows, or a conforming unsupported result? | Use rows only to inventory dataset coverage. OpenEnv defines no row-to-reset binding; schedule portable training with explicit reset options and deterministic seeds. |
 | **OpenEnv trust boundary** | is the environment public, loopback, or protected by a bearer credential, and is that credential exact-origin scoped? | Use `--credential-env` for direct CLI work or a server-owned `[openenv.credentials.<id>]` handle. Never place tokens in task payloads, manifests, recipes, or receipts. |
 | **OpenEnv held-out plan** | reserve disjoint reset seeds and pin the environment deployment identity before training | OpenEnv promotion evidence must measure paired behavior-vs-candidate returns on unseen tasks, never the training episodes. |
+| **OpenEnv terminal diagnosis** | does a failed persisted run expose `kiln.openenv-run-failure.v1` with a closed code, stage, retryability, and hint? | Branch pipeline recovery on the typed failure. `retryable=true` permits a corrected new attempt, never episode resume or reuse of the terminal attempt's idempotency key. |
 | **Reward variance** | sample 20 baseline rollouts on `datasets/train.tasks.jsonl`, compute group variance | < 0.03 → GRPO has no signal. ≥ 0.05 → strong signal filter applies. |
 | **Task is multi-turn tool-calling?** | is `rollout.py` driving pi or another agent loop? | If yes, agentic-GRPO with ECHO is mandatory; everything else is a sub-step. |
 | **Baseline distribution shape** | inspect 5 base responses on `datasets/eval.tasks.jsonl` | Sanity-check that C₀ matches reality — saturated *or* over-strict rubrics distort it. |
@@ -221,6 +222,10 @@ its capacity snapshot is not a reservation. A synchronous rejection
 therefore spent no episodes: correct the request and use a new idempotency key
 only when its semantics change. The dashboard's **Prove it after training**
 control emits this same contract.
+If a persisted run fails, record its complete `failure` object in stage
+evidence. Use `failure.code` and `failure.stage` for pipeline decisions, apply
+`failure.hint`, and create a new attempt key only when `failure.retryable=true`;
+the free-form compatibility `error` string is not a routing contract.
 **Use when:** Rule A. Stateful OpenEnv tasks or multi-turn tool-calling tasks.
 **Data:** For OpenEnv, seed-matched stateful WebSocket episodes collected as
 canonical `AgenticGroup` JSONL. For pi, session JSONLs normalized into

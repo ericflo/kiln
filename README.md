@@ -157,7 +157,12 @@ After training, it can pair behavior and candidate policies on
 identical, disjoint held-out environment seeds, compare environment-owned
 returns with an exact sign test, and defer auto-load until the candidate earns
 promotion. A train run is terminal only after every requested evaluation has
-an outcome; restart-interrupted active work fails explicitly.
+an outcome; restart-interrupted active work fails explicitly. Newly failed
+runs retain `kiln.openenv-run-failure.v1` with a stable stage, code,
+retryability, operator hint, and exact OpenEnv protocol or HTTP evidence when
+available. API, CLI, dashboard, capability pipelines, and the fixed-cardinality
+`kiln_openenv_run_failures_total{stage,retryable}` metric all consume that
+diagnosis; the legacy `error` string remains only for compatibility.
 
 ```bash
 # Inspect the environment's health, metadata, schemas, and content identity.

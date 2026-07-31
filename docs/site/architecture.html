@@ -370,12 +370,20 @@ OpenEnv RL
   -> dataset + exact replay + summary v4 receipt
   -> native GRPO
   -> paired held-out environment evaluation
-  -> promote, retain, or reject adapter</code></pre>
+  -> promote, retain, or reject adapter
+  -> completed evidence or typed terminal failure</code></pre>
         <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
           Train admission atomically persists <code>kiln.openenv-training-contract.v1</code> with the
           effective GRPO config and optional post-eval suite. Restart, trainer submission, CLI, and
           dashboard consume that sealed value instead of recomputing defaults; summary v4 embeds it
           before first artifact publication so a later handoff failure remains auditable.
+        </p>
+        <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
+          Failure is part of that state machine, not an unstructured side channel. New terminal failures
+          retain <code>kiln.openenv-run-failure.v1</code>: a closed lifecycle stage and reason code,
+          retryability, bounded detail, operator hint, timestamp, and exact protocol or HTTP evidence when
+          supplied. CLI, API, dashboard, and fixed-cardinality metrics project the same diagnosis; the
+          historical <code>error</code> string remains only for compatibility.
         </p>
         <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
           One reset object may be shared, or a heterogeneous portfolio may align one object with each

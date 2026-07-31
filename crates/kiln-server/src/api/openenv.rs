@@ -69,8 +69,12 @@ const LIFECYCLE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const POST_EVAL_PUBLICATION_GRACE: Duration = Duration::from_secs(5);
 const POST_EVAL_GATE_TIMEOUT: Duration = Duration::from_secs(300);
 
+mod failure;
 mod training_evidence;
 
+pub use failure::{
+    OPENENV_RUN_FAILURE_SCHEMA_V1, OpenEnvRunFailure, OpenEnvRunFailureCode, OpenEnvRunFailureStage,
+};
 use training_evidence::ensure_openenv_training_evidence;
 #[cfg(test)]
 use training_evidence::publish_openenv_training_evidence;
@@ -386,6 +390,10 @@ pub struct OpenEnvRunStatus {
     pub post_evaluations: Vec<OpenEnvPostEvalStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment_evaluation: Option<OpenEnvEnvironmentEvalStatus>,
+    /// Stable, bounded terminal diagnosis for new failed runs. `error` remains
+    /// as a compatibility projection for older clients and persisted records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<OpenEnvRunFailure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -414,6 +422,7 @@ impl OpenEnvRunStatus {
             && self.training_submission.is_none()
             && self.training.is_none()
             && self.post_evaluations.is_empty()
+            && self.failure.is_none()
     }
 
     fn safely_migratable_v4_queued(&self) -> bool {
@@ -682,11 +691,20 @@ impl OpenEnvRunRegistry {
                         persist_status_to(&status_path, &status)?;
                     }
                     Err(error) => {
+                        let message = format!(
+                            "Kiln could not migrate this queued OpenEnv v4 training contract: {error:#}"
+                        );
                         status.state = OpenEnvRunState::Failed;
                         status.finished_unix_ms = Some(now);
-                        status.error = Some(format!(
-                            "Kiln could not migrate this queued OpenEnv v4 training contract: {error:#}"
+                        status.failure = Some(OpenEnvRunFailure::explicit(
+                            OpenEnvRunFailureCode::PersistedContractInvalid,
+                            OpenEnvRunFailureStage::Restoration,
+                            false,
+                            &message,
+                            "Correct the retained request or trainer configuration before submitting a new run.",
+                            now,
                         ));
+                        status.error = Some(message);
                         if let Some(admission) = status.admission.as_mut() {
                             admission.queue_position = None;
                         }
@@ -695,10 +713,20 @@ impl OpenEnvRunRegistry {
                 }
             }
             if !status.terminal() && !status.safely_restartable_queued() {
+                let finished_unix_ms = now_unix_ms();
+                let message =
+                    "Kiln restarted before this OpenEnv run reached a terminal state".to_string();
                 status.state = OpenEnvRunState::Failed;
-                status.finished_unix_ms = Some(now_unix_ms());
-                status.error =
-                    Some("Kiln restarted before this OpenEnv run reached a terminal state".into());
+                status.finished_unix_ms = Some(finished_unix_ms);
+                status.failure = Some(OpenEnvRunFailure::explicit(
+                    OpenEnvRunFailureCode::RunInterrupted,
+                    OpenEnvRunFailureStage::Restoration,
+                    true,
+                    &message,
+                    "Submit a new run; OpenEnv sessions and trainer ownership cannot be assumed resumable after restart.",
+                    finished_unix_ms,
+                ));
+                status.error = Some(message);
                 if let Some(admission) = status.admission.as_mut() {
                     admission.queue_position = None;
                 }
@@ -740,12 +768,21 @@ impl OpenEnvRunRegistry {
             .unwrap_or_default();
         for status in restored.iter_mut().skip(self.policy.max_tracked_runs) {
             if status.safely_restartable_queued() {
-                status.state = OpenEnvRunState::Failed;
-                status.finished_unix_ms = Some(now);
-                status.error = Some(format!(
+                let message = format!(
                     "Kiln restarted with openenv.max_tracked_runs={} before this queued run could be restored",
                     self.policy.max_tracked_runs
+                );
+                status.state = OpenEnvRunState::Failed;
+                status.finished_unix_ms = Some(now);
+                status.failure = Some(OpenEnvRunFailure::explicit(
+                    OpenEnvRunFailureCode::RunAdmissionFailed,
+                    OpenEnvRunFailureStage::Restoration,
+                    true,
+                    &message,
+                    "Raise openenv.max_tracked_runs or reduce retained history before submitting a new run.",
+                    now,
                 ));
+                status.error = Some(message);
                 if let Some(admission) = status.admission.as_mut() {
                     admission.queue_position = None;
                 }
@@ -953,6 +990,7 @@ impl OpenEnvRunRegistry {
             training: None,
             post_evaluations: Vec::new(),
             environment_evaluation,
+            failure: None,
             error: None,
         };
         persist_status_to(&run_dir.join("run.json"), &status)?;
@@ -1166,6 +1204,7 @@ impl OpenEnvRunRegistry {
             if queued {
                 status.state = OpenEnvRunState::Cancelled;
                 status.finished_unix_ms = Some(now_unix_ms());
+                status.failure = None;
                 status.error =
                     Some("OpenEnv run cancelled while waiting for execution capacity".into());
                 if let Some(admission) = status.admission.as_mut() {
@@ -2144,6 +2183,15 @@ async fn admit_and_execute_run(state: AppState, run_id: String, control: OpenEnv
         Err(_) if control.cancel.load(Ordering::Relaxed) => return,
         Err(error) => {
             let error_message = format!("OpenEnv run admission failed: {error:#}");
+            let occurred_unix_ms = now_unix_ms();
+            let failure = OpenEnvRunFailure::explicit(
+                OpenEnvRunFailureCode::RunAdmissionFailed,
+                OpenEnvRunFailureStage::Admission,
+                true,
+                &error_message,
+                "Inspect server capacity and submit a new run after admission recovers.",
+                occurred_unix_ms,
+            );
             tracing::error!(
                 run_id = %run_id,
                 error = %error_message,
@@ -2151,9 +2199,13 @@ async fn admit_and_execute_run(state: AppState, run_id: String, control: OpenEnv
             );
             let _ = state.openenv_runs.update(&run_id, |status| {
                 status.state = OpenEnvRunState::Failed;
-                status.finished_unix_ms = Some(now_unix_ms());
+                status.finished_unix_ms = Some(occurred_unix_ms);
+                status.failure = Some(failure.clone());
                 status.error = Some(error_message);
             });
+            state
+                .metrics
+                .record_openenv_run_failure(failure.stage.as_label(), failure.retryable);
             state
                 .metrics
                 .openenv_runs_failed
@@ -2183,7 +2235,23 @@ async fn admit_and_execute_run(state: AppState, run_id: String, control: OpenEnv
 async fn execute_run(state: AppState, run_id: String, cancel: Arc<AtomicBool>) {
     if let Err(error) = execute_run_inner(&state, &run_id, cancel.clone()).await {
         let cancelled = cancel.load(Ordering::Relaxed);
-        let error_message = format!("{error:#}");
+        let occurred_unix_ms = now_unix_ms();
+        let failure = (!cancelled).then(|| {
+            let current = state.openenv_runs.get(&run_id);
+            let run_state = current
+                .as_ref()
+                .map(|status| status.state)
+                .unwrap_or(OpenEnvRunState::Failed);
+            let collection_complete = current.as_ref().is_some_and(|status| {
+                status.progress.groups_total > 0
+                    && status.progress.groups_completed == status.progress.groups_total
+            });
+            OpenEnvRunFailure::from_error(run_state, collection_complete, &error, occurred_unix_ms)
+        });
+        let error_message = failure
+            .as_ref()
+            .map(|failure| failure.message.clone())
+            .unwrap_or_else(|| format!("{error:#}"));
         tracing::warn!(
             run_id = %run_id,
             cancelled,
@@ -2196,7 +2264,8 @@ async fn execute_run(state: AppState, run_id: String, cancel: Arc<AtomicBool>) {
             } else {
                 OpenEnvRunState::Failed
             };
-            status.finished_unix_ms = Some(now_unix_ms());
+            status.finished_unix_ms = Some(occurred_unix_ms);
+            status.failure = failure.clone();
             status.error = Some(error_message);
         }) {
             tracing::error!(
@@ -2211,6 +2280,11 @@ async fn execute_run(state: AppState, run_id: String, cancel: Arc<AtomicBool>) {
                 .openenv_runs_cancelled
                 .fetch_add(1, Ordering::Relaxed);
         } else {
+            if let Some(failure) = &failure {
+                state
+                    .metrics
+                    .record_openenv_run_failure(failure.stage.as_label(), failure.retryable);
+            }
             state
                 .metrics
                 .openenv_runs_failed
@@ -2287,6 +2361,7 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
                 .map(|inspection| inspection.identity.clone())
                 .collect();
             status.artifacts = artifacts;
+            status.failure = None;
             status.error = None;
         })?;
         state
@@ -2314,6 +2389,7 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
             .map(|inspection| inspection.identity.clone())
             .collect();
         status.artifacts = artifacts;
+        status.failure = None;
         status.error = None;
     })?;
     anyhow::ensure!(!cancel.load(Ordering::Relaxed), "OpenEnv run cancelled");
@@ -2360,6 +2436,7 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
         status.training_submission = Some(submission.clone());
         status.training = Some(training);
         status.artifacts = artifacts;
+        status.failure = None;
         status.error = None;
     })?;
     state
@@ -2409,6 +2486,7 @@ fn finish_followed_training(
         status.finished_unix_ms = request.environment_eval.is_none().then_some(now_unix_ms());
         status.training = Some(training);
         status.post_evaluations = evals;
+        status.failure = None;
         status.error = None;
     })?;
     Ok(())
@@ -2478,6 +2556,7 @@ async fn run_openenv_environment_evaluation(
             outcome: None,
             verdict: None,
         });
+        status.failure = None;
         status.error = None;
     })?;
     state
@@ -2669,6 +2748,7 @@ async fn run_openenv_environment_evaluation(
             outcome: Some(outcome),
             verdict: Some(verdict),
         });
+        status.failure = None;
         status.error = None;
     })?;
     if terminal_error.is_some() {
@@ -2852,7 +2932,8 @@ async fn follow_openenv_training(
                 );
             }
             TrainingState::Completed => {
-                ensure_openenv_training_evidence(state, run_id, request, &training)?;
+                ensure_openenv_training_evidence(state, run_id, request, &training)
+                    .map_err(failure::training_evidence_failure)?;
                 if post_eval.is_none() {
                     finish_followed_training(state, run_id, request, training, evals)?;
                     return Ok(());
@@ -3780,6 +3861,11 @@ mod tests {
         let interrupted = restored.get(&active.run_id).unwrap();
         assert_eq!(interrupted.state, OpenEnvRunState::Failed);
         assert!(interrupted.error.as_deref().unwrap().contains("restarted"));
+        let failure = interrupted.failure.unwrap();
+        assert_eq!(failure.schema, OPENENV_RUN_FAILURE_SCHEMA_V1);
+        assert_eq!(failure.code, OpenEnvRunFailureCode::RunInterrupted);
+        assert_eq!(failure.stage, OpenEnvRunFailureStage::Restoration);
+        assert!(failure.retryable);
         let safe = restored.get(&queued_first.run_id).unwrap();
         assert_eq!(safe.state, OpenEnvRunState::Queued);
         assert_eq!(safe.admission.unwrap().queue_position, Some(1));
@@ -4453,6 +4539,52 @@ mod tests {
         assert_eq!(cancelled.state, OpenEnvRunState::Cancelled);
         assert_eq!(state.openenv_runs.counts(), (1, 0, 2));
         drop(active_permit);
+    }
+
+    #[tokio::test]
+    async fn failed_discovery_persists_typed_retryable_diagnosis() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(&temp, OpenEnvConfig::default());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let unavailable = listener.local_addr().unwrap();
+        drop(listener);
+        let mut submitted = request(OpenEnvRunKind::Rollout);
+        submitted.environment_urls = vec![format!("http://{unavailable}")];
+        let app = routes().with_state(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/openenv/runs")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&submitted).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let accepted: OpenEnvRunStatus = serde_json::from_slice(&body).unwrap();
+
+        let failed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let status = state.openenv_runs.get(&accepted.run_id).unwrap();
+                if status.state == OpenEnvRunState::Failed {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let failure = failed.failure.unwrap();
+        assert_eq!(failure.code, OpenEnvRunFailureCode::EnvironmentUnavailable);
+        assert_eq!(failure.stage, OpenEnvRunFailureStage::Discovery);
+        assert!(failure.retryable);
+        assert_eq!(failed.error.as_deref(), Some(failure.message.as_str()));
+        assert_eq!(state.metrics.openenv_runs_failed.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

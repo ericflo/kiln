@@ -91,6 +91,13 @@ closed. Run-status v4 exposes bounded FIFO admission. `queued` with
 `admission.queue_position` is accepted work, not a retry signal. Preserve the
 run ID and cancel a superseded queued attempt.
 
+A failed run carries `kiln.openenv-run-failure.v1`. Persist its closed
+`code`, `stage`, `retryable`, and `hint` fields with stage evidence; exact
+`protocol_code` or `http_status` is included only when the environment supplied
+it. `retryable=true` means correct the condition and start a new attempt with a
+new idempotency key. It never authorizes in-place episode resume. The adjacent
+free-form `error` field is a compatibility projection, not pipeline control.
+
 Keep training and held-out seeds disjoint. A kept stage requires the native
 paired-return gate; training returns never substitute for it.
 

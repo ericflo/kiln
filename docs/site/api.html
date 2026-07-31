@@ -1092,6 +1092,11 @@ curl -fsS http://localhost:8420/v1/train/opd \
           Accepted train status atomically retains <code>kiln.openenv-training-contract.v1</code>;
           restart and execution use it without recomputing defaults, and summary v4 embeds the same
           settings before artifact publication.
+          Failed workflows retain a bounded <code>kiln.openenv-run-failure.v1</code>
+          diagnosis with a closed stage and code, retryability, next-step hint, and exact
+          OpenEnv protocol code or HTTP status when the peer supplied one. The legacy
+          <code>error</code> string remains for compatibility; automation should consume
+          <code>failure</code>. Metrics expose only the fixed stage × retryability matrix.
           Rejections therefore spend no episodes or artifacts. Training &rarr; OpenEnv exposes that suite as <strong>Prove it after
           training</strong>; collect-only requests reject every training-only field.
         </p>

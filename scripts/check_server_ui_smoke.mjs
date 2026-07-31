@@ -1197,6 +1197,27 @@ async function startServer({
     submitted_unix_ms: 1_700_000_000_000,
     admission: { max_active_runs: 1, sequence: 2, queue_position: 2 },
     progress: { groups_completed: 0, groups_total: 8, rollouts_completed: 0, rollouts_total: 32 },
+  }, {
+    schema: 'kiln.openenv-run.v5',
+    run_id: 'failed-openenv-run',
+    kind: 'train',
+    state: 'failed',
+    request: { adapter: 'base' },
+    submitted_unix_ms: 1_699_999_999_000,
+    finished_unix_ms: 1_700_000_000_000,
+    admission: { max_active_runs: 1, sequence: 1, admitted_unix_ms: 1_699_999_999_100, queue_wait_ms: 100 },
+    progress: { groups_completed: 1, groups_total: 8, rollouts_completed: 4, rollouts_total: 32 },
+    failure: {
+      schema: 'kiln.openenv-run-failure.v1',
+      code: 'environment_capacity_exhausted',
+      stage: 'collection',
+      retryable: true,
+      message: 'The environment remained at capacity.',
+      hint: 'Retry after environment capacity becomes available.',
+      occurred_unix_ms: 1_700_000_000_000,
+      protocol_code: 'CAPACITY_REACHED',
+    },
+    error: 'The environment remained at capacity.',
   }];
   let openEnvDroppedAcceptedResponse = false;
   const smokeTeacherRevision = `sha256:${'7'.repeat(64)}`;
@@ -4830,6 +4851,7 @@ async function runSmoke(baseUrl, {
     await clickAndWait(page, '#training-tab-openenv', 'Could not open OpenEnv training tab');
     await waitForVisiblePanel(page, '#tab-openenv', 'OpenEnv training tab did not activate');
     await waitForPanelText(page, '#openenv-runs', /queue-op[\s\S]*queued[\s\S]*FIFO execution queue · position 2 · 1 active slot/, 'OpenEnv history should render live FIFO admission position and capacity');
+    await waitForPanelText(page, '#openenv-runs', /failed-o[\s\S]*environment_capacity_exhausted · collection · retryable · OpenEnv CAPACITY_REACHED[\s\S]*Next: Retry after environment capacity becomes available/, 'OpenEnv history should render typed actionable failure semantics');
     await waitForPanelText(page, '#openenv-optimizer-support', /Muon · bf16 LoRA · round-to-nearest · rank 8 \(supported 2–32\)/, 'OpenEnv train should render the native GRPO optimizer tuple');
     await expectDisabled(page, '#openenv-form button[type="submit"]', false, 'OpenEnv train should enable after native GRPO capability admission');
     if (setEvalSuites) {

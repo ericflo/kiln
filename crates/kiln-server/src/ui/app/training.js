@@ -1393,7 +1393,12 @@ function openEnvRunCard(run) {
     ? `<button class="btn btn-sm" type="button" data-openenv-training-job="${escapeHtml(run.training_job_id)}">Training ${escapeHtml(run.training_job_id.slice(0, 8))}</button>`
     : '';
   const cancel = terminal ? '' : `<button class="btn btn-sm btn-danger" type="button" data-openenv-cancel="${escapeHtml(run.run_id)}">Cancel</button>`;
-  const error = run.error ? `<div class="training-card-error">${escapeHtml(run.error)}</div>` : '';
+  const failure = run.failure || null;
+  const error = failure
+    ? `<div class="training-card-error"><strong>${escapeHtml(String(failure.code || 'internal_error'))}</strong> · ${escapeHtml(openEnvStateLabel(failure.stage || 'orchestration'))} · ${failure.retryable ? 'retryable' : 'not retryable'}${failure.protocol_code ? ` · OpenEnv ${escapeHtml(failure.protocol_code)}` : ''}${failure.http_status ? ` · HTTP ${Number(failure.http_status)}` : ''}<br>${escapeHtml(failure.message || run.error || 'OpenEnv run failed.')}${failure.hint ? `<br><span class="hint">Next: ${escapeHtml(failure.hint)}</span>` : ''}</div>`
+    : run.error
+      ? `<div class="training-card-error">${escapeHtml(run.error)}</div>`
+      : '';
   const admissionDetail = admission
     ? state === 'queued'
       ? `<div class="training-card-meta">FIFO execution queue · position ${Number(admission.queue_position || 0).toLocaleString()} · ${Number(admission.max_active_runs || 0).toLocaleString()} active slot${Number(admission.max_active_runs || 0) === 1 ? '' : 's'}</div>`

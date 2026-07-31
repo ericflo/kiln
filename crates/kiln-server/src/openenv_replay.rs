@@ -31,6 +31,20 @@ pub(crate) const MAX_OPENENV_ARTIFACT_BYTES: usize = 256 * 1024 * 1024;
 const CAPACITY_RETRY_FLOOR: Duration = Duration::from_millis(250);
 const CAPACITY_RETRY_CEILING: Duration = Duration::from_secs(2);
 
+/// Typed terminal capacity result retained through `anyhow::Context` so the
+/// persisted OpenEnv workflow can expose automation-safe failure semantics.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "OpenEnv server {base_url} remained at capacity for {waited:?} after {retries} retries (active {active_sessions:?}, max {max_sessions:?})"
+)]
+pub(crate) struct OpenEnvCapacityTimeout {
+    base_url: String,
+    waited: Duration,
+    retries: usize,
+    active_sessions: Option<u64>,
+    max_sessions: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct OpenEnvReplayManifest {
@@ -529,14 +543,16 @@ pub async fn connect_and_reset_with_capacity_checked(
                 retries = retries.saturating_add(1);
                 let _ = session.close().await;
                 let elapsed = started.elapsed();
-                anyhow::ensure!(
-                    elapsed < capacity_wait,
-                    "OpenEnv server {} remained at capacity for {:?} after {retries} retries (active {:?}, max {:?})",
-                    client.base_url(),
-                    capacity_wait,
-                    error.active_sessions,
-                    error.max_sessions
-                );
+                if elapsed >= capacity_wait {
+                    return Err(OpenEnvCapacityTimeout {
+                        base_url: client.base_url().to_string(),
+                        waited: capacity_wait,
+                        retries,
+                        active_sessions: error.active_sessions,
+                        max_sessions: error.max_sessions,
+                    }
+                    .into());
+                }
                 let multiplier = u32::try_from(retries).unwrap_or(u32::MAX);
                 let delay = CAPACITY_RETRY_FLOOR
                     .saturating_mul(multiplier)

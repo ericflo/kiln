@@ -75,6 +75,18 @@ const THINKING_BUDGET_OUTCOMES: [&str; 9] = [
     "interrupted",
     "unresolved",
 ];
+const OPENENV_FAILURE_STAGES: [&str; 10] = [
+    "restoration",
+    "admission",
+    "discovery",
+    "collection",
+    "artifact_publication",
+    "training_submission",
+    "training",
+    "post_evaluation",
+    "environment_evaluation",
+    "orchestration",
+];
 
 /// Closed prompt-logprob scoring routes exposed through Prometheus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,6 +243,9 @@ pub struct Metrics {
     pub openenv_training_completed: AtomicU64,
     pub openenv_runs_failed: AtomicU64,
     pub openenv_runs_cancelled: AtomicU64,
+    /// Fixed stage × retryability failure taxonomy. No endpoint, message, run
+    /// ID, or protocol payload is ever admitted as a Prometheus label.
+    openenv_run_failures: [AtomicU64; OPENENV_FAILURE_STAGES.len() * 2],
     pub openenv_episodes_collected: AtomicU64,
     pub openenv_authenticated_inspections: AtomicU64,
     pub openenv_task_catalog_inspections_started: AtomicU64,
@@ -303,6 +318,7 @@ impl Metrics {
             openenv_training_completed: AtomicU64::new(0),
             openenv_runs_failed: AtomicU64::new(0),
             openenv_runs_cancelled: AtomicU64::new(0),
+            openenv_run_failures: std::array::from_fn(|_| AtomicU64::new(0)),
             openenv_episodes_collected: AtomicU64::new(0),
             openenv_authenticated_inspections: AtomicU64::new(0),
             openenv_task_catalog_inspections_started: AtomicU64::new(0),
@@ -327,6 +343,16 @@ impl Metrics {
             RequestStatus::Timeout => self.requests_timeout.fetch_add(1, Ordering::Relaxed),
             RequestStatus::Rejected => self.requests_rejected.fetch_add(1, Ordering::Relaxed),
         };
+    }
+
+    /// Record one terminal OpenEnv run failure using only closed labels.
+    pub(crate) fn record_openenv_run_failure(&self, stage: &'static str, retryable: bool) {
+        let stage_index = OPENENV_FAILURE_STAGES
+            .iter()
+            .position(|candidate| *candidate == stage)
+            .unwrap_or(OPENENV_FAILURE_STAGES.len() - 1);
+        let retry_index = usize::from(retryable);
+        self.openenv_run_failures[stage_index * 2 + retry_index].fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record one fully settled prompt-logprob projection chunk.
@@ -3155,6 +3181,20 @@ impl Metrics {
         ] {
             prom_counter(&mut out, "kiln_openenv_runs_total", "status", status, value);
         }
+        out.push_str("# HELP kiln_openenv_run_failures_total Terminal OpenEnv workflow failures by closed lifecycle stage and retryability.\n");
+        out.push_str("# TYPE kiln_openenv_run_failures_total counter\n");
+        for (stage_index, stage) in OPENENV_FAILURE_STAGES.iter().enumerate() {
+            for (retry_index, retryable) in ["false", "true"].iter().enumerate() {
+                push_line(
+                    &mut out,
+                    &format!(
+                        "kiln_openenv_run_failures_total{{stage=\"{stage}\",retryable=\"{retryable}\"}} {}",
+                        self.openenv_run_failures[stage_index * 2 + retry_index]
+                            .load(Ordering::Relaxed)
+                    ),
+                );
+            }
+        }
         out.push_str("# HELP kiln_openenv_run_queue_wait_seconds_total Total time accepted OpenEnv runs spent waiting for bounded execution admission.\n");
         out.push_str("# TYPE kiln_openenv_run_queue_wait_seconds_total counter\n");
         push_line(
@@ -3947,6 +3987,7 @@ mod tests {
         m.openenv_run_idempotent_replays.store(4, Ordering::Relaxed);
         m.openenv_run_queue_wait_ms_total
             .store(1_250, Ordering::Relaxed);
+        m.record_openenv_run_failure("collection", true);
 
         let mut token_closed = test_thinking_budget(true, "request", "server_default");
         token_closed.max_tokens = Some(64);
@@ -4403,6 +4444,14 @@ mod tests {
         assert!(output.contains("kiln_openenv_training_preflights_total{status=\"rejected\"} 7"));
         assert!(output.contains("kiln_openenv_runs_total{status=\"resumed\"} 2"));
         assert!(output.contains("kiln_openenv_runs_total{status=\"idempotent_replay\"} 4"));
+        assert!(output.contains(
+            "kiln_openenv_run_failures_total{stage=\"collection\",retryable=\"true\"} 1"
+        ));
+        assert!(
+            output.contains(
+                "kiln_openenv_run_failures_total{stage=\"training\",retryable=\"false\"} 0"
+            )
+        );
         assert!(output.contains("kiln_openenv_run_queue_wait_seconds_total 1.250"));
         assert!(output.contains("kiln_openenv_runs_active 2"));
         assert!(output.contains("kiln_openenv_runs_queued 3"));

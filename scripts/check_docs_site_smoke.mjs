@@ -1694,6 +1694,11 @@ function validateSftLossRouteDocumentationSourceContract() {
   if (!staticArchitectureHtml.includes('id="openenv-rl-workflow"')) {
     fail('docs/site/architecture.html: missing stable #openenv-rl-workflow anchor');
   }
+  for (const term of ['kiln.openenv-run-failure.v1', 'Failure is part of that state machine', 'fixed-cardinality metrics']) {
+    if (!staticArchitectureHtml.includes(term)) {
+      fail(`docs/site/architecture.html: OpenEnv failure architecture is missing ${term}`);
+    }
+  }
   const nativeSftLink = expectedArchitectureLinks
     .find((link) => link.label === 'generated Native SFT profile')?.href;
   if (!nativeSftLink || !staticArchitectureHtml.includes(`href="${nativeSftLink}"`)) {
@@ -1711,6 +1716,9 @@ function validateSftLossRouteDocumentationSourceContract() {
     'retained-representation budget error reports current and additional bytes',
     'publishes no partial artifact bundle',
     'openenv_artifact_integrity_failed',
+    'failure.code',
+    'failure.retryable',
+    'use a new idempotency key',
     'Restore the original bundle or recollect; never edit retained artifacts in place',
     'do not edit the receipt',
   ]);
@@ -1750,6 +1758,9 @@ function validateSftLossRouteDocumentationSourceContract() {
     'compact_device',
     'bounded_host_fallback',
     'OpenEnv is a native persisted training lifecycle, not an environment-specific adapter',
+    'kiln.openenv-run-failure.v1',
+    'automation should consume failure',
+    'fixed stage × retryability matrix',
     'kiln openenv start --request openenv-run.json',
     '--idempotency-key experiment:math:17 --follow',
     'kiln openenv artifact <run-id> environment_eval_receipt --output receipt.json',

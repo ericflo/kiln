@@ -534,6 +534,79 @@ def build_openenv_types() -> None:
         ],
         "Persisted OpenEnv orchestration lifecycle state.",
     )
+    add_enum(
+        "OpenEnvRunFailureStage",
+        "OpenEnvRunFailureStage",
+        [
+            "restoration",
+            "admission",
+            "discovery",
+            "collection",
+            "artifact_publication",
+            "training_submission",
+            "training",
+            "post_evaluation",
+            "environment_evaluation",
+            "orchestration",
+        ],
+        "Closed workflow boundary that owned an operation when an OpenEnv run failed.",
+    )
+    add_enum(
+        "OpenEnvRunFailureCode",
+        "OpenEnvRunFailureCode",
+        [
+            "run_admission_failed",
+            "run_interrupted",
+            "persisted_contract_invalid",
+            "environment_unavailable",
+            "environment_capacity_exhausted",
+            "environment_protocol_error",
+            "collection_failed",
+            "artifact_publication_failed",
+            "training_submission_failed",
+            "training_failed",
+            "training_evidence_invalid",
+            "post_evaluation_failed",
+            "environment_evaluation_failed",
+            "internal_error",
+        ],
+        "Stable, automation-safe terminal reason for an OpenEnv workflow failure.",
+    )
+    add_enum(
+        "OpenEnvErrorCode",
+        "kiln_openenv::OpenEnvErrorCode",
+        [
+            "INVALID_JSON",
+            "UNKNOWN_TYPE",
+            "VALIDATION_ERROR",
+            "EXECUTION_ERROR",
+            "CAPACITY_REACHED",
+            "FACTORY_ERROR",
+            "SESSION_ERROR",
+        ],
+        "Exact error code supplied by an OpenEnv WebSocket peer.",
+    )
+    add_object(
+        "OpenEnvRunFailure",
+        "OpenEnvRunFailure",
+        {
+            "schema": {"const": "kiln.openenv-run-failure.v1"},
+            "code": ref("OpenEnvRunFailureCode"),
+            "stage": ref("OpenEnvRunFailureStage"),
+            "retryable": ref("Boolean"),
+            "message": {"type": "string", "maxLength": 4096},
+            "hint": ref("String"),
+            "occurred_unix_ms": ref("NonNegativeInteger"),
+            "protocol_code": ref("OpenEnvErrorCode"),
+            "http_status": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 599,
+            },
+        },
+        "Bounded, self-contained terminal diagnosis retained with an OpenEnv run. Protocol and HTTP evidence are present only when supplied by the environment.",
+        optional=("protocol_code", "http_status"),
+    )
     add_object(
         "OpenEnvRunProgress",
         "OpenEnvRunProgress",
@@ -907,6 +980,7 @@ def build_openenv_types() -> None:
             "training": ref("OpenEnvTrainingStatus"),
             "post_evaluations": array(ref("OpenEnvPostEvalStatus")),
             "environment_evaluation": ref("OpenEnvEnvironmentEvalStatus"),
+            "failure": ref("OpenEnvRunFailure"),
             "error": ref("String"),
         },
         "Persisted status, collection artifacts, immutable admitted training contract, and authoritative training and evaluation lifecycle for one OpenEnv run. Version 1 records may retain the historical terminal training_queued handoff; version 2 follows learning to completion; version 3 includes paired held-out environment evaluation; version 4 adds bounded FIFO execution admission; version 5 seals exact trainer settings before collection.",
@@ -921,6 +995,7 @@ def build_openenv_types() -> None:
             "training",
             "post_evaluations",
             "environment_evaluation",
+            "failure",
             "error",
         ),
         extra={
@@ -997,6 +1072,7 @@ def build_openenv_types() -> None:
                 "v5 train status contains the immutable preflighted training_contract and executes from it",
                 "v5 rollout status omits training_contract",
                 "v1 through v4 status predates training_contract and omits it",
+                "new failed runs carry failure as the stable diagnosis while error remains a compatibility projection",
             ],
         },
     )

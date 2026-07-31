@@ -1674,7 +1674,7 @@ fn openenv_server_run_fingerprint(run: &Value) -> String {
         .filter_map(|evaluation| evaluation.get("examples_completed").and_then(Value::as_u64))
         .sum::<u64>();
     format!(
-        "{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
         run.get("state").and_then(Value::as_str).unwrap_or_default(),
         run.pointer("/training/state")
             .and_then(Value::as_str)
@@ -1696,6 +1696,12 @@ fn openenv_server_run_fingerprint(run: &Value) -> String {
         run.get("artifacts")
             .and_then(Value::as_array)
             .map(Vec::len)
+            .unwrap_or_default(),
+        run.pointer("/failure/code")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        run.pointer("/failure/stage")
+            .and_then(Value::as_str)
             .unwrap_or_default()
     )
 }
@@ -1900,7 +1906,41 @@ fn print_openenv_server_run(run: &Value) {
             println!("    Environment gate: {outcome}");
         }
     }
-    if let Some(error) = run.get("error").and_then(Value::as_str) {
+    if let Some(failure) = run.get("failure") {
+        let code = failure
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("internal_error");
+        let stage = failure
+            .get("stage")
+            .and_then(Value::as_str)
+            .unwrap_or("orchestration");
+        let retryable = failure
+            .get("retryable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        println!(
+            "  Failure: {code} at {} · {}",
+            stage.replace('_', " "),
+            if retryable {
+                "retryable"
+            } else {
+                "not retryable"
+            }
+        );
+        if let Some(protocol_code) = failure.get("protocol_code").and_then(Value::as_str) {
+            println!("    OpenEnv protocol: {protocol_code}");
+        }
+        if let Some(http_status) = failure.get("http_status").and_then(Value::as_u64) {
+            println!("    OpenEnv HTTP: {http_status}");
+        }
+        if let Some(message) = failure.get("message").and_then(Value::as_str) {
+            println!("    Detail: {message}");
+        }
+        if let Some(hint) = failure.get("hint").and_then(Value::as_str) {
+            println!("    Next: {hint}");
+        }
+    } else if let Some(error) = run.get("error").and_then(Value::as_str) {
         println!("  Error: {error}");
     }
     if let Some(artifacts) = run.get("artifacts").and_then(Value::as_array) {
@@ -3940,6 +3980,23 @@ mod tests {
                 {"kind": "train_receipt"},
                 {"kind": "adapter_manifest"}
             ]
+        });
+        assert_ne!(
+            openenv_server_run_fingerprint(&before),
+            openenv_server_run_fingerprint(&after)
+        );
+    }
+
+    #[test]
+    fn server_run_follow_fingerprint_tracks_typed_failure_diagnosis() {
+        let before = json!({"schema": "kiln.openenv-run.v5", "state": "collecting"});
+        let after = json!({
+            "schema": "kiln.openenv-run.v5",
+            "state": "failed",
+            "failure": {
+                "code": "environment_capacity_exhausted",
+                "stage": "collection"
+            }
         });
         assert_ne!(
             openenv_server_run_fingerprint(&before),

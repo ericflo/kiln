@@ -370,6 +370,46 @@ Live replay uses the same capacity acquisition rule. Capacity retries are
 reported separately from environment transitions and never become fabricated
 training observations.
 
+## Persisted failure semantics
+
+Every newly failed server-owned run retains a bounded
+`kiln.openenv-run-failure.v1` object in `OpenEnvRunStatus.failure`. It is the
+automation contract; the adjacent `error` string remains only as a backwards-
+compatible projection for older clients and historical records. The failure
+contains a closed `stage`, closed `code`, `retryable`, message, actionable
+hint, and occurrence time. When the environment actually supplied evidence,
+it also retains the exact uppercase OpenEnv `protocol_code` or upstream
+`http_status`. Credentials, URLs with secrets, run IDs, and unbounded peer
+payloads never become metric labels.
+
+The stable codes are:
+
+| Code | Meaning |
+|---|---|
+| `run_admission_failed` | Kiln could not acquire or persist workflow admission. |
+| `run_interrupted` | A restart interrupted a non-resumable environment, trainer, or evaluator owner. |
+| `persisted_contract_invalid` | A retained request or immutable training contract cannot execute safely. |
+| `environment_unavailable` | Discovery or the stateful transport could not reach a usable peer. |
+| `environment_capacity_exhausted` | Fresh-session acquisition exhausted the bounded capacity wait. |
+| `environment_protocol_error` | The peer violated or terminally rejected the advertised protocol. |
+| `collection_failed` | Episode collection or policy execution failed before a complete corpus existed. |
+| `artifact_publication_failed` | A complete collection could not publish its fail-closed artifact bundle. |
+| `training_submission_failed` | Native GRPO rejected or lost the training handoff. |
+| `training_failed` | The authoritative native trainer failed. |
+| `training_evidence_invalid` | Trainer receipt, adapter manifest, corpus digest, or OpenEnv lineage failed validation. |
+| `post_evaluation_failed` | A requested static evaluation failed or never published. |
+| `environment_evaluation_failed` | Paired held-out collection, evidence, or promotion failed. |
+| `internal_error` | No narrower safe category applies. |
+
+`retryable=true` means an operator may submit a **new** run after correcting the
+hinted condition. It never promises in-place resume and never changes the
+idempotency rule: retrying the same retained key returns the original terminal
+run, so a deliberate new attempt needs a new key. The CLI and dashboard render
+the typed diagnosis directly. Prometheus exports
+`kiln_openenv_run_failures_total{stage="...",retryable="true|false"}` over a
+fixed stage × retryability matrix; endpoint, message, code payload, and run ID
+cardinality cannot leak into the metric.
+
 ## Training admission
 
 For every training request, Kiln materializes the exact native-GRPO

@@ -594,6 +594,7 @@ impl OpenEnvClientError {
     pub fn http_status_code(&self) -> Option<u16> {
         match self {
             Self::HttpStatus { status, .. } => Some(status.as_u16()),
+            Self::AuthenticatedWebSocketStatus(status) => Some(status.as_u16()),
             _ => None,
         }
     }
@@ -1326,5 +1327,12 @@ mod tests {
         assert_eq!((catalog.start, catalog.stop), (Some(1), Some(3)));
         assert_eq!(catalog.tasks.len(), 2);
         server.abort();
+    }
+
+    #[test]
+    fn authenticated_websocket_rejection_exposes_only_its_status() {
+        let error = OpenEnvClientError::AuthenticatedWebSocketStatus(StatusCode::UNAUTHORIZED);
+        assert_eq!(error.http_status_code(), Some(401));
+        assert!(!error.to_string().contains("credential"));
     }
 }
