@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ericflo.github.io/kiln/schemas/rocm-hf-next-token-oracle-v2.schema.json",
   "title": "Kiln ROCm Hugging Face Next-Token Oracle Result v2",
-  "description": "Compact source-, input-, process-, and network-bound evidence for one eager Hugging Face next-token attribution.",
+  "description": "Result of one independent eager Hugging Face next-token comparison on ROCm. The record binds the pushed source tree, implementation bytes, request, model, process containment, full-vocabulary logits artifact, and verdict; it attributes this exact divergent state rather than proving general model parity.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -22,20 +22,25 @@
   ],
   "properties": {
     "schema": {
+      "description": "Schema identifier for this oracle-result format.",
       "const": "kiln.rocm-hf-next-token-oracle.v2"
     },
     "result_sha256": {
+      "description": "Canonical SHA-256 identity of the complete result after removing this self-hash field.",
       "$ref": "#/$defs/sha256"
     },
     "created_at_utc": {
+      "description": "UTC time when the result record was created.",
       "type": "string",
       "format": "date-time"
     },
     "duration_seconds": {
+      "description": "Total wall-clock duration of model fingerprinting, contained oracle execution, verification, and result assembly.",
       "type": "number",
       "exclusiveMinimum": 0
     },
     "source": {
+      "description": "Clean pushed repository identity used to build and execute the oracle.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -45,17 +50,21 @@
       ],
       "properties": {
         "commit": {
+          "description": "Full Git commit checked out during execution.",
           "$ref": "#/$defs/gitObject"
         },
         "origin_main": {
+          "description": "Full `origin/main` commit required to equal the checked-out commit.",
           "$ref": "#/$defs/gitObject"
         },
         "tree": {
+          "description": "Git tree object for the checked-out commit.",
           "$ref": "#/$defs/gitObject"
         }
       }
     },
     "implementation": {
+      "description": "Content identities of the worker, interpreter, and containment runner that produced the oracle evidence.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -65,17 +74,21 @@
       ],
       "properties": {
         "hf_worker_sha256": {
+          "description": "SHA-256 identity of the eager Hugging Face logits worker.",
           "$ref": "#/$defs/sha256"
         },
         "python_sha256": {
+          "description": "SHA-256 identity of the Python executable used for fingerprinting and oracle execution.",
           "$ref": "#/$defs/sha256"
         },
         "process_runner_sha256": {
+          "description": "SHA-256 identity of the process-containment runner.",
           "$ref": "#/$defs/sha256"
         }
       }
     },
     "request": {
+      "description": "Repository-local attribution request, its canonical identity, and the paired candidate-source receipts it binds.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -86,28 +99,35 @@
       ],
       "properties": {
         "contract_path": {
+          "description": "Repository-relative path to the retained Hugging Face next-token request.",
           "type": "string",
           "minLength": 1
         },
         "id": {
+          "description": "Request identifier copied from the retained contract.",
           "type": "string",
           "minLength": 1
         },
         "sha256": {
+          "description": "Canonical SHA-256 identity of the retained request content.",
           "$ref": "#/$defs/sha256"
         },
         "source": {
+          "description": "Source revision and Kiln/vLLM qualification receipts copied from the request.",
           "$ref": "#/$defs/sourcePair"
         }
       }
     },
     "model_identity": {
+      "description": "Recomputed content identity of the exact model, tokenizer, chat template, configuration, and weight shards.",
       "$ref": "#/$defs/modelIdentity"
     },
     "model_fingerprint": {
+      "description": "Implementation and process evidence for the separate contained model-fingerprinting step.",
       "$ref": "#/$defs/modelFingerprintEvidence"
     },
     "containment": {
+      "description": "Host-memory preflight, network isolation, and process-exit evidence for the oracle worker.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -117,21 +137,26 @@
       ],
       "properties": {
         "host_available_before_gib": {
+          "description": "Whole GiB of host memory reported available immediately before contained oracle launch.",
           "type": "integer",
           "minimum": 1
         },
         "network": {
+          "description": "Network policy applied to the systemd service; fixed to a private network namespace with access forbidden.",
           "const": "forbidden"
         },
         "service": {
+          "description": "Bounded process evidence for the contained oracle service.",
           "$ref": "#/$defs/processEvidence"
         }
       }
     },
     "oracle": {
+      "description": "Full-vocabulary Hugging Face output, candidate ranks, runtime identity, and resource evidence for the bound input state.",
       "$ref": "#/$defs/oracleEvidence"
     },
     "reference_artifact": {
+      "description": "Ignored local safetensors file retaining the complete full-vocabulary logits used by later attribution work.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -141,18 +166,22 @@
       ],
       "properties": {
         "bytes": {
+          "description": "Exact size of the retained logits artifact in bytes.",
           "type": "integer",
           "minimum": 1
         },
         "location": {
+          "description": "Retention class; `local_ignored` means the artifact is intentionally outside tracked source.",
           "const": "local_ignored"
         },
         "sha256": {
+          "description": "SHA-256 identity of the retained logits artifact's exact bytes.",
           "$ref": "#/$defs/sha256"
         }
       }
     },
     "verdict": {
+      "description": "Attribution of the Hugging Face argmax to one disputed candidate, or to neither candidate.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -162,6 +191,7 @@
       ],
       "properties": {
         "argmax_candidate": {
+          "description": "Candidate engine whose token uniquely equals the Hugging Face argmax; `neither` also covers no match or an ambiguous duplicate.",
           "enum": [
             "kiln",
             "vllm",
@@ -169,9 +199,11 @@
           ]
         },
         "argmax_token_id": {
+          "description": "Hugging Face full-vocabulary argmax token ID.",
           "$ref": "#/$defs/tokenId"
         },
         "candidate_attribution_complete": {
+          "description": "True only when exactly one of the Kiln or vLLM candidate tokens matches the Hugging Face argmax.",
           "type": "boolean"
         }
       }
@@ -179,19 +211,23 @@
   },
   "$defs": {
     "sha256": {
+      "description": "Lowercase SHA-256 digest with the `sha256:` algorithm prefix.",
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
     },
     "gitObject": {
+      "description": "Full lowercase SHA-1 Git object identifier.",
       "type": "string",
       "pattern": "^[0-9a-f]{40}$"
     },
     "tokenId": {
+      "description": "Tokenizer vocabulary ID for the bound Qwen3.5-4B model identity.",
       "type": "integer",
       "minimum": 0,
       "maximum": 248319
     },
     "receiptReference": {
+      "description": "Repository-relative qualification receipt with hashes of both its file bytes and canonical content.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -201,18 +237,22 @@
       ],
       "properties": {
         "path": {
+          "description": "Repository-relative path to the retained receipt.",
           "type": "string",
           "minLength": 1
         },
         "file_sha256": {
+          "description": "SHA-256 identity of the receipt file's exact bytes.",
           "$ref": "#/$defs/sha256"
         },
         "content_sha256": {
+          "description": "SHA-256 identity of the receipt's canonical content.",
           "$ref": "#/$defs/sha256"
         }
       }
     },
     "sourcePair": {
+      "description": "Source revision and qualification receipts for the Kiln and vLLM candidate-producing runs.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -222,17 +262,21 @@
       ],
       "properties": {
         "source_commit": {
+          "description": "Full Git commit shared by the paired candidate runs.",
           "$ref": "#/$defs/gitObject"
         },
         "kiln_receipt": {
+          "description": "Retained Kiln qualification receipt and its content identities.",
           "$ref": "#/$defs/receiptReference"
         },
         "vllm_receipt": {
+          "description": "Retained vLLM qualification receipt and its content identities.",
           "$ref": "#/$defs/receiptReference"
         }
       }
     },
     "weightFile": {
+      "description": "One model weight shard and its exact size and content identity.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -242,19 +286,23 @@
       ],
       "properties": {
         "path": {
+          "description": "Path or stable shard name within the bound model source.",
           "type": "string",
           "minLength": 1
         },
         "bytes": {
+          "description": "Exact weight-shard size in bytes.",
           "type": "integer",
           "minimum": 1
         },
         "sha256": {
+          "description": "SHA-256 identity of the shard's exact bytes.",
           "$ref": "#/$defs/sha256"
         }
       }
     },
     "modelIdentity": {
+      "description": "Complete content identity for the model inputs used by candidate and oracle processes.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -267,22 +315,28 @@
       ],
       "properties": {
         "id": {
+          "description": "Human-readable model identifier recorded alongside the content hashes.",
           "type": "string",
           "minLength": 1
         },
         "content_sha256": {
+          "description": "Aggregate content identity for the complete model source.",
           "$ref": "#/$defs/sha256"
         },
         "config_hash": {
+          "description": "SHA-256 identity of the effective model configuration.",
           "$ref": "#/$defs/sha256"
         },
         "tokenizer_hash": {
+          "description": "SHA-256 identity of the tokenizer inputs.",
           "$ref": "#/$defs/sha256"
         },
         "chat_template_hash": {
+          "description": "SHA-256 identity of the chat template used to render the prompt.",
           "$ref": "#/$defs/sha256"
         },
         "weight_files": {
+          "description": "Complete ordered inventory of model weight shards.",
           "type": "array",
           "minItems": 1,
           "items": {
@@ -302,17 +356,21 @@
       ],
       "properties": {
         "implementation_sha256": {
+          "description": "SHA-256 identity of the model-fingerprint implementation.",
           "$ref": "#/$defs/sha256"
         },
         "python_sha256": {
+          "description": "SHA-256 identity of the Python executable used for fingerprinting.",
           "$ref": "#/$defs/sha256"
         },
         "process": {
+          "description": "Bounded process evidence for the separate fingerprint worker.",
           "$ref": "#/$defs/processEvidence"
         }
       }
     },
     "topToken": {
+      "description": "One of the ten highest Hugging Face logits, ordered from highest to lowest.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -322,17 +380,21 @@
       ],
       "properties": {
         "token_id": {
+          "description": "Vocabulary ID of this ranked token.",
           "$ref": "#/$defs/tokenId"
         },
         "text": {
+          "description": "Tokenizer-decoded text for this token.",
           "type": "string"
         },
         "logit": {
+          "description": "F32 logit produced by the eager Hugging Face reference.",
           "type": "number"
         }
       }
     },
     "candidateToken": {
+      "description": "One disputed engine candidate with its Hugging Face logit and one-based full-vocabulary rank.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -344,21 +406,26 @@
       ],
       "properties": {
         "engine": {
+          "description": "Candidate-producing inference engine.",
           "enum": [
             "kiln",
             "vllm"
           ]
         },
         "token_id": {
+          "description": "Vocabulary ID predicted by the named engine.",
           "$ref": "#/$defs/tokenId"
         },
         "text": {
+          "description": "Tokenizer-decoded text for the predicted token.",
           "type": "string"
         },
         "logit": {
+          "description": "Hugging Face logit at this candidate's vocabulary ID.",
           "type": "number"
         },
         "rank": {
+          "description": "One-based rank of this candidate in the complete Hugging Face vocabulary, with 1 denoting the argmax.",
           "type": "integer",
           "minimum": 1,
           "maximum": 248320
@@ -366,6 +433,7 @@
       }
     },
     "oracleEvidence": {
+      "description": "Eager Hugging Face next-token evidence for one exact request and model state.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -403,16 +471,20 @@
       ],
       "properties": {
         "attention_implementation": {
+          "description": "Transformers full-attention implementation selected for the oracle; fixed to eager execution.",
           "const": "eager"
         },
         "argmax": {
+          "description": "Vocabulary ID with the highest Hugging Face logit.",
           "$ref": "#/$defs/tokenId"
         },
         "argmax_text": {
+          "description": "Tokenizer-decoded text for the Hugging Face argmax token.",
           "type": "string",
           "minLength": 1
         },
         "candidate_tokens": {
+          "description": "The two disputed candidates, ordered as Kiln then vLLM, annotated with their Hugging Face logits and ranks.",
           "type": "array",
           "minItems": 2,
           "maxItems": 2,
@@ -425,6 +497,7 @@
                 {
                   "properties": {
                     "engine": {
+                      "description": "The first candidate must come from Kiln.",
                       "const": "kiln"
                     }
                   }
@@ -439,6 +512,7 @@
                 {
                   "properties": {
                     "engine": {
+                      "description": "The second candidate must come from vLLM.",
                       "const": "vllm"
                     }
                   }
@@ -449,81 +523,103 @@
           "items": false
         },
         "configuration_sha256": {
+          "description": "SHA-256 identity of the fixed oracle execution configuration enforced by the worker.",
           "$ref": "#/$defs/sha256"
         },
         "deterministic_algorithms": {
+          "description": "Whether PyTorch deterministic algorithms were required; fixed to true.",
           "const": true
         },
         "device": {
+          "description": "Diagnostic accelerator name reported by PyTorch. It identifies this run but is not a dispatch-policy input.",
           "type": "string",
           "minLength": 1
         },
         "dtype": {
+          "description": "Model execution dtype used by the oracle.",
           "const": "bfloat16"
         },
         "duration_seconds": {
+          "description": "Wall-clock duration of the eager Hugging Face worker itself.",
           "type": "number",
           "exclusiveMinimum": 0
         },
         "input_token_count": {
+          "description": "Number of tokens in the complete prompt-plus-continuation input.",
           "type": "integer",
           "minimum": 1
         },
         "input_token_ids_sha256": {
+          "description": "Canonical SHA-256 identity of the complete input-token sequence.",
           "$ref": "#/$defs/sha256"
         },
         "linear_attention_implementation": {
+          "description": "Transformers implementation selected for Gated DeltaNet linear-attention layers.",
           "const": "transformers_torch_fallback"
         },
         "logits_sha256": {
+          "description": "SHA-256 identity of the contiguous F32 full-vocabulary logit bytes after the bound continuation state.",
           "$ref": "#/$defs/sha256"
         },
         "memory_high_events": {
+          "description": "Number of cgroup `memory.events` high-threshold events observed during the contained worker.",
           "type": "integer",
           "minimum": 0
         },
         "memory_max_events": {
+          "description": "Number of cgroup `memory.events` max-limit events observed during the contained worker.",
           "type": "integer",
           "minimum": 0
         },
         "memory_oom_events": {
+          "description": "Number of cgroup out-of-memory events observed during the contained worker.",
           "type": "integer",
           "minimum": 0
         },
         "memory_oom_kill_events": {
+          "description": "Number of cgroup out-of-memory kill events observed during the contained worker.",
           "type": "integer",
           "minimum": 0
         },
         "memory_peak_bytes": {
+          "description": "Peak cgroup memory consumption in bytes during the contained worker.",
           "type": "integer",
           "minimum": 1
         },
         "memory_swap_bytes": {
+          "description": "Cgroup swap usage in bytes reported for the contained worker.",
           "type": "integer",
           "minimum": 0
         },
         "modeling_sha256": {
+          "description": "SHA-256 identity of the pinned Transformers Qwen3.5 modeling implementation expected by the worker.",
           "$ref": "#/$defs/sha256"
         },
         "output_bytes": {
+          "description": "Exact size in bytes of the retained full-vocabulary logits artifact.",
           "type": "integer",
           "minimum": 1
         },
         "request_id": {
+          "description": "Identifier copied from the bound next-token request.",
           "type": "string",
           "minLength": 1
         },
         "request_sha256": {
+          "description": "Canonical SHA-256 identity of the bound next-token request.",
           "$ref": "#/$defs/sha256"
         },
         "tf32_allowed": {
+          "description": "Whether TF32 matrix operations were permitted; fixed to false for this comparison.",
           "const": false
         },
         "top_logit_margin": {
+          "description": "Positive difference between the highest and second-highest Hugging Face logits.",
           "type": "number",
           "exclusiveMinimum": 0
         },
         "top_tokens": {
+          "description": "Exactly the ten highest Hugging Face tokens and logits, ordered from highest to lowest.",
           "type": "array",
           "minItems": 10,
           "maxItems": 10,
@@ -532,24 +628,30 @@
           }
         },
         "torch_commit": {
+          "description": "Pinned PyTorch source commit used by the qualification environment.",
           "$ref": "#/$defs/gitObject"
         },
         "torch_hip_version": {
+          "description": "HIP runtime version reported by the pinned PyTorch build.",
           "type": "string",
           "minLength": 1
         },
         "torch_version": {
+          "description": "Pinned PyTorch distribution version required by this result schema.",
           "const": "2.13.0+rocm7.2"
         },
         "transformers_version": {
+          "description": "Pinned Transformers distribution version required by this result schema.",
           "const": "5.13.1"
         },
         "vocab": {
+          "description": "Vocabulary size used for logits, ranks, and token-ID bounds.",
           "const": 248320
         }
       }
     },
     "processEvidence": {
+      "description": "Bounded worker execution record emitted by the shared process-containment runner.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -560,17 +662,21 @@
       ],
       "properties": {
         "elapsed_seconds": {
+          "description": "Wall-clock duration observed by the containment runner.",
           "type": "number",
           "minimum": 0
         },
         "schema": {
+          "description": "Schema identifier for the shared process-containment evidence.",
           "const": "kiln.hf-process-containment.v1"
         },
         "timeout_seconds": {
+          "description": "Maximum worker duration enforced by the containment runner.",
           "type": "number",
           "exclusiveMinimum": 0
         },
         "worker_exit_code": {
+          "description": "Contained worker exit code; zero is required for retained oracle evidence.",
           "const": 0
         }
       }

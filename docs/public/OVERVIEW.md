@@ -14,7 +14,8 @@ improvement loop matters as much as raw serving throughput.
 Kiln is a good fit for:
 
 - OpenAI-compatible local inference for agents and applications;
-- SFT, GRPO, OPD, and adapter hot-swap on the same accelerator;
+- SFT, GRPO, OPD, and adapter hot-swap when the selected backend advertises
+  the required training route;
 - local eval suites, comparisons, judgments, and replay;
 - traceable artifacts with model, request, training, and execution provenance;
 - a single-GPU workstation rather than a distributed serving fleet.
@@ -25,7 +26,7 @@ the measured boundary and the metrics behind it.
 
 ## The shortest path
 
-1. Follow the [five-minute Quickstart](https://ericflo.github.io/kiln/quickstart.html).
+1. Follow the [guided Quickstart](https://ericflo.github.io/kiln/quickstart.html).
 2. Send an OpenAI-compatible chat request.
 3. Open the embedded dashboard at `http://127.0.0.1:8420/ui/`.
 4. Import or collect training examples.
@@ -67,6 +68,5 @@ The site is split intentionally:
 - **Reference library** contains exact schemas, contracts, qualification
   protocols, and maintainer material when you need source-level detail.
 
-If a core page requires a 20,000-word schema dump to answer a basic question,
-that page is broken. The reference should be linked, searchable, and available,
-but it should not be the first thing every reader has to parse.
+Core pages keep the common path readable and link to the searchable reference
+for exact fields, schemas, and qualification evidence.

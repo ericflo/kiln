@@ -1,121 +1,128 @@
 # GRPO Training Guide
 
-The normative HTTP field contract for `GrpoRequest`, `GrpoConfig`, scored
-rollouts, exact provenance, job admission, queue state, and training detail is
-the generated [Training and Agent Control Plane API
-Schema](../contracts/kiln-control-plane-v1.schema.json). The complete route,
-status, transport, and structured-error inventory is the generated [HTTP API
-contract](../contracts/kiln-http-api-v1.openapi.json). This guide owns the
-workflow; those generated contracts own wire requiredness, nullability,
-aliases, bounds, and unknown-field behavior.
+GRPO in Kiln is a generate → score → train → evaluate loop. You provide a
+reward function; Kiln turns groups of scored completions into a LoRA update,
+publishes the resulting adapter, and records enough evidence to audit the
+policy change.
 
-This guide walks through GRPO end-to-end on Kiln: what it is, the loop you run,
-and three runnable verifiable-reward examples (math correctness, JSON-validity,
-code-runs). Everything below assumes a Kiln server running on
-`http://localhost:8420` with at least one adapter slot free and Python 3.10+
-on the client.
+The generated [Training and Agent Control Plane API
+Schema](../contracts/kiln-control-plane-v1.schema.json) owns request and
+response fields. The generated [HTTP API
+contract](../contracts/kiln-http-api-v1.openapi.json) owns routes, status codes,
+and error shapes. This guide owns the workflow and the decisions around it.
 
-The end-to-end generate/train/hot-swap loop requires the explicit development
-profile: start Kiln with `KILN_SERVER_SERVING_PROFILE=experimental`. The default
-`stable` profile returns `409 serving_profile_conflict` for training, while
-`maintenance` disables the generation half of the loop. Production systems
-should generate under `stable`, restart into drained `maintenance` for the
-training mutation, then restart into `stable` to evaluate. See
+## Before you start
+
+Use the `experimental` serving profile for a controlled loop that generates,
+trains, and evaluates in one process:
+
+```bash
+KILN_SERVER_SERVING_PROFILE=experimental kiln serve
+```
+
+The default `stable` profile allows inference but rejects training and live
+adapter transitions. `maintenance` allows drained training and adapter changes
+but rejects inference and evaluation. Therefore a
+stable → maintenance → stable sequence cannot evaluate or serve the resulting
+unmerged adapter: the last stable process cannot load it. Either use
+`experimental` for the complete controlled loop, or train under `maintenance`
+and start an `experimental` process to load and evaluate the result.
+
+Serving profiles are GPU-ownership policies, not hardware selectors. They do
+not contain device-name, vendor-ID, or model-specific route allowlists. See
 [Serving Profiles](SERVING_PROFILES.md).
 
-## What GRPO is, in 5 sentences
+Before a real run, confirm:
 
-GRPO is **Group Relative Policy Optimization**, the reinforcement-learning
-algorithm introduced by [DeepSeekMath](https://arxiv.org/abs/2402.03300). For
-each prompt you generate a *group* of `n` completions, score them with a
-reward function you write, and turn those rewards into a policy-gradient
-update — no separate critic network and no replay buffer, which is what makes
-it suit Kiln's single-process design. Within each group the rewards are
-mean-zeroed and (optionally) normalized to produce per-completion *advantages*,
-so the update only depends on which completions in the group beat the others.
-When exact rollout provenance is available, a clipped importance-sampling
-ratio corrects for drift from the policy that generated the rollouts. Without
-that provenance, Kiln explicitly fixes the ratio at one rather than pretending
-that the KL reference was the behavior policy. A separately configured KL
-penalty can keep the adapter from collapsing onto one high-reward output.
-**You write the reward function. That's the whole point.**
+- the server has real model weights and reports a healthy training backend;
+- the reward function measures the behavior you actually want;
+- each prompt can produce completions with different rewards;
+- generation and held-out evaluation prompts are separate;
+- untrusted model output is sandboxed before any reward function executes it.
+
+## What GRPO updates
+
+GRPO stands for Group Relative Policy Optimization. For one prompt, generate a
+group of completions and assign each a numeric reward. Kiln converts the
+within-group reward differences into advantages and updates the LoRA policy
+without training a separate critic.
+
+Four distinctions matter:
+
+- **Reward signal:** a group whose rewards are all identical has no relative
+  policy signal. Kiln's default dynamic-sampling filter skips such groups.
+- **Behavior policy:** exact recorded rollout provenance enables importance
+  correction. Without it, Kiln fixes the ratio at one explicitly.
+- **KL reference:** the policy used for the KL penalty is configured
+  separately. Kiln never pretends that the KL reference generated a rollout.
+- **Environment tokens:** ECHO is enabled by default and can add an auxiliary
+  environment-token objective when trajectories contain those tokens. See the
+  [ECHO Guide](ECHO_GUIDE.md).
+
+The default policy surrogate is token-level. Sequence-level GSPO and CISPO are
+available as explicit alternatives; they change the importance-weighting
+mechanics, not the reward function.
 
 ## The loop
 
-Every GRPO iteration is the same four-step cycle. In the `experimental`
-profile this is one process, two HTTP endpoints, and an atomic adapter
-hot-swap:
-
+```text
+tasks + request template
+          │
+          ▼
+generate completions ── exact behavior provenance
+          │
+          ▼
+score every completion ── one numeric reward each
+          │
+          ▼
+train one versioned adapter
+          │
+          ▼
+run held-out evaluation ── promote, keep, or reject
+          │
+          └────────────── next round uses the accepted adapter
 ```
-   [ generate ]    kiln rollout-generate
-        │            (scored JSONL + exact behavior provenance)
-        ▼
-   [  score   ]    your reward fn (Python, regex, json.loads, subprocess, …)
-        │
-        ▼
-   [  train   ]    POST /v1/train/grpo
-        │            (groups + scored completions → adapter delta)
-        ▼
-   [hot-swap +     next inference call already uses the new adapter
-    repeat   ]
-```
 
-That's the whole loop. Run it 5–20 times for a toy task and watch the mean
-reward trend up.
+Training submission is asynchronous. A successful `POST /v1/train/grpo`
+response means “queued,” not “trained.” Do not generate the next round until
+the job reaches a terminal state and you have reviewed its adapter and
+evaluation outcome.
 
-## Endpoint reference
+Use a new output name for every round, such as `math-r001` and `math-r002`.
+For round two and later, set `base_adapter` to the accepted adapter from the
+previous round. Reusing one physically loaded output name creates avoidable
+revision conflicts and makes rollback ambiguous.
 
-The full schema for both endpoints lives in
-[Quickstart §9](../QUICKSTART.md#9-advanced-api-examples). The fields used in
-this guide are:
+## Choose the rollout contract
 
-**`kiln rollout-generate`** — renders a chat request for every task and seed,
-forces non-streaming single-choice generation with exact rollout provenance,
-runs your scorer, and writes trainer-compatible JSONL. It validates the
-returned schema, seed, adapter identity, prompt/content hashes, complete action
-coverage, and usage counts before invoking the scorer. Output publication is
-atomic: one missing or malformed record fails the command without replacing an
-existing dataset. This is the supported source for
-`behavior_policy: "recorded"`. Recorded tool-call rollouts remain unsupported:
-tool definitions and tool choice fail admission until generated tool actions can
-be represented in the scored completion. Prior assistant `tool_calls` and
-`role: "tool"` responses are supported context: their `name` and `tool_call_id`
-fields survive the output JSONL and are bound into the provenance prompt hash.
+Kiln supports two explicit behavior-policy modes:
 
-**`POST /v1/completions/batch`** — issues `prompts.len() × n` text completions
-in one HTTP round-trip. It remains useful for fast online or explicitly
-uncorrected experiments, including the compact worked examples below, but it
-does not emit exact per-token behavior provenance. Train those rollouts only
-with `behavior_policy: "no_importance_correction"`.
+| Mode | Use it when | Policy ratio |
+|---|---|---|
+| `recorded` | Rollouts came from `kiln rollout-generate` and retain validated per-token provenance | Computed from policy and recorded behavior log-probabilities |
+| `no_importance_correction` | You intentionally accept uncorrected data, such as hand-authored or text-only batches | Fixed at exactly 1 |
 
-**`POST /v1/train/grpo`** — accepts `groups`, where each group is
-`{"messages": [...], "completions": [{"text": "...", "reward": 0.0}, ...]}`.
-The request is enqueued and returns a `job_id` immediately; training runs on a
-background thread. Its output remains hidden until Kiln atomically publishes
-and auto-loads the completed adapter at an iteration boundary. Every `config`
-field has a server default, so `{"groups": [...]}` is a valid minimal payload.
-The default `behavior_policy` is `"no_importance_correction"`, which is the
-honest mode for the text-only examples below. Set it to `"recorded"` only when
-every scored completion includes a validated `provenance` object from the
-generation that produced it.
+Prefer `recorded` for an iterative on-policy loop. Do not switch to
+`no_importance_correction` merely to suppress a provenance error: that changes
+the objective rather than fixing the dataset.
 
 ## Recommended recorded-policy workflow
 
-When the source is an uploaded named `grpo_groups` dataset, native training
-selects its persisted `train` partition by default and accepts an explicit
-`dataset_split`. Dataset-to-suite synthesis selects `holdout` by default, and
-a held-out `post_eval` rejects content or declared source-group overlap before
-the training job is published. See
-[Dataset Splits and Train/Eval Separation](DATASET_SPLITS.md) for the complete
-API and provenance contract.
+This example uses one arithmetic task so the file shapes stay visible. A useful
+training run needs a broader train set and a separate held-out suite.
 
-Create one task per line and a normal chat request template. The CLI owns
-`seed`, `adapter`, `n`, `stream`, and `rollout_provenance`, so template values
-for those fields are overwritten deliberately.
+### 1. Write tasks
+
+`tasks.jsonl` contains one JSON object per line:
 
 ```json
 {"id":"sum-1","prompt":"What is 47 + 138? Reply with just the number.","answer":185}
 ```
+
+### 2. Write the request template
+
+`request.json` is a chat-completions body. The CLI substitutes task fields and
+owns `seed`, `adapter`, `n`, `stream`, and rollout-provenance controls.
 
 ```json
 {
@@ -126,20 +133,40 @@ for those fields are overwritten deliberately.
 }
 ```
 
-The scorer receives the task, exact request, full response, parsed content,
-usage, and latency on stdin. A minimal executable scorer can print one number:
+### 3. Write a scorer
+
+The scorer receives the task, rendered request, full response, parsed content,
+usage, adapter, seed, and latency as one JSON object on standard input. It
+prints either one finite number or an object containing `reward`, `score`, or
+`value`.
 
 ```python
 #!/usr/bin/env python3
-import json, re, sys
+import json
+import re
+import sys
 
 row = json.load(sys.stdin)
 numbers = re.findall(r"-?\d+", row["content"])
-print(float(bool(numbers) and int(numbers[-1]) == row["task"]["answer"]))
+correct = bool(numbers) and int(numbers[-1]) == row["task"]["answer"]
+print(1.0 if correct else 0.0)
 ```
+
+Make it executable:
 
 ```bash
 chmod +x score_math.py
+```
+
+If a scorer runs code emitted by the model, execute that code in a dedicated
+sandbox with bounded CPU, memory, wall time, filesystem access, syscalls, and
+network access. A subprocess timeout alone is not a security boundary.
+
+### 4. Generate scored rollouts
+
+For the first round, force the base model:
+
+```bash
 kiln rollout-generate \
   --adapter base \
   --thinking false \
@@ -148,486 +175,281 @@ kiln rollout-generate \
   --seed-start 42 \
   --request-template request.json \
   --scorer ./score_math.py \
-  --output math.rollouts.jsonl \
-  --summary-output math.rollouts.summary.json
+  --output math-r001.rollouts.jsonl \
+  --summary-output math-r001.summary.json
 ```
 
-Each completion contains `text`, `reward`, and the server-issued
-`kiln.rollout-provenance.v1` object. It intentionally has no synthetic
-single-turn `trajectory`: adding one after generation would change the scored
-payload identity. The JSONL contains only the canonical training schema, so it
-can enter strict HF/TRL export without normalization. Per-request latency,
-usage, seed, adapter, server performance, and raw scorer output live in the
-separate summary JSON. When the JSONL path is visible to the server, submit it
-with recorded importance correction:
+Publication is atomic. The command validates every response's seed, adapter,
+prompt and content hashes, token/action coverage, usage, tokenizer/template
+identity, sampling controls, and backend provenance before replacing either
+output. The training JSONL contains canonical groups and
+`kiln.rollout-provenance.v1` records. Latency, token counts, raw scorer output,
+and per-request summaries remain in the separate summary file.
+
+Inspect the reward distribution before training:
 
 ```bash
-curl -s http://localhost:8420/v1/train/grpo \
-  -H 'Content-Type: application/json' \
-  -d "{\"dataset_path\":\"$(realpath math.rollouts.jsonl)\",\"config\":{\"behavior_policy\":\"recorded\",\"output_name\":\"math-grpo\"}}" \
-  | python3 -m json.tool
+jq '.stats | {mean_reward, min_reward, max_reward}' math-r001.summary.json
 ```
 
-The server replays the recorded template invocation with its pinned tokenizer,
-verifies the exact prompt prefix and scored payload again, and uses only sampled
-actions as policy targets. Runtime-forced thinking-close tokens remain context
-and never receive invented behavior probabilities.
+If every completion received the same reward, improve generation diversity or
+the reward shape before spending a training step.
 
-## Worked example 1: Math correctness reward
+### 5. Submit recorded-policy training
 
-The cheapest possible verifiable reward: was the final integer in the
-completion equal to the ground-truth answer?
-
-```python
-# math_reward.py — runnable end-to-end against a kiln server on :8420
-import json
-import re
-import requests
-
-KILN = "http://localhost:8420"
-
-PROBLEMS = [
-    {"messages": [{"role": "user", "content": "What is 47 + 138? Reply with just the number."}],         "answer": 185},
-    {"messages": [{"role": "user", "content": "What is 23 * 17? Reply with just the number."}],          "answer": 391},
-    {"messages": [{"role": "user", "content": "What is 1024 - 376? Reply with just the number."}],       "answer": 648},
-    {"messages": [{"role": "user", "content": "What is the sum of the integers from 1 to 20?"}],          "answer": 210},
-]
-
-def reward(completion_text: str, answer: int) -> float:
-    """Extract the last integer in the completion. +1 if it equals `answer`, else 0."""
-    nums = re.findall(r"-?\d+", completion_text)
-    if not nums:
-        return 0.0
-    return 1.0 if int(nums[-1]) == answer else 0.0
-
-# 1. Generate — 8 samples per prompt, single batch round-trip
-batch = requests.post(f"{KILN}/v1/completions/batch", json={
-    "prompts":     [p["messages"] for p in PROBLEMS],
-    "n":           8,
-    "temperature": 0.9,        # diverse rollouts
-    "max_tokens":  64,
-    "seed":        42,
-}).json()
-
-# Reshape: items[i*n + j] belongs to prompt i, completion j
-n = 8
-groups = [{"messages": p["messages"], "completions": []} for p in PROBLEMS]
-for item in batch["completions"]:
-    pi = item["prompt_index"]
-    text = item["text"]
-    r = reward(text, PROBLEMS[pi]["answer"])
-    groups[pi]["completions"].append({"text": text, "reward": r})
-
-mean_reward = sum(c["reward"] for g in groups for c in g["completions"]) / (len(PROBLEMS) * n)
-print(f"mean reward this round: {mean_reward:.3f}")
-
-# 3. Train — server enqueues the GRPO step and hot-swaps the resulting adapter
-job = requests.post(f"{KILN}/v1/train/grpo", json={
-    "groups": groups,
-    "config": {
-        "kl_coeff":      0.1,
-        "clip_epsilon":  0.2,
-        "lora_rank":     16,
-        "output_name":   "math-correctness",
-        "auto_load":     True,
-    },
-}).json()
-print("queued:", job["job_id"], job["state"])
-```
-
-Run that script in a loop for 10–20 rounds. With Qwen3.5-4B as the base, the
-mean reward typically climbs from ~0.4 (some completions already nail it) to
-~0.85 within the first dozen rounds for arithmetic this simple. Re-running
-with the same `seed` lets you compare runs directly.
-
-### Serving during training
-
-Server-submitted GRPO does not reserve the GPU for the lifetime of the job.
-Model residency/setup, each complete optimizer group (including any EMA
-reference refresh), device snapshots, and final smoke/cleanup work acquire
-exclusive GPU ownership separately. The backend is synchronized before every
-release, and a failed settlement or panic quarantines the process until restart.
-Reward filtering, JSONL reads, tokenization, progress callbacks, safetensors
-encoding, and filesystem publication run without the GPU writer, so healthy
-inference can make progress between groups.
-
-Each group is still one atomic training interval. A very large or long-context
-group can therefore produce a correspondingly long attributed inference wait.
-Inspect `phase_timings.gpu_writer_wait_ms`, `gpu_writer_held_ms`, and
-`gpu_writer_acquisitions` in `train_receipt.json` when diagnosing pauses; these
-fields distinguish expected group-level contention from time spent outside GPU
-ownership.
-
-### Exact checkpoint and resume
-
-Set a cadence when a run must survive cancellation or process failure:
+The JSONL path is read by the server process, so it must be an absolute path
+that the server can access:
 
 ```bash
-kiln train grpo \
-  --file math.rollouts.jsonl \
-  --adapter math-grpo \
-  --checkpoint-interval 25
+rollouts_path="$(realpath math-r001.rollouts.jsonl)"
+response="$(
+  curl --fail-with-body -sS http://localhost:8420/v1/train/grpo \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -n --arg path "$rollouts_path" '{
+      dataset_path: $path,
+      config: {
+        behavior_policy: "recorded",
+        output_name: "math-r001",
+        auto_load: false,
+        checkpoint_interval: 25
+      }
+    }')"
+)"
+job_id="$(jq -r '.job_id' <<<"$response")"
+printf 'queued %s\n' "$job_id"
 ```
 
-The cadence counts committed optimizer groups. Cooperative cancellation waits
-for the current group to settle and publishes an immutable
-`.kiln-checkpoint`; a process crash can lose only the in-flight group after the
-newest committed checkpoint. `kiln train status --job-id JOB_ID` and
-`GET /v1/train/jobs/{job_id}` report its direct basename. The browser job drill
-also labels whether the checkpoint came from inline or JSONL GRPO and can
-prepare the matching form.
+`auto_load: false` keeps training completion separate from promotion. Add a
+held-out `post_eval` gate when automatic promotion is appropriate.
 
-Resume with the identical source, route, adapter name, and configuration:
+The convenience command `kiln train grpo --file FILE.jsonl` submits the
+streamed route with the default `no_importance_correction` behavior policy.
+For recorded-policy JSONL, use an HTTP request like the one above or a JSON
+request file that explicitly sets `config.behavior_policy` to `recorded`.
+
+### 6. Wait for a terminal state
 
 ```bash
-kiln train grpo \
-  --file math.rollouts.jsonl \
-  --adapter math-grpo \
-  --checkpoint-interval 25 \
-  --resume-checkpoint math-grpo-checkpoint-step-00000025.kiln-checkpoint
+while :; do
+  detail="$(curl --fail-with-body -sS \
+    "http://localhost:8420/v1/train/jobs/$job_id")"
+  state="$(jq -r '.state' <<<"$detail")"
+  printf '%s\n' "$state"
+  case "$state" in
+    completed) break ;;
+    failed)
+      jq '{state, error}' <<<"$detail"
+      exit 1
+      ;;
+  esac
+  sleep 2
+done
 ```
 
-For the API, put the same two fields under `config`:
+Review `adapter_path`, `train_receipt`, `linked_eval_job_ids`, and the
+promotion outcome in job detail. “Completed” proves that training published an
+adapter; it does not by itself prove that the adapter improved.
+
+### 7. Continue from the accepted adapter
+
+After held-out evaluation accepts `math-r001`, generate the next rollouts with
+that exact adapter:
+
+```bash
+kiln rollout-generate \
+  --adapter math-r001 \
+  --thinking false \
+  --tasks tasks.jsonl \
+  --seeds 8 \
+  --seed-start 50 \
+  --request-template request.json \
+  --scorer ./score_math.py \
+  --output math-r002.rollouts.jsonl \
+  --summary-output math-r002.summary.json
+```
+
+Submit round two with a new output and the prior adapter as its starting
+weights:
 
 ```json
 {
-  "dataset_path": "/absolute/path/math.rollouts.jsonl",
+  "dataset_path": "/absolute/path/math-r002.rollouts.jsonl",
   "config": {
     "behavior_policy": "recorded",
-    "output_name": "math-grpo",
-    "checkpoint_interval": 25,
-    "resume_checkpoint": "math-grpo-checkpoint-step-00000025.kiln-checkpoint"
+    "base_adapter": "math-r001",
+    "output_name": "math-r002",
+    "auto_load": false
   }
 }
 ```
 
-Resume restores adapter and optimizer tensors, frozen/EMA reference state and
-cadence, exact inline order or JSONL line/byte cursor, RNG streams, loss
-history, policy/ECHO/gradient diagnostics, and phase timings. Before GPU setup,
-Kiln validates the complete artifact set and checksums plus exact data,
-configuration, model/base weights, tokenizer, precision, backend, and derived
-gradient plan. A PEFT adapter snapshot is a serving/warm-start artifact, not a
-resume point. See [Native Training Checkpoints](training-checkpoints.md) for the
-full fail-closed and immutable-name contract.
+Never advance the loop merely because mean training reward rose. Compare the
+new adapter against the previous accepted adapter on a held-out suite, then
+promote, keep, or reject it deliberately.
 
-## Worked example 2: JSON-validity reward (format compliance)
+## Group and source rules
 
-A reward function doesn't have to be binary. Partial credit for *almost*
-right is often the difference between a stuck loop and a learning one.
+Each GRPO group has one shared prompt and one or more scored completions:
 
-```python
-# json_reward.py
-import json
-import requests
-
-KILN = "http://localhost:8420"
-REQUIRED_KEYS = {"name", "age", "city"}
-
-PROMPTS = [
-    [{"role": "user", "content": "Return a JSON object with keys name, age, city for a 32-year-old "
-                                  "named Mira living in Lisbon. Reply with only the JSON."}],
-    [{"role": "user", "content": "Return a JSON object with keys name, age, city for a 19-year-old "
-                                  "named Theo living in Cairo. Reply with only the JSON."}],
-    [{"role": "user", "content": "Return a JSON object with keys name, age, city for a 47-year-old "
-                                  "named Akemi living in Kyoto. Reply with only the JSON."}],
-]
-
-def reward(text: str) -> float:
-    """1.0 = parses + has all keys, 0.5 = parses, 0.0 = doesn't parse."""
-    try:
-        obj = json.loads(text)
-    except (ValueError, TypeError):
-        return 0.0
-    if not isinstance(obj, dict):
-        return 0.0
-    return 1.0 if REQUIRED_KEYS.issubset(obj.keys()) else 0.5
-
-batch = requests.post(f"{KILN}/v1/completions/batch", json={
-    "prompts": PROMPTS, "n": 8, "temperature": 0.9, "max_tokens": 96, "seed": 0,
-}).json()
-
-groups = [{"messages": p, "completions": []} for p in PROMPTS]
-for item in batch["completions"]:
-    groups[item["prompt_index"]]["completions"].append(
-        {"text": item["text"], "reward": reward(item["text"])}
-    )
-
-requests.post(f"{KILN}/v1/train/grpo", json={
-    "groups": groups,
-    "config": {"lora_rank": 16, "output_name": "json-format"},
-}).raise_for_status()
+```json
+{
+  "messages": [{"role": "user", "content": "Return valid JSON."}],
+  "completions": [
+    {"text": "{\"ok\":true}", "reward": 1.0},
+    {"text": "ok", "reward": 0.0}
+  ]
+}
 ```
 
-Format compliance is harder to learn than arithmetic — expect 20–40 rounds
-before mean reward saturates. The 0.5/1.0 split matters: if you reward only
-the perfect output the gradient is zero whenever the whole group fails, and
-the loop stalls.
+Use exactly one source per request:
 
-## Worked example 3: Code-runs reward (subprocess-based)
+- `groups` for an inline array;
+- `dataset_path` for server-local canonical JSONL;
+- `dataset` for a named uploaded dataset.
 
-The most powerful verifiable reward is "run the code and see if it works."
-Kiln's GRPO endpoint doesn't care how you produce the score, only that it's a
-float per completion.
+The streamed JSONL route performs bounded full-corpus admission and pins a
+private read-only snapshot before queue publication. Named `grpo_groups`
+datasets use the persisted `train` partition by default and accept an explicit
+`dataset_split`. Held-out post-eval rejects content or declared source-group
+overlap. See [Dataset Splits and Train/Eval
+Separation](DATASET_SPLITS.md).
 
-````python
-# code_reward.py
-import re
-import subprocess
-import tempfile
-import textwrap
-from pathlib import Path
-
-import requests
-
-KILN = "http://localhost:8420"
-
-TASK = {
-    "messages": [{"role": "user", "content":
-        "Write a Python function `add(a, b)` that returns a + b. "
-        "Reply with only the function definition, no prose."}],
-    "tests": [
-        ("add(1, 2)",     3),
-        ("add(-5, 5)",    0),
-        ("add(10, 100)",  110),
-        ("add(0, 0)",     0),
-    ],
-}
-
-CODE_BLOCK = re.compile(r"```(?:python)?\n(.*?)```", re.DOTALL)
-
-def reward(text: str, tests: list[tuple[str, int]]) -> float:
-    """Fraction of test cases that pass when the completion is exec'd in a subprocess.
-
-    Security caveat: this exec's untrusted model output. For real workloads,
-    run inside a sandbox (Docker, gVisor, firejail, …). The example below
-    assumes you trust your own model's output during development.
-    """
-    m = CODE_BLOCK.search(text)
-    src = m.group(1) if m else text
-    harness = "\n".join(
-        f"assert {expr} == {expected}, '{expr} expected {expected}'"
-        for expr, expected in tests
-    )
-    program = textwrap.dedent(src) + "\n" + harness
-    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
-        f.write(program)
-        path = f.name
-    try:
-        result = subprocess.run(
-            ["python3", path], capture_output=True, timeout=5, text=True,
-        )
-    except subprocess.TimeoutExpired:
-        return 0.0
-    finally:
-        Path(path).unlink(missing_ok=True)
-    if result.returncode == 0:
-        return 1.0
-    # Partial credit: count how many of the assertions ran before the first failure
-    failed_at = result.stderr.count("AssertionError")
-    passed = max(0, len(tests) - failed_at)
-    return passed / len(tests)
-
-batch = requests.post(f"{KILN}/v1/completions/batch", json={
-    "prompts": [TASK["messages"]], "n": 8, "temperature": 0.9, "max_tokens": 192, "seed": 7,
-}).json()
-
-group = {"messages": TASK["messages"], "completions": []}
-for item in batch["completions"]:
-    group["completions"].append({"text": item["text"], "reward": reward(item["text"], TASK["tests"])})
-
-requests.post(f"{KILN}/v1/train/grpo", json={
-    "groups": [group],
-    "config": {"lora_rank": 16, "output_name": "code-runs"},
-}).raise_for_status()
-````
-
-For the trivial `add` task, a base Qwen3.5-4B already nails most rollouts.
-The interesting regime is harder problems (string parsing, recursion, small
-data-structure manipulation) where the base model fails 60–80% of the time
-and GRPO has room to push the success rate up.
+For recorded mode, do not hand-edit completions, prompts, sampling controls, or
+provenance. Kiln replays the template invocation with its pinned tokenizer and
+rejects drift before training.
 
 ## Tuning knobs
 
-`config` on `/v1/train/grpo` accepts the following — every field has a
-server-side default, so omit anything you don't want to override:
+Start with defaults and change one decision at a time. The effective
+configuration and receipt—not this summary—are authoritative for a run.
 
-- **`n` (in the batch request)** — group size. Defaults to 1; for GRPO use
-  `>= 4`. 8 is the usual starting point; smaller groups have higher variance,
-  larger groups eat the 64-completion batch cap faster.
-- **`learning_rate`** — omit it: the server resolves the default per
-  optimizer (Muon, the default: `2e-3` for GRPO; AdamW/SGD: legacy `1e-5`)
-  and the train receipt records the resolved value. If you do pin it, halve
-  on reward oscillation / KL spikes, double if reward improves but slowly —
-  and mind that Muon's band is ~200x AdamW's.
-- **`optimizer`** — defaults to Muon (momentum-orthogonalized SGD with fused
-  on-device kernels). Select AdamW/SGD per request via
-  `{"optimizer": {"kind": "adam_w"}}` / `{"kind": "sgd"}`.
-- **`kl_coeff`** — defaults to `0.1`. Higher keeps the adapter closer to the
-  base model (more conservative, slower). Lower lets the adapter drift faster
-  but risks mode collapse onto whatever scored highest in early rounds.
-- **`behavior_policy`** — defaults to `"no_importance_correction"`, which fixes
-  the policy ratio at one. `"recorded"` enables correction from each sampled
-  action token's exact behavior log-probability and rejects any completion with
-  missing or mismatched provenance. The behavior distribution is never inferred
-  from the base model or KL reference.
-- **`kl_reference_policy`** — independently selects the frozen KL anchor.
-  `{"kind": "base_per_step"}` is the default. Use `{"kind": "ema",
-  "decay": 0.9, "refresh_every": 32}` for a moving frozen snapshot, or
-  `{"kind": "none"}` only with `"kl_estimator": "none"` or `kl_coeff: 0`.
-  The old `reference_policy` key is accepted only as an input alias; new
-  requests and receipts should use `kl_reference_policy`.
-- **`kl_estimator`** — `"k1"` by default; `"k3"` selects the non-negative
-  estimator and `"none"` disables both the penalty and KL-reference forward.
-- **`is_level`** — `"token"` (default) applies PPO clipping per action token.
-  `"sequence"` selects GSPO: it forms one geometric-mean ratio per completion,
-  broadcasts one sequence surrogate, and normalizes by completion length once.
-  `"cispo"` uses a detached per-token importance weight with an upper cap and
-  no lower floor. These modes share the same independently configured KL term.
-- **`clip_epsilon`** / **`clip_eps_high`** — `0.2` / `null` by default. Token
-  PPO and sequence GSPO use `[1 - clip_epsilon, 1 + clip_eps_high]`; a null
-  upper value uses `clip_epsilon` symmetrically. These bounds have no effect on
-  CISPO, or on the fixed-one ratio in no-correction mode.
-- **`cispo_max_weight`** — defaults to `5.0` and is used only with
-  `is_level: "cispo"`. This is an absolute cap (`min(ratio, 5.0)`), not an
-  additive epsilon (`1 + 5.0`). Ratios below one retain their natural weight;
-  Kiln does not impose the PPO lower floor. This matches MiniMax-M1 and TRL's
-  CISPO loss semantics.
-- **`lora_rank`** / **`lora_alpha`** — defaults `16` / `32`. The capacity of
-  the adapter. Rank 8 is faster and still works for narrow tasks; rank 32+
-  for broader behavioral shifts.
-- **`base_adapter`** — continue training from a previously trained adapter
-  instead of starting fresh from the base model.
-- **`output_name`** — name the resulting adapter on disk (defaults to
-  `grpo-<job_id_prefix>`).
-- **`auto_load`** — defaults `true`. When the job completes, the new adapter
-  is hot-swapped in immediately. Set `false` if you want to load it manually
-  via `/v1/adapters` (e.g., for A/B testing). If `output_name` is already
-  physically loaded, Kiln must reload that same name at its revision barrier
-  even when this is `false`; use a new versioned name for a truly idle output.
-- **`adapter_smoke_test` / `adapter_smoke_prompts`** — the boolean enables the
-  post-training base-versus-adapter canary. The optional prompt array replaces
-  the built-in canaries and requires the boolean to be true. The CLI accepts
-  `--adapter-smoke-test --adapter-smoke-prompts-file PATH`; the file is read by
-  the client as either a JSON string array or one text prompt, so the server
-  never depends on ambient filesystem or environment state.
-- **`shared_prefix_reference`** — defaults `true`. Reuses qualified prompt-side
-  KL-reference state across completions; Vulkan currently keeps the exact
-  per-completion fallback regardless. Set false, pass
-  `--no-shared-prefix-reference`, or clear the browser toggle only for an
-  explicit correctness/performance comparison. The choice is retained in the
-  effective config and receipt.
-- **`detect_anomaly`** — defaults `false`. When enabled, every full or
-  checkpoint-segment tape scans each backward operation's returned gradients
-  and fails at the first NaN or Inf with the operation name and tape position.
-  This is a request-local diagnostic and cannot affect inference or another
-  job. It adds synchronization-heavy reductions, so use it to localize a
-  failing run rather than for throughput measurement. The equivalent CLI flag
-  is `--detect-anomaly`; the browser control is under GRPO Advanced.
+| Field | Default | What it changes |
+|---|---:|---|
+| `behavior_policy` | `no_importance_correction` | Whether the policy ratio uses recorded behavior probabilities |
+| `kl_coeff` | `0.1` | Strength of the separately configured KL penalty |
+| `kl_reference_policy` | `base_per_step` | Frozen policy used only for KL |
+| `kl_estimator` | `k1` | KL estimator; `none` disables the reference forward when the coefficient is also zero |
+| `is_level` | `token` | Token PPO, sequence GSPO, or CISPO importance weighting |
+| `clip_epsilon` | `0.2` | Lower and, unless overridden, upper PPO/GSPO clipping width |
+| `dynamic_sampling` | `true` | Skips groups with no relative reward signal |
+| `lora_rank` / `lora_alpha` | `16` / `32` | Adapter capacity and scale |
+| `optimizer` | Muon | Optimizer family; omission lets Kiln resolve its GRPO learning-rate default |
+| `auto_load` | `true` | Whether a completed, canary-qualified adapter may become active |
+| `shared_prefix_reference` | `true` | Reuses qualified prompt-side KL-reference state |
+| `detect_anomaly` | `false` | Adds expensive per-operation NaN/Inf localization |
 
-For full schema details, see
-[QUICKSTART.md §9.4](../QUICKSTART.md#94-grpo-rollout-generation).
+`clip_eps_high` makes PPO/GSPO clipping asymmetric. `cispo_max_weight` applies
+only to CISPO and is an absolute upper cap, not an epsilon. `base_adapter`
+loads weights from an earlier PEFT adapter but does not restore optimizer state;
+use `resume_checkpoint` for exact continuation.
 
-## Audit the policy update
+Vulkan currently uses the exact per-completion KL-reference fallback even when
+`shared_prefix_reference` is true. That is a capability-derived fallback, not
+a device-name exception.
 
-Every non-dry GRPO run that reaches the training loop writes a versioned audit
-at `train_receipt.json` -> `grpo.policy_audit`. The same object appears as
-`report.policy_audit` in the long-context training benchmark and the trainer
-emits a compact `GRPO policy audit` structured log event when it writes the
-receipt. Retrieve a published adapter's receipt with:
+## Observe and audit the update
+
+Every non-dry run that enters the training loop writes
+`train_receipt.json`. The `grpo.policy_audit` object has schema
+`kiln.grpo-policy-audit.v1` and keeps three kinds of evidence separate:
+
+- `importance_sampling` summarizes policy-versus-behavior ratios and clipping;
+- `kl_reference` summarizes policy-versus-reference differences before
+  multiplying by `kl_coeff`;
+- `recorded_provenance` counts sampled and controller-forced actions and binds
+  the behavior model, adapter revision, tokenizer/template invocation,
+  sampling controls, and generation backend.
+
+Retrieve a published adapter's receipt:
 
 ```bash
-ADAPTER=math-grpo
-curl -s http://localhost:8420/v1/adapters/$ADAPTER/receipt \
+curl --fail-with-body -sS \
+  http://localhost:8420/v1/adapters/math-r001/receipt \
   | jq '.grpo.policy_audit'
 ```
 
-The object has schema `kiln.grpo-policy-audit.v1` and keeps the two policy
-comparisons separate:
+Also inspect:
 
-- `importance_sampling` uses `exp(log p_policy - log p_behavior)`. Token PPO
-  and CISPO report one ratio observation per action token; sequence/GSPO
-  reports one per completion while retaining the total action-token count.
-  `no_importance_correction` reports an exact ratio of `1.0` and does not
-  borrow the KL reference as a denominator. For token PPO and GSPO,
-  `below_clip_count` and `above_clip_count` describe the two-sided interval.
-  CISPO has no lower bound, so its below count is always zero and its above
-  count/fraction report only ratios beyond `cispo_max_weight`.
-- `kl_reference` uses `log p_policy - log p_reference`. Its K1/K3 means are
-  reported before multiplying by `kl_coeff`; `mean_masked_estimator` includes
-  zeros for entropy-masked tokens and remains normalized over every observed
-  action token, matching the loss contribution's denominator.
-- `recorded_provenance` counts sampled and controller-forced actions and lists
-  content-addressed behavior sources. A source binds the behavior model and
-  adapter revision, tokenizer/template invocation, sampling controls, and
-  generation backend. `behavior_source_manifest_sha256` is stable regardless
-  of input order and changes when any source identity changes.
+- reward and dynamic-filter statistics;
+- loss history and gradient diagnostics;
+- `phase_timings.gpu_writer_wait_ms`, `gpu_writer_held_ms`, and
+  `gpu_writer_acquisitions`;
+- adapter smoke-test evidence;
+- linked held-out evaluation results and promotion outcome.
 
-Counts are runtime observations, so multiple epochs count a completion each
-time it is trained. The receipt intentionally stores aggregate metrics and
-source identities rather than duplicating every per-token log-probability from
-the rollout dataset. Dry runs and failures before the training loop omit the
-audit instead of inventing zero-work policy evidence.
+Server-submitted GRPO acquires exclusive GPU ownership for setup, each complete
+optimizer group, device snapshots, and final smoke/cleanup work. Tokenization,
+reward filtering, JSONL reads, progress callbacks, encoding, and file
+publication run outside the GPU writer. A large group can still create a long
+inference pause; the phase timings distinguish writer contention from work
+outside GPU ownership.
 
-## What to expect at the wall clock
+## Checkpoint and resume
 
-On a single A6000 with rank-8 LoRA, end-to-end timing for the loops above is
-roughly:
+Set `checkpoint_interval` to publish an immutable exact checkpoint every N
+committed optimizer groups. Cooperative cancellation settles the current group
+and publishes at the next safe boundary.
 
-- **Generate (8 prompts × 8 completions, 64 total)**: 1–3 s with continuous
-  batching and chunked prefill.
-- **Score (Python-side)**: depends entirely on your reward fn — sub-millisecond
-  for math/JSON, 5–20 s for the code-runs example because each subprocess pays
-  Python startup.
-- **Train (one GRPO step over 64 completions)**: 5–15 s with gradient
-  checkpointing on, hot-swap is atomic at iteration boundary.
+```bash
+kiln train grpo \
+  --file scored-groups.jsonl \
+  --adapter math-r001 \
+  --checkpoint-interval 25
+```
 
-Reward trajectories on these toy tasks:
+Resume requires the identical source bytes, route, adapter name, and effective
+configuration:
 
-- Math correctness: noticeable improvement in 5–10 rounds, saturation by ~20.
-- JSON-validity: 15–30 rounds to saturate; format compliance is harder.
-- Code-runs: 30+ rounds for non-trivial problems; the variance is higher and
-  the reward signal sparser.
+```bash
+kiln train grpo \
+  --file scored-groups.jsonl \
+  --adapter math-r001 \
+  --checkpoint-interval 25 \
+  --resume-checkpoint math-r001-checkpoint-step-00000025.kiln-checkpoint
+```
 
-Watch live training progress with `GET /v1/train/status`.
+An exact checkpoint restores adapter and optimizer tensors, reference state,
+cursor, RNG streams, loss and diagnostic history, and runtime planning. A PEFT
+adapter is a warm-start or serving artifact, not a resume point. See [Native
+Training Checkpoints](training-checkpoints.md).
+
+## Promotion
+
+Use versioned output names and compare the candidate with the previous accepted
+adapter. With `auto_load: true` and no gate, Kiln may activate a completed
+adapter after its serving canary passes. With a held-out `post_eval` accuracy
+gate, activation is deferred and the previous adapter remains active until the
+gate passes.
+
+Training completion, evaluation success, and adapter activation are separate
+states. Record all three. See the [Evaluation Guide](EVAL_GUIDE.md) for
+comparison and promotion semantics.
 
 ## Troubleshooting
 
-- **Reward isn't budging.** Check that the rewards within each group aren't all
-  identical — GRPO normalizes within-group, so a group where every completion
-  got `1.0` (or every one got `0.0`) contributes zero gradient. Either increase
-  temperature to get more variance, or reshape the reward to be continuous (the
-  0.5/1.0 split in example 2 is a worked instance).
-- **Adapter looks worse, not better.** Most often `kl_coeff` is too low — the
-  adapter is overfitting to whatever scored highest in the first few rounds.
-  Try `0.2` or `0.5`.
-- **Mock-mode error on `/v1/train/grpo`.** The server was started without real
-  model weights (`--model-path`/`KILN_MODEL_PATH` unset, or the path didn't
-  resolve). Training requires real weights; mock inference is fine for API
-  smoke tests but not for training.
-- **`adapter_revision_conflict`.** Another upload, delete, gate action, or
-  publisher changed `output_name` while this job was preparing its result. The
-  newer on-disk revision was preserved; start the next iteration from the
-  current adapter and resubmit. A gated (`post_eval.min_accuracy`) same-name
-  rewrite also returns this before GPU work when that adapter is physically
-  loaded; unload it or choose a versioned `output_name`.
-- **`behavior_policy=recorded` is rejected.** Do not switch to
-  `no_importance_correction` merely to suppress the error for off-policy data.
-  Regenerate the dataset with `kiln rollout-generate`; it requires exact token
-  IDs, sampled-token behavior log-probabilities, behavior model/adapter
-  identity, tokenizer/template hashes, effective sampling controls, seed, and
-  backend provenance before it publishes output. Kiln also rejects provenance
-  whose canonical prompt messages, scored payload, exact token sequence,
-  action positions, or tokenizer identity drifted before training.
+- **All groups were filtered.** Their rewards had no useful within-group
+  contrast, or explicit reward-variance filters removed them. Inspect the
+  receipt, then improve sampling diversity or reward shaping.
+- **Recorded policy was rejected.** Regenerate with `kiln rollout-generate`.
+  Do not weaken the objective to hide prompt, token, adapter, sampling, or
+  provenance drift.
+- **The next round does not build on the last one.** Set `base_adapter` to the
+  previous accepted adapter and use a new `output_name`.
+- **The adapter regressed.** Keep the previous adapter active, inspect the
+  held-out comparison and policy audit, then change one reward or optimization
+  decision at a time.
+- **`adapter_revision_conflict`.** Another mutation changed the output name, or
+  a gated same-name rewrite targeted physically loaded weights. Use a new
+  versioned output name.
+- **Training says real weights are unavailable.** Set `model.path` in TOML or
+  `KILN_MODEL_PATH`, restart the server, and verify readiness before
+  resubmitting.
 
 ## See also
 
-- [Quickstart §9.4](../QUICKSTART.md#94-grpo-rollout-generation) — rollout
-  generation paths and API constraints; [Quickstart §9](../QUICKSTART.md#9-advanced-api-examples)
-  has the full schema for `/v1/completions/batch` and `/v1/train/grpo`, plus
-  the fastest path to run Kiln before trying GRPO.
-- [README.md `## The GRPO Loop`](../README.md#the-grpo-loop) — the 30-second
-  overview of why the generate → score → train loop exists.
-- [Website Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html) — setup,
-  model-loading, adapter, and API recovery steps when a command or request does
-  not behave as expected.
-- [DeepSeekMath](https://arxiv.org/abs/2402.03300) — the algorithm.
+- [ECHO Guide](ECHO_GUIDE.md)
+- [Dataset Splits and Train/Eval Separation](DATASET_SPLITS.md)
+- [Native Training Checkpoints](training-checkpoints.md)
+- [Evaluation Guide](EVAL_GUIDE.md)
+- [Quickstart](../QUICKSTART.md)
+- [DeepSeekMath](https://arxiv.org/abs/2402.03300)

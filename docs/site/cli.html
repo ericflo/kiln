@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Kiln CLI Reference &mdash; Server, training, and adapters</title>
-  <meta name="description" content="A concise command-line reference for running Kiln, checking health, submitting native training, exporting verified HF/TRL bundles, and managing LoRA adapters.">
+  <title>Kiln CLI Guide &mdash; Server, training, evals, and adapters</title>
+  <meta name="description" content="A task-oriented command-line guide for serving Kiln, checking health, configuring clients, training adapters, running evals, and using offline tools.">
   <meta name="theme-color" content="#0a0908">
   <meta name="color-scheme" content="dark">
   <link rel="canonical" href="https://ericflo.github.io/kiln/cli.html">
@@ -12,7 +12,7 @@
   <link rel="alternate icon" type="image/png" href="assets/logo.png">
   <link rel="apple-touch-icon" href="assets/logo.png">
 
-  <meta property="og:title" content="Kiln CLI Reference &mdash; Server, training, and adapters">
+  <meta property="og:title" content="Kiln CLI Guide &mdash; Server, training, evals, and adapters">
   <meta property="og:description" content="Run Kiln, check health, submit native training, export verified HF/TRL bundles, and manage LoRA adapters from the command line.">
   <meta property="og:type" content="website">
   <meta property="og:locale" content="en_US">
@@ -24,7 +24,7 @@
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Kiln CLI Reference &mdash; Server, training, and adapters">
+  <meta name="twitter:title" content="Kiln CLI Guide &mdash; Server, training, evals, and adapters">
   <meta name="twitter:description" content="Run Kiln, check health, submit native training, export verified HF/TRL bundles, and manage LoRA adapters from the command line.">
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image-v3.png">
   <meta name="twitter:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
@@ -76,7 +76,7 @@
       position: absolute;
       left: 1rem;
       top: 0;
-      transform: translateY(-120%);
+      transform: translateY(calc(-100% + 1px));
       z-index: 50;
       background: var(--accent);
       color: #1a0c00;
@@ -257,18 +257,24 @@
 
   <section>
     <div class="max-w-4xl mx-auto px-6 pt-16 pb-10">
-      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">CLI Reference &middot; serve &middot; pi-setup &middot; train &middot; eval &middot; adapters</span>
-      <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">Run Kiln from the terminal.</h1>
+      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">CLI guide &middot; serve &middot; pi-setup &middot; train &middot; eval &middot; adapters</span>
+      <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">Run Kiln from the terminal</h1>
       <p class="text-lg leading-relaxed max-w-3xl" style="color: var(--fg-dim);">
-        Use the CLI when you want a headless server, repeatable scripts, or quick diagnostics against a running Kiln instance. These examples assume a running Kiln server backed by <code>Qwen/Qwen3.5-4B</code>; see <a href="quickstart.html">Quickstart</a> for setup and model download details. If you want visual status, adapter controls, or training monitoring, open <code>http://127.0.0.1:8420/ui</code> instead.
+        Use the CLI to start a headless server, automate a workflow, or
+        diagnose a running Kiln instance. The examples use
+        <code>Qwen/Qwen3.5-4B</code>; see <a href="quickstart.html">Quickstart</a>
+        for installation and model download. Release archives contain the
+        <code>kiln</code> binary only. Eval, benchmark, replay, and Vulkan
+        research clients require a source build, documented below.
       </p>
       <div class="mt-8 flex flex-wrap gap-3">
         <a href="#serve" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Start the server</a>
         <a href="#health" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Check health</a>
+        <a href="#binary-availability" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Find each binary</a>
         <a href="#pi-setup" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Configure pi</a>
         <a href="#training" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Submit training</a>
         <a href="#evals" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Run evals</a>
-        <a href="#benchmarks" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Run benchmarks</a>
+        <a href="#benchmarks" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Run offline tools</a>
         <a href="#adapters" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Manage adapters</a>
       </div>
     </div>
@@ -278,7 +284,7 @@
     <div class="max-w-5xl mx-auto px-6 py-10">
       <div class="card p-6 sm:p-8">
         <p class="label mb-2">Command chooser</p>
-        <h2 class="text-2xl font-semibold tracking-tight mb-4">If you want to...</h2>
+        <h2 class="text-2xl font-semibold tracking-tight mb-4">Choose a task</h2>
         <div class="grid md:grid-cols-2 gap-5 text-sm leading-relaxed">
           <div>
             <h3 class="font-semibold mb-2">Start the server</h3>
@@ -296,7 +302,7 @@ kiln health --json</code></pre>
             <h3 class="font-semibold mb-2">Submit training</h3>
             <p class="mb-3" style="color: var(--fg-dim);">Send native training data, export or import a verified HF/TRL handoff, or check progress.</p>
 <pre class="text-xs"><code>kiln train sft --file corrections.jsonl --adapter support-bot
-kiln train grpo --file grpo-batch.json --adapter support-bot
+kiln train grpo --file scored-groups.jsonl --adapter support-bot
 kiln train hf export-sft --file /data/corrections.jsonl --name support-hf-01
 kiln train hf export-grpo --file /data/recorded.jsonl --name support-grpo-01
 kiln train hf import-peft --bundle ./support-hf-01.kiln-hf --name support-v2
@@ -318,9 +324,9 @@ kiln adapters unload</code></pre>
           <div>
             <h3 class="font-semibold mb-2">Run and replay evals</h3>
             <p class="mb-3" style="color: var(--fg-dim);">Grade an adapter, compare candidates, or verify a completed run's exact decoder bytes.</p>
-<pre class="text-xs"><code>kiln-eval run --suite smoke --adapter support-bot --watch
-kiln-eval compare --suite smoke --adapter "" --adapter support-bot --watch
-kiln-eval replay --job eval_123 --json</code></pre>
+<pre class="text-xs"><code>./target/release/kiln-eval run --suite smoke --adapter support-bot --watch
+./target/release/kiln-eval compare --suite smoke --adapter "" --adapter support-bot --watch
+./target/release/kiln-eval replay --job eval_123 --json</code></pre>
           </div>
           <div class="md:col-span-2">
             <h3 class="font-semibold mb-2">Validate config</h3>
@@ -329,6 +335,42 @@ kiln-eval replay --job eval_123 --json</code></pre>
 kiln config --file kiln.toml --backend rocm
 kiln config --file kiln.toml --backend rocm --json</code></pre>
           </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="binary-availability" class="divider">
+    <div class="max-w-5xl mx-auto px-6 py-12">
+      <div class="card p-6 sm:p-8">
+        <p class="label mb-2">Binary availability</p>
+        <h2 class="text-2xl font-semibold tracking-tight mb-4">Know which commands the release archive includes</h2>
+        <p class="mb-5 leading-relaxed" style="color: var(--fg-dim);">
+          Current prebuilt server archives contain only <code>kiln</code>.
+          Build the auxiliary clients from a source checkout when you need
+          them. The commands below place each binary in
+          <code>./target/release/</code>; use that path explicitly or add the
+          directory to your <code>PATH</code>.
+        </p>
+<pre class="text-sm"><code>cargo build --release --locked -p kiln-server \
+  --bin kiln-eval --bin kiln-bench
+
+cargo build --release --locked -p kiln-train \
+  --bin kiln-replay
+
+cargo build --release --locked -p kiln-vulkan-kernel \
+  --bin vulkan_decode_microbench</code></pre>
+        <div class="overflow-x-auto mt-5">
+          <table class="w-full text-sm" style="color: var(--fg-dim);">
+            <thead><tr><th class="text-left p-2">Binary</th><th class="text-left p-2">Purpose</th><th class="text-left p-2">Distribution</th></tr></thead>
+            <tbody>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>kiln</code></td><td class="p-2">Serve, health, configuration, training, adapters, pi setup, and rollout generation.</td><td class="p-2">Prebuilt server archive.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>kiln-eval</code></td><td class="p-2">Register, run, compare, probe, and strict-replay evals.</td><td class="p-2">Source build.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>kiln-bench</code></td><td class="p-2">Offline model-path benchmark driver.</td><td class="p-2">Source build.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>kiln-replay</code></td><td class="p-2">Historical request-lineage hash inspection; not model replay.</td><td class="p-2">Source build.</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>vulkan_decode_microbench</code></td><td class="p-2">Vulkan kernel research, not serving qualification.</td><td class="p-2">Source build.</td></tr>
+            </tbody>
+          </table>
         </div>
       </div>
     </div>
@@ -357,13 +399,19 @@ kiln serve --config kiln.toml
 kiln serve --served-model-id Qwen3.5-4B-local</code></pre>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">Use <code>kiln config</code> to validate built-in defaults plus <code>KILN_*</code> environment overrides, or <code>kiln config --file</code> / <code>kiln config -f</code> to validate a TOML file before starting the server. <code>--backend cpu|cuda|rocm|metal|vulkan</code> resolves hardware-independent scheduling policy and applies the serve-startup actor-prefill validator without probing hardware or loading model weights. <code>--json</code> emits the complete <code>kiln.config-check.v1</code> machine document.</p>
       </div>
+      <details class="reference-details lg:col-span-2">
+        <summary>
+          <span>Advanced startup policy</span>
+          <small>Effective values, CUDA graphs, batching, prefix caching, and streaming prefill</small>
+        </summary>
+        <div class="reference-details-body grid gap-6">
       <div class="card p-6 lg:col-span-2">
         <p class="label mb-2">Effective configuration</p>
-        <h2 class="text-2xl font-semibold tracking-tight mb-4">Inspect every startup value and authority</h2>
-        <p class="mb-4" style="color: var(--fg-dim);">The JSON check contains <code>kiln.effective-configuration.v1</code>: all 112 fixed typed leaves plus two dynamic leaves for each configured teacher credential. The flat, sorted field map records the post-precedence typed value, <code>default</code>/<code>config_file</code>/<code>environment</code>/<code>command_line</code> source, the canonical environment spelling, an explicitly empty compatibility-name list, redaction state, and restart requirement.</p>
+        <h2 class="text-2xl font-semibold tracking-tight mb-4">Inspect resolved startup values and their sources</h2>
+        <p class="mb-4" style="color: var(--fg-dim);">The JSON check contains <code>kiln.effective-configuration.v1</code>. Its flat, sorted field map records every typed value after precedence resolution, the <code>default</code>/<code>config_file</code>/<code>environment</code>/<code>command_line</code> source, canonical environment spelling, compatibility names, redaction state, and restart requirement.</p>
 <pre class="text-sm"><code>kiln config --file kiln.toml --json | jq '.effective_configuration'
 kiln config --file kiln.toml --backend vulkan --json | jq '.backend_preview'
-curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["server.max_decode_batch"]'</code></pre>
+curl -fsS http://localhost:8420/v1/config | jq '.effective_configuration.fields["server.max_decode_batch"]'</code></pre>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">The CLI path parses and validates configuration without probing hardware or loading weights. A running server publishes its immutable startup snapshot in <code>GET /v1/config</code> under <code>effective_configuration</code>; sibling accelerator, batching, memory, and availability objects are authoritative for backend-derived and live results. Self-improvement requests, webhook URLs, and teacher credential-provider names remain represented with their source but serialize as redacted <code>null</code> values.</p>
       </div>
       <div class="card p-6 lg:col-span-2">
@@ -378,8 +426,8 @@ cuda_graphs = true
 cuda_graph_cache_entries = 8</code></pre>
 <pre class="text-sm mt-4"><code>kiln config --file kiln.toml
 kiln serve --config kiln.toml
-curl -s http://localhost:8420/v1/config | jq '.cuda_graphs'
-curl -s http://localhost:8420/health | jq '.decode_runtime.cuda_graphs'</code></pre>
+curl -fsS http://localhost:8420/v1/config | jq '.cuda_graphs'
+curl -fsS http://localhost:8420/health | jq '.decode_runtime.cuda_graphs'</code></pre>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">The canonical cache override is <code>KILN_MEMORY_CUDA_GRAPH_CACHE_ENTRIES</code>. The default <code>stable</code> profile reports the request but resolves capture off; <code>experimental</code> permits the requested single-row policy. Decode never re-reads process environment.</p>
       </div>
       <div class="card p-6 lg:col-span-2">
@@ -393,7 +441,7 @@ prefill_admission_quantum = "auto"
 actor_cycle_idle_ms = 0</code></pre>
 <pre class="text-sm mt-4"><code>kiln config --file kiln.toml --backend rocm
 kiln serve --config kiln.toml
-curl -s http://localhost:8420/v1/config | jq '.batching'</code></pre>
+curl -fsS http://localhost:8420/v1/config | jq '.batching'</code></pre>
         <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>kiln config</code> validates and prints all four batching fields plus the combined actor-cycle budget, prompt-token and layer ceilings, decode-width ceiling, streaming mode, threshold, and three configured tiles, each with source provenance. Every real backend uses one batching actor; activation and the former direct worker are not configurable. <code>actor_cycle_idle_ms</code> is an explicit 0&ndash;60,000 ms safe-boundary duty-cycle delay: zero is unpaced; nonzero trades throughput and ITL for lower sustained accelerator duty cycle and polls control commands within 5 ms. Its canonical environment override is <code>KILN_BATCHING_ACTOR_CYCLE_IDLE_MS</code>. Add <code>--backend</code> to resolve the alignment requirement, decode width, streaming dispatch, and tiles and reject an invalid contract without probing hardware or loading model weights. Without it, the command leaves backend-effective values unresolved. After restart, <code>/v1/config</code> reports backend policy, effective decode-width clamping, and <code>actor_active</code>.</p>
       </div>
       <div class="card p-6 lg:col-span-2">
@@ -406,8 +454,8 @@ enabled = true
 # max_entries = 16</code></pre>
 <pre class="text-sm mt-4"><code>kiln config --file kiln.toml
 kiln serve --config kiln.toml
-curl -s http://localhost:8420/v1/config | jq '.prefix_cache'
-curl -s http://localhost:8420/health | jq '.prefix_cache, .decode_runtime.batching_engine.prefix_cache_enabled'</code></pre>
+curl -fsS http://localhost:8420/v1/config | jq '.prefix_cache'
+curl -fsS http://localhost:8420/health | jq '.prefix_cache, .decode_runtime.batching_engine.prefix_cache_enabled'</code></pre>
         <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>enabled</code> defaults to <code>true</code>; <code>max_blocks</code> and <code>max_entries</code> are optional positive integers. CPU, CUDA, ROCm, and Metal currently honor the request. Vulkan reports <code>effective_enabled=false</code> and <code>effective_reason="vulkan_correctness_quarantine"</code>, allocates no prefix-cache capacity, and fresh-prefills exact repeats. No request or environment override can bypass that source-level quarantine.</p>
       </div>
       <div class="card p-6 lg:col-span-2">
@@ -442,10 +490,12 @@ tile_tokens = 2048</code></pre>
         </div>
 <pre class="text-sm mt-4"><code>kiln config --file kiln.toml
 kiln serve --config kiln.toml
-curl -s http://localhost:8420/v1/config | jq '.streaming_prefill'
-curl -s http://localhost:8420/health | jq '.prefill_runtime.streaming_prefill'</code></pre>
+curl -fsS http://localhost:8420/v1/config | jq '.streaming_prefill'
+curl -fsS http://localhost:8420/health | jq '.prefill_runtime.streaming_prefill'</code></pre>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">Canonical overrides are mechanically derived: <code>KILN_STREAMING_PREFILL_MODE</code>, <code>KILN_STREAMING_PREFILL_THRESHOLD_TOKENS</code>, <code>KILN_STREAMING_PREFILL_TILE_TOKENS</code>, <code>KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS</code>, <code>KILN_STREAMING_PREFILL_DETACHED_FULL_ATTN_TILE_TOKENS</code>, and <code>KILN_STREAMING_PREFILL_LAST_TOKEN_LM_HEAD</code>. Six old shorter spellings warn and conflict-check; legacy TOML <code>enabled</code> is compatibility-only. Startup injects one policy into inference and native training, so restart after every change. The two diagnostic objects must match.</p>
       </div>
+        </div>
+      </details>
       <div class="card p-6 lg:col-span-2">
         <p class="label mb-2">Logging</p>
         <h2 class="text-2xl font-semibold tracking-tight mb-4">Tune startup output</h2>
@@ -481,9 +531,13 @@ kiln health --url http://localhost:8420</code></pre>
   <section id="pi-setup" class="divider">
     <div class="max-w-5xl mx-auto px-6 py-12">
       <p class="label mb-2">pi integration</p>
-      <h2 class="text-2xl font-semibold tracking-tight mb-4">Point pi or opencode at Kiln</h2>
+      <h2 class="text-2xl font-semibold tracking-tight mb-4">Point pi or OpenCode at Kiln</h2>
       <p class="max-w-3xl mb-6" style="color: var(--fg-dim);">
-        <code>kiln pi-setup</code> updates pi's OpenAI-compatible provider config without replacing the whole file. It writes a <code>kiln-local</code> provider with <code>baseUrl</code> ending in <code>/v1</code>, <code>api: "openai-completions"</code>, and model id <code>Qwen3.5-4B</code>. It also preserves existing <code>settings.json</code> keys while setting pi's default provider and model to Kiln. For opencode, add a Kiln provider block (below) — both point at <code>http://localhost:8420/v1</code> with no API key.
+        <code>kiln pi-setup</code> merges a <code>kiln-local</code> provider into pi&rsquo;s existing
+        configuration and sets Kiln as the default provider and model. The local examples target
+        <code>http://localhost:8420/v1</code>; Kiln does not require an API key on its loopback API.
+        OpenCode&rsquo;s OpenAI-compatible provider accepts a local endpoint
+        without an <code>apiKey</code>.
       </p>
       <div class="grid lg:grid-cols-2 gap-6">
         <div class="card p-6">
@@ -499,15 +553,24 @@ pi -p "Use the bash tool to run: pwd"</code></pre>
         </div>
       </div>
       <div class="card p-6 mt-6">
-        <h3 class="font-semibold mb-2">opencode &middot; provider config</h3>
-        <p class="mb-3" style="color: var(--fg-dim);">Add a Kiln provider to <code>~/.config/opencode/opencode.json</code>, then run <code>opencode</code> and pick <strong style="color: var(--fg);">Kiln &middot; Qwen3.5-4B</strong> with <code>/models</code>. Uses the OpenAI-compatible AI SDK adapter — <code>apiKey</code> can be any value.</p>
+        <h3 class="font-semibold mb-2">OpenCode &middot; provider config</h3>
+        <p class="mb-3" style="color: var(--fg-dim);">
+          Add a Kiln provider to
+          <code>~/.config/opencode/opencode.json</code>, then run
+          <code>opencode</code> and pick
+          <strong style="color: var(--fg);">Kiln &middot; Qwen3.5-4B</strong>
+          with <code>/models</code>. OpenCode documents
+          <code>@ai-sdk/openai-compatible</code>, <code>options.baseURL</code>,
+          and an optional <code>options.apiKey</code> for custom providers; see
+          its <a href="https://opencode.ai/docs/providers/#custom-provider">custom-provider guide</a>.
+        </p>
 <pre class="text-sm"><code>{
   "$schema": "https://opencode.ai/config.json",
   "provider": {
     "kiln": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "Kiln (local)",
-      "options": { "baseURL": "http://localhost:8420/v1", "apiKey": "unused" },
+      "options": { "baseURL": "http://localhost:8420/v1" },
       "models": { "Qwen3.5-4B": { "name": "Kiln · Qwen3.5-4B" } }
     }
   }
@@ -515,6 +578,10 @@ pi -p "Use the bash tool to run: pwd"</code></pre>
       </div>
       <p class="text-sm mt-4" style="color: var(--fg-mute);">
         Tool-calling clients receive OpenAI <code>tool_calls</code> even when Qwen3.5 internally emits its native XML tool-call form, so pi and opencode execute the tool instead of showing raw XML.
+      </p>
+      <p class="text-sm mt-3" style="color: var(--warn);">
+        Kiln does not add API authentication. Use a remote URL only on a trusted network or behind
+        an authenticated reverse proxy, especially when training and adapter-management routes are enabled.
       </p>
     </div>
   </section>
@@ -524,6 +591,19 @@ pi -p "Use the bash tool to run: pwd"</code></pre>
       <p class="label mb-2">Training</p>
       <h2 class="text-2xl font-semibold tracking-tight mb-4">Run native jobs or move a verified HF/TRL handoff</h2>
       <p class="max-w-3xl mb-6" style="color: var(--fg-dim);">Training commands talk to an already-running server. SFT reads JSONL with one chat correction example per line, each with a <code>messages</code> array. GRPO accepts either one JSON request/batch with <code>groups</code> or streamed JSONL with one group per line; each group has prompt <code>messages</code> plus candidate <code>completions</code> containing <code>text</code> and <code>reward</code> scores. OPD reads one <code>/v1/train/opd</code> request object, or a JSON prompt array paired with <code>--teacher</code>, and binds the registered teacher's exact content revision. The nested <code>train hf</code> commands create and manage immutable bundles for broader Transformers/TRL/PEFT training.</p>
+      <div class="card p-5 mb-6" style="background: rgba(249, 115, 22, 0.08); border-color: rgba(249, 115, 22, 0.22);">
+        <h3 class="font-semibold mb-2">The running server must admit training</h3>
+        <p style="color: var(--fg-dim);">
+          The default <code>stable</code> profile rejects training and live adapter transitions. Start the
+          server with <code>server.serving_profile = "experimental"</code> for an interactive loop, or use a
+          drained <code>maintenance</code> process for artifact production without inference or eval.
+          These CLI commands do not expose <code>auto_load</code> or <code>post_eval</code>; they inherit the
+          server&rsquo;s <code>auto_load: true</code> training default. Use the
+          <a href="api.html#training">HTTP training API</a> with <code>auto_load: false</code> or a held-out
+          <code>post_eval</code> gate when activation must depend on evidence. Training takes exclusive
+          accelerator ownership while the queued job runs.
+        </p>
+      </div>
       <div class="grid lg:grid-cols-2 gap-4">
         <div class="card p-5">
           <h3 class="font-semibold mb-2">SFT corrections</h3>
@@ -532,7 +612,12 @@ pi -p "Use the bash tool to run: pwd"</code></pre>
   --adapter support-bot \
   --checkpoint-interval 25
 kiln train sft --file corrections.jsonl --adapter support-bot --url http://gpu-box:8420</code></pre>
+          <details class="reference-details mt-4">
+            <summary><span>SFT flags and resume contract</span></summary>
+            <div class="reference-details-body">
           <p class="text-sm mt-4" style="color: var(--fg-mute);">Each JSONL line is one chat correction with a <code>messages</code> array. Native SFT uses the fixed <code>native_online_lora_v1</code> profile: one conversation per update, constant learning rate, and no accumulation, warmup, decay, or clipping. Add <code>--epochs</code>, <code>--lr</code>, or <code>--lora-rank</code> to override its bounded settings. Continue an interrupted run with the same file and options plus <code>--resume-checkpoint BASENAME</code>. <code>--adapter-smoke-test</code> runs post-training canaries; <code>--adapter-smoke-prompts-file</code> loads a JSON string array or one text prompt into request-local config. Add <code>--detect-anomaly</code> only when localizing a NaN or Inf; it scans every backward operation and can substantially slow the job.</p>
+            </div>
+          </details>
         </div>
         <div class="card p-5">
           <h3 class="font-semibold mb-2">GRPO rewards</h3>
@@ -546,7 +631,12 @@ kiln train grpo \
   --adapter support-bot \
   --checkpoint-interval 25 \
   --resume-checkpoint support-bot-checkpoint-step-00000025.kiln-checkpoint</code></pre>
+          <details class="reference-details mt-4">
+            <summary><span>GRPO input, resume, and diagnostic flags</span></summary>
+            <div class="reference-details-body">
           <p class="text-sm mt-4" style="color: var(--fg-mute);">Use <code>/v1/completions/batch</code> or another generator to create prompts and candidate completions first, score them, then submit the scored <code>groups</code>. A <code>.jsonl</code> file selects the memory-bounded streamed route; JSON containing <code>groups</code> selects inline training. Exact resume requires the identical file, route, adapter, and options. Adapter canaries use the same <code>--adapter-smoke-test</code> and <code>--adapter-smoke-prompts-file</code> controls as SFT. <code>--no-shared-prefix-reference</code> selects the exact per-completion KL-reference fallback for a deliberate comparison. <code>--detect-anomaly</code> enables the same request-local per-operation NaN/Inf diagnostic as SFT. See the <a href="grpo.html" class="link">GRPO Guide</a>.</p>
+            </div>
+          </details>
         </div>
         <div class="card p-5 lg:col-span-2">
           <h3 class="font-semibold mb-2">Verified HF/TRL SFT and GRPO handoff</h3>
@@ -581,7 +671,15 @@ kiln train hf list --json
 kiln train hf delete \
   --name retained-export \
   --export-sha256 sha256:&lt;64-hex-from-list&gt;</code></pre>
+          <details class="reference-details mt-4">
+            <summary>
+              <span>Export and import integrity contract</span>
+              <small>Input location, archive validation, conditional cleanup, and no-replace publication</small>
+            </summary>
+            <div class="reference-details-body">
           <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>--file</code> is read by the server process; it is not uploaded from the CLI host. SFT requires exactly one <code>--file</code> or <code>--dataset</code>; GRPO requires canonical compact, final-LF <code>--file</code> input whose uniform-width groups carry exact recorded provenance. Add <code>--input-adapter NAME</code>, <code>--split-manifest FILE</code>, or <code>--keep-server-copy</code> to either route; <code>--invalid-row-policy skip</code> is SFT-only. Both exports refuse redirects and existing outputs, require response <code>ETag</code> identity agreement, bound idle reads and compressed/expanded bytes, stream into a sibling temporary file, reject links, special entries, duplicate paths, trailing gzip data, and any root other than <code>{name}.kiln-hf</code>, verify every manifest-bound byte, then publish atomically. Automatic cleanup and safe manual retry use identity-conditional <code>If-Match</code> through <code>--export-sha256</code>, so a concurrently reused server name is never deleted; omit that flag only for deliberate operator cleanup of the current name or a damaged bundle. Import takes the completed extracted <code>.kiln-hf</code> directory, fails local verification before connecting, streams a deterministic ten-file envelope through bounded memory, and requires HTTP 201 plus exact locally predicted receipt, <code>ETag</code>, PEFT revision, installed size, and file count. It never changes or removes the source bundle; an existing target is rejected without replacement.</p>
+            </div>
+          </details>
         </div>
         <div class="card p-5">
           <h3 class="font-semibold mb-2">OPD teacher distillation</h3>
@@ -597,7 +695,12 @@ kiln train opd \
   --teacher qwen35@vllm \
   --checkpoint-interval 25 \
   --resume-checkpoint distilled-bot-checkpoint-step-00000025.kiln-checkpoint</code></pre>
+          <details class="reference-details mt-4">
+            <summary><span>OPD resume and sampler flags</span></summary>
+            <div class="reference-details-body">
           <p class="text-sm mt-4" style="color: var(--fg-mute);">OPD defaults to an exact checkpoint every 25 committed optimizer steps. Exact resume requires the identical request data, effective configuration, output adapter, and currently registered teacher content revision; a same-name replacement is rejected. Job detail and the dashboard expose the candidate cursor and immutable basename. <code>--sampler-segments</code> configures the memory-bounded student sampler; <code>--rollout-prompt-rendering</code> selects the qualified admitted-token boundary or the experimental chat-template algorithm. <code>--detect-anomaly</code> opts this job into per-operation NaN/Inf scans and is retained in exact resume state.</p>
+            </div>
+          </details>
         </div>
         <div class="card p-5">
           <h3 class="font-semibold mb-2">Queue status</h3>
@@ -608,9 +711,9 @@ kiln train status --url http://gpu-box:8420</code></pre>
         </div>
         <div class="card p-5">
           <h3 class="font-semibold mb-2">Request-lineage integrity</h3>
-<pre class="text-sm"><code>kiln-replay verify ./adapters/support-bot
-kiln-replay show ./adapters/support-bot</code></pre>
-          <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>kiln-replay</code> is a historical command name. It recomputes request-lineage hashes only; it does not load a model, execute training or inference, compare outputs, or prove reproducibility. Use a validated <code>.kiln-checkpoint</code> for exact continuation. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/REPLAY_INTEGRITY.md" class="link">integrity contract</a>.</p>
+<pre class="text-sm"><code>./target/release/kiln-replay verify ./adapters/support-bot
+./target/release/kiln-replay show ./adapters/support-bot</code></pre>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>kiln-replay</code> is a historical command name. It recomputes request-lineage hashes only; it does not load a model, execute training or inference, compare outputs, or prove reproducibility. Use a validated <code>.kiln-checkpoint</code> for exact continuation. See the <a href="docs/request-lineage-integrity/" class="link">request-lineage integrity contract</a>.</p>
         </div>
       </div>
     </div>
@@ -620,22 +723,28 @@ kiln-replay show ./adapters/support-bot</code></pre>
     <div class="max-w-5xl mx-auto px-6 py-12">
       <p class="label mb-2">Evaluation</p>
       <h2 class="text-2xl font-semibold tracking-tight mb-4">Run, compare, and strictly replay evals</h2>
-      <p class="max-w-3xl mb-6" style="color: var(--fg-dim);"><code>kiln-eval</code> talks to the running server selected by <code>KILN_SERVER_URL</code>. It can register suites, run registered or local suite files, compare adapters on shared deterministic seeds, create one-example probes, and strictly replay a completed run.</p>
+      <p class="max-w-3xl mb-6" style="color: var(--fg-dim);">
+        <code>kiln-eval</code> is a source-built client, not part of the prebuilt
+        server archive. It talks to the running server selected by
+        <code>KILN_SERVER_URL</code>, and can register suites, run registered or
+        local suite files, compare adapters on shared sampling inputs, create
+        one-example probes, and strictly replay a completed run.
+      </p>
       <div class="grid lg:grid-cols-2 gap-6">
         <div class="card p-6">
           <h3 class="font-semibold mb-2">Suites and runs</h3>
-<pre class="text-sm"><code>kiln-eval list
-kiln-eval register --file smoke.json --force
-kiln-eval run --suite smoke --adapter support-bot --seed 42 --watch
-kiln-eval run --file smoke.json --adapter support-bot --watch --json
-kiln-eval compare --suite smoke --adapter "" --adapter support-bot --seed 42 --watch
-kiln-eval probe --prompt "1+1?" --target 2 --scorer numeric --adapter support-bot --seed 42</code></pre>
+<pre class="text-sm"><code>./target/release/kiln-eval list
+./target/release/kiln-eval register --file smoke.json --force
+./target/release/kiln-eval run --suite smoke --adapter support-bot --seed 42 --watch
+./target/release/kiln-eval run --file smoke.json --adapter support-bot --watch --json
+./target/release/kiln-eval compare --suite smoke --adapter "" --adapter support-bot --seed 42 --watch
+./target/release/kiln-eval probe --prompt "1+1?" --target 2 --scorer numeric --adapter support-bot --seed 42</code></pre>
           <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>run</code> accepts exactly one registered <code>--suite</code> or local <code>--file</code>. <code>--watch</code> polls to terminal state; <code>--json</code> preserves full result, execution, base-weight, and replay evidence. Compare uses one effective seed across every adapter.</p>
         </div>
         <div class="card p-6">
           <h3 class="font-semibold mb-2">Strict byte replay</h3>
-<pre class="text-sm"><code>kiln-eval replay --job eval_123
-kiln-eval replay --job eval_compare_123 --run-index 1 --json</code></pre>
+<pre class="text-sm"><code>./target/release/kiln-eval replay --job eval_123
+./target/release/kiln-eval replay --job eval_compare_123 --run-index 1 --json</code></pre>
           <p class="text-sm mt-4" style="color: var(--fg-mute);"><code>--run-index</code> defaults to zero and selects one source arm. The command always waits for a terminal <code>matched</code>, <code>mismatch</code>, or <code>error</code> verdict and exits nonzero unless the complete replay identity and every raw decoder continuation match byte-for-byte. Admission refuses legacy records and any execution, base-weight, candidate, or judge identity drift. See <a href="evals.html#strict-replay">Strict replay</a> for the exact proof boundary.</p>
         </div>
       </div>
@@ -648,17 +757,25 @@ kiln-eval replay --job eval_compare_123 --run-index 1 --json</code></pre>
       <h2 class="text-2xl font-semibold tracking-tight mb-4">Configure benchmark runs explicitly</h2>
       <p class="mb-5 leading-relaxed" style="color: var(--fg-dim);">
         <code>kiln-bench</code> loads the same typed <code>KilnConfig</code> as the server. The Vulkan
-        microbenchmark is a separate kernel-research executable. Neither binary reads private
+        microbenchmark is a separate kernel-research executable. Both are
+        source-built developer tools rather than release-archive binaries.
+        Neither binary reads private
         <code>KILN_BENCH_*</code> or <code>KILN_VK_MICROBENCH_*</code> controls; every experiment-specific
         choice is visible in the command. Invalid enums, lists, numeric values, and unknown flags fail before
         accelerator work.
       </p>
-      <pre class="text-sm"><code>kiln-bench --model-path ./Qwen3.5-4B --config kiln.toml \
+      <pre class="text-sm"><code>./target/release/kiln-bench --model-path ./Qwen3.5-4B --config kiln.toml \
   --paged --latency-only --prompt-tokens 512 --max-output-tokens 128
 
-vulkan_decode_microbench --only full_step_resident,full_token_resident_paged \
+./target/release/vulkan_decode_microbench --only full_step_resident,full_token_resident_paged \
   --batches 1,4,8 --warmup-iters 10 --timed-iters 30 --repeats 5</code></pre>
 
+      <details class="reference-details mt-6">
+        <summary>
+          <span>Complete <code>kiln-bench</code> argument table</span>
+          <small>Defaults, validation, research flags, and qualification boundary</small>
+        </summary>
+        <div class="reference-details-body">
       <h3 class="font-semibold mt-8 mb-3">Complete <code>kiln-bench</code> arguments</h3>
       <div class="overflow-x-auto">
         <table class="w-full text-sm" style="color: var(--fg-dim);">
@@ -684,7 +801,15 @@ vulkan_decode_microbench --only full_step_resident,full_token_resident_paged \
         retained receipt constitute qualification evidence. The experimental benchmark opt-in is only an
         accident-prevention acknowledgment.
       </p>
+        </div>
+      </details>
 
+      <details class="reference-details mt-5">
+        <summary>
+          <span>Complete Vulkan microbenchmark argument table</span>
+          <small>Kernel cases, batch sizes, thresholds, and route toggles</small>
+        </summary>
+        <div class="reference-details-body">
       <h3 class="font-semibold mt-8 mb-3">Complete Vulkan microbenchmark arguments</h3>
       <div class="overflow-x-auto">
         <table class="w-full text-sm" style="color: var(--fg-dim);">
@@ -708,10 +833,13 @@ vulkan_decode_microbench --only full_step_resident,full_token_resident_paged \
         </table>
       </div>
       <p class="mt-5 text-sm leading-relaxed" style="color: var(--fg-mute);">
-        These Vulkan switches affect only the offline research binary. Product dispatch remains the immutable
-        versioned Vulkan kernel policy documented in Architecture. A microbenchmark result is not a serving
-        qualification receipt.
+        These switches affect only the offline Vulkan research binary. Product serving chooses
+        dispatch through the backend&rsquo;s versioned runtime policy, not these microbenchmark flags
+        or a machine-specific override. See <a href="architecture.html">Architecture</a>.
+        A microbenchmark result is not a serving qualification receipt.
       </p>
+        </div>
+      </details>
     </div>
   </section>
 
@@ -719,7 +847,14 @@ vulkan_decode_microbench --only full_step_resident,full_token_resident_paged \
     <div class="max-w-5xl mx-auto px-6 py-12">
       <p class="label mb-2">Adapters</p>
       <h2 class="text-2xl font-semibold tracking-tight mb-4">Manage LoRA adapters</h2>
-      <p class="max-w-3xl mb-6" style="color: var(--fg-dim);">Adapter commands call the running server's adapter API. Use them in scripts; use <code>/ui</code> when you want upload, download, merge, or safer visual confirmation before deleting.</p>
+      <p class="max-w-3xl mb-6" style="color: var(--fg-dim);">
+        Adapter commands call the running server&rsquo;s adapter API. Listing is
+        read-only; loading or unloading weights requires the
+        <code>experimental</code> or drained <code>maintenance</code> profile.
+        The default <code>stable</code> profile cannot load a saved LoRA. Use
+        these commands in scripts; use <code>/ui</code> for upload, download,
+        merge, or visual confirmation before deletion.
+      </p>
       <div class="grid lg:grid-cols-2 gap-6">
         <div class="card p-6">
           <h3 class="font-semibold mb-2">List, load, unload</h3>
@@ -733,7 +868,11 @@ kiln adapters unload support-bot</code></pre>
         <div class="card p-6">
           <h3 class="font-semibold mb-2">Delete</h3>
 <pre class="text-sm"><code>kiln adapters delete support-bot</code></pre>
-          <p class="text-sm mt-4" style="color: var(--fg-mute);">Delete removes an adapter through the server. Prefer the UI for one-off manual cleanup.</p>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);">
+            Delete permanently removes an idle adapter from the server registry;
+            an active or physically loaded adapter is rejected. There is no
+            trash or automatic undo. Prefer the UI for one-off cleanup.
+          </p>
         </div>
       </div>
     </div>
@@ -748,11 +887,11 @@ kiln adapters unload support-bot</code></pre>
           <p style="color: var(--fg-dim);">Install Kiln, download the model, and send the first chat request.</p>
         </a>
         <a class="card p-5 block" href="api.html">
-          <h3 class="font-semibold mb-2">API Reference</h3>
+          <h3 class="font-semibold mb-2">API reference</h3>
           <p style="color: var(--fg-dim);">Map CLI flows to inference, training, adapter, and health endpoints.</p>
         </a>
         <a class="card p-5 block" href="grpo.html">
-          <h3 class="font-semibold mb-2">GRPO Guide</h3>
+          <h3 class="font-semibold mb-2">GRPO guide</h3>
           <p style="color: var(--fg-dim);">Build the generate, score, train loop around <code>kiln train grpo</code>.</p>
         </a>
         <a class="card p-5 block" href="troubleshooting.html">
@@ -787,7 +926,7 @@ kiln adapters unload support-bot</code></pre>
         <a href="demo/">Demo</a>
         <a href="troubleshooting.html">Troubleshooting</a>
         <a href="architecture.html">Architecture</a>
-        <a href="https://github.com/ericflo/kiln/blob/main/BENCHMARKS.md">Benchmarks</a>
+        <a href="docs/benchmarks/">Benchmarks</a>
         <a href="https://github.com/ericflo/kiln/blob/main/CHANGELOG.md">Changelog</a>
         <a href="https://github.com/ericflo/kiln/blob/main/SECURITY.md">Security</a>
         <a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License</a>

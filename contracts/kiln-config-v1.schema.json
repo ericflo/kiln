@@ -305,7 +305,7 @@
         },
         "shutdown_timeout_secs": {
           "type": "integer",
-          "minimum": 0,
+          "minimum": 1,
           "default": 5,
           "description": "Must be greater than zero. Hard ceiling for graceful drain before forced exit.",
           "x-kiln-path": "server.shutdown_timeout_secs",

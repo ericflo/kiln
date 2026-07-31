@@ -1,16 +1,16 @@
-# Dataset Splits and Train/Eval Separation
+# Dataset splits and train/eval separation
 
-Kiln treats a registered dataset as one content-addressed corpus with three
-persisted views: `train`, `validation`, and `holdout`. Native SFT and GRPO use
-the `train` view by default. Dataset-to-suite synthesis uses `holdout` by
-default. A post-training eval declared held out is checked against the exact
-corpus admitted for training before the job is published to the queue.
+Each registered dataset is one content-addressed corpus with three persisted
+views: `train`, `validation`, and `holdout`. Native SFT and GRPO select
+`train` by default; dataset-to-suite synthesis selects `holdout`. Before Kiln
+publishes a training job to the queue, it checks a post-training eval declared
+as held out against the data admitted for that job.
 
-This page defines that contract. The generated
-[Eval and Judgment API Schema](../contracts/kiln-evals-v1.schema.json) and
-[Training Control Plane Schema](../contracts/kiln-control-plane-v1.schema.json)
-are the field-level references. The generated
-[HTTP API Contract](../contracts/kiln-http-api-v1.openapi.json) owns route,
+This guide explains the policy and workflow. The generated
+[eval and judgment schema](../contracts/kiln-evals-v1.schema.json) and
+[training control-plane schema](../contracts/kiln-control-plane-v1.schema.json)
+define individual fields. The generated
+[HTTP API contract](../contracts/kiln-http-api-v1.openapi.json) defines route,
 status, and media-type details.
 
 ## Recommended workflow
@@ -22,10 +22,10 @@ status, and media-type details.
 4. Train the named dataset's `train` partition.
 5. Synthesize an eval suite from its `holdout` partition.
 6. Attach that suite as a held-out `post_eval`.
-7. Inspect `training_data` on the training job to retain the exact corpus and
-   split-manifest identities used at admission.
+7. Record the job's `training_data` object, which identifies the corpus and
+   split manifest used at admission.
 
-The browser implements this workflow directly. Dataset pickers show train,
+The browser UI implements this workflow directly. Dataset pickers show train,
 validation, and holdout counts; named training selects `train`; suite
 synthesis selects `holdout`; and post-training evaluation defaults to
 `Held-out evaluation`. `Train-set diagnostic` is a separate deliberate mode.
@@ -83,8 +83,8 @@ New and migrated datasets default to:
 }
 ```
 
-Holdout receives the remainder, so the default target is 80/10/10. To
-replace the persisted assignment:
+Holdout receives the remainder, so the default target is 80/10/10. To replace
+the persisted assignment:
 
 ```bash
 curl -sS -X PUT \
@@ -103,7 +103,7 @@ especially when a large group or session must remain intact. Inspect
 `split_counts`; do not assume that an 80/10/10 policy produced exact row
 counts.
 
-For small datasets, Kiln deterministically repairs the hash assignment when
+For small datasets, Kiln deterministically adjusts the hash assignment when
 the number of independent components permits the partition:
 
 - one or more independent components always produce a train partition;
@@ -116,7 +116,9 @@ split. Reading an empty materialized partition for training or synthesis
 fails with a request error instead of silently falling back to another
 partition.
 
-## Row and group identity
+<a id="row-and-group-identity"></a>
+
+## How Kiln keeps related rows together
 
 Every non-empty JSONL row receives two SHA-256 identities:
 
@@ -137,11 +139,11 @@ transitive connected components across:
 - equal non-empty `group_id` values;
 - equal non-empty `session_id` values.
 
-An entire connected component receives one partition. This prevents exact or
-normalized duplicates, multiple candidates from one reward group, and turns
-from one declared session from leaking across train and eval partitions.
-Grouping works only when producers preserve those IDs. Add stable group and
-session IDs at data creation time when row relationships matter.
+An entire connected component receives one partition. This keeps exact or
+normalized duplicates, rows with the same declared reward-group ID, and turns
+from the same declared session from crossing train/eval boundaries. Kiln can
+honor only the relationships present in the data, so assign stable group and
+session IDs when you create related rows.
 
 Component assignment is deterministic over the split schema, seed, and the
 component's stable normalized identity. Repeating the same corpus and config
@@ -164,11 +166,10 @@ can relocate the `.eval` root. Each registered dataset contains:
 | `validation.jsonl` | Derived rows assigned to validation. |
 | `holdout.jsonl` | Derived rows assigned to holdout. |
 
-Do not edit derived artifacts. Upload, replacement, append, removal, and split
+Do not edit derived artifacts. Dataset creation, row append/removal, and split
 updates rebuild them from `data.jsonl`. Loading a pre-split manifest from an
-older Kiln version also rebuilds the missing identity and split artifacts on
-first access while preserving the original dataset content and split config
-where available.
+older Kiln version also rebuilds missing identity and split artifacts on first
+access. It preserves the dataset content and any available split config.
 
 ## Train a named partition
 
@@ -212,9 +213,9 @@ deliberate experiments. The browser always selects `train`. Inline data,
 `dataset_path`, and the virtual `corrections:active` source cannot set
 `dataset_split`, because they are not bound to a registered split manifest.
 
-SFT and streamed GRPO perform exact corpus preparation before queue
-publication. A request does not become a queued job and then discover that
-its selected partition is empty, invalid, or contaminated.
+SFT and streamed GRPO prepare the exact corpus before queue publication. Kiln
+therefore rejects an empty, invalid, or contaminated selected partition
+during admission instead of after the job has entered the queue.
 
 ## Synthesize a held-out suite
 
@@ -223,7 +224,7 @@ State it explicitly in automation so the policy is visible in review:
 
 ```bash
 curl -sS -X POST \
-  http://localhost:8420/v1/eval/datasets/support-corrections/synthesize/preview \
+  http://localhost:8420/v1/eval/datasets/support-corrections/preview \
   -H 'content-type: application/json' \
   -d '{
     "suite_name": "support-holdout",
@@ -244,11 +245,11 @@ curl -sS -X POST \
   }'
 ```
 
-Every synthesized example carries private `kiln_dataset_provenance` metadata
-with the source dataset, selected partition, exact source-row identity,
-normalized identity, and any group/session IDs. That metadata lets later
-training admission detect source-level overlap even when synthesis transforms
-one conversation into a different prompt/target shape.
+Every synthesized example carries reserved `kiln_dataset_provenance` metadata:
+the source dataset and partition, exact and normalized source-row identities,
+and any group/session IDs. Training admission can therefore detect
+source-level overlap even when synthesis turns one conversation into a
+different prompt/target shape.
 
 Selecting `source_split: "train"` is allowed for diagnostics. It does not
 make those examples held out. Link such a suite to training only with the
@@ -260,7 +261,7 @@ explicit diagnostic label described below.
 
 | Value | Contract |
 | --- | --- |
-| `held-out` | Default. Admission rejects detected overlap with the exact training corpus. It may set `min_accuracy`. |
+| `held-out` | Default. Admission rejects detected overlap with the admitted training data. It may set `min_accuracy`. |
 | `train-set-eval` | Explicit diagnostic. Overlap is allowed. It cannot set `min_accuracy`. |
 
 A normal held-out gate looks like:
@@ -357,9 +358,9 @@ rewrite an archived job's recorded provenance.
 
 ## What this does and does not prove
 
-This contract prevents known training/eval leakage under exact content,
-conservative normalized content, and declared source relationships. It makes
-the admitted corpus and split policy auditable and stable across UI, API,
+This contract prevents known training/eval leakage under exact-content,
+conservative normalized-content, and declared source-relationship checks. It
+makes the admitted corpus and split policy auditable across the UI, API,
 archives, and restarts.
 
 It does not detect arbitrary paraphrases, semantically equivalent code,

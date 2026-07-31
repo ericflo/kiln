@@ -1,27 +1,44 @@
-# Serving Profiles
+# Serving profiles
 
-Kiln resolves one serving profile at startup and keeps it immutable for the
-life of the process. The profile is the GPU ownership contract: it decides
-whether inference, training writers, adapter weight transitions, physical KV
-cache changes, allocator reclaim, and live graph capture may run.
+A serving profile is an immutable, process-wide GPU ownership policy. It
+controls inference admission, training writers, adapter weight transitions,
+physical KV-cache changes, allocator reclaim, live graph capture, and Vulkan
+resident prefill. Requests cannot select or override a profile.
 
-`stable` is the default. Select a different profile only for a deliberate
-development or drained-maintenance session:
+`stable` is the default. Choose another profile only when its additional
+operations are required:
+
+| Profile | Use it for | Do not use it for |
+|---|---|---|
+| **stable** | Predictable base-model inference without live GPU mutations | Training, loading or unloading an adapter, or live memory and graph changes |
+| **experimental** | Development and qualification that require inference plus training or adapter changes in one process | A latency or correctness baseline |
+| **maintenance** | Drained training, adapter changes, and physical memory maintenance | Any inference or evaluation |
+
+## Select a profile
+
+Set the profile in TOML:
 
 ```toml
 [server]
 serving_profile = "stable"
 ```
 
-`KILN_SERVER_SERVING_PROFILE` overrides the TOML value. Accepted values are exactly
-`stable`, `experimental`, and `maintenance` (case-insensitive, with surrounding
-whitespace ignored). An empty or unknown value is a fatal startup error that
-names the invalid field or environment variable and value.
+Or override TOML for one process:
 
-The retired `KILN_SERVING_PROFILE` spelling is ignored. Use the canonical name
-or TOML and verify the resolved source with `kiln config --json`.
+```bash
+KILN_SERVER_SERVING_PROFILE=experimental kiln serve
+```
 
-## Policy matrix
+Accepted values are exactly `stable`, `experimental`, and `maintenance`.
+Matching is case-insensitive and ignores surrounding whitespace. An empty or
+unknown value is a fatal startup error that identifies the invalid source and
+value.
+
+The retired `KILN_SERVING_PROFILE` spelling is ignored. Use
+`KILN_SERVER_SERVING_PROFILE` or TOML, then run `kiln config --json` to verify
+the resolved value and its source.
+
+## Exact policy
 
 | Effective policy | `stable` (default) | `experimental` | `maintenance` |
 |---|---:|---:|---:|
@@ -31,116 +48,85 @@ or TOML and verify the resolved source with `kiln config --json`.
 | Dynamic physical KV resize | no | yes | yes |
 | Allocator reclaim | no | yes | yes |
 | Live graph capture | no | yes | no |
-| Vulkan resident token prefill | no | yes | no |
-| Exclusive GPU behavior | reject | writer priority | inference disabled, drain, then exclusive |
+| Vulkan resident prefill | no | yes | no |
+| Exclusive GPU behavior | reject | writer priority | inference disabled; drain, then run exclusively |
 
-The stable profile keeps ordinary logical scheduling available. On a backend
-that admits cross-request prefix reuse, requests may be admitted, cancelled,
-evicted, and served from the prefix cache without moving live allocation
-pointers. Vulkan currently forces that effective capability off under a
-correctness quarantine and fresh-prefills every request. The profile rejects
-training ownership and real adapter weight changes before either can wait for
-the actor-wide GPU writer.
-A request that selects the adapter already active is a no-op and remains
-allowed.
+The profile is one policy boundary, not a hardware selector. Kiln still
+selects backend routes from runtime capabilities, tensor shapes, data types,
+and correctness gates. Device marketing names, vendor or device IDs, driver
+strings, benchmark host names, and qualification receipts never choose a
+profile or a Vulkan kernel.
 
-The experimental profile retains dynamic behavior for controlled development
-and comparison work. It is not the supported latency or correctness baseline.
-Writer-priority operations may interrupt inference progress, and live graph
-capture or physical memory changes may alter latency. On Vulkan, experimental
-also admits native resident token prefill after the backend and request-level
-eligibility checks pass. This route batches one prompt token per active row and
-retains its KV and recurrent state on the Vulkan device. Stable serving keeps
-the generic layer-resumable prompt path authoritative until the resident route
-passes the final repeated-cohort and soak gates. The current Strix Halo
-development-soak candidate deliberately constrains the active region through
-existing typed controls:
+## Stable
 
-```toml
-[server]
-serving_profile = "experimental"
-max_decode_batch = 2
-max_prefill_tokens_per_cycle = 128
-max_prefill_layers_per_cycle = 4
+Use `stable` for predictable inference. Logical batching, request
+cancellation, eviction, and supported prefix-cache reuse remain available, but
+the process rejects training GPU ownership and real adapter weight changes
+before either can wait for the GPU writer. Dynamic physical KV resize,
+allocator reclaim, and live graph capture are disabled.
 
-[batching]
-prefill_admission_quantum = 2
+Vulkan currently disables cross-request prefix reuse under a correctness
+quarantine, so stable Vulkan requests use fresh prefill. Stable also keeps the
+generic layer-resumable prompt path authoritative instead of enabling the
+experimental resident-prefill route.
 
-[memory]
-vulkan_buffer_pool_gb = 3.5
-```
+There is an important current limitation: Kiln starts a serving process with
+the base model active and has no startup setting for selecting a saved adapter.
+Loading or unloading an adapter is a live weight transition, which `stable`
+rejects. A stable process therefore cannot currently serve or evaluate a saved,
+unmerged adapter. Use `experimental` when adapter inference is required. This
+is a product limitation, not a hidden configuration option.
 
-Decode width two plus two staged prompts yields a health-attested maximum of
-four active requests and admits an equal pair together. Qualification alternates one/four-way waves; each pair
-uses one of the 16/32/64/96-word prompt slots, all four concurrent rows share
-that length with distinct identities, and cycles rotate every slot before
-repeating. This deliberately forces resident multirow execution and batch
-scratch growth before the measurement baseline. The 3.5 GiB idle-buffer cap is
-specific to this candidate; the product default remains 3.0 GiB. Larger active sets and
-longer-prompt throughput remain explicitly unqualified and are retained in the
-vLLM comparison backlog; this profile does not reject longer prompts or promise
-their latency. There is no per-request or environment override for
-resident-prefill admission.
+## Experimental
 
-Qualification does not add a host-model temperature controller to this profile.
-Timing is ordinary wall-clock time, and hardware-specific receipts do not alter
-the portable `experimental` serving configuration.
+Use `experimental` for controlled development and qualification that require
+inference and GPU-writer operations in the same process. Training, adapter
+transitions, dynamic KV changes, allocator reclaim, and live graph capture are
+allowed. Writer-priority work can pause inference, and memory or graph changes
+can alter latency, so this profile is not the stable performance baseline.
 
-The clean pushed-source `e79d3686d` run passed this exact 30-minute development
-soak on the recorded hardware. It completed 51 exact measured responses and five
-cancellations over 21 drained waves with byte-stable process DRM, zero measured
-Vulkan allocation/free/recycler-miss churn and zero unexplained ITL outliers.
-This accepts the declared development operating point only. Its roughly
-150.15-second measured p99 TTFT remains a performance limitation; that
-development receipt alone does not establish multi-hour endurance.
+On Vulkan, `experimental` permits resident token prefill only after the
+backend's capability and request-shape checks pass. The route batches one
+prompt token per active row and retains KV and recurrent state on the Vulkan
+device. Admission has no device-name, host-name, or receipt-based exception.
+Portable defaults remain portable; hardware-specific experiments and results
+belong in the [benchmark report](public/BENCHMARKS.md) and
+[serving benchmark protocol](SERVING_BENCHMARK_PROTOCOL.md), not in this
+profile's product policy.
 
-The clean pushed-source `3897239fe` final endurance run subsequently measured
-the same operating point for 28,867.72 seconds. It completed 820 exact responses,
-13,120 completion tokens, 82 cancellations, and 328 drained waves with byte-flat
-process DRM and live Vulkan ownership, zero measured allocation/free/recycler-
-miss/eviction/uncached churn, and zero unexplained ITL outliers. RSS grew
-21,610,496 bytes, host availability
-stayed above 17,928,245,248 bytes, the server added no swap, final snapshots
-completed, and teardown was clean. This accepts eight-hour endurance for this
-named host and exact experimental operating point. Its 0.454 aggregate output
-tokens/second and 152.29-second p99 TTFT remain performance limitations; the
-result does not claim vLLM competitiveness, broader prompt/concurrency capacity,
-stable-profile admission, or portability to another host.
+## Maintenance
 
-The maintenance profile is intentionally not a serving profile. Inference
-prewarm is skipped, `/health` and `/v1/health` return HTTP 503 with
-`status: "maintenance"`, and completion, prompt-logprob, eval, and agent-run
+`maintenance` is a drained work mode, not a serving mode. Inference prewarm is
+skipped. `/health` and `/v1/health` return HTTP 503 with
+`status: "maintenance"`. Completion, prompt-logprob, eval, and agent-run
 admission return HTTP 503 with `code: "inference_disabled_by_profile"`.
-Training, real adapter transitions, and physical memory maintenance remain
-available. Live graph capture stays disabled because no request should be
-present to justify a new serving graph.
 
-## Entering maintenance
+Training, real adapter transitions, dynamic KV changes, and allocator reclaim
+remain available. Live graph capture stays disabled because no inference
+request should be present to justify a serving graph.
 
-The profile cannot be changed by an API request or reloaded in place. Use a
+## Move between profiles
+
+A profile cannot be changed through an API request or reloaded in place. Use a
 restart as the ownership boundary:
 
-1. Remove the stable instance from traffic and stop it gracefully. Wait for
-   admitted requests to finish within the configured shutdown timeout.
-2. Start a new process with `KILN_SERVER_SERVING_PROFILE=maintenance`. Keep it out of
-   the serving pool; its 503 health response is an additional readiness guard.
-3. Run the training, adapter activation, or physical memory operation that
-   requires exclusive GPU ownership.
-4. Stop the maintenance process and restart with
-   `KILN_SERVER_SERVING_PROFILE=stable` (or remove the override).
-5. Wait for `/health` to return 200 before restoring traffic.
+1. Remove the current instance from traffic and stop it gracefully.
+2. Start a new process with the required profile.
+3. Run only operations admitted by that profile.
+4. Stop the process, start the next profile, and wait for `/health` before
+   restoring traffic.
 
-Post-training evaluation requires inference. Do not schedule it inside the
-maintenance process; run it after the stable restart. Use `experimental` only
-when the experiment specifically requires inference and GPU-writer transitions
-inside one process.
+For drained training, use `maintenance` while the writer owns the GPU. The
+result remains on disk, but `maintenance` cannot evaluate it and `stable`
+cannot load it. Start a separate `experimental` process to load, evaluate, or
+serve the unmerged adapter. If you need generation, training, and evaluation
+in one process, use `experimental` for the entire controlled loop.
 
-## Observability
+## Observe the resolved policy
 
-At startup, Kiln logs the selected profile, its source, immutability, request
-override policy, and every effective policy field. The same
-`serving_profile` object is returned by `/health`, `/v1/health`, and
-`/v1/config`:
+At startup, Kiln logs the selected profile, its source, its immutability, and
+every effective policy field. `/health`, `/v1/health`, and `/v1/config` expose
+the same `serving_profile` object:
 
 ```json
 {
@@ -163,13 +149,12 @@ override policy, and every effective policy field. The same
 ```
 
 `source` is `default`, `config_file`, or `environment`. Request selection is
-never a source because request overrides are prohibited. Under stable mode,
-`decode_runtime.memory_governor` reports `reclaim_mode: "off"` even if
-`requested_reclaim_mode` was configured differently, and sets
-`disabled_by_serving_profile: true`. This distinction prevents requested
-configuration from being mistaken for behavior that is actually running.
+never a source. In stable mode,
+`decode_runtime.memory_governor.reclaim_mode` is `"off"` even when
+`requested_reclaim_mode` contains another configured value, and
+`disabled_by_serving_profile` is `true`.
 
-Backend health is independent of readiness. A healthy maintenance process
-reports `backend_runtime.healthy: true` while its `inference_admission` health
-check is false and its overall HTTP status remains 503. A quarantined backend
-continues to report `backend_runtime.healthy: false` and requires a restart.
+Backend health and readiness are separate. A healthy maintenance process can
+report `backend_runtime.healthy: true` while its `inference_admission` check is
+false and its overall HTTP status is 503. A quarantined backend reports
+`backend_runtime.healthy: false` and requires a restart.

@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Kiln API Reference &mdash; Endpoint map</title>
-  <meta name="description" content="A compact website API reference for Kiln endpoints: health, metrics, OpenAI-compatible inference, adapter management, SFT, GRPO, training queue, and config.">
+  <title>Kiln API Guide &mdash; Workflows and endpoint map</title>
+  <meta name="description" content="Use the Kiln API for health checks, OpenAI-compatible inference, adapters, local training, evaluation, and configuration.">
   <meta name="theme-color" content="#0a0908">
   <meta name="color-scheme" content="dark">
   <link rel="canonical" href="https://ericflo.github.io/kiln/api.html">
@@ -12,8 +12,8 @@
   <link rel="alternate icon" type="image/png" href="assets/logo.png">
   <link rel="apple-touch-icon" href="assets/logo.png">
 
-  <meta property="og:title" content="Kiln API Reference &mdash; Endpoint map">
-  <meta property="og:description" content="A compact endpoint map for Kiln: health, metrics, inference, adapters, SFT, GRPO, training queue, and config.">
+  <meta property="og:title" content="Kiln API Guide &mdash; Workflows and endpoint map">
+  <meta property="og:description" content="Use the Kiln API for health checks, OpenAI-compatible inference, adapters, local training, evaluation, and configuration.">
   <meta property="og:type" content="website">
   <meta property="og:locale" content="en_US">
   <meta property="og:site_name" content="Kiln">
@@ -24,8 +24,8 @@
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Kiln API Reference &mdash; Endpoint map">
-  <meta name="twitter:description" content="A compact endpoint map for Kiln: health, metrics, inference, adapters, SFT, GRPO, training queue, and config.">
+  <meta name="twitter:title" content="Kiln API Guide &mdash; Workflows and endpoint map">
+  <meta name="twitter:description" content="Use the Kiln API for health checks, OpenAI-compatible inference, adapters, local training, evaluation, and configuration.">
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image-v3.png">
   <meta name="twitter:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
 
@@ -80,7 +80,7 @@
       position: absolute;
       left: 1rem;
       top: 0;
-      transform: translateY(-120%);
+      transform: translateY(calc(-100% + 1px));
       z-index: 50;
       background: var(--accent);
       color: #1a0c00;
@@ -286,15 +286,14 @@
     <div class="max-w-4xl mx-auto px-6 pt-16 pb-10">
       <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">API reference &middot; endpoint map</span>
       <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">
-        The Kiln API surface at a glance.
+        Start with a working request, then find the contract you need.
       </h1>
       <p class="text-lg leading-relaxed max-w-3xl" style="color: var(--fg-dim);">
-        A compact website map for cold readers who want to see the serving, adapter, training,
-        monitoring, and configuration endpoints before walking through the full Quickstart. The
-        <a href="docs/http-api/">generated HTTP contract</a> is the complete machine-readable
-        inventory of all 103 paths and 115 method bindings. Generated
+        This page pairs copyable requests with a task-oriented map of Kiln&rsquo;s inference,
+        adapter, training, evaluation, monitoring, and configuration endpoints. Use the
+        <a href="docs/http-api/">generated HTTP contract</a> for the complete route inventory. Generated
         <a href="docs/inference-schema/">inference</a> and
-        <a href="docs/observability-schema/">observability</a> schemas own the completed
+        <a href="docs/observability-schema/">observability</a> schemas define the
         field-level wire contracts.
       </p>
       <div class="flex flex-wrap gap-3 mt-8">
@@ -320,15 +319,17 @@
         <div class="label mb-3">On this page</div>
         <div class="flex flex-wrap gap-2 text-sm">
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#copy-paste-first-requests">First requests</a>
-          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#power-user-requests">Power-user requests</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#power-user-requests">Advanced requests</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#server-status">Server status</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#generation">Generation</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#thinking-budgets">Thinking budgets</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#lora-lifecycle">LoRA lifecycle</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#training">Training</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#remote-teachers">Remote teachers</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#evals">Evals</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#training-data-safety">Training data safety</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#response-shapes">Response shapes</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#errors">Errors</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#where-to-go-next">Where to go next</a>
         </div>
       </div>
@@ -366,1504 +367,23 @@
             <small>Policy IDs, backend decisions, graph state, memory ownership, and typed provenance</small>
           </summary>
           <div class="reference-details-body">
-        <div class="endpoint mt-4">
-          <h3 class="font-semibold mb-2">Check runtime configuration</h3>
-          <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
-            The response carries <code>kiln.effective-configuration.v1</code>; top-level
-            <code>cuda_graphs</code> configured/effective/cache/invariant state; the live
-            <code>decode_runtime.cuda_graphs</code> view; independent top-level <code>rocm_graphs</code>
-            full statistics; and an immutable operational snapshot for terminal/agent access, pi
-            resolution, library URL, and cache/session paths.
-          </p>
-          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/config | python3 -m json.tool
-curl -s http://localhost:8420/v1/config | jq '.effective_configuration'
-curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["server.port"]'</code></pre>
-          <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-            <code>effective_configuration</code> is a sorted flat map of all 112 fixed typed startup leaves plus two dynamic leaves for each teacher credential. Every field carries its post-precedence typed value, <code>default</code>, <code>config_file</code>, <code>environment</code>, or <code>command_line</code> source, its canonical environment spelling, an explicitly empty compatibility-name list, redaction state, and a true restart requirement. Self-improvement requests, webhook URLs, and credential-provider names are retained only as redacted null entries. The map includes the typed effective-config hash and is identical to the startup snapshot available from <code>kiln config --json</code>. The response keeps that input object separate from accelerator, batching, and streaming-prefill intent, backend policy, effective execution, startup
-            capacity resolution, the current safe memory sample, and the budget derived from effective
-            capacity separate. Every <code>*_gib</code> value uses
-            1 GiB = 1,073,741,824 bytes and is paired with an exact <code>*_bytes</code> value where the
-            response exposes both units. Its top-level <code>accelerator_runtime</code> object is immutable
-            startup policy. Top-level <code>cuda_graphs</code> reports the requested and profile-effective single-row
-            CUDA graph policy, the startup-fixed cache bound, mandatory stable metadata, and unavailable batched route.
-            The trusted debug response repeats that exact object at top-level <code>cuda_graphs</code> so a
-            qualification receipt can bind the launch policy without reconstructing it from process state.
-            Top-level <code>rocm_graphs</code> is a nonblocking full cache/counter snapshot, while
-            <code>rocm_graph_telemetry</code> is the separate current/completed phase and transient-candidate
-            snapshot; each has its own typed unavailable-reason sibling. The Playground uses the same response to preview the resolved
-            thinking token/time pair before send, marking each dimension as server- or request-owned.
-          </p>
-          <div class="grid gap-4 mt-4">
-            <section id="accelerator-runtime" class="pt-4" style="border-top: 1px solid var(--line);">
-              <h4 class="font-semibold mb-2"><code>accelerator_runtime</code>: immutable accelerator execution policy</h4>
-              <pre class="overflow-x-auto text-xs leading-relaxed"><code>{
-  "accelerator_runtime": {
-    "schema_id": "kiln.accelerator-runtime-policy.v16",
-    "version": 16,
-    "vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v6",
-    "vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1",
-    "serving_profile": "stable",
-    "serving_profile_source": "default",
-    "kt_api_mode": {
-      "configured": "auto",
-      "effective": "auto",
-      "source": "default"
-    },
-    "full_attention_score_budget_mib": {
-      "configured": 2048,
-      "effective": 2048,
-      "source": "default"
-    },
-    "vulkan_device_index": {
-      "configured": null,
-      "effective": null,
-      "source": "default"
-    },
-    "vulkan_validation": {
-      "configured": false,
-      "effective": false,
-      "source": "default"
-    },
-    "cuda_kernel_profile": {
-      "configured": "native_default",
-      "effective": "native_default",
-      "source": "default"
-    },
-    "cuda_marlin_profile": {
-      "configured": "disabled",
-      "effective": "disabled",
-      "source": "default"
-    },
-    "cuda_flash_backward_mode": {
-      "configured": "fast",
-      "effective": "fast",
-      "source": "default"
-    },
-    "metal_kernel_profile": {
-      "configured": "native_default",
-      "effective": "native_default",
-      "source": "default"
-    },
-    "rocm_synchronization_mode": {
-      "configured": "legacy_host_barriers",
-      "effective": "legacy_host_barriers",
-      "source": "default"
-    },
-    "rocm_strided_batched_matmul_mode": {
-      "configured": "disabled",
-      "effective": "disabled",
-      "source": "default"
-    },
-    "rocm_bf16_matmul_output_mode": {
-      "configured": "f32_then_cast",
-      "effective": "f32_then_cast",
-      "source": "default"
-    },
-    "rocm_kernel_profile": {
-      "configured": "portable_fallback",
-      "effective": "portable_fallback",
-      "source": "default"
-    },
-    "rocm_graph_mode": {
-      "configured": "profile",
-      "effective": "disabled",
-      "source": "default"
-    },
-    "rocm_graph_cache_entries": {
-      "configured": 8,
-      "effective": 8,
-      "source": "default"
-    },
-    "rocm_graph_cache_max_bytes": {
-      "configured": 1073741824,
-      "effective": 1073741824,
-      "source": "default"
-    }
-  }
-}</code></pre>
-              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                The server resolves this object before accelerator execution or primary-context creation.
-                Kiln-tensor API mode <code>auto</code> uses qualified adapter routes while keeping experimental
-                generic matmul and paged-KV routes inactive; <code>all</code> and <code>disabled</code> require
-                the experimental profile.
-                Exact full-attention score geometry is fixed at startup: the default 2048 MiB ceiling
-                applies to materialized routes, and ROCm online attention derives a fixed 1024 MiB ceiling.
-                Live memory remains an admission check and cannot retile an in-flight request.
-                Vulkan device selection is also fixed before logical-device creation. <code>null</code> means
-                automatic discrete-GPU preference; an explicit zero-based index fails startup when unavailable.
-                Validation requires the experimental profile and an installed Khronos validation layer.
-                <code>profile</code> graph mode becomes <code>disabled</code> under stable and maintenance,
-                and <code>lazy_capture_replay</code> under experimental. Explicit
-                <code>warmup_then_eager</code> and <code>lazy_capture_replay</code> modes require the
-                experimental profile. Graph-cache entries and retained requested physical bytes are independent
-                hard admission limits: 1&ndash;64 entries and 64 MiB&ndash;16 GiB respectively. Stable paged metadata is a
-                correctness invariant rather than a switch.
-              </p>
-              <h5 class="font-semibold mt-4 mb-2">All fifteen typed <code>[accelerator]</code> fields</h5>
-              <div class="overflow-x-auto">
-                <table class="w-full text-xs" style="color: var(--fg-dim);">
-                  <thead style="color: var(--fg);"><tr><th class="text-left p-2">TOML field</th><th class="text-left p-2">Default and validation</th><th class="text-left p-2">Canonical environment name</th></tr></thead>
-                  <tbody>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>kt_api_mode</code></td><td class="p-2"><code>auto</code>; <code>all</code> enables experimental matmul and paged-KV routes, while <code>disabled</code> forces legacy fallbacks. Explicit modes require the experimental profile.</td><td class="p-2"><code>KILN_ACCELERATOR_KT_API_MODE</code></td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>full_attention_score_budget_mib</code></td><td class="p-2"><code>2048</code>; unsigned MiB in <code>64..=2048</code>. ROCm online attention uses <code>min(value, 1024)</code>.</td><td class="p-2"><code>KILN_ACCELERATOR_FULL_ATTENTION_SCORE_BUDGET_MIB</code></td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>vulkan_device_index</code></td><td class="p-2"><code>auto</code> prefers a discrete Vulkan physical device, then the first enumerated device. A zero-based integer is strict and unavailable indices fail startup. Retired <code>KILN_VULKAN_DEVICE</code> is ignored.</td><td class="p-2"><code>KILN_ACCELERATOR_VULKAN_DEVICE_INDEX</code></td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>vulkan_validation</code></td><td class="p-2"><code>false</code>. True requires the experimental profile and fails startup unless <code>VK_LAYER_KHRONOS_validation</code> is installed. Retired <code>KILN_VULKAN_VALIDATION</code> is ignored.</td><td class="p-2"><code>KILN_ACCELERATOR_VULKAN_VALIDATION</code></td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>cuda_kernel_profile</code></td><td class="p-2"><code>native_default</code> preserves all twenty-five previously default-on CUDA model/backend routes without claiming hardware qualification; <code>portable_fallback</code> declines them all. The architecture reference enumerates every route.</td><td class="p-2"><code>KILN_ACCELERATOR_CUDA_KERNEL_PROFILE</code></td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>cuda_marlin_profile</code></td><td class="p-2"><code>disabled</code> preserves BF16 weights; <code>attention_mlp</code> packs full-attention Q and MLP projections as W4A16; <code>attention_mlp_gdn</code> also packs GDN output. Both W4A16 profiles require <code>server.serving_profile = "experimental"</code>. Packing is always parallel.</td><td class="p-2"><code>KILN_ACCELERATOR_CUDA_MARLIN_PROFILE</code></td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>cuda_flash_backward_mode</code></td><td class="p-2"><code>fast</code> preserves established CUDA FlashAttention backward accumulation; <code>deterministic</code> selects split accumulation for exact replay and diagnosis.</td><td class="p-2"><code>KILN_ACCELERATOR_CUDA_FLASH_BACKWARD_MODE</code></td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>metal_kernel_profile</code></td><td class="p-2"><code>native_default</code> preserves forty-five of forty-six established Metal backend routes, with custom LM-head argmax still off; <code>portable_fallback</code> declines every owned route. The architecture reference enumerates every route and retired variable.</td><td class="p-2"><code>KILN_ACCELERATOR_METAL_KERNEL_PROFILE</code></td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_synchronization_mode</code></td><td class="p-2"><code>legacy_host_barriers</code>; also accepts experimental-only <code>stream_ordered</code>.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_SYNCHRONIZATION_MODE</code></td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_strided_batched_matmul_mode</code></td><td class="p-2"><code>disabled</code> is the portable default; <code>enabled</code> requires the experimental profile. Retired <code>auto</code> is rejected.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_STRIDED_BATCHED_MATMUL_MODE</code></td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_bf16_matmul_output_mode</code></td><td class="p-2"><code>f32_then_cast</code> is the portable default; <code>native_bf16</code> requires the experimental profile. Retired <code>auto</code> is rejected.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_BF16_MATMUL_OUTPUT_MODE</code></td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_kernel_profile</code></td><td class="p-2"><code>portable_fallback</code> is the only product value. Retired machine-qualified values fail startup; historical attribution requires the example-only <code>hardware-qualification</code> build feature.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_KERNEL_PROFILE</code></td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_graph_mode</code></td><td class="p-2"><code>profile</code>; accepts <code>disabled</code>, <code>warmup_then_eager</code>, or <code>lazy_capture_replay</code>.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_GRAPH_MODE</code></td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_graph_cache_entries</code></td><td class="p-2"><code>8</code>; unsigned integer in <code>1..=64</code>. This is the process-wide ceiling. Saturated admission reclaims idle owners first, then minimum fair-LRU active entries while retaining one projected graph per active owner.</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_GRAPH_CACHE_ENTRIES</code></td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_graph_cache_max_bytes</code></td><td class="p-2"><code>1073741824</code> (1 GiB); unsigned integer bytes in <code>67108864..=17179869184</code> (64 MiB&ndash;16 GiB).</td><td class="p-2"><code>KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES</code></td></tr>
-                  </tbody>
-                </table>
-              </div>
-              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                The typed <code>kt_api_mode</code> replaces the former per-operation
-                <code>KILN_USE_KT_API_*</code>, <code>KILN_DISABLE_KT_API_*</code>, and
-                <code>KILN_USE_KT_PAGED_KV_*</code> debug switches. Those names are intentionally not
-                accepted as aliases because they permitted unvalidated, order-dependent route combinations.
-              </p>
-              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>cuda_kernel_profile</code> is installed before CUDA backend construction and cannot
-                change between requests. It owns full-attention QKV projection; GDN A/B projection,
-                prefill projection and gates, base/gates/gated-RMSNorm, fused decode, unexpanded Q/K,
-                both Q/K-normalized recurrent variants, and multi-block full-chunk forward; fused
-                convolution; and decode LoRA add. Former CUDA-specific per-kernel variables are not aliases.
-              </p>
-              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>metal_kernel_profile</code> is installed before Metal backend construction and cannot
-                change between requests. It owns all forty-six documented SDPA, convolution, GDN,
-                RMSNorm, MLP, attention-gate, QKV, LoRA, LM-head, paged-attention/KV, and transposed
-                cooperative-GEMV decisions. Former Metal per-kernel variables are removed rather than aliases.
-              </p>
-              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>cuda_marlin_profile</code> fixes CUDA projection representation before weight upload,
-                while <code>cuda_flash_backward_mode</code> fixes training backward accumulation before model
-                construction. The former <code>KILN_W4A16</code>,
-                <code>KILN_W4A16_GDN_OUT_PROJ</code>, <code>KILN_DISABLE_PARALLEL_PACK</code>, and
-                <code>KILN_FLASH_ATTN_BWD_DETERMINISTIC</code> spellings are removed, not aliases.
-                The unused <code>KILN_DISABLE_OPD_LOSS_KERNEL</code> is deleted and FLCE active-row tiling is
-                fixed at 4,096 instead of reading <code>KILN_FLCE_ACTIVE_ROW_TILE</code> during training.
-              </p>
-              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>rocm_kernel_profile</code> accepts only <code>portable_fallback</code> in product builds.
-                It declines machine-qualified model and tensor accelerations while retaining bounded training,
-                concat, finite-check, RMSNorm, and flash-attention fallback geometry. Retired profile and
-                per-kernel values fail startup rather than aliasing to a different route set. Historical route
-                attribution is isolated behind the example-only <code>hardware-qualification</code> feature.
-              </p>
-              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Vulkan device policy has schema <code>kiln.vulkan-device-policy.v1</code>. The typed startup
-                values are installed once before Vulkan logical-device creation; a same-value reinstall is
-                idempotent and a conflicting late owner fails. The former <code>GGML_VK_VISIBLE_DEVICES</code>
-                behavior is removed rather than accepted as configuration. Driver-level selectors remain
-                external identity remaps and fail the device-scoped memory-probe identity gate.
-              </p>
-              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>full_attention_score_budget_mib</code> replaces eight undocumented materialized-score,
-                ROCm online-score, and tile-size environment controls. Those controls are not aliases. They
-                previously let the model and ROCm flash planners parse different permissive values during
-                execution and derive geometry from changing free-memory snapshots, including a materialized
-                ceiling as high as 32 GiB. Policy v16 installs one bounded ceiling before execution. The memory
-                governor can reject a plan whose exact working set is no longer available, but it cannot
-                silently shrink, expand, or retile that plan between layers or requests.
-              </p>
-              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Portable matmul policy uses per-row GEMMs and F32 output followed by an on-device BF16 cast.
-                Strided batching and native BF16 output are explicit experimental choices. The retired
-                machine-shaped <code>auto</code> values fail startup, and execution does not inspect device
-                identity, live memory, or process environment to recreate them.
-              </p>
-              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                The byte limit counts requested physical bytes held by graph-stable direct I/O tensors,
-                freeze-pointer capture arenas, each retained private-stream hipBLASLt workspace, and recurrent/conv
-                state in every runner-owned owner slot, including active slot state that outlives graph eviction.
-                Accounting deduplicates one physical
-                allocation across tensors, graphs, and categories by device ordinal plus allocation identity;
-                shared slot state is counted once per allocation even when one owner retains several graphs.
-                <code>retained_bytes</code> is the deduplicated sum, while the four
-                <code>retained_*_bytes</code> fields preserve category attribution. <code>peak_retained_bytes</code>
-                advances after slot creation or cache admission and is never reported below the current total.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                HIP does not expose byte sizes for a retained graph, executable, stream, or either ordering event.
-                These five objects per graph are reported through <code>opaque_native_object_count</code> but are
-                excluded from <code>retained_bytes</code>; allocator-pool slack is excluded too. Therefore
-                <code>retained_bytes_accounting_complete=true</code> means every byte-accounted tensor mapped to
-                allocation metadata, not that opaque driver overhead is zero. Live memory pressure complements
-                rather than expands the immutable byte limit.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>legacy_host_barriers</code> preserves the qualified host waits, including a device-wide
-                external-yield drain. <code>stream_ordered</code> requires the experimental profile and skips
-                only explicitly proven same-stream dependency barriers; host readbacks, buffer lifetimes,
-                in-place mutation, reclamation, graph transitions, and error recovery remain synchronized.
-                External yield waits on the primary stream. ROCm graph replay records completion on its capture
-                stream and orders that event into the primary stream first.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>GET /v1/config</code> exposes immutable policy at top-level
-                <code>accelerator_runtime</code>. Its live graph contract has four separate top-level fields, and
-                trusted debug repeats those same four fields alongside <code>accelerator_runtime</code> and
-                <code>rocm_synchronization</code>:
-              </p>
-              <div class="overflow-x-auto mt-3">
-                <table class="w-full text-xs" style="color: var(--fg-dim);">
-                  <thead style="color: var(--fg);"><tr><th class="text-left p-2">Config/debug field</th><th class="text-left p-2">Authority</th></tr></thead>
-                  <tbody>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_graphs</code></td><td class="p-2">Optional nonblocking full graph-cache/counter snapshot.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_graphs_unavailable_reason</code></td><td class="p-2">Null exactly when <code>rocm_graphs</code> is present; otherwise one closed reason.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_graph_telemetry</code></td><td class="p-2">Optional current/completed phase and transient-candidate snapshot, independent of the model and graph-runner locks.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rocm_graph_telemetry_unavailable_reason</code></td><td class="p-2">Null exactly when <code>rocm_graph_telemetry</code> is present; otherwise one closed reason.</td></tr>
-                  </tbody>
-                </table>
-              </div>
-              <pre class="overflow-x-auto text-xs leading-relaxed mt-3"><code>{
-  "rocm_graphs": { "requested": true, "capture_requested": true, "enabled": true },
-  "rocm_graphs_unavailable_reason": null,
-  "rocm_graph_telemetry": {
-    "current_phase": "native_capture",
-    "current_phase_elapsed_micros": 42000,
-    "pre_candidate_headroom_phase": { "calls": 14, "slow": 0, "total_duration_micros": 1200, "max_duration_micros": 300 },
-    "candidate_warm_phase": { "calls": 12, "slow": 1, "total_duration_micros": 155000, "max_duration_micros": 108000 },
-    "pre_native_reservation_phase": { "calls": 9, "slow": 0, "total_duration_micros": 900, "max_duration_micros": 180 },
-    "native_capture_phase": { "calls": 8, "slow": 1, "total_duration_micros": 210000, "max_duration_micros": 120000 },
-    "native_replay_phase": { "calls": 42, "slow": 0, "total_duration_micros": 8400, "max_duration_micros": 350 },
-    "rejected_candidate_cleanup_phase": { "calls": 2, "slow": 0, "total_duration_micros": 9000, "max_duration_micros": 5000 },
-    "last_transient_candidate_bytes": 67108864,
-    "peak_transient_candidate_bytes": 100663296
-  },
-  "rocm_graph_telemetry_unavailable_reason": null
-}</code></pre>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Both reason fields use exactly <code>backend_without_graph_runner</code>,
-                <code>model_runner_busy</code>, <code>model_runner_lock_poisoned</code>,
-                <code>graph_runner_busy</code>, or <code>graph_runner_lock_poisoned</code>. Full statistics may use
-                any of the five. The phase handle is stored outside both runner locks, so every real backend keeps
-                phase telemetry readable through model-runner or graph-runner contention and poison; currently
-                only <code>backend_without_graph_runner</code> makes that value null. Its reason field and metric
-                family still use the same closed schema. A null value never means an empty cache or zero activity.
-                The graph observations themselves do not wait for either runner mutex; this is not a latency
-                guarantee for the complete <code>/v1/config</code> handler, which also reads unrelated immutable
-                training-capability state.
-              </p>
-              <div class="overflow-x-auto mt-3">
-                <table class="w-full text-xs" style="color: var(--fg-dim);">
-                  <thead style="color: var(--fg);"><tr><th class="text-left p-2"><code>rocm_graphs</code> full-statistics group</th><th class="text-left p-2">Fields</th></tr></thead>
-                  <tbody>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Policy and circuit breaker</td><td class="p-2"><code>requested</code>, <code>capture_requested</code>, <code>enabled</code>, <code>capture_enabled</code>, <code>max_cached_graphs</code>, <code>max_retained_bytes</code>.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Capture and replay</td><td class="p-2"><code>capture_attempts</code>, <code>capture_successes</code>, <code>capture_deferrals</code>, <code>capture_failures</code>, <code>replay_attempts</code>, <code>replay_successes</code>, <code>replay_failures</code>, <code>failures</code>.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Owner and slot lifecycle</td><td class="p-2"><code>decode_owner_release_count</code>, <code>decode_owner_graph_release_count</code>, <code>graph_slot_create_count</code>, <code>graph_slot_reuse_count</code>, <code>graph_slot_count</code>, <code>active_graph_slot_count</code>, <code>idle_graph_slot_count</code>, <code>tracked_decode_owner_count</code>. Active slots are assigned to live logical rows. Idle slots remain retained for reuse and include slots reserved for a particular batched width; a width reservation is not live request ownership.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Bounded cache</td><td class="p-2"><code>cache_admission_successes</code>, <code>cache_evictions</code>, <code>cache_evicted_bytes</code>, <code>budget_evictions</code>, <code>pressure_evictions</code>, <code>invalidation_evictions</code>, <code>recovery_evictions</code>, <code>entry_capacity_rejections</code>, <code>byte_budget_rejections</code>, <code>accounting_incomplete_rejections</code>, <code>pre_capture_entry_capacity_skips</code>, <code>pre_capture_byte_budget_skips</code>, <code>pre_capture_accounting_incomplete_skips</code>, <code>pre_capture_memory_reservation_denied_skips</code>, <code>memory_governor_selector_mismatch_skips</code>, and <code>captured_graph_count</code>.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Retained memory</td><td class="p-2"><code>retained_stable_io_bytes</code>, <code>retained_capture_arena_bytes</code>, <code>retained_blaslt_workspace_bytes</code>, <code>retained_slot_state_bytes</code>, <code>retained_bytes</code>, <code>peak_retained_bytes</code>, <code>opaque_native_object_count</code>, <code>retained_bytes_accounting_complete</code>, and <code>quarantined_retained_bytes</code>.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Point-in-time phase/transient copy</td><td class="p-2">The six completed <code>*_phase</code> summaries plus <code>last_transient_candidate_bytes</code> and <code>peak_transient_candidate_bytes</code> are also serialized with a successful full snapshot. Use separate <code>rocm_graph_telemetry</code> for the active phase and for telemetry that remains available while either runner lock blocks full statistics.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Closed fallbacks</td><td class="p-2"><code>fallbacks</code> contains <code>total</code>, all 14 reason counters, <code>slow</code>, <code>total_duration_micros</code>, and <code>max_duration_micros</code>. Current ROCm capture includes contiguous BF16 multi-row decode; a supported batched route must leave the historical <code>multi_row_batch_unsupported</code> counter at zero and publish real capture/replay activity.</td></tr>
-                  </tbody>
-                </table>
-              </div>
-              <div class="overflow-x-auto mt-3">
-                <table class="w-full text-xs" style="color: var(--fg-dim);">
-                  <thead style="color: var(--fg);"><tr><th class="text-left p-2"><code>rocm_graph_telemetry</code> field</th><th class="text-left p-2">Meaning</th></tr></thead>
-                  <tbody>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>current_phase</code>, <code>current_phase_elapsed_micros</code></td><td class="p-2">Null phase plus zero elapsed while idle; otherwise the active phase and monotonic elapsed time.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Six phase summary objects</td><td class="p-2"><code>pre_candidate_headroom_phase</code>, <code>candidate_warm_phase</code>, <code>pre_native_reservation_phase</code>, <code>native_capture_phase</code>, <code>native_replay_phase</code>, and <code>rejected_candidate_cleanup_phase</code>. Each contains <code>calls</code>, <code>slow</code>, <code>total_duration_micros</code>, and <code>max_duration_micros</code>.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>last_transient_candidate_bytes</code>, <code>peak_transient_candidate_bytes</code></td><td class="p-2">Exact deduplicated queryable candidate allocations measured before admission; excludes already-owned recurrent slot state and opaque native objects.</td></tr>
-                  </tbody>
-                </table>
-              </div>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                A warm candidate that performs a host upload emits
-                <code>event=rocm_graph_capture_host_transfer</code> once per unique source site. Each record carries
-                the same closed fallback reason, build-source file/line/column, dtype, elements and bytes per copy,
-                copy count, and total bytes. Observation is thread- and device-scoped and bounded to 32 unique sites
-                per candidate; excess sites collapse into one <code>source_file=bounded_site_overflow</code> record.
-                No request text, token ID, tensor value, allocation address, shape, or source site becomes a metric
-                label. Pair these records with fallback duration and capture/replay counters rather than treating
-                their absence as proof of graph replay.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Health flattens these two authorities into <code>decode_runtime.rocm_graphs</code>. Full-statistic
-                fields are null when unavailable. Its <code>state</code> is <code>enabled</code> or
-                <code>disabled</code> when full statistics exist, <code>busy</code> only for
-                <code>model_runner_busy</code> or <code>graph_runner_busy</code>, and <code>unavailable</code> for
-                <code>backend_without_graph_runner</code> or either poisoned-lock reason.
-                <code>unavailable_reason</code> governs full statistics;
-                <code>phase_telemetry_available</code> and <code>phase_telemetry_unavailable_reason</code> govern
-                the current phase, six summaries, and transient-byte fields independently. The dashboard uses
-                config for static policy/full-stat context and its two-second health poll to refresh Graph live
-                and Graph current phase, including typed unavailable reason and elapsed time; it never fabricates
-                zeroes for missing snapshots.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>capture_successes</code> means native graph instantiation and its first launch succeeded;
-                <code>cache_admission_successes</code> is the retained, replayable subset, and the entry, byte, and
-                accounting post-capture rejection counters explain their difference. Pre-capture skips are
-                intentionally separate. Entry/known-byte saturation is reclaimed before candidate allocation;
-                after the settled warm Record pass, exact pre-native accounting, matching-device pressure, and
-                atomic global reservation must pass before native capture. Post-capture admission is a defensive
-                concurrency recheck. Candidate-alone byte and incomplete-accounting results make the geometry
-                non-capture-safe for the runner lifetime. Aggregate budget suppression clears after ownership or
-                budget relief; global-reservation denial retries only after matching-device cached headroom is
-                sufficient. A memory-governor selector mismatch fails closed rather than consuming another
-                accelerator's budget. These distinct rules prevent a per-token warm/allocation storm.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Exact candidate size is unavailable until its warm pass allocates stable I/O, arena buffers, and
-                private-stream workspace. The transient fields expose that residual rather than retained cache
-                residency. Five capture-lifecycle phases attribute headroom reclamation, warm allocation and execution,
-                reservation/accounting, native capture plus settled first launch plus defensive cache
-                admission/publication and blocking committed governor debit, and rejected-candidate cleanup.
-                <code>rejected_candidate_cleanup</code> starts only when an unretained candidate enters destruction
-                and settlement. The sixth phase, <code>native_replay</code>, covers replay input updates,
-                cross-stream dependency setup, and native launch submission; external-yield settlement remains
-                separate request synchronization. The phase
-                handle is independent of both runner locks, so health and phase metrics can show an
-                in-progress phase while the full cache snapshot is busy or poisoned. Governor reads fail closed unless their device selector matches the
-                runner, and warm-pass host-copy observation is scoped so unrelated concurrent copies cannot poison
-                capture eligibility.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                A native capture error is not automatically a process fault. The recoverable path attributes a
-                device drain to <code>capture_rollback</code> while admission remains open, then proves logical
-                recurrent-state restoration. Only when both steps succeed may the runner disable graph capture,
-                count <code>capture_failure</code>, and continue eagerly. Failed settlement, failed logical rollback,
-                or an armed/unclassified capture guard leaving scope publishes sticky STOP first, uses
-                <code>error_recovery</code> only for a post-STOP diagnostic drain, rejects eager continuation, and
-                requires process restart. A later successful diagnostic drain never clears the quarantine.
-              </p>
-              <h5 class="font-semibold mt-4 mb-2">ROCm graph Prometheus contract</h5>
-              <div class="overflow-x-auto">
-                <table class="w-full text-xs" style="color: var(--fg-dim);">
-                  <thead style="color: var(--fg);"><tr><th class="text-left p-2">Metric family</th><th class="text-left p-2">Closed dimensions and meaning</th></tr></thead>
-                  <tbody>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>kiln_rocm_graph_telemetry_available</code>, <code>kiln_rocm_graph_snapshot_unavailable{reason}</code></td><td class="p-2">Always emitted. Availability governs the full cache/counter families; the reason family is one-hot over the five closed unavailable reasons and all zero when the snapshot is present.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>kiln_rocm_graph_phase_telemetry_available</code>, <code>kiln_rocm_graph_phase_telemetry_unavailable{reason}</code></td><td class="p-2">Always emitted independently. Availability governs current/completed phase and transient-candidate families; the reason family uses the same five-value one-hot set.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>kiln_rocm_graph_state{kind}</code></td><td class="p-2"><code>kind</code> is exactly <code>requested</code>, <code>capture_requested</code>, <code>enabled</code>, or <code>capture_enabled</code>.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Cache and limits</td><td class="p-2"><code>kiln_rocm_graph_cache_entries</code>, <code>kiln_rocm_graph_cache_entry_limit</code>, <code>kiln_rocm_graph_retained_byte_limit</code>, <code>kiln_rocm_graph_retained_byte_accounting_complete</code>, and <code>kiln_rocm_graph_opaque_native_objects</code>.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Slots and owners</td><td class="p-2"><code>kiln_rocm_graph_slots{state="total|active|idle"}</code>, <code>kiln_rocm_graph_tracked_decode_owners</code>, and <code>kiln_rocm_graph_owner_lifecycle_total{event="decode_release|graph_release|slot_create|slot_reuse"}</code>.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>kiln_rocm_graph_retained_bytes{kind}</code></td><td class="p-2"><code>kind</code> is exactly <code>stable_io</code>, <code>capture_arena</code>, <code>blaslt_workspace</code>, <code>slot_state</code>, <code>total</code>, <code>peak</code>, or <code>quarantined</code>.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Phase and transient telemetry</td><td class="p-2"><code>kiln_rocm_graph_current_phase{phase}</code> is one-hot, <code>kiln_rocm_graph_current_phase_elapsed_seconds</code> is zero while idle, <code>kiln_rocm_graph_phase_calls_total{phase}</code>, <code>kiln_rocm_graph_phase_slow_total{phase}</code>, <code>kiln_rocm_graph_phase_duration_seconds_total{phase}</code>, and <code>kiln_rocm_graph_phase_duration_seconds_max{phase}</code> use exactly the six phase labels, and <code>kiln_rocm_graph_transient_candidate_bytes{kind="last|peak"}</code> reports the measured residual. These remain readable for a real backend while either runner lock blocks or is poisoned.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Cache action counters</td><td class="p-2"><code>kiln_rocm_graph_cache_admissions_total</code>, <code>kiln_rocm_graph_cache_evictions_total</code>, <code>kiln_rocm_graph_cache_evicted_bytes_total</code>, <code>kiln_rocm_graph_cache_evictions_by_cause_total{cause="budget|pressure|invalidation|recovery"}</code>, <code>kiln_rocm_graph_cache_admission_rejections_total{reason="entry_capacity|byte_budget|accounting_incomplete"}</code>, and <code>kiln_rocm_graph_pre_capture_skips_total{reason="entry_capacity|byte_budget|accounting_incomplete|memory_reservation_denied|memory_governor_selector_mismatch"}</code>.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Capture and replay counters</td><td class="p-2"><code>kiln_rocm_graph_capture_attempts_total</code>, <code>kiln_rocm_graph_capture_outcomes_total{outcome="success|deferred|failure"}</code>, <code>kiln_rocm_graph_replay_attempts_total</code>, and <code>kiln_rocm_graph_replay_outcomes_total{outcome="success|failure"}</code>.</td></tr>
-                    <tr style="border-top:1px solid var(--line);"><td class="p-2">Fallback counters and latency</td><td class="p-2"><code>kiln_rocm_graph_fallbacks_total{reason}</code> uses exactly <code>multi_row_batch_unsupported</code>, <code>cold_cache_host_round_trip</code>, <code>persistent_host_round_trip</code>, <code>shape_dependent_attention</code>, <code>graph_cache_capacity</code>, <code>graph_cache_byte_budget</code>, <code>graph_accounting_incomplete</code>, <code>moderate_memory_pressure</code>, <code>tight_memory_pressure</code>, <code>critical_memory_pressure</code>, <code>memory_reservation_denied</code>, <code>memory_governor_selector_mismatch</code>, <code>capture_failure</code>, or <code>replay_failure</code>. <code>kiln_rocm_graph_fallback_slow_total</code>, <code>kiln_rocm_graph_fallback_duration_seconds_total</code>, and <code>kiln_rocm_graph_fallback_duration_seconds_max</code> are unlabelled bounded-latency summaries.</td></tr>
-                  </tbody>
-                </table>
-              </div>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Counter labels are closed sets; decode shapes, allocation identities, byte limits, and request
-                values never become labels. Check <code>kiln_rocm_graph_telemetry_available == 1</code> before
-                interpreting full cache/counter families, and inspect its one-hot unavailable reason when zero.
-                Phase and transient families have their own
-                <code>kiln_rocm_graph_phase_telemetry_available</code> authority and reason family and remains
-                available for a real backend during either runner-lock contention or poison. A zero full-snapshot gauge therefore omits the
-                full families, not the independently authoritative phase families, and vice versa.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Health repeats the policy at <code>decode_runtime.accelerator_runtime</code>. Its sibling
-                <code>decode_runtime.rocm_synchronization</code> reports whether ROCm is active, telemetry
-                availability, cleanup quarantine, total device/stream waits, waited nanoseconds, skipped
-                barriers, and a fixed 23-reason array. <code>cleanup_quarantined=true</code> is a process-lifetime
-                sticky device fault: further execution is rejected, possibly in-flight resources are retained
-                rather than destroyed unsafely, and restart is required. Active ROCm telemetry unavailability is
-                likewise fail-closed instead of being interpreted as a false quarantine value. The shared server
-                admission gate latches either condition before adapter, training, import, or other backend mutation
-                work can begin. The same snapshot makes
-                <code>backend_runtime</code> unhealthy and quarantined, fails the
-                <code>backend_runtime_healthy</code> readiness check, and returns HTTP 503. It is intentionally
-                absent from <code>/v1/config</code> because it is live fault state, not policy. Prometheus exports
-                <code>kiln_rocm_cleanup_quarantined</code>,
-                <code>kiln_rocm_synchronizations_total{reason,scope}</code>,
-                <code>kiln_rocm_synchronization_wait_seconds_total{reason}</code>, and
-                <code>kiln_rocm_synchronization_skipped_total{reason}</code>, plus active, availability, and
-                policy gauges. Interpret the quarantine gauge only when telemetry availability is one. These
-                endpoints load atomics only and never synchronize the accelerator.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Configure the six fields under <code>[accelerator]</code>. Canonical environment names derive
-                mechanically as <code>KILN_ACCELERATOR_&lt;FIELD&gt;</code>. Historical
-                <code>KILN_ROCM_GRAPHS</code>, <code>KILN_ROCM_GRAPH_CAPTURE</code>, and
-                <code>KILN_ROCM_GRAPH_CACHE_MAX</code>, plus the four old matmul force/disable names,
-                are strict deprecated startup aliases, not hot runtime switches. See the
-                <a href="docs/configuration/" class="link">complete accelerator configuration contract</a>
-                for mode semantics, validation, local A/B gates, and migration behavior.
-              </p>
-            </section>
-            <section class="pt-4" style="border-top: 1px solid var(--line);">
-              <h4 class="font-semibold mb-2"><code>batching</code>: immutable scheduling policy and actor activity</h4>
-              <pre class="overflow-x-auto text-xs leading-relaxed"><code>{
-  "batching": {
-    "configuration": {
-      "rowwise_decode": { "enabled": false, "source": "default" },
-      "prefix_aware_admission": { "enabled": true, "source": "default" },
-      "prefill_admission_quantum": {
-        "configured": null,
-        "configured_source": "default",
-        "backend_policy": 4,
-        "effective": 4,
-        "effective_source": "backend_policy"
-      },
-      "actor_cycle_idle": {
-        "milliseconds": 0,
-        "source": "default",
-        "enabled": false,
-        "command_poll_milliseconds": 5
-      },
-      "burst_prefill_admission": false,
-      "actor_prefill_tile_alignment_required": true
-    },
-    "actor_active": true
-  }
-}</code></pre>
-              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Every real backend constructs this actor. Streaming and non-streaming requests,
-                deterministic and sampled decode, cancellation, backpressure, KV ownership, adapter
-                barriers, and shutdown all use that one scheduling state machine. Mock mode retains the
-                scheduler-backed test engine and reports <code>actor_active=false</code>.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>rowwise_decode=false</code> is true multi-row decode. Turning it on is an emergency
-                correctness comparison and normally loses throughput. Prefix-aware admission defers a
-                queued same-adapter strict descendant while its active shorter prompt can become a reusable
-                prefix; independent rows can still enter. Both values include their startup source.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                A null admission <code>configured</code> value means TOML <code>"auto"</code>. CUDA and
-                Vulkan then select the effective decode width; ROCm, Metal, and CPU select 4. The result is
-                always clamped to the effective decode width. <code>effective_source</code> is
-                <code>default</code>, <code>backend_policy</code>, <code>config_file</code>,
-                <code>environment</code>, or <code>effective_decode_width</code> when that clamp wins.
-                <code>default</code> is reachable only for an explicit programmatic value carrying default
-                provenance; normal built-in <code>auto</code> reports <code>backend_policy</code>. CUDA alone
-                currently reports <code>burst_prefill_admission=true</code>; this value is backend-owned and
-                has no operator field. ROCm alone reports
-                <code>actor_prefill_tile_alignment_required=true</code>. Its startup contract requires
-                actor prompt chunks to preserve the qualified streaming-prefill numerical boundary. Unsafe
-                combinations fail startup instead of silently changing deterministic output. Every batching setting is
-                startup-only and requires restart.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>actor_cycle_idle</code> is an explicit fixed duty-cycle policy. Zero preserves the
-                ordinary actor. A configured value from 1 through
-                60,000 milliseconds waits only after an actor cycle advanced prefill or decode and
-                synchronous accelerator work returned. During the wait the actor polls control commands
-                at intervals no longer than 5 ms; shutdown remains responsive, and the HTTP process and
-                response-delivery worker remain live. Nonzero values deliberately trade throughput and
-                ITL for lower sustained accelerator duty cycle and require restart.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>GET /health</code> repeats the same immutable object at
-                <code>decode_runtime.batching_configuration</code> beside the optional live
-                <code>batching_engine</code> snapshot. <code>GET /v1/health</code> is the same response.
-                The gated trusted debug response retains <code>batching_engine.enabled</code> for actual
-                activity and adds the object at <code>batching_engine.configuration</code>. Canonical startup overrides are
-                mechanically derived as <code>KILN_BATCHING_&lt;FIELD&gt;</code>; see the
-                <a href="docs/configuration/" class="link">complete Configuration Reference</a> for strict
-                grammar and removed-variable migration.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                A live actor snapshot reports <code>actor_cycle_idle_ms</code>,
-                <code>actor_cycle_idle_source</code>, <code>actor_cycle_idle_active</code>,
-                <code>actor_cycle_idle_count</code>, <code>total_actor_cycle_idle_ms</code>, and
-                <code>max_actor_cycle_idle_ms</code> in health and trusted debug. Prometheus mirrors these
-                as <code>kiln_batching_engine_actor_cycle_idle_configured_seconds</code>,
-                <code>kiln_batching_engine_actor_cycle_idle_active</code>,
-                <code>kiln_batching_engine_actor_cycle_idles_total</code>,
-                <code>kiln_batching_engine_actor_cycle_idle_seconds_total</code>, and
-                <code>kiln_batching_engine_actor_cycle_idle_max_seconds</code>. Serving benchmark driver
-                v18 records the actor-only route, configured source, measured-window count, and elapsed time, settles an
-                idle boundary outside request timing, and fails the
-                <code>actor_cycle_idle_accounted</code> gate on contradictory evidence.
-                The same snapshot publishes <code>actor_barrier_adapter_active</code> and
-                <code>actor_barrier_resize_active</code> from command acceptance through drain and
-                mutation completion; Prometheus mirrors them as
-                <code>kiln_batching_engine_actor_barrier_adapter_active</code> and
-                <code>kiln_batching_engine_actor_barrier_resize_active</code>. These live gauges do
-                not replace request-local nullable <code>adapter_ms</code> and <code>resize_ms</code>.
-              </p>
-              <h5 class="font-semibold mt-4 mb-2">Cross-request prefix-cache policy and capability</h5>
-              <pre class="overflow-x-auto text-xs leading-relaxed"><code>{
-  "prefix_cache": {
-    "configuration": {
-      "enabled": true,
-      "max_blocks": null,
-      "max_entries": null
-    },
-    "effective_enabled": false,
-    "effective_reason": "vulkan_correctness_quarantine",
-    "effective_max_blocks": 0,
-    "effective_max_entries": 0,
-    "effective_max_state_bytes": 0
-  }
-}</code></pre>
-              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                This is the <code>GET /v1/config</code> shape. <code>configuration</code> is startup intent;
-                the remaining fields are the backend-qualified live allocation policy. Reasons are
-                <code>active</code>, <code>configuration</code>, <code>vulkan_correctness_quarantine</code>, or
-                <code>backend_unavailable</code>. CPU, CUDA, ROCm, and Metal currently honor an enabled request.
-                Vulkan forces it off after guarded production-model exact repeats proved semantic corruption.
-              </p>
-              <pre class="overflow-x-auto text-xs leading-relaxed"><code>{
-  "prefix_cache": {
-    "enabled": false,
-    "lookup_hits": 0,
-    "lookup_misses": 0,
-    "hit_tokens": 0,
-    "hit_blocks": 0,
-    "cached_blocks": 0,
-    "max_blocks": 0,
-    "cached_entries": 0,
-    "max_entries": 0,
-    "cached_state_bytes": 0,
-    "max_state_bytes": 0,
-    "active_leases": 0,
-    "pending_release_entries": 0
-  },
-  "decode_runtime": {
-    "batching_engine": { "prefix_cache_enabled": false }
-  }
-}</code></pre>
-              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                This is the relevant <code>GET /health</code> and <code>GET /v1/health</code> state on Vulkan.
-                Trusted debug state exposes the actor capability in its <code>batching_engine</code> snapshot and
-                the same counters under <code>caches.prefix_cache</code>. Prometheus publishes
-                <code>kiln_batching_engine_prefix_cache_enabled</code> plus the existing
-                <code>kiln_prefix_cache_*</code> activity and residency series. While the capability is false,
-                all activity and residency values must remain zero; exact repeats use fresh generic prefill.
-              </p>
-              <h5 class="font-semibold mt-4 mb-2">Resident Vulkan prefill telemetry</h5>
-              <pre class="overflow-x-auto text-xs leading-relaxed"><code>{
-  "resident_prefill_enabled": false,
-  "active_resident_prefill": 0,
-  "total_resident_prefill_attempts": 0,
-  "total_resident_prefill_forwards": 0,
-  "total_resident_prefill_initial_declines": 0,
-  "total_resident_prefill_route_failures": 0,
-  "total_resident_prefill_rows": 0,
-  "total_resident_prefill_completed_rows": 0,
-  "last_resident_prefill_batch_size": 0,
-  "max_resident_prefill_batch_size": 0
-}</code></pre>
-              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                These fields are part of <code>decode_runtime.batching_engine</code> on
-                <code>GET /health</code> and <code>GET /v1/health</code>, and of the trusted debug
-                <code>batching_engine</code> snapshot. They are always present when the actor is active.
-                Production currently reports <code>resident_prefill_enabled=false</code> because guarded Vulkan
-                model runs found semantic corruption on the optimization. While false, every route counter and
-                batch-size gauge must remain zero, and every batching request reports
-                <code>resident_prefill_used=false</code>.
-                <code>active_resident_prefill</code> is the live count of prefill rows whose newest native
-                positions cannot fall back to generic prefill. It must return to zero after request drain.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                If a future correctness-qualified build enables the route, an attempt is one actor call into the
-                native route. A forward is a successful call, while an
-                initial decline is a mutation-free decision made before any selected row enters native authority.
-                In a healthy interval with no route failure, attempt delta equals forward delta plus initial-decline
-                delta. Route failures count fail-closed native errors, post-entry declines, eligibility loss, and
-                progress-contract violations; any increase is an inference error, not a generic fallback.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                When enabled, rows count all request rows advanced by successful calls, completed rows count the subset whose
-                prompt ended on those calls, and last/maximum batch size report successful cohort width. A rising
-                forward-count delta and a row-count delta strictly greater than it prove that the measured interval
-                contained a multi-row forward. Maximum width at least two proves multi-row execution somewhere in
-                the process lifetime; a maximum of one proves only the single-row tail. Counters are process-lifetime
-                monotonic values; compare two snapshots for an interval. Last and maximum batch sizes are gauges,
-                with maximum monotonic for the process lifetime.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Prometheus exports the same state as
-                <code>kiln_batching_engine_resident_prefill_enabled</code>,
-                <code>kiln_batching_engine_active_resident_prefill</code>,
-                <code>kiln_batching_engine_resident_prefill_attempts_total</code>,
-                <code>kiln_batching_engine_resident_prefill_forwards_total</code>,
-                <code>kiln_batching_engine_resident_prefill_initial_declines_total</code>,
-                <code>kiln_batching_engine_resident_prefill_route_failures_total</code>,
-                <code>kiln_batching_engine_resident_prefill_rows_total</code>,
-                <code>kiln_batching_engine_resident_prefill_completed_rows_total</code>,
-                <code>kiln_batching_engine_resident_prefill_last_batch_size</code>, and
-                <code>kiln_batching_engine_resident_prefill_max_batch_size</code>.
-              </p>
-            </section>
-            <section id="streaming-prefill-runtime" class="pt-4" style="border-top: 1px solid var(--line);">
-              <h4 class="font-semibold mb-2"><code>streaming_prefill</code>: immutable tiled-prefill policy</h4>
-              <pre class="overflow-x-auto text-xs leading-relaxed"><code>{
-  "streaming_prefill": {
-    "dispatch": {
-      "configured_mode": "auto",
-      "configured_source": "default",
-      "backend_policy": {
-        "policy": "prompt_tokens_at_least",
-        "minimum_prompt_tokens": 256
-      },
-      "effective": {
-        "policy": "prompt_tokens_at_least",
-        "minimum_prompt_tokens": 256
-      },
-      "effective_source": "backend_policy"
-    },
-    "threshold_tokens": {
-      "configured": null,
-      "configured_source": "default",
-      "backend_policy": 256,
-      "effective_for_auto_mode": 256,
-      "override_applied_to_backend_auto_policy": false
-    },
-    "tile_tokens": {
-      "configured": null,
-      "configured_source": "default",
-      "backend_policy": 256,
-      "effective": 256,
-      "effective_source": "backend_policy"
-    },
-    "tape_tile_tokens": {
-      "configured": null,
-      "configured_source": "default",
-      "backend_policy": 256,
-      "effective": 256,
-      "effective_source": "backend_policy"
-    },
-    "detached_full_attn_tile_tokens": {
-      "configured": null,
-      "configured_source": "default",
-      "backend_policy": 8192,
-      "effective": 8192,
-      "effective_source": "backend_policy"
-    },
-    "detached_full_attn_boundary_tile_tokens": {
-      "backend_policy": 8192,
-      "effective": 8192,
-      "effective_source": "backend_policy"
-    },
-    "detached_full_attn_tape_replay_tile_tokens": {
-      "backend_policy": 8192,
-      "effective": 8192,
-      "effective_source": "backend_policy"
-    },
-    "last_token_lm_head": {
-      "configured": true,
-      "configured_source": "default",
-      "effective": true,
-      "effective_source": "default"
-    },
-    "immutable_after_startup": true,
-    "restart_required_to_change": true
-  }
-}</code></pre>
-              <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                This example is the ROCm default. <code>configured_mode</code> is
-                <code>auto</code>, <code>enabled</code>, or <code>disabled</code>. Auto dispatch is
-                threshold-based and inclusive on CUDA, ROCm, and Metal; CPU and Vulkan report
-                <code>policy="never"</code>. Enabled selects every non-empty prompt, while disabled is
-                the clean monolithic-prefill isolation control. A concrete threshold changes only a
-                backend that already has threshold-based auto dispatch; it cannot turn CPU or Vulkan
-                auto policy on. Dispatch eligibility creates multiple physical tiles only when the
-                sequence exceeds the effective tile for that route. There is no single
-                <code>effective_enabled</code> field because automatic dispatch depends on each prompt length.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Backend defaults for <code>(base, tape, detached, boundary, replay)</code> are CPU
-                <code>(8192,8192,8192,8192,8192)</code>, CUDA
-                <code>(1024,1024,8192,65536,65536)</code>, ROCm
-                <code>(256,256,8192,8192,8192)</code>, Metal
-                <code>(2048,2048,8192,8192,8192)</code>, and Vulkan
-                <code>(2048,2048,8192,8192,8192)</code>. Base tiles cover ordinary inference and
-                non-tape GDN segments; tape tiles cover tape-authoritative native training; detached
-                tiles cover materialized full-attention training routes. Every concrete tile is a
-                positive multiple of 64.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                A concrete base tile feeds any <code>auto</code> tape or detached field. That inherited
-                detached value also feeds boundary and tape-replay variants. A concrete detached value
-                overrides all three detached variants directly. The effective source makes this explicit
-                as <code>inherited_from_tile_tokens_config_file</code> or
-                <code>inherited_from_tile_tokens_environment</code>; untouched values report
-                <code>backend_policy</code>. <code>last_token_lm_head</code> controls whether the final
-                inference tile projects only its last row.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Startup resolves and injects this one object into inference, SFT/GRPO/OPD training,
-                training admission, and checkpoint planning. Those paths never re-read the public
-                streaming environment names, and every change requires restart. Health repeats the
-                object at <code>prefill_runtime.streaming_prefill</code>; trusted debug exposes it at
-                top-level <code>streaming_prefill</code>. Canonical names are mechanically derived as
-                <code>KILN_STREAMING_PREFILL_&lt;FIELD&gt;</code>. The
-                <a href="docs/configuration/" class="link">Configuration Reference</a> lists the six
-                strict deprecated aliases, legacy TOML <code>enabled</code> compatibility, conflict
-                behavior, and operational examples.
-              </p>
-            </section>
-            <section class="pt-4" style="border-top: 1px solid var(--line);">
-              <h4 class="font-semibold mb-2"><code>vram</code>: device and startup capacity resolution</h4>
-              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>probe_selector</code> identifies the device actually being served, using
-                <code>nvidia:N</code>, <code>linux-drm:amd:N</code>, <code>linux-drm:intel:N</code>,
-                <code>linux-drm:any:N</code>, <code>apple-unified</code>, <code>auto</code>, or
-                <code>none</code>. <code>unified</code> says whether GPU and host memory share capacity.
-                <code>physical_capacity_bytes</code>/<code>physical_capacity_gib</code> and
-                <code>physical_capacity_source</code> report the device-scoped detected capacity. On a
-                unified-memory device this is the host- and cgroup-bounded safe capacity, not the
-                driver&rsquo;s potentially much larger address space. Linux DRM never promotes GTT into
-                primary device-local capacity when the driver reports nonzero VRAM. GTT and Linux
-                host headroom are governed as a separate host-backed tier for allocations that
-                actually use it.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>configured_capacity_bytes</code>/<code>configured_capacity_gib</code> contain the
-                optional configured request, or <code>null</code> when no cap was set. Configuration is
-                cap-only: it can reduce detected capacity but can never expand it.
-                <code>effective_capacity_bytes</code>/<code>effective_capacity_gib</code> and
-                <code>effective_capacity_source</code> are the capacity used by planning.
-                <code>configured_capacity_clamped</code> is <code>true</code> when a configured request
-                exceeded safe detected capacity and was reduced to that limit.
-              </p>
-            </section>
-            <section class="pt-4" style="border-top: 1px solid var(--line);">
-              <h4 class="font-semibold mb-2"><code>vram.live</code>: current safe availability</h4>
-              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>total_bytes</code>/<code>total_gib</code>, <code>used_bytes</code>/<code>used_gib</code>,
-                and <code>available_bytes</code>/<code>available_gib</code> are the most recent bounded
-                governor sample; <code>source</code> records the probe that supplied it. The endpoint
-                reads the governor cache instead of launching a synchronous device probe on the request
-                path. <code>sample_age_ms</code>, <code>sample_max_age_ms</code>,
-                <code>sample_stale</code>, <code>sampler_required</code>,
-                <code>sampler_running</code>, and <code>sampler_healthy</code> make its freshness and
-                worker liveness explicit. The maximum healthy age is
-                <code>max(5000 ms, 4 * probe_ms)</code>. A failed or stale sample, or a stopped required
-                sampler, retains diagnostic capacity/provenance but contributes zero allocation
-                headroom.
-                <code>effective_capacity_available_bytes</code>/<code>effective_capacity_available_gib</code>
-                additionally apply the startup effective cap. <code>usable_after_governor_floor_bytes</code>/
-                <code>usable_after_governor_floor_gib</code> then subtract the configured governor floor
-                and live soft reservations. <code>soft_reserved_bytes</code>/<code>soft_reserved_gib</code>
-                and <code>pressure</code> expose those live policy inputs directly.
-                These last two pairs are the useful admission values when driver-free memory, the
-                configured cap, and the safety floor disagree.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>raw_observations</code> preserves the inputs in exact bytes for diagnosis:
-                <code>probe_failed</code>, <code>driver_total_bytes</code>, <code>driver_used_bytes</code>,
-                <code>driver_free_bytes</code>, <code>driver_vram_total_bytes</code>,
-                <code>driver_vram_used_bytes</code>, <code>driver_gtt_total_bytes</code>,
-                <code>driver_gtt_used_bytes</code>, <code>host_total_bytes</code>,
-                <code>host_available_bytes</code>, <code>cgroup_limit_bytes</code>,
-                <code>cgroup_high_bytes</code>,
-                <code>cgroup_current_bytes</code>, <code>cgroup_remaining_bytes</code>, and
-                <code>unified_reserve_bytes</code>. <code>host_backed</code> is either <code>null</code>
-                or an exact byte/GiB object with <code>total</code>, <code>used</code>, and <code>free</code>
-                values for the independently admissible GTT/host tier. It is bounded by driver GTT,
-                host <code>MemAvailable</code>, the strictest finite cgroup <code>memory.max</code> and
-                <code>memory.high</code> ancestor headroom, and the host reserve. Vulkan&rsquo;s current
-                host-resident KV and recurrent prefix state must fit this tier as well as the primary
-                accelerator budget. An unavailable observation is <code>null</code>;
-                <code>probe_failed=true</code> means the latest sample failed, in which case effective
-                free memory is forced to zero while the last known capacity and provenance remain visible.
-                NVIDIA&rsquo;s reported used and free counters can leave a reserved gap, including on
-                WSL2. The safe NVIDIA snapshot therefore uses the lower of
-                <code>driver_free_bytes</code> and total minus
-                <code>driver_used_bytes</code>, while preserving both raw counters here.
-                The safe bounded values derived from the observations remain in the surrounding
-                <code>live</code> fields.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Hardware qualification receipts describe only the machine and boundary that produced
-                them. Current WSL2 execution uses generic scope accounting, a bounded PID count, and
-                process cleanup without a default CPU quota, fixed host-memory ceiling, or
-                machine-specific temperature policy. Its platform receipt records point-in-time host
-                and selected-GPU temperature observability as typed read-only evidence; an unavailable
-                source remains explicit and never changes execution or product defaults.
-                Retained receipt
-                <code>20260728t050414137676z-cuda-rtx4090-laptop-wsl2-local-environment-v1-df3e8fee15-v1</code>
-                passed from clean pushed source <code>6699d9775e3a</code> with all declared outer
-                WSL2 capabilities available and the contained environment case passing. That result
-                applies only to the measured laptop under WSL2. Qualification Cargo admission derives
-                its available-memory floor and host reserve from the current host instead of pinning
-                a machine-sized minimum; one build job and aggregate cgroup accounting remain enforced.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Retained Metal platform receipt
-                <code>20260728t223911446266z-metal-macbook-air-m1-local-environment-v1-99474c38c1-v1</code>
-                passed from clean pushed source <code>c8d9f5856ce9</code>. The selected Metal device,
-                Apple hardware view, <code>sysctl</code> chip identity, and live Metal runtime agreed
-                on Apple M1; the measured MacBook Air reported eight GPU cores and 17,179,869,184
-                unified-memory bytes without making either value a product default. The receipt binds
-                macOS 26.6 build 25G72, Xcode 26.6 build 17F113, the macOS 26.5 SDK, Command Line
-                Tools, and the installed Metal toolchain. A real shader compiled to AIR and linked to
-                a metallib. Writable APFS passed full file sync, directory sync, atomic replacement,
-                hardlink, relative-symlink, and case-insensitive lookup probes. The contained case
-                preserved loopback, received a permission denial for external networking, owned its
-                session and process group, and exited cleanly. Unified-memory, compressor, paging,
-                swap, and memory-pressure observations were retained. Supported unprivileged host and
-                GPU temperature readings were explicitly unavailable; available thermal-pressure state
-                remained read-only. This receipt is platform-boundary evidence only; separate receipts
-                supply each completed Phase 7.2 evidence class.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Retained Metal core receipt
-                <code>20260728t225405419496z-metal-macbook-air-m1-cuda-metal-core-correctn-d119e83143-v1</code>
-                passed from clean pushed source <code>94d03199f334</code>. Its five required cases
-                selected Apple M1; proved exact contiguous, strided-view, and BF16 tensor round trips;
-                compared F32, batched, left-transposed, and right-transposed matrix-core matmuls with
-                CPU oracles; and required single-row and two-row Metal ICB replay with exact token and
-                KV-cache parity against eager execution. The training case completed one Metal LoRA
-                SFT forward/backward/AdamW step and a twenty-step BF16 AdamW trajectory against the
-                pinned PyTorch oracle. Every case exited zero with no output-assertion failure, and
-                the receipt passed independent current-source and local-artifact validation. This is
-                bounded core-correctness evidence on the measured M1 MacBook Air, not memory,
-                serving, capacity, performance, endurance, or other-Apple-Silicon evidence.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Retained Metal unified-memory lifecycle receipt
-                <code>20260728t230542216939z-metal-macbook-air-m1-metal-memory-lifecycle-v-dfc8d17c13-v1</code>
-                passed from clean pushed source <code>ee39b573566d</code>. Using the live Apple
-                unified-memory snapshot, a controlled floor left a 64 MiB budget and the exact
-                server paged-KV gate rejected 10,241 blocks before <code>currentAllocatedSize</code>
-                changed. An injected first allocator failure retried at the declared lower fraction,
-                allocated and released a real Metal paged-KV cache near baseline, then allocated
-                again. A separate 268,435,456-byte Metal allocation appeared in
-                <code>currentAllocatedSize</code>; dropping its sole owner reclaimed all
-                268,435,456 bytes before another allocation succeeded. All cases completed the
-                runner-owned macOS session/process-group settlement path. This is controlled UMA
-                lifecycle evidence, not a physical host OOM, serving-capacity, performance,
-                endurance, or other-Apple-Silicon claim.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Retained Metal serving evidence uses one fixed greedy-short prompt set,
-                temperature zero, seed 17, exact 158-token prompts and 64-token completions,
-                a 600-second request deadline, and a 15 GiB whole-host Apple unified-memory
-                limit. The
-                <a href="https://github.com/ericflo/kiln/blob/main/benchmarks/receipts/metal/macbook-air-m1/20260729t005123z-metal-macbook-air-m1-qwen35-4b-greedy-short-c1-12-capacity-v1.kiln.json" class="link">
-                  c1-c12 receipt
-                </a>
-                and individual c13-c18 receipts passed from clean pushed sources. The c17 run
-                identifier was named prospectively: its signed verdict and all gates passed.
-                The final
-                <a href="https://github.com/ericflo/kiln/blob/main/benchmarks/receipts/metal/macbook-air-m1/20260729t025314z-metal-macbook-air-m1-qwen35-4b-greedy-short-c19-64-capacity-boundary-search-v1.kiln.json" class="link">
-                  c19/c20 boundary receipt
-                </a>
-                ran from clean pushed source <code>74a62a614545</code> with one exact artifact.
-                c19 passed 19/19 at 3.086786 output tokens per second and a
-                14,602,888,807-byte peak. c20 reached 600.024 seconds with 12/20 successes;
-                eight incomplete streams lacked terminal usage, while its
-                14,431,090,115-byte peak remained below the memory limit. The fail-closed driver
-                retained c20, recorded c21-c64 as unexecuted, stopped the sweep, and completed
-                non-forced zero shutdown with every finalization check passing. All 190 measured
-                requests from c1 through c19 produced the required exact output. Tail latency and
-                SLO goodput remain visible measurements, not capacity gates. This c19 ceiling is
-                specific to the declared workload and measured M1 MacBook Air; it is not endurance
-                or broader Apple Silicon evidence.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Retained passing Metal endurance receipt
-                <a href="https://github.com/ericflo/kiln/blob/main/qualification/receipts/metal/macbook-air-m1/20260729t125321404525z-metal-macbook-air-m1-serving-metal-endurance--267c4e3d84-v1.json" class="link">
-                  <code>20260729t125321404525z-...-267c4e3d84-v1</code>
-                </a>
-                ran from clean pushed source <code>fa3ab5a9dab7</code> and passed independent
-                current-source, local-artifact, and known-commit validation. After four stable
-                cycles, one source-built server completed 28,811.809 ordinary monotonic seconds,
-                739 mixed c1/c4 waves, 1,846 exact 32-token responses over fixed
-                16/32/64/96-word prompt cohorts, and 184 confirmed cancellations at 2.050270
-                output tokens per second. Request, response-validity, synchronization-failure,
-                device-fault, batching-error, unexplained-ITL, KV-residue, worker-residue, and
-                shutdown-failure counts were zero. All 1,291 ITL outliers were attributed to
-                runtime events; 902 slow Metal external-yield synchronizations remain visible
-                diagnostics and none failed.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Whole-host unified memory started at 13,056,700,580 bytes, peaked at
-                14,774,687,499, and ended at 12,884,901,888. The 1,717,986,919-byte peak increase
-                stayed below the raw 2 GiB target plus one explicit 171,798,692-byte
-                <code>memory_pressure</code> resolution step, an effective 2,319,282,340-byte
-                gate, and below the independent 15 GiB absolute ceiling. Final whole-host and
-                process-RSS growth were zero; RSS started at 2,665,070,592 bytes, peaked at
-                2,666,692,608, and ended at 2,644,131,840. The fixed 389-block KV pool ended
-                unchanged and idle, and shutdown was non-forced, zero, and free of residue. The
-                preceding
-                <a href="https://github.com/ericflo/kiln/blob/main/qualification/receipts/metal/macbook-air-m1/20260729t043210429221z-metal-macbook-air-m1-serving-metal-endurance--267c4e3d84-v1.json" class="link">
-                  failed eight-hour receipt
-                </a>
-                is retained as counterevidence: its sole failure was crossing the raw 2 GiB
-                growth gate by the counter's next one-percentage-point quantum. The passing
-                checkpoint makes that tolerance explicit without changing the raw target or
-                absolute ceiling. This is scoped endurance evidence on the measured M1 MacBook
-                Air, not an SLO or broader Apple Silicon qualification.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Retained CUDA core receipt
-                <code>20260728t051305956568z-cuda-rtx4090-laptop-wsl2-cuda-metal-core-correctn-9f21d75c94-v1</code>
-                passed from clean source <code>b81c6787d0a4</code>. It required the selected device,
-                tensor and matmul parity, CUDA graph replay against eager execution, a complete CUDA
-                LoRA SFT step, and a twenty-step BF16 AdamW trajectory against the pinned PyTorch
-                oracle. All five cases exited zero, reported no cgroup memory event, and removed their
-                owned WSL2 scopes. This result applies only to that declared core subset on the
-                measured laptop under WSL2; the separate memory-lifecycle receipt supplies the memory
-                evidence, and separate serving-capacity receipts supply serving and concurrency
-                evidence. Endurance, native Linux, desktop RTX 4090, and Metal evidence remain
-                outside this core result.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Retained CUDA memory-lifecycle receipt
-                <code>20260728t060537096336z-cuda-rtx4090-laptop-wsl2-cuda-memory-lifecycle-v1-61a2e68c95-v1</code>
-                passed from clean pushed source <code>4b68c4493972</code>. Its five required cases
-                selected the declared laptop GPU, reclaimed two GiB held by the CUDA pool, rejected
-                a request above the live admission ceiling before allocation, recovered from a
-                controlled injected allocator error by retrying a smaller real CUDA cache, and
-                preserved data through a 4,000-to-500-to-4,000 block physical KV resize. Every case
-                exited zero; every owned scope reported zero cgroup memory events, was removed, and
-                left no CUDA or qualification process. The controlled error proves the retry path,
-                not a physical device OOM or full-model memory-pressure run. Serving and concurrency
-                evidence is retained separately; this is not endurance, native Linux, desktop RTX
-                4090, or Metal evidence.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Retained CUDA serving receipt
-                <code>20260728t090043z-cuda-wsl2-qwen35-4b-greedy-short-c1-4-qualified-v1</code>
-                passed from clean pushed source <code>a7156931b130</code>. Its fixed greedy-short
-                workload produced exact 64-token outputs at c1 through c4 under an independent 15 GiB
-                whole-device limit, at 22.92, 22.98, 26.82, and 27.39 aggregate output tokens per
-                second. The companion
-                <code>20260728t084724z-cuda-wsl2-qwen35-4b-greedy-short-c1-16-capacity-v1</code>
-                capacity receipt repeated those passes and established c5 as the first non-fitting
-                level: peak device memory was 16,303,263,744 bytes against a 16,106,127,360-byte
-                limit. All 136 boundary-sweep requests still returned the exact required output; the
-                receipt&rsquo;s failed verdict is retained memory-limit counterevidence. Both runs
-                preserved their bound source, binary, configuration, model, and runtime identities
-                and completed process, port, and GPU cleanup. This c4 ceiling applies only to the
-                fixed workload and measured laptop under WSL2. It is not an SLO, endurance, native
-                Linux, desktop RTX 4090, or Metal claim.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Retained CUDA endurance receipt
-                <code>20260728t113040389600z-cuda-rtx4090-laptop-wsl2-serving-cuda-endurance-v-0d78751328-v1</code>
-                passed from clean pushed source <code>fe3f1a694704</code>. Its contained case measured
-                28,812.55 seconds with ordinary monotonic time over the fixed c1/c4 and
-                16/32/64/96-word prompt envelope. All 6,980 measured requests completed the exact
-                32-token response oracle with zero failures, all 698 scheduled cancellations were
-                confirmed, and aggregate output throughput was 7.752 tokens per second. The
-                17,171,480,576-byte whole-envelope GPU high-water baseline matched the measured peak;
-                final GPU memory was 15,365,832,704 bytes, post-baseline GPU growth was zero, and RSS
-                grew 8,650,752 bytes. The fixed 303-block KV capacity ended idle with zero unaccounted
-                blocks, and cleanup left no scope or CUDA process. CUDA graphs, allocator reclaim,
-                and prefix caching were disabled; the prefix cache remained quarantined for CUDA
-                prefill semantics. This establishes only the declared eight-hour workload on the
-                measured laptop under WSL2, not native Linux, desktop RTX 4090, Metal, an SLO, or a
-                broader workload claim.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Current Strix Halo core receipts
-                <code>20260728t222535119053z-rocm-strix-halo-core-correctness-v1-9faecc7321-v1</code>
-                and
-                <code>20260728t222644757744z-vulkan-strix-halo-core-correctness-v1-0a09f3bcee-v1</code>
-                passed from the same clean pushed source <code>8e419e43051b</code>. ROCm 7.2.4
-                selected the gfx1151 AMD Radeon 8060S, and Vulkan selected the same physical GPU
-                through RADV Strix Halo. Each backend passed its required device probe, real-device
-                tensor transfer/parity, and deterministic dense matmul parity against the CPU
-                oracle. These receipts establish only that bounded core subset on this host; targeted
-                serving, KV-pressure, prefix-cache, and cleanup evidence remains separate.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                The bounded ROCm/Vulkan serving-closure contract builds one current-source server
-                per backend with a fixed eight-block KV pool. A 253-token prime prompt emits 16
-                tokens, crosses token 256, and retains four prefix blocks. A 255-token pressure
-                prompt initially owns the other four blocks and emits exactly 256 tokens across
-                four live-decode growth boundaries. ROCm must emit structured reclamation of the
-                unleased prefix blocks. Vulkan must complete the same growth with its correctness
-                quarantine effective and zero prefix-cache ownership. Both variants require
-                drained KV accounting, non-forced zero shutdown, and no snapshot residue. This
-                two-request correctness check does not measure performance or search for a
-                capacity limit. ROCm retains 600-second request and 1,800-second overall
-                deadlines. Vulkan uses finite 2,100-second request, 2,400-second overall, and
-                2,700-second outer-case deadlines because its correctness-quarantined
-                current-source path completed the prime request exactly but emitted only 86 of
-                256 pressure tokens before the former 600-second deadline. That bounded window
-                changes no prompt, token, KV, output, or cleanup gate and is not a throughput
-                threshold.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                The retained ROCm serving receipt
-                <a href="https://github.com/ericflo/kiln/blob/main/qualification/receipts/rocm/strix-halo/20260729t023946445804z-rocm-strix-halo-serving-backend-regressi-b18fa140d9-v1.json" class="link">
-                  <code>20260729t023946445804z-…-b18fa140d9-v1</code>
-                </a>
-                passed from clean pushed source <code>29ace2467bea</code>. It completed exact
-                253/255-token prompts and 16/256-token completions, crossed four pressure
-                decode-growth blocks, and reclaimed all four unleased prime-cache blocks in one
-                structured event. Three valid cached blocks remained, with zero active leases,
-                pending releases, or unaccounted blocks. This refresh postdates the shared LM-head
-                routing repair used by Vulkan and proves it did not regress ROCm serving closure.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                The retained Vulkan serving receipt
-                <a href="https://github.com/ericflo/kiln/blob/main/qualification/receipts/vulkan/strix-halo/20260729t013047275616z-vulkan-strix-halo-serving-backend-regressi-2a1ed8c677-v1.json" class="link">
-                  <code>20260729t013047275616z-…-2a1ed8c677-v1</code>
-                </a>
-                passed from clean pushed source <code>69246007ac48</code> with the same exact
-                geometry and four growth blocks. Its correctness quarantine retained zero
-                prefix-cache enablement, lookup activity, blocks, leases, pending releases,
-                reclaim events, or state bytes. Across both receipts, request, exact-output,
-                device-fault, batching, synchronization-failure, resize, policy, unaccounted-KV,
-                forced/nonzero shutdown, early-exit, and snapshot-residue counts were zero.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Final hosted
-                <a href="https://github.com/ericflo/kiln/actions/runs/30498143581" class="link">
-                  <code>backend_build=all</code> run 30498143581
-                </a>
-                passed from exact pushed source <code>f19d2591ab8e</code>. Separate Metal, CUDA,
-                ROCm, and Vulkan jobs all passed, together with Linux default features, formatting,
-                dependency policy, and portable receipt validation. All seven jobs completed
-                successfully on the final Phase 7.2-integrated source. This is hosted compile/test
-                evidence; the compile-only CUDA and ROCm lanes are not hardware execution evidence.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Receipt-only Metal checkpoints through <code>aaca10d4e</code> changed no shared
-                runtime or qualification tooling and do not invalidate the targeted Strix results.
-                Their serving receipts pass through c18. The c17 run identifier contains
-                <code>first-nonfit</code>, but its signed verdict, all 17 requests, memory gate,
-                and every other gate passed; c18 passed as well. It is not evidence of a
-                non-fitting boundary. Checkpoint <code>74a62a614</code> then made ascending
-                capacity sweeps stop after the first actually failed row and retain the
-                unexecuted suffix as structured failure. Its source-bound Metal sweep passed c19
-                and retained c20 as the first non-fitting row. That campaign driver is separate
-                from the bounded Strix closure runner.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Phase 7.2 tooling checkpoint <code>fa3ab5a9dab7</code> added Apple-only
-                unified-memory admission and macOS containment plus a backend-selected Metal soak
-                runtime. Shared qualification helpers preserve the ROCm and Vulkan effective
-                configurations; memory-counter tolerance and slow-sync handling are conditional on
-                Metal/macOS. Final retention commit <code>f19d2591ab8e</code> then added only the
-                passing endurance receipt and its documentation. On that final integrated source,
-                the focused sampler, soak, mixed-load, workload, runner, and receipt suites passed
-                178 tests. Under the Phase 7.3 integration rule, these backend-isolated changes
-                require no targeted Strix hardware repeat.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Closure documentation commit <code>8e3ea37085f7</code> passed its exact-commit
-                Pages, repository-hygiene, and release-version-drift workflows. Its local audit
-                revalidated every qualification receipt, retained benchmark and oracle evidence,
-                repository artifact policy, production file budget, release-version drift, and
-                the assembled 54-document site. The four bounded Strix core and serving receipts
-                also passed local-artifact and known-commit validation. With Phase 7.2 complete,
-                these results close Phase 7.3. The completion update changes documentation only
-                and adds no broader hardware claim.
-              </p>
-            </section>
-            <section class="pt-4" style="border-top: 1px solid var(--line);">
-              <h4 class="font-semibold mb-2">Memory alerting contract</h4>
-              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Prometheus exports <code>kiln_gpu_memory_probe_failed</code>,
-                <code>kiln_gpu_memory_sample_healthy</code>,
-                <code>kiln_gpu_memory_sample_stale</code>,
-                <code>kiln_gpu_memory_sample_age_seconds</code>,
-                <code>kiln_gpu_memory_sample_max_age_seconds</code>,
-                <code>kiln_gpu_memory_sampler_required</code>, and
-                <code>kiln_gpu_memory_sampler_running</code>. Alert whenever a required sampler is not
-                running, the sample is unhealthy, or probe failure persists. When a host-backed tier
-                exists, <code>kiln_gpu_host_backed_memory_bytes{kind="total|used|free"}</code> exposes
-                its three fixed series. These metrics are rendered from one cached observation and do
-                not trigger a driver probe.
-              </p>
-            </section>
-            <section class="pt-4" style="border-top: 1px solid var(--line);">
-              <h4 class="font-semibold mb-2"><code>vram.governor</code>: resolved memory policy</h4>
-              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>floor_bytes</code>/<code>floor_gib</code> is the free-memory reserve,
-                <code>capacity_limit_bytes</code>/<code>capacity_limit_gib</code> is the immutable
-                cap enforced by governor admission,
-                <code>probe_ms</code> is the typed probe cadence.
-                <code>reclaim_mode_requested</code> is the configured <code>off</code>,
-                <code>on-demand</code>, or <code>automatic</code> policy, while
-                <code>reclaim_mode_effective</code> is the behavior the running serving profile permits.
-                <code>reclaim_disabled_by_serving_profile</code> reports whether that profile gates
-                allocator reclaim off, and <code>reclaim_mode_source</code> reports whether the requested
-                value came from <code>default</code>, <code>config_file</code>, or <code>environment</code>.
-                These are process-lifetime values resolved before the global governor starts; the
-                endpoint does not re-read environment variables.
-              </p>
-            </section>
-            <section class="pt-4" style="border-top: 1px solid var(--line);">
-              <h4 class="font-semibold mb-2"><code>speculative</code>: configured intent and fail-closed serving policy</h4>
-              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Speculative decoding has no serving route. <code>kiln config</code> and startup reject
-                every effective non-off policy before model weights are loaded, including
-                <code>enabled=true</code> with <code>configured_method="off"</code>, whose legacy effective
-                method is <code>skip_layer</code>. Production loading uses <code>load_mtp=false</code>.
-                The draft-window default and hard ceiling are both K=4 pending planned local
-                accelerator qualification at K=1, K=2, and K=4.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>enabled</code>, <code>configured_method</code>,
-                <code>configured_effective_method</code>, <code>num_speculative_tokens</code>, and
-                <code>draft_layers</code> preserve typed startup intent.
-                <code>configured_policy_immutable_after_startup</code> is always true.
-                <code>serving_effective_method</code> is <code>off</code>,
-                <code>serving_routable</code> is false, and
-                <code>serving_unavailable_reason</code> is the stable
-                <code>pending_cancel_safe_local_accelerator_qualification</code> reason.
-                <code>draft_token_ceiling</code> reports the enforced value, currently 4.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>backend_mtp.support</code> is the backend capability classification:
-                <code>native</code>, <code>native_with_constraints</code>,
-                <code>host_fallback_allowed</code>, <code>declined</code>, <code>unsupported</code>,
-                <code>disabled_by_env</code>, or <code>requires_feature</code>.
-                <code>backend_mtp.native</code> is true only for the first two classifications.
-                These are diagnostics, not routing or loaded-weight authority. The response intentionally has no speculative
-                <code>weights_loaded</code>, <code>scope</code>, <code>admission</code>, or
-                <code>routing</code> object because the server loads, admits, and routes no
-                speculative work.
-              </p>
-            </section>
-            <section class="pt-4" style="border-top: 1px solid var(--line);">
-              <h4 class="font-semibold mb-2"><code>training</code>: execution and optimizer support, checkpoint policy, and provenance</h4>
-              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>runtime_device</code> names the immutable native-training execution binding and
-                <code>model_weight_device</code> names the frozen weight representation.
-                <code>native_training_supported</code> is a coarse process summary; the workload array below
-                is authoritative when SFT, GRPO, OPD, and DistillRefresh differ. When every workload is unavailable,
-                <code>native_training_unavailable_reason</code> carries the same fail-closed reason returned
-                by training submission before corpus admission. This makes Vulkan&rsquo;s hybrid CPU-host
-                weight limitation visible without attempting a job.
-                <code>checkpoint_policy</code> is a tagged object whose <code>mode</code> is
-                <code>auto</code>, <code>explicit_segments</code> with <code>segments</code>, or
-                <code>disabled</code> with an optional retained <code>segments</code> value.
-                <code>checkpoint_segments</code> is the effective segment count, reported as
-                <code>0</code> whenever checkpointing is disabled, and
-                <code>checkpointing_enabled</code> is the resulting execution switch. A segment
-                value retained inside a disabled <code>checkpoint_policy</code> records configuration
-                provenance only; it is not executed.
-                <code>checkpoint_segments_source</code> is <code>auto</code>,
-                <code>conservative_fallback</code>, <code>configured</code>, or <code>disabled</code>, so
-                an operator can distinguish a measured automatic choice from a fail-closed fallback.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>optimizer_support</code> is <code>null</code> for a mock runner. A real runner returns
-                schema <code>{"id":"kiln.training-optimizer-support","version":1}</code> with the resident
-                <code>backend</code>, <code>device</code>, <code>base_weight_dtype</code>, and
-                <code>resolved_lora_parameter_dtype</code>. <code>immutable_after_startup=true</code>
-                identifies a process-lifetime capability snapshot. Product
-                <code>rounding_modes</code> and
-                <code>backend_implementation_rounding_modes</code> remain distinct so an implementation
-                capability cannot silently become server policy; product training is fixed to
-                <code>round_to_nearest</code>. A null
-                <code>resolved_lora_parameter_dtype</code> means the resident base dtype cannot be
-                resolved by the backend precision policy; per-kind tuple reasons carry the failure.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Read support in layers. <code>backend_implementation</code> reports the raw update
-                implementation, route, native-hook identity, and accepted parameter dtypes. Accelerator paths
-                use <code>native_device_hook</code>; CPU uses <code>portable_reference</code> with
-                <code>native_device_hook=false</code>. An unavailable raw implementation reports
-                <code>supported=false</code>, route <code>unavailable</code>, and no native hook.
-                <code>optimizer_tuple</code> then adds the exact resident
-                backend/device, base and resolved LoRA dtypes, product rounding, kind, and static rank range;
-                <code>optimizer_tuple_kinds</code> summarizes the successful resident tuples. Finally, each
-                <code>workloads</code> member independently reports <code>sft</code>, <code>grpo</code>,
-                <code>opd</code>, or <code>distill_refresh</code> execution with <code>supported</code>,
-                <code>unavailable_reason</code>, and the intersection in
-                <code>allowed_optimizer_kinds</code>. Consumers must use that workload entry, not infer server
-                execution from a hook or tuple.
-              </p>
-              <div class="code-block mt-3"><pre><code>{
-  "training": {
-    "optimizer_support": {
-      "schema": {"id": "kiln.training-optimizer-support", "version": 1},
-      "backend": "rocm",
-      "device": "rocm:0",
-      "base_weight_dtype": "bf16",
-      "resolved_lora_parameter_dtype": "bf16",
-      "immutable_after_startup": true,
-      "rounding_modes": ["round_to_nearest"],
-      "backend_implementation_rounding_modes": ["round_to_nearest"],
-      "optimizer_tuple_kinds": ["muon", "adam_w", "sgd"],
-      "workloads": [
-        {
-          "workload": "sft",
-          "supported": true,
-          "unavailable_reason": null,
-          "allowed_optimizer_kinds": ["muon", "adam_w", "sgd"]
-        },
-        {
-          "workload": "grpo",
-          "supported": true,
-          "unavailable_reason": null,
-          "allowed_optimizer_kinds": ["muon", "adam_w", "sgd"]
-        },
-        {
-          "workload": "opd",
-          "supported": true,
-          "unavailable_reason": null,
-          "allowed_optimizer_kinds": ["muon", "adam_w", "sgd"]
-        },
-        {
-          "workload": "distill_refresh",
-          "supported": false,
-          "unavailable_reason": "distill_refresh is unavailable until admission pins separate exact SFT and OPD phase plans, prepares the exact SFT rows, and reserves the maximum sequential working set",
-          "allowed_optimizer_kinds": []
-        }
-      ],
-      "optimizers": [
-        {
-          "kind": "muon",
-          "backend_implementation": {
-            "supported": true,
-            "route": "native_device_hook",
-            "native_device_hook": true,
-            "parameter_dtypes": ["f32", "bf16"]
-          },
-          "optimizer_tuple": {
-            "supported": true,
-            "unavailable_reason": null,
-            "lora_rank": {"minimum": 2, "maximum": 48, "backend_maximum": 48, "model_maximum": 1024, "live_memory_admission_required": true}
-          }
-        },
-        {
-          "kind": "adam_w",
-          "backend_implementation": {
-            "supported": true,
-            "route": "native_device_hook",
-            "native_device_hook": true,
-            "parameter_dtypes": ["f32", "bf16"]
-          },
-          "optimizer_tuple": {
-            "supported": true,
-            "unavailable_reason": null,
-            "lora_rank": {"minimum": 1, "maximum": 1024, "backend_maximum": null, "model_maximum": 1024, "live_memory_admission_required": true}
-          }
-        },
-        {
-          "kind": "sgd",
-          "backend_implementation": {
-            "supported": true,
-            "route": "native_device_hook",
-            "native_device_hook": true,
-            "parameter_dtypes": ["f32", "bf16"]
-          },
-          "optimizer_tuple": {
-            "supported": true,
-            "unavailable_reason": null,
-            "lora_rank": {"minimum": 1, "maximum": 1024, "backend_maximum": null, "model_maximum": 1024, "live_memory_admission_required": true}
-          }
-        }
-      ]
-    }
-  }
-}</code></pre></div>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                For canonical Qwen3.5-4B, <code>model_maximum</code> is 1024, derived from the
-                smallest trained projection. The table below is the resident optimizer-tuple matrix
-                before per-workload and live-memory admission. It is not a server-execution matrix.
-              </p>
-              <div class="overflow-x-auto mt-3">
-                <table class="w-full text-sm">
-                  <thead><tr><th>Backend</th><th>Base &rarr; LoRA dtype</th><th>SGD</th><th>AdamW</th><th>Muon</th></tr></thead>
-                  <tbody>
-                    <tr><td>CPU portable reference</td><td>F32 &rarr; F32</td><td>rank 1..=1024 (backend unbounded)</td><td>rank 1..=1024 (backend unbounded)</td><td>rank 2..=1024 (backend unbounded)</td></tr>
-                    <tr><td>CUDA</td><td>F32 &rarr; F32; BF16 &rarr; BF16</td><td>rank 1..=1024 (backend unbounded)</td><td>rank 1..=1024 (backend unbounded)</td><td>rank 2..=48</td></tr>
-                    <tr><td>ROCm</td><td>F32 &rarr; F32; BF16 &rarr; BF16</td><td>rank 1..=1024 (backend unbounded)</td><td>rank 1..=1024 (backend unbounded)</td><td>rank 2..=48</td></tr>
-                    <tr><td>Metal</td><td>BF16 &rarr; BF16</td><td>unsupported</td><td>rank 1..=1024 (backend unbounded)</td><td>rank 2..=32</td></tr>
-                    <tr><td>Vulkan tuple</td><td>F32/BF16 &rarr; F32</td><td>rank 1..=1024 (backend unbounded)</td><td>rank 1..=1024 (backend unbounded)</td><td>rank 2..=32</td></tr>
-                  </tbody>
-                </table>
-              </div>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                F16 is inference-only on CUDA/ROCm. Each rank object exposes the optimizer
-                <code>backend_maximum</code>, the trained-projection <code>model_maximum</code>, and
-                their effective minimum as <code>maximum</code>. A null
-                <code>backend_maximum</code> means the backend adds no ceiling; effective
-                <code>maximum</code> remains the concrete model ceiling.
-                <code>live_memory_admission_required=true</code> means the exact tuple is revalidated
-                against live capacity and rejected if it does not fit; admission does not lower the
-                requested rank, substitute an optimizer, or alter the backend range. CPU can expose
-                portable F32 tuples, including Muon rank 2+ before the model ceiling, while all four
-                server workloads remain unsupported. Hybrid Vulkan
-                can expose raw native hooks or tuples while CPU-host weights or a workload route make
-                <code>workloads[].supported=false</code>. Product rounding is immutable round-to-nearest.
-                Stochastic rounding is an
-                explicit optimizer-library policy, not a server config, request, or environment mode.
-                <code>KILN_BF16_STOCHASTIC_ROUND</code>,
-                <code>KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK</code>,
-                <code>KILN_CUDA_TRAINING_OPTIMIZER_FALLBACK</code>,
-                <code>KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK</code>,
-                <code>KILN_METAL_TRAINING_OPTIMIZER_FALLBACK</code>, and
-                <code>KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK</code> were removed without aliases;
-                delete them rather than translating them to new settings.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Every static workload requires a real readable runner, serving-profile training GPU
-                ownership, configured/resident weight-device agreement, a runtime that resolves those
-                weights, exact native backend/device identity, no Marlin-packed projection, and the
-                authoritative <code>kt_tape_authoritative</code> forward/backward route. SFT also rejects
-                multi-segment checkpointing with <code>full_logits</code>; OPD also requires its loss and
-                phase-B backward routes. The first failed condition is preserved in
-                <code>workloads[].unavailable_reason</code> and its allowed-kind list is empty.
-              </p>
-              <h5 id="training-tape-scope" class="font-semibold mt-4 mb-2">Tape scope authority and inference isolation</h5>
-              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
-                The kt autograd tape is a required workload substrate, not a configuration feature.
-                Kiln opens an internal thread-local training scope only around forward/backward work that
-                must record gradients. Scope presence is the recorder&rsquo;s sole activation authority:
-                a request cannot open or close it, disable one link, or select a partially tape-backed
-                workload. There is no TOML field, API property, CLI flag, or mechanically derived
-                environment name for tape activation. An unavailable graph-preserving route makes the
-                matching <code>workloads[]</code> member unsupported.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Ordinary inference never opens that scope and therefore retains forward-only fast paths.
-                In particular, GDN chunkwise recurrence and CUDA&rsquo;s weight-aware embedding lookup defer
-                only while a training scope is actually active; neither consults a cached global tape
-                default. While the scope is active, debug or performance tuning may select only an
-                implementation whose backward stays connected to the same tape. It cannot suppress a
-                recorder, sever the gradient graph, or silently change the optimizer update.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>KILN_USE_TAPE_FORWARD</code>, <code>KILN_USE_TAPE_FLASH_ATTN</code>,
-                <code>KILN_USE_TAPE_SDPA</code>, <code>KILN_USE_TAPE_LORA_ADD</code>,
-                <code>KILN_USE_TAPE_GDN</code>, <code>KILN_USE_TAPE_GDN_CONV</code>,
-                <code>KILN_USE_TAPE_GDN_QK_NORM</code>, and
-                <code>KILN_USE_TAPE_GDN_GATED_NORM</code> were removed without aliases or replacement
-                fields. Delete them from service definitions. The portable source contract verifies
-                ownership and inference isolation; it is not hardware qualification and does not claim
-                accelerator-specific numerical, latency, memory, or stability evidence.
-              </p>
-              <h5 id="training-frozen-parameter-ownership" class="font-semibold mt-4 mb-2">Frozen parameter ownership</h5>
-              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Native SFT, GRPO, and OPD train LoRA A/B tensors and no base-model parameters.
-                Embedding tables, base projection matrices, RMSNorm and gated-RMSNorm weights,
-                GDN gate parameters, MTP projection weights, and loss-head transposes are saved
-                constants rather than differentiable tape inputs. Backward operators return only
-                the activation and LoRA gradients required upstream. They do not allocate, retain,
-                deposit, or run matrix products for frozen-weight gradients; frozen fused
-                normalization routes also omit dWeight outputs and atomics.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Both chunks of the split Q/gate projection retain the original full LoRA A/B IDs.
-                Each chunk pads its B contribution to the full parameter shape before accumulation,
-                and tape-aware reshapes preserve the post-split activation graph. A sliced base
-                matrix or temporary B slice can never become an optimizer leaf. This ownership has
-                no request, TOML, CLI, debug, or environment override. It removes frozen dWeight
-                compute and storage by construction, but is not accelerator throughput evidence.
-              </p>
-              <h5 id="training-exact-gradient-boundary" class="font-semibold mt-4 mb-2">Exact LoRA gradient-set boundary</h5>
-              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Before an optimizer mutates any parameter, moment, momentum, or step counter, the
-                observed gradient tensor IDs must equal the configured trainable LoRA leaves. Every
-                gradient must match its leaf&rsquo;s shape, backward-compute dtype, and master device and
-                contain only finite values. Missing or unknown IDs, metadata drift, NaN, and infinity
-                reject the step; a finite all-zero gradient remains valid. There is no request, config,
-                debug, or environment bypass.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                CUDA, ROCm, and Vulkan use backend finite reducers. Metal currently synchronizes and
-                copies each complete gradient to the host for the same stride-aware finite scan until a
-                native Metal reducer is qualified. This is a correctness fallback, not a Metal
-                large-batch throughput claim, and it cannot be disabled at the optimizer boundary.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                Checkpoint reverse segments must return exactly the leaves in their layer range and
-                the tape bridge produces one accumulated entry per leaf when distinct recorded inputs
-                contribute to it. Every registered differentiable input must have a gradient before
-                reduction, so one connected clone cannot hide a disconnected use of the same leaf.
-                Split output-projection chunks assemble zero-padded contributions under the original
-                full LoRA leaf ID rather than temporary slice IDs. A range with no configured LoRA
-                leaves accepts only an empty gradient set. The checkpoint merge rejects duplicate leaf
-                IDs across disjoint segments. Token-level GRPO validates each completion&rsquo;s identity and metadata while
-                accumulating, then performs one finite-value scan on the combined set immediately
-                before optimizer mutation. SFT, GRPO, and OPD share this consumer contract.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                DistillRefresh is a separate sequential workload, not an OPD alias. Its SFT knowledge
-                phase and OPD behavior-recovery phase need separate exact phase plans; admission must
-                prepare the precise SFT rows and reserve the larger of the two sequential working sets.
-                Until one admission record pins all three facts, <code>distill_refresh</code> is always
-                unsupported with reason <code>distill_refresh is unavailable until admission pins separate
-                exact SFT and OPD phase plans, prepares the exact SFT rows, and reserves the maximum
-                sequential working set</code>. Cheap teacher-alias validation and metadata pinning retain
-                their established request-error ordering. Rejection still happens before seed derivation,
-                checkpoint loading, remote/local teacher materialization, corpus scanning, memory preflight,
-                or GPU reservation.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>checkpoint_boundary_policy</code> is the process-lifetime SFT boundary policy:
-                <code>recompute_mode</code> is <code>auto</code>, <code>enabled</code>, or
-                <code>disabled</code>; <code>recompute_threshold_tokens</code> is the inclusive
-                automatic crossover; <code>anchor_stride</code> is a positive explicit stride or
-                <code>null</code> for shape/cache-based selection; and <code>cache_target_bytes</code>
-                is the startup-converted integral byte target. The default object is shown below.
-                The typed loader separately tracks whether each configured field came from the
-                default, TOML, or environment; this response publishes the resolved execution object,
-                not a second mutable control plane.
-              </p>
-              <div class="code-block mt-3"><pre><code>{
-  "training": {
-    "checkpoint_boundary_policy": {
-      "recompute_mode": "auto",
-      "recompute_threshold_tokens": 8192,
-      "anchor_stride": null,
-      "cache_target_bytes": 6442450944
-    }
-  }
-}</code></pre></div>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>GET /health</code> and <code>GET /v1/health</code> repeat the same object at
-                <code>training.checkpoint_boundary_policy</code>. Trusted
-                <code>GET /v1/debug/model-state</code> uses the same path, and the dashboard&rsquo;s
-                Runtime Config training group renders its mode, threshold, stride, cache target,
-                immutability, and restart requirement. All four observations come from application
-                state; none re-reads a configuration file or environment variable.
-              </p>
-            </section>
-            <section class="pt-4" style="border-top: 1px solid var(--line);">
-              <h4 class="font-semibold mb-2"><code>memory_budget</code>: effective-cap partition</h4>
-              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>total_vram_bytes</code>/<code>total_vram_gib</code>,
-                <code>model_bytes</code>/<code>model_gib</code>,
-                <code>kv_cache_bytes</code>/<code>kv_cache_gib</code>, and
-                <code>training_budget_bytes</code>/<code>training_budget_gib</code> expose the exact
-                partition used by the running server. <code>inference_memory_fraction</code> records the
-                fraction assigned to inference. These values derive from effective capacity, never an
-                unclamped configuration request or raw unified-memory driver total.
-              </p>
-            </section>
-            <section class="pt-4" style="border-top: 1px solid var(--line);">
-              <h4 class="font-semibold mb-2">Other resolved runtime groups</h4>
-              <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>serving_profile</code> returns <code>profile</code>, its <code>source</code>, the
-                immutability and request-override flags, <code>effective_policy_source</code>, and the
-                complete effective policy for inference admission, training GPU ownership, adapter
-                transitions, dynamic KV resize, allocator reclaim, live graph capture, and exclusive
-                GPU behavior. <code>decode_runtime.deterministic</code> reports <code>enabled</code> and
-                <code>source</code>; <code>decode_runtime.max_decode_batch</code> reports
-                <code>configured</code>, <code>configured_source</code>, <code>backend_policy</code>,
-                <code>effective</code>, and <code>effective_source</code>.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>kv_cache</code> reports <code>num_blocks</code>, <code>num_blocks_source</code>,
-                <code>fp8_enabled</code>, and the complete <code>autoscaler</code> runtime object.
-                The autoscaler object separates <code>requested</code> from <code>enabled</code>, reports
-                <code>requested_source</code>, the one-shot <code>force_blocks</code> request and its
-                source, and a bounded <code>state</code>/<code>reason</code>. The same object appears at
-                <code>/health.decode_runtime.kv_autoscaler</code> and the trusted debug endpoint.
-                <code>memory.kv_autoscale</code> defaults true but remains subject to profile and backend
-                policy. A positive <code>memory.kv_force_blocks</code> is accepted only with autoscaling
-                requested in maintenance mode; zero disables it. No endpoint re-reads either deprecated
-                environment alias.
-              </p>
-              <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-                <code>generation</code> reports
-                <code>default_thinking_enabled</code>, <code>default_thinking_budget_tokens</code>,
-                <code>default_thinking_budget_ms</code>, and <code>fold_reasoning_into_content</code>.
-                Nullable generation defaults are returned as <code>null</code> when the server leaves that
-                request dimension unset.
-              </p>
-            </section>
-          </div>
-        </div>
+            <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
+              Use <code>GET /v1/config</code> to inspect the immutable startup configuration,
+              effective backend policy, graph state, capacity resolution, and live memory snapshot.
+              Each typed setting reports its resolved value, source, canonical environment name,
+              redaction state, and restart requirement. Kiln keeps configuration intent separate
+              from backend-selected execution policy and reports unsupported or unavailable
+              measurements as <code>null</code> rather than inventing values.
+            </p>
+            <pre class="overflow-x-auto text-sm leading-relaxed mt-4" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/config | python3 -m json.tool
+curl -fsS http://localhost:8420/v1/config | jq '.effective_configuration'</code></pre>
+            <p class="mt-4 text-sm leading-relaxed" style="color: var(--fg-dim);">
+              See the <a href="docs/configuration/">Configuration Reference</a> for common settings,
+              the <a href="docs/configuration-complete/">Complete Configuration Reference</a> for
+              every field and precedence rule, and the
+              <a href="docs/observability-schema/">Observability API Schema</a> for the exact
+              response shape.
+            </p>
           </div>
         </details>
         <p class="mt-4 text-sm leading-relaxed" style="color: var(--fg-dim);">
@@ -1872,10 +392,10 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
           trusted debug state exposes the complete base-weight shard manifest. Training and eval
           artifacts reuse this identity without reading model files mid-inference. Legacy
           aggregate-only checkpoints cannot establish exact shard identity. See the
-          <a href="https://github.com/ericflo/kiln/blob/main/docs/BASE_WEIGHT_PROVENANCE.md">base-weight provenance contract</a>.
+          <a href="docs/base-weight-provenance/">base-weight provenance contract</a>.
         </p>
         <p class="mt-4 text-sm leading-relaxed" style="color:var(--fg-dim)">
-          Production startup also constructs a strict <code>kiln.execution-provenance.v1</code> record over the backend/device, numerical runtime, exact executable, optional source revision, model/tokenizer/template, precision, compiled kernel contract, and effective configuration/environment digests. Response metadata names the typed configuration digest <code>effective_config_hash</code>; the separate provenance environment digest includes redacted presence markers for secret-bearing <code>KILN_*</code> inputs. Health exposes only the bounded identity summary and fails readiness if a real backend lacks a valid record; the gated debug endpoint returns the complete typed record without echoing raw process values. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/EXECUTION_PROVENANCE.md">execution provenance contract</a>.
+          Production startup also constructs a strict <code>kiln.execution-provenance.v1</code> record over the backend/device, numerical runtime, exact executable, optional source revision, model/tokenizer/template, precision, compiled kernel contract, and effective configuration/environment digests. Response metadata names the typed configuration digest <code>effective_config_hash</code>; the separate provenance environment digest includes redacted presence markers for secret-bearing <code>KILN_*</code> inputs. Health exposes only the bounded identity summary and fails readiness if a real backend lacks a valid record; the gated debug endpoint returns the complete typed record without echoing raw process values. See the <a href="docs/execution-provenance/">execution provenance contract</a>.
         </p>
       </article>
 
@@ -1883,13 +403,17 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
         <div class="label mb-3">First requests</div>
         <h2 id="copy-paste-first-requests" class="text-2xl font-semibold mb-4">Copy-paste first requests</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          Once Kiln is serving on <code>localhost:8420</code>, these are the smallest useful
-          requests to chat, submit one SFT correction, submit scored GRPO completions, and watch the training queue.
+          Once Kiln is serving on <code>localhost:8420</code>, start with chat.
+          The SFT and GRPO examples require
+          <code>KILN_SERVER_SERVING_PROFILE=experimental</code> and a backend
+          whose runtime capability report admits the requested training workload.
+          Both examples leave the new adapter inactive so evaluation can decide
+          whether it should be served.
         </p>
         <div class="grid gap-4">
           <section class="endpoint">
             <h3 class="font-semibold mb-2">First chat completion</h3>
-            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/chat/completions \
+            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "messages": [{"role": "user", "content": "Hello!"}],
@@ -1900,20 +424,26 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
           </section>
           <section class="endpoint">
             <h3 class="font-semibold mb-2">First SFT correction submission</h3>
-            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/train/sft \
+            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/train/sft \
   -H "Content-Type: application/json" \
   -d '{
     "examples": [{"messages": [
       {"role": "user", "content": "Hi"},
       {"role": "assistant", "content": "Hey there!"}
     ]}],
-    "config": {"training_profile": "native_online_lora_v1", "output_name": "default", "epochs": 3, "invalid_row_policy": "fail"}
+    "config": {
+      "training_profile": "native_online_lora_v1",
+      "output_name": "first-sft",
+      "epochs": 3,
+      "invalid_row_policy": "fail",
+      "auto_load": false
+    }
   }' \
   | python3 -m json.tool</code></pre>
           </section>
           <section class="endpoint">
             <h3 class="font-semibold mb-2">First GRPO scored-completions submission</h3>
-            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/train/grpo \
+            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/train/grpo \
   -H "Content-Type: application/json" \
   -d '{
     "groups": [{
@@ -1923,7 +453,12 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
         {"text": "Blue", "reward": 0.0}
       ]
     }],
-    "config": {"output_name": "grpo-demo", "kl_coeff": 0.1}
+    "config": {
+      "output_name": "grpo-demo",
+      "behavior_policy": "no_importance_correction",
+      "kl_coeff": 0.1,
+      "auto_load": false
+    }
   }' \
   | python3 -m json.tool</code></pre>
           </section>
@@ -1931,17 +466,20 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
             <h3 class="font-semibold mb-2">Training status check</h3>
             <p class="text-sm mb-3" style="color: var(--fg-dim);">Use the CLI for a friendlier summary, or hit the endpoint directly:</p>
             <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>kiln train status</code></pre>
-            <pre class="overflow-x-auto text-sm leading-relaxed mt-3" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/train/status | python3 -m json.tool</code></pre>
+            <pre class="overflow-x-auto text-sm leading-relaxed mt-3" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/train/status | python3 -m json.tool</code></pre>
           </section>
         </div>
       </article>
 
       <article class="card p-6">
         <div class="label mb-3">Advanced flows</div>
-        <h2 id="power-user-requests" class="text-2xl font-semibold mb-4">Copy-paste power-user requests</h2>
+        <h2 id="power-user-requests" class="text-2xl font-semibold mb-4">Copyable advanced requests</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
           After the first chat and training jobs work, these examples cover provenance-bound rollouts,
           text-only batch generation, adapter portability, adapter merging, per-request composition, and training-completion webhooks.
+          Upload, merge, and live composition are adapter mutations and therefore
+          require the <code>experimental</code> or drained
+          <code>maintenance</code> profile.
         </p>
         <div class="grid gap-4">
           <section class="endpoint">
@@ -1961,13 +499,15 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
           </section>
           <section class="endpoint">
             <h3 class="font-semibold mb-2">Text-only batch completions</h3>
-            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/completions/batch \
+            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/completions/batch \
   -H "Content-Type: application/json" \
   -d '{"prompts": ["Name a warm color.", "Name a cool color."], "max_tokens": 32, "seed": 7}' \
   | python3 -m json.tool</code></pre>
             <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-              This high-throughput endpoint does not emit per-token behavior probabilities; use
-              <code>behavior_policy: "no_importance_correction"</code> for its outputs.
+              This endpoint returns text, not trainer-ready scored groups, and
+              does not emit per-token behavior probabilities. Score and reshape
+              the completions before training, then explicitly use
+              <code>behavior_policy: "no_importance_correction"</code>.
             </p>
             <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
               Chat and batch requests accept <code>ignore_eos: true</code> for bounded fixed-length
@@ -1980,17 +520,17 @@ curl -s http://localhost:8420/v1/config | jq '.effective_configuration.fields["s
           </section>
           <section class="endpoint">
             <h3 class="font-semibold mb-2">Download and upload an adapter archive</h3>
-            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -L http://localhost:8420/v1/adapters/default/download \
+            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/adapters/default/download \
   -o default-adapter.tar.gz
 
-curl -s http://localhost:8420/v1/adapters/upload \
+curl -fsS http://localhost:8420/v1/adapters/upload \
   -F "archive=@default-adapter.tar.gz" \
   -F "name=default-copy" \
   | python3 -m json.tool</code></pre>
           </section>
           <section class="endpoint">
             <h3 class="font-semibold mb-2">Merge adapters with TIES</h3>
-            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/adapters/merge \
+            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/adapters/merge \
   -H "Content-Type: application/json" \
   -d '{
     "output_name": "merged-ties",
@@ -2004,7 +544,7 @@ curl -s http://localhost:8420/v1/adapters/upload \
           </section>
           <section class="endpoint">
             <h3 class="font-semibold mb-2">Concatenate adapters into a wider LoRA</h3>
-            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/adapters/merge \
+            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/adapters/merge \
   -H "Content-Type: application/json" \
   -d '{
     "output_name": "merged-concat",
@@ -2018,7 +558,7 @@ curl -s http://localhost:8420/v1/adapters/upload \
           </section>
           <section class="endpoint">
             <h3 class="font-semibold mb-2">Compose adapters per request</h3>
-            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/chat/completions \
+            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "messages": [{"role": "user", "content": "Write a short checklist."}],
@@ -2058,7 +598,13 @@ kiln serve --config kiln.toml</code></pre>
           and handler inventory. The guidance below explains workflows and operational tradeoffs; it
           does not redefine either machine-readable contract.
         </p>
-        <h3 id="performance-timing" class="text-xl font-semibold mt-6 mb-3">Attribute first-token latency</h3>
+        <details class="reference-details mt-5">
+          <summary id="performance-timing">
+            <span>Deep reference: latency attribution</span>
+            <small>Phase ownership, nullability, streaming events, and qualification evidence</small>
+          </summary>
+          <div class="reference-details-body">
+        <h3 class="text-xl font-semibold mt-6 mb-3">Attribute first-token latency</h3>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
           Set <code>include_performance: true</code> on a chat request to receive terminal
           <code>metadata.performance</code>. Batching-engine responses partition TTFT into
@@ -2145,7 +691,21 @@ kiln serve --config kiln.toml</code></pre>
           continuity of an already-decoding request instead of comparing a queued peer with a
           pressure interval that began first.
         </p>
+          </div>
+        </details>
         <h3 id="prompt-logprobs" class="text-xl font-semibold mt-6 mb-3">Score prompt tokens</h3>
+        <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
+          Send token IDs to <code>POST /v1/completions</code> with <code>max_tokens</code> set to
+          <code>0</code> or <code>1</code> and <code>prompt_logprobs</code> from <code>0</code> through
+          <code>256</code>. This serialized scoring route is intended for identity-bound teacher
+          queries, not high-throughput generation.
+        </p>
+        <details class="reference-details mb-4">
+          <summary>
+            <span>Deep reference: prompt-scoring guarantees</span>
+            <small>Result shape, validation, backend routes, limits, and settlement</small>
+          </summary>
+          <div class="reference-details-body">
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
           Set <code>max_tokens</code> to <code>0</code> or <code>1</code> and request
           <code>prompt_logprobs</code> from <code>0</code> through <code>256</code>. The first result is
@@ -2176,6 +736,8 @@ kiln serve --config kiln.toml</code></pre>
           <code>kiln_prompt_logprob_selection_rows_total</code>, labeled with the closed routes
           <code>compact_device</code> and <code>bounded_host_fallback</code>.
         </p>
+          </div>
+        </details>
         <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>{
   "prompt": [1, 42, 314],
   "max_tokens": 0,
@@ -2217,7 +779,7 @@ kiln serve --config kiln.toml</code></pre>
           batch request. An omitted field inherits its server default; explicit <code>null</code> makes
           that dimension unlimited, even when the server has a default; <code>0</code> closes an open
           thinking block immediately. See the
-          <a href="https://github.com/ericflo/kiln/blob/main/docs/THINKING_BUDGET_CONTRACT.md">Thinking Budget Contract</a>
+          <a href="docs/thinking-budgets/">Thinking Budget Contract</a>
           for the normative wire schema and executable semantics.
         </p>
         <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>{
@@ -2239,6 +801,12 @@ kiln serve --config kiln.toml</code></pre>
           on runtime speed. Token-budgeted requests remain cacheable under a budget-aware key. Official
           OpenAI clients can send these Kiln extensions through <code>extra_body</code>.
         </p>
+        <details class="reference-details mt-5">
+          <summary>
+            <span>Deep reference: thinking-budget results</span>
+            <small>Outcome fields, streaming placement, request history, and metrics</small>
+          </summary>
+          <div class="reference-details-body">
         <pre class="overflow-x-auto text-sm leading-relaxed mt-4" style="color: var(--fg);"><code>{
   "triggered": true,
   "trigger": "tokens",
@@ -2275,6 +843,8 @@ kiln serve --config kiln.toml</code></pre>
           <code>kiln_thinking_budget_effective_seconds</code> are fixed-bucket histograms. Numeric
           request limits never become labels.
         </p>
+          </div>
+        </details>
         <div class="endpoint mt-5">
           <h3 class="font-semibold mb-2">Server defaults</h3>
           <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code># kiln.toml; omit either setting for unlimited
@@ -2291,6 +861,14 @@ KILN_SERVER_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
       <article class="card p-6">
         <div class="label mb-3">Adapters</div>
         <h2 id="lora-lifecycle" class="text-2xl font-semibold mb-4">LoRA lifecycle</h2>
+        <p class="mb-4 leading-relaxed" style="color: var(--fg-dim);">
+          Adapter reads are available in every profile. Loading, unloading,
+          uploading, merging, deleting, or otherwise changing adapter weights
+          requires <code>experimental</code> or drained
+          <code>maintenance</code>. Kiln currently has no startup option for a
+          saved LoRA, so the default <code>stable</code> profile cannot serve or
+          evaluate one.
+        </p>
         <div class="endpoint-list" style="color: var(--fg-dim);">
           <div class="endpoint"><span class="method">GET</span> <code>/v1/adapters</code> &mdash; list saved/available LoRA adapters, identify the active adapter, and report the exact loaded name/content revision.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/adapters/load</code> &mdash; load an adapter from disk, or explicitly reload its already-live revision at the request barrier, and return the exact content revision.</div>
@@ -2312,13 +890,29 @@ KILN_SERVER_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
           Upload, merge, delete, training publication, eval-gate demotion, and live weight transitions share one serialized revision barrier. Hidden staging directories never appear in the adapter list. Delete returns <code>adapter_active</code> when the name is the server default and <code>adapter_loaded</code> when its revision is physically loaded; both are HTTP 409 responses with an unload-and-retry hint. Gate demotion swaps loaded rejected weights to base before renaming them to <code>.failed</code>.
         </p>
         <p class="mt-3" style="color: var(--fg-dim);">
-          The required-device <code>serving-rocm-public-mutation-lifecycle-v1</code> qualification uses one exact source-built binary for two isolated arms. The experimental arm hashes and privately copies a real adapter, proves the public load/list/chat-header/unload identity chain, requires captured-graph invalidation, and compares identical base output before load and after unload. The maintenance arm uses typed <code>memory.kv_force_blocks</code>, requires the structured resize to reach its exact target, then proves a rejected chat request changed no admission, prefill, decode, or used-block counter. Both arms fail on device faults, dirty teardown, or snapshot residue. The current clean pushed-source Strix Halo receipt observed a null adapter phase on the already-active request and 3,530.155 ms on the request queued behind the live reload barrier, inside 3,531.217 ms of actor queue; it also completed the exact 4,096-to-1 block maintenance resize with zero request, device, shutdown, or residue failure. This is lifecycle evidence, not a throughput or endurance claim. The complete command, input rules, metrics, receipt bindings, and non-promises are in the <a href="https://ericflo.github.io/kiln/docs/hardware-qualification/#rocm-public-mutation-lifecycle">Qualification guide</a>.
+          Public-mutation qualification verifies the load, list, request-header, unload,
+          graph-invalidation, memory-resize, failure, and cleanup boundaries on the backend and
+          device named by each receipt. A device-specific result is evidence for that run; it does
+          not define a product default or restrict other compatible devices. See
+          <a href="docs/hardware-qualification/#serving-qualification">Hardware Qualification</a>
+          for the protocol and current receipts.
         </p>
       </article>
 
       <article class="card p-6">
         <div class="label mb-3">Training</div>
         <h2 id="training" class="text-2xl font-semibold mb-4">SFT, GRPO, OPD, status, and queue control</h2>
+        <p class="mb-4 leading-relaxed" style="color: var(--fg-dim);">
+          The default <code>stable</code> serving profile rejects training and live weight transitions.
+          Use <code>experimental</code> for a controlled train, eval, and activation
+          loop. <code>maintenance</code> admits drained training but disables
+          generation and eval; its artifact remains inactive until a later
+          <code>experimental</code> process evaluates or loads it. GPU training
+          takes exclusive accelerator ownership even though jobs are managed by
+          a background queue. Native training is capability-gated: for example,
+          the current hybrid Vulkan server rejects it before dataset admission
+          and directs broader workloads through the verified HF/TRL handoff.
+        </p>
         <div class="endpoint-list" style="color: var(--fg-dim);">
           <div class="endpoint"><span class="method">POST</span> <code>/v1/train/sft</code> &mdash; submit supervised fine-tuning examples and return the exact effective seed.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/train/hf/sft/exports</code> &mdash; atomically publish an immutable SFT handoff with exact model, tokenizer, template, corpus, provenance, optional split/adapter, and pinned runner identities.</div>
@@ -2344,13 +938,24 @@ KILN_SERVER_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
           <div class="endpoint"><span class="method">DELETE</span> <code>/v1/train/queue/{job_id}</code> &mdash; cancel a job: queued jobs leave the queue; running jobs stop at the next step boundary.</div>
         </div>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
-          Every admitted SFT, GRPO, OPD, and OPD-backed distillation entry point resolves one seed before queue publication. Set <code>config.seed</code> for a fresh run or omit it and record the decimal-string <code>effective_seed</code> returned by submission and status. Recipe and self-improvement responses return <code>effective_seeds</code> keyed by job ID. DistillRefresh is distinct and currently rejects before a seed or job exists. Resume inherits <code>rng_states["lora-init"].seed</code> from the exact checkpoint and rejects a conflicting request seed. This value is an initial condition, not a cross-build or cross-backend byte-replay promise; weights, data, tokenizer/template, build, runtime, device, precision, kernels, and effective environment remain part of the deterministic envelope.
+          An admitted SFT, GRPO, OPD, or OPD-backed distillation job resolves its seed before it
+          enters the queue. Set <code>config.seed</code>, or omit it and retain the decimal-string
+          <code>effective_seed</code> returned by submission and status. Resume inherits the
+          checkpoint&rsquo;s LoRA-initialization seed and rejects a conflicting request seed. A seed
+          is an initial condition, not a promise of byte-identical results across builds, backends,
+          devices, precision policies, or environments.
+        </p>
+        <details class="reference-details mt-5">
+          <summary>
+            <span>Deep reference: training admission and identity</span>
+            <small>SFT loss, native profiles, optimizers, recipes, ingestion, and checkpoint planning</small>
+          </summary>
+          <div class="reference-details-body">
+        <p class="mt-3 text-sm" style="color: var(--fg-dim);">
+          Native SFT renders TRL&rsquo;s prefix-preserving Qwen3.5 training template with <code>add_generation_prompt=false</code>. Loss covers the thinking/answer/tool-call body, <code>&lt;|im_end|&gt;</code>, and trailing newline; assistant role headers plus system, user, and tool-response turns use the <code>-100</code> ignore label. Exact rendered text, token IDs, and labels are checked against source-pinned Hugging Face and TRL sources for plain, thinking, tool-call, tool-response, and multi-turn examples. See <a href="docs/sft-tokenization/">SFT Tokenization and Loss</a> for the normative contract and reproduction command.
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
-          Native SFT renders TRL&rsquo;s prefix-preserving Qwen3.5 training template with <code>add_generation_prompt=false</code>. Loss covers the thinking/answer/tool-call body, <code>&lt;|im_end|&gt;</code>, and trailing newline; assistant role headers plus system, user, and tool-response turns use the <code>-100</code> ignore label. Exact rendered text, token IDs, and labels are checked against source-pinned Hugging Face and TRL sources for plain, thinking, tool-call, tool-response, and multi-turn examples. See <a href="https://github.com/ericflo/kiln/blob/main/docs/sft-tokenization.md">SFT Tokenization and Assistant-Only Loss</a> for the normative contract and reproduction command.
-        </p>
-        <p class="mt-3 text-sm" style="color: var(--fg-dim);">
-          Native SFT accepts one fixed profile: <code>native_online_lora_v1</code>. One conversation is one optimizer update at a constant learning rate; accumulation is 1, with no warmup, decay, or gradient clipping. Unknown profile names and general-trainer fields return structured <code>training_invalid_request</code> errors. Server SFT always normalizes omitted <code>train_mtp</code> to false and rejects explicit true before queue publication; the deferred MTP alignment phase remains offline-only until it participates in server GPU coordination, memory admission, cancellation, and settlement. A hybrid Vulkan server deliberately returns <code>training_backend_unsupported</code> before dataset admission: its serving weights use CPU-host handles, while the multi-GiB full-model resident Vulkan training path has not passed the production qualification gates. There is no environment bypass; use HF/TRL export/import until that substrate is proven. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/NATIVE_SFT_PROFILE.md">Native SFT Profile</a> for update, precision, optimizer-state, checkpoint, and MTP semantics. Use the HF/TRL route for broader training: SFT and recorded-GRPO exports snapshot their canonical corpus, exact model/tokenizer/template provenance, optional split, and optional adapter into one private immutable registry, embed the task-aware pinned runner, and revalidate every byte before download. GRPO accepts exactly one provenance-complete inline group array or server-local canonical JSONL path. <code>kiln train hf export-sft</code> and <code>export-grpo</code> wrap creation, redirect-free streamed download, strict single-root archive validation, manifest verification, atomic no-clobber local publication, and default server cleanup; <code>list</code> and <code>delete</code> manage retained exports. <code>kiln train hf import-peft</code> verifies the completed local bundle before connecting, streams its deterministic corpus-free envelope through bounded memory, and accepts success only when HTTP 201, JSON, strong ETag, import digest, PEFT content revision, installed byte count, six-file count, task, and source identities match values derived locally; it retains the source bundle on every outcome. The raw PEFT import API accepts only the derived ten-file envelope, caps compressed/expanded/metadata resources, compares the complete current resident identity, validates every LoRA A/B shape, shares the adapter mutation barrier and strict disk quota, and stores a self-verifying <code>kiln.hf-trl-import.v1</code> receipt before kernel-enforced no-replace publication. The versioned identity model, 256 MiB inline-body ceiling, 256-export registry cap, 2 GiB import-body ceiling, and lifecycle are documented in the <a href="https://github.com/ericflo/kiln/blob/main/docs/HF_TRL_INTEROP.md">HF/TRL Interoperability Contract</a>.
+          Native SFT accepts one fixed profile: <code>native_online_lora_v1</code>. One conversation is one optimizer update at a constant learning rate; accumulation is 1, with no warmup, decay, or gradient clipping. Unknown profile names and general-trainer fields return structured <code>training_invalid_request</code> errors. Server SFT always normalizes omitted <code>train_mtp</code> to false and rejects explicit true before queue publication; the deferred MTP alignment phase remains offline-only until it participates in server GPU coordination, memory admission, cancellation, and settlement. A hybrid Vulkan server deliberately returns <code>training_backend_unsupported</code> before dataset admission: its serving weights use CPU-host handles, while the multi-GiB full-model resident Vulkan training path has not passed the production qualification gates. There is no environment bypass; use HF/TRL export/import until that substrate is proven. See the <a href="docs/native-sft-profile/">Native SFT Profile</a> for update, precision, optimizer-state, checkpoint, and MTP semantics. Use the HF/TRL route for broader training: SFT and recorded-GRPO exports snapshot their canonical corpus, exact model/tokenizer/template provenance, optional split, and optional adapter into one private immutable registry, embed the task-aware pinned runner, and revalidate every byte before download. GRPO accepts exactly one provenance-complete inline group array or server-local canonical JSONL path. <code>kiln train hf export-sft</code> and <code>export-grpo</code> wrap creation, redirect-free streamed download, strict single-root archive validation, manifest verification, atomic no-clobber local publication, and default server cleanup; <code>list</code> and <code>delete</code> manage retained exports. <code>kiln train hf import-peft</code> verifies the completed local bundle before connecting, streams its deterministic corpus-free envelope through bounded memory, and accepts success only when HTTP 201, JSON, strong ETag, import digest, PEFT content revision, installed byte count, six-file count, task, and source identities match values derived locally; it retains the source bundle on every outcome. The raw PEFT import API accepts only the derived ten-file envelope, caps compressed/expanded/metadata resources, compares the complete current resident identity, validates every LoRA A/B shape, shares the adapter mutation barrier and strict disk quota, and stores a self-verifying <code>kiln.hf-trl-import.v1</code> receipt before kernel-enforced no-replace publication. The versioned identity model, 256 MiB inline-body ceiling, 256-export registry cap, 2 GiB import-body ceiling, and lifecycle are documented in <a href="docs/hf-trl-interoperability/">HF/TRL Interoperability</a>.
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
           <code>config.optimizer</code> is tagged by kind; omission selects Muon, and
@@ -2398,7 +1003,7 @@ KILN_SERVER_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
           two-phase planning reason above.
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
-          Every SFT source uses one row-admission contract. <code>config.invalid_row_policy</code> is <code>fail</code> by default; explicit <code>skip</code> queues only valid rows and records ordered kept/rejected SHA-256 identities under <code>train_receipt.json</code> &rarr; <code>data.sft_ingestion</code>. Server-local JSONL is revalidated against its submit-time manifest before GPU ownership. See <a href="https://github.com/ericflo/kiln/blob/main/docs/sft-ingestion.md">SFT Ingestion, Invalid Rows, and Row Identity</a>.
+          Every SFT source uses one row-admission contract. <code>config.invalid_row_policy</code> is <code>fail</code> by default; explicit <code>skip</code> queues only valid rows and records ordered kept/rejected SHA-256 identities under <code>train_receipt.json</code> &rarr; <code>data.sft_ingestion</code>. Server-local JSONL is revalidated against its submit-time manifest before GPU ownership. See <a href="docs/sft-ingestion/">SFT Ingestion and Row Identity</a>.
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
           New exact checkpoints, <code>train_receipt.json</code>, and <code>adapter_manifest.json</code> persist the full validated base-weight shard manifest and <code>kiln.execution-provenance.v1</code> process/runtime envelope. Exact resume first passes the current workload and resident tuple gates, then compares shard bytes and the canonical execution digest before GPU ownership. It separately validates the backend/device, optimizer kind and state, rank, concrete parameter/activation/gradient dtypes, immutable rounding mode, and checkpoint/tape/loss routes. Server training records only <code>{"mode":"round_to_nearest"}</code>. A legacy checkpoint recording stochastic rounding fails closed on precision mismatch before GPU ownership; Kiln does not discard its seed or continue under a different update rule. A changed native identity, newly Marlin-packed weight, unavailable authoritative route, aggregate-only checkpoint, or partial-runtime checkpoint is likewise not exact-resumable.
@@ -2407,44 +1012,53 @@ KILN_SERVER_DEFAULT_THINKING_BUDGET_MS=5000</code></pre>
           Queued resume admission fully validates the checkpoint manifest plus every declared artifact size and SHA-256, then retains only the checkpoint ID, a digest of that validated manifest (whose entries cover the artifact hashes), and the effective seed. Before memory reservation at dequeue, the worker fully reloads the checkpoint and requires both the recomputed identity and effective seed to match. This is revalidation, not a filesystem snapshot: the queue does not copy or pin checkpoint files, and it cannot eliminate a mutation race after the reload. Keep an exact checkpoint directory immutable for its entire use.
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
-          Native SFT checkpoint-boundary replay is also startup-authoritative. <code>[training].recompute_checkpoint_boundaries</code> defaults to <code>auto</code>, whose inclusive sequence threshold defaults to 8,192 tokens. <code>checkpoint_boundary_anchor_stride</code> defaults to <code>auto</code> and derives one positive stride from the admitted shape and the default 6 GiB <code>checkpoint_boundary_cache_gb</code> target; explicit positive strides bypass only that shape calculation. Canonical environment names derive mechanically as <code>KILN_TRAINING_&lt;FIELD&gt;</code>; the four historical unsectioned names are deprecated, parsed strictly, and must agree with a present canonical value. The same pure policy functions drive admission and execution, and no runtime path re-reads those names. Exact SFT checkpoints additionally bind the admitted backend loss route as <code>sft_loss_route</code> under <code>kiln.training-checkpoint-planning.v4</code>; prior SFT v3 checkpoints fail closed as planning drift. GRPO and OPD continue to retain every segment boundary and remain under <code>kiln.training-checkpoint-planning.v3</code>. A v2 checkpoint or any applicable policy change is planning drift and cannot resume exactly; the outer checkpoint envelope remains schema v1. Restart the server to change startup policy. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/CONFIGURATION.md#sft-checkpoint-boundary-policy">configuration contract</a> and <a href="https://github.com/ericflo/kiln/blob/main/docs/training-checkpoints.md#checkpoint-planning-identity">checkpoint identity contract</a>.
+          Native SFT checkpoint-boundary replay is also startup-authoritative. <code>[training].recompute_checkpoint_boundaries</code> defaults to <code>auto</code>, whose inclusive sequence threshold defaults to 8,192 tokens. <code>checkpoint_boundary_anchor_stride</code> defaults to <code>auto</code> and derives one positive stride from the admitted shape and the default 6 GiB <code>checkpoint_boundary_cache_gb</code> target; explicit positive strides bypass only that shape calculation. Canonical environment names derive mechanically as <code>KILN_TRAINING_&lt;FIELD&gt;</code>; the four historical unsectioned names are deprecated, parsed strictly, and must agree with a present canonical value. The same pure policy functions drive admission and execution, and no runtime path re-reads those names. Exact SFT checkpoints additionally bind the admitted backend loss route as <code>sft_loss_route</code> under <code>kiln.training-checkpoint-planning.v4</code>; prior SFT v3 checkpoints fail closed as planning drift. GRPO and OPD continue to retain every segment boundary and remain under <code>kiln.training-checkpoint-planning.v3</code>. A v2 checkpoint or any applicable policy change is planning drift and cannot resume exactly; the outer checkpoint envelope remains schema v1. Restart the server to change startup policy. See the <a href="docs/configuration-complete/#sft-checkpoint-boundary-policy">complete configuration reference</a> and <a href="docs/training-checkpoints/#checkpoint-planning-identity">Native Training Checkpoints</a>.
         </p>
-        <div class="code-block mt-4" data-placeholder="JOB_ID=<job-id>"><pre><code>curl -s http://localhost:8420/v1/train/queue | python3 -m json.tool
+          </div>
+        </details>
+        <h3 class="text-xl font-semibold mt-6 mb-3">Cancel or resume training</h3>
+        <div class="code-block mt-4" data-placeholder="JOB_ID=<job-id>"><pre><code>curl -fsS http://localhost:8420/v1/train/queue | python3 -m json.tool
 JOB_ID=&lt;job-id&gt;
-curl -s -X DELETE http://localhost:8420/v1/train/queue/$JOB_ID | python3 -m json.tool</code></pre></div>
+curl -fsS -X DELETE http://localhost:8420/v1/train/queue/$JOB_ID | python3 -m json.tool</code></pre></div>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
           DELETE removes queued jobs or requests cooperative cancellation of a running job. Terminal jobs are removed through <code>/v1/train/jobs/{job_id}</code>.
         </p>
+        <details class="reference-details mt-5">
+          <summary>
+            <span>Checkpoint and publication examples</span>
+            <small>SFT, GRPO, and OPD resume requests, revision conflicts, and GRPO receipts</small>
+          </summary>
+          <div class="reference-details-body">
         <div class="code-block mt-4"><pre><code># Start exact SFT checkpoints every 25 committed steps
-curl -s http://localhost:8420/v1/train/sft \
+curl -fsS http://localhost:8420/v1/train/sft \
   -H 'content-type: application/json' \
   -d '{"dataset_path":"/data/corrections.jsonl","config":{"training_profile":"native_online_lora_v1","output_name":"support-bot","epochs":3,"checkpoint_interval":25}}'
 
 # Continue with identical data/config and the basename reported by job detail
-curl -s http://localhost:8420/v1/train/sft \
+curl -fsS http://localhost:8420/v1/train/sft \
   -H 'content-type: application/json' \
   -d '{"dataset_path":"/data/corrections.jsonl","config":{"training_profile":"native_online_lora_v1","output_name":"support-bot","epochs":3,"checkpoint_interval":25,"resume_checkpoint":"support-bot-checkpoint-step-00000025.kiln-checkpoint"}}'
 
 # The same exact contract applies to streamed GRPO optimizer groups
-curl -s http://localhost:8420/v1/train/grpo \
+curl -fsS http://localhost:8420/v1/train/grpo \
   -H 'content-type: application/json' \
   -d '{"dataset_path":"/data/scored-groups.jsonl","config":{"output_name":"reward-bot","checkpoint_interval":25}}'
 
-curl -s http://localhost:8420/v1/train/grpo \
+curl -fsS http://localhost:8420/v1/train/grpo \
   -H 'content-type: application/json' \
   -d '{"dataset_path":"/data/scored-groups.jsonl","config":{"output_name":"reward-bot","checkpoint_interval":25,"resume_checkpoint":"reward-bot-checkpoint-step-00000025.kiln-checkpoint"}}'
 
 # OPD defaults to an exact checkpoint every 25 committed optimizer steps
-curl -s http://localhost:8420/v1/train/opd \
+curl -fsS http://localhost:8420/v1/train/opd \
   -H 'content-type: application/json' \
   -d '{"prompts":[{"messages":[{"role":"user","content":"Explain why the sky is blue."}]}],"teacher":"qwen35@vllm","config":{"output_name":"distilled-bot","checkpoint_interval":25}}'
 
 # Resume with identical prompts/config and the exact registered teacher revision
-curl -s http://localhost:8420/v1/train/opd \
+curl -fsS http://localhost:8420/v1/train/opd \
   -H 'content-type: application/json' \
   -d '{"prompts":[{"messages":[{"role":"user","content":"Explain why the sky is blue."}]}],"teacher":"qwen35@vllm","config":{"output_name":"distilled-bot","checkpoint_interval":25,"resume_checkpoint":"distilled-bot-checkpoint-step-00000025.kiln-checkpoint"}}'</code></pre></div>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
-          SFT, GRPO, and OPD checkpoints are immutable <code>.kiln-checkpoint</code> directories published directly beneath the adapter registry while training runs. Cancellation checkpoints at the next committed SFT step, GRPO group, or settled OPD candidate boundary. Resume requires the same output name, data bytes and route, effective configuration, precision, model/base weights, tokenizer, and backend; OPD additionally binds the exact teacher content revision and keeps its optimizer-step and candidate cursors separate. The server validates the complete adapter, optimizer, reference/EMA where applicable, loop-state artifact set, and checksums before continuation. Job detail reports <code>training_kind</code>, <code>data_source_kind</code>, the next epoch/group/candidate cursor, validated effective configuration and data identity, plus OPD teacher identity. PEFT snapshots remain serving-only. See <a href="https://github.com/ericflo/kiln/blob/main/docs/training-checkpoints.md">Native Training Checkpoints</a> for the exact contract.
+          SFT, GRPO, and OPD checkpoints are immutable <code>.kiln-checkpoint</code> directories published directly beneath the adapter registry while training runs. Cancellation checkpoints at the next committed SFT step, GRPO group, or settled OPD candidate boundary. Resume requires the same output name, data bytes and route, effective configuration, precision, model/base weights, tokenizer, and backend; OPD additionally binds the exact teacher content revision and keeps its optimizer-step and candidate cursors separate. The server validates the complete adapter, optimizer, reference/EMA where applicable, loop-state artifact set, and checksums before continuation. Job detail reports <code>training_kind</code>, <code>data_source_kind</code>, the next epoch/group/candidate cursor, validated effective configuration and data identity, plus OPD teacher identity. PEFT snapshots remain serving-only. See <a href="docs/training-checkpoints/">Native Training Checkpoints</a> for the exact contract.
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
           Training writes every artifact beneath a hidden staging root and captures the target&rsquo;s starting content revision. Publication compares that revision again: if another operation won, the job fails with <code>adapter_revision_conflict</code> and preserves the newer adapter. An ungated same-name adapter that is already loaded is reloaded atomically with the directory replacement, even when <code>auto_load=false</code>. A gated <code>post_eval.min_accuracy</code> rewrite of a physically loaded same-name target is rejected before GPU work; unload it or choose a versioned <code>config.output_name</code>.
@@ -2452,6 +1066,8 @@ curl -s http://localhost:8420/v1/train/opd \
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
           A GRPO run that reaches the training loop records <code>grpo.policy_audit</code> in the adapter receipt returned by <code>GET /v1/adapters/{name}/receipt</code>. The versioned <code>kiln.grpo-policy-audit.v1</code> object reports behavior-policy importance ratios, independently referenced K1/K3 metrics, entropy-mask coverage, clipping tails, and content-addressed rollout-source identities. No-correction runs report unit ratios; they never substitute the KL reference for missing behavior probabilities. Token PPO and sequence GSPO use <code>clip_epsilon</code>/<code>clip_eps_high</code>; CISPO uses the separate absolute upper-only <code>cispo_max_weight</code> cap and has no lower clip count. See the <a href="grpo.html#audit-policy">GRPO audit guide</a> for denominator and count semantics.
         </p>
+          </div>
+        </details>
       </article>
 
       <article class="card p-6">
@@ -2473,7 +1089,7 @@ curl -s http://localhost:8420/v1/train/opd \
           <div class="endpoint"><span class="method">GET</span> <code>/v1/cache/stats</code> &mdash; validate and summarize canonical cache-v3 entries by teacher revision. Expensive cache operations are serialized and run off the async executor.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/cache/export</code> &mdash; stream a deterministic validated v3 export, bounded to one million scanned files and 16 GiB of source entries. A concurrent scan returns <code>cache_operation_busy</code>; archive import is intentionally unavailable.</div>
         </div>
-        <div class="code-block mt-4"><pre><code>curl -X POST http://localhost:8420/v1/teachers \
+        <div class="code-block mt-4"><pre><code>curl -fsS -X POST http://localhost:8420/v1/teachers \
   -H 'content-type: application/json' \
   -d '{
     "alias": "qwen35@vllm",
@@ -2497,14 +1113,19 @@ curl -s http://localhost:8420/v1/train/opd \
         <div class="label mb-3">Evals · datasets · judgments</div>
         <h2 id="evals" class="text-2xl font-semibold mb-4">Run eval suites, synthesize datasets, train a local judge</h2>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
-          Evals are a first-class peer of training. Every adapter Kiln produces can be graded by a registered or inline suite, compared head-to-head against any other adapter, or auto-evaluated the moment a training job finishes. Full request shapes, scorer reference, and the <code>kiln-eval</code> CLI live in the <a href="evals.html">Evals guide</a> and <a href="https://github.com/ericflo/kiln/blob/main/docs/EVAL_GUIDE.md">EVAL_GUIDE.md</a>.
+          Run a registered or inline suite against one target, compare targets
+          on shared sampling inputs, or bind post-training activation to held-out
+          evidence. Saved-adapter eval requires the <code>experimental</code>
+          profile; <code>maintenance</code> rejects eval admission. See the task-oriented
+          <a href="evals.html">Evals guide</a> and generated <a href="docs/evals/">Eval guide</a>
+          for complete request shapes, scorer behavior, and <code>kiln-eval</code> commands.
         </p>
         <div class="endpoint-list" style="color: var(--fg-dim);">
           <div class="endpoint"><span class="method">GET</span> <code>/v1/eval/suites</code> &mdash; list registered eval suites.</div>
-          <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/suites</code> &mdash; register or overwrite a suite (examples + scorers + generation defaults).</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/suites</code> &mdash; create a suite; add <code>?force=true</code> to replace an existing name deliberately.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/eval/suites/{name}</code> &mdash; fetch one suite as JSON.</div>
           <div class="endpoint"><span class="method">DELETE</span> <code>/v1/eval/suites/{name}</code> &mdash; delete a suite.</div>
-          <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/run</code> &mdash; queue an eval (registered suite or inline) against any adapter; optional top-level <code>seed</code> preserves the suite's other generation settings.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/run</code> &mdash; queue a registered or inline suite against the base model or one resolvable adapter; an optional top-level <code>seed</code> preserves the suite's other generation settings.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/compare</code> &mdash; run one suite across multiple adapters with one shared effective seed.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/eval/jobs</code> &mdash; list eval jobs, headline accuracies, exact effective seeds, and admission-time base-weight and execution identities.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/eval/jobs/{id}</code> &mdash; fetch one eval job with its full base-weight shard manifest, validated execution-provenance record, decimal-string job/per-completion seeds, and outcomes.</div>
@@ -2513,13 +1134,19 @@ curl -s http://localhost:8420/v1/train/opd \
           <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/jobs/{id}/replay</code> &mdash; queue a strict byte replay of a completed run; optional <code>run_index</code> selects a compare arm, while admission requires exact replay, execution, base-weight, candidate, and judge identities.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/datasets/upload</code> &mdash; multipart upload of an SFT or GRPO JSONL file.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/datasets/{name}/synthesize</code> &mdash; decompose a dataset into a graded suite via <code>final_assistant</code>, <code>first_assistant_turn</code>, <code>every_assistant_turn</code>, or <code>tool_call_predict</code>.</div>
-          <div class="endpoint"><span class="method">GET / POST</span> <code>/v1/judgments</code> &mdash; list or create judgment datasets (the A/B flywheel).</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/judgments</code> &mdash; list judgment datasets.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/judgments</code> &mdash; create a judgment dataset for A/B/Tie/Skip preferences.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/judgments/{name}/rows</code> &mdash; append one A/B/Tie/Skip preference.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/judgments/{name}/compile</code> &mdash; compile judgments into an SFT dataset for a local judge LoRA.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/judgments/{name}/validate</code> &mdash; score a judge LoRA against a held-out judgment slice.</div>
         </div>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
-          Any <code>SftRequest</code> or <code>GrpoRequest</code> can include <code>post_eval: { suite, include_baseline: true, generation }</code> to auto-queue an eval the moment the training job finishes. See <a href="evals.html#post-eval">post-eval auto-grading</a>.
+          An SFT or GRPO request can include <code>post_eval</code>. Pair
+          <code>config.auto_load: true</code> with a versioned held-out suite,
+          <code>data_scope: "held-out"</code>, and
+          <code>min_accuracy</code> when the exact trained revision must pass the
+          fixed evidence gate before activation. Diagnostic post-eval runs do not
+          imply promotion. See <a href="evals.html#post-eval">post-training eval and promotion</a>.
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
           Eval admission snapshots the resident shard manifest before queue publication. Job archives and raw JSON retain the complete list; <code>kiln-eval</code> and the dashboard show a compact aggregate/count/byte summary, and downloaded outcome JSONL includes the full manifest on every standalone row. Corrupt archived manifests fail validation on restart; missing manifests identify only legacy or synthetic jobs.
@@ -2531,12 +1158,15 @@ curl -s http://localhost:8420/v1/train/opd \
 
       <article class="card p-6" style="background: var(--bg-soft-2);">
         <div class="label mb-3">Security note</div>
-        <h2 id="training-data-safety" class="text-2xl font-semibold mb-4">Training data changes the active adapter</h2>
+        <h2 id="training-data-safety" class="text-2xl font-semibold mb-4">Treat every training endpoint as privileged</h2>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           Kiln&rsquo;s training endpoints are privileged: do not expose <code>/v1/train/sft</code> or
-          <code>/v1/train/grpo</code> to untrusted inputs. Training validates request structure, not
-          whether an example is semantically safe or desirable. Treat training data like code review
-          input, and start with the <a href="https://github.com/ericflo/kiln/blob/main/README.md#security-model">README security model</a>
+          <code>/v1/train/grpo</code> to untrusted inputs. A job can create or
+          replace an adapter artifact and, when explicitly or implicitly
+          auto-loaded, change the model serving subsequent requests. Kiln
+          validates request structure, not whether an example is semantically
+          safe or desirable. Review training data and activation policy as
+          carefully as code, and start with the <a href="docs/security/">Security guide</a>
           and <a href="troubleshooting.html">Troubleshooting</a> guide when hardening a deployment.
         </p>
       </article>
@@ -2561,6 +1191,38 @@ curl -s http://localhost:8420/v1/train/opd \
           tags are not emitted on the separated path.
         </p>
       </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Failure handling</div>
+        <h2 id="errors" class="text-2xl font-semibold mb-4">Branch on HTTP status and <code>error.code</code></h2>
+        <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
+          Non-success responses use one structured body with
+          <code>error.code</code>, <code>error.message</code>, and
+          <code>error.hint</code>. Treat the status and code as the stable
+          programmatic signal; retain the message for diagnosis and present the
+          hint to the operator. A retryable HTTP 503 may also carry
+          <code>Retry-After</code>. Do not infer retry safety from prose alone.
+        </p>
+        <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>{
+  "error": {
+    "code": "serving_profile_conflict",
+    "message": "Serving profile `stable` prohibits live adapter weight transitions",
+    "hint": "Restart with KILN_SERVER_SERVING_PROFILE=experimental for controlled concurrent mutation, or KILN_SERVER_SERVING_PROFILE=maintenance for drained exclusive work."
+  }
+}</code></pre>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">
+          During diagnosis, omit curl&rsquo;s <code>--fail</code> flag so the JSON
+          body remains visible:
+        </p>
+        <pre class="overflow-x-auto text-sm leading-relaxed mt-3" style="color: var(--fg);"><code>curl -sS -w '\nHTTP %{http_code}\n' \
+  http://localhost:8420/v1/adapters/load \
+  -H "Content-Type: application/json" \
+  -d '{"name":"support-bot"}'</code></pre>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">
+          The generated <a href="docs/http-api/">HTTP contract</a> lists the
+          status codes and response schemas for every operation.
+        </p>
+      </article>
     </div>
   </main>
 
@@ -2579,7 +1241,7 @@ curl -s http://localhost:8420/v1/train/opd \
         </a>
         <a class="card p-5 block" href="troubleshooting.html">
           <h3 class="font-semibold mb-2">Troubleshooting</h3>
-          <p style="color: var(--fg-dim);">Check binary, CUDA or Metal setup, model path, health output, and adapter storage.</p>
+          <p style="color: var(--fg-dim);">Check the binary, accelerator setup, model path, health output, and adapter storage.</p>
         </a>
         <a class="card p-5 block" href="demo/">
           <h3 class="font-semibold mb-2">Demo</h3>
@@ -2608,7 +1270,7 @@ curl -s http://localhost:8420/v1/train/opd \
         <a href="demo/">Demo</a>
         <a href="troubleshooting.html">Troubleshooting</a>
         <a href="architecture.html">Architecture</a>
-        <a href="https://github.com/ericflo/kiln/blob/main/BENCHMARKS.md">Benchmarks</a>
+        <a href="docs/benchmarks/">Benchmarks</a>
         <a href="https://github.com/ericflo/kiln/blob/main/CHANGELOG.md">Changelog</a>
         <a href="https://github.com/ericflo/kiln/blob/main/SECURITY.md">Security</a>
         <a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License</a>

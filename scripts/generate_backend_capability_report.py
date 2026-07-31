@@ -21,6 +21,7 @@ except ModuleNotFoundError:
 ROOT = Path(__file__).resolve().parents[1]
 REPORT_MD = ROOT / "docs" / "backend-capability-report.md"
 REPORT_JSON = ROOT / "docs" / "backend-capability-report.json"
+REPORT_AUDITED_ON = "2026-07-30"
 
 BACKENDS = {
     "cuda": ROOT / "crates" / "kiln-model" / "src" / "backend" / "cuda.rs",
@@ -160,7 +161,9 @@ REPLAY_AUTHORITIES = {
             "crates/kiln-tensor/tests/rocm_capture_arena.rs",
         ],
         "parity_sources": ["crates/kiln-model/src/rocm_graph.rs"],
-        "parity_tests": ["ROCm graph runner byte-identical eager/replay source contract"],
+        "parity_tests": [
+            "source contract: ROCm graph runner keeps eager and replay output handling byte-identical"
+        ],
     },
     "metal": {
         "production_authority": "model_level_runner_with_graph_crate_replay_object",
@@ -1282,8 +1285,11 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "no_unexpected_host_fallback",
             "phase8_requirement": "no unexpected host fallback in decode/training hot paths",
-            "status": None,
+            "status": "partial",
             "command": "cargo test -p kiln-tensor device_op_host_fallback_counts_are_backend_and_arity_specific",
+            "coverage_blockers": [
+                "the counter test proves backend and arity attribution, not that end-to-end decode and training hot paths keep fallback counts at zero"
+            ],
             "evidence": [
                 "crates/kiln-tensor/src/device_op.rs",
                 "crates/kiln-model/src/generate.rs",
@@ -2377,6 +2383,21 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
         else "partial"
     )
     phase8_migration = "complete" if phase8_status == "covered" else "partial"
+    phase8_remaining: list[str] = []
+    if gate_statuses.get("no_unexpected_host_fallback") != "covered":
+        phase8_remaining.append(
+            "add end-to-end decode and training assertions that accelerator host-fallback counters remain at zero"
+        )
+    if gate_statuses.get("hardware_latency_thresholds") != "covered":
+        phase8_remaining.append(
+            "import real hardware receipts and lock portable, backend-scoped latency thresholds"
+        )
+    for gate, status in gate_statuses.items():
+        if status != "covered" and gate not in {
+            "no_unexpected_host_fallback",
+            "hardware_latency_thresholds",
+        }:
+            phase8_remaining.append(f"{gate} remains {status}")
     migration_by_phase = {
         0: "complete",
         7: "complete",
@@ -2672,9 +2693,7 @@ def migration_phase_status_report(conformance_gates: list[dict[str, Any]]) -> li
             "migration_signals": [],
             "remaining": []
             if phase8_status == "covered"
-            else [
-                "hardware_latency_thresholds remains fixture_required until real known-hardware result artifacts satisfy --require-covered",
-            ],
+            else phase8_remaining,
         },
     ]
     for phase in phases:
@@ -2713,133 +2732,703 @@ def optimizer_dispatch_report(backends: dict[str, Any]) -> dict[str, Any]:
 
 def markdown(data: dict[str, Any]) -> str:
     lines: list[str] = []
-    lines.append("# Backend Capability Report")
+    def append_table(headers: list[str], rows: list[list[str]]) -> None:
+        lines.append("| " + " | ".join(headers) + " |")
+        lines.append("|" + "|".join("---" for _ in headers) + "|")
+        for row in rows:
+            lines.append("| " + " | ".join(row) + " |")
+        lines.append("")
+
+    def status_counts(records: list[dict[str, Any]]) -> str:
+        counts: dict[str, int] = {}
+        for record in records:
+            status = record["status"]
+            counts[status] = counts.get(status, 0) + 1
+        return ", ".join(f"{count} `{status}`" for status, count in sorted(counts.items()))
+
+    def format_coverage_blocker(blocker: str) -> str:
+        manifest_match = re.fullmatch(
+            r"manifest status is '([^']+)', expected '([^']+)'", blocker
+        )
+        if manifest_match:
+            return (
+                f"Manifest status is `{manifest_match.group(1)}`; "
+                f"expected `{manifest_match.group(2)}`."
+            )
+        state_match = re.fullmatch(
+            r"([^:]+): threshold_state is '([^']+)', expected '([^']+)'",
+            blocker,
+        )
+        if state_match:
+            return (
+                f"`{state_match.group(1)}` has threshold state "
+                f"`{state_match.group(2)}`; expected `{state_match.group(3)}`."
+            )
+        metric_match = re.fullmatch(
+            r"([^.]+)\.([^:]+): max threshold is not finite numeric", blocker
+        )
+        if metric_match:
+            return (
+                f"`{metric_match.group(1)}` metric `{metric_match.group(2)}` "
+                "does not have a finite numeric maximum."
+            )
+        return blocker.rstrip(".") + "."
+
+    source = data["source"]
+    feature_crates = len(data["features"])
+    complete_feature_crates = sum(
+        all(family in features for family in FEATURE_FAMILIES)
+        for features in data["features"].values()
+    )
+    open_phases = [
+        phase for phase in data["migration_phase_status"] if phase["status"] != "covered"
+    ]
+    open_gates = [
+        gate for gate in data["conformance_gates"] if gate["status"] != "covered"
+    ]
+
+    lines.append("# Backend capability report")
     lines.append("")
-    lines.append("Generated from the live source tree by `scripts/generate_backend_capability_report.py`.")
+    lines.append(
+        f"Snapshot generated and editorially audited on {source['audited_on']} from the current source tree "
+        f"by `{source['script']}`."
+    )
     lines.append("")
-    lines.append("## Feature Fanout")
+    lines.append(
+        "This report answers a narrow question: which backend interfaces, support predicates, "
+        "fallback policies, and verification contracts does the repository currently declare? "
+        "It is a static source inventory. The generator does not compile a backend, execute the "
+        "listed commands, detect hardware, or measure throughput."
+    )
     lines.append("")
-    lines.append("| Crate | CUDA | ROCm | Metal | Vulkan |")
-    lines.append("|---|---|---|---|---|")
+    lines.append("## Read this first")
+    lines.append("")
+    append_table(
+        ["Question", "Use this part of the report"],
+        [
+            [
+                "Can I select a backend at build time?",
+                "Compiled feature fanout shows whether the public crates expose its Cargo feature.",
+            ],
+            [
+                "Can this exact operation run natively?",
+                "Support predicates and typed request descriptors show the source-level decision points. "
+                "The answer can still depend on dtype, shape, layout, batch size, and runtime state.",
+            ],
+            [
+                "What happens when a native operation declines?",
+                "Runtime fallback policy distinguishes correctness fallbacks from native-required hot paths.",
+            ],
+            [
+                "Has the implementation been verified?",
+                "Conformance gates list the intended commands and source owners. `covered` is inventory "
+                "coverage, not a claim that this generated page ran the command.",
+            ],
+            [
+                "How fast is a backend?",
+                "Not here. Use the [benchmark guide](public/BENCHMARKS.md) and dated result artifacts; "
+                "this report contains no tokens-per-second result.",
+            ],
+        ],
+    )
+    lines.append(
+        "> **Vulkan interpretation:** determine support from capabilities and request constraints, "
+        "not a device name. A hardware-specific fixture identifier is benchmark provenance only; "
+        "it must never become runtime dispatch, a default, or a support promise. If a runtime path "
+        "uses such an identifier, that is a bug."
+    )
+    lines.append("")
+    lines.append("## Current source snapshot")
+    lines.append("")
+    append_table(
+        ["Signal", "Current result", "Interpretation"],
+        [
+            [
+                "Compiled backend features",
+                f"{complete_feature_crates} of {feature_crates} public runtime crates declare CUDA, ROCm, Metal, and Vulkan features",
+                "Feature fanout exists; it does not prove operation coverage or performance.",
+            ],
+            [
+                "Legacy monolithic interface",
+                f"`BackendRuntime` contains {data['trait_method_count']} methods",
+                "Focused backend traits now own most behavior; a low count is intentional.",
+            ],
+            [
+                "Migration phases",
+                status_counts(data["migration_phase_status"]),
+                f"{len(open_phases)} phase(s) still report unfinished work.",
+            ],
+            [
+                "Conformance gates",
+                status_counts(data["conformance_gates"]),
+                f"{len(open_gates)} gate(s) still need stronger evidence.",
+            ],
+            [
+                "Support/implementation mismatches",
+                str(len(data["mismatches"])),
+                "Counts literal-true support predicates paired with methods that always decline.",
+            ],
+        ],
+    )
+
+    lines.append("## Open coverage work")
+    lines.append("")
+    lines.append(
+        "These are the unresolved items in the generated inventory. They are listed before the "
+        "completed material so a reader does not have to infer gaps from a giant table."
+    )
+    lines.append("")
+    open_rows: list[list[str]] = []
+    for phase in open_phases:
+        open_rows.append(
+            [
+                "Migration phase",
+                f"Phase {phase['phase']}: {phase['title']}",
+                f"`{phase['status']}`",
+                "; ".join(phase["remaining"]) or "No remaining item recorded.",
+            ]
+        )
+    for gate in open_gates:
+        if gate["gate"] == "hardware_latency_thresholds":
+            remaining = (
+                "Import real hardware result artifacts and lock thresholds. Pending fixture IDs "
+                "and metric-level blockers remain available in the detailed gate inventory."
+            )
+        else:
+            remaining = (
+                "; ".join(gate["coverage_blockers"]) or "Missing source evidence."
+            )
+        open_rows.append(
+            [
+                "Conformance gate",
+                f"`{gate['gate']}`",
+                f"`{gate['status']}`",
+                remaining,
+            ]
+        )
+    append_table(["Kind", "Item", "State", "What remains"], open_rows)
+    lines.append(
+        "In particular, the host-fallback counter test validates counter attribution; it does not "
+        "prove that end-to-end decode or training completed with zero accelerator-to-host fallbacks. "
+        "The report therefore marks that gate `partial`."
+    )
+    lines.append("")
+
+    lines.append("## Runtime fallback policy")
+    lines.append("")
+    lines.append(
+        "Generic tensor operations and model hot paths have different contracts. A generic "
+        "correctness fallback may copy through CPU memory, while decode and optimizer paths can "
+        "require native execution to prevent a silent performance collapse."
+    )
+    lines.append("")
+    fallback_rows = []
+    for backend, info in data["fallback_policy"].items():
+        fallback_rows.append(
+            [
+                f"`{backend}`",
+                f"`{info['generic_device_op_fallback']}`",
+                f"`{info['counter']}`",
+                info["evidence"],
+            ]
+        )
+    append_table(
+        ["Backend", "Generic `DeviceOp` policy", "Fallback counter", "Source evidence"],
+        fallback_rows,
+    )
+    decode_rows = []
+    for backend, info in data["decode_hot_path_policy"].items():
+        decode_rows.append(
+            [
+                f"`{backend}`",
+                f"`{info['default_policy']}`",
+                "none",
+                info["enforcement"],
+            ]
+        )
+    append_table(
+        ["Backend", "Decode default", "Mutable override", "Enforcement"],
+        decode_rows,
+    )
+
+    lines.append("<details>")
+    lines.append("<summary><strong>Training optimizer resolution and fallback</strong></summary>")
+    lines.append("")
+    lines.append(
+        "Product-executable tuples combine the base-weight precision policy with optimizer "
+        "implementation support. Parameter dtypes describe the reference implementation on CPU "
+        "and required native hooks on accelerators; by themselves they do not promise that the "
+        "product resolver can produce a particular LoRA dtype."
+    )
+    lines.append("")
+    optimizer_rows = []
+    for backend, info in data["training_optimizer_fallback_policy"].items():
+        supported = info["optimizer_parameter_dtypes"]
+        resolved = ", ".join(
+            f"{base} → {lora}"
+            for base, lora in info["product_executable_base_to_lora"].items()
+        )
+        max_rank = (
+            info["muon_max_lora_rank"]
+            if info["muon_max_lora_rank"] is not None
+            else "unbounded"
+        )
+        optimizer_rows.append(
+            [
+                f"`{backend}`",
+                f"`{info['default_policy']}`",
+                f"`{resolved}`",
+                f"`{', '.join(info['product_executable_optimizer_kinds'])}`",
+                f"`{', '.join(supported['sgd']) or 'none'} / "
+                f"{', '.join(supported['adam_w']) or 'none'} / "
+                f"{', '.join(supported['muon']) or 'none'}`",
+                f"`{info['muon_min_lora_rank']}…{max_rank}`",
+                info["enforcement"],
+            ]
+        )
+    append_table(
+        [
+            "Backend",
+            "Default",
+            "Base → LoRA",
+            "Optimizers",
+            "Parameter dtype: SGD / AdamW / Muon",
+            "Muon rank",
+            "Enforcement",
+        ],
+        optimizer_rows,
+    )
+    lines.append("</details>")
+    lines.append("")
+
+    lines.append("<details>")
+    lines.append("<summary><strong>Streaming prefill policy</strong></summary>")
+    lines.append("")
+    lines.append(
+        "Tile sizes are policy constants extracted from source. They are neither benchmark "
+        "results nor device-specific tuning guarantees."
+    )
+    lines.append("")
+    prefill_rows = []
+    for backend, info in data["streaming_prefill_backend_policy"].items():
+        dispatch = info["auto_dispatch"]
+        if dispatch["minimum_prompt_tokens"] is not None:
+            dispatch_display = (
+                f"prompt tokens ≥ {dispatch['minimum_prompt_tokens']}"
+            )
+        else:
+            dispatch_display = dispatch["kind"].replace("_", " ")
+        prefill_rows.append(
+            [
+                f"`{backend}`",
+                f"`{dispatch_display}`",
+                f"`{info['base_tile_tokens']}`",
+                f"`{info['tape_tile_tokens']}`",
+                f"`{info['detached_full_attn_tile_tokens']}`",
+                f"`{info['detached_full_attn_boundary_tile_tokens']}`",
+                f"`{info['detached_full_attn_tape_replay_tile_tokens']}`",
+            ]
+        )
+    append_table(
+        [
+            "Backend",
+            "Automatic dispatch",
+            "Base tile",
+            "Tape tile",
+            "Detached full-attention",
+            "Boundary",
+            "Tape replay",
+        ],
+        prefill_rows,
+    )
+    lines.append("</details>")
+    lines.append("")
+
+    lines.append("<details>")
+    lines.append("<summary><strong>Training precision, loss routing, and optimizer dispatch</strong></summary>")
+    lines.append("")
+    precision_rows = []
+    for backend, info in data["training_precision_policy"].items():
+        precision_rows.append(
+            [
+                f"`{backend}`",
+                f"`{info['name']}`",
+                f"`{', '.join(info['activation_dtypes'])}`",
+                f"`{', '.join(info['base_weight_dtypes'])}`",
+                f"`{', '.join(info['lora_parameter_dtypes'])}`",
+                f"`{info['loss_accumulation_dtype']}`",
+                f"`{', '.join(info['optimizer_parameter_dtypes'])}`",
+                f"`{info['mixed_rms_norm_weight_dtype'] or 'none'}`",
+                "yes" if info["mixed_precision"] else "no",
+            ]
+        )
+    append_table(
+        [
+            "Backend",
+            "Policy",
+            "Activations",
+            "Base weights",
+            "LoRA",
+            "Loss accumulation",
+            "Optimizer parameters",
+            "Mixed RMSNorm weight",
+            "Mixed precision?",
+        ],
+        precision_rows,
+    )
+    loss_rows = []
+    for backend, info in data["training_loss_policy"].items():
+        loss_rows.append(
+            [
+                f"`{backend}`",
+                f"`{info['tape_forward_backward_route']}`",
+                f"`{info['sft_flce_loss_route']}`",
+                f"`{info['grpo_loss_route']}`",
+                f"`{info['grpo_kl_auxiliary_route']}`",
+                f"`{info['opd_loss_route']}`",
+                f"`{info['opd_phase_b_backward_route']}`",
+                f"`{info['final_rmsnorm_backward_route']}`",
+                info["evidence"],
+            ]
+        )
+    append_table(
+        [
+            "Backend",
+            "Tape forward/backward",
+            "SFT FLCE",
+            "GRPO",
+            "GRPO KL auxiliary",
+            "OPD",
+            "OPD phase-B backward",
+            "Final RMSNorm backward",
+            "Evidence",
+        ],
+        loss_rows,
+    )
+    dispatch_rows = []
+    for backend, info in data["optimizer_dispatch"].items():
+        dispatch_rows.append(
+            [
+                f"`{backend}`",
+                f"`{info['sgd_step']}`",
+                f"`{info['adamw_step']}`",
+                f"`{info['muon_step']}`",
+            ]
+        )
+    append_table(["Backend", "SGD step", "AdamW step", "Muon step"], dispatch_rows)
+    lines.append("</details>")
+    lines.append("")
+
+    lines.append("## How to read status labels")
+    lines.append("")
+    append_table(
+        ["Label", "Meaning in this generated report", "What it does not mean"],
+        [
+            [
+                "`covered`",
+                "The expected source owners exist and the generator’s structural signals are complete.",
+                "The command ran on this page load, every supported device passed, or performance is acceptable.",
+            ],
+            [
+                "`partial`",
+                "Some structural evidence exists, but a named migration or verification requirement remains.",
+                "The backend is generally broken.",
+            ],
+            [
+                "`fixture_required`",
+                "The harness exists, but a real hardware result or locked threshold is still missing.",
+                "The fixture’s named machine controls runtime support.",
+            ],
+            [
+                "`gap`",
+                "Required source evidence is absent.",
+                "An implicit or unverified implementation should be assumed to work.",
+            ],
+            [
+                "`dynamic` / `NativeWithConstraints`",
+                "The support method evaluates request or runtime conditions.",
+                "Every dtype, shape, layout, batch size, or device is accepted.",
+            ],
+            [
+                "`literal_true`",
+                "The parsed support predicate returns true without a detected condition.",
+                "A performance or hardware-qualification guarantee.",
+            ],
+        ],
+    )
+    lines.append(
+        "Source paths identify ownership. A listed command is the prescribed verification command; "
+        "the generator records it but does not run it. Use CI receipts or a dated benchmark artifact "
+        "when the distinction matters."
+    )
+    lines.append("")
+
+    lines.append("## Detailed generated inventory")
+    lines.append("")
+    lines.append(
+        "The remaining tables preserve the exact generated evidence for maintainers and reviewers. "
+        "They are collapsed so the page remains readable."
+    )
+    lines.append("")
+
+    lines.append('<details class="docs-capability-inventory">')
+    lines.append("<summary><strong>Compiled feature fanout and migration history</strong></summary>")
+    lines.append("")
+    feature_rows = []
     for crate, features in data["features"].items():
-        row = [crate]
-        for family in FEATURE_FAMILIES:
-            deps = features.get(family)
-            row.append("yes" if deps is not None else "no")
-        lines.append("| " + " | ".join(f"`{cell}`" if cell not in {"yes", "no"} else cell for cell in row) + " |")
+        feature_rows.append(
+            [
+                f"`{crate}`",
+                *[
+                    "yes" if features.get(family) is not None else "no"
+                    for family in FEATURE_FAMILIES
+                ],
+            ]
+        )
+    append_table(["Crate", "CUDA", "ROCm", "Metal", "Vulkan"], feature_rows)
+    lines.append(
+        "A `yes` means that the crate declares the Cargo feature. It does not mean that every "
+        "operation has a native implementation."
+    )
     lines.append("")
-    lines.append("## Migration Phase Status")
-    lines.append("")
-    lines.append("| Phase | Title | Status | Contract | Migration | Genuine | Evidence | Remaining |")
-    lines.append("|---|---|---|---|---|---|---|---|")
+    phase_rows = []
     for phase in data["migration_phase_status"]:
         evidence = ", ".join(f"`{path}`" for path in phase["evidence_present"]) or "none"
         remaining = "; ".join(phase["remaining"]) or "none"
-        genuine = "yes" if phase["genuine"] else "no"
-        lines.append(
-            f"| Phase {phase['phase']} | {phase['title']} | `{phase['status']}` | "
-            f"`{phase['contract']}` | `{phase['migration']}` | {genuine} | "
-            f"{evidence} | {remaining} |"
+        phase_rows.append(
+            [
+                f"Phase {phase['phase']}",
+                phase["title"],
+                f"`{phase['status']}`",
+                f"`{phase['contract']}`",
+                f"`{phase['migration']}`",
+                "yes" if phase["genuine"] else "no",
+                evidence,
+                remaining,
+            ]
         )
+    append_table(
+        [
+            "Phase",
+            "Title",
+            "Status",
+            "Contract",
+            "Migration",
+            "Complete?",
+            "Evidence",
+            "Remaining",
+        ],
+        phase_rows,
+    )
+    lines.append("</details>")
     lines.append("")
-    lines.append("## BackendRuntime Overrides")
+
+    lines.append('<details class="docs-capability-inventory">')
+    lines.append("<summary><strong>Backend interfaces and focused facets</strong></summary>")
     lines.append("")
-    lines.append("| Backend | Source Modules | Override Count | Support Methods | Native Env Gates | Legacy Env Aliases |")
-    lines.append("|---|---|---:|---:|---:|---:|")
+    lines.append(
+        "`BackendRuntime` is the legacy compatibility facade. Zero backend-specific overrides is "
+        "the expected result after behavior moves into focused traits."
+    )
+    lines.append("")
+    backend_rows = []
     for backend, info in data["backends"].items():
-        sources = ", ".join(f"`{source}`" for source in info.get("source_modules", [info["source"]]))
-        lines.append(
-            f"| `{backend}` | {sources} | {info['override_count']} | "
-            f"{len(info['support_methods'])} | {len(info['native_env_gates'])} | "
-            f"{len(info['legacy_env_aliases'])} |"
+        sources = ", ".join(
+            f"`{item}`" for item in info.get("source_modules", [info["source"]])
         )
-    lines.append("")
-    lines.append("## Focused Backend Facets")
-    lines.append("")
-    lines.append("| Facet | Method Count | Forwarding Impl | Concrete Impl Count | Concrete Impls | Methods |")
-    lines.append("|---|---:|---|---:|---|---|")
+        backend_rows.append(
+            [
+                f"`{backend}`",
+                sources,
+                str(info["override_count"]),
+                str(len(info["support_methods"])),
+                str(len(info["native_env_gates"])),
+                str(len(info["legacy_env_aliases"])),
+            ]
+        )
+    append_table(
+        [
+            "Backend",
+            "Source modules",
+            "Legacy overrides",
+            "Support methods",
+            "Native environment gates",
+            "Legacy aliases",
+        ],
+        backend_rows,
+    )
+    facet_rows = []
     for name, info in data["focused_backend_facets"].items():
         methods = ", ".join(f"`{method}`" for method in info["methods"])
-        concrete_impls = ", ".join(f"`{impl}`" for impl in info["concrete_impls"]) or "none"
-        lines.append(
-            f"| `{name}` | {info['method_count']} | `{info['forwarding_impl']}` | "
-            f"{info['concrete_impl_count']} | {concrete_impls} | {methods} |"
+        concrete_impls = (
+            ", ".join(f"`{impl}`" for impl in info["concrete_impls"]) or "none"
         )
+        facet_rows.append(
+            [
+                f"`{name}`",
+                str(info["method_count"]),
+                f"`{info['forwarding_impl']}`",
+                str(info["concrete_impl_count"]),
+                concrete_impls,
+                methods,
+            ]
+        )
+    append_table(
+        [
+            "Facet",
+            "Methods",
+            "Forwarding implementation",
+            "Concrete implementations",
+            "Implementation types",
+            "Method names",
+        ],
+        facet_rows,
+    )
+    lines.append("</details>")
     lines.append("")
-    lines.append("## Replay Authority")
+
+    lines.append('<details class="docs-capability-inventory">')
+    lines.append("<summary><strong>Replay authority</strong></summary>")
     lines.append("")
     lines.append(
-        "| Backend | Production Authority | Native Primitive | Runners | Graph Crates | Parity Tests | Missing Evidence |"
+        "The evidence column may name executable parity tests or a source-level contract. The "
+        "ROCm entry is explicitly a source contract; it is not presented as live hardware parity."
     )
-    lines.append("|---|---|---|---|---|---|---|")
+    lines.append("")
+    replay_rows = []
     for backend, info in data["replay_authority"].items():
-        runners = ", ".join(f"`{path}`" for path in info["runner_paths"]) or "none"
-        graph_crates = ", ".join(f"`{path}`" for path in info["graph_crate_paths"]) or "none"
-        tests = ", ".join(f"`{test}`" for test in info["parity_tests"]) or "none"
-        missing = ", ".join(f"`{path}`" for path in info["evidence_missing"]) or "none"
-        lines.append(
-            f"| `{backend}` | `{info['production_authority']}` | `{info['native_primitive']}` | "
-            f"{runners} | {graph_crates} | {tests} | {missing} |"
+        replay_rows.append(
+            [
+                f"`{backend}`",
+                f"`{info['production_authority']}`",
+                f"`{info['native_primitive']}`",
+                ", ".join(f"`{path}`" for path in info["runner_paths"]) or "none",
+                ", ".join(f"`{path}`" for path in info["graph_crate_paths"]) or "none",
+                ", ".join(f"`{item}`" for item in info["parity_tests"]) or "none",
+                ", ".join(f"`{path}`" for path in info["evidence_missing"]) or "none",
+            ]
         )
+    append_table(
+        [
+            "Backend",
+            "Production authority",
+            "Native primitive",
+            "Runners",
+            "Graph crates",
+            "Named tests or source contracts",
+            "Missing evidence",
+        ],
+        replay_rows,
+    )
+    lines.append("</details>")
     lines.append("")
-    lines.append("## Support Predicates")
+
+    lines.append('<details class="docs-capability-inventory">')
+    lines.append("<summary><strong>Support predicates</strong></summary>")
     lines.append("")
-    lines.append("| Backend | Method | Predicate Status | Support State | Paired Method | Pair Always Declines | Gates |")
-    lines.append("|---|---|---|---|---|---|---|")
+    lines.append(
+        "Each row describes a parsed support method and its paired implementation, when present. "
+        "Dynamic support must be evaluated for the actual request."
+    )
+    lines.append("")
+    support_rows = []
     for backend, info in data["backends"].items():
         for method, entry in info["support_methods"].items():
-            gates = ",".join(key for key, enabled in entry["gate_hints"].items() if enabled) or "none"
-            pair = entry["paired_method"] or ""
-            declines = "yes" if entry["paired_method_always_declines"] else "no"
-            lines.append(
-                f"| `{backend}` | `{method}` | `{entry['status']}` | "
-                f"`{entry['support_state']}` | `{pair}` | {declines} | {gates} |"
+            gates = ", ".join(
+                key for key, enabled in entry["gate_hints"].items() if enabled
+            ) or "none"
+            support_rows.append(
+                [
+                    f"`{backend}`",
+                    f"`{method}`",
+                    f"`{entry['status']}`",
+                    f"`{entry['support_state']}`",
+                    f"`{entry['paired_method']}`"
+                    if entry["paired_method"]
+                    else "none",
+                    "yes" if entry["paired_method_always_declines"] else "no",
+                    gates,
+                ]
             )
-    lines.append("")
-    lines.append("## Typed Request Descriptors")
-    lines.append("")
-    lines.append(
-        "| Descriptor | Field Count | DType | Shape | Layout | Batch | Replay Safe | Fields |"
+    append_table(
+        [
+            "Backend",
+            "Method",
+            "Predicate",
+            "Support state",
+            "Paired method",
+            "Paired method always declines?",
+            "Detected gates",
+        ],
+        support_rows,
     )
-    lines.append("|---|---:|---|---|---|---|---|---|")
+    lines.append("</details>")
+    lines.append("")
+
+    lines.append('<details class="docs-capability-inventory">')
+    lines.append("<summary><strong>Typed requests, capabilities, and resident resources</strong></summary>")
+    lines.append("")
+    request_rows = []
     for name, info in data["request_descriptors"].items():
         fields = ", ".join(f"`{field['name']}`" for field in info["fields"])
-        lines.append(
-            f"| `{name}` | {info['field_count']} | "
-            f"{'yes' if info['has_dtype'] else 'no'} | "
-            f"{'yes' if info['has_shape'] else 'no'} | "
-            f"{'yes' if info['has_layout'] else 'no'} | "
-            f"{'yes' if info['has_batch'] else 'no'} | "
-            f"{'yes' if info['has_replay_safe'] else 'no'} | {fields} |"
+        request_rows.append(
+            [
+                f"`{name}`",
+                str(info["field_count"]),
+                "yes" if info["has_dtype"] else "no",
+                "yes" if info["has_shape"] else "no",
+                "yes" if info["has_layout"] else "no",
+                "yes" if info["has_batch"] else "no",
+                "yes" if info["has_replay_safe"] else "no",
+                fields,
+            ]
         )
-    lines.append("")
-    lines.append("## Request Capability Queries")
+    append_table(
+        [
+            "Request descriptor",
+            "Fields",
+            "Dtype?",
+            "Shape?",
+            "Layout?",
+            "Batch?",
+            "Replay safety?",
+            "Field names",
+        ],
+        request_rows,
+    )
+    lines.append("Request capability queries:")
     lines.append("")
     for method in data["request_capability_queries"]:
         lines.append(f"- `{method}`")
     lines.append("")
-    lines.append("## Typed Capability Descriptors")
-    lines.append("")
-    lines.append("| Descriptor | Field Count | Fields |")
-    lines.append("|---|---:|---|")
+    capability_rows = []
     for name, info in data["capability_descriptors"].items():
         fields = ", ".join(f"`{field['name']}`" for field in info["fields"])
-        lines.append(f"| `{name}` | {info['field_count']} | {fields} |")
-    lines.append("")
-    lines.append("## Resident Resource Descriptors")
-    lines.append("")
-    lines.append("| Descriptor | Field Count | Fields |")
-    lines.append("|---|---:|---|")
+        capability_rows.append([f"`{name}`", str(info["field_count"]), fields])
+    append_table(
+        ["Capability descriptor", "Field count", "Field names"], capability_rows
+    )
+    resident_rows = []
     for name, info in data["resident_resource_descriptors"].items():
         fields = ", ".join(f"`{field['name']}`" for field in info["fields"])
-        lines.append(f"| `{name}` | {info['field_count']} | {fields} |")
+        resident_rows.append([f"`{name}`", str(info["field_count"]), fields])
+    append_table(
+        ["Resident resource descriptor", "Field count", "Field names"],
+        resident_rows,
+    )
+    lines.append("</details>")
     lines.append("")
-    lines.append("## Conformance And Performance Gates")
+
+    lines.append('<details class="docs-capability-inventory">')
+    lines.append("<summary><strong>Conformance and performance gate inventory</strong></summary>")
     lines.append("")
     lines.append(
-        "| Gate | Phase 8 Requirement | Status | Command | Supplemental Commands | Evidence | Missing Evidence | Coverage Blockers |"
+        "Commands are prescriptions, not execution receipts. Supplemental commands identify "
+        "feature- or hardware-specific lanes. Pending hardware fixture identifiers are provenance "
+        "labels only and do not participate in runtime dispatch."
     )
-    lines.append("|---|---|---|---|---|---|---|---|")
+    lines.append("")
+    gate_rows = []
     for gate in data["conformance_gates"]:
         supplemental = (
             "; ".join(
@@ -2848,153 +3437,132 @@ def markdown(data: dict[str, Any]) -> str:
             )
             or "none"
         )
-        evidence = ", ".join(f"`{path}`" for path in gate["evidence_present"]) or "none"
-        missing = ", ".join(f"`{path}`" for path in gate["evidence_missing"]) or "none"
-        blockers = (
-            "; ".join(f"`{blocker}`" for blocker in gate["coverage_blockers"]) or "none"
+        evidence = ", ".join(
+            f"`{path}`" for path in gate["evidence_present"]
+        ) or "none"
+        missing = ", ".join(
+            f"`{path}`" for path in gate["evidence_missing"]
+        ) or "none"
+        if len(gate["coverage_blockers"]) > 3:
+            blockers = (
+                f"{len(gate['coverage_blockers'])} blockers; see the list below."
+            )
+        else:
+            blockers = (
+                "; ".join(
+                    format_coverage_blocker(blocker)
+                    for blocker in gate["coverage_blockers"]
+                )
+                or "none"
+            )
+        gate_rows.append(
+            [
+                f"`{gate['gate']}`",
+                gate["phase8_requirement"],
+                f"`{gate['status']}`",
+                f"`{gate['command']}`",
+                supplemental,
+                evidence,
+                missing,
+                blockers,
+            ]
         )
-        lines.append(
-            f"| `{gate['gate']}` | {gate['phase8_requirement']} | "
-            f"`{gate['status']}` | `{gate['command']}` | {supplemental} | "
-            f"{evidence} | {missing} | {blockers} |"
-        )
-    lines.append("")
-    lines.append("## Generic DeviceOp Fallback")
-    lines.append("")
-    lines.append("| Backend | Policy | Counter | Evidence |")
-    lines.append("|---|---|---|---|")
-    for backend, info in data["fallback_policy"].items():
-        lines.append(
-            f"| `{backend}` | `{info['generic_device_op_fallback']}` | "
-            f"`{info['counter']}` | {info['evidence']} |"
-        )
-    lines.append("")
-    lines.append("## Decode Hot-Path Fallback")
-    lines.append("")
-    lines.append("| Backend | Default Policy | Mutable Override | Enforcement |")
-    lines.append("|---|---|---|---|")
-    for backend, info in data["decode_hot_path_policy"].items():
-        lines.append(
-            f"| `{backend}` | `{info['default_policy']}` | `none` | "
-            f"{info['enforcement']} |"
-        )
-    lines.append("")
-    lines.append("## Training Optimizer Product Resolution and Fallback")
-    lines.append("")
-    lines.append(
-        "Product-executable tuples combine the base-weight precision policy with optimizer-implementation support. "
-        "The listed parameter dtypes use the reference implementation on CPU and required native hooks on accelerators; "
-        "they are not independently a promise that the product resolver can produce that LoRA dtype."
+    append_table(
+        [
+            "Gate",
+            "Requirement",
+            "Status",
+            "Prescribed command",
+            "Supplemental commands",
+            "Source evidence",
+            "Missing source evidence",
+            "Coverage blockers",
+        ],
+        gate_rows,
     )
-    lines.append("")
-    lines.append("| Backend | Default Policy | Product Base -> LoRA | Product Kinds | Optimizer Parameter Dtypes (SGD / AdamW / Muon) | Muon Rank | Rounding | Enforcement |")
-    lines.append("|---|---|---|---|---|---:|---|---|")
-    for backend, info in data["training_optimizer_fallback_policy"].items():
-        supported = info["optimizer_parameter_dtypes"]
-        resolved = ", ".join(
-            f"{base}->{lora}"
-            for base, lora in info["product_executable_base_to_lora"].items()
-        )
-        lines.append(
-            f"| `{backend}` | `{info['default_policy']}` | "
-            f"`{resolved}` | "
-            f"`{', '.join(info['product_executable_optimizer_kinds'])}` | "
-            f"`{', '.join(supported['sgd']) or 'none'} / {', '.join(supported['adam_w']) or 'none'} / {', '.join(supported['muon']) or 'none'}` | "
-            f"`{info['muon_min_lora_rank']}..={info['muon_max_lora_rank'] if info['muon_max_lora_rank'] is not None else 'unbounded'}` | "
-            f"`{', '.join(info['rounding_modes'])}` | {info['enforcement']} |"
-        )
-    lines.append("")
-    lines.append("## Streaming Prefill Backend Policy")
-    lines.append("")
-    lines.append(
-        "| Backend | Auto Dispatch | Base Tile | Tape Tile | Detached Full-Attn Tile | Detached Boundary Tile | Detached Tape-Replay Tile |"
+    hardware_gate = next(
+        (
+            gate
+            for gate in data["conformance_gates"]
+            if gate["gate"] == "hardware_latency_thresholds"
+        ),
+        None,
     )
-    lines.append("|---|---|---:|---:|---:|---:|---:|")
-    for backend, info in data["streaming_prefill_backend_policy"].items():
-        dispatch = info["auto_dispatch"]
-        dispatch_display = dispatch["kind"]
-        if dispatch["minimum_prompt_tokens"] is not None:
-            dispatch_display += f" {dispatch['minimum_prompt_tokens']}"
-        lines.append(
-            f"| `{backend}` | `{dispatch_display}` | "
-            f"`{info['base_tile_tokens']}` | "
-            f"`{info['tape_tile_tokens']}` | "
-            f"`{info['detached_full_attn_tile_tokens']}` | "
-            f"`{info['detached_full_attn_boundary_tile_tokens']}` | "
-            f"`{info['detached_full_attn_tape_replay_tile_tokens']}` |"
-        )
+    if hardware_gate and hardware_gate["coverage_blockers"]:
+        lines.append("Pending hardware fixture blockers:")
+        lines.append("")
+        for blocker in hardware_gate["coverage_blockers"]:
+            lines.append(f"- {format_coverage_blocker(blocker)}")
+        lines.append("")
+    lines.append("</details>")
     lines.append("")
-    lines.append("## Training Precision Policy")
-    lines.append("")
-    lines.append("| Backend | Policy | Activations | Base Weights | LoRA | Loss Accum | Optimizer Params | Mixed RMSNorm Weight | Mixed |")
-    lines.append("|---|---|---|---|---|---|---|---|---|")
-    for backend, info in data["training_precision_policy"].items():
-        mixed_rms_norm_weight_dtype = info["mixed_rms_norm_weight_dtype"] or "none"
-        lines.append(
-            f"| `{backend}` | `{info['name']}` | "
-            f"`{','.join(info['activation_dtypes'])}` | "
-            f"`{','.join(info['base_weight_dtypes'])}` | "
-            f"`{','.join(info['lora_parameter_dtypes'])}` | "
-            f"`{info['loss_accumulation_dtype']}` | "
-            f"`{','.join(info['optimizer_parameter_dtypes'])}` | "
-            f"`{mixed_rms_norm_weight_dtype}` | "
-            f"{'yes' if info['mixed_precision'] else 'no'} |"
-        )
-    lines.append("")
-    lines.append("## Training Loss Routing")
-    lines.append("")
-    lines.append(
-        "| Backend | Tape Forward/Backward Route | SFT FLCE Route | GRPO Route | GRPO KL Auxiliary Route | OPD Route | OPD Phase-B Backward Route | Final RMSNorm Backward Route | Evidence |"
-    )
-    lines.append("|---|---|---|---|---|---|---|---|---|")
-    for backend, info in data["training_loss_policy"].items():
-        lines.append(
-            f"| `{backend}` | `{info['tape_forward_backward_route']}` | "
-            f"`{info['sft_flce_loss_route']}` | "
-            f"`{info['grpo_loss_route']}` | "
-            f"`{info['grpo_kl_auxiliary_route']}` | `{info['opd_loss_route']}` | "
-            f"`{info['opd_phase_b_backward_route']}` | "
-            f"`{info['final_rmsnorm_backward_route']}` | {info['evidence']} |"
-        )
-    lines.append("")
-    lines.append("## Optimizer Dispatch")
-    lines.append("")
-    lines.append("| Backend | SGD Step | AdamW Step | Muon Step |")
-    lines.append("|---|---|---|---|")
-    for backend, info in data["optimizer_dispatch"].items():
-        lines.append(
-            f"| `{backend}` | `{info['sgd_step']}` | `{info['adamw_step']}` | "
-            f"`{info['muon_step']}` |"
-        )
-    lines.append("")
-    lines.append("## Mismatch Audit")
+
+    lines.append('<details class="docs-capability-inventory">')
+    lines.append("<summary><strong>Mismatch audit and environment gates</strong></summary>")
     lines.append("")
     if data["mismatches"]:
-        lines.append("| Backend | Support Method | Paired Method | Lines |")
-        lines.append("|---|---|---|---|")
+        mismatch_rows = []
         for item in data["mismatches"]:
-            lines.append(
-                f"| `{item['backend']}` | `{item['support_method']}` | `{item['paired_method']}` | "
-                f"{item['support_line']} / {item['paired_line']} |"
+            mismatch_rows.append(
+                [
+                    f"`{item['backend']}`",
+                    f"`{item['support_method']}`",
+                    f"`{item['paired_method']}`",
+                    f"{item['support_line']} / {item['paired_line']}",
+                ]
             )
+        append_table(
+            ["Backend", "Support method", "Paired method", "Source lines"],
+            mismatch_rows,
+        )
     else:
-        lines.append("No literal-true support predicate currently pairs with an always-declining method body.")
-    lines.append("")
-    lines.append("## Backend Env Gates")
-    lines.append("")
+        lines.append(
+            "No literal-true support predicate currently pairs with an implementation that "
+            "always declines."
+        )
+        lines.append("")
+    backend_labels = {
+        "cuda": "CUDA",
+        "rocm": "ROCm",
+        "metal": "Metal",
+        "vulkan": "Vulkan",
+    }
     for backend, info in data["backends"].items():
-        lines.append(f"### {backend.upper()}")
+        lines.append(f"**{backend_labels.get(backend, backend)}**")
+        lines.append("")
         if info["native_env_gates"]:
+            lines.append("Native environment gates:")
+            lines.append("")
             for gate in info["native_env_gates"]:
                 lines.append(f"- `{gate}`")
         else:
-            lines.append("- none detected")
+            lines.append("No native environment gates detected.")
         if info["legacy_env_aliases"]:
             lines.append("")
-            lines.append("Legacy aliases honored for compatibility:")
+            lines.append("Legacy compatibility aliases:")
+            lines.append("")
             for gate in info["legacy_env_aliases"]:
                 lines.append(f"- `{gate}`")
         lines.append("")
+    lines.append("</details>")
+    lines.append("")
+
+    lines.append("## Regenerate and validate")
+    lines.append("")
+    lines.append("From the repository root:")
+    lines.append("")
+    lines.append("```bash")
+    lines.append("python3 scripts/generate_backend_capability_report.py --self-test")
+    lines.append("python3 scripts/generate_backend_capability_report.py")
+    lines.append("python3 scripts/generate_backend_capability_report.py --check")
+    lines.append("```")
+    lines.append("")
+    lines.append(
+        "The first command tests generator helpers, the second rewrites the Markdown and JSON "
+        "snapshots, and the third fails if either checked-in file is stale. Run the prescribed "
+        "conformance commands separately and retain their CI or hardware receipts; regeneration "
+        "alone is not verification."
+    )
     return "\n".join(lines)
 
 
@@ -3151,6 +3719,10 @@ def build_report_data() -> tuple[dict[str, Any], list[dict[str, Any]]]:
     data = {
         "source": {
             "script": str(Path(__file__).relative_to(ROOT)),
+            "audited_on": REPORT_AUDITED_ON,
+            "generated_on": REPORT_AUDITED_ON,
+            "scope": "static source and contract inventory",
+            "does_not_execute_commands": True,
         },
         "features": feature_report(),
         "trait_method_count": len(trait_methods),

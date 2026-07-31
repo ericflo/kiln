@@ -336,7 +336,7 @@ This keeps inference, live adapter activation, and post-training eval available
 in one process. For production, remove the instance from traffic, restart with
 `KILN_SERVER_SERVING_PROFILE=maintenance`, train without `post_eval`, then restart in
 `stable` and run the eval before restoring traffic. The full drain procedure is
-in [Serving Profiles](docs/SERVING_PROFILES.md#entering-maintenance).
+in [Serving profiles](docs/SERVING_PROFILES.md#move-between-profiles).
 
 Create a training file `examples.jsonl` with chat-format examples:
 

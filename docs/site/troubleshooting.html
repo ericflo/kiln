@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Kiln Troubleshooting &mdash; First-run checks</title>
-  <meta name="description" content="Kiln troubleshooting for first-time setup, ROCm inference pauses, accelerator policy, memory pressure, health checks, training endpoints, and adapters.">
+  <title>Kiln Troubleshooting &mdash; Diagnose by symptom</title>
+  <meta name="description" content="Diagnose Kiln startup, accelerator selection, memory pressure, inference latency, health, training, remote access, and adapters.">
   <meta name="theme-color" content="#0a0908">
   <meta name="color-scheme" content="dark">
   <link rel="canonical" href="https://ericflo.github.io/kiln/troubleshooting.html">
@@ -12,8 +12,8 @@
   <link rel="alternate icon" type="image/png" href="assets/logo.png">
   <link rel="apple-touch-icon" href="assets/logo.png">
 
-  <meta property="og:title" content="Kiln Troubleshooting &mdash; First-run checks">
-  <meta property="og:description" content="First-run checks and evidence-based diagnosis for Kiln setup, ROCm inference pauses, memory pressure, health, training endpoints, and adapters.">
+  <meta property="og:title" content="Kiln Troubleshooting &mdash; Diagnose by symptom">
+  <meta property="og:description" content="Evidence-based diagnosis for Kiln startup, accelerators, memory pressure, inference latency, health, training, remote access, and adapters.">
   <meta property="og:type" content="website">
   <meta property="og:locale" content="en_US">
   <meta property="og:site_name" content="Kiln">
@@ -24,8 +24,8 @@
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Kiln Troubleshooting &mdash; First-run checks">
-  <meta name="twitter:description" content="First-run checks and evidence-based diagnosis for Kiln setup, ROCm inference pauses, memory pressure, health, training endpoints, and adapters.">
+  <meta name="twitter:title" content="Kiln Troubleshooting &mdash; Diagnose by symptom">
+  <meta name="twitter:description" content="Evidence-based diagnosis for Kiln startup, accelerators, memory pressure, inference latency, health, training, remote access, and adapters.">
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image-v3.png">
   <meta name="twitter:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
 
@@ -80,7 +80,7 @@
       position: absolute;
       left: 1rem;
       top: 0;
-      transform: translateY(-120%);
+      transform: translateY(calc(-100% + 1px));
       z-index: 50;
       background: var(--accent);
       color: #1a0c00;
@@ -271,15 +271,14 @@
   <!-- hero -->
   <section class="hero-glow">
     <div class="max-w-4xl mx-auto px-6 pt-16 pb-10">
-      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">Troubleshooting &middot; first-run checks</span>
+      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">Troubleshooting &middot; diagnose by symptom</span>
       <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">
-        If Kiln does not start cleanly, check these first.
+        Start with the symptom, then gather the smallest useful evidence.
       </h1>
       <p class="text-lg leading-relaxed max-w-3xl" style="color: var(--fg-dim);">
-        This page is a compact diagnosis guide for cold-reader setup issues. It does not replace the
-        <a href="quickstart.html">Quickstart</a>; use it when
-        a command fails, <code>/health</code> is not green, or the server is running but not using the
-        model or adapter you expected.
+        This page is a task-oriented diagnosis guide. It does not replace the
+        <a href="quickstart.html">Quickstart</a>; use it when a command fails, <code>/health</code> is not green,
+        performance changes unexpectedly, or the server is not using the model, adapter, or accelerator you expected.
       </p>
     </div>
   </section>
@@ -293,12 +292,14 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#desktop-app-first-launch">Desktop first launch</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#wrong-binary-or-gpu-path">GPU path</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#memory-budget-or-sampler">Memory budget</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#batching-pauses-or-throughput">Batching</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#cuda-graph-policy">CUDA graph policy</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#rocm-token-pauses">ROCm token pauses</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#streaming-prefill-pauses-or-oom">Prefill pauses/OOM</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#tape-scope-or-removed-switches">Training tape</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#model-weights-not-found">Model weights</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#health-not-green">Health</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#remote-server-not-reachable">Remote access</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#long-prefill-timeouts">Long-prefill timeouts</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#mock-mode">Mock mode</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#adapter-directory">Adapter directory</a>
@@ -318,14 +319,16 @@
           <div class="label mb-2">Binary</div>
           <p style="color: var(--fg-dim);">
             Pick the release artifact for your OS and accelerator: Linux/Windows CUDA builds for NVIDIA GPUs,
-            the Linux Vulkan build for AMD/Intel GPUs, or the Apple Silicon Metal build on macOS arm64.
+            Linux ROCm for supported AMD GPUs, Linux Vulkan for Vulkan-capable GPUs, or Apple Silicon Metal
+            on macOS arm64.
           </p>
         </div>
         <div class="card p-5">
           <div class="label mb-2">Model path</div>
           <p style="color: var(--fg-dim);">
-            Point Kiln at the local Qwen3.5-4B weights with <code>KILN_MODEL_PATH</code> or
-            <code>--model-path</code>. The path must contain the downloaded safetensors and tokenizer files.
+            Point Kiln at local Qwen3.5-4B weights with <code>KILN_MODEL_PATH</code> or
+            <code>model.path</code> in TOML. The directory must contain the downloaded safetensors,
+            configuration, and tokenizer files.
           </p>
         </div>
         <div class="card p-5">
@@ -342,9 +345,9 @@
         <code>--url http://host:8420</code> for remote servers). The curl commands below are the
         equivalent HTTP probes &mdash; handy for CI, scripts, or any environment without the CLI.
       </p>
-<pre class="mt-6"><code>curl -s http://localhost:8420/health | jq .
-curl -s http://localhost:8420/v1/models | jq .
-curl -s http://localhost:8420/v1/chat/completions \
+<pre class="mt-6"><code>curl -fsS http://localhost:8420/health | jq .
+curl -fsS http://localhost:8420/v1/models | jq .
+curl -fsS http://localhost:8420/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"Qwen3.5-4B","messages":[{"role":"user","content":"Say hi."}],"max_tokens":16}' | jq .</code></pre>
       <div class="card p-6 mt-6">
@@ -359,7 +362,7 @@ curl -s http://localhost:8420/v1/chat/completions \
             <li>If the server binary failed to download or verify, retry the download and confirm the app can write to its data directory.</li>
             <li>If the model path is unset or missing weights, choose the local Qwen3.5-4B directory that contains safetensors, config, and tokenizer files.</li>
             <li>If the CUDA driver is too old or an update is blocked on Linux or Windows, update the NVIDIA driver before launching the CUDA server.</li>
-            <li>If a Vulkan build falls back to CPU, run <code>vulkaninfo --summary</code> and confirm the AMD/Intel GPU is listed before launching the Vulkan server.</li>
+            <li>If a Vulkan build falls back to CPU, run <code>vulkaninfo --summary</code> and confirm that the target GPU is listed before launching the Vulkan server.</li>
           </ul>
           <ul class="list-disc pl-5">
             <li>If the port is already in use, stop the other Kiln/server process or change the Desktop App server port before restarting.</li>
@@ -387,14 +390,19 @@ curl -s http://localhost:8420/v1/chat/completions \
             <div class="label mb-2">Check</div>
             <ul class="list-disc pl-5">
               <li>Linux and Windows CUDA builds require an NVIDIA GPU.</li>
+              <li>The Linux ROCm release targets the GPU architectures declared in the release notes.</li>
               <li>Linux Vulkan builds require a working Vulkan loader and compute-capable driver; <code>vulkaninfo --summary</code> should list the target GPU. Kiln negotiates the loader API up to Vulkan 1.2 rather than requiring 1.2 unconditionally.</li>
-              <li>CUDA release builds target CUDA 12.4-era systems.</li>
+              <li>CUDA release builds are compiled with CUDA 12.4; check the release notes for emitted SM targets.</li>
               <li>macOS uses the Apple Silicon Metal artifact, not a CUDA or Vulkan artifact.</li>
             </ul>
           </div>
           <div>
             <div class="label mb-2">Fix</div>
-            <p>Download the matching artifact from <a href="https://github.com/ericflo/kiln/releases">GitHub releases</a>. Select Vulkan through typed <code>accelerator.vulkan_device_index</code> or <code>KILN_ACCELERATOR_VULKAN_DEVICE_INDEX</code>; <code>auto</code> preserves discrete-GPU preference and an explicit unavailable index fails immediately. The memory-probe identity gate currently permits startup only when the selected index is zero and exactly one relevant physical DRM device exists. An available nonzero or multi-device selection therefore fails before model upload instead of measuring another GPU. Retired <code>KILN_VULKAN_DEVICE</code> and <code>GGML_VK_VISIBLE_DEVICES</code> inputs are ignored, while driver remaps such as <code>MESA_VK_DEVICE_SELECT</code> or <code>DRI_PRIME</code> are rejected. CUDA/ROCm visibility variables remain subject to the same interim identity guard, so use a bare-host single-GPU launch or CPU until PCI-address/UUID-bound probing is available.</p>
+            <ul class="list-disc pl-5">
+              <li>Download the matching artifact from <a href="https://github.com/ericflo/kiln/releases">GitHub releases</a>.</li>
+              <li>Select Vulkan with <code>accelerator.vulkan_device_index</code> or its canonical environment override. <code>auto</code> prefers a discrete GPU; an unavailable explicit index fails instead of choosing another device.</li>
+              <li>The current memory-probe identity gate admits only index zero when exactly one relevant physical DRM device exists. Nonzero, multi-GPU, or remapped selections fail before model upload until backend selection and memory probing share a PCI address or UUID. This is an identity-safety gate, not a device or kernel allowlist.</li>
+            </ul>
           </div>
         </div>
       </article>
@@ -411,7 +419,7 @@ curl -s http://localhost:8420/v1/chat/completions \
             <ul class="list-disc pl-5">
               <li>Inspect <code>/v1/config</code> at <code>vram.live</code>, including sample age, staleness, sampler health, and <code>raw_observations.host_backed</code>.</li>
               <li>For Vulkan, inspect <code>vram.vulkan_buffer_pool</code> and <code>/health</code> at <code>vulkan_buffer_pool</code>. Growing retained bytes indicate recycler working-set growth; flat retention with growing RSS indicates a different ownership or page-residency mechanism. Route-specific misses identify device-local versus host-visible growth; host-visible lookup may legitimately hit a larger compatible idle bucket.</li>
-              <li>On Linux Vulkan, compare primary VRAM with the host-backed GTT tier. A 96 GiB firmware VRAM carveout does not mean Linux can safely allocate a 96 GiB host-resident KV cache.</li>
+              <li>On Linux Vulkan, compare primary VRAM with the host-backed GTT tier. A large firmware VRAM carveout does not mean Linux can safely allocate an equally large host-resident KV cache.</li>
               <li>If live ownership is flat but anonymous RSS grows, inspect <code>AnonHugePages</code> in <code>/proc/&lt;pid&gt;/smaps</code>. Repeated fixed-shape requests should reuse recently released KV blocks instead of continuously first-touching untouched pool pages.</li>
               <li>Check host <code>MemAvailable</code> and every applicable cgroup <code>memory.max</code>/<code>memory.high</code> ancestor.</li>
             </ul>
@@ -421,9 +429,9 @@ curl -s http://localhost:8420/v1/chat/completions \
             <p>Reduce <code>memory.num_blocks</code> or <code>memory.inference_memory_fraction</code> in <code>kiln.toml</code>, reduce <code>prefix_cache.max_entries</code>, lower <code>memory.vulkan_buffer_pool_gb</code>, or disable the prefix cache. A zero Vulkan pool cap disables scratch retention; active operations may still need temporary memory. Free host memory or raise the deliberate cgroup limit. Do not bypass a missing, stale, or unhealthy sample: Kiln treats it as zero headroom so a zero-filled allocation cannot take down the process or host.</p>
           </div>
         </div>
-        <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config | jq '.vram.live'
-curl -s http://localhost:8420/health | jq '.gpu_memory.live, .vulkan_buffer_pool, .decode_runtime.memory_governor'
-curl -s http://localhost:8420/metrics | grep -E 'kiln_gpu_memory_(probe_failed|sample_|sampler_)|kiln_gpu_host_backed_memory_bytes|kiln_vulkan_buffer_pool'</code></pre>
+        <pre class="mt-5"><code>curl -fsS http://localhost:8420/v1/config | jq '.vram.live'
+curl -fsS http://localhost:8420/health | jq '.gpu_memory.live, .vulkan_buffer_pool, .decode_runtime.memory_governor'
+curl -fsS http://localhost:8420/metrics | grep -E 'kiln_gpu_memory_(probe_failed|sample_|sampler_)|kiln_gpu_host_backed_memory_bytes|kiln_vulkan_buffer_pool'</code></pre>
       </article>
 
       <article class="card p-6">
@@ -446,11 +454,11 @@ curl -s http://localhost:8420/metrics | grep -E 'kiln_gpu_memory_(probe_failed|s
             <p>Put the four controls in <code>[batching]</code>, restart, capture the resolved object, and change one field per A/B. Restore <code>rowwise_decode=false</code> for throughput. A smaller admission quantum can isolate prompt-admission delay but may reduce batch fill.</p>
           </div>
         </div>
-        <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config \
+        <pre class="mt-5"><code>curl -fsS http://localhost:8420/v1/config \
   | jq '.batching, .decode_runtime.max_decode_batch'
-curl -s http://localhost:8420/health \
+curl -fsS http://localhost:8420/health \
   | jq '.decode_runtime.batching_configuration, .decode_runtime.batching_engine, .decode_runtime.memory_governor'
-curl -s http://localhost:8420/metrics \
+curl -fsS http://localhost:8420/metrics \
   | grep -E 'kiln_batching_engine_|kiln_gpu_memory_|kiln_kv_'</code></pre>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
           Do not label a scheduling pause as VRAM rebalancing without a matching reclaim, physical resize,
@@ -459,25 +467,35 @@ curl -s http://localhost:8420/metrics \
           automatically admit up to effective decode width; ROCm/Metal/CPU default to 4, clamped to that
           width. Every batching change is process-lifetime policy and requires restart.
         </p>
+        <details class="reference-details mt-5">
+          <summary>
+            <span>ROCm decode-width qualification</span>
+            <small>Offline candidate selection, controls, and evidence boundary</small>
+          </summary>
+          <div class="reference-details-body">
         <h3 id="rocm-decode-width-selection" class="text-lg font-semibold mt-6 mb-2">ROCm decode-width selection</h3>
         <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
           Use the committed width campaign as a bounded, offline autotuner, not a live response to a pause.
-          It reruns the accepted width-4 control, then tests widths 6 and 8 serially against one source-built
-          release binary, with a fresh server process and completed cooldown for every arm under a 97 C
-          package-temperature guard. Width 2 is excluded after a retained slower route/outlier rejection. Every candidate
-          must complete 1,312 fixed deterministic output tokens, sampled traffic, and the post-sampling canary;
-          the fused W8A8 sampled LM-head route reaches the same width, and graph capture/replay must remain
-          correct. The selector maximizes the minimum of the deterministic and sampled throughput ratios,
-          rejects an arm when peak GPU allocation grows by more than 1 GiB or bounded tail latency regresses,
-          and chooses the narrowest width within 2% of the best score. Promotion above width 4 also requires a
+          It reruns the accepted control and tests wider candidates serially against one source-built release
+          binary, using a fresh process, cooldown, and declared thermal guard for every arm. Each candidate must
+          pass deterministic output, sampled traffic, post-sampling canary, memory, latency, graph, and cleanup
+          gates. The selector favors the narrowest width near the best combined score; promotion also requires
           material gain plus a new exact-source soak and benchmark.
         </p>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
           This is qualification-time autotuning, not online self-tuning: it never changes a live scheduler,
           never mutates this field, and stops wider arms after a correctness failure. Review the source-bound
-          receipt, then pin the selected integer in <code>server.max_decode_batch</code>. A selection from this
-          Strix Halo ROCm campaign is not evidence for CUDA, Vulkan, Metal, another model, or another source tree.
+          receipt, then pin the selected integer in <code>server.max_decode_batch</code>. A selected width applies
+          only to the source, model, backend, device, and workload bound by that receipt.
         </p>
+          </div>
+        </details>
+        <details class="reference-details mt-5">
+          <summary>
+            <span>CUDA and Metal backend-profile diagnosis</span>
+            <small>Whole-profile comparisons, route attribution, Marlin, and training backward</small>
+          </summary>
+          <div class="reference-details-body">
         <h3 id="cuda-kernel-profile-diagnosis" class="text-lg font-semibold mt-6 mb-2">CUDA backend-profile diagnosis</h3>
         <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
           Inspect <code>accelerator_runtime.cuda_kernel_profile</code> before attributing a CUDA route change.
@@ -485,7 +503,7 @@ curl -s http://localhost:8420/metrics \
           qualification claim; <code>portable_fallback</code> declines all twenty-five. The policy is immutable
           after startup and its source identifies TOML, canonical environment override, or default ownership.
         </p>
-        <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config \
+        <pre class="mt-5"><code>curl -fsS http://localhost:8420/v1/config \
   | jq '.accelerator_runtime | {schema_id, version, cuda_kernel_profile, cuda_marlin_profile, cuda_flash_backward_mode}'</code></pre>
         <ul class="list-disc pl-5 mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
           <li>Use <code>accelerator.cuda_kernel_profile = "portable_fallback"</code> only as a whole-profile comparison, restart, and preserve both resolved config objects with the same model, request, seed, batch, and memory policy.</li>
@@ -503,14 +521,22 @@ curl -s http://localhost:8420/metrics \
           argmax off; <code>portable_fallback</code> declines all forty-six. The policy is immutable after startup
           and its source identifies TOML, canonical environment override, or default ownership.
         </p>
-        <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config \
+        <pre class="mt-5"><code>curl -fsS http://localhost:8420/v1/config \
   | jq '.accelerator_runtime | {schema_id, version, metal_kernel_profile}'</code></pre>
         <ul class="list-disc pl-5 mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
           <li>Compare <code>accelerator.metal_kernel_profile = "native_default"</code> and <code>"portable_fallback"</code> only with identical source, model, request, seed, batch, memory, and graph policy; restart between runs and retain both resolved config objects.</li>
           <li>A profile difference localizes the issue to the forty-six routes enumerated in the architecture reference. It does not identify a leaf; use route telemetry, a profiler trace, and a focused reproduction.</li>
           <li>Do not restore former <code>KILN_DISABLE_METAL_*</code>, generic GDN/RMSNorm, or <code>KILN_ENABLE_METAL_LM_HEAD_ARGMAX</code> variables. They are intentionally not aliases.</li>
-          <li>Neither profile is an M1 qualification claim. Record parity, memory, throughput, and lifecycle evidence on the exact pushed source before promotion.</li>
+          <li>Neither profile is a hardware-qualification claim. Record parity, memory, throughput, and lifecycle evidence on the exact pushed source before promotion.</li>
         </ul>
+          </div>
+        </details>
+        <details class="reference-details mt-5">
+          <summary>
+            <span>Vulkan policy and quarantined-route diagnosis</span>
+            <small>Capability-derived dispatch, benchmark interpretation, prefix reuse, and resident prefill</small>
+          </summary>
+          <div class="reference-details-body">
         <h3 id="vulkan-kernel-policy-diagnosis" class="text-lg font-semibold mt-6 mb-2">Vulkan kernel-policy diagnosis</h3>
         <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
           <code>kiln.vulkan-kernel-policy.v6</code> is derived once from the selected physical device's reported
@@ -521,7 +547,7 @@ curl -s http://localhost:8420/metrics \
           object for those decisions; malformed shell values, device names, vendor IDs, device IDs, and PCI identity
           cannot select a different path.
         </p>
-        <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config \
+        <pre class="mt-5"><code>curl -fsS http://localhost:8420/v1/config \
   | jq '.accelerator_runtime | {schema_id, version, vulkan_kernel_policy_schema_id, vulkan_device_policy_schema_id, vulkan_device_index, vulkan_validation}'</code></pre>
         <ul class="list-disc pl-5 mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
           <li>Remove old kernel switches from launch scripts. They have no compatibility aliases or replacement fields.</li>
@@ -545,9 +571,9 @@ curl -s http://localhost:8420/metrics \
           A conforming process reports the configured intent separately from an effective false capability and
           fresh-prefills exact repeats. Do not interpret zero hits as a tuning or capacity problem on this backend.
         </p>
-        <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config | jq '.prefix_cache'
-curl -s http://localhost:8420/health | jq '.prefix_cache, .decode_runtime.batching_engine.prefix_cache_enabled'
-curl -s http://localhost:8420/metrics | grep '^kiln_.*prefix_cache'</code></pre>
+        <pre class="mt-5"><code>curl -fsS http://localhost:8420/v1/config | jq '.prefix_cache'
+curl -fsS http://localhost:8420/health | jq '.prefix_cache, .decode_runtime.batching_engine.prefix_cache_enabled'
+curl -fsS http://localhost:8420/metrics | grep '^kiln_.*prefix_cache'</code></pre>
         <ul class="list-disc pl-5 mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
           <li>Require <code>effective_enabled=false</code>, <code>effective_reason="vulkan_correctness_quarantine"</code>, health <code>prefix_cache.enabled=false</code>, and actor <code>prefix_cache_enabled=false</code>.</li>
           <li>Every lookup, hit, miss, hit-token, hit-block, cached-block, maximum-block, cached-entry, maximum-entry, state-byte, lease, and pending-release value must be zero.</li>
@@ -557,22 +583,23 @@ curl -s http://localhost:8420/metrics | grep '^kiln_.*prefix_cache'</code></pre>
         </ul>
         <h3 id="vulkan-resident-prefill-diagnosis" class="text-lg font-semibold mt-6 mb-2">Vulkan resident-prefill diagnosis</h3>
         <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
-          Production currently correctness-quarantines the native token-prefill optimization after guarded Vulkan
-          runs returned semantically wrong tokens. Start every incident check by requiring
-          <code>resident_prefill_enabled=false</code>. Every attempt, forward, decline, route-failure, row,
-          completion, and batch-size field must remain zero; <code>active_resident_prefill</code> must also remain
-          zero. Any activity means the running artifact does not implement the current production contract.
+          The serving profile—not a device name or request field—controls admission. Stable and maintenance
+          report <code>resident_prefill_enabled=false</code>; experimental reports true and may take the native
+          route when the request and selected device satisfy its checks. This route is separate from
+          cross-request prefix reuse, which remains quarantined on Vulkan in every profile.
         </p>
-        <pre class="mt-5"><code>curl -s http://localhost:8420/health \
+        <pre class="mt-5"><code>curl -fsS http://localhost:8420/health \
   | jq '.decode_runtime.batching_engine | with_entries(select(.key | contains("resident_prefill")))'
-curl -s http://localhost:8420/metrics \
+curl -fsS http://localhost:8420/metrics \
   | grep '^kiln_batching_engine_.*resident_prefill'</code></pre>
         <ul class="list-disc pl-5 mt-3 text-sm leading-relaxed" style="color: var(--fg-dim);">
-          <li>The generic layer-resumable prefill route remains authoritative. There is no supported environment variable, config field, or request override that enables resident token-prefill.</li>
-          <li><code>kiln_batching_engine_resident_prefill_enabled 0</code> is the Prometheus equivalent of the health capability.</li>
-          <li>A request-level <code>resident_prefill_used=true</code> is impossible in a conforming production process and should be treated as artifact or contract drift.</li>
-          <li>Re-enablement requires production-model semantic parity across changing cohorts and repeated process history. Scheduler counters or a successful HTTP response are not sufficient evidence.</li>
+          <li>Under stable or maintenance, every attempt, forward, decline, route-failure, row, completion, active-row, and batch-size field must remain zero; each request must report <code>resident_prefill_used=false</code>.</li>
+          <li>Under experimental, require the capability to be true before interpreting activity. A request-level <code>resident_prefill_used=true</code> means a native full-stack forward completed; it is route evidence, not a performance or correctness verdict.</li>
+          <li>There is no independent resident-prefill TOML field, environment switch, or request override. Change the serving profile, restart, and verify the resolved policy.</li>
+          <li>For wrong tokens, route failures, or instability, preserve the exact source/config/device receipt and return to stable. Production-model parity across changing cohorts, cancellation, and repeated process history is required before promotion.</li>
         </ul>
+          </div>
+        </details>
       </article>
 
       <article class="card p-6">
@@ -591,8 +618,8 @@ curl -s http://localhost:8420/metrics \
             <p>Stable paged metadata is mandatory and batched capture is unavailable. Former stable-metadata, batched-enable, no-replay, force-eager, and batched-KV environment probes are retired; setting them cannot alter CUDA decode.</p>
           </div>
         </div>
-        <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config | jq '.cuda_graphs'
-curl -s http://localhost:8420/health | jq '.decode_runtime.cuda_graphs'
+        <pre class="mt-5"><code>curl -fsS http://localhost:8420/v1/config | jq '.cuda_graphs'
+curl -fsS http://localhost:8420/health | jq '.decode_runtime.cuda_graphs'
 kiln config --file kiln.toml</code></pre>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
           Use <code>server.serving_profile="experimental"</code> only for controlled qualification. A CUDA feature
@@ -607,458 +634,130 @@ kiln config --file kiln.toml</code></pre>
         <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
           <div>
             <div class="label mb-2">Symptom</div>
-            <p>Token delivery stops briefly during an otherwise healthy ROCm decode, inter-token latency has a long tail, or a new decode shape pauses once and then runs normally. A pause alone is not evidence that Kiln rebalanced VRAM.</p>
+            <p>Token delivery pauses during an otherwise healthy decode, inter-token latency has a long tail, or a new decode shape pauses once and then runs normally.</p>
           </div>
           <div>
-            <div class="label mb-2">Attribute before tuning</div>
+            <div class="label mb-2">Collect</div>
             <ul class="list-disc pl-5">
-              <li>Capture <code>GET /v1/config</code> at top-level <code>accelerator_runtime</code>, <code>rocm_graphs</code>, <code>rocm_graphs_unavailable_reason</code>, <code>rocm_graph_telemetry</code>, and <code>rocm_graph_telemetry_unavailable_reason</code> so immutable policy, full cache state, and the independent phase channel are all part of the result. A null value means unavailable data, not zero activity.</li>
-              <li>Compare health <code>decode_runtime.rocm_synchronization</code> before and after the request. Rising wait time in <code>external_yield</code>, eager-output, matmul, or handoff reasons supports a synchronization-boundary hypothesis.</li>
-              <li>Inspect <code>decode_runtime.rocm_graphs</code>. Check full <code>state</code>/<code>unavailable_reason</code> separately from <code>phase_telemetry_available</code>/<code>phase_telemetry_unavailable_reason</code>. A live <code>current_phase</code>, phase latency growth, transient candidate bytes, new capture attempts, deferrals, admissions, pre/post admission decisions, evictions, retained-byte changes, or fallback duration around a new shape support a graph-lifecycle hypothesis.</li>
-              <li>Require matching allocator reclaim, physical KV resize, primary/host-backed memory movement, or host pressure before calling the event VRAM rebalancing.</li>
+              <li>Resolved accelerator, synchronization, and graph policy from <code>/v1/config</code>.</li>
+              <li>Before-and-after health and metrics snapshots around one reproducible request.</li>
+              <li>Request performance metadata, token timestamps, and matching server logs.</li>
             </ul>
           </div>
           <div>
-            <div class="label mb-2">Interpret carefully</div>
-            <p><code>waited_ns</code> measures host wall time at the named boundary. It identifies where the host observed unfinished GPU work, not necessarily which earlier kernel produced it. Correlate reason deltas with actor phase timing, graph counters, memory telemetry, and token timestamps rather than treating one counter as a causal profile.</p>
+            <div class="label mb-2">Interpret</div>
+            <p>A pause alone is not evidence of VRAM rebalancing. Require a matching allocator reclaim, physical KV resize, memory-pressure transition, or primary/host-backed memory change before using that diagnosis.</p>
           </div>
         </div>
+        <pre class="mt-5"><code>curl -fsS http://localhost:8420/v1/config \
+  | jq '{policy: .accelerator_runtime,
+         graphs: .rocm_graphs,
+         graphs_reason: .rocm_graphs_unavailable_reason,
+         phases: .rocm_graph_telemetry,
+         phases_reason: .rocm_graph_telemetry_unavailable_reason}'
+curl -fsS http://localhost:8420/health \
+  | jq '.decode_runtime
+        | {accelerator_runtime, rocm_synchronization, rocm_graphs,
+           memory_governor, batching_engine}'
+curl -fsS http://localhost:8420/metrics \
+  | grep -E '^kiln_rocm_(cleanup|synchronization|graph_)|^kiln_gpu_memory_|^kiln_kv_'</code></pre>
 
-        <h3 class="font-semibold mt-6 mb-3">Record the immutable policy and reasoned telemetry</h3>
-        <pre><code>curl -s http://localhost:8420/v1/config \
-  | jq '.accelerator_runtime,
-        {rocm_graphs, rocm_graphs_unavailable_reason,
-         rocm_graph_telemetry, rocm_graph_telemetry_unavailable_reason}'
-# Record rocm_graph_cache_max_bytes configured/effective/source from that object.
-curl -s http://localhost:8420/health \
-  | jq '.decode_runtime.accelerator_runtime,
-        .decode_runtime.rocm_synchronization,
-        .decode_runtime.rocm_graphs'
-curl -s http://localhost:8420/v1/debug/model-state \
-  | jq '.accelerator_runtime, .rocm_synchronization,
-        {rocm_graphs, rocm_graphs_unavailable_reason,
-         rocm_graph_telemetry, rocm_graph_telemetry_unavailable_reason}'
-curl -s http://localhost:8420/metrics \
-  | grep -E 'kiln_rocm_(cleanup_quarantined|synchronization|synchronizations)'
-curl -s http://localhost:8420/metrics \
-  | grep '^kiln_rocm_graph_'
-# Require cleanup_quarantined=false and kiln_rocm_cleanup_quarantined 0.
-# Require kiln_rocm_graph_telemetry_available 1 before reading full cache families.
-# When it is 0, read kiln_rocm_graph_snapshot_unavailable{reason}.
-# Require kiln_rocm_graph_phase_telemetry_available 1 for current/completed phase evidence.
-# When it is 0, read kiln_rocm_graph_phase_telemetry_unavailable{reason}.
-# Any quarantine or missing safety telemetry is a hard safety fault;
-# graph unavailability invalidates the arm.</code></pre>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          Trusted debug must already be enabled; do not expose it merely to collect this comparison. The
-          synchronization snapshot is a fixed 23-reason atomic read and does not wait on the device or probe
-          the driver. Prometheus separates device and stream wait counts by <code>{reason,scope}</code>, host
-          wait seconds by <code>{reason}</code>, and barriers deliberately skipped by stream-ordered policy.
-          <code>telemetry_available=false</code> invalidates the synchronization comparison instead of implying
-          zero waits. Require <code>cleanup_quarantined=false</code> and
-          <code>kiln_rocm_cleanup_quarantined 0</code> while telemetry is available. A quarantine is a hard
-          safety fault, not a normal capture fallback: stop the arm, preserve the health/metrics/log evidence,
-          and restart the process before resuming service. Quarantine is process-lifetime sticky; a later
-          recovery drain cannot clear it. Active ROCm telemetry loss is equally fatal, even when the quarantine
-          bit reads false. The shared backend gate rejects inference, adapter, training, and import admission
-          once either condition is observed. The runtime rejects new
-          execution and retains possibly in-flight HIP resources until process exit rather than destroying them
-          without proof of quiescence.
-        </p>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          Full graph-cache observation does not wait for the runner locks. Require
-          <code>kiln_rocm_graph_telemetry_available 1</code> before interpreting cache, counter, or fallback
-          families. A zero availability value explains why those families are absent from that scrape; it does
-          not mean the cache is empty. Read the one-hot
-          <code>kiln_rocm_graph_snapshot_unavailable{reason}</code> family rather than guessing. The same condition
-          appears as null <code>rocm_graphs</code> plus <code>rocm_graphs_unavailable_reason</code> in config and
-          trusted debug. Health reports <code>state="busy"</code> only for <code>model_runner_busy</code> or
-          <code>graph_runner_busy</code>; it reports <code>state="unavailable"</code> for
-          <code>backend_without_graph_runner</code>, <code>model_runner_lock_poisoned</code>, or
-          <code>graph_runner_lock_poisoned</code>. Do not ascribe every null to lock contention. The independent
-          phase handle lives outside both runner locks, so it remains readable for every real backend through
-          model-runner or graph-runner contention and poison. Require
-          <code>kiln_rocm_graph_phase_telemetry_available 1</code>, then use
-          <code>kiln_rocm_graph_current_phase</code>, its elapsed-seconds gauge, and fixed phase duration families
-          to identify a headroom, warm, reservation, native-capture/publication, or cleanup pause while it is
-          occurring. <code>native_capture</code> includes the settled first launch, defensive cache
-          admission/publication, and blocking committed governor debit; <code>rejected_candidate_cleanup</code>
-          begins only when an unretained candidate enters destruction and settlement. When
-          phase availability is zero, inspect
-          <code>kiln_rocm_graph_phase_telemetry_unavailable{reason}</code>; currently only
-          <code>backend_without_graph_runner</code> can be active there, though the family uses the same closed
-          five-reason schema. The two availability gauges govern only their own metric families.
-        </p>
+        <h3 class="font-semibold mt-6 mb-3">Read each signal at its boundary</h3>
+        <ul class="list-disc pl-5 text-sm leading-relaxed" style="color: var(--fg-dim);">
+          <li><code>waited_ns</code> measures host wall time where Kiln observed unfinished GPU work. It does not identify which earlier kernel consumed that time.</li>
+          <li>Use reason deltas to distinguish external yield, output handoff, matmul/cast, graph transition, memory reclaim, and recovery boundaries.</li>
+          <li>A live graph phase or a new capture, admission, eviction, byte-budget rejection, or fallback around the pause supports a graph-lifecycle hypothesis.</li>
+          <li>A null graph snapshot means unavailable data, not an empty cache. Read the paired unavailable reason and the independent phase-telemetry authority.</li>
+          <li>Graph capture success and cache admission are different outcomes: a successfully launched candidate can still be rejected safely by the final cache-admission check.</li>
+        </ul>
 
-        <h3 class="font-semibold mt-6 mb-3">Run a controlled legacy versus stream-ordered A/B</h3>
-        <p class="mb-4 leading-relaxed" style="color: var(--fg-dim);">
-          Use the same binary, model, request corpus, prompt order, seed, sampling parameters, memory budget,
-          batching configuration, concurrency, and warmup. Run the arms serially after separate restarts. Both
-          arms use the experimental serving profile because <code>stream_ordered</code> is qualification-only;
-          both explicitly disable graphs so capture does not become a second changed variable.
-        </p>
-        <pre><code># rocm-legacy.toml
+        <div class="card p-4 mt-5" style="background: var(--bg-soft-2); border-color: var(--amber);">
+          <h3 class="font-semibold mb-2" style="color: var(--fg);">Stop on a safety fault</h3>
+          <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
+            <code>cleanup_quarantined=true</code>, active synchronization-telemetry loss, a capture parity
+            failure, or a replay failure is not a tuning result. Stop the arm, preserve config, health, metrics,
+            and logs, then restart the process. Quarantine is process-lifetime state; a later diagnostic drain
+            does not make execution safe again.
+          </p>
+        </div>
+
+        <details class="reference-details mt-5">
+          <summary>
+            <span>Run one-variable comparisons</span>
+            <small>Synchronization, graph lifecycle, cache, and rollback</small>
+          </summary>
+          <div class="reference-details-body">
+            <h3 class="font-semibold mt-6 mb-3">Synchronization</h3>
+            <p class="leading-relaxed" style="color: var(--fg-dim);">
+              Compare <code>legacy_host_barriers</code> with <code>stream_ordered</code> only under the
+              experimental profile. Use the same binary, model, corpus, request order, seed, sampling,
+              batching, memory budget, concurrency, and warmup. Run the arms serially in fresh processes and
+              disable graphs in both arms so graph capture is not a second changed variable.
+            </p>
+            <pre class="mt-4"><code># control.toml
 [server]
 serving_profile = "experimental"
 
 [accelerator]
 rocm_synchronization_mode = "legacy_host_barriers"
 rocm_graph_mode = "disabled"
-rocm_graph_cache_entries = 8
-rocm_graph_cache_max_bytes = 1073741824
 
-# rocm-stream-ordered.toml: identical except this field
-# rocm_synchronization_mode = "stream_ordered"
+# candidate.toml is identical except:
+# rocm_synchronization_mode = "stream_ordered"</code></pre>
+            <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+              Compare token or logit parity, completion count, throughput, p50/p95/p99/max inter-token
+              latency, reasoned wait/skip deltas, memory peaks, and post-run plateaus.
+              <code>legacy_host_barriers</code> remains the qualified default. A lower wait count without
+              parity and stability is not a pass.
+            </p>
 
-kiln config --file rocm-legacy.toml --backend rocm
-kiln serve --config rocm-legacy.toml
-# Stop the first server before starting the second arm.
-kiln config --file rocm-stream-ordered.toml --backend rocm
-kiln serve --config rocm-stream-ordered.toml</code></pre>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Save pre/post health and metrics snapshots for each arm. Compare token or logit parity, completed
-          requests, throughput at concurrency 1/8/16/32/64, p50/p95/p99/max inter-token latency, per-reason
-          wait and skip deltas, and primary plus host-backed memory peaks and post-run plateaus. Stop the arm on
-          a parity error, replay/capture failure, cleanup quarantine, OOM, telemetry loss, host-memory pressure,
-          or incomplete request. A lower wait count without parity and stability is not a pass.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          <code>legacy_host_barriers</code> remains the qualified default. It preserves historical device and
-          active-stream waits, including a device-wide external-yield drain. <code>stream_ordered</code> skips
-          only call sites proven FIFO-ordered on the same HIP stream and changes external yield to a primary
-          stream wait. Host readback, buffer lifetime, in-place mutation, allocator reclaim, graph transition,
-          error recovery, and global-state drains still wait.
-        </p>
+            <h3 class="font-semibold mt-6 mb-3">Graph lifecycle</h3>
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm" style="color: var(--fg-dim);">
+                <thead style="color: var(--fg);"><tr><th class="text-left p-2">Mode</th><th class="text-left p-2">Purpose</th><th class="text-left p-2">Profile</th></tr></thead>
+                <tbody>
+                  <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>disabled</code></td><td class="p-2">Eager control with no graph warmup, capture, or replay.</td><td class="p-2">Any</td></tr>
+                  <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>warmup_then_eager</code></td><td class="p-2">Graph-shaped warmup without native capture.</td><td class="p-2">Experimental</td></tr>
+                  <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>lazy_capture_replay</code></td><td class="p-2">Lazy native capture and replay for eligible shapes.</td><td class="p-2">Experimental</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+              Compare disabled with graph-shaped eager before testing native capture. Keep synchronization,
+              cache bounds, corpus, concurrency, and memory policy fixed. A one-time pause accompanied by a
+              new successful capture can be a bucket transition; repeated fallbacks, replay failures, parity
+              failures, or an unbounded memory plateau are not.
+            </p>
 
-        <h3 class="font-semibold mt-6 mb-3">Isolate graph lifecycle separately</h3>
-        <div class="overflow-x-auto">
-          <table class="w-full text-sm" style="color: var(--fg-dim);">
-            <thead style="color: var(--fg);"><tr><th class="text-left p-2">Mode</th><th class="text-left p-2">Lifecycle</th><th class="text-left p-2">Profile rule</th></tr></thead>
-            <tbody>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>profile</code></td><td class="p-2">Resolves to disabled under stable/maintenance and lazy capture/replay under experimental.</td><td class="p-2">Recommended default.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>disabled</code></td><td class="p-2">No graph-shaped warmup, capture, or replay.</td><td class="p-2">Valid in every profile.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>warmup_then_eager</code></td><td class="p-2">One graph-shaped eager warmup, then eager decode without capture.</td><td class="p-2">Experimental only.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>lazy_capture_replay</code></td><td class="p-2">Eager warmup followed by lazy capture/replay for eligible decode shapes; independently bounded to 1&ndash;64 entries and 64 MiB&ndash;16 GiB retained requested allocation bytes.</td><td class="p-2">Experimental only.</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          Compare <code>disabled</code> with <code>warmup_then_eager</code> before testing native capture. A
-          one-time pause paired with new capture counters can be a deterministic bucket transition; repeated
-          fallback growth or replay failures are not. Graph replay records completion on its capture stream,
-          orders that event into the primary stream, and only then permits the external-yield wait to publish
-          progress. See <a href="architecture.html#rocm-execution-policy">ROCm execution policy</a> for the
-          ordering contract.
-        </p>
-        <h3 class="font-semibold mt-6 mb-3">Isolate prefix-cache state separately</h3>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          If deterministic output still differs after graphs and KV autoscaling are disabled, compare the
-          committed <code>both-off</code> arm directly with <code>both-off-prefix-cache-off</code>. The latter
-          writes <code>prefix_cache.enabled = false</code> in the generated typed launch file; do not inject an
-          environment override. It must report a false batching capability and zero cache capacity, lookup,
-          hit, lease, pending-release, retained-block, entry, and recurrent-state-byte evidence at every
-          attested boundary. Its receipt retains the enabled bit, baseline residency, lookup/hit deltas, and
-          final residency. Do not interpret a failure as proof against the cache axis unless the tested source also
-          proves route invariance. Before the July 20 correction, this toggle changed the final long-prompt chunk
-          boundary on GDN models even on an enabled-cache miss, so the storage A/B also changed recurrent-state
-          numerics. Current source keeps the block-aligned boundary and configured token/layer quanta identical,
-          suppresses only lookup/snapshot/registration/retention work, and has portable first-token, recurrent-state,
-          and following-token parity coverage. The clean source-bound Strix Halo ROCm replacement arm subsequently
-          passed all ten deterministic and eight sampled requests, including the formerly failing 2,432-token prompt,
-          while every cache metric remained zero. Preserve both receipts: the pass closes this specific ROCm
-          discriminator, while another backend or source revision still requires its own accelerator evidence.
-        </p>
+            <h3 class="font-semibold mt-6 mb-3">Prefix cache</h3>
+            <p class="text-sm leading-relaxed" style="color: var(--fg-dim);">
+              If deterministic output still differs after graph capture and physical KV autoscaling are off,
+              compare <code>prefix_cache.enabled=true</code> with <code>false</code> in otherwise identical
+              files. The disabled arm must report no lookup, hit, retained-block, lease, or recurrent-state
+              activity. This isolates storage and reuse only when both arms preserve the same prompt-chunk
+              geometry.
+            </p>
 
-        <h3 class="font-semibold mt-6 mb-3">Run graph lifecycle and byte-budget A/Bs separately</h3>
-        <p class="mb-4 leading-relaxed" style="color: var(--fg-dim);">
-          Start with graph-shaped eager versus native capture. Keep synchronization mode, both cache limits,
-          model, corpus, request order, seed, sampling, concurrency, warmup, and memory configuration identical;
-          change only <code>rocm_graph_mode</code>. The byte budget is an exact integer byte count, defaults to
-          1 GiB, accepts 64 MiB through 16 GiB, and has canonical environment name
-          <code>KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES</code>.
-        </p>
-        <pre><code># rocm-graph-eager.toml
-[server]
-serving_profile = "experimental"
-
-[accelerator]
-rocm_synchronization_mode = "legacy_host_barriers"
-rocm_graph_mode = "warmup_then_eager"
-rocm_graph_cache_entries = 8
-rocm_graph_cache_max_bytes = 1073741824
-
-# rocm-graph-capture.toml: identical except this field
-# rocm_graph_mode = "lazy_capture_replay"
-
-kiln config --file rocm-graph-eager.toml
-kiln serve --config rocm-graph-eager.toml
-# Stop the first server, then repeat with rocm-graph-capture.toml.</code></pre>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          After the capture arm passes parity and stability, a separate conservative budget-pressure arm may
-          lower only <code>rocm_graph_cache_max_bytes</code>, for example to the 64 MiB minimum
-          (<code>67108864</code>). That arm tests rejection, idle-owner eviction, and eager fallback; it is not a
-          throughput target. Never raise the byte limit merely because a pause occurred. First require matching
-          byte-budget rejections or evictions, accounting completeness, and sufficient live memory headroom.
-          Entry/known-byte saturation should reclaim eligible idle owners before candidate allocation. If those
-          cannot make room, fair active relief may retire the minimum selected exact geometries after settlement;
-          one projected graph per active owner plus every live recurrent-state slot and continuity timeline must
-          remain. After the
-          settled warm pass, exact accounting, matching-device pressure, and atomic governor reservation should
-          reject an inadmissible candidate before native capture. A defensive post-capture rejection is still
-          possible if concurrent state changes. A candidate-alone byte or incomplete-accounting result makes that
-          geometry non-capture-safe for the runner lifetime. Aggregate budget suppression clears only after owner
-          or budget relief; reservation denial retries only after matching-device cached headroom is sufficient.
-          Later matches take the typed eager fallback without another full warm/allocation pass. A
-          <code>memory_governor_selector_mismatch</code> fails closed and is a configuration/topology fault, not
-          evidence that the graph cache byte limit is too low.
-        </p>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          Keep hardware evidence separate from product policy. A source-bound
-          receipt may record the accelerator, driver, clocks, memory, graph
-          events, allocator activity, and phase timing that were observed, but
-          another host must run its own qualification. Current workloads do not
-          require a laptop model, one ROCm architecture, or a temperature
-          sensor. Startup, requests, and teardown use their declared wall-clock
-          bounds, and process cleanup remains mandatory.
-        </p>
-
-        <h3 class="font-semibold mt-6 mb-3">Capture exact graph memory diagnostics</h3>
-        <pre><code>curl -s http://localhost:8420/v1/config \
-  | jq '{policy: (.accelerator_runtime
-                   | {schema_id, version, rocm_graph_mode,
-                      rocm_graph_cache_entries, rocm_graph_cache_max_bytes}),
-         live_graphs: .rocm_graphs,
-         live_graphs_reason: .rocm_graphs_unavailable_reason,
-         live_phase: .rocm_graph_telemetry,
-         live_phase_reason: .rocm_graph_telemetry_unavailable_reason}'
-curl -s http://localhost:8420/health \
-  | jq '.decode_runtime.rocm_graphs
-        | {max_cached_graphs, max_retained_bytes,
-           captured_graph_count, active_graph_slot_count, idle_graph_slot_count,
-           cache_admission_successes, cache_evictions, cache_evicted_bytes,
-           budget_evictions, pressure_evictions,
-           invalidation_evictions, recovery_evictions,
-           entry_capacity_rejections, byte_budget_rejections,
-           accounting_incomplete_rejections,
-           pre_capture_entry_capacity_skips, pre_capture_byte_budget_skips,
-           pre_capture_accounting_incomplete_skips,
-           pre_capture_memory_reservation_denied_skips,
-           memory_governor_selector_mismatch_skips,
-           batched_capture_attempts, batched_capture_successes,
-           batched_capture_deferrals, batched_capture_failures,
-           capture_parity_checks, capture_parity_passes,
-           capture_parity_failures, capture_parity_errors,
-           capture_parity_compared_bytes, capture_parity_duration_micros,
-           retained_stable_io_bytes, retained_capture_arena_bytes,
-           retained_blaslt_workspace_bytes, retained_slot_state_bytes,
-           retained_bytes, peak_retained_bytes,
-           last_transient_candidate_bytes, peak_transient_candidate_bytes,
-           opaque_native_object_count, retained_bytes_accounting_complete,
-           quarantined_retained_bytes, current_phase,
-           current_phase_elapsed_micros, pre_candidate_headroom_phase,
-           candidate_warm_phase, pre_native_reservation_phase,
-           native_capture_phase, rejected_candidate_cleanup_phase, fallbacks}'
-curl -s http://localhost:8420/v1/debug/model-state \
-  | jq '{rocm_graphs, rocm_graphs_unavailable_reason,
-         rocm_graph_telemetry, rocm_graph_telemetry_unavailable_reason}'
-  # trusted debug must already be enabled
-curl -s http://localhost:8420/metrics \
-  | grep '^kiln_rocm_graph_'</code></pre>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          At a drained boundary, require <code>active_graph_slot_count=0</code> and
-          <code>tracked_decode_owner_count=0</code>. A positive <code>idle_graph_slot_count</code> is bounded retained
-          cache capacity, not a leak: it includes reusable single-row slots and slots reserved for a native batched
-          width. Correlate the active count with batching liveness; do not classify a width reservation as a live
-          request or require all retained graph state to be destroyed between waves.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Require <code>captured_graph_count &lt;= max_cached_graphs</code> and
-          <code>retained_bytes_accounting_complete=true</code> for every retained cache admission. Exact
-          admission must not publish a candidate whose projected <code>retained_bytes</code> exceeds
-          <code>max_retained_bytes</code>. A later arbitrary snapshot can still include required active graphless
-          slot state; the runner must count and preserve that continuity state, block new capture when it consumes
-          the budget, and never fabricate a lower total. Also require
-          <code>peak_retained_bytes &gt;= retained_bytes</code>. The current total deduplicates physical allocations
-          by device and allocation identity across stable I/O, capture arenas, private-stream hipBLASLt
-          workspaces, and every runner-owned recurrent/conv owner slot. The four category fields attribute those
-          requested bytes; shared slot allocations are counted once even when an owner has multiple graphs, and
-          active graphless slots remain in <code>retained_slot_state_bytes</code>.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          The warm Record pass must allocate the candidate before its exact size exists. Treat
-          <code>last_transient_candidate_bytes</code> and <code>peak_transient_candidate_bytes</code> as that
-          residual exposure plus the separately reserved first-launch parity snapshots, current-row gather, and
-          exact-equality mask, not as retained cache bytes. For every phase require
-          <code>slow &lt;= calls</code>, <code>max_duration_micros &lt;= total_duration_micros</code>, and all duration
-          fields zero when <code>calls</code> is zero. A rising <code>current_phase_elapsed_micros</code> while the
-          full graph snapshot is busy is direct phase attribution, not telemetry loss. The five completed phase
-          totals do not overlap. A successful full <code>rocm_graphs</code> response includes point-in-time copies
-          of completed phase and transient fields, but the separate <code>rocm_graph_telemetry</code> object and
-          health&rsquo;s phase fields are authoritative while full statistics are unavailable.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          For Prometheus, first require <code>kiln_rocm_graph_telemetry_available 1</code>. Compare
-          <code>kiln_rocm_graph_retained_bytes{kind="total"}</code> with
-          <code>kiln_rocm_graph_retained_byte_limit</code>, and require
-          <code>kiln_rocm_graph_retained_byte_accounting_complete 1</code>. Attribute cache movement with
-          <code>kiln_rocm_graph_cache_admissions_total</code>,
-          <code>kiln_rocm_graph_cache_evictions_total</code>,
-          <code>kiln_rocm_graph_cache_evicted_bytes_total</code>,
-          <code>kiln_rocm_graph_cache_evictions_by_cause_total{cause="budget|pressure|invalidation|recovery"}</code>,
-          <code>kiln_rocm_graph_cache_admission_rejections_total{reason="entry_capacity|byte_budget|accounting_incomplete"}</code>,
-          and <code>kiln_rocm_graph_pre_capture_skips_total{reason="entry_capacity|byte_budget|accounting_incomplete|memory_reservation_denied|memory_governor_selector_mismatch"}</code>.
-          Capture behavior is split between <code>kiln_rocm_graph_capture_attempts_total</code>,
-          <code>kiln_rocm_graph_capture_outcomes_total{outcome="success|deferred|failure"}</code>,
-          <code>kiln_rocm_graph_batched_capture_attempts_total</code>,
-          <code>kiln_rocm_graph_batched_capture_outcomes_total{outcome="success|deferred|failure"}</code>,
-          <code>kiln_rocm_graph_capture_parity_checks_total</code>,
-          <code>kiln_rocm_graph_capture_parity_outcomes_total{outcome="passed|failed|error"}</code>,
-          <code>kiln_rocm_graph_capture_parity_compared_bytes_total</code>,
-          <code>kiln_rocm_graph_capture_parity_duration_seconds_total</code>,
-          <code>kiln_rocm_graph_replay_attempts_total</code>, and
-          <code>kiln_rocm_graph_replay_outcomes_total{outcome="success|failure"}</code>.
-          <code>kiln_rocm_graph_fallbacks_total{reason}</code> supplies the closed fallback reason; no request,
-          shape, allocation, or configured-byte value is used as a label.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Current ROCm capture supports contiguous BF16 multi-row decode. A healthy batch route reports successful
-          capture/replay, a retained shared width slot that is idle between cohorts, and zero
-          <code>kiln_rocm_graph_fallbacks_total{reason="multi_row_batch_unsupported"}</code> delta. A positive value
-          identifies a historical binary or a route outside the supported graph contract; it is not proof of VRAM
-          rebalancing, and a graph-performance qualification must still fail.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          For every new batch geometry, find exactly one
-          <code>event=rocm_graph_capture_parity_check</code>. A passed event means the first graph launch matched its
-          own eager warm hidden output, every recurrent and convolution tensor, and the current K/V rows. Inspect
-          <code>comparison_complete</code>, <code>compared_bytes</code>, and <code>duration_ms</code>. A completed check
-          also reports <code>hidden_match</code>; each first-mismatch layer field appears when that state family
-          differs. An error reports the comparison failure instead. A failed, errored, or missing check on a claimed current-source capture is
-          failure evidence. The runner must settle and restore state, discard the graph, disable graph execution,
-          and report <code>capture_failure</code> before any contained eager retry; do not treat the eager completion
-          as graph correctness. For durable evidence, require batched attempts and parity checks to reconcile to
-          their outcome counters, successful batch admissions not to exceed passed checks, and a clean measured
-          window to have zero failure/error with equal success/pass deltas. The serving receipt&rsquo;s
-          <code>rocm_graph_capture_parity_accounted</code> gate enforces that contract without parsing logs.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          For <code>cold_cache_host_round_trip</code> or <code>persistent_host_round_trip</code>, inspect the paired
-          <code>event=rocm_graph_capture_host_transfer</code> records. They identify each warm-pass upload by
-          build-source file/line/column, dtype, elements and bytes per copy, copy count, and total bytes. The scope is
-          thread- and device-local and keeps at most 32 unique sites per candidate; a
-          <code>source_file=bounded_site_overflow</code> row aggregates the remainder. A site repeated on every attempt
-          is a persistent forward path. A site present only on the first attempt can be a cold shape-cache fill, but
-          actual capture and replay counters remain the authority. The event never includes prompt text, token IDs,
-          tensor values, or allocation addresses.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          A current binary does not upload ROCm broadcast shape metadata. Rank-eight shape and stride data is captured
-          directly as a kernel value. If an attribution record names metadata construction in
-          <code>rocm_ops/index_select.rs</code>, first compare the executable hash and source identity with the current
-          receipt; on matching current source, treat the event as a regression and stop graph qualification.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Independently require <code>kiln_rocm_graph_phase_telemetry_available 1</code>. The phase label is exactly
-          <code>pre_candidate_headroom</code>, <code>candidate_warm</code>,
-          <code>pre_native_reservation</code>, <code>native_capture</code>, or
-          <code>rejected_candidate_cleanup</code>. Compare calls, slow calls, total seconds, and maximum seconds;
-          inspect <code>kiln_rocm_graph_current_phase{phase}</code> plus
-          <code>kiln_rocm_graph_current_phase_elapsed_seconds</code> during the pause and
-          <code>kiln_rocm_graph_transient_candidate_bytes{kind="last|peak"}</code> after measurement.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Do not equate capture success with cache retention. A
-          <code>kiln_rocm_graph_capture_outcomes_total{outcome="success"}</code> increment means native
-          instantiation and first launch succeeded, even if exact post-capture admission then safely rejected the
-          candidate. <code>kiln_rocm_graph_cache_admissions_total</code> counts only the retained/replayable
-          subset. Attribute their delta with entry/byte/accounting post-capture rejection counters and the corresponding
-          closed fallback reason; it is not a capture failure.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          <code>opaque_native_object_count</code> is a separate count of graph, executable, stream, and two event
-          handles per retained entry. HIP does not expose their driver byte sizes, and allocator-pool slack is
-          also outside <code>retained_bytes</code>. Compare the graph snapshot with live driver/governor memory;
-          do not treat the byte-accounting total as whole-process VRAM residency.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Ordinary entry or byte pressure evicts deterministic least-recently-used idle owners as whole units.
-          If those cannot make room at actual saturation, an exact-geometry miss uses deterministic fair-LRU active
-          relief. The incoming candidate counts toward its owner's projected share; the most represented owner and
-          then its oldest geometry are selected until the candidate fits, while every active owner retains one
-          projected graph. Boundary <code>pre_capture_active_fair_share</code> preserves active slots, assignments,
-          and continuity. A cache hit is never retired, and unused global headroom never triggers active eviction.
-          Correlate a pause with the structured <code>rocm_graph_cache_eviction</code> event: a nonzero
-          <code>active_graph_only_owner_count</code> identifies this prior-geometry path, while the boundary,
-          removed counts, released bytes, and typed reason identify the exact transaction.
-          Moderate pressure permits retained replay but blocks cache growth. Tight pressure evicts all eligible idle owners,
-          permits an already-retained active-owner replay, and sends a miss to eager without capture. Critical or
-          unavailable pressure settles and removes every graph, preserves active recurrent slot state, and uses
-          eager execution only after cleanup proves safe. Rising <code>budget_evictions</code>,
-          <code>pressure_evictions</code>, <code>graph_cache_byte_budget</code>, or
-          <code>tight_memory_pressure</code> can therefore be expected evidence in the corresponding diagnostic
-          arm; parity loss, unbounded plateaus, or cleanup quarantine are never expected.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Every eviction and rejected post-capture candidate follows pre-drop settlement, resource drop, then
-          post-drop settlement. If the first settlement fails during cached eviction, the cache map remains
-          intact. A safely settled and destroyed rejected candidate continues through its typed eager fallback.
-          Only a rejected candidate whose pre-drop settlement fails falls into cleanup quarantine and retains
-          possibly in-flight low-level handles until exit. Likewise, if a destructor, async free, or final
-          settlement fails, <code>quarantined_retained_bytes</code> records the affected logical bytes and execution
-          becomes cleanup-quarantined. Stop immediately: no eager retry is permitted, no successful reclaimed-byte
-          event may be inferred, and the process must restart.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Diagnose native capture failure separately from rejected-candidate cleanup. A recoverable failure drains
-          under synchronization reason <code>capture_rollback</code> while admission is still open and then restores
-          logical recurrent state; only success of both proofs permits the <code>capture_failure</code> eager
-          continuation. A failed settlement, failed logical rollback, or armed/unclassified guard exit publishes
-          sticky STOP, uses <code>error_recovery</code> only for a post-STOP diagnostic drain, and requires restart
-          even if that later drain succeeds. Treat quarantine as failure evidence, never as a normal fallback.
-        </p>
-
-        <h3 class="font-semibold mt-6 mb-3">Rollback</h3>
-        <pre><code>[server]
+            <h3 class="font-semibold mt-6 mb-3">Rollback</h3>
+            <pre><code>[server]
 serving_profile = "stable"
 
 [accelerator]
 rocm_synchronization_mode = "legacy_host_barriers"
-rocm_graph_mode = "profile"
-rocm_graph_cache_entries = 8
-rocm_graph_cache_max_bytes = 1073741824</code></pre>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          Validate, restart, and require effective graph mode <code>disabled</code>. Removing the explicit
-          <code>[accelerator]</code> section produces the same stable defaults. Stable startup rejects
-          <code>stream_ordered</code> and explicit non-disabled graph modes rather than silently weakening the
-          request. Do not change these process-lifetime fields in the shell or file and assume a running server
-          observed them.
-        </p>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          The clean-source Strix Halo ROCm stable arm passed this exact contract: requested autoscaling,
-          automatic reclaim, and graphs resolved effectively off; KV stayed at 4,096 blocks; every resize,
-          reclaim, graph warmup/capture/replay, live-graph, and transient-byte counter remained zero; and all
-          deterministic and sampled requests passed. Its p99/p99.9 ITL was 479.783/488.150 ms at 13.632 output
-          tokens/second, with an 88.875 C package peak and clean unforced shutdown. This is source-bound device
-          evidence for the mixed-load arm, not a substitute for the 30-minute development soak or final endurance.
-        </p>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          The first development-soak attempt rejected a false-drained snapshot before measurement:
-          all 29 warmup responses were valid and the prefix cache reached all 39 entries, but batching had already
-          published zero active rows while terminal model cleanup still retained one ROCm graph owner. Treat
-          batching drain as a resource-ownership boundary, not merely an empty scheduling queue. Measurement and
-          accelerator telemetry correctly remain zero when setup fails; this receipt therefore is not throughput
-          evidence. The guarded process peaked at 89.875 C, grew no swap, shut down cleanly, removed its snapshot,
-          and left no process.
-        </p>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          The exact-source rerun with conservative terminal publication reached the same 29-request, 39-entry
-          boundary and failed closed again. That isolated a second issue: native batched graphs retain reusable
-          width-reserved slots, and the health statistic classified the reservation itself as active even though it
-          owned no live decode row. A width reservation is not live request ownership. The documented active count
-          is live logical ownership; retained reusable slots
-          belong in the idle count. The rerun began no measurement, grew no swap, stayed below the 97 C guard,
-          shut down unforced with exit zero, and left no process or snapshot. Correct and regress the slot-liveness
-          classification before another soak; neither rejected receipt is throughput evidence.
+rocm_graph_mode = "profile"</code></pre>
+            <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+              Validate, restart, and require effective graph mode <code>disabled</code>. Stable startup rejects
+              stream-ordered synchronization and explicit non-disabled graph modes instead of silently
+              weakening the request.
+            </p>
+          </div>
+        </details>
+
+        <p class="mt-5 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Use the <a href="docs/latency-observability/">latency observability guide</a> for metric definitions,
+          the <a href="docs/serving-benchmark-protocol/">serving benchmark protocol</a> for comparable runs,
+          and <a href="docs/hardware-qualification/">hardware qualification</a> for source-bound receipts.
+          A receipt describes one build, device, driver, model, and workload; it never becomes product routing.
         </p>
       </article>
 
@@ -1084,6 +783,9 @@ rocm_graph_cache_max_bytes = 1073741824</code></pre>
             <p>Keep actor ownership and tiled dispatch fixed. Change the actor ceiling, streaming threshold, and base tile together in a separate diagnostic file so they retain one numerical boundary. Reduce that boundary in multiples of 64 for a measured OOM; do not broadly raise the timeout or infer VRAM rebalancing from a temporal gap alone.</p>
           </div>
         </div>
+        <details class="reference-details mt-5">
+          <summary>Exact tiled-prefill diagnostic and policy defaults</summary>
+          <div class="reference-details-body">
 <pre class="mt-5"><code># kiln-rocm-prefill-128-diagnostic.toml
 [server]
 max_batch_tokens = 256
@@ -1099,9 +801,9 @@ last_token_lm_head = true
 
 kiln config --file kiln-rocm-prefill-128-diagnostic.toml --backend rocm
 kiln serve --config kiln-rocm-prefill-128-diagnostic.toml
-curl -s http://localhost:8420/v1/config | jq '.streaming_prefill'
-curl -s http://localhost:8420/health | jq '.prefill_runtime.streaming_prefill'
-curl -s http://localhost:8420/metrics \
+curl -fsS http://localhost:8420/v1/config | jq '.streaming_prefill'
+curl -fsS http://localhost:8420/health | jq '.prefill_runtime.streaming_prefill'
+curl -fsS http://localhost:8420/metrics \
   | grep -E 'kiln_batching_engine_|kiln_gpu_memory_|kiln_kv_'</code></pre>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
           On ROCm, <code>mode="disabled"</code> and a threshold later than the first actor tile are invalid:
@@ -1116,10 +818,13 @@ curl -s http://localhost:8420/metrics \
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
           Backend auto policy starts at 256 on ROCm, 2048 on CUDA/Metal, and never on CPU/Vulkan.
           Base/tape defaults are ROCm 256, CUDA 1024, Metal/Vulkan 2048, and CPU 8192. Detached defaults
-          are 8192; CUDA boundary and replay use 65536. Forcing <code>enabled</code> on CPU or Vulkan is an explicit diagnostic, not
-          proof that the route is supported or faster. Qualify ROCm and Vulkan on the local Strix Halo,
-          CUDA on the named CUDA machines, and Metal on the Mac; hosted GPU CI is not hardware evidence.
+          are 8192; CUDA boundary and replay use 65536. Forcing <code>enabled</code> on CPU or Vulkan is an
+          explicit diagnostic, not proof that the route is supported or faster. Qualify every backend on the
+          exact target device and source revision. Compile-only or hosted CI without the declared accelerator
+          is not hardware evidence.
         </p>
+          </div>
+        </details>
       </article>
 
       <article class="card p-6">
@@ -1133,19 +838,26 @@ curl -s http://localhost:8420/metrics \
             <div class="label mb-2">Check</div>
             <ul class="list-disc pl-5">
               <li>Inspect <code>/v1/config</code> at <code>training.optimizer_support.workloads</code>. That per-workload result, not a shell variable, is the static training-substrate authority.</li>
-              <li>Search the service definition for <code>KILN_USE_TAPE_FORWARD</code>, <code>KILN_USE_TAPE_FLASH_ATTN</code>, <code>KILN_USE_TAPE_SDPA</code>, <code>KILN_USE_TAPE_LORA_ADD</code>, and the four <code>KILN_USE_TAPE_GDN*</code> names.</li>
-              <li>Read the complete gradient error. A missing registered input indicates a disconnected use even if another clone reached the same leaf. Missing or unknown leaf IDs indicate graph/deposit drift, including a temporary slice ID that was not assembled into its original full leaf. Shape, backward dtype, or master-device mismatches indicate producer drift; NaN or infinity indicates numerical failure. A finite all-zero gradient is accepted, and a checkpoint range with no configured leaves must return an empty set.</li>
-              <li>Inspect tape inputs and profiler shapes. Only LoRA A/B are trainable model leaves. Embedding tables, base projection matrices, normalization weights, GDN gate parameters, MTP projections, and loss heads must be saved constants. Their backward routes must not emit a frozen-weight gradient; split Q/gate chunks must deposit under the original full A/B IDs and retain tape-aware reshapes.</li>
-              <li>On Metal, a synchronized full-gradient host scan at the optimizer boundary is the current correctness fallback until a native finite reducer is qualified. Profile it as an expected synchronization cost; do not bypass the check.</li>
               <li>For an inference pause, use actor, prefill, synchronization, and memory metrics. A historical tape variable is not evidence that a tape scope exists.</li>
             </ul>
+            <details class="reference-details mt-3">
+              <summary>Training graph and gradient checks</summary>
+              <div class="reference-details-body">
+                <ul class="list-disc pl-5">
+                  <li>Search the service definition for <code>KILN_USE_TAPE_FORWARD</code>, <code>KILN_USE_TAPE_FLASH_ATTN</code>, <code>KILN_USE_TAPE_SDPA</code>, <code>KILN_USE_TAPE_LORA_ADD</code>, and the four <code>KILN_USE_TAPE_GDN*</code> names.</li>
+                  <li>Read the complete gradient error. A missing registered input indicates a disconnected use even if another clone reached the same leaf. Missing or unknown leaf IDs indicate graph/deposit drift, including a temporary slice ID that was not assembled into its original full leaf. Shape, backward dtype, or master-device mismatches indicate producer drift; NaN or infinity indicates numerical failure. A finite all-zero gradient is accepted, and a checkpoint range with no configured leaves must return an empty set.</li>
+                  <li>Inspect tape inputs and profiler shapes. Only LoRA A/B are trainable model leaves. Embedding tables, base projection matrices, normalization weights, GDN gate parameters, MTP projections, and loss heads must be saved constants. Their backward routes must not emit a frozen-weight gradient; split Q/gate chunks must deposit under the original full A/B IDs and retain tape-aware reshapes.</li>
+                  <li>On Metal, a synchronized full-gradient host scan at the optimizer boundary is the current correctness fallback until a native finite reducer is qualified. Profile it as an expected synchronization cost; do not bypass the check.</li>
+                </ul>
+              </div>
+            </details>
           </div>
           <div>
             <div class="label mb-2">Fix</div>
             <p>Delete all eight names from launch scripts; they were removed without aliases or replacement fields. Kiln activates its required tape solely through an internal training scope. Ordinary inference opens no such scope and retains forward-only paths, including GDN chunkwise recurrence and CUDA&rsquo;s weight-aware embedding lookup. Fix the producer named by an exact-gradient rejection. If a frozen gradient appears, route that operation through its frozen-input backward rather than filtering the result at the optimizer. No configuration bypass is supported.</p>
           </div>
         </div>
-        <pre class="mt-5"><code>curl -s http://localhost:8420/v1/config \
+        <pre class="mt-5"><code>curl -fsS http://localhost:8420/v1/config \
   | jq '.training.optimizer_support.workloads'
 
 env | grep -E '^KILN_USE_TAPE_(FORWARD|FLASH_ATTN|SDPA|LORA_ADD|GDN)'</code></pre>
@@ -1153,8 +865,8 @@ env | grep -E '^KILN_USE_TAPE_(FORWARD|FLASH_ATTN|SDPA|LORA_ADD|GDN)'</code></pr
           Debug or performance tuning may choose only graph-preserving implementations while the internal
           scope is active; it must not sever the gradient graph or change the update rule. The source
           contract that enforces scope ownership is portable static evidence, not hardware qualification.
-          Validate numerical correctness, latency, memory, cancellation, and stability on the named ROCm,
-          Vulkan, CUDA, or Metal machine before making a backend claim.
+          Validate numerical correctness, latency, memory, cancellation, and stability on the exact target
+          device and source revision before making a backend claim.
         </p>
       </article>
 
@@ -1179,7 +891,9 @@ env | grep -E '^KILN_USE_TAPE_(FORWARD|FLASH_ATTN|SDPA|LORA_ADD|GDN)'</code></pr
           </div>
         </div>
 <pre class="mt-5"><code>KILN_MODEL_PATH=/models/Qwen3.5-4B ./kiln serve
-./kiln serve --model-path /models/Qwen3.5-4B</code></pre>
+
+# Or put `path = "/models/Qwen3.5-4B"` under [model] in kiln.toml:
+./kiln serve --config kiln.toml</code></pre>
       </article>
 
       <article class="card p-6">
@@ -1217,7 +931,7 @@ env | grep -E '^KILN_USE_TAPE_(FORWARD|FLASH_ATTN|SDPA|LORA_ADD|GDN)'</code></pr
               <li>The default bind is local-only: <code>127.0.0.1:8420</code>.</li>
               <li>For private-network access, set <code>server.host = "0.0.0.0"</code> in config or start with <code>KILN_SERVER_HOST=0.0.0.0</code>.</li>
               <li>Only expose that bind on a trusted/private network or behind a reverse proxy that adds authentication.</li>
-              <li>From the client machine, verify the exact host with <code>curl http://gpu-box:8420/health</code>.</li>
+              <li>From the client machine, verify the exact host with <code>curl -fsS http://gpu-box:8420/health</code>.</li>
             </ul>
           </div>
           <div>
@@ -1241,14 +955,14 @@ kiln adapters list --url http://gpu-box:8420</code></pre>
             <div class="label mb-2">Check</div>
             <ul class="list-disc pl-5">
               <li>This guidance is only for users intentionally pinned to kiln-v0.2.9.</li>
-              <li>Issue <a href="https://github.com/ericflo/kiln/issues/664">#664</a> tracks the tools-bearing cascade after a prefill timeout.</li>
-              <li>Issue <a href="https://github.com/ericflo/kiln/issues/656">#656</a> tracks the KV-cache-exhaustion and prefill-state-cleanup investigation.</li>
-              <li>Issue <a href="https://github.com/ericflo/kiln/issues/686">#686</a> tracks repeated long-prefill HTTP 408s around the old timeout boundary.</li>
+              <li>Closed issue <a href="https://github.com/ericflo/kiln/issues/664">#664</a> documents the tools-bearing cascade after a prefill timeout.</li>
+              <li>Closed issue <a href="https://github.com/ericflo/kiln/issues/656">#656</a> documents the KV-cache-exhaustion and prefill-state-cleanup investigation.</li>
+              <li>Closed issue <a href="https://github.com/ericflo/kiln/issues/686">#686</a> documents repeated long-prefill HTTP 408s around the old timeout boundary.</li>
             </ul>
           </div>
           <div>
             <div class="label mb-2">Fix</div>
-            <p>Upgrade to the latest <code>kiln-v*</code> release. If pinned to v0.2.9, run clients with <code>workers=1</code> so requests are serialized; if concurrent workers are required, set <code>server.request_timeout_secs</code> to at least <code>600</code>.</p>
+            <p>Upgrade from v0.2.9 to a current release. If pinned to v0.2.9, run clients with <code>workers=1</code> so requests are serialized; if concurrent workers are required, set <code>server.request_timeout_secs</code> to at least <code>600</code>.</p>
           </div>
         </div>
         <div class="mt-5 space-y-3" style="color: var(--fg-dim);">
@@ -1259,8 +973,8 @@ kiln adapters list --url http://gpu-box:8420</code></pre>
             The <code>request_timeout_secs &gt;= 600</code> mitigation is also historical. It was useful for pinned kiln-v0.2.9 deployments that had to keep <code>workers=2</code> while running tight KV-cache caps and roughly 20k-token-or-longer prefills. Current releases route prefix-cache prefill through the tiled/streaming dispatcher and include follow-on prefix-cache memory, KV auto-sizing, streaming-prefill, and observability fixes.
           </p>
           <p>
-            For the original diagnosis and bisect notes, read
-            <a href="https://github.com/ericflo/kiln/blob/main/docs/audits/PHASE11_ISSUE_686_BISECT.md"><code>docs/audits/PHASE11_ISSUE_686_BISECT.md</code></a>.
+            For the original diagnosis and bisect notes, read the
+            <a href="https://github.com/ericflo/kiln/blob/main/docs/audits/PHASE11_ISSUE_686_BISECT.md">issue 686 investigation</a>.
           </p>
         </div>
       </article>
@@ -1282,7 +996,7 @@ kiln adapters list --url http://gpu-box:8420</code></pre>
           </div>
           <div>
             <div class="label mb-2">Fix</div>
-            <p>Use mock mode to verify wiring, then run the same payload against a real model path. Treat training endpoints as privileged: posted examples update the active adapter.</p>
+            <p>Use mock mode to verify wiring, then run the payload against a real model under a profile that admits training. Treat training endpoints as privileged: a successful job saves adapter weights and may activate them when <code>auto_load</code> is true and any held-out post-eval gate passes.</p>
           </div>
         </div>
       </article>
@@ -1297,14 +1011,14 @@ kiln adapters list --url http://gpu-box:8420</code></pre>
           <div>
             <div class="label mb-2">Check</div>
             <ul class="list-disc pl-5">
-              <li>Adapter storage is separate from the base model weights.</li>
+              <li>When <code>model.adapter_dir</code> is omitted, Kiln uses <code>&lt;model.path&gt;/adapters</code>.</li>
               <li>Docker containers only see directories you mounted.</li>
               <li>Different working directories can imply different relative adapter paths.</li>
             </ul>
           </div>
           <div>
             <div class="label mb-2">Fix</div>
-            <p>Use an explicit adapter directory in your config or CLI flags, and mount it into Docker just like the model directory. Then verify with <code>GET /v1/adapters</code>.</p>
+            <p>Set <code>model.adapter_dir</code> in TOML or <code>KILN_MODEL_ADAPTER_DIR</code> before startup, mount that exact directory in Docker, restart, and verify saved plus active state with <code>GET /v1/adapters</code>.</p>
           </div>
         </div>
       </article>
@@ -1326,7 +1040,7 @@ kiln adapters list --url http://gpu-box:8420</code></pre>
           </div>
           <div>
             <div class="label mb-2">Fix</div>
-            <p>For <code>adapter_active</code> or <code>adapter_loaded</code>, call <code>POST /v1/adapters/unload</code> and retry. For <code>adapter_revision_conflict</code>, keep the intervening winner and resubmit against the current revision. Unload a gated same-name target or choose a versioned <code>config.output_name</code>. Hidden staging directories clean themselves up.</p>
+            <p>For <code>adapter_active</code> or <code>adapter_loaded</code>, call <code>POST /v1/adapters/unload</code> and retry. For <code>adapter_revision_conflict</code>, keep the intervening winner and resubmit against the current revision. Unload a gated same-name target or choose a versioned <code>config.output_name</code>. Kiln removes hidden staging directories during normal cleanup.</p>
           </div>
         </div>
       </article>
@@ -1359,9 +1073,17 @@ kiln adapters list --url http://gpu-box:8420</code></pre>
           <h3 class="font-semibold mb-2">CLI reference</h3>
           <p style="color: var(--fg-dim);">Map the same diagnostics to <code>kiln health</code>, adapter, config, and training commands.</p>
         </a>
+        <a class="card p-5 block" href="docs/configuration/">
+          <h3 class="font-semibold mb-2">Configuration</h3>
+          <p style="color: var(--fg-dim);">Verify exact fields, defaults, environment overrides, validation, and restart requirements.</p>
+        </a>
+        <a class="card p-5 block" href="docs/benchmarks/">
+          <h3 class="font-semibold mb-2">Benchmarks</h3>
+          <p style="color: var(--fg-dim);">Compare throughput and latency with the declared source, device, workload, and method.</p>
+        </a>
         <a class="card p-5 block" href="https://github.com/ericflo/kiln/issues">
           <h3 class="font-semibold mb-2">GitHub issues</h3>
-          <p style="color: var(--fg-dim);">Open an issue with your OS, GPU, binary name, startup command, and <code>/health</code> output.</p>
+          <p style="color: var(--fg-dim);">Open an issue with your OS, GPU, binary name, startup command, and redacted <code>/health</code> output.</p>
         </a>
       </div>
     </div>
@@ -1386,7 +1108,7 @@ kiln adapters list --url http://gpu-box:8420</code></pre>
         <a href="demo/">Demo</a>
         <a href="troubleshooting.html">Troubleshooting</a>
         <a href="architecture.html">Architecture</a>
-        <a href="https://github.com/ericflo/kiln/blob/main/BENCHMARKS.md">Benchmarks</a>
+        <a href="docs/benchmarks/">Benchmarks</a>
         <a href="https://github.com/ericflo/kiln/blob/main/CHANGELOG.md">Changelog</a>
         <a href="https://github.com/ericflo/kiln/blob/main/SECURITY.md">Security</a>
         <a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License</a>

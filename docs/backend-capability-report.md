@@ -1,8 +1,141 @@
-# Backend Capability Report
+# Backend capability report
 
-Generated from the live source tree by `scripts/generate_backend_capability_report.py`.
+Snapshot generated and editorially audited on 2026-07-30 from the current source tree by `scripts/generate_backend_capability_report.py`.
 
-## Feature Fanout
+This report answers a narrow question: which backend interfaces, support predicates, fallback policies, and verification contracts does the repository currently declare? It is a static source inventory. The generator does not compile a backend, execute the listed commands, detect hardware, or measure throughput.
+
+## Read this first
+
+| Question | Use this part of the report |
+|---|---|
+| Can I select a backend at build time? | Compiled feature fanout shows whether the public crates expose its Cargo feature. |
+| Can this exact operation run natively? | Support predicates and typed request descriptors show the source-level decision points. The answer can still depend on dtype, shape, layout, batch size, and runtime state. |
+| What happens when a native operation declines? | Runtime fallback policy distinguishes correctness fallbacks from native-required hot paths. |
+| Has the implementation been verified? | Conformance gates list the intended commands and source owners. `covered` is inventory coverage, not a claim that this generated page ran the command. |
+| How fast is a backend? | Not here. Use the [benchmark guide](public/BENCHMARKS.md) and dated result artifacts; this report contains no tokens-per-second result. |
+
+> **Vulkan interpretation:** determine support from capabilities and request constraints, not a device name. A hardware-specific fixture identifier is benchmark provenance only; it must never become runtime dispatch, a default, or a support promise. If a runtime path uses such an identifier, that is a bug.
+
+## Current source snapshot
+
+| Signal | Current result | Interpretation |
+|---|---|---|
+| Compiled backend features | 4 of 4 public runtime crates declare CUDA, ROCm, Metal, and Vulkan features | Feature fanout exists; it does not prove operation coverage or performance. |
+| Legacy monolithic interface | `BackendRuntime` contains 3 methods | Focused backend traits now own most behavior; a low count is intentional. |
+| Migration phases | 6 `covered`, 3 `partial` | 3 phase(s) still report unfinished work. |
+| Conformance gates | 11 `covered`, 1 `fixture_required`, 1 `partial` | 2 gate(s) still need stronger evidence. |
+| Support/implementation mismatches | 0 | Counts literal-true support predicates paired with methods that always decline. |
+
+## Open coverage work
+
+These are the unresolved items in the generated inventory. They are listed before the completed material so a reader does not have to infer gaps from a giant table.
+
+| Kind | Item | State | What remains |
+|---|---|---|---|
+| Migration phase | Phase 2: Normalize fallback policy | `partial` | decode hot-path fallback decisions are not centralized in BackendFallbackCapabilities |
+| Migration phase | Phase 5: Move replay into the authoritative graph layer | `partial` | eager-vs-replay parity gate is not live in both local ReplayPlan contract and hardware graph tests |
+| Migration phase | Phase 8: Conformance and performance gates | `partial` | add end-to-end decode and training assertions that accelerator host-fallback counters remain at zero; import real hardware receipts and lock portable, backend-scoped latency thresholds |
+| Conformance gate | `no_unexpected_host_fallback` | `partial` | the counter test proves backend and arity attribution, not that end-to-end decode and training hot paths keep fallback counts at zero |
+| Conformance gate | `hardware_latency_thresholds` | `fixture_required` | Import real hardware result artifacts and lock thresholds. Pending fixture IDs and metric-level blockers remain available in the detailed gate inventory. |
+
+In particular, the host-fallback counter test validates counter attribution; it does not prove that end-to-end decode or training completed with zero accelerator-to-host fallbacks. The report therefore marks that gate `partial`.
+
+## Runtime fallback policy
+
+Generic tensor operations and model hot paths have different contracts. A generic correctness fallback may copy through CPU memory, while decode and optimizer paths can require native execution to prevent a silent performance collapse.
+
+| Backend | Generic `DeviceOp` policy | Fallback counter | Source evidence |
+|---|---|---|---|
+| `cuda` | `strict_native_miss_errors` | `none` | crates/kiln-tensor/src/device_op.rs CUDA native miss falls through on CUDA storage and fails loudly |
+| `rocm` | `host_round_trip_correctness_fallback` | `kiln_tensor::profile::device_op_host_fallback_counts().rocm_op{1,2,3}` | crates/kiln-tensor/src/device_op.rs ROCm missing native forward stages through CPU |
+| `metal` | `host_round_trip_correctness_fallback` | `kiln_tensor::profile::device_op_host_fallback_counts().metal_op{1,2,3}` | crates/kiln-tensor/src/device_op.rs Metal missing native forward stages through CPU |
+| `vulkan` | `host_round_trip_correctness_fallback` | `kiln_tensor::profile::device_op_host_fallback_counts().vulkan_op{1,2,3}` | crates/kiln-tensor/src/device_op.rs Vulkan missing native forward stages through CPU |
+
+| Backend | Decode default | Mutable override | Enforcement |
+|---|---|---|---|
+| `cpu` | `CorrectnessAllowed` | none | CPU is the reference path |
+| `cuda` | `CorrectnessAllowed` | none | CUDA native misses remain device-visible/errors rather than silent host staging |
+| `rocm` | `NativeRequired` | none | batched decode errors before generic fallback when no ROCm native path produced tokens |
+| `metal` | `NativeRequired` | none | batched/sample decode errors before generic fallback when no Metal native path produced tokens |
+| `vulkan` | `NativeRequired` | none | ordinary batched decode errors before generic fallback; active LoRA may use the capability-gated portable paged-attention route, with sparse vulkan_lora_paged_decode_fallback warnings |
+
+<details>
+<summary><strong>Training optimizer resolution and fallback</strong></summary>
+
+Product-executable tuples combine the base-weight precision policy with optimizer implementation support. Parameter dtypes describe the reference implementation on CPU and required native hooks on accelerators; by themselves they do not promise that the product resolver can produce a particular LoRA dtype.
+
+| Backend | Default | Base → LoRA | Optimizers | Parameter dtype: SGD / AdamW / Muon | Muon rank | Enforcement |
+|---|---|---|---|---|---|---|
+| `cpu` | `CorrectnessAllowed` | `F32 → F32` | `sgd, adam_w, muon` | `F32 / F32 / F32` | `2…unbounded` | CPU is the F32 reference optimizer path |
+| `cuda` | `NativeRequired` | `F32 → F32, BF16 → BF16` | `sgd, adam_w, muon` | `F32, BF16 / F32, BF16 / F32, BF16` | `2…48` | SGD/AdamW/Muon GPU training errors before host fallback when native dispatch declines; no runtime override is supported |
+| `rocm` | `NativeRequired` | `F32 → F32, BF16 → BF16` | `sgd, adam_w, muon` | `F32, BF16 / F32, BF16 / F32, BF16` | `2…48` | SGD/AdamW/Muon GPU training errors before host fallback when native dispatch declines; no runtime override is supported |
+| `metal` | `NativeRequired` | `BF16 → BF16` | `adam_w, muon` | `none / F32, BF16 / F32, BF16` | `2…32` | SGD/AdamW/Muon GPU training errors before host fallback when native dispatch declines; no runtime override is supported |
+| `vulkan` | `NativeRequired` | `F32 → F32, BF16 → F32` | `sgd, adam_w, muon` | `F32, BF16 / F32, BF16 / F32, BF16` | `2…32` | SGD/AdamW/Muon GPU training errors before host fallback when native dispatch declines; no runtime override is supported |
+
+</details>
+
+<details>
+<summary><strong>Streaming prefill policy</strong></summary>
+
+Tile sizes are policy constants extracted from source. They are neither benchmark results nor device-specific tuning guarantees.
+
+| Backend | Automatic dispatch | Base tile | Tape tile | Detached full-attention | Boundary | Tape replay |
+|---|---|---|---|---|---|---|
+| `cpu` | `never` | `8192` | `8192` | `8192` | `8192` | `8192` |
+| `cuda` | `prompt tokens ≥ 2048` | `1024` | `1024` | `8192` | `65536` | `65536` |
+| `rocm` | `prompt tokens ≥ 2048` | `1024` | `1024` | `8192` | `8192` | `8192` |
+| `metal` | `prompt tokens ≥ 2048` | `2048` | `2048` | `8192` | `8192` | `8192` |
+| `vulkan` | `never` | `2048` | `2048` | `8192` | `8192` | `8192` |
+
+</details>
+
+<details>
+<summary><strong>Training precision, loss routing, and optimizer dispatch</strong></summary>
+
+| Backend | Policy | Activations | Base weights | LoRA | Loss accumulation | Optimizer parameters | Mixed RMSNorm weight | Mixed precision? |
+|---|---|---|---|---|---|---|---|---|
+| `cpu` | `cpu_f32_reference` | `F32` | `F32` | `F32` | `F32` | `F32` | `none` | no |
+| `cuda` | `cuda_native_float` | `F32, BF16` | `F32, BF16` | `F32, BF16` | `F32` | `F32, BF16` | `none` | yes |
+| `rocm` | `rocm_native_float` | `F32, BF16` | `F32, BF16` | `F32, BF16` | `F32` | `F32, BF16` | `none` | yes |
+| `metal` | `metal_bf16_uma` | `BF16` | `BF16` | `F32, BF16` | `F32` | `F32, BF16` | `none` | yes |
+| `vulkan` | `vulkan_mixed_f32_bf16` | `F32` | `F32, BF16` | `F32` | `F32` | `F32, BF16` | `BF16` | yes |
+
+| Backend | Tape forward/backward | SFT FLCE | GRPO | GRPO KL auxiliary | OPD | OPD phase-B backward | Final RMSNorm backward | Evidence |
+|---|---|---|---|---|---|---|---|---|
+| `cpu` | `unsupported` | `full_logits` | `kt_composite` | `host_composite` | `unsupported` | `unsupported` | `kt_composite` | TrainingCapabilities::portable keeps tape forward/backward unsupported, SFT on the portable full-logits loss path, GRPO on the shared kt composite loss root, GRPO KL auxiliaries on the host-composite route, OPD unsupported on the portable backend surface, and final RMSNorm backward on the kt-composite route |
+| `cuda` | `kt_tape_authoritative` | `kt_tape_flce` | `kt_composite` | `cuda_rocm_device_fast_path` | `kt_tape_phase_b` | `cuda_rocm_fused_unit_grad` | `cuda_rocm_fused_tail` | CudaBackend::training_capabilities_static advertises kt tape-authoritative forward/backward, kt-tape FLCE over CUDA tensors, the shared kt GRPO composite route, CUDA/ROCm device fast paths for GRPO KL auxiliaries, the shared kt-tape OPD Phase-B route, the fused CUDA/ROCm Phase-B hidden-gradient leaf, and the fused final-RMSNorm tail route |
+| `rocm` | `kt_tape_authoritative` | `kt_tape_flce` | `kt_composite` | `cuda_rocm_device_fast_path` | `kt_tape_phase_b` | `cuda_rocm_fused_unit_grad` | `cuda_rocm_fused_tail` | RocmBackend::training_capabilities_static advertises kt tape-authoritative forward/backward, the shared kt-tape FLCE route over ROCm tensors, the shared kt GRPO composite route, CUDA/ROCm device fast paths for GRPO KL auxiliaries, the shared kt-tape OPD Phase-B route, the fused CUDA/ROCm Phase-B hidden-gradient leaf, and the fused final-RMSNorm tail route |
+| `metal` | `kt_tape_authoritative` | `full_logits` | `kt_composite` | `host_composite` | `kt_tape_phase_b` | `kt_composite` | `kt_composite` | Metal training capabilities advertise kt tape-authoritative forward/backward, inherit the portable full-logits SFT loss route, shared kt GRPO composite route, host-composite GRPO KL auxiliaries, shared kt-tape OPD Phase-B route, device-agnostic kt composite Phase-B backward, and kt-composite final RMSNorm backward |
+| `vulkan` | `kt_tape_authoritative` | `vulkan_active_rows` | `vulkan_active_rows` | `host_composite` | `vulkan_active_hidden` | `vulkan_active_hidden` | `kt_composite` | Vulkan training capabilities advertise kt tape-authoritative forward/backward, active-row fused SFT/GRPO shader routes, host-composite GRPO KL auxiliaries, the active-hidden fused OPD loss/backward shader route, and kt-composite final RMSNorm backward |
+
+| Backend | SGD step | AdamW step | Muon step |
+|---|---|---|---|
+| `cuda` | `overridden` | `overridden` | `overridden` |
+| `rocm` | `overridden` | `overridden` | `overridden` |
+| `metal` | `default_decline` | `overridden` | `overridden` |
+| `vulkan` | `overridden` | `overridden` | `overridden` |
+
+</details>
+
+## How to read status labels
+
+| Label | Meaning in this generated report | What it does not mean |
+|---|---|---|
+| `covered` | The expected source owners exist and the generator’s structural signals are complete. | The command ran on this page load, every supported device passed, or performance is acceptable. |
+| `partial` | Some structural evidence exists, but a named migration or verification requirement remains. | The backend is generally broken. |
+| `fixture_required` | The harness exists, but a real hardware result or locked threshold is still missing. | The fixture’s named machine controls runtime support. |
+| `gap` | Required source evidence is absent. | An implicit or unverified implementation should be assumed to work. |
+| `dynamic` / `NativeWithConstraints` | The support method evaluates request or runtime conditions. | Every dtype, shape, layout, batch size, or device is accepted. |
+| `literal_true` | The parsed support predicate returns true without a detected condition. | A performance or hardware-qualification guarantee. |
+
+Source paths identify ownership. A listed command is the prescribed verification command; the generator records it but does not run it. Use CI receipts or a dated benchmark artifact when the distinction matters.
+
+## Detailed generated inventory
+
+The remaining tables preserve the exact generated evidence for maintainers and reviewers. They are collapsed so the page remains readable.
+
+<details class="docs-capability-inventory">
+<summary><strong>Compiled feature fanout and migration history</strong></summary>
 
 | Crate | CUDA | ROCm | Metal | Vulkan |
 |---|---|---|---|---|
@@ -11,9 +144,9 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `kiln-tensor` | yes | yes | yes | yes |
 | `kiln-train` | yes | yes | yes | yes |
 
-## Migration Phase Status
+A `yes` means that the crate declares the Cargo feature. It does not mean that every operation has a native implementation.
 
-| Phase | Title | Status | Contract | Migration | Genuine | Evidence | Remaining |
+| Phase | Title | Status | Contract | Migration | Complete? | Evidence | Remaining |
 |---|---|---|---|---|---|---|---|
 | Phase 0 | Audit and stabilize capability reporting | `covered` | `landed` | `complete` | yes | `docs/backend-engine-unification-plan.md`, `scripts/generate_backend_capability_report.py`, `docs/backend-capability-report.md`, `docs/backend-capability-report.json`, `crates/kiln-model/tests/backend_capability_contract.rs` | none |
 | Phase 1 | Introduce focused backend traits | `covered` | `landed` | `complete` | yes | `crates/kiln-model/src/backend/mod.rs`, `scripts/generate_backend_capability_report.py`, `crates/kiln-model/tests/backend_capability_contract.rs` | none |
@@ -23,21 +156,24 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | Phase 5 | Move replay into the authoritative graph layer | `partial` | `landed` | `partial` | no | `crates/kiln-graph/src/replay_plan.rs`, `crates/kiln-graph-cuda/src/lib.rs`, `crates/kiln-graph-metal/src/lib.rs`, `crates/kiln-graph-vulkan/src/lib.rs`, `crates/kiln-model/src/cuda_graph.rs`, `crates/kiln-model/src/rocm_graph.rs`, `crates/kiln-model/src/metal_graph.rs`, `crates/kiln-model/src/vk_decode_resident.rs`, `crates/kiln-vulkan-kernel/src/cmd_batch.rs`, `crates/kiln-model/tests/backend_capability_contract.rs` | eager-vs-replay parity gate is not live in both local ReplayPlan contract and hardware graph tests |
 | Phase 6 | Finish shared training integration | `covered` | `landed` | `complete` | yes | `crates/kiln-train/src/trainer.rs`, `crates/kiln-train/src/sft_tape_shim.rs`, `crates/kiln-train/src/grpo_tape_shim.rs`, `crates/kiln-train/src/opd_tape_shim.rs`, `crates/kiln-model/src/backend/metal_training.rs`, `crates/kiln-model/src/backend/vulkan_training.rs`, `crates/kiln-model/tests/backend_capability_contract.rs` | none |
 | Phase 7 | Decompose backend modules | `covered` | `landed` | `complete` | yes | `crates/kiln-model/src/backend/metal.rs`, `crates/kiln-model/src/backend/metal_attention.rs`, `crates/kiln-model/src/backend/metal_gdn.rs`, `crates/kiln-model/src/backend/metal_residency.rs`, `crates/kiln-model/src/backend/metal_training.rs`, `crates/kiln-model/src/backend/vulkan.rs`, `crates/kiln-model/src/backend/vulkan_residency.rs`, `crates/kiln-model/src/backend/vulkan_tensor_bridge.rs`, `crates/kiln-model/src/backend/cuda_rocm_common.rs`, `crates/kiln-model/tests/backend_capability_contract.rs` | none |
-| Phase 8 | Conformance and performance gates | `fixture_required` | `landed` | `partial` | no | `docs/backend-capability-report.md`, `docs/backend-capability-report.json`, `docs/backend-latency-fixtures.json`, `docs/backend-latency-result-schema.md`, `scripts/check_unification_gates.sh`, `scripts/run_backend_latency_fixture.py`, `scripts/write_backend_latency_result_artifact.py`, `scripts/import_backend_latency_artifact.py`, `scripts/lock_backend_latency_thresholds.py`, `scripts/check_backend_latency_fixtures.py`, `scripts/plan_backend_latency_fixture_dispatch.py`, `scripts/generate_backend_capability_report.py`, `crates/kiln-model/tests/backend_capability_contract.rs` | hardware_latency_thresholds remains fixture_required until real known-hardware result artifacts satisfy --require-covered |
+| Phase 8 | Conformance and performance gates | `partial` | `landed` | `partial` | no | `docs/backend-capability-report.md`, `docs/backend-capability-report.json`, `docs/backend-latency-fixtures.json`, `docs/backend-latency-result-schema.md`, `scripts/check_unification_gates.sh`, `scripts/run_backend_latency_fixture.py`, `scripts/write_backend_latency_result_artifact.py`, `scripts/import_backend_latency_artifact.py`, `scripts/lock_backend_latency_thresholds.py`, `scripts/check_backend_latency_fixtures.py`, `scripts/plan_backend_latency_fixture_dispatch.py`, `scripts/generate_backend_capability_report.py`, `crates/kiln-model/tests/backend_capability_contract.rs` | add end-to-end decode and training assertions that accelerator host-fallback counters remain at zero; import real hardware receipts and lock portable, backend-scoped latency thresholds |
 
-## BackendRuntime Overrides
+</details>
 
-| Backend | Source Modules | Override Count | Support Methods | Native Env Gates | Legacy Env Aliases |
-|---|---|---:|---:|---:|---:|
+<details class="docs-capability-inventory">
+<summary><strong>Backend interfaces and focused facets</strong></summary>
+
+`BackendRuntime` is the legacy compatibility facade. Zero backend-specific overrides is the expected result after behavior moves into focused traits.
+
+| Backend | Source modules | Legacy overrides | Support methods | Native environment gates | Legacy aliases |
+|---|---|---|---|---|---|
 | `cuda` | `crates/kiln-model/src/backend/cuda.rs`, `crates/kiln-model/src/backend/cuda_rocm_common.rs` | 0 | 16 | 0 | 0 |
 | `rocm` | `crates/kiln-model/src/backend/rocm.rs`, `crates/kiln-model/src/backend/cuda_rocm_common.rs` | 0 | 19 | 0 | 0 |
 | `metal` | `crates/kiln-model/src/backend/metal.rs`, `crates/kiln-model/src/backend/metal_attention.rs`, `crates/kiln-model/src/backend/metal_config.rs`, `crates/kiln-model/src/backend/metal_conv1d.rs`, `crates/kiln-model/src/backend/metal_core.rs`, `crates/kiln-model/src/backend/metal_dense.rs`, `crates/kiln-model/src/backend/metal_gdn.rs`, `crates/kiln-model/src/backend/metal_icb.rs`, `crates/kiln-model/src/backend/metal_lm_head.rs`, `crates/kiln-model/src/backend/metal_msl.rs`, `crates/kiln-model/src/backend/metal_norm.rs`, `crates/kiln-model/src/backend/metal_paged.rs`, `crates/kiln-model/src/backend/metal_pipeline.rs`, `crates/kiln-model/src/backend/metal_precompile.rs`, `crates/kiln-model/src/backend/metal_residency.rs`, `crates/kiln-model/src/backend/metal_runtime.rs`, `crates/kiln-model/src/backend/metal_training.rs` | 0 | 20 | 0 | 0 |
 | `vulkan` | `crates/kiln-model/src/backend/vulkan.rs`, `crates/kiln-model/src/backend/vulkan_attention.rs`, `crates/kiln-model/src/backend/vulkan_config.rs`, `crates/kiln-model/src/backend/vulkan_conv1d.rs`, `crates/kiln-model/src/backend/vulkan_decode_state.rs`, `crates/kiln-model/src/backend/vulkan_dense.rs`, `crates/kiln-model/src/backend/vulkan_device.rs`, `crates/kiln-model/src/backend/vulkan_gdn.rs`, `crates/kiln-model/src/backend/vulkan_linear.rs`, `crates/kiln-model/src/backend/vulkan_residency.rs`, `crates/kiln-model/src/backend/vulkan_resources.rs`, `crates/kiln-model/src/backend/vulkan_tensor_bridge.rs`, `crates/kiln-model/src/backend/vulkan_training.rs`, `crates/kiln-model/src/backend/vulkan_weights.rs` | 0 | 21 | 0 | 0 |
 
-## Focused Backend Facets
-
-| Facet | Method Count | Forwarding Impl | Concrete Impl Count | Concrete Impls | Methods |
-|---|---:|---|---:|---|---|
+| Facet | Methods | Forwarding implementation | Concrete implementations | Implementation types | Method names |
+|---|---|---|---|---|---|
 | `BackendIdentity` | 3 | `concrete_authoritative` | 5 | `CpuBackend`, `CudaBackend`, `MetalBackend`, `RocmBackend`, `VulkanBackend` | `runtime_as_any`, `runtime_device`, `runtime_name` |
 | `StartupBackend` | 1 | `concrete_authoritative` | 5 | `CpuBackend`, `CudaBackend`, `MetalBackend`, `RocmBackend`, `VulkanBackend` | `runtime_precompile_startup_kernels` |
 | `ExternalYieldBackend` | 1 | `concrete_authoritative` | 5 | `CpuBackend`, `CudaBackend`, `MetalBackend`, `RocmBackend`, `VulkanBackend` | `runtime_synchronize_external_yield` |
@@ -52,18 +188,28 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `TrainingLossBackend` | 9 | `concrete_authoritative` | 5 | `CpuBackend`, `CudaBackend`, `MetalBackend`, `RocmBackend`, `VulkanBackend` | `runtime_final_rmsnorm_backward_route`, `runtime_grpo_kl_auxiliary_route`, `runtime_grpo_loss_route`, `runtime_opd_loss_route`, `runtime_opd_phase_b_backward_route`, `runtime_sft_flce_loss_route`, `runtime_tape_forward_backward_route`, `runtime_training_capabilities`, `runtime_training_precision_policy` |
 | `ReplayBackend` | 6 | `concrete_authoritative` | 5 | `CpuBackend`, `CudaBackend`, `MetalBackend`, `RocmBackend`, `VulkanBackend` | `runtime_decode_resident_pool_ready`, `runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs`, `runtime_replay_authority`, `runtime_replay_key_for_request`, `runtime_supports_replay_request`, `runtime_supports_resident_decode` |
 
-## Replay Authority
+</details>
 
-| Backend | Production Authority | Native Primitive | Runners | Graph Crates | Parity Tests | Missing Evidence |
+<details class="docs-capability-inventory">
+<summary><strong>Replay authority</strong></summary>
+
+The evidence column may name executable parity tests or a source-level contract. The ROCm entry is explicitly a source contract; it is not presented as live hardware parity.
+
+| Backend | Production authority | Native primitive | Runners | Graph crates | Named tests or source contracts | Missing evidence |
 |---|---|---|---|---|---|---|
 | `cuda` | `model_level_runner` | `CUDA graph` | `crates/kiln-model/src/cuda_graph.rs` | `crates/kiln-graph-cuda/src/lib.rs` | `test_cuda_graph_bs1_decode_matches_eager` | none |
-| `rocm` | `model_level_runner` | `HIP graph` | `crates/kiln-model/src/rocm_graph.rs` | none | `ROCm graph runner byte-identical eager/replay source contract` | none |
+| `rocm` | `model_level_runner` | `HIP graph` | `crates/kiln-model/src/rocm_graph.rs` | none | `source contract: ROCm graph runner keeps eager and replay output handling byte-identical` | none |
 | `metal` | `model_level_runner_with_graph_crate_replay_object` | `Metal ICB` | `crates/kiln-model/src/metal_graph.rs`, `crates/kiln-model/src/backend/metal_paged.rs` | `crates/kiln-graph-metal/src/lib.rs` | `test_metal_graph_bs1_decode_matches_eager_across_boundaries_and_buckets`, `test_metal_graph_batched_decode_matches_eager_and_replays_bucket`, `single_token_paged_decode_icb_matches_eager_and_updates_slot`, `batched_paged_decode_icb_matches_eager_and_updates_slots` | none |
 | `vulkan` | `resident_decode_command_batch` | `Vulkan CommandBatch` | `crates/kiln-model/src/vk_decode_resident.rs`, `crates/kiln-vulkan-kernel/src/cmd_batch.rs` | `crates/kiln-graph-vulkan/src/lib.rs` | `vk_resident_decode_matches_nonresident_on_qwen35_4b` | none |
 
-## Support Predicates
+</details>
 
-| Backend | Method | Predicate Status | Support State | Paired Method | Pair Always Declines | Gates |
+<details class="docs-capability-inventory">
+<summary><strong>Support predicates</strong></summary>
+
+Each row describes a parsed support method and its paired implementation, when present. Dynamic support must be evaluated for the actual request.
+
+| Backend | Method | Predicate | Support state | Paired method | Paired method always declines? | Detected gates |
 |---|---|---|---|---|---|---|
 | `cuda` | `runtime_supports_causal_conv1d_prefill` | `dynamic` | `NativeWithConstraints` | `runtime_causal_conv1d_prefill` | no | none |
 | `cuda` | `runtime_supports_causal_conv1d_update` | `dynamic` | `NativeWithConstraints` | `runtime_causal_conv1d_update` | no | none |
@@ -71,16 +217,16 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `cuda` | `runtime_supports_flash_attn_prefill` | `dynamic` | `NativeWithConstraints` | `runtime_flash_attn_prefill` | no | none |
 | `cuda` | `runtime_supports_gdn_chunk_prep` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_chunk_prep` | no | none |
 | `cuda` | `runtime_supports_gdn_chunk_scan` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_chunk_scan` | no | none |
-| `cuda` | `runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk` | `dynamic` | `NativeWithConstraints` | `` | no | none |
+| `cuda` | `runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk` | `dynamic` | `NativeWithConstraints` | none | no | none |
 | `cuda` | `runtime_supports_gdn_decode_qk_norm_gates_recurrent` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_decode_qk_norm_gates_recurrent` | no | none |
 | `cuda` | `runtime_supports_gdn_forward_substitution` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_forward_substitution` | no | none |
 | `cuda` | `runtime_supports_gdn_full_chunk_forward` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_full_chunk_forward` | no | none |
 | `cuda` | `runtime_supports_gdn_gated_rms_norm` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_gated_rms_norm` | no | none |
 | `cuda` | `runtime_supports_gdn_gates` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_gates` | no | none |
 | `cuda` | `runtime_supports_gdn_recurrent_step` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_recurrent_step` | no | none |
-| `cuda` | `runtime_supports_matmul_request` | `dynamic` | `NativeWithConstraints` | `` | no | none |
-| `cuda` | `runtime_supports_resident_activation` | `literal_true` | `NativeWithConstraints` | `` | no | none |
-| `cuda` | `runtime_supports_strict_paged_decode_contiguous_batch` | `dynamic` | `NativeWithConstraints` | `` | no | layout |
+| `cuda` | `runtime_supports_matmul_request` | `dynamic` | `NativeWithConstraints` | none | no | none |
+| `cuda` | `runtime_supports_resident_activation` | `literal_true` | `NativeWithConstraints` | none | no | none |
+| `cuda` | `runtime_supports_strict_paged_decode_contiguous_batch` | `dynamic` | `NativeWithConstraints` | none | no | layout |
 | `rocm` | `runtime_supports_causal_conv1d_prefill` | `dynamic` | `NativeWithConstraints` | `runtime_causal_conv1d_prefill` | no | none |
 | `rocm` | `runtime_supports_causal_conv1d_update` | `dynamic` | `NativeWithConstraints` | `runtime_causal_conv1d_update` | no | none |
 | `rocm` | `runtime_supports_flash_attn_paged_decode` | `dynamic` | `NativeWithConstraints` | `runtime_flash_attn_paged_decode` | no | none |
@@ -88,18 +234,18 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `rocm` | `runtime_supports_flash_attn_prefill_head_major` | `dynamic` | `NativeWithConstraints` | `runtime_flash_attn_prefill_head_major` | no | none |
 | `rocm` | `runtime_supports_gdn_chunk_prep` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_chunk_prep` | no | none |
 | `rocm` | `runtime_supports_gdn_chunk_scan` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_chunk_scan` | no | none |
-| `rocm` | `runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk` | `dynamic` | `NativeWithConstraints` | `` | no | none |
+| `rocm` | `runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk` | `dynamic` | `NativeWithConstraints` | none | no | none |
 | `rocm` | `runtime_supports_gdn_decode_qk_norm_gates_recurrent` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_decode_qk_norm_gates_recurrent` | no | none |
 | `rocm` | `runtime_supports_gdn_forward_substitution` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_forward_substitution` | no | none |
 | `rocm` | `runtime_supports_gdn_full_chunk_forward` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_full_chunk_forward` | no | none |
 | `rocm` | `runtime_supports_gdn_gated_rms_norm` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_gated_rms_norm` | no | none |
 | `rocm` | `runtime_supports_gdn_gates` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_gates` | no | none |
 | `rocm` | `runtime_supports_gdn_recurrent_step` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_recurrent_step` | no | none |
-| `rocm` | `runtime_supports_matmul_request` | `dynamic` | `NativeWithConstraints` | `` | no | none |
-| `rocm` | `runtime_supports_quantized_lm_head_argmax_batch` | `dynamic` | `NativeWithConstraints` | `` | no | none |
-| `rocm` | `runtime_supports_quantized_lm_head_sample_batch` | `dynamic` | `NativeWithConstraints` | `` | no | none |
-| `rocm` | `runtime_supports_resident_activation` | `literal_true` | `NativeWithConstraints` | `` | no | none |
-| `rocm` | `runtime_supports_strict_paged_decode_contiguous_batch` | `dynamic` | `NativeWithConstraints` | `` | no | layout |
+| `rocm` | `runtime_supports_matmul_request` | `dynamic` | `NativeWithConstraints` | none | no | none |
+| `rocm` | `runtime_supports_quantized_lm_head_argmax_batch` | `dynamic` | `NativeWithConstraints` | none | no | none |
+| `rocm` | `runtime_supports_quantized_lm_head_sample_batch` | `dynamic` | `NativeWithConstraints` | none | no | none |
+| `rocm` | `runtime_supports_resident_activation` | `literal_true` | `NativeWithConstraints` | none | no | none |
+| `rocm` | `runtime_supports_strict_paged_decode_contiguous_batch` | `dynamic` | `NativeWithConstraints` | none | no | layout |
 | `metal` | `runtime_supports_causal_conv1d_prefill` | `dynamic` | `NativeWithConstraints` | `runtime_causal_conv1d_prefill` | no | none |
 | `metal` | `runtime_supports_causal_conv1d_update` | `dynamic` | `NativeWithConstraints` | `runtime_causal_conv1d_update` | no | none |
 | `metal` | `runtime_supports_flash_attn_paged_decode` | `literal_true` | `NativeWithConstraints` | `runtime_flash_attn_paged_decode` | no | none |
@@ -108,7 +254,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `metal` | `runtime_supports_gdn_chunk_prep` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_chunk_prep` | no | none |
 | `metal` | `runtime_supports_gdn_forward_substitution` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_forward_substitution` | no | none |
 | `metal` | `runtime_supports_gdn_full_chunk_forward` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_full_chunk_forward` | no | none |
-| `metal` | `runtime_supports_gdn_full_chunk_forward_head_last` | `dynamic` | `NativeWithConstraints` | `` | no | none |
+| `metal` | `runtime_supports_gdn_full_chunk_forward_head_last` | `dynamic` | `NativeWithConstraints` | none | no | none |
 | `metal` | `runtime_supports_gdn_gated_rms_norm` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_gated_rms_norm` | no | none |
 | `metal` | `runtime_supports_gdn_gates` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_gates` | no | none |
 | `metal` | `runtime_supports_gdn_recurrent_prefill_head_last` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_recurrent_prefill_head_last` | no | none |
@@ -116,15 +262,15 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `metal` | `runtime_supports_gdn_recurrent_step` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_recurrent_step` | no | none |
 | `metal` | `runtime_supports_linear_decode_sample` | `dynamic` | `NativeWithConstraints` | `runtime_linear_decode_sample` | no | none |
 | `metal` | `runtime_supports_linear_decode_sample_batch` | `dynamic` | `NativeWithConstraints` | `runtime_linear_decode_sample_batch` | no | none |
-| `metal` | `runtime_supports_matmul_request` | `dynamic` | `NativeWithConstraints` | `` | no | dtype |
+| `metal` | `runtime_supports_matmul_request` | `dynamic` | `NativeWithConstraints` | none | no | dtype |
 | `metal` | `runtime_supports_paged_kv_head_major_read` | `literal_true` | `NativeWithConstraints` | `runtime_paged_kv_head_major_read` | no | none |
 | `metal` | `runtime_supports_paged_kv_head_major_read_append_token_major` | `literal_true` | `NativeWithConstraints` | `runtime_paged_kv_head_major_read_append_token_major` | no | none |
-| `metal` | `runtime_supports_resident_activation` | `literal_true` | `NativeWithConstraints` | `` | no | none |
+| `metal` | `runtime_supports_resident_activation` | `literal_true` | `NativeWithConstraints` | none | no | none |
 | `vulkan` | `runtime_supports_causal_conv1d_prefill` | `dynamic` | `NativeWithConstraints` | `runtime_causal_conv1d_prefill` | no | none |
 | `vulkan` | `runtime_supports_causal_conv1d_update` | `dynamic` | `NativeWithConstraints` | `runtime_causal_conv1d_update` | no | none |
 | `vulkan` | `runtime_supports_flash_attn_paged_decode` | `dynamic` | `NativeWithConstraints` | `runtime_flash_attn_paged_decode` | no | none |
 | `vulkan` | `runtime_supports_flash_attn_prefill` | `dynamic` | `NativeWithConstraints` | `runtime_flash_attn_prefill` | no | none |
-| `vulkan` | `runtime_supports_flash_attn_prefill_head_major` | `literal_false` | `Declined` | `` | no | none |
+| `vulkan` | `runtime_supports_flash_attn_prefill_head_major` | `literal_false` | `Declined` | none | no | none |
 | `vulkan` | `runtime_supports_gdn_chunk_prep` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_chunk_prep` | no | none |
 | `vulkan` | `runtime_supports_gdn_chunk_scan` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_chunk_scan` | no | none |
 | `vulkan` | `runtime_supports_gdn_forward_substitution` | `dynamic` | `NativeWithConstraints` | `runtime_gdn_forward_substitution` | no | none |
@@ -138,21 +284,24 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `vulkan` | `runtime_supports_linear_decode_argmax_batch` | `dynamic` | `NativeWithConstraints` | `runtime_linear_decode_argmax_batch` | no | none |
 | `vulkan` | `runtime_supports_linear_decode_sample` | `dynamic` | `NativeWithConstraints` | `runtime_linear_decode_sample` | no | none |
 | `vulkan` | `runtime_supports_linear_decode_sample_batch` | `dynamic` | `NativeWithConstraints` | `runtime_linear_decode_sample_batch` | no | none |
-| `vulkan` | `runtime_supports_matmul_request` | `dynamic` | `NativeWithConstraints` | `` | no | none |
-| `vulkan` | `runtime_supports_resident_activation` | `literal_true` | `NativeWithConstraints` | `` | no | none |
+| `vulkan` | `runtime_supports_matmul_request` | `dynamic` | `NativeWithConstraints` | none | no | none |
+| `vulkan` | `runtime_supports_resident_activation` | `literal_true` | `NativeWithConstraints` | none | no | none |
 | `vulkan` | `runtime_supports_resident_decode` | `dynamic` | `NativeWithConstraints` | `runtime_decode_resident_pool_ready` | no | none |
 
-## Typed Request Descriptors
+</details>
 
-| Descriptor | Field Count | DType | Shape | Layout | Batch | Replay Safe | Fields |
-|---|---:|---|---|---|---|---|---|
+<details class="docs-capability-inventory">
+<summary><strong>Typed requests, capabilities, and resident resources</strong></summary>
+
+| Request descriptor | Fields | Dtype? | Shape? | Layout? | Batch? | Replay safety? | Field names |
+|---|---|---|---|---|---|---|---|
 | `AttentionRequest` | 13 | yes | yes | yes | yes | yes | `kind`, `q_shape`, `k_shape`, `v_shape`, `output_shape`, `layout`, `q_dtype`, `k_dtype`, `v_dtype`, `batch`, `seq_len`, `head_dim`, `replay_safe` |
 | `MatmulRequest` | 12 | yes | yes | yes | yes | yes | `lhs_shape`, `rhs_shape`, `lhs_dtype`, `rhs_dtype`, `out_dtype`, `accumulation`, `lhs_layout`, `rhs_layout`, `out_layout`, `batch`, `epilogue`, `replay_safe` |
 | `MatmulBlasRequest` | 15 | yes | yes | yes | yes | yes | `m`, `n`, `k`, `dtype`, `lhs_dtype`, `rhs_dtype`, `out_dtype`, `accumulation`, `lhs_layout`, `rhs_layout`, `out_layout`, `epilogue`, `batch`, `replay_safe`, `concurrent_streams` |
 | `LinearRequest` | 12 | yes | yes | yes | yes | yes | `kind`, `input_shape`, `weight_shape`, `output_shape`, `layout`, `input_dtype`, `weight_dtype`, `output_dtype`, `batch`, `top_k`, `temperatures`, `replay_safe` |
 | `ReplayRequest` | 8 | yes | yes | yes | yes | yes | `kind`, `replay_shape`, `layout`, `max_hidden`, `max_intermediate`, `max_batch`, `dtype`, `replay_safe` |
 
-## Request Capability Queries
+Request capability queries:
 
 - `backend_capabilities`
 - `capability_snapshot`
@@ -162,10 +311,8 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 - `supports_matmul_request`
 - `supports_replay_request`
 
-## Typed Capability Descriptors
-
-| Descriptor | Field Count | Fields |
-|---|---:|---|
+| Capability descriptor | Field count | Field names |
+|---|---|---|
 | `BackendCapabilities` | 13 | `backend`, `device`, `storage`, `startup`, `matmul`, `attention`, `streaming_prefill`, `gdn`, `decode`, `decode_execution`, `training`, `graph_replay`, `fallback` |
 | `StorageCapabilities` | 13 | `backend`, `device`, `resident_activation`, `resident_decode`, `projection_load_policy`, `kv_cache_device_memory_pressure`, `gpu_memory_detection_policy`, `gpu_memory_budget_policy`, `gpu_allocator_memory_probe_policy`, `gpu_memory_reclaim_policy`, `kv_sizing_residency_model_multiplier`, `kv_auto_block_policy`, `kv_cache_fp8_policy` |
 | `ProjectionLoadPolicy` | 12 | `backend`, `direct_transposed_upload_for_cached_weights`, `parallel_transposed_projection_upload`, `parallel_auxiliary_weight_upload`, `cache_full_attention_qkv_transpose_concat`, `cache_linear_attention_ab_transpose_concat`, `cache_mlp_gate_up_transpose_concat`, `pack_w8a16_projection_rows`, `stub_embedding_table_after_transposed_upload`, `drop_projection_originals`, `drop_projection_transposes`, `synchronize_after_dropping_originals` |
@@ -193,16 +340,19 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `BackendFallbackCapabilities` | 3 | `generic_device_op`, `decode_hot_path`, `training_optimizer` |
 | `TrainingOptimizerSupport` | 6 | `sgd_parameter_dtypes`, `adamw_parameter_dtypes`, `muon_parameter_dtypes`, `muon_min_lora_rank`, `muon_max_lora_rank`, `rounding_modes` |
 
-## Resident Resource Descriptors
-
-| Descriptor | Field Count | Fields |
-|---|---:|---|
+| Resident resource descriptor | Field count | Field names |
+|---|---|---|
 | `ResidentResource` | 13 | `tensor_id`, `backend`, `device`, `dtype`, `shape`, `layout`, `element_count`, `byte_len`, `addressable_byte_len`, `family`, `ownership`, `state`, `replay_stability` |
 | `ResidentResourceLayout` | 3 | `strides`, `start_offset`, `contiguous` |
 
-## Conformance And Performance Gates
+</details>
 
-| Gate | Phase 8 Requirement | Status | Command | Supplemental Commands | Evidence | Missing Evidence | Coverage Blockers |
+<details class="docs-capability-inventory">
+<summary><strong>Conformance and performance gate inventory</strong></summary>
+
+Commands are prescriptions, not execution receipts. Supplemental commands identify feature- or hardware-specific lanes. Pending hardware fixture identifiers are provenance labels only and do not participate in runtime dispatch.
+
+| Gate | Requirement | Status | Prescribed command | Supplemental commands | Source evidence | Missing source evidence | Coverage blockers |
 |---|---|---|---|---|---|---|---|
 | `storage_round_trip` | storage round trip | `covered` | `cargo test -p kiln-tensor --features rocm --test rocm_storage_smoke && cargo test -p kiln-vulkan-kernel --test vk_tensor_parity` | `ROCm feature lane: cargo test -p kiln-tensor --features rocm --test rocm_storage_smoke`; `Vulkan kernel lane: cargo test -p kiln-vulkan-kernel --test vk_tensor_parity` | `crates/kiln-tensor/tests/rocm_storage_smoke.rs`, `crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs` | none | none |
 | `host_transfer_to_device_parity` | host transfer / to_device parity with explicit unsupported errors | `covered` | `cargo test -p kiln-tensor device_transfer_support_classifies_explicit_transitions && cargo test -p kiln-tensor to_device_without_gpu_features_reports_explicit_unsupported_transition` | `CUDA hardware lane: CUDARC_CUDA_VERSION=12080 cargo test -p kiln-tensor --no-default-features --features cuda --test cuda_resize_copy_primitives`; `ROCm feature lane: cargo test -p kiln-tensor --features rocm --test rocm_compare_parity`; `macOS Metal feature lane: cargo test -p kiln-tensor --features metal --test metal_ops_parity`; `Vulkan kernel lane: cargo test -p kiln-vulkan-kernel --test vk_tensor_parity` | `crates/kiln-tensor/src/tensor.rs`, `crates/kiln-tensor/tests/cuda_resize_copy_primitives.rs`, `crates/kiln-tensor/tests/metal_ops_parity.rs`, `crates/kiln-tensor/tests/rocm_compare_parity.rs`, `crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs` | none | none |
@@ -212,97 +362,61 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `optimizer_parity` | optimizer parity | `covered` | `cargo test -p kiln-optim --test integration && cargo test -p kiln-train training_optimizer && cargo test -p kiln-model --test backend_capability_contract` | `CUDA plus Vulkan OPD hardware lane: CUDARC_CUDA_VERSION=12080 cargo test -p kiln-train --features cuda,vulkan --test vk_cuda_opd_parity` | `crates/kiln-optim/tests/integration.rs`, `crates/kiln-model/src/backend/cuda.rs`, `crates/kiln-model/src/backend/rocm.rs`, `crates/kiln-model/src/backend/metal_training.rs`, `crates/kiln-model/src/backend/vulkan.rs`, `crates/kiln-model/src/backend/vulkan_training.rs`, `crates/kiln-model/src/backend/mod.rs`, `crates/kiln-train/src/trainer.rs`, `crates/kiln-train/tests/vk_cuda_opd_parity.rs` | none | none |
 | `replay_parity` | replay parity | `covered` | `cargo test -p kiln-graph replay && cargo test -p kiln-graph --test capture_lifetime && cargo test -p kiln-graph-cuda replay && cargo test -p kiln-graph-metal replay && cargo test -p kiln-graph-vulkan replay && cargo test -p kiln-model --features vulkan --test vk_resident_decode_parity && cargo test -p kiln-tensor --features rocm --test rocm_capture_arena && cargo test -p kiln-model --test backend_capability_contract` | none | `crates/kiln-graph/src/replay_plan.rs`, `crates/kiln-graph/src/captured_graph.rs`, `crates/kiln-graph/tests/capture_lifetime.rs`, `crates/kiln-graph-cuda/src/lib.rs`, `crates/kiln-graph-metal/src/lib.rs`, `crates/kiln-graph-vulkan/src/lib.rs`, `crates/kiln-model/src/backend/capability.rs`, `crates/kiln-model/src/backend/residency.rs`, `crates/kiln-model/tests/vk_resident_decode_parity.rs`, `crates/kiln-tensor/tests/rocm_capture_arena.rs` | none | none |
 | `one_step_training_proof` | one-step training proof | `covered` | `cargo test -p kiln-optim --test end_to_end_training && cargo test -p kiln-model --test backend_capability_contract` | `CUDA hardware lane: CUDARC_CUDA_VERSION=12080 cargo test -p kiln-model --features cuda --test cuda_sft_step_proof`; `ROCm feature lane: cargo test -p kiln-model --features rocm --test rocm_sft_step_proof`; `macOS Metal feature lane: cargo test -p kiln-model --features metal --test metal_sft_step_proof`; `Vulkan hardware opt-in lane: KILN_TENSOR_VULKAN_TEST=1 cargo test -p kiln-model --features vulkan --test vk_sft_step_proof` | `crates/kiln-model/tests/cuda_sft_step_proof.rs`, `crates/kiln-model/tests/metal_sft_step_proof.rs`, `crates/kiln-model/tests/vk_sft_step_proof.rs`, `crates/kiln-model/tests/rocm_sft_step_proof.rs`, `crates/kiln-optim/tests/end_to_end_training.rs` | none | none |
-| `no_unexpected_host_fallback` | no unexpected host fallback in decode/training hot paths | `covered` | `cargo test -p kiln-tensor device_op_host_fallback_counts_are_backend_and_arity_specific` | none | `crates/kiln-tensor/src/device_op.rs`, `crates/kiln-model/src/generate.rs`, `crates/kiln-train/src/trainer.rs` | none | none |
+| `no_unexpected_host_fallback` | no unexpected host fallback in decode/training hot paths | `partial` | `cargo test -p kiln-tensor device_op_host_fallback_counts_are_backend_and_arity_specific` | none | `crates/kiln-tensor/src/device_op.rs`, `crates/kiln-model/src/generate.rs`, `crates/kiln-train/src/trainer.rs` | none | the counter test proves backend and arity attribution, not that end-to-end decode and training hot paths keep fallback counts at zero. |
 | `decode_submit_or_replay_count` | max submit count or replay count per decode token | `covered` | `cargo test -p kiln-server batching_engine && cargo test -p kiln-server test_metrics_render && cargo test -p kiln-graph replay` | none | `crates/kiln-server/src/batching_engine.rs`, `crates/kiln-server/src/metrics.rs`, `crates/kiln-server/src/api/health.rs`, `crates/kiln-server/src/api/debug_model_state.rs`, `crates/kiln-graph/src/captured_graph.rs`, `crates/kiln-graph/src/replay_plan.rs` | none | none |
 | `matmul_algorithm_cache_reporting` | matmul algorithm/cache hit reporting | `covered` | `cargo test -p kiln-blas cache_stats_reports_entries_and_hit_rate && cargo test -p kiln-rocblas cache_stats_reports_entries_and_hit_rate && CUDARC_CUDA_VERSION=12080 cargo check -p kiln-blas --features cublaslt --tests && cargo check -p kiln-rocblas --features hipblaslt --tests` | none | `crates/kiln-blas/src/algo_cache.rs`, `crates/kiln-blas/src/cublaslt_handle.rs`, `crates/kiln-blas/tests/cublaslt_handle_smoke.rs`, `crates/kiln-rocblas/src/algo_cache.rs`, `crates/kiln-rocblas/src/hipblaslt_handle.rs` | none | none |
-| `hardware_latency_thresholds` | backend-specific latency thresholds on known hardware fixtures | `fixture_required` | `python3 scripts/run_backend_latency_fixture.py --self-test && python3 scripts/write_backend_latency_result_artifact.py --self-test && python3 scripts/import_backend_latency_artifact.py --self-test && python3 scripts/lock_backend_latency_thresholds.py --self-test && python3 scripts/check_backend_latency_fixtures.py --self-test && python3 scripts/plan_backend_latency_fixture_dispatch.py --self-test && python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered` | none | `docs/backend-latency-fixtures.json`, `docs/backend-latency-result-schema.md`, `scripts/check_unification_gates.sh`, `scripts/run_backend_latency_fixture.py`, `scripts/write_backend_latency_result_artifact.py`, `scripts/import_backend_latency_artifact.py`, `scripts/lock_backend_latency_thresholds.py`, `scripts/check_backend_latency_fixtures.py`, `scripts/plan_backend_latency_fixture_dispatch.py`, `crates/kiln-tensor/tests/cuda_latency_bench.rs`, `crates/kiln-server/examples/flce_preflight_bench.rs`, `crates/kiln-tensor/tests/metal_matmul_bench.rs`, `crates/kiln-tensor/tests/metal_sdpa_bench.rs`, `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs`, `crates/kiln-tensor/tests/rocm_latency_bench.rs` | none | `manifest status is 'fixture_required', expected 'covered'`; `metal_apple_silicon_matmul_qwen35_4b: threshold_state is 'pending_fixture_result', expected 'locked_threshold'`; `metal_apple_silicon_matmul_qwen35_4b.decode_qkv_m1_2560x4096_ms: max threshold is not finite numeric`; `metal_apple_silicon_matmul_qwen35_4b.prefill_qkv_m256_2560x4096_ms: max threshold is not finite numeric`; `metal_apple_silicon_matmul_qwen35_4b.prefill_gate_up_m256_2560x18432_ms: max threshold is not finite numeric`; `metal_apple_silicon_matmul_qwen35_4b.lm_head_m1_2560x152064_ms: max threshold is not finite numeric`; `metal_apple_silicon_sdpa_qwen35_4b: threshold_state is 'pending_fixture_result', expected 'locked_threshold'`; `metal_apple_silicon_sdpa_qwen35_4b.decode_sq1_sk512_ms: max threshold is not finite numeric`; `metal_apple_silicon_sdpa_qwen35_4b.decode_sq1_sk4096_ms: max threshold is not finite numeric`; `metal_apple_silicon_sdpa_qwen35_4b.prefill_sq512_sk512_ms: max threshold is not finite numeric`; `vulkan_strix_halo_decode_microbench: threshold_state is 'pending_fixture_result', expected 'locked_threshold'`; `vulkan_strix_halo_decode_microbench.full_step_resident_us: max threshold is not finite numeric`; `vulkan_strix_halo_decode_microbench.full_token_resident_paged_us: max threshold is not finite numeric` |
+| `hardware_latency_thresholds` | backend-specific latency thresholds on known hardware fixtures | `fixture_required` | `python3 scripts/run_backend_latency_fixture.py --self-test && python3 scripts/write_backend_latency_result_artifact.py --self-test && python3 scripts/import_backend_latency_artifact.py --self-test && python3 scripts/lock_backend_latency_thresholds.py --self-test && python3 scripts/check_backend_latency_fixtures.py --self-test && python3 scripts/plan_backend_latency_fixture_dispatch.py --self-test && python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered` | none | `docs/backend-latency-fixtures.json`, `docs/backend-latency-result-schema.md`, `scripts/check_unification_gates.sh`, `scripts/run_backend_latency_fixture.py`, `scripts/write_backend_latency_result_artifact.py`, `scripts/import_backend_latency_artifact.py`, `scripts/lock_backend_latency_thresholds.py`, `scripts/check_backend_latency_fixtures.py`, `scripts/plan_backend_latency_fixture_dispatch.py`, `crates/kiln-tensor/tests/cuda_latency_bench.rs`, `crates/kiln-server/examples/flce_preflight_bench.rs`, `crates/kiln-tensor/tests/metal_matmul_bench.rs`, `crates/kiln-tensor/tests/metal_sdpa_bench.rs`, `crates/kiln-vulkan-kernel/src/bin/vulkan_decode_microbench.rs`, `crates/kiln-tensor/tests/rocm_latency_bench.rs` | none | 13 blockers; see the list below. |
 | `generated_capability_dashboard` | generated capability dashboard checked into docs or build artifacts | `covered` | `python3 scripts/generate_backend_capability_report.py --self-test && python3 scripts/generate_backend_capability_report.py --check` | none | `docs/backend-capability-report.md`, `docs/backend-capability-report.json`, `scripts/generate_backend_capability_report.py`, `scripts/check_unification_gates.sh` | none | none |
 
-## Generic DeviceOp Fallback
+Pending hardware fixture blockers:
 
-| Backend | Policy | Counter | Evidence |
-|---|---|---|---|
-| `cuda` | `strict_native_miss_errors` | `none` | crates/kiln-tensor/src/device_op.rs CUDA native miss falls through on CUDA storage and fails loudly |
-| `rocm` | `host_round_trip_correctness_fallback` | `kiln_tensor::profile::device_op_host_fallback_counts().rocm_op{1,2,3}` | crates/kiln-tensor/src/device_op.rs ROCm missing native forward stages through CPU |
-| `metal` | `host_round_trip_correctness_fallback` | `kiln_tensor::profile::device_op_host_fallback_counts().metal_op{1,2,3}` | crates/kiln-tensor/src/device_op.rs Metal missing native forward stages through CPU |
-| `vulkan` | `host_round_trip_correctness_fallback` | `kiln_tensor::profile::device_op_host_fallback_counts().vulkan_op{1,2,3}` | crates/kiln-tensor/src/device_op.rs Vulkan missing native forward stages through CPU |
+- Manifest status is `fixture_required`; expected `covered`.
+- `metal_apple_silicon_matmul_qwen35_4b` has threshold state `pending_fixture_result`; expected `locked_threshold`.
+- `metal_apple_silicon_matmul_qwen35_4b` metric `decode_qkv_m1_2560x4096_ms` does not have a finite numeric maximum.
+- `metal_apple_silicon_matmul_qwen35_4b` metric `prefill_qkv_m256_2560x4096_ms` does not have a finite numeric maximum.
+- `metal_apple_silicon_matmul_qwen35_4b` metric `prefill_gate_up_m256_2560x18432_ms` does not have a finite numeric maximum.
+- `metal_apple_silicon_matmul_qwen35_4b` metric `lm_head_m1_2560x152064_ms` does not have a finite numeric maximum.
+- `metal_apple_silicon_sdpa_qwen35_4b` has threshold state `pending_fixture_result`; expected `locked_threshold`.
+- `metal_apple_silicon_sdpa_qwen35_4b` metric `decode_sq1_sk512_ms` does not have a finite numeric maximum.
+- `metal_apple_silicon_sdpa_qwen35_4b` metric `decode_sq1_sk4096_ms` does not have a finite numeric maximum.
+- `metal_apple_silicon_sdpa_qwen35_4b` metric `prefill_sq512_sk512_ms` does not have a finite numeric maximum.
+- `vulkan_strix_halo_decode_microbench` has threshold state `pending_fixture_result`; expected `locked_threshold`.
+- `vulkan_strix_halo_decode_microbench` metric `full_step_resident_us` does not have a finite numeric maximum.
+- `vulkan_strix_halo_decode_microbench` metric `full_token_resident_paged_us` does not have a finite numeric maximum.
 
-## Decode Hot-Path Fallback
+</details>
 
-| Backend | Default Policy | Mutable Override | Enforcement |
-|---|---|---|---|
-| `cpu` | `CorrectnessAllowed` | `none` | CPU is the reference path |
-| `cuda` | `CorrectnessAllowed` | `none` | CUDA native misses remain device-visible/errors rather than silent host staging |
-| `rocm` | `NativeRequired` | `none` | batched decode errors before generic fallback when no ROCm native path produced tokens |
-| `metal` | `NativeRequired` | `none` | batched/sample decode errors before generic fallback when no Metal native path produced tokens |
-| `vulkan` | `NativeRequired` | `none` | ordinary batched decode errors before generic fallback; active LoRA may use the capability-gated portable paged-attention route, with sparse vulkan_lora_paged_decode_fallback warnings |
+<details class="docs-capability-inventory">
+<summary><strong>Mismatch audit and environment gates</strong></summary>
 
-## Training Optimizer Product Resolution and Fallback
+No literal-true support predicate currently pairs with an implementation that always declines.
 
-Product-executable tuples combine the base-weight precision policy with optimizer-implementation support. The listed parameter dtypes use the reference implementation on CPU and required native hooks on accelerators; they are not independently a promise that the product resolver can produce that LoRA dtype.
+**CUDA**
 
-| Backend | Default Policy | Product Base -> LoRA | Product Kinds | Optimizer Parameter Dtypes (SGD / AdamW / Muon) | Muon Rank | Rounding | Enforcement |
-|---|---|---|---|---|---:|---|---|
-| `cpu` | `CorrectnessAllowed` | `F32->F32` | `sgd, adam_w, muon` | `F32 / F32 / F32` | `2..=unbounded` | `round_to_nearest` | CPU is the F32 reference optimizer path |
-| `cuda` | `NativeRequired` | `F32->F32, BF16->BF16` | `sgd, adam_w, muon` | `F32, BF16 / F32, BF16 / F32, BF16` | `2..=48` | `round_to_nearest` | SGD/AdamW/Muon GPU training errors before host fallback when native dispatch declines; no runtime override is supported |
-| `rocm` | `NativeRequired` | `F32->F32, BF16->BF16` | `sgd, adam_w, muon` | `F32, BF16 / F32, BF16 / F32, BF16` | `2..=48` | `round_to_nearest` | SGD/AdamW/Muon GPU training errors before host fallback when native dispatch declines; no runtime override is supported |
-| `metal` | `NativeRequired` | `BF16->BF16` | `adam_w, muon` | `none / F32, BF16 / F32, BF16` | `2..=32` | `round_to_nearest` | SGD/AdamW/Muon GPU training errors before host fallback when native dispatch declines; no runtime override is supported |
-| `vulkan` | `NativeRequired` | `F32->F32, BF16->F32` | `sgd, adam_w, muon` | `F32, BF16 / F32, BF16 / F32, BF16` | `2..=32` | `round_to_nearest` | SGD/AdamW/Muon GPU training errors before host fallback when native dispatch declines; no runtime override is supported |
+No native environment gates detected.
 
-## Streaming Prefill Backend Policy
+**ROCm**
 
-| Backend | Auto Dispatch | Base Tile | Tape Tile | Detached Full-Attn Tile | Detached Boundary Tile | Detached Tape-Replay Tile |
-|---|---|---:|---:|---:|---:|---:|
-| `cpu` | `never` | `8192` | `8192` | `8192` | `8192` | `8192` |
-| `cuda` | `prompt_tokens_at_least 2048` | `1024` | `1024` | `8192` | `65536` | `65536` |
-| `rocm` | `prompt_tokens_at_least 2048` | `1024` | `1024` | `8192` | `8192` | `8192` |
-| `metal` | `prompt_tokens_at_least 2048` | `2048` | `2048` | `8192` | `8192` | `8192` |
-| `vulkan` | `never` | `2048` | `2048` | `8192` | `8192` | `8192` |
+No native environment gates detected.
 
-## Training Precision Policy
+**Metal**
 
-| Backend | Policy | Activations | Base Weights | LoRA | Loss Accum | Optimizer Params | Mixed RMSNorm Weight | Mixed |
-|---|---|---|---|---|---|---|---|---|
-| `cpu` | `cpu_f32_reference` | `F32` | `F32` | `F32` | `F32` | `F32` | `none` | no |
-| `cuda` | `cuda_native_float` | `F32,BF16` | `F32,BF16` | `F32,BF16` | `F32` | `F32,BF16` | `none` | yes |
-| `rocm` | `rocm_native_float` | `F32,BF16` | `F32,BF16` | `F32,BF16` | `F32` | `F32,BF16` | `none` | yes |
-| `metal` | `metal_bf16_uma` | `BF16` | `BF16` | `F32,BF16` | `F32` | `F32,BF16` | `none` | yes |
-| `vulkan` | `vulkan_mixed_f32_bf16` | `F32` | `F32,BF16` | `F32` | `F32` | `F32,BF16` | `BF16` | yes |
+No native environment gates detected.
 
-## Training Loss Routing
+**Vulkan**
 
-| Backend | Tape Forward/Backward Route | SFT FLCE Route | GRPO Route | GRPO KL Auxiliary Route | OPD Route | OPD Phase-B Backward Route | Final RMSNorm Backward Route | Evidence |
-|---|---|---|---|---|---|---|---|---|
-| `cpu` | `unsupported` | `full_logits` | `kt_composite` | `host_composite` | `unsupported` | `unsupported` | `kt_composite` | TrainingCapabilities::portable keeps tape forward/backward unsupported, SFT on the portable full-logits loss path, GRPO on the shared kt composite loss root, GRPO KL auxiliaries on the host-composite route, OPD unsupported on the portable backend surface, and final RMSNorm backward on the kt-composite route |
-| `cuda` | `kt_tape_authoritative` | `kt_tape_flce` | `kt_composite` | `cuda_rocm_device_fast_path` | `kt_tape_phase_b` | `cuda_rocm_fused_unit_grad` | `cuda_rocm_fused_tail` | CudaBackend::training_capabilities_static advertises kt tape-authoritative forward/backward, kt-tape FLCE over CUDA tensors, the shared kt GRPO composite route, CUDA/ROCm device fast paths for GRPO KL auxiliaries, the shared kt-tape OPD Phase-B route, the fused CUDA/ROCm Phase-B hidden-gradient leaf, and the fused final-RMSNorm tail route |
-| `rocm` | `kt_tape_authoritative` | `kt_tape_flce` | `kt_composite` | `cuda_rocm_device_fast_path` | `kt_tape_phase_b` | `cuda_rocm_fused_unit_grad` | `cuda_rocm_fused_tail` | RocmBackend::training_capabilities_static advertises kt tape-authoritative forward/backward, the shared kt-tape FLCE route over ROCm tensors, the shared kt GRPO composite route, CUDA/ROCm device fast paths for GRPO KL auxiliaries, the shared kt-tape OPD Phase-B route, the fused CUDA/ROCm Phase-B hidden-gradient leaf, and the fused final-RMSNorm tail route |
-| `metal` | `kt_tape_authoritative` | `full_logits` | `kt_composite` | `host_composite` | `kt_tape_phase_b` | `kt_composite` | `kt_composite` | Metal training capabilities advertise kt tape-authoritative forward/backward, inherit the portable full-logits SFT loss route, shared kt GRPO composite route, host-composite GRPO KL auxiliaries, shared kt-tape OPD Phase-B route, device-agnostic kt composite Phase-B backward, and kt-composite final RMSNorm backward |
-| `vulkan` | `kt_tape_authoritative` | `vulkan_active_rows` | `vulkan_active_rows` | `host_composite` | `vulkan_active_hidden` | `vulkan_active_hidden` | `kt_composite` | Vulkan training capabilities advertise kt tape-authoritative forward/backward, active-row fused SFT/GRPO shader routes, host-composite GRPO KL auxiliaries, the active-hidden fused OPD loss/backward shader route, and kt-composite final RMSNorm backward |
+No native environment gates detected.
 
-## Optimizer Dispatch
+</details>
 
-| Backend | SGD Step | AdamW Step | Muon Step |
-|---|---|---|---|
-| `cuda` | `overridden` | `overridden` | `overridden` |
-| `rocm` | `overridden` | `overridden` | `overridden` |
-| `metal` | `default_decline` | `overridden` | `overridden` |
-| `vulkan` | `overridden` | `overridden` | `overridden` |
+## Regenerate and validate
 
-## Mismatch Audit
+From the repository root:
 
-No literal-true support predicate currently pairs with an always-declining method body.
+```bash
+python3 scripts/generate_backend_capability_report.py --self-test
+python3 scripts/generate_backend_capability_report.py
+python3 scripts/generate_backend_capability_report.py --check
+```
 
-## Backend Env Gates
-
-### CUDA
-- none detected
-
-### ROCM
-- none detected
-
-### METAL
-- none detected
-
-### VULKAN
-- none detected
-
+The first command tests generator helpers, the second rewrites the Markdown and JSON snapshots, and the third fails if either checked-in file is stale. Run the prescribed conformance commands separately and retain their CI or hardware receipts; regeneration alone is not verification.

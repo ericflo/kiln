@@ -27,6 +27,19 @@ may use `content: null` or omit `content`; both normalize to empty content. Tool
 responses retain `role: "tool"`, `name`, and `tool_call_id` through ingestion,
 although the current Qwen template does not serialize the latter two fields.
 
+## Sequence length and truncation
+
+Kiln tokenizes the complete rendered conversation. Native SFT does not silently
+truncate a row, join multiple rows into one sequence, or split one row across
+optimizer steps. Each accepted row remains one conversation and one optimizer
+step.
+
+Ingestion records the actual longest accepted sequence. Server preflight uses
+that length for memory admission, and the trainer uses each row's actual length
+when choosing its gradient-checkpoint plan. A row that cannot pass tokenization
+and label validation is rejected according to the configured invalid-row
+policy; it is never shortened into a different training example.
+
 ## Assistant-only labels
 
 The mask contract is `kiln.qwen35-assistant-only.v1`:

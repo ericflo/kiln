@@ -13,9 +13,7 @@ port = 8420
 
 [model]
 path = "/models/Qwen3.5-4B"
-
-[adapters]
-directory = "/var/lib/kiln/adapters"
+adapter_dir = "/var/lib/kiln/adapters"
 ```
 
 Run `kiln config` before starting a long-lived service. It resolves defaults,
@@ -27,8 +25,8 @@ loading the model.
 | Goal | Setting or command | Guidance |
 |---|---|---|
 | Listen beyond localhost | `server.host` | Add authentication and network controls before exposing the port. |
-| Select a GPU | `accelerator.device_index` or the backend-specific selector shown by `kiln config` | Verify the effective device in `/health`; do not infer it from ordering alone. |
-| Move adapter storage | `adapters.directory` | Use durable local storage and preserve manifests with adapter files. |
+| Select a Vulkan GPU | `accelerator.vulkan_device_index` | Use `auto` or an explicit zero-based Vulkan index. The current memory-probe identity gate still admits only index zero on a single-GPU host; verify the selected device in `/health`. |
+| Move adapter storage | `model.adapter_dir` | Use durable local storage and preserve manifests with adapter files. |
 | Bound request work | request `max_tokens`, thinking budgets, server batch budgets | Set explicit client limits before tuning throughput. |
 | Change serving behavior | `serving_profile` and batching fields | Measure TTFT, inter-token latency, and request-window throughput separately. |
 | Enable diagnostics | observability and protected debug settings | Treat debug endpoints as operational data, not public APIs. |

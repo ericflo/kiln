@@ -1043,6 +1043,43 @@ impl Default for RewardStatsReceipt {
 }
 
 impl TrainReceipt {
+    fn validate_envelope(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.schema_version == TRAIN_RECEIPT_SCHEMA_VERSION,
+            "unsupported train-receipt schema_version {}; expected {}",
+            self.schema_version,
+            TRAIN_RECEIPT_SCHEMA_VERSION
+        );
+        anyhow::ensure!(
+            self.receipt_type == "kiln_train_receipt",
+            "invalid train-receipt receipt_type {:?}; expected \"kiln_train_receipt\"",
+            self.receipt_type
+        );
+        anyhow::ensure!(
+            !self.adapter_name.trim().is_empty(),
+            "train-receipt adapter_name must not be empty"
+        );
+        chrono::DateTime::parse_from_rfc3339(&self.produced_at)
+            .context("train-receipt produced_at must be an RFC3339 timestamp")?;
+        match self.status {
+            TrainReceiptStatus::Success => {
+                anyhow::ensure!(
+                    self.failure_reason.is_none() && self.failure_message.is_none(),
+                    "successful train receipt must not carry failure_reason or failure_message"
+                );
+            }
+            TrainReceiptStatus::Failed => {
+                anyhow::ensure!(
+                    self.failure_reason
+                        .as_deref()
+                        .is_some_and(|reason| !reason.trim().is_empty()),
+                    "failed train receipt must carry a non-empty failure_reason"
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(
         adapter_name: impl Into<String>,
         mode: impl Into<String>,
@@ -1130,6 +1167,8 @@ impl TrainReceipt {
     }
 
     pub fn write_to_adapter_dir(&self, adapter_dir: &Path) -> Result<PathBuf> {
+        self.validate_envelope()
+            .context("validate train-receipt envelope")?;
         self.validate_training_chat_template_identity()
             .context("validate train-receipt training chat template identity")?;
         if let Some(ingestion) = self.data.sft_ingestion.as_ref() {
@@ -1180,6 +1219,9 @@ impl TrainReceipt {
             .with_context(|| format!("read train receipt {}", path.display()))?;
         let receipt: Self = serde_json::from_slice(&bytes)
             .with_context(|| format!("deserialize train receipt {}", path.display()))?;
+        receipt
+            .validate_envelope()
+            .with_context(|| format!("validate train-receipt envelope in {}", path.display()))?;
         receipt
             .validate_training_chat_template_identity()
             .with_context(|| {
@@ -2914,6 +2956,70 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("validate execution provenance"));
+        Ok(())
+    }
+
+    #[test]
+    fn train_receipt_reader_rejects_invalid_envelope_identity_and_status() -> Result<()> {
+        let dir = tempdir()?;
+        let receipt = TrainReceipt::new(
+            "adapter-a",
+            "sft",
+            &ModelConfig::qwen3_5_4b(),
+            &minimal_tokenizer()?,
+            HyperparameterReceipt {
+                mode: "sft".to_string(),
+                rank: 8,
+                alpha: 16.0,
+                alpha_over_rank: Some(2.0),
+                learning_rate: 1e-4,
+                epochs: 1,
+                seed: Some(42),
+                shuffle: false,
+            },
+            serde_json::json!({"epochs": 1}),
+        );
+        let path = dir.path().join(TRAIN_RECEIPT_FILENAME);
+        let valid = serde_json::to_value(receipt)?;
+
+        for (field, value, expected) in [
+            (
+                "schema_version",
+                serde_json::json!(TRAIN_RECEIPT_SCHEMA_VERSION + 1),
+                "unsupported train-receipt schema_version",
+            ),
+            (
+                "receipt_type",
+                serde_json::json!("other_receipt"),
+                "invalid train-receipt receipt_type",
+            ),
+            (
+                "produced_at",
+                serde_json::json!("not-a-timestamp"),
+                "must be an RFC3339 timestamp",
+            ),
+        ] {
+            let mut changed = valid.clone();
+            changed[field] = value;
+            std::fs::write(&path, serde_json::to_vec_pretty(&changed)?)?;
+            let error = format!(
+                "{:#}",
+                TrainReceipt::read_from_adapter_dir(dir.path()).unwrap_err()
+            );
+            assert!(error.contains(expected), "{error}");
+        }
+
+        let mut inconsistent_success = valid;
+        inconsistent_success["failure_reason"] = serde_json::json!("training_error");
+        std::fs::write(&path, serde_json::to_vec_pretty(&inconsistent_success)?)?;
+        let error = format!(
+            "{:#}",
+            TrainReceipt::read_from_adapter_dir(dir.path()).unwrap_err()
+        );
+        assert!(
+            error.contains("successful train receipt must not carry"),
+            "{error}"
+        );
         Ok(())
     }
 

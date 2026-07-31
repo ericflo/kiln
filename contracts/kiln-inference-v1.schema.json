@@ -24,6 +24,7 @@
   "$defs": {
     "AdapterRef": {
       "type": "object",
+      "description": "One saved adapter and its composition scale.",
       "required": ["name", "scale"],
       "properties": {
         "name": {
@@ -33,7 +34,7 @@
         },
         "scale": {
           "type": "number",
-          "description": "Composition scale forwarded to merge_concat. The current request edge requires a finite JSON number but applies no narrower range."
+          "description": "Composition scale used when merging request-wide adapters. The request must contain a finite JSON number; Kiln applies no narrower range."
         }
       },
       "additionalProperties": true,
@@ -42,6 +43,7 @@
     },
     "BatchCompletionItem": {
       "type": "object",
+      "description": "One generated choice from one prompt in a batch request.",
       "required": [
         "prompt_index",
         "completion_index",
@@ -84,15 +86,17 @@
     },
     "BatchCompletionMetadata": {
       "type": "object",
+      "description": "Request-wide metadata for a completed batch response.",
       "required": ["thinking_budget"],
       "properties": {
-        "thinking_budget": { "$ref": "#/$defs/ThinkingBudgetConfigurationMetadata" }
+        "thinking_budget": { "$ref": "#/$defs/ThinkingBudgetConfigurationMetadata", "description": "Resolved request-wide thinking-limit configuration." }
       },
       "additionalProperties": false,
       "x-kiln-rust-type": "BatchCompletionMetadata"
     },
     "BatchCompletionRequest": {
       "type": "object",
+      "description": "Generate one or more choices for each conversation in a batch.",
       "required": ["prompts"],
       "properties": {
         "model": {
@@ -117,15 +121,15 @@
           "default": 1,
           "description": "Completions per prompt. Missing or null means 1."
         },
-        "temperature": { "$ref": "#/$defs/NullableSamplingNumber" },
-        "top_p": { "$ref": "#/$defs/NullableSamplingNumber" },
-        "top_k": { "$ref": "#/$defs/NullableUint32" },
-        "min_p": { "$ref": "#/$defs/NullableSamplingNumber" },
-        "presence_penalty": { "$ref": "#/$defs/NullableSamplingNumber" },
-        "frequency_penalty": { "$ref": "#/$defs/NullableSamplingNumber" },
-        "repetition_penalty": { "$ref": "#/$defs/NullableSamplingNumber" },
-        "sampling_preset": { "$ref": "#/$defs/SamplingPreset" },
-        "max_tokens": { "$ref": "#/$defs/NullableNonNegativeInteger" },
+        "temperature": { "$ref": "#/$defs/NullableSamplingNumber", "description": "Sampling temperature. Null uses the selected preset or runtime default." },
+        "top_p": { "$ref": "#/$defs/NullableSamplingNumber", "description": "Nucleus-sampling probability mass. Null uses the selected preset or runtime default." },
+        "top_k": { "$ref": "#/$defs/NullableUint32", "description": "Maximum candidate count for top-k filtering. Null uses the selected preset or runtime default." },
+        "min_p": { "$ref": "#/$defs/NullableSamplingNumber", "description": "Minimum probability relative to the most likely token. Null uses the selected preset or runtime default." },
+        "presence_penalty": { "$ref": "#/$defs/NullableSamplingNumber", "description": "OpenAI-style presence penalty. Null uses the selected preset or runtime default." },
+        "frequency_penalty": { "$ref": "#/$defs/NullableSamplingNumber", "description": "OpenAI-style frequency penalty. Null uses the selected preset or runtime default." },
+        "repetition_penalty": { "$ref": "#/$defs/NullableSamplingNumber", "description": "Token repetition penalty. Null uses the selected preset or runtime default." },
+        "sampling_preset": { "$ref": "#/$defs/SamplingPreset", "description": "Named group of sampling defaults; explicit sampling fields take precedence." },
+        "max_tokens": { "$ref": "#/$defs/NullableNonNegativeInteger", "description": "Maximum generated tokens per completion. Null uses the runtime default." },
         "max_completion_tokens": {
           "$ref": "#/$defs/NullableNonNegativeInteger",
           "description": "Newer OpenAI alias. max_tokens wins when both are non-null."
@@ -136,13 +140,15 @@
           "description": "Treat tokenizer EOS IDs as ordinary tokens; max_tokens and explicit stop sequences still bound generation."
         },
         "thinking_budget_tokens": {
-          "$ref": "thinking-budget-v1.schema.json#/$defs/limitOverride"
+          "$ref": "thinking-budget-v1.schema.json#/$defs/limitOverride",
+          "description": "Per-request thinking-token limit override; null explicitly removes the limit."
         },
         "thinking_budget_ms": {
-          "$ref": "thinking-budget-v1.schema.json#/$defs/limitOverride"
+          "$ref": "thinking-budget-v1.schema.json#/$defs/limitOverride",
+          "description": "Per-request thinking-time limit in milliseconds; null explicitly removes the limit."
         },
-        "stop": { "$ref": "#/$defs/StopInput" },
-        "seed": { "$ref": "#/$defs/NullableUint64" },
+        "stop": { "$ref": "#/$defs/StopInput", "description": "One or more decoded-text stop sequences." },
+        "seed": { "$ref": "#/$defs/NullableUint64", "description": "Request seed; null lets the runtime choose." },
         "adapter": {
           "$ref": "#/$defs/NullableString",
           "description": "One adapter applied to every prompt. Mutually exclusive with adapters."
@@ -159,11 +165,11 @@
           ],
           "description": "Request-wide adapter composition. Mutually exclusive with adapter."
         },
-        "tools": { "$ref": "#/$defs/NullableToolArray" },
+        "tools": { "$ref": "#/$defs/NullableToolArray", "description": "Request-wide OpenAI-shaped tool definitions forwarded to the chat template." },
         "tool_choice": {
           "description": "Opaque OpenAI tool_choice value forwarded to the chat template."
         },
-        "chat_template_kwargs": { "$ref": "#/$defs/NullableTemplateKwargs" }
+        "chat_template_kwargs": { "$ref": "#/$defs/NullableTemplateKwargs", "description": "Request-wide keyword arguments forwarded to the chat template." }
       },
       "allOf": [
         {
@@ -187,17 +193,19 @@
     },
     "BatchCompletionResponse": {
       "type": "object",
+      "description": "All choices, token usage, and request-wide metadata from a batch generation request.",
       "required": ["id", "object", "created", "model", "completions", "usage", "metadata"],
       "properties": {
-        "id": { "type": "string", "pattern": "^batchcmpl-" },
-        "object": { "const": "batch.completion" },
+        "id": { "type": "string", "pattern": "^batchcmpl-", "description": "Unique batch-completion identifier." },
+        "object": { "const": "batch.completion", "description": "OpenAI-style object discriminator for a batch completion." },
         "created": { "$ref": "#/$defs/UnixSeconds" },
-        "model": { "type": "string" },
+        "model": { "type": "string", "description": "Served model ID used for every completion." },
         "completions": {
           "type": "array",
           "minItems": 1,
           "maxItems": 64,
-          "items": { "$ref": "#/$defs/BatchCompletionItem" }
+          "items": { "$ref": "#/$defs/BatchCompletionItem" },
+          "description": "Generated choices in prompt order, then completion order."
         },
         "usage": { "$ref": "#/$defs/Usage" },
         "metadata": { "$ref": "#/$defs/BatchCompletionMetadata" }
@@ -208,18 +216,20 @@
     },
     "ChatCompletionChunk": {
       "type": "object",
+      "description": "One OpenAI-compatible server-sent event in a streaming chat completion.",
       "required": ["id", "object", "created", "model", "choices"],
       "properties": {
-        "id": { "type": "string", "pattern": "^chatcmpl-" },
-        "object": { "const": "chat.completion.chunk" },
+        "id": { "type": "string", "pattern": "^chatcmpl-", "description": "Chat-completion identifier shared by every chunk in the stream." },
+        "object": { "const": "chat.completion.chunk", "description": "OpenAI-compatible streaming-chunk discriminator." },
         "created": { "$ref": "#/$defs/UnixSeconds" },
-        "model": { "type": "string" },
+        "model": { "type": "string", "description": "Served model ID used for this completion." },
         "choices": {
           "type": "array",
-          "items": { "$ref": "#/$defs/ChunkChoice" }
+          "items": { "$ref": "#/$defs/ChunkChoice" },
+          "description": "Incremental choices carried by this chunk; the usage-only chunk has none."
         },
         "metadata": { "$ref": "#/$defs/StreamingTerminalMetadata" },
-        "usage": { "$ref": "#/$defs/Usage" }
+        "usage": { "$ref": "#/$defs/Usage", "description": "Token counts for this individual completion." }
       },
       "additionalProperties": false,
       "x-kiln-rust-type": "ChatCompletionChunk"
@@ -227,7 +237,7 @@
     "ChatCompletionChunkStream": {
       "type": "string",
       "contentMediaType": "text/event-stream",
-      "description": "SSE body containing JSON ChatCompletionChunk events, optional kiln.token_timing events when include_performance is explicitly true, an optional empty-choices usage chunk when stream_options.include_usage is true, and a final data: [DONE] sentinel. The terminal finish chunk carries thinking-budget metadata before the usage chunk and sentinel.",
+      "description": "Server-sent event stream containing JSON `ChatCompletionChunk` events, optional `kiln.token_timing` events when `include_performance` is true, an optional usage chunk with no choices when `stream_options.include_usage` is true, and a final `data: [DONE]` sentinel. The terminal finish chunk carries thinking-budget metadata before the optional usage chunk and sentinel.",
       "x-kiln-event-schemas": [
         { "$ref": "#/$defs/ChatCompletionChunk" },
         { "$ref": "#/$defs/StreamingTokenTiming" }
@@ -237,6 +247,7 @@
     },
     "ChatCompletionMetadata": {
       "type": "object",
+      "description": "Kiln-specific thinking, configuration, and performance metadata for a chat completion.",
       "required": [
         "thinking_enabled",
         "thinking_mode",
@@ -246,7 +257,7 @@
         "thinking_budget"
       ],
       "properties": {
-        "thinking_enabled": { "type": "boolean" },
+        "thinking_enabled": { "type": "boolean", "description": "Whether the rendered prompt enabled model thinking." },
         "thinking_mode": {
           "type": "string",
           "enum": ["non_reasoning", "reasoning"],
@@ -254,26 +265,30 @@
         },
         "thinking_source": {
           "type": "string",
-          "enum": ["custom", "request", "server_default", "template_default"]
+          "enum": ["custom", "request", "server_default", "template_default"],
+          "description": "Authority that selected the effective thinking mode."
         },
-        "default_thinking_enabled": { "type": "boolean" },
-        "final_content_empty": { "type": "boolean" },
+        "default_thinking_enabled": { "type": "boolean", "description": "Configured server or template default before a request override." },
+        "final_content_empty": { "type": "boolean", "description": "Whether the final answer content is empty after reasoning separation." },
         "content_empty_reason": {
           "type": "string",
-          "enum": ["no_content", "reasoning_without_final_content", "tool_call"]
+          "enum": ["no_content", "reasoning_without_final_content", "tool_call"],
+          "description": "Reason final answer content is empty; omitted when content is present."
         },
-        "reasoning_folded_into_content": { "type": "boolean" },
+        "reasoning_folded_into_content": { "type": "boolean", "description": "Whether compatibility mode copied separated reasoning into content." },
         "thinking_budget": {
-          "$ref": "thinking-budget-v1.schema.json#/$defs/record"
+          "$ref": "thinking-budget-v1.schema.json#/$defs/record",
+          "description": "Resolved and terminal thinking-budget record."
         },
-        "config_hashes": { "$ref": "#/$defs/ConfigHashes" },
-        "performance": { "$ref": "#/$defs/ChatCompletionPerformanceMetadata" }
+        "config_hashes": { "$ref": "#/$defs/ConfigHashes", "description": "Configuration hashes when requested or enabled by default." },
+        "performance": { "$ref": "#/$defs/ChatCompletionPerformanceMetadata", "description": "Request-local performance metadata when requested or enabled by default." }
       },
       "additionalProperties": false,
       "x-kiln-rust-type": "ChatCompletionMetadata"
     },
     "ChatCompletionPerformanceMetadata": {
       "type": "object",
+      "description": "Token counts and request-local latency measurements emitted when performance metadata is enabled.",
       "required": [
         "prompt_tokens",
         "completion_tokens",
@@ -292,25 +307,26 @@
         "latency"
       ],
       "properties": {
-        "prompt_tokens": { "$ref": "#/$defs/NonNegativeInteger" },
-        "completion_tokens": { "$ref": "#/$defs/NonNegativeInteger" },
-        "ttft_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "prefill_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "actor_queue_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "actor_admission_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "actor_prefill_wall_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "resident_prefill_used": { "$ref": "#/$defs/NullableBoolean" },
-        "decode_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "total_latency_ms": { "type": "number", "minimum": 0 },
-        "decode_tokens_per_sec": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "adapter_used": { "type": "string" },
-        "thinking_mode": { "type": "string" },
-        "finish_reason": { "$ref": "#/$defs/FinishReason" },
+        "prompt_tokens": { "$ref": "#/$defs/NonNegativeInteger", "description": "Number of prompt tokens processed." },
+        "completion_tokens": { "$ref": "#/$defs/NonNegativeInteger", "description": "Number of generated tokens." },
+        "ttft_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Time to first generated token in milliseconds, or null when unavailable." },
+        "prefill_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Measured prompt-prefill work in milliseconds, or null when unavailable." },
+        "actor_queue_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Time waiting in the batching actor's queue, or null off the actor path." },
+        "actor_admission_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Time from actor receipt to workload admission, or null off the actor path." },
+        "actor_prefill_wall_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Wall-clock time from actor admission through prompt prefill, or null off the actor path." },
+        "resident_prefill_used": { "$ref": "#/$defs/NullableBoolean", "description": "Whether prefill used resident recurrent state, or null when the route does not report it." },
+        "decode_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Measured token-decode work in milliseconds, or null when unavailable." },
+        "total_latency_ms": { "type": "number", "minimum": 0, "description": "Request latency from handler entry through response construction, in milliseconds." },
+        "decode_tokens_per_sec": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Generated tokens divided by measured decode time, or null when unavailable." },
+        "adapter_used": { "type": "string", "description": "Base or named adapter selection used for generation." },
+        "thinking_mode": { "type": "string", "description": "Thinking mode observed from the rendered prompt." },
+        "finish_reason": { "$ref": "#/$defs/FinishReason", "description": "Terminal reason for this choice." },
         "latency": {
           "anyOf": [
             { "$ref": "#/$defs/RequestLatencyDiagnostics" },
             { "type": "null" }
-          ]
+          ],
+          "description": "Detailed latency diagnostics when the serving path recorded them; otherwise null."
         }
       },
       "additionalProperties": false,
@@ -318,6 +334,7 @@
     },
     "ChatCompletionRequest": {
       "type": "object",
+      "description": "Create one or more OpenAI-compatible chat-completion choices.",
       "required": ["messages"],
       "properties": {
         "model": {
@@ -337,15 +354,15 @@
           "default": 1,
           "description": "Number of choices. Values above 1 require stream=false."
         },
-        "temperature": { "$ref": "#/$defs/NullableSamplingNumber" },
-        "top_p": { "$ref": "#/$defs/NullableSamplingNumber" },
-        "top_k": { "$ref": "#/$defs/NullableUint32" },
-        "min_p": { "$ref": "#/$defs/NullableSamplingNumber" },
-        "presence_penalty": { "$ref": "#/$defs/NullableSamplingNumber" },
-        "frequency_penalty": { "$ref": "#/$defs/NullableSamplingNumber" },
-        "repetition_penalty": { "$ref": "#/$defs/NullableSamplingNumber" },
-        "sampling_preset": { "$ref": "#/$defs/SamplingPreset" },
-        "max_tokens": { "$ref": "#/$defs/NullableNonNegativeInteger" },
+        "temperature": { "$ref": "#/$defs/NullableSamplingNumber", "description": "Sampling temperature. Null uses the selected preset or runtime default." },
+        "top_p": { "$ref": "#/$defs/NullableSamplingNumber", "description": "Nucleus-sampling probability mass. Null uses the selected preset or runtime default." },
+        "top_k": { "$ref": "#/$defs/NullableUint32", "description": "Maximum candidate count for top-k filtering. Null uses the selected preset or runtime default." },
+        "min_p": { "$ref": "#/$defs/NullableSamplingNumber", "description": "Minimum probability relative to the most likely token. Null uses the selected preset or runtime default." },
+        "presence_penalty": { "$ref": "#/$defs/NullableSamplingNumber", "description": "OpenAI-style presence penalty. Null uses the selected preset or runtime default." },
+        "frequency_penalty": { "$ref": "#/$defs/NullableSamplingNumber", "description": "OpenAI-style frequency penalty. Null uses the selected preset or runtime default." },
+        "repetition_penalty": { "$ref": "#/$defs/NullableSamplingNumber", "description": "Token repetition penalty. Null uses the selected preset or runtime default." },
+        "sampling_preset": { "$ref": "#/$defs/SamplingPreset", "description": "Named group of sampling defaults; explicit sampling fields take precedence." },
+        "max_tokens": { "$ref": "#/$defs/NullableNonNegativeInteger", "description": "Maximum generated tokens per choice. Null uses the runtime default." },
         "max_completion_tokens": {
           "$ref": "#/$defs/NullableNonNegativeInteger",
           "description": "Newer OpenAI alias. max_tokens wins when both are non-null."
@@ -356,23 +373,27 @@
           "description": "Treat tokenizer EOS IDs as ordinary tokens; incompatible with rollout_provenance=true."
         },
         "thinking_budget_tokens": {
-          "$ref": "thinking-budget-v1.schema.json#/$defs/limitOverride"
+          "$ref": "thinking-budget-v1.schema.json#/$defs/limitOverride",
+          "description": "Per-request thinking-token limit override; null explicitly removes the limit."
         },
         "thinking_budget_ms": {
-          "$ref": "thinking-budget-v1.schema.json#/$defs/limitOverride"
+          "$ref": "thinking-budget-v1.schema.json#/$defs/limitOverride",
+          "description": "Per-request thinking-time limit in milliseconds; null explicitly removes the limit."
         },
         "stream": {
           "type": "boolean",
-          "default": false
+          "default": false,
+          "description": "Return server-sent events instead of one JSON response."
         },
         "stream_options": {
           "oneOf": [
             { "type": "null" },
             { "$ref": "#/$defs/StreamOptions" }
-          ]
+          ],
+          "description": "Additional streaming behavior; ignored for a non-streaming request."
         },
-        "stop": { "$ref": "#/$defs/StopInput" },
-        "seed": { "$ref": "#/$defs/NullableUint64" },
+        "stop": { "$ref": "#/$defs/StopInput", "description": "One or more decoded-text stop sequences." },
+        "seed": { "$ref": "#/$defs/NullableUint64", "description": "Request seed; null lets the runtime choose." },
         "adapter": {
           "$ref": "#/$defs/NullableString",
           "description": "Missing uses the server default; null or an empty string selects base; a non-empty string selects a named adapter. Mutually exclusive with adapters."
@@ -389,14 +410,14 @@
           ],
           "description": "Per-request adapter composition. Mutually exclusive with adapter."
         },
-        "tools": { "$ref": "#/$defs/NullableToolArray" },
+        "tools": { "$ref": "#/$defs/NullableToolArray", "description": "OpenAI-shaped tool definitions forwarded to the chat template." },
         "tool_choice": {
           "description": "Opaque OpenAI tool_choice value forwarded to the chat template."
         },
-        "chat_template_kwargs": { "$ref": "#/$defs/NullableTemplateKwargs" },
-        "fold_reasoning_into_content": { "$ref": "#/$defs/NullableBoolean" },
-        "include_performance": { "$ref": "#/$defs/NullableBoolean" },
-        "include_config_hashes": { "$ref": "#/$defs/NullableBoolean" },
+        "chat_template_kwargs": { "$ref": "#/$defs/NullableTemplateKwargs", "description": "Keyword arguments forwarded to the chat template." },
+        "fold_reasoning_into_content": { "$ref": "#/$defs/NullableBoolean", "description": "Override whether separated reasoning is also copied into final content." },
+        "include_performance": { "$ref": "#/$defs/NullableBoolean", "description": "Override whether the response includes request-local performance metadata." },
+        "include_config_hashes": { "$ref": "#/$defs/NullableBoolean", "description": "Override whether the response includes content hashes for the active configuration." },
         "rollout_provenance": {
           "type": "boolean",
           "default": false,
@@ -459,17 +480,19 @@
     },
     "ChatCompletionResponse": {
       "type": "object",
+      "description": "A non-streaming OpenAI-compatible chat completion with Kiln metadata.",
       "required": ["id", "object", "created", "model", "choices", "usage", "metadata"],
       "properties": {
-        "id": { "type": "string", "pattern": "^chatcmpl-" },
-        "object": { "const": "chat.completion" },
+        "id": { "type": "string", "pattern": "^chatcmpl-", "description": "Unique chat-completion identifier." },
+        "object": { "const": "chat.completion", "description": "OpenAI-compatible object discriminator." },
         "created": { "$ref": "#/$defs/UnixSeconds" },
-        "model": { "type": "string" },
+        "model": { "type": "string", "description": "Served model ID used for generation." },
         "choices": {
           "type": "array",
           "minItems": 1,
           "maxItems": 64,
-          "items": { "$ref": "#/$defs/Choice" }
+          "items": { "$ref": "#/$defs/Choice" },
+          "description": "Generated choices in index order."
         },
         "usage": { "$ref": "#/$defs/Usage" },
         "metadata": { "$ref": "#/$defs/ChatCompletionMetadata" }
@@ -480,6 +503,7 @@
     },
     "ChatMessageInput": {
       "type": "object",
+      "description": "One input message passed to the model's chat template.",
       "required": ["role"],
       "properties": {
         "role": {
@@ -495,15 +519,16 @@
           "default": "",
           "description": "String, null, or OpenAI content-part array. Text/input_text/output_text parts are concatenated and non-text parts are ignored."
         },
-        "reasoning_content": { "$ref": "#/$defs/NullableString" },
+        "reasoning_content": { "$ref": "#/$defs/NullableString", "description": "Prior assistant reasoning preserved for template round trips." },
         "tool_calls": {
           "oneOf": [
             { "type": "null" },
             { "$ref": "#/$defs/ToolCallArray" }
-          ]
+          ],
+          "description": "Prior assistant tool calls preserved for the next template render."
         },
-        "name": { "$ref": "#/$defs/NullableString" },
-        "tool_call_id": { "$ref": "#/$defs/NullableString" }
+        "name": { "$ref": "#/$defs/NullableString", "description": "Optional message name." },
+        "tool_call_id": { "$ref": "#/$defs/NullableString", "description": "Tool-call identifier associated with a tool response." }
       },
       "additionalProperties": true,
       "x-kiln-rust-type": "Message",
@@ -511,63 +536,68 @@
     },
     "ChatMessageOutput": {
       "type": "object",
+      "description": "One assistant message emitted in a non-streaming choice.",
       "required": ["role", "content"],
       "properties": {
-        "role": { "type": "string" },
-        "content": { "type": "string" },
-        "reasoning_content": { "type": "string" },
-        "tool_calls": { "$ref": "#/$defs/ToolCallArray" },
-        "name": { "type": "string" },
-        "tool_call_id": { "type": "string" }
+        "role": { "type": "string", "description": "Assistant message role." },
+        "content": { "type": "string", "description": "Final answer content after reasoning separation." },
+        "reasoning_content": { "type": "string", "description": "Separated reasoning content; omitted when absent." },
+        "tool_calls": { "$ref": "#/$defs/ToolCallArray", "description": "Tool calls emitted by the assistant; omitted when absent." },
+        "name": { "type": "string", "description": "Optional message name." },
+        "tool_call_id": { "type": "string", "description": "Tool-call identifier associated with a tool response." }
       },
       "additionalProperties": false,
       "x-kiln-rust-type": "Message"
     },
     "Choice": {
       "type": "object",
+      "description": "One complete non-streaming chat choice.",
       "required": ["index", "message", "finish_reason"],
       "properties": {
-        "index": { "$ref": "#/$defs/NonNegativeInteger" },
-        "message": { "$ref": "#/$defs/ChatMessageOutput" },
-        "finish_reason": { "$ref": "#/$defs/FinishReason" },
+        "index": { "$ref": "#/$defs/NonNegativeInteger", "description": "Zero-based choice index." },
+        "message": { "$ref": "#/$defs/ChatMessageOutput", "description": "Complete assistant message for this choice." },
+        "finish_reason": { "$ref": "#/$defs/FinishReason", "description": "Why generation ended for this choice." },
         "thinking_budget": {
           "$ref": "thinking-budget-v1.schema.json#/$defs/outcome"
         },
-        "rollout_provenance": { "$ref": "#/$defs/RolloutProvenanceV1" }
+        "rollout_provenance": { "$ref": "#/$defs/RolloutProvenanceV1", "description": "Exact behavior-policy provenance when requested." }
       },
       "additionalProperties": false,
       "x-kiln-rust-type": "Choice"
     },
     "ChunkChoice": {
       "type": "object",
+      "description": "One incremental choice in a streaming chat chunk.",
       "required": ["index", "delta"],
       "properties": {
-        "index": { "$ref": "#/$defs/NonNegativeInteger" },
-        "delta": { "$ref": "#/$defs/Delta" },
-        "finish_reason": { "$ref": "#/$defs/FinishReason" }
+        "index": { "$ref": "#/$defs/NonNegativeInteger", "description": "Zero-based choice index." },
+        "delta": { "$ref": "#/$defs/Delta", "description": "Fields added by this streaming chunk." },
+        "finish_reason": { "$ref": "#/$defs/FinishReason", "description": "Why generation ended; present only on the terminal chunk." }
       },
       "additionalProperties": false,
       "x-kiln-rust-type": "ChunkChoice"
     },
     "ConfigHashes": {
       "type": "object",
+      "description": "Content hashes that identify the tokenizer, templates, model configuration, and resolved inference configuration.",
       "properties": {
-        "tokenizer_config_hash": { "$ref": "#/$defs/Sha256" },
-        "chat_template_hash": { "$ref": "#/$defs/Sha256" },
-        "training_chat_template_hash": { "$ref": "#/$defs/Sha256" },
-        "model_config_hash": { "$ref": "#/$defs/Sha256" },
-        "effective_config_hash": { "$ref": "#/$defs/Sha256" }
+        "tokenizer_config_hash": { "$ref": "#/$defs/Sha256", "description": "Hash of the tokenizer configuration." },
+        "chat_template_hash": { "$ref": "#/$defs/Sha256", "description": "Hash of the inference chat template." },
+        "training_chat_template_hash": { "$ref": "#/$defs/Sha256", "description": "Hash of the training chat template." },
+        "model_config_hash": { "$ref": "#/$defs/Sha256", "description": "Hash of the model configuration." },
+        "effective_config_hash": { "$ref": "#/$defs/Sha256", "description": "Hash of the resolved inference configuration." }
       },
       "additionalProperties": false,
       "x-kiln-rust-type": "ConfigHashes"
     },
     "Delta": {
       "type": "object",
+      "description": "Incremental message fields emitted in a streaming choice.",
       "properties": {
-        "role": { "type": "string" },
-        "content": { "type": "string" },
-        "reasoning_content": { "type": "string" },
-        "tool_calls": { "$ref": "#/$defs/ToolCallArray" }
+        "role": { "type": "string", "description": "Role emitted when a streaming choice begins." },
+        "content": { "type": "string", "description": "Incremental final-answer text." },
+        "reasoning_content": { "type": "string", "description": "Incremental separated reasoning text." },
+        "tool_calls": { "$ref": "#/$defs/ToolCallArray", "description": "Tool-call deltas emitted by this chunk." }
       },
       "additionalProperties": false,
       "x-kiln-rust-type": "Delta"
@@ -575,7 +605,7 @@
     "FinishReason": {
       "type": "string",
       "enum": ["error", "length", "stop", "tool_calls"],
-      "description": "Why generation ended. error is used for per-item batch failures; ordinary model termination emits stop, length, or tool_calls."
+      "description": "Why generation ended. `error` identifies a per-item batch failure; ordinary termination emits `stop`, `length`, or `tool_calls`."
     },
     "LatencyPhaseTimings": {
       "type": "object",
@@ -587,26 +617,26 @@
         "trim_ms", "adapter_ms", "training_ms", "unexplained_ms"
       ],
       "properties": {
-        "actor_queue_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "actor_admission_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "tokenization_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "prefill_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "decode_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "actor_cycle_idle_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "sampling_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "readback_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "response_delivery_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "handler_queue_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "client_delivery_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "gpu_lock_wait_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "graph_capture_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "graph_replay_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "synchronization_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "resize_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "trim_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "adapter_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "training_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "unexplained_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" }
+        "actor_queue_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Time waiting for the batching actor to receive the request." },
+        "actor_admission_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Time between actor receipt and workload admission." },
+        "tokenization_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Time spent rendering and tokenizing the prompt." },
+        "prefill_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Measured accelerator time spent processing prompt tokens." },
+        "decode_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Measured accelerator time spent generating tokens." },
+        "actor_cycle_idle_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Intentional batching-actor pacing time." },
+        "sampling_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Time spent selecting output tokens from logits." },
+        "readback_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Time spent transferring inference results to the host." },
+        "response_delivery_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Time from token readiness to producer handoff." },
+        "handler_queue_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Time from producer handoff to HTTP-handler receipt." },
+        "client_delivery_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Time from handler receipt to response-body enqueue." },
+        "gpu_lock_wait_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Time waiting for exclusive accelerator ownership." },
+        "graph_capture_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Time spent capturing an accelerator graph." },
+        "graph_replay_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Time spent submitting an accelerator graph replay." },
+        "synchronization_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Time spent waiting for accelerator synchronization." },
+        "resize_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Time spent resizing runtime-owned storage." },
+        "trim_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Time spent trimming or reclaiming runtime-owned storage." },
+        "adapter_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Time spent loading, composing, or applying an adapter." },
+        "training_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Time blocked by accelerator work owned by training." },
+        "unexplained_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Measured latency not covered by another reported phase." }
       },
       "additionalProperties": false,
       "description": "Bounded request phase timings; null means the serving path did not measure that subphase.",
@@ -614,6 +644,7 @@
     },
     "LatencyStallReasonCounts": {
       "type": "object",
+      "description": "Number of retained inter-token stalls attributed to each bounded phase.",
       "required": [
         "actor_queue", "actor_admission", "actor_prefill", "actor_decode", "actor_cycle_idle",
         "response_delivery", "handler_queue", "client_delivery", "sampling",
@@ -621,46 +652,50 @@
         "synchronization", "resize", "trim", "adapter", "training", "unexplained"
       ],
       "properties": {
-        "actor_queue": { "$ref": "#/$defs/NonNegativeInteger" },
-        "actor_admission": { "$ref": "#/$defs/NonNegativeInteger" },
-        "actor_prefill": { "$ref": "#/$defs/NonNegativeInteger" },
-        "actor_decode": { "$ref": "#/$defs/NonNegativeInteger" },
-        "actor_cycle_idle": { "$ref": "#/$defs/NonNegativeInteger" },
-        "response_delivery": { "$ref": "#/$defs/NonNegativeInteger" },
-        "handler_queue": { "$ref": "#/$defs/NonNegativeInteger" },
-        "client_delivery": { "$ref": "#/$defs/NonNegativeInteger" },
-        "sampling": { "$ref": "#/$defs/NonNegativeInteger" },
-        "readback": { "$ref": "#/$defs/NonNegativeInteger" },
-        "gpu_lock_wait": { "$ref": "#/$defs/NonNegativeInteger" },
-        "graph_capture": { "$ref": "#/$defs/NonNegativeInteger" },
-        "graph_replay": { "$ref": "#/$defs/NonNegativeInteger" },
-        "synchronization": { "$ref": "#/$defs/NonNegativeInteger" },
-        "resize": { "$ref": "#/$defs/NonNegativeInteger" },
-        "trim": { "$ref": "#/$defs/NonNegativeInteger" },
-        "adapter": { "$ref": "#/$defs/NonNegativeInteger" },
-        "training": { "$ref": "#/$defs/NonNegativeInteger" },
-        "unexplained": { "$ref": "#/$defs/NonNegativeInteger" }
+        "actor_queue": { "$ref": "#/$defs/NonNegativeInteger", "description": "Stalls primarily attributed to batching-actor queueing." },
+        "actor_admission": { "$ref": "#/$defs/NonNegativeInteger", "description": "Stalls primarily attributed to batching-actor admission." },
+        "actor_prefill": { "$ref": "#/$defs/NonNegativeInteger", "description": "Stalls primarily attributed to another request's actor-owned prefill." },
+        "actor_decode": { "$ref": "#/$defs/NonNegativeInteger", "description": "Stalls primarily attributed to actor-owned decode work." },
+        "actor_cycle_idle": { "$ref": "#/$defs/NonNegativeInteger", "description": "Stalls primarily attributed to intentional actor pacing." },
+        "response_delivery": { "$ref": "#/$defs/NonNegativeInteger", "description": "Stalls primarily attributed to producer handoff." },
+        "handler_queue": { "$ref": "#/$defs/NonNegativeInteger", "description": "Stalls primarily attributed to the queue before the HTTP handler." },
+        "client_delivery": { "$ref": "#/$defs/NonNegativeInteger", "description": "Stalls primarily attributed to response-body delivery." },
+        "sampling": { "$ref": "#/$defs/NonNegativeInteger", "description": "Stalls primarily attributed to token sampling." },
+        "readback": { "$ref": "#/$defs/NonNegativeInteger", "description": "Stalls primarily attributed to accelerator readback." },
+        "gpu_lock_wait": { "$ref": "#/$defs/NonNegativeInteger", "description": "Stalls primarily attributed to accelerator-ownership waits." },
+        "graph_capture": { "$ref": "#/$defs/NonNegativeInteger", "description": "Stalls primarily attributed to graph capture." },
+        "graph_replay": { "$ref": "#/$defs/NonNegativeInteger", "description": "Stalls primarily attributed to graph replay." },
+        "synchronization": { "$ref": "#/$defs/NonNegativeInteger", "description": "Stalls primarily attributed to accelerator synchronization." },
+        "resize": { "$ref": "#/$defs/NonNegativeInteger", "description": "Stalls primarily attributed to storage resizing." },
+        "trim": { "$ref": "#/$defs/NonNegativeInteger", "description": "Stalls primarily attributed to storage trimming or reclaim." },
+        "adapter": { "$ref": "#/$defs/NonNegativeInteger", "description": "Stalls primarily attributed to adapter work." },
+        "training": { "$ref": "#/$defs/NonNegativeInteger", "description": "Stalls primarily attributed to training-owned accelerator work." },
+        "unexplained": { "$ref": "#/$defs/NonNegativeInteger", "description": "Stalls that no measured phase explains." }
       },
       "additionalProperties": false,
       "x-kiln-rust-type": "LatencyStallReasonCounts"
     },
     "NonNegativeInteger": {
       "type": "integer",
-      "minimum": 0
+      "minimum": 0,
+      "description": "An integer greater than or equal to zero."
     },
     "NullableBoolean": {
+      "description": "A Boolean value or null.",
       "oneOf": [
         { "type": "null" },
         { "type": "boolean" }
       ]
     },
     "NullableNonNegativeInteger": {
+      "description": "A non-negative integer or null.",
       "oneOf": [
         { "type": "null" },
         { "$ref": "#/$defs/NonNegativeInteger" }
       ]
     },
     "NullableNonNegativeNumber": {
+      "description": "A non-negative finite JSON number or null.",
       "oneOf": [
         { "type": "null" },
         { "type": "number", "minimum": 0 }
@@ -671,16 +706,18 @@
         { "type": "null" },
         { "type": "number" }
       ],
-      "description": "Finite JSON number. The current chat/batch edge applies no additional range check before sampling; this is an explicit runtime-validation gap, not a documented recommendation.",
+      "description": "Finite JSON number or null. The chat and batch endpoints currently apply no narrower range check before sampling.",
       "x-kiln-runtime-validation": "finite_json_number_only"
     },
     "NullableString": {
+      "description": "A string or null.",
       "oneOf": [
         { "type": "null" },
         { "type": "string" }
       ]
     },
     "NullableTemplateKwargs": {
+      "description": "Template-specific keyword arguments, or null.",
       "oneOf": [
         { "type": "null" },
         {
@@ -691,6 +728,7 @@
       ]
     },
     "NullableToolArray": {
+      "description": "OpenAI-shaped tool definitions, or null.",
       "oneOf": [
         { "type": "null" },
         {
@@ -701,12 +739,14 @@
       ]
     },
     "NullableUint32": {
+      "description": "An unsigned 32-bit integer or null.",
       "oneOf": [
         { "type": "null" },
         { "type": "integer", "minimum": 0, "maximum": 4294967295 }
       ]
     },
     "NullableUint64": {
+      "description": "An unsigned 64-bit integer or null.",
       "oneOf": [
         { "type": "null" },
         {
@@ -718,11 +758,12 @@
     },
     "PromptLogprobEntry": {
       "type": "object",
+      "description": "The log probability, rank, and decoded text for one candidate token.",
       "required": ["logprob", "rank", "decoded_token"],
       "properties": {
-        "logprob": { "type": "number" },
-        "rank": { "type": "integer", "minimum": 1 },
-        "decoded_token": { "type": "string" }
+        "logprob": { "type": "number", "description": "Natural-log probability assigned to this token." },
+        "rank": { "type": "integer", "minimum": 1, "description": "One-based vocabulary rank by log probability." },
+        "decoded_token": { "type": "string", "description": "Tokenizer-decoded text for this token ID." }
       },
       "additionalProperties": false,
       "x-kiln-rust-type": "PromptLogprobEntry"
@@ -742,26 +783,27 @@
         "stall_threshold_ms", "stall_count", "unexplained_stall_count", "stall_reasons", "phases"
       ],
       "properties": {
-        "emitted_tokens": { "$ref": "#/$defs/NonNegativeInteger" },
-        "gap_samples": { "$ref": "#/$defs/NonNegativeInteger" },
-        "retained_gap_samples": { "type": "integer", "minimum": 0, "maximum": 8192 },
-        "gap_samples_truncated": { "type": "boolean" },
-        "ttft_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "itl_ms_p50": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "itl_ms_p99": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "itl_ms_p999": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "max_itl_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "stall_threshold_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" },
-        "stall_count": { "$ref": "#/$defs/NonNegativeInteger" },
-        "unexplained_stall_count": { "$ref": "#/$defs/NonNegativeInteger" },
-        "stall_reasons": { "$ref": "#/$defs/LatencyStallReasonCounts" },
-        "phases": { "$ref": "#/$defs/LatencyPhaseTimings" }
+        "emitted_tokens": { "$ref": "#/$defs/NonNegativeInteger", "description": "Number of generated tokens emitted by the request." },
+        "gap_samples": { "$ref": "#/$defs/NonNegativeInteger", "description": "Number of inter-token gaps observed." },
+        "retained_gap_samples": { "type": "integer", "minimum": 0, "maximum": 8192, "description": "Inter-token gaps retained for percentile calculation after the bounded sample cap." },
+        "gap_samples_truncated": { "type": "boolean", "description": "Whether the request produced more gap samples than the diagnostic retained." },
+        "ttft_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Time from request start to the first generated token." },
+        "itl_ms_p50": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Median retained inter-token latency." },
+        "itl_ms_p99": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "99th-percentile retained inter-token latency." },
+        "itl_ms_p999": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "99.9th-percentile retained inter-token latency." },
+        "max_itl_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Largest observed inter-token latency." },
+        "stall_threshold_ms": { "$ref": "#/$defs/NullableNonNegativeNumber", "description": "Inter-token gap at or above which a sample is classified as a stall." },
+        "stall_count": { "$ref": "#/$defs/NonNegativeInteger", "description": "Number of inter-token gaps classified as stalls." },
+        "unexplained_stall_count": { "$ref": "#/$defs/NonNegativeInteger", "description": "Number of stalls not covered by a measured phase." },
+        "stall_reasons": { "$ref": "#/$defs/LatencyStallReasonCounts", "description": "Stall counts grouped by the phase with the largest overlap." },
+        "phases": { "$ref": "#/$defs/LatencyPhaseTimings", "description": "Measured request time grouped by bounded phase." }
       },
       "additionalProperties": false,
       "description": "Request-local TTFT, ITL tail, bounded stall reasons, and honest phase-coverage diagnostics.",
       "x-kiln-rust-type": "RequestLatencyDiagnostics"
     },
     "RolloutActionTokenV1": {
+      "description": "One generated token labeled as sampled or forced, with the behavior-policy log probability present only for sampled tokens.",
       "oneOf": [
         {
           "type": "object",
@@ -790,16 +832,18 @@
     },
     "RolloutAdapterIdentityV1": {
       "type": "object",
+      "description": "The name and content hash of the adapter used for a rollout.",
       "required": ["name", "content_sha256"],
       "properties": {
-        "name": { "$ref": "#/$defs/RolloutIdentityText" },
-        "content_sha256": { "$ref": "#/$defs/Sha256" }
+        "name": { "$ref": "#/$defs/RolloutIdentityText", "description": "Saved adapter name." },
+        "content_sha256": { "$ref": "#/$defs/Sha256", "description": "Content hash of the adapter used for generation." }
       },
       "additionalProperties": false,
       "x-kiln-rust-type": "RolloutAdapterIdentityV1"
     },
     "RolloutBehaviorPolicyIdentityV1": {
       "type": "object",
+      "description": "Content-addressed identity of the model, adapter, configuration, and implementation that generated a rollout.",
       "required": [
         "served_model_id",
         "base_model_sha256",
@@ -807,25 +851,27 @@
         "implementation"
       ],
       "properties": {
-        "served_model_id": { "$ref": "#/$defs/RolloutIdentityText" },
-        "base_model_sha256": { "$ref": "#/$defs/Sha256" },
-        "adapter": { "$ref": "#/$defs/RolloutAdapterIdentityV1" },
-        "inference_config_sha256": { "$ref": "#/$defs/Sha256" },
-        "implementation": { "$ref": "#/$defs/RolloutIdentityText" }
+        "served_model_id": { "$ref": "#/$defs/RolloutIdentityText", "description": "Model ID exposed by the inference API." },
+        "base_model_sha256": { "$ref": "#/$defs/Sha256", "description": "Canonical content hash of the base model." },
+        "adapter": { "$ref": "#/$defs/RolloutAdapterIdentityV1", "description": "Adapter identity when generation used one; omitted for base." },
+        "inference_config_sha256": { "$ref": "#/$defs/Sha256", "description": "Hash of the resolved inference policy." },
+        "implementation": { "$ref": "#/$defs/RolloutIdentityText", "description": "Implementation identity that generated the rollout." }
       },
       "additionalProperties": false,
       "x-kiln-rust-type": "RolloutBehaviorPolicyIdentityV1"
     },
     "RolloutChatTemplateInvocationV1": {
       "type": "object",
+      "description": "Tool and template inputs that affected the rendered rollout prompt.",
       "properties": {
-        "tools": { "type": "array", "maxItems": 256, "items": {} },
-        "tool_choice": {},
+        "tools": { "type": "array", "maxItems": 256, "items": {}, "description": "Tool definitions supplied to the chat template." },
+        "tool_choice": { "description": "OpenAI-shaped tool-choice value supplied to the chat template." },
         "template_kwargs": {
           "type": "object",
           "maxProperties": 256,
           "propertyNames": { "type": "string", "minLength": 1, "maxLength": 256 },
-          "additionalProperties": {}
+          "additionalProperties": {},
+          "description": "Additional keyword arguments supplied to the chat template."
         }
       },
       "additionalProperties": false,
@@ -837,11 +883,12 @@
       "minLength": 1,
       "maxLength": 256,
       "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
-      "description": "Non-empty, trimmed, control-free identity text. maxLength bounds code points; the runtime additionally rejects surrounding whitespace and enforces at most 256 UTF-8 bytes.",
+      "description": "Non-empty, trimmed identity text without control characters. The schema's `maxLength` bounds code points; the runtime also rejects surrounding whitespace and enforces at most 256 UTF-8 bytes.",
       "x-kiln-max-utf8-bytes": 256
     },
     "RolloutProvenanceV1": {
       "type": "object",
+      "description": "Exact prompt, action-token, behavior-policy, tokenizer, sampling, and backend evidence for one generated rollout.",
       "required": [
         "schema",
         "input_token_ids",
@@ -856,32 +903,35 @@
         "generation_backend"
       ],
       "properties": {
-        "schema": { "const": "kiln.rollout-provenance.v1" },
+        "schema": { "const": "kiln.rollout-provenance.v1", "description": "Provenance schema identifier." },
         "input_token_ids": {
           "type": "array",
           "minItems": 1,
           "maxItems": 16777216,
-          "items": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+          "items": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+          "description": "Rendered prompt tokens followed by every generated action token."
         },
-        "prompt_token_count": { "type": "integer", "minimum": 1 },
-        "prompt_messages_sha256": { "$ref": "#/$defs/Sha256" },
-        "scored_payload_sha256": { "$ref": "#/$defs/Sha256" },
+        "prompt_token_count": { "type": "integer", "minimum": 1, "description": "Number of leading input_token_ids that belong to the rendered prompt." },
+        "prompt_messages_sha256": { "$ref": "#/$defs/Sha256", "description": "Hash of the canonical input-message payload." },
+        "scored_payload_sha256": { "$ref": "#/$defs/Sha256", "description": "Hash of the exact token payload scored by the behavior policy." },
         "action_tokens": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/RolloutActionTokenV1" }
+          "items": { "$ref": "#/$defs/RolloutActionTokenV1" },
+          "description": "Ordered generated tokens with sampled-versus-forced provenance."
         },
-        "behavior_policy": { "$ref": "#/$defs/RolloutBehaviorPolicyIdentityV1" },
-        "tokenizer": { "$ref": "#/$defs/RolloutTokenizerIdentityV1" },
-        "template_invocation": { "$ref": "#/$defs/RolloutChatTemplateInvocationV1" },
-        "sampling": { "$ref": "#/$defs/RolloutSamplingConfigV1" },
-        "seed": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "behavior_policy": { "$ref": "#/$defs/RolloutBehaviorPolicyIdentityV1", "description": "Content-addressed policy that generated the action tokens." },
+        "tokenizer": { "$ref": "#/$defs/RolloutTokenizerIdentityV1", "description": "Content-addressed tokenizer used for prompt rendering and generation." },
+        "template_invocation": { "$ref": "#/$defs/RolloutChatTemplateInvocationV1", "description": "Tool and template arguments that affected prompt rendering; omitted when empty." },
+        "sampling": { "$ref": "#/$defs/RolloutSamplingConfigV1", "description": "Resolved sampling configuration used for generation." },
+        "seed": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615, "description": "Resolved generation seed." },
         "generation_backend": {
           "type": "string",
           "minLength": 1,
           "maxLength": 64,
           "pattern": "^[^\\u0000-\\u001f\\u007f]+$",
-          "x-kiln-max-utf8-bytes": 64
+          "x-kiln-max-utf8-bytes": 64,
+          "description": "Backend name that generated the rollout."
         }
       },
       "additionalProperties": false,
@@ -896,6 +946,7 @@
     },
     "RolloutSamplingConfigV1": {
       "type": "object",
+      "description": "Resolved sampling policy used to generate a rollout.",
       "required": [
         "temperature",
         "top_p",
@@ -908,20 +959,21 @@
         "stop"
       ],
       "properties": {
-        "temperature": { "type": "number", "minimum": 0 },
-        "top_p": { "type": "number", "minimum": 0, "maximum": 1 },
-        "top_k": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
-        "min_p": { "type": "number", "minimum": 0, "maximum": 1 },
-        "max_tokens": { "type": "integer", "minimum": 1 },
-        "repetition_penalty": { "type": "number", "exclusiveMinimum": 0 },
-        "presence_penalty": { "type": "number", "minimum": -2, "maximum": 2 },
-        "frequency_penalty": { "type": "number", "minimum": -2, "maximum": 2 },
+        "temperature": { "type": "number", "minimum": 0, "description": "Resolved sampling temperature." },
+        "top_p": { "type": "number", "minimum": 0, "maximum": 1, "description": "Resolved nucleus-sampling probability mass." },
+        "top_k": { "type": "integer", "minimum": 0, "maximum": 4294967295, "description": "Resolved maximum candidate count; zero disables top-k filtering." },
+        "min_p": { "type": "number", "minimum": 0, "maximum": 1, "description": "Resolved minimum probability relative to the most likely token." },
+        "max_tokens": { "type": "integer", "minimum": 1, "description": "Resolved generation-token ceiling." },
+        "repetition_penalty": { "type": "number", "exclusiveMinimum": 0, "description": "Resolved repetition penalty." },
+        "presence_penalty": { "type": "number", "minimum": -2, "maximum": 2, "description": "Resolved OpenAI-style presence penalty." },
+        "frequency_penalty": { "type": "number", "minimum": -2, "maximum": 2, "description": "Resolved OpenAI-style frequency penalty." },
         "stop": {
           "type": "array",
           "maxItems": 256,
-          "items": { "type": "string", "minLength": 1 }
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Resolved stop sequences."
         },
-        "thinking_budget": { "$ref": "#/$defs/RolloutThinkingBudgetV1" }
+        "thinking_budget": { "$ref": "#/$defs/RolloutThinkingBudgetV1", "description": "Resolved thinking limit when one applied." }
       },
       "additionalProperties": false,
       "x-kiln-rust-type": "RolloutSamplingConfigV1",
@@ -929,14 +981,16 @@
     },
     "RolloutThinkingBudgetV1": {
       "type": "object",
+      "description": "Resolved thinking limit and the token sequence used to close the thinking block.",
       "required": ["close_token_ids"],
       "properties": {
-        "max_tokens": { "$ref": "#/$defs/NonNegativeInteger" },
-        "max_time_ms": { "$ref": "#/$defs/NonNegativeInteger" },
+        "max_tokens": { "$ref": "#/$defs/NonNegativeInteger", "description": "Maximum thinking tokens before forced closure." },
+        "max_time_ms": { "$ref": "#/$defs/NonNegativeInteger", "description": "Maximum thinking time in milliseconds before forced closure." },
         "close_token_ids": {
           "type": "array",
           "minItems": 1,
-          "items": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+          "items": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+          "description": "Token sequence forced when a thinking limit closes the thinking block."
         }
       },
       "anyOf": [
@@ -948,11 +1002,12 @@
     },
     "RolloutTokenizerIdentityV1": {
       "type": "object",
+      "description": "Content hashes for the tokenizer vocabulary, configuration, and chat template.",
       "required": ["vocab_sha256", "config_sha256", "chat_template_sha256"],
       "properties": {
-        "vocab_sha256": { "$ref": "#/$defs/Sha256" },
-        "config_sha256": { "$ref": "#/$defs/Sha256" },
-        "chat_template_sha256": { "$ref": "#/$defs/Sha256" }
+        "vocab_sha256": { "$ref": "#/$defs/Sha256", "description": "Hash of tokenizer vocabulary content." },
+        "config_sha256": { "$ref": "#/$defs/Sha256", "description": "Hash of tokenizer configuration content." },
+        "chat_template_sha256": { "$ref": "#/$defs/Sha256", "description": "Hash of the chat template used to render the rollout prompt." }
       },
       "additionalProperties": false,
       "x-kiln-rust-type": "RolloutTokenizerIdentityV1"
@@ -962,7 +1017,7 @@
         { "type": "null" },
         { "type": "string" }
       ],
-      "description": "Named sampling profile. Known values are qwen3-thinking-general, qwen3-thinking-coding, qwen3-non-thinking-general, qwen3-non-thinking-reasoning, and greedy. The current runtime silently maps unknown strings to qwen3-thinking-general; this compatibility behavior is an explicit footgun pending fail-closed migration.",
+      "description": "Named sampling profile. Known values are `qwen3-thinking-general`, `qwen3-thinking-coding`, `qwen3-non-thinking-general`, `qwen3-non-thinking-reasoning`, and `greedy`. For compatibility, the current runtime maps an unknown string to `qwen3-thinking-general` instead of rejecting it.",
       "x-kiln-known-values": [
         "greedy",
         "qwen3-non-thinking-general",
@@ -974,7 +1029,8 @@
     },
     "Sha256": {
       "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$"
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "A lowercase SHA-256 digest prefixed with sha256:."
     },
     "StopInput": {
       "oneOf": [
@@ -982,10 +1038,11 @@
         { "type": "string" },
         { "type": "array", "items": { "type": "string" } }
       ],
-      "description": "Missing/null means no explicit stop sequence. One string and an array of strings normalize to the same internal list."
+      "description": "Missing or null means no explicit stop sequence. One string and an array of strings normalize to the same internal list."
     },
     "StreamOptions": {
       "type": "object",
+      "description": "Options that control additional events in a streaming response.",
       "properties": {
         "include_usage": {
           "type": "boolean",
@@ -1001,18 +1058,20 @@
       "type": "object",
       "required": ["thinking_budget"],
       "properties": {
-        "thinking_budget": { "$ref": "thinking-budget-v1.schema.json#/$defs/record" },
-        "performance": { "$ref": "#/$defs/ChatCompletionPerformanceMetadata" }
+        "thinking_budget": { "$ref": "thinking-budget-v1.schema.json#/$defs/record", "description": "Resolved and terminal thinking-budget record." },
+        "performance": { "$ref": "#/$defs/ChatCompletionPerformanceMetadata", "description": "Performance metadata when explicitly requested." }
       },
       "additionalProperties": false,
       "description": "Metadata attached only to the terminal finish chunk."
     },
     "StreamingTokenTiming": {
       "type": "object",
+      "description": "Request-relative timestamps and blocking attribution for one streamed token.",
       "required": [
         "object",
         "source",
         "token_index",
+        "token_id",
         "ready_ms",
         "producer_delivered_ms",
         "handler_received_ms",
@@ -1025,25 +1084,26 @@
         "blocking_phase_ms"
       ],
       "properties": {
-        "object": { "const": "kiln.token_timing" },
+        "object": { "const": "kiln.token_timing", "description": "Kiln token-timing event discriminator." },
         "source": {
           "type": "string",
           "enum": ["batching_engine", "direct"],
           "description": "Producer path that owns ready and delivery timestamps."
         },
-        "token_index": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
-        "ready_ms": { "type": "number", "minimum": 0 },
-        "producer_delivered_ms": { "type": "number", "minimum": 0 },
-        "handler_received_ms": { "type": "number", "minimum": 0 },
-        "body_enqueued_ms": { "type": "number", "minimum": 0 },
-        "response_delivery_ms": { "type": "number", "minimum": 0 },
-        "handler_queue_ms": { "type": "number", "minimum": 0 },
+        "token_index": { "type": "integer", "minimum": 0, "maximum": 4294967295, "description": "Zero-based generated-token index." },
+        "token_id": { "type": "integer", "minimum": 0, "maximum": 4294967295, "description": "Accepted model token represented by this timing event, including a special token that decodes to no visible text." },
+        "ready_ms": { "type": "number", "minimum": 0, "description": "Time when model work produced the token, relative to request start." },
+        "producer_delivered_ms": { "type": "number", "minimum": 0, "description": "Time when the generation producer handed off the token." },
+        "handler_received_ms": { "type": "number", "minimum": 0, "description": "Time when the HTTP handler received the token." },
+        "body_enqueued_ms": { "type": "number", "minimum": 0, "description": "Time when the handler enqueued the token event for the response body." },
+        "response_delivery_ms": { "type": "number", "minimum": 0, "description": "Delay from token readiness to producer handoff." },
+        "handler_queue_ms": { "type": "number", "minimum": 0, "description": "Delay from producer handoff to HTTP-handler receipt." },
         "queue_delay_ms": {
           "type": "number",
           "minimum": 0,
           "description": "Compatibility aggregate equal to response_delivery_ms + handler_queue_ms."
         },
-        "client_delivery_ms": { "type": "number", "minimum": 0 },
+        "client_delivery_ms": { "type": "number", "minimum": 0, "description": "Delay from handler receipt to response-body enqueue." },
         "blocking_phase": {
           "type": ["string", "null"],
           "enum": [
@@ -1053,7 +1113,8 @@
             "readback", "gpu_lock_wait", "graph_capture", "graph_replay",
             "synchronization", "resize", "trim", "adapter", "training",
             "unexplained", null
-          ]
+          ],
+          "description": "Phase attributed as the dominant blocking interval for this token, or null."
         },
         "blocking_phase_ms": { "$ref": "#/$defs/NullableNonNegativeNumber" }
       },
@@ -1062,11 +1123,12 @@
     },
     "TextCompletionChoice": {
       "type": "object",
+      "description": "Prompt log probabilities and termination status for one scored prompt.",
       "required": ["index", "text", "finish_reason"],
       "properties": {
-        "index": { "$ref": "#/$defs/NonNegativeInteger" },
-        "text": { "type": "string" },
-        "finish_reason": { "$ref": "#/$defs/FinishReason" },
+        "index": { "$ref": "#/$defs/NonNegativeInteger", "description": "Zero-based choice index; always zero for this endpoint." },
+        "text": { "type": "string", "description": "Generated text; empty in prompt-logprob scoring mode." },
+        "finish_reason": { "$ref": "#/$defs/FinishReason", "description": "Why prompt scoring ended." },
         "prompt_logprobs": {
           "type": "array",
           "items": {
@@ -1083,6 +1145,7 @@
     },
     "TextCompletionRequest": {
       "type": "object",
+      "description": "Score prompt-token log probabilities through the compatibility completions endpoint.",
       "required": ["prompt", "prompt_logprobs"],
       "properties": {
         "model": {
@@ -1107,7 +1170,7 @@
             { "type": "integer", "minimum": 0, "maximum": 1 }
           ],
           "default": 1,
-          "description": "Only correctness-first prompt-logprobs mode is supported."
+          "description": "Must be null, 0, or 1. This endpoint scores prompt log probabilities; it does not provide general text generation."
         },
         "prompt_logprobs": {
           "type": "integer",
@@ -1120,9 +1183,10 @@
             { "type": "null" },
             { "const": 1 }
           ],
-          "default": 1
+          "default": 1,
+          "description": "Compatibility field. Missing, null, and 1 all request the single supported choice."
         },
-        "stream": { "const": false, "default": false },
+        "stream": { "const": false, "default": false, "description": "Prompt-logprob scoring is non-streaming only." },
         "add_special_tokens": {
           "type": "boolean",
           "default": true,
@@ -1142,6 +1206,7 @@
     },
     "TextCompletionResponse": {
       "type": "object",
+      "description": "Prompt-token log probabilities, identity, and token usage for one scored prompt.",
       "required": [
         "id",
         "object",
@@ -1152,10 +1217,10 @@
         "usage"
       ],
       "properties": {
-        "id": { "type": "string", "pattern": "^cmpl-" },
-        "object": { "const": "text_completion" },
+        "id": { "type": "string", "pattern": "^cmpl-", "description": "Unique completion identifier." },
+        "object": { "const": "text_completion", "description": "OpenAI-compatible text-completion discriminator." },
         "created": { "$ref": "#/$defs/UnixSeconds" },
-        "model": { "type": "string" },
+        "model": { "type": "string", "description": "Served base-model ID used for scoring." },
         "system_fingerprint": {
           "$ref": "#/$defs/NullableString",
           "description": "Canonical content-addressed teacher identity; mock responses retain the field as null."
@@ -1164,7 +1229,8 @@
           "type": "array",
           "minItems": 1,
           "maxItems": 1,
-          "items": { "$ref": "#/$defs/TextCompletionChoice" }
+          "items": { "$ref": "#/$defs/TextCompletionChoice" },
+          "description": "The single prompt-scoring choice."
         },
         "usage": { "$ref": "#/$defs/Usage" }
       },
@@ -1174,13 +1240,14 @@
     },
     "ThinkingBudgetConfigurationMetadata": {
       "type": "object",
+      "description": "Request-wide resolved thinking limits and their configuration sources.",
       "required": ["configured", "tokens_source", "time_source"],
       "properties": {
-        "configured": { "type": "boolean" },
-        "max_tokens": { "$ref": "#/$defs/NonNegativeInteger" },
-        "max_time_ms": { "$ref": "#/$defs/NonNegativeInteger" },
-        "tokens_source": { "$ref": "thinking-budget-v1.schema.json#/$defs/source" },
-        "time_source": { "$ref": "thinking-budget-v1.schema.json#/$defs/source" }
+        "configured": { "type": "boolean", "description": "Whether either resolved thinking limit is finite." },
+        "max_tokens": { "$ref": "#/$defs/NonNegativeInteger", "description": "Resolved thinking-token limit; omitted when unlimited." },
+        "max_time_ms": { "$ref": "#/$defs/NonNegativeInteger", "description": "Resolved thinking-time limit in milliseconds; omitted when unlimited." },
+        "tokens_source": { "$ref": "thinking-budget-v1.schema.json#/$defs/source", "description": "Authority that supplied or removed the thinking-token limit." },
+        "time_source": { "$ref": "thinking-budget-v1.schema.json#/$defs/source", "description": "Authority that supplied or removed the thinking-time limit." }
       },
       "additionalProperties": false,
       "x-kiln-rust-type": "ThinkingBudgetConfigurationMetadata"
@@ -1197,11 +1264,12 @@
     },
     "Usage": {
       "type": "object",
+      "description": "Prompt, completion, and total token counts.",
       "required": ["prompt_tokens", "completion_tokens", "total_tokens"],
       "properties": {
-        "prompt_tokens": { "$ref": "#/$defs/NonNegativeInteger" },
-        "completion_tokens": { "$ref": "#/$defs/NonNegativeInteger" },
-        "total_tokens": { "$ref": "#/$defs/NonNegativeInteger" }
+        "prompt_tokens": { "$ref": "#/$defs/NonNegativeInteger", "description": "Number of prompt tokens processed." },
+        "completion_tokens": { "$ref": "#/$defs/NonNegativeInteger", "description": "Number of generated tokens." },
+        "total_tokens": { "$ref": "#/$defs/NonNegativeInteger", "description": "Prompt tokens plus completion tokens." }
       },
       "additionalProperties": false,
       "x-kiln-rust-type": "Usage",
@@ -1354,6 +1422,7 @@
         "object": "kiln.token_timing",
         "source": "batching_engine",
         "token_index": 0,
+        "token_id": 42,
         "ready_ms": 12.5,
         "producer_delivered_ms": 12.6,
         "handler_received_ms": 12.8,

@@ -267,7 +267,66 @@ function schemaConstraints(schema) {
   return constraints;
 }
 
-function schemaFieldTable(schema) {
+function localSchemaReference(rootSchema, reference) {
+  if (!nonEmptyString(reference) || !reference.startsWith('#/')) return null;
+  let current = rootSchema;
+  for (const encodedSegment of reference.slice(2).split('/')) {
+    const segment = encodedSegment.replaceAll('~1', '/').replaceAll('~0', '~');
+    if (!current || typeof current !== 'object' || Array.isArray(current)) return null;
+    current = current[segment];
+  }
+  return current && typeof current === 'object' && !Array.isArray(current) ? current : null;
+}
+
+const SCHEMA_FIELD_ACRONYMS = new Map([
+  ['api', 'API'],
+  ['bf16', 'BF16'],
+  ['cuda', 'CUDA'],
+  ['eos', 'EOS'],
+  ['fp8', 'FP8'],
+  ['gdn', 'GDN'],
+  ['gpu', 'GPU'],
+  ['hf', 'HF'],
+  ['http', 'HTTP'],
+  ['id', 'ID'],
+  ['ids', 'IDs'],
+  ['itl', 'ITL'],
+  ['json', 'JSON'],
+  ['kv', 'KV'],
+  ['lora', 'LoRA'],
+  ['mib', 'MiB'],
+  ['ms', 'ms'],
+  ['mtp', 'MTP'],
+  ['opd', 'OPD'],
+  ['rocm', 'ROCm'],
+  ['sft', 'SFT'],
+  ['sha256', 'SHA-256'],
+  ['sse', 'SSE'],
+  ['ttft', 'TTFT'],
+  ['ui', 'UI'],
+  ['url', 'URL'],
+  ['utf8', 'UTF-8'],
+  ['vram', 'VRAM'],
+  ['vulkan', 'Vulkan'],
+  ['ws', 'WebSocket'],
+]);
+
+function schemaFieldLabel(name) {
+  const words = String(name).split('_').map((word) => SCHEMA_FIELD_ACRONYMS.get(word) ?? word);
+  const label = words.join(' ');
+  return `${label.charAt(0).toUpperCase()}${label.slice(1)}`;
+}
+
+function schemaFieldDescription(name, field, rootSchema) {
+  if (nonEmptyString(field?.description)) return field.description;
+  const label = schemaFieldLabel(name);
+  const referenced = localSchemaReference(rootSchema, field?.$ref);
+  if (nonEmptyString(referenced?.description)) return `${label}. ${referenced.description}`;
+  if (nonEmptyString(field?.$ref)) return `${label}. See ${field.$ref}.`;
+  return `${label}.`;
+}
+
+function schemaFieldTable(schema, rootSchema) {
   const properties = schema?.properties;
   if (!properties || typeof properties !== 'object' || Array.isArray(properties)) {
     return '_This schema node has no named object fields._\n';
@@ -297,7 +356,7 @@ function schemaFieldTable(schema) {
     ].join('\n');
   }
   const rows = entries.map(([name, field]) => {
-    const description = field?.description ?? field?.title ?? '';
+    const description = schemaFieldDescription(name, field, rootSchema) || field?.title || '';
     return `| \`${markdownTableCell(name)}\` | ${required.has(name) ? 'yes' : 'no'} | \`${markdownTableCell(schemaType(field))}\` | ${markdownTableCell(schemaConstraints(field).join('; '))} | ${markdownTableCell(description)} |`;
   });
   return [
@@ -332,14 +391,18 @@ function schemaStructuralRules(schema) {
   return rules;
 }
 
-function schemaStructuralMarkdown(schema, headingLevel) {
+function schemaStructuralMarkdown(schema, headingLevel, collapsed = false) {
   const rules = schemaStructuralRules(schema);
   if (Object.keys(rules).length === 0) return '';
   const heading = '#'.repeat(headingLevel);
-  return `${heading} Composition and conditional rules\n\nThe following JSON is copied exactly from this schema node.\n\n\`\`\`json\n${JSON.stringify(rules, null, 2)}\n\`\`\`\n`;
+  const code = `\`\`\`json\n${JSON.stringify(rules, null, 2)}\n\`\`\``;
+  if (collapsed) {
+    return `${heading} Composition and conditional rules\n\n<details class="docs-schema-raw">\n<summary>Show exact composition rules</summary>\n\n${code}\n\n</details>\n`;
+  }
+  return `${heading} Composition and conditional rules\n\nThe following JSON is copied exactly from this schema node.\n\n${code}\n`;
 }
 
-function schemaContractAnnotations(schema, headingLevel) {
+function schemaContractAnnotations(schema, headingLevel, collapsed = false) {
   const annotations = Object.fromEntries(
     Object.entries(schema ?? {})
       .filter(([key]) => key.startsWith('x-kiln-'))
@@ -347,23 +410,73 @@ function schemaContractAnnotations(schema, headingLevel) {
   );
   if (Object.keys(annotations).length === 0) return '';
   const heading = '#'.repeat(headingLevel);
-  return `${heading} Kiln contract annotations\n\nThese machine-readable annotations are copied exactly from this schema node.\n\n\`\`\`json\n${JSON.stringify(annotations, null, 2)}\n\`\`\`\n`;
+  const code = `\`\`\`json\n${JSON.stringify(annotations, null, 2)}\n\`\`\``;
+  if (collapsed) {
+    return `${heading} Kiln contract annotations\n\n<details class="docs-schema-raw">\n<summary>Show exact Kiln annotations and examples</summary>\n\n${code}\n\n</details>\n`;
+  }
+  return `${heading} Kiln contract annotations\n\nThese machine-readable annotations are copied exactly from this schema node.\n\n${code}\n`;
+}
+
+function schemaRootEntrypoints(schema) {
+  if (!Array.isArray(schema?.oneOf)) return [];
+  return schema.oneOf.flatMap((choice) => {
+    if (!nonEmptyString(choice?.$ref) || !choice.$ref.startsWith('#/$defs/')) return [];
+    const definition = localSchemaReference(schema, choice.$ref);
+    if (!definition) return [];
+    const name = choice.$ref.slice('#/$defs/'.length);
+    return [{ name, definition }];
+  });
+}
+
+function schemaEntrypointTable(entrypoints) {
+  const rows = entrypoints.map(({ name, definition }) => {
+    const description = nonEmptyString(definition?.description)
+      ? definition.description.trim()
+      : 'See the exact fields and constraints in its definition.';
+    const fieldCount = Object.keys(definition?.properties ?? {}).length;
+    const fields = fieldCount === 1 ? '1 field' : `${fieldCount} fields`;
+    const inputPolicy = definition?.additionalProperties === true
+      ? 'Unknown fields accepted and ignored'
+      : definition?.additionalProperties === false
+        ? 'Unknown fields rejected'
+        : 'Varies by composed variant';
+    return `| [\`${markdownTableCell(name)}\`](#${markdownTableCell(slugifyHeading(name))}) | ${markdownTableCell(description)} | ${fields} | ${inputPolicy} |`;
+  });
+  return [
+    '| Entrypoint | Purpose | Shape | Unknown fields |',
+    '| --- | --- | --- | --- |',
+    ...rows,
+    '',
+  ].join('\n');
 }
 
 function renderJsonSchemaMarkdown(schema, document) {
   const lines = [`# ${document.title}`, ''];
   if (nonEmptyString(schema.description)) lines.push(schema.description.trim(), '');
+  const entrypoints = schemaRootEntrypoints(schema);
   lines.push('## Schema identity', '');
   lines.push('| Property | Value |', '| --- | --- |');
   if (nonEmptyString(schema.title)) lines.push(`| Title | ${markdownTableCell(schema.title)} |`);
   if (nonEmptyString(schema.$id)) lines.push(`| \`$id\` | \`${markdownTableCell(schema.$id)}\` |`);
   if (nonEmptyString(schema.$schema)) lines.push(`| Dialect | \`${markdownTableCell(schema.$schema)}\` |`);
-  lines.push(`| Root type | \`${markdownTableCell(schemaType(schema))}\` |`);
-  lines.push(`| Root object | ${schema.additionalProperties === false ? 'closed' : 'open or unspecified'} |`, '');
-  lines.push('## Root fields', '', schemaFieldTable(schema));
-  const rootRules = schemaStructuralMarkdown(schema, 3);
+  if (entrypoints.length > 0) {
+    lines.push(`| Root type | Union of ${entrypoints.length} public entrypoints |`);
+    lines.push('| Root object | Defined by the selected entrypoint |', '');
+    lines.push(
+      '## Entrypoints',
+      '',
+      'Choose the request or response shape for the operation you are implementing. Each name links to its complete field table and constraints.',
+      '',
+      schemaEntrypointTable(entrypoints),
+    );
+  } else {
+    lines.push(`| Root type | \`${markdownTableCell(schemaType(schema))}\` |`);
+    lines.push(`| Root object | ${schema.additionalProperties === false ? 'closed' : 'open or unspecified'} |`, '');
+    lines.push('## Root fields', '', schemaFieldTable(schema, schema));
+  }
+  const rootRules = schemaStructuralMarkdown(schema, 3, true);
   if (rootRules) lines.push(rootRules);
-  const rootAnnotations = schemaContractAnnotations(schema, 3);
+  const rootAnnotations = schemaContractAnnotations(schema, 3, true);
   if (rootAnnotations) lines.push(rootAnnotations);
 
   const definitions = schema.$defs ?? schema.definitions ?? {};
@@ -371,15 +484,24 @@ function renderJsonSchemaMarkdown(schema, document) {
     const entries = Object.entries(definitions);
     if (entries.length > 0) lines.push('## Definitions', '');
     for (const [name, definition] of entries) {
-      lines.push(`### ${name}`, '');
-      if (nonEmptyString(definition?.description)) lines.push(definition.description.trim(), '');
+      const description = nonEmptyString(definition?.description)
+        ? definition.description.trim()
+        : 'Exact fields and constraints for this schema definition.';
+      const fieldCount = Object.keys(definition?.properties ?? {}).length;
+      const disclosureLabel = fieldCount === 1 ? '1 field' : `${fieldCount} fields`;
+      lines.push(
+        '<details class="docs-schema-definition">',
+        `<summary id="${escapeHtml(slugifyHeading(name))}"><span><code>${escapeHtml(name)}</code><small>${escapeHtml(description)}</small></span><b>${escapeHtml(disclosureLabel)}</b></summary>`,
+        '',
+      );
       const constraints = schemaConstraints(definition);
       lines.push(`Type: \`${schemaType(definition)}\`${constraints.length ? `. Constraints: ${constraints.join('; ')}.` : '.'}`, '');
-      if (definition?.properties) lines.push(schemaFieldTable(definition));
+      if (definition?.properties) lines.push(schemaFieldTable(definition, schema));
       const definitionRules = schemaStructuralMarkdown(definition, 4);
       if (definitionRules) lines.push(definitionRules);
       const definitionAnnotations = schemaContractAnnotations(definition, 4);
       if (definitionAnnotations) lines.push(definitionAnnotations);
+      lines.push('</details>', '');
     }
   }
   return `${lines.join('\n').trim()}\n`;
@@ -457,6 +579,10 @@ function renderOpenApiMarkdown(spec, document) {
   }
   const servers = (spec?.servers ?? []).map((server) => server?.url).filter(nonEmptyString);
   lines.push(`| Servers | ${markdownTableCell(servers.join(', ') || 'none')} |`, '');
+  const authentication = Array.isArray(spec?.security) && spec.security.length === 0
+    ? 'none declared; protect remote deployments with an authenticated reverse proxy'
+    : 'see OpenAPI security requirements';
+  lines.splice(lines.length - 1, 0, `| Authentication | ${markdownTableCell(authentication)} |`);
   if (spec?.['x-kiln-method-counts'] && typeof spec['x-kiln-method-counts'] === 'object') {
     const counts = Object.entries(spec['x-kiln-method-counts'])
       .map(([method, count]) => `${method} ${count}`)
@@ -800,6 +926,8 @@ function renderTopbar(manifest, depth) {
   const docsPrefix = depth === 'hub' ? '.' : '..';
   const searchId = `docs-search-${depth}`;
   const searchResultsId = `docs-search-results-${depth}`;
+  const searchEntryCount = manifest.site.product_guides.length + manifest.documents.length;
+  const searchLabel = `Search ${searchEntryCount} guides and references`;
   return `
     <header class="docs-topbar">
       <a class="docs-brand" href="${rootPrefix}/" aria-label="Kiln home">
@@ -808,13 +936,14 @@ function renderTopbar(manifest, depth) {
       </a>
       <a class="docs-product-name" href="${docsPrefix}/">Documentation</a>
       <div class="docs-search" data-docs-search>
-        <label class="sr-only" for="${searchId}">Search documentation</label>
-        <input id="${searchId}" type="search" role="combobox" placeholder="Search documentation"
+        <label class="sr-only" for="${searchId}">${searchLabel}</label>
+        <input id="${searchId}" type="search" role="combobox" placeholder="${searchLabel}"
           autocomplete="off" spellcheck="false" aria-autocomplete="list"
           aria-controls="${searchResultsId}" aria-expanded="false"
           aria-keyshortcuts="/ Control+K Meta+K">
         <kbd class="docs-search-shortcut" aria-hidden="true">/</kbd>
-        <div class="docs-search-results" id="${searchResultsId}" data-docs-search-results role="listbox" hidden></div>
+        <div class="docs-search-results" id="${searchResultsId}" data-docs-search-results
+          role="listbox" aria-label="Documentation search results" aria-live="polite" hidden></div>
       </div>
       <button class="docs-menu-button" type="button" data-docs-menu aria-controls="docs-sidebar" aria-expanded="false" aria-label="Menu, open documentation navigation" title="Open navigation">Menu</button>
     </header>`;
@@ -930,11 +1059,16 @@ function renderHubPage(manifest) {
       )).join('')}</div>
     </section>`;
   }).join('');
-  const guideOutcomes = ['01 · Run', '02 · Teach', '03 · Prove', '04 · Integrate'];
+  const guideOutcomes = [
+    { label: '01 · Run', action: 'Run Kiln' },
+    { label: '02 · Train', action: 'Train an adapter' },
+    { label: '03 · Evaluate', action: 'Evaluate a change' },
+    { label: '04 · Integrate', action: 'Integrate the API' },
+  ];
   const featuredGuides = manifest.site.product_guides.slice(0, guideOutcomes.length);
   const secondaryGuides = manifest.site.product_guides.slice(guideOutcomes.length);
   const guides = featuredGuides.map((guide, index) => (
-    `<a class="docs-guide" href="${escapeHtml(guide.href)}"><small>${escapeHtml(guideOutcomes[index])}</small><strong>${escapeHtml(guide.title)}</strong><span>${escapeHtml(guide.description)}</span><b>Open guide <i aria-hidden="true">→</i></b></a>`
+    `<a class="docs-guide" href="${escapeHtml(guide.href)}"><small>${escapeHtml(guideOutcomes[index].label)}</small><strong>${escapeHtml(guide.title)}</strong><span>${escapeHtml(guide.description)}</span><b>${escapeHtml(guideOutcomes[index].action)} <i aria-hidden="true">→</i></b></a>`
   )).join('');
   const guideLinks = secondaryGuides.map((guide) => (
     `<a href="${escapeHtml(guide.href)}">${escapeHtml(guide.title)} <span aria-hidden="true">→</span></a>`
@@ -954,8 +1088,8 @@ function renderHubPage(manifest) {
   }).join('');
   return `${pageHead({
     manifest,
-    title: 'Documentation',
-    description: 'Task-focused Kiln guides with a separate searchable library for exact schemas, contracts, and engineering evidence.',
+    title: 'Guides and reference',
+    description: 'Choose a task-focused Kiln guide, or search exact schemas, operating contracts, performance evidence, and maintainer policy.',
     canonical,
     depth: 'hub',
   })}
@@ -967,28 +1101,29 @@ function renderHubPage(manifest) {
     <main class="docs-main docs-hub" id="main-content">
       <nav class="docs-breadcrumbs" aria-label="Breadcrumb"><a href="../">Home</a><span aria-hidden="true">/</span><span>Docs</span></nav>
       <header class="docs-hub-header">
-        <p class="docs-section-label">Start with the answer</p>
+        <p class="docs-section-label">Choose a path</p>
         <h1>Kiln documentation</h1>
-        <p>Choose the outcome you need, or search every guide, contract, schema, and engineering receipt from one place. The deep reference library stays out of the way until you ask for it.</p>
+          <p>Start with a product workflow below. Use search or open the reference library when you need an exact field, operating contract, benchmark protocol, or engineering guarantee.</p>
       </header>
       <section class="docs-product-guides" aria-labelledby="product-guides-heading">
         <div class="docs-product-guides-head">
           <div>
-            <p class="docs-section-label">Choose a goal</p>
-            <h2 id="product-guides-heading">Start with a workflow.</h2>
+            <p class="docs-section-label">Product guides</p>
+            <h2 id="product-guides-heading">Start with a workflow</h2>
           </div>
-          <p>Each path begins with a working command and ends at the next useful decision.</p>
+          <p>Each guide begins with a working action, states the relevant limits, and links to exact reference material when you need it.</p>
         </div>
         <div class="docs-guide-grid">${guides}</div>
         ${guideLinks ? `<nav class="docs-guide-links" aria-label="More product guides">${guideLinks}</nav>` : ''}
       </section>
       <section class="docs-core-library" aria-labelledby="core-docs-heading">
-        <h2 id="core-docs-heading">Understand the system.</h2>
+        <h2 id="core-docs-heading">Core documentation</h2>
+        <p>Use these shorter guides for product scope, configuration, security, performance, and reasoning limits.</p>
         <div class="docs-directory">${sections}</div>
       </section>
       <details class="docs-reference-library">
         <summary>
-          <span><strong>Reference library</strong><small>Exact schemas, contracts, qualification, and maintainer material</small></span>
+          <span><strong>Reference library</strong><small>Field-level schemas, operating contracts, qualification evidence, and maintainer policy</small></span>
           <b>${referenceDocuments.length} documents</b>
         </summary>
         <div class="docs-reference-library-body">${references}</div>
@@ -1102,7 +1237,7 @@ async function writeLlmsTxt(outDir, manifest) {
     '',
     '> Kiln is a pure-Rust, single-GPU server for Qwen3.5-4B that combines OpenAI-compatible inference, live LoRA training, local evals, and strict replay in one process.',
     '',
-    'Kiln deliberately targets one model family and one local improvement loop. The server owns inference, SFT, GRPO, OPD, adapter lifecycle, evaluation, receipts, and the dashboard. CUDA, ROCm, Metal, and Vulkan are supported; performance claims are bounded by the published benchmark receipts.',
+    'Kiln deliberately targets one model family and one local improvement loop. The server owns inference, SFT, GRPO, OPD, adapter lifecycle, evaluation, receipts, and the dashboard. CUDA, ROCm, Metal, and Vulkan builds are available. Runtime accelerator policy is derived from reported capabilities, not device names or machine allowlists; performance claims are bounded by the published benchmark receipts.',
     '',
     'Prefer the source documents and machine-readable contracts below for implementation details. Use the product guides for task-oriented orientation.',
     '',

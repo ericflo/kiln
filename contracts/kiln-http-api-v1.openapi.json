@@ -4,17 +4,18 @@
   "info": {
     "title": "Kiln HTTP API",
     "version": "1.0.0",
-    "description": "Canonical inventory of every production HTTP route, method, transport, handler owner, request type, response type, status, media type, path/header/query input, and structured error envelope. Every named payload component delegates its complete field contract to a canonical generated schema."
+    "description": "Canonical inventory of every production HTTP route, method, transport, handler owner, request type, response type, status, media type, path/header/query input, and structured error envelope. Every named payload component delegates its complete field contract to a canonical generated schema. Kiln does not authenticate HTTP requests. The server binds to loopback by default; put any remotely accessible deployment behind an authenticated reverse proxy on a trusted network."
   },
   "servers": [
     {
       "url": "http://127.0.0.1:8420"
     }
   ],
+  "security": [],
   "tags": [
     {
       "name": "ui",
-      "description": "Embedded offline dashboard, redirects, and static assets."
+      "description": "Embedded dashboard, redirects, and static assets."
     },
     {
       "name": "observability",
@@ -30,15 +31,15 @@
     },
     {
       "name": "corrections",
-      "description": "Captured correction rows and training lifecycle marking."
+      "description": "Stored correction rows and their training status."
     },
     {
       "name": "teachers",
-      "description": "Identity-bound remote teacher registration and cache artifacts."
+      "description": "Identity-bound remote teachers and teacher-logit cache artifacts."
     },
     {
       "name": "agents",
-      "description": "Embedded agent runs, imported traces, and self-improvement workflows."
+      "description": "Embedded agent runs, imported traces, terminal access, and self-improvement workflows."
     },
     {
       "name": "training",
@@ -54,7 +55,7 @@
     },
     {
       "name": "preflight",
-      "description": "Compatibility, capacity, tier defaults, and intent routing."
+      "description": "Training compatibility, capacity estimates, tier defaults, and intent routing."
     },
     {
       "name": "recipes",
@@ -62,7 +63,7 @@
     },
     {
       "name": "library",
-      "description": "Adapter library discovery, installation, and publication."
+      "description": "Adapter-library contract surface. Remote discovery, installation, and publication are not operational."
     }
   ],
   "paths": {
@@ -71,7 +72,7 @@
         "tags": [
           "ui"
         ],
-        "summary": "Redirect root to ui",
+        "summary": "Redirect the server root to the embedded dashboard",
         "operationId": "ui_redirect_root_to_ui_get",
         "x-kiln-handler": "ui::redirect_root_to_ui",
         "x-kiln-rust-signature": "async fn redirect_root_to_ui() -> Redirect",
@@ -164,7 +165,7 @@
         "tags": [
           "ui"
         ],
-        "summary": "Redirect ui to slash",
+        "summary": "Redirect /ui to /ui/",
         "operationId": "ui_redirect_ui_to_slash_get_ui",
         "x-kiln-handler": "ui::redirect_ui_to_slash",
         "x-kiln-rust-signature": "async fn redirect_ui_to_slash(uri: Uri) -> impl IntoResponse",
@@ -201,7 +202,7 @@
         "tags": [
           "ui"
         ],
-        "summary": "Serve ui",
+        "summary": "Serve the embedded dashboard",
         "operationId": "ui_serve_ui_get_ui",
         "x-kiln-handler": "ui::serve_ui",
         "x-kiln-rust-signature": "async fn serve_ui() -> impl IntoResponse",
@@ -226,7 +227,7 @@
         "tags": [
           "ui"
         ],
-        "summary": "Serve app js",
+        "summary": "Serve the dashboard JavaScript",
         "operationId": "ui_serve_app_js_get_ui_app_js",
         "x-kiln-handler": "ui::serve_app_js",
         "x-kiln-rust-signature": "async fn serve_app_js() -> impl IntoResponse",
@@ -251,7 +252,7 @@
         "tags": [
           "ui"
         ],
-        "summary": "Serve demo js",
+        "summary": "Serve the dashboard demo-fixture JavaScript",
         "operationId": "ui_serve_demo_js_get_ui_demo_js",
         "x-kiln-handler": "ui::serve_demo_js",
         "x-kiln-rust-signature": "async fn serve_demo_js() -> impl IntoResponse",
@@ -276,7 +277,7 @@
         "tags": [
           "ui"
         ],
-        "summary": "Serve styles css",
+        "summary": "Serve the dashboard stylesheet",
         "operationId": "ui_serve_styles_css_get_ui_styles_css",
         "x-kiln-handler": "ui::serve_styles_css",
         "x-kiln-rust-signature": "async fn serve_styles_css() -> impl IntoResponse",
@@ -301,7 +302,7 @@
         "tags": [
           "ui"
         ],
-        "summary": "Serve xterm fit js",
+        "summary": "Serve the bundled xterm fit add-on",
         "operationId": "ui_serve_xterm_fit_js_get_ui_vendor_xterm_addon_fit_js",
         "x-kiln-handler": "ui::serve_xterm_fit_js",
         "x-kiln-rust-signature": "async fn serve_xterm_fit_js() -> impl IntoResponse",
@@ -326,7 +327,7 @@
         "tags": [
           "ui"
         ],
-        "summary": "Serve xterm css",
+        "summary": "Serve the bundled xterm stylesheet",
         "operationId": "ui_serve_xterm_css_get_ui_vendor_xterm_css",
         "x-kiln-handler": "ui::serve_xterm_css",
         "x-kiln-rust-signature": "async fn serve_xterm_css() -> impl IntoResponse",
@@ -351,7 +352,7 @@
         "tags": [
           "ui"
         ],
-        "summary": "Serve xterm js",
+        "summary": "Serve the bundled xterm JavaScript",
         "operationId": "ui_serve_xterm_js_get_ui_vendor_xterm_js",
         "x-kiln-handler": "ui::serve_xterm_js",
         "x-kiln-rust-signature": "async fn serve_xterm_js() -> impl IntoResponse",
@@ -376,7 +377,7 @@
         "tags": [
           "adapters"
         ],
-        "summary": "List adapters",
+        "summary": "List installed adapters",
         "operationId": "adapters_list_adapters_get_v1_adapters",
         "x-kiln-handler": "adapters::list_adapters",
         "x-kiln-rust-signature": "async fn list_adapters(State(state): State<AppState>) -> Json<AdaptersResponse>",
@@ -404,7 +405,7 @@
         "tags": [
           "training"
         ],
-        "summary": "Submit distill merge",
+        "summary": "Submit an adapter-distillation merge job",
         "operationId": "training_submit_distill_merge_post_v1_adapters_distill_merge",
         "x-kiln-handler": "training::submit_distill_merge",
         "x-kiln-rust-signature": "async fn submit_distill_merge( State(state): State<AppState>, payload: Result<Json<DistillMergeRequest>, JsonRejection>, ) -> Result<Json<TrainingResponse>, ApiError>",
@@ -443,7 +444,7 @@
         "tags": [
           "adapters"
         ],
-        "summary": "Load adapter",
+        "summary": "Load an adapter for inference",
         "operationId": "adapters_load_adapter_post_v1_adapters_load",
         "x-kiln-handler": "adapters::load_adapter",
         "x-kiln-rust-signature": "async fn load_adapter( State(state): State<AppState>, Json(req): Json<LoadAdapterRequest>, ) -> Result<Json<LoadAdapterResponse>, ApiError>",
@@ -482,7 +483,7 @@
         "tags": [
           "adapters"
         ],
-        "summary": "Merge adapters",
+        "summary": "Merge adapters into a composed adapter",
         "operationId": "adapters_merge_adapters_post_v1_adapters_merge",
         "x-kiln-handler": "adapters::merge_adapters",
         "x-kiln-rust-signature": "async fn merge_adapters( State(state): State<AppState>, Json(req): Json<MergeAdapterRequest>, ) -> Result<Json<MergeAdapterResponse>, ApiError>",
@@ -521,7 +522,7 @@
         "tags": [
           "adapters"
         ],
-        "summary": "Unload adapter",
+        "summary": "Unload the active adapter",
         "operationId": "adapters_unload_adapter_post_v1_adapters_unload",
         "x-kiln-handler": "adapters::unload_adapter",
         "x-kiln-rust-signature": "async fn unload_adapter( State(state): State<AppState>, ) -> Result<Json<UnloadAdapterResponse>, ApiError>",
@@ -549,7 +550,7 @@
         "tags": [
           "adapters"
         ],
-        "summary": "Upload adapter",
+        "summary": "Upload and validate an adapter archive",
         "operationId": "adapters_upload_adapter_post_v1_adapters_upload",
         "x-kiln-handler": "adapters::upload_adapter",
         "x-kiln-rust-signature": "async fn upload_adapter( State(state): State<AppState>, mut multipart: Multipart, ) -> Result<Json<UploadAdapterResponse>, ApiError>",
@@ -588,7 +589,7 @@
         "tags": [
           "adapters"
         ],
-        "summary": "Delete adapter",
+        "summary": "Delete a stored adapter",
         "operationId": "adapters_delete_adapter_delete_v1_adapters_name",
         "x-kiln-handler": "adapters::delete_adapter",
         "x-kiln-rust-signature": "async fn delete_adapter( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<DeleteAdapterResponse>, ApiError>",
@@ -627,7 +628,7 @@
         "tags": [
           "adapters"
         ],
-        "summary": "Adapter detail",
+        "summary": "Get adapter metadata and verification detail",
         "operationId": "adapters_adapter_detail_get_v1_adapters_name_detail",
         "x-kiln-handler": "adapters::adapter_detail",
         "x-kiln-rust-signature": "async fn adapter_detail( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<AdapterDetail>, ApiError>",
@@ -666,7 +667,7 @@
         "tags": [
           "adapters"
         ],
-        "summary": "Download adapter",
+        "summary": "Download an adapter archive",
         "operationId": "adapters_download_adapter_get_v1_adapters_name_download",
         "x-kiln-handler": "adapters::download_adapter",
         "x-kiln-rust-signature": "async fn download_adapter( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Response, ApiError>",
@@ -712,7 +713,7 @@
         "tags": [
           "adapters"
         ],
-        "summary": "Adapter receipt",
+        "summary": "Get an adapter training receipt",
         "operationId": "adapters_adapter_receipt_get_v1_adapters_name_receipt",
         "x-kiln-handler": "adapters::adapter_receipt",
         "x-kiln-rust-signature": "async fn adapter_receipt( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<kiln_train::AdapterReceipt>, ApiError>",
@@ -751,7 +752,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "Judge distill",
+        "summary": "Distill a judge adapter from captured judgments",
         "operationId": "self_improve_judge_distill_post_v1_agent_judge_distill",
         "x-kiln-handler": "self_improve::judge_distill",
         "x-kiln-rust-signature": "async fn judge_distill( State(state): State<AppState>, Json(req): Json<JudgeDistillRequest>, ) -> Result<Json<JudgeDistillResponse>, ApiError>",
@@ -790,7 +791,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "Judge drift check",
+        "summary": "Validate a judge drift-check request (scoring is unavailable)",
         "operationId": "self_improve_judge_drift_check_post_v1_agent_judge_drift_check",
         "x-kiln-handler": "self_improve::judge_drift_check",
         "x-kiln-rust-signature": "async fn judge_drift_check( State(state): State<AppState>, Json(req): Json<JudgeDriftCheckRequest>, ) -> Result<Json<serde_json::Value>, ApiError>",
@@ -827,7 +828,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "List runs",
+        "summary": "List embedded agent runs",
         "operationId": "agent_runs_list_runs_get_v1_agent_runs",
         "x-kiln-handler": "agent_runs::list_runs",
         "x-kiln-rust-signature": "async fn list_runs( State(state): State<AppState>, Query(q): Query<ListRunsQuery>, ) -> Result<Json<AgentRunListResponse>, ApiError>",
@@ -854,7 +855,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "Create run",
+        "summary": "Create an embedded agent run",
         "operationId": "agent_runs_create_run_post_v1_agent_runs",
         "x-kiln-handler": "agent_runs::create_run",
         "x-kiln-rust-signature": "async fn create_run( State(state): State<AppState>, Json(req): Json<CreateRunRequest>, ) -> Result<Json<AgentRunRecord>, ApiError>",
@@ -893,7 +894,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "Runs status",
+        "summary": "Get aggregate agent-run status",
         "operationId": "agent_runs_runs_status_get_v1_agent_runs_status",
         "x-kiln-handler": "agent_runs::runs_status",
         "x-kiln-rust-signature": "async fn runs_status(State(state): State<AppState>) -> Json<AgentRunsStatusResponse>",
@@ -921,7 +922,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "Get run",
+        "summary": "Get one agent run",
         "operationId": "agent_runs_get_run_get_v1_agent_runs_id",
         "x-kiln-handler": "agent_runs::get_run",
         "x-kiln-rust-signature": "async fn get_run( State(state): State<AppState>, AxumPath(id): AxumPath<String>, ) -> Result<Json<AgentRunRecord>, ApiError>",
@@ -960,7 +961,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "Abort run",
+        "summary": "Abort an agent run",
         "operationId": "agent_runs_abort_run_post_v1_agent_runs_id_abort",
         "x-kiln-handler": "agent_runs::abort_run",
         "x-kiln-rust-signature": "async fn abort_run( State(state): State<AppState>, AxumPath(id): AxumPath<String>, ) -> Result<Json<AgentRunAbortResponse>, ApiError>",
@@ -999,7 +1000,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "Run events",
+        "summary": "List events for an agent run",
         "operationId": "agent_runs_run_events_get_v1_agent_runs_id_events",
         "x-kiln-handler": "agent_runs::run_events",
         "x-kiln-rust-signature": "async fn run_events( State(state): State<AppState>, AxumPath(id): AxumPath<String>, Query(q): Query<EventsQuery>, ) -> Result<Json<AgentRunEventsResponse>, ApiError>",
@@ -1039,7 +1040,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "Follow up run",
+        "summary": "Queue a follow-up message for an agent run",
         "operationId": "agent_runs_follow_up_run_post_v1_agent_runs_id_follow_up",
         "x-kiln-handler": "agent_runs::follow_up_run",
         "x-kiln-rust-signature": "async fn follow_up_run( State(state): State<AppState>, AxumPath(id): AxumPath<String>, Json(req): Json<MessageRequest>, ) -> Result<Json<AgentRunQueuedResponse>, ApiError>",
@@ -1089,7 +1090,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "Steer run",
+        "summary": "Steer an active agent run",
         "operationId": "agent_runs_steer_run_post_v1_agent_runs_id_steer",
         "x-kiln-handler": "agent_runs::steer_run",
         "x-kiln-rust-signature": "async fn steer_run( State(state): State<AppState>, AxumPath(id): AxumPath<String>, Json(req): Json<MessageRequest>, ) -> Result<Json<AgentRunQueuedResponse>, ApiError>",
@@ -1139,7 +1140,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "Self improve",
+        "summary": "Run the self-improvement workflow",
         "operationId": "self_improve_self_improve_post_v1_agent_self_improve",
         "x-kiln-handler": "self_improve::self_improve",
         "x-kiln-rust-signature": "async fn self_improve( State(state): State<AppState>, Json(req): Json<SelfImproveRequest>, ) -> Result<Json<SelfImproveResponse>, ApiError>",
@@ -1178,7 +1179,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "List traces",
+        "summary": "List discovered agent traces",
         "operationId": "agent_traces_list_traces_get_v1_agent_traces",
         "x-kiln-handler": "agent_traces::list_traces",
         "x-kiln-rust-signature": "async fn list_traces(State(state): State<AppState>) -> Json<AgentTracesListResponse>",
@@ -1206,7 +1207,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "Discover traces",
+        "summary": "Discover agent traces from the configured session root",
         "operationId": "agent_traces_discover_traces_post_v1_agent_traces_discover",
         "x-kiln-handler": "agent_traces::discover_traces",
         "x-kiln-rust-signature": "async fn discover_traces( State(state): State<AppState>, Json(req): Json<DiscoverRequest>, ) -> Result<Json<DiscoverResponse>, ApiError>",
@@ -1245,7 +1246,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "Get trace",
+        "summary": "Get one agent trace",
         "operationId": "agent_traces_get_trace_get_v1_agent_traces_id",
         "x-kiln-handler": "agent_traces::get_trace",
         "x-kiln-rust-signature": "async fn get_trace( State(state): State<AppState>, AxumPath(id): AxumPath<String>, ) -> Result<Json<AgentTrace>, ApiError>",
@@ -1284,7 +1285,7 @@
         "tags": [
           "teachers"
         ],
-        "summary": "Cache export",
+        "summary": "Download the teacher-logit cache archive",
         "operationId": "cache_cache_export_get_v1_cache_export",
         "x-kiln-handler": "cache::cache_export",
         "x-kiln-rust-signature": "async fn cache_export(State(state): State<AppState>) -> Result<Response, ApiError>",
@@ -1319,7 +1320,7 @@
         "tags": [
           "teachers"
         ],
-        "summary": "Cache stats",
+        "summary": "Get teacher-logit cache statistics",
         "operationId": "cache_cache_stats_get_v1_cache_stats",
         "x-kiln-handler": "cache::cache_stats",
         "x-kiln-rust-signature": "async fn cache_stats(State(state): State<AppState>) -> Result<Json<CacheStatsResponse>, ApiError>",
@@ -1469,7 +1470,7 @@
         "tags": [
           "observability"
         ],
-        "summary": "Get config",
+        "summary": "Get the resolved runtime configuration",
         "operationId": "config_get_config_get_v1_config",
         "x-kiln-handler": "config::get_config",
         "x-kiln-rust-signature": "async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse>",
@@ -1497,7 +1498,7 @@
         "tags": [
           "corrections"
         ],
-        "summary": "Clear corrections",
+        "summary": "Delete every stored correction",
         "operationId": "corrections_clear_corrections_delete_v1_corrections",
         "x-kiln-handler": "corrections::clear_corrections",
         "x-kiln-rust-signature": "async fn clear_corrections( State(state): State<AppState>, ) -> Result<Json<ClearCorrectionsResponse>, ApiError>",
@@ -1523,7 +1524,7 @@
         "tags": [
           "corrections"
         ],
-        "summary": "List corrections",
+        "summary": "List stored corrections",
         "operationId": "corrections_list_corrections_get_v1_corrections",
         "x-kiln-handler": "corrections::list_corrections",
         "x-kiln-rust-signature": "async fn list_corrections( State(state): State<AppState>, Query(q): Query<ListQuery>, ) -> Json<ListResponse>",
@@ -1550,7 +1551,7 @@
         "tags": [
           "corrections"
         ],
-        "summary": "Upsert correction",
+        "summary": "Create or replace a correction",
         "operationId": "corrections_upsert_correction_post_v1_corrections",
         "x-kiln-handler": "corrections::upsert_correction",
         "x-kiln-rust-signature": "async fn upsert_correction( State(state): State<AppState>, Json(row): Json<CorrectionRow>, ) -> Result<Json<CorrectionRow>, ApiError>",
@@ -1589,7 +1590,7 @@
         "tags": [
           "corrections"
         ],
-        "summary": "Mark trained",
+        "summary": "Mark corrections as used for training",
         "operationId": "corrections_mark_trained_post_v1_corrections_mark_trained",
         "x-kiln-handler": "corrections::mark_trained",
         "x-kiln-rust-signature": "async fn mark_trained( State(state): State<AppState>, Json(req): Json<MarkTrainedRequest>, ) -> Result<Json<MarkTrainedResponse>, ApiError>",
@@ -1628,7 +1629,7 @@
         "tags": [
           "corrections"
         ],
-        "summary": "Delete correction",
+        "summary": "Delete one correction by request ID",
         "operationId": "corrections_delete_correction_delete_v1_corrections_request_id",
         "x-kiln-handler": "corrections::delete_correction",
         "x-kiln-rust-signature": "async fn delete_correction( State(state): State<AppState>, AxumPath(request_id): AxumPath<String>, ) -> Result<Json<DeleteCorrectionResponse>, ApiError>",
@@ -1667,7 +1668,7 @@
         "tags": [
           "observability"
         ],
-        "summary": "Model state",
+        "summary": "Get trusted model-state diagnostics",
         "operationId": "debug_model_state_model_state_get_v1_debug_model_state",
         "x-kiln-handler": "debug_model_state::model_state",
         "x-kiln-rust-signature": "async fn model_state(State(state): State<AppState>) -> Response",
@@ -1714,7 +1715,7 @@
         "tags": [
           "training"
         ],
-        "summary": "Submit distill pump",
+        "summary": "Submit a frontier-teacher distillation job",
         "operationId": "training_submit_distill_pump_post_v1_distill_pump",
         "x-kiln-handler": "training::submit_distill_pump",
         "x-kiln-rust-signature": "async fn submit_distill_pump( State(state): State<AppState>, payload: Result<Json<DistillPumpRequest>, JsonRejection>, ) -> Result<Json<TrainingResponse>, ApiError>",
@@ -1753,7 +1754,7 @@
         "tags": [
           "training"
         ],
-        "summary": "Submit distill refresh",
+        "summary": "Submit a dataset-refresh distillation job",
         "operationId": "training_submit_distill_refresh_post_v1_distill_refresh",
         "x-kiln-handler": "training::submit_distill_refresh",
         "x-kiln-rust-signature": "async fn submit_distill_refresh( State(state): State<AppState>, payload: Result<Json<DistillRefreshRequest>, JsonRejection>, ) -> Result<Json<TrainingResponse>, ApiError>",
@@ -1792,7 +1793,7 @@
         "tags": [
           "training"
         ],
-        "summary": "Submit distill self",
+        "summary": "Submit a self-distillation job",
         "operationId": "training_submit_distill_self_post_v1_distill_self",
         "x-kiln-handler": "training::submit_distill_self",
         "x-kiln-rust-signature": "async fn submit_distill_self( State(state): State<AppState>, payload: Result<Json<DistillSelfRequest>, JsonRejection>, ) -> Result<Json<TrainingResponse>, ApiError>",
@@ -1831,7 +1832,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Submit compare",
+        "summary": "Submit a paired eval comparison",
         "operationId": "eval_submit_compare_post_v1_eval_compare",
         "x-kiln-handler": "eval::submit_compare",
         "x-kiln-rust-signature": "async fn submit_compare( State(state): State<AppState>, Json(spec): Json<EvalCompareSpec>, ) -> Result<Json<EvalRunResponse>, ApiError>",
@@ -1870,7 +1871,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "List datasets",
+        "summary": "List eval datasets",
         "operationId": "eval_list_datasets_get_v1_eval_datasets",
         "x-kiln-handler": "eval::list_datasets",
         "x-kiln-rust-signature": "async fn list_datasets(State(state): State<AppState>) -> Json<DatasetListResponse>",
@@ -1898,7 +1899,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Upload dataset",
+        "summary": "Upload and validate an eval dataset",
         "operationId": "eval_upload_dataset_post_v1_eval_datasets_upload",
         "x-kiln-handler": "eval::upload_dataset",
         "x-kiln-rust-signature": "async fn upload_dataset( State(state): State<AppState>, mut multipart: Multipart, ) -> Result<Json<DatasetManifest>, ApiError>",
@@ -1937,7 +1938,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Delete dataset",
+        "summary": "Delete an eval dataset",
         "operationId": "eval_delete_dataset_delete_v1_eval_datasets_name",
         "x-kiln-handler": "eval::delete_dataset",
         "x-kiln-rust-signature": "async fn delete_dataset( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<DeleteDatasetResponse>, ApiError>",
@@ -1974,7 +1975,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Get dataset",
+        "summary": "Get an eval dataset manifest",
         "operationId": "eval_get_dataset_get_v1_eval_datasets_name",
         "x-kiln-handler": "eval::get_dataset",
         "x-kiln-rust-signature": "async fn get_dataset( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<DatasetManifest>, ApiError>",
@@ -2013,7 +2014,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Synthesize dataset preview",
+        "summary": "Preview synthetic rows without saving them",
         "operationId": "eval_synthesize_dataset_preview_post_v1_eval_datasets_name_preview",
         "x-kiln-handler": "eval::synthesize_dataset_preview",
         "x-kiln-rust-signature": "async fn synthesize_dataset_preview( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(body): Json<SynthesisPreviewBody>, ) -> Result<Json<SynthesisPreview>, ApiError>",
@@ -2063,7 +2064,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Dataset rows",
+        "summary": "List rows from an eval dataset",
         "operationId": "eval_dataset_rows_get_v1_eval_datasets_name_rows",
         "x-kiln-handler": "eval::dataset_rows",
         "x-kiln-rust-signature": "async fn dataset_rows( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Query(q): Query<DatasetRowsQuery>, ) -> Result<Json<Vec<serde_json::Value>>, ApiError>",
@@ -2103,7 +2104,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Get dataset split manifest",
+        "summary": "Get an eval dataset's split manifest",
         "operationId": "eval_get_dataset_split_get_v1_eval_datasets_name_split",
         "x-kiln-handler": "eval::get_dataset_split",
         "x-kiln-rust-signature": "async fn get_dataset_split( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<DatasetSplitManifest>, ApiError>",
@@ -2140,7 +2141,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Replace dataset split policy",
+        "summary": "Replace an eval dataset's split policy",
         "operationId": "eval_update_dataset_split_put_v1_eval_datasets_name_split",
         "x-kiln-handler": "eval::update_dataset_split",
         "x-kiln-rust-signature": "async fn update_dataset_split( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(config): Json<DatasetSplitConfig>, ) -> Result<Json<DatasetSplitManifest>, ApiError>",
@@ -2190,7 +2191,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Synthesize dataset",
+        "summary": "Generate and save synthetic dataset rows",
         "operationId": "eval_synthesize_dataset_post_v1_eval_datasets_name_synthesize",
         "x-kiln-handler": "eval::synthesize_dataset",
         "x-kiln-rust-signature": "async fn synthesize_dataset( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(body): Json<SynthesizeBody>, ) -> Result<Json<SynthesizeDatasetResponse>, ApiError>",
@@ -2240,7 +2241,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "List jobs",
+        "summary": "List eval jobs",
         "operationId": "eval_list_jobs_get_v1_eval_jobs",
         "x-kiln-handler": "eval::list_jobs",
         "x-kiln-rust-signature": "async fn list_jobs(State(state): State<AppState>) -> Json<EvalJobListResponse>",
@@ -2268,7 +2269,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Cancel job",
+        "summary": "Cancel a queued or running eval job",
         "operationId": "eval_cancel_job_delete_v1_eval_jobs_job_id",
         "x-kiln-handler": "eval::cancel_job",
         "x-kiln-rust-signature": "async fn cancel_job( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, ) -> Result<Json<CancelEvalJobResponse>, ApiError>",
@@ -2305,7 +2306,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Get job",
+        "summary": "Get one eval job and its results",
         "operationId": "eval_get_job_get_v1_eval_jobs_job_id",
         "x-kiln-handler": "eval::get_job",
         "x-kiln-rust-signature": "async fn get_job( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, ) -> Result<Json<EvalResult>, ApiError>",
@@ -2344,7 +2345,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Replay job",
+        "summary": "Strictly replay one retained eval run",
         "operationId": "eval_replay_job_post_v1_eval_jobs_job_id_replay",
         "x-kiln-handler": "eval::replay_job",
         "x-kiln-rust-signature": "async fn replay_job( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, Json(body): Json<ReplayBody>, ) -> Result<Json<EvalRunResponse>, ApiError>",
@@ -2394,7 +2395,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Rerun job",
+        "summary": "Rerun the failed examples from an eval job",
         "operationId": "eval_rerun_job_post_v1_eval_jobs_job_id_rerun",
         "x-kiln-handler": "eval::rerun_job",
         "x-kiln-rust-signature": "async fn rerun_job( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, Json(body): Json<RerunBody>, ) -> Result<Json<EvalRunResponse>, ApiError>",
@@ -2444,7 +2445,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Submit eval",
+        "summary": "Submit an eval job",
         "operationId": "eval_submit_eval_post_v1_eval_run",
         "x-kiln-handler": "eval::submit_eval",
         "x-kiln-rust-signature": "async fn submit_eval( State(state): State<AppState>, Json(req): Json<EvalRunRequest>, ) -> Result<Json<EvalRunResponse>, ApiError>",
@@ -2483,7 +2484,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "List suites",
+        "summary": "List eval suites",
         "operationId": "eval_list_suites_get_v1_eval_suites",
         "x-kiln-handler": "eval::list_suites",
         "x-kiln-rust-signature": "async fn list_suites(State(state): State<AppState>) -> Result<Json<SuiteListResponse>, ApiError>",
@@ -2509,7 +2510,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Save suite",
+        "summary": "Create or replace an eval suite",
         "operationId": "eval_save_suite_post_v1_eval_suites",
         "x-kiln-handler": "eval::save_suite",
         "x-kiln-rust-signature": "async fn save_suite( State(state): State<AppState>, Query(query): Query<SuiteUpsertQuery>, Json(suite): Json<EvalSuite>, ) -> Result<Json<SuiteSaveResponse>, ApiError>",
@@ -2549,7 +2550,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Delete suite",
+        "summary": "Delete an eval suite",
         "operationId": "eval_delete_suite_delete_v1_eval_suites_name",
         "x-kiln-handler": "eval::delete_suite",
         "x-kiln-rust-signature": "async fn delete_suite( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<DeleteSuiteResponse>, ApiError>",
@@ -2586,7 +2587,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Get suite",
+        "summary": "Get an eval suite",
         "operationId": "eval_get_suite_get_v1_eval_suites_name",
         "x-kiln-handler": "eval::get_suite",
         "x-kiln-rust-signature": "async fn get_suite( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<EvalSuite>, ApiError>",
@@ -2661,7 +2662,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "List judgments",
+        "summary": "List judgment datasets",
         "operationId": "eval_list_judgments_get_v1_judgments",
         "x-kiln-handler": "eval::list_judgments",
         "x-kiln-rust-signature": "async fn list_judgments(State(state): State<AppState>) -> Json<JudgmentListResponse>",
@@ -2687,7 +2688,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Create judgment dataset",
+        "summary": "Create a judgment dataset",
         "operationId": "eval_create_judgment_dataset_post_v1_judgments",
         "x-kiln-handler": "eval::create_judgment_dataset",
         "x-kiln-rust-signature": "async fn create_judgment_dataset( State(state): State<AppState>, Json(body): Json<CreateJudgmentBody>, ) -> Result<Json<JudgmentManifest>, ApiError>",
@@ -2726,7 +2727,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Render judgment prompt",
+        "summary": "Render the prompt for a proposed judgment row",
         "operationId": "eval_render_judgment_prompt_post_v1_judgments_render_prompt",
         "x-kiln-handler": "eval::render_judgment_prompt",
         "x-kiln-rust-signature": "async fn render_judgment_prompt( Json(body): Json<AppendJudgmentBody>, ) -> Json<RenderJudgmentPromptResponse>",
@@ -2765,7 +2766,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Delete judgment dataset",
+        "summary": "Delete a judgment dataset",
         "operationId": "eval_delete_judgment_dataset_delete_v1_judgments_name",
         "x-kiln-handler": "eval::delete_judgment_dataset",
         "x-kiln-rust-signature": "async fn delete_judgment_dataset( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Json<DeleteJudgmentResponse>, ApiError>",
@@ -2804,7 +2805,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Compile judgment",
+        "summary": "Compile a judgment dataset for training",
         "operationId": "eval_compile_judgment_post_v1_judgments_name_compile",
         "x-kiln-handler": "eval::compile_judgment",
         "x-kiln-rust-signature": "async fn compile_judgment( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(body): Json<CompileJudgmentBody>, ) -> Result<Json<CompileJudgmentResponse>, ApiError>",
@@ -2854,7 +2855,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Append judgment",
+        "summary": "Append a row to a judgment dataset",
         "operationId": "eval_append_judgment_post_v1_judgments_name_rows",
         "x-kiln-handler": "eval::append_judgment",
         "x-kiln-rust-signature": "async fn append_judgment( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(body): Json<AppendJudgmentBody>, ) -> Result<Json<AppendJudgmentResponse>, ApiError>",
@@ -2904,7 +2905,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Remove judgment row",
+        "summary": "Delete one row from a judgment dataset",
         "operationId": "eval_remove_judgment_row_delete_v1_judgments_name_rows_judgment_id",
         "x-kiln-handler": "eval::remove_judgment_row",
         "x-kiln-rust-signature": "async fn remove_judgment_row( State(state): State<AppState>, AxumPath((name, judgment_id)): AxumPath<(String, String)>, ) -> Result<Json<JudgmentManifest>, ApiError>",
@@ -2952,7 +2953,7 @@
         "tags": [
           "evals"
         ],
-        "summary": "Validate judgment adapter",
+        "summary": "Validate an adapter against a judgment dataset",
         "operationId": "eval_validate_judgment_adapter_post_v1_judgments_name_validate",
         "x-kiln-handler": "eval::validate_judgment_adapter",
         "x-kiln-rust-signature": "async fn validate_judgment_adapter( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(body): Json<PromoteJudgmentBody>, ) -> Result<Json<ValidateJudgmentResponse>, ApiError>",
@@ -3002,7 +3003,7 @@
         "tags": [
           "library"
         ],
-        "summary": "List library",
+        "summary": "Report adapter-library status (remote listing is unavailable)",
         "operationId": "library_list_library_get_v1_library",
         "x-kiln-handler": "library::list_library",
         "x-kiln-rust-signature": "async fn list_library(State(_state): State<AppState>) -> Json<LibraryListResponse>",
@@ -3030,7 +3031,7 @@
         "tags": [
           "library"
         ],
-        "summary": "Install from library",
+        "summary": "Report that remote adapter installation is unavailable",
         "operationId": "library_install_from_library_post_v1_library_install_id",
         "x-kiln-handler": "library::install_from_library",
         "x-kiln-rust-signature": "async fn install_from_library( State(state): State<AppState>, AxumPath(id): AxumPath<String>, ) -> Result<Json<serde_json::Value>, ApiError>",
@@ -3067,7 +3068,7 @@
         "tags": [
           "library"
         ],
-        "summary": "Publish to library",
+        "summary": "Validate an adapter for future library publication",
         "operationId": "library_publish_to_library_post_v1_library_publish_name",
         "x-kiln-handler": "library::publish_to_library",
         "x-kiln-rust-signature": "async fn publish_to_library( State(state): State<AppState>, AxumPath(name): AxumPath<String>, Json(payload): Json<PublishPayload>, ) -> Result<Json<PublishToLibraryResponse>, ApiError>",
@@ -3117,7 +3118,7 @@
         "tags": [
           "observability"
         ],
-        "summary": "List models",
+        "summary": "List models available through the inference API",
         "operationId": "models_list_models_get_v1_models",
         "x-kiln-handler": "models::list_models",
         "x-kiln-rust-signature": "async fn list_models(State(state): State<AppState>) -> Json<ModelsResponse>",
@@ -3145,7 +3146,7 @@
         "tags": [
           "preflight"
         ],
-        "summary": "Capacity",
+        "summary": "Estimate whether a training request fits",
         "operationId": "pit_of_success_capacity_post_v1_preflight_capacity",
         "x-kiln-handler": "pit_of_success::capacity",
         "x-kiln-rust-signature": "async fn capacity( State(_state): State<AppState>, Json(req): Json<CapacityRequest>, ) -> Result<Json<CapacityResponse>, ApiError>",
@@ -3184,7 +3185,7 @@
         "tags": [
           "preflight"
         ],
-        "summary": "Compatibility",
+        "summary": "Check model, backend, and training compatibility",
         "operationId": "pit_of_success_compatibility_get_v1_preflight_compatibility",
         "x-kiln-handler": "pit_of_success::compatibility",
         "x-kiln-rust-signature": "async fn compatibility( State(_state): State<AppState>, Query(q): Query<CompatibilityQuery>, ) -> Json<CompatibilityResponse>",
@@ -3213,7 +3214,7 @@
         "tags": [
           "preflight"
         ],
-        "summary": "Tier defaults endpoint",
+        "summary": "Get defaults for one training tier",
         "operationId": "pit_of_success_tier_defaults_endpoint_get_v1_preflight_tier_defaults",
         "x-kiln-handler": "pit_of_success::tier_defaults_endpoint",
         "x-kiln-rust-signature": "async fn tier_defaults_endpoint( State(_state): State<AppState>, Query(q): Query<TierQuery>, ) -> Result<Json<TierDefaultsResponse>, ApiError>",
@@ -3242,7 +3243,7 @@
         "tags": [
           "preflight"
         ],
-        "summary": "Tier defaults list",
+        "summary": "List built-in training tiers and their defaults",
         "operationId": "pit_of_success_tier_defaults_list_get_v1_preflight_tiers",
         "x-kiln-handler": "pit_of_success::tier_defaults_list",
         "x-kiln-rust-signature": "async fn tier_defaults_list(State(_state): State<AppState>) -> Json<TierDefaultsListResponse>",
@@ -3270,7 +3271,7 @@
         "tags": [
           "recipes"
         ],
-        "summary": "List recipes",
+        "summary": "List built-in training recipes",
         "operationId": "recipes_list_recipes_get_v1_recipes",
         "x-kiln-handler": "recipes::list_recipes",
         "x-kiln-rust-signature": "async fn list_recipes(State(state): State<AppState>) -> Json<RecipesListResponse>",
@@ -3298,7 +3299,7 @@
         "tags": [
           "recipes"
         ],
-        "summary": "Run recipe",
+        "summary": "Start a built-in training recipe",
         "operationId": "recipes_run_recipe_post_v1_recipes_run",
         "x-kiln-handler": "recipes::run_recipe",
         "x-kiln-rust-signature": "async fn run_recipe( State(state): State<AppState>, payload: Result<Json<RecipeRunRequest>, JsonRejection>, ) -> Result<Json<RecipeRunResponse>, ApiError>",
@@ -3337,7 +3338,7 @@
         "tags": [
           "observability"
         ],
-        "summary": "Get decode stats",
+        "summary": "Get aggregate decode statistics",
         "operationId": "stats_get_decode_stats_get_v1_stats_decode",
         "x-kiln-handler": "stats::get_decode_stats",
         "x-kiln-rust-signature": "async fn get_decode_stats(State(state): State<AppState>) -> Json<DecodeStatsSnapshot>",
@@ -3365,7 +3366,7 @@
         "tags": [
           "observability"
         ],
-        "summary": "Get recent requests",
+        "summary": "List recent inference request records",
         "operationId": "stats_get_recent_requests_get_v1_stats_recent_requests",
         "x-kiln-handler": "stats::get_recent_requests",
         "x-kiln-rust-signature": "async fn get_recent_requests(State(state): State<AppState>) -> Json<Vec<RequestRecord>>",
@@ -3393,7 +3394,7 @@
         "tags": [
           "teachers"
         ],
-        "summary": "List teachers",
+        "summary": "List registered remote teachers",
         "operationId": "teachers_list_teachers_get_v1_teachers",
         "x-kiln-handler": "teachers::list_teachers",
         "x-kiln-rust-signature": "async fn list_teachers(State(state): State<AppState>) -> Json<TeachersListResponse>",
@@ -3419,7 +3420,7 @@
         "tags": [
           "teachers"
         ],
-        "summary": "Register teacher",
+        "summary": "Register an identity-bound remote teacher",
         "operationId": "teachers_register_teacher_post_v1_teachers",
         "x-kiln-handler": "teachers::register_teacher",
         "x-kiln-rust-signature": "async fn register_teacher( State(state): State<AppState>, payload: Result<Json<RegisterTeacherRequest>, JsonRejection>, ) -> Result<Json<TeacherEntry>, ApiError>",
@@ -3458,7 +3459,7 @@
         "tags": [
           "teachers"
         ],
-        "summary": "Delete teacher",
+        "summary": "Delete a registered remote teacher",
         "operationId": "teachers_delete_teacher_delete_v1_teachers_alias",
         "x-kiln-handler": "teachers::delete_teacher",
         "x-kiln-rust-signature": "async fn delete_teacher( State(state): State<AppState>, AxumPath(alias): AxumPath<String>, ) -> Result<Json<DeleteTeacherResponse>, ApiError>",
@@ -3497,7 +3498,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "Terminal status",
+        "summary": "Get embedded-terminal availability and access status",
         "operationId": "terminal_terminal_status_get_v1_terminal_status",
         "x-kiln-handler": "terminal::terminal_status",
         "x-kiln-rust-signature": "async fn terminal_status() -> Json<TerminalStatusResponse>",
@@ -3525,7 +3526,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "Upgrade to the trusted embedded terminal WebSocket",
+        "summary": "Open the embedded-terminal WebSocket when access policy permits",
         "operationId": "terminal_terminal_ws_get_v1_terminal_ws",
         "x-kiln-handler": "terminal::terminal_ws",
         "x-kiln-rust-signature": "async fn terminal_ws( ws: WebSocketUpgrade, axum::extract::State(state): axum::extract::State<AppState>, headers: HeaderMap, ) -> impl IntoResponse",
@@ -3564,7 +3565,7 @@
         "tags": [
           "preflight"
         ],
-        "summary": "Submit front door",
+        "summary": "Validate and route a training request",
         "operationId": "pit_of_success_submit_front_door_post_v1_train",
         "x-kiln-handler": "pit_of_success::submit_front_door",
         "x-kiln-rust-signature": "async fn submit_front_door( State(state): State<AppState>, payload: Result<Json<FrontDoorRequest>, JsonRejection>, ) -> Result<Json<FrontDoorResponse>, ApiError>",
@@ -3642,7 +3643,7 @@
         "tags": [
           "training"
         ],
-        "summary": "Submit grpo",
+        "summary": "Submit a GRPO training job",
         "operationId": "training_submit_grpo_post_v1_train_grpo",
         "x-kiln-handler": "training::submit_grpo",
         "x-kiln-rust-signature": "async fn submit_grpo( State(state): State<AppState>, payload: Result<Json<GrpoRequest>, JsonRejection>, ) -> Result<Json<TrainingResponse>, ApiError>",
@@ -3681,7 +3682,7 @@
         "tags": [
           "hf-trl"
         ],
-        "summary": "List exports",
+        "summary": "List immutable Hugging Face training exports",
         "operationId": "hf_trl_list_exports_get_v1_train_hf_exports",
         "x-kiln-handler": "hf_trl::list_exports",
         "x-kiln-rust-signature": "async fn list_exports(State(state): State<AppState>) -> Result<Json<ExportList>, ApiError>",
@@ -3709,7 +3710,7 @@
         "tags": [
           "hf-trl"
         ],
-        "summary": "Delete export",
+        "summary": "Delete a Hugging Face training export",
         "operationId": "hf_trl_delete_export_delete_v1_train_hf_exports_name",
         "x-kiln-handler": "hf_trl::delete_export",
         "x-kiln-rust-signature": "async fn delete_export( State(state): State<AppState>, AxumPath(name): AxumPath<String>, headers: HeaderMap, ) -> Result<Json<DeleteExportResponse>, ApiError>",
@@ -3755,7 +3756,7 @@
         "tags": [
           "hf-trl"
         ],
-        "summary": "Get export",
+        "summary": "Get a Hugging Face training export manifest",
         "operationId": "hf_trl_get_export_get_v1_train_hf_exports_name",
         "x-kiln-handler": "hf_trl::get_export",
         "x-kiln-rust-signature": "async fn get_export( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Response, ApiError>",
@@ -3801,7 +3802,7 @@
         "tags": [
           "hf-trl"
         ],
-        "summary": "Download export",
+        "summary": "Download a Hugging Face training export",
         "operationId": "hf_trl_download_export_get_v1_train_hf_exports_name_download",
         "x-kiln-handler": "hf_trl::download_export",
         "x-kiln-rust-signature": "async fn download_export( State(state): State<AppState>, AxumPath(name): AxumPath<String>, ) -> Result<Response, ApiError>",
@@ -3852,7 +3853,7 @@
         "tags": [
           "hf-trl"
         ],
-        "summary": "Create grpo export",
+        "summary": "Create an immutable GRPO export for Hugging Face",
         "operationId": "hf_trl_create_grpo_export_post_v1_train_hf_grpo_exports",
         "x-kiln-handler": "hf_trl::create_grpo_export",
         "x-kiln-rust-signature": "async fn create_grpo_export( State(state): State<AppState>, payload: Result<Json<GrpoExportRequest>, JsonRejection>, ) -> Result<Response, ApiError>",
@@ -3964,7 +3965,7 @@
         "tags": [
           "hf-trl"
         ],
-        "summary": "Create sft export",
+        "summary": "Create an immutable SFT export for Hugging Face",
         "operationId": "hf_trl_create_sft_export_post_v1_train_hf_sft_exports",
         "x-kiln-handler": "hf_trl::create_sft_export",
         "x-kiln-rust-signature": "async fn create_sft_export( State(state): State<AppState>, payload: Result<Json<SftExportRequest>, JsonRejection>, ) -> Result<Response, ApiError>",
@@ -4010,7 +4011,7 @@
         "tags": [
           "training"
         ],
-        "summary": "Delete archived job",
+        "summary": "Delete an archived training job",
         "operationId": "training_delete_archived_job_delete_v1_train_jobs_job_id",
         "x-kiln-handler": "training::delete_archived_job",
         "x-kiln-rust-signature": "async fn delete_archived_job( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, ) -> Result<Json<DeleteTrainingJobResponse>, ApiError>",
@@ -4047,7 +4048,7 @@
         "tags": [
           "training"
         ],
-        "summary": "Job detail",
+        "summary": "Get training-job configuration, status, and artifacts",
         "operationId": "training_job_detail_get_v1_train_jobs_job_id",
         "x-kiln-handler": "training::job_detail",
         "x-kiln-rust-signature": "async fn job_detail( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, ) -> Result<Json<TrainingJobDetail>, ApiError>",
@@ -4086,7 +4087,7 @@
         "tags": [
           "training"
         ],
-        "summary": "Submit opd",
+        "summary": "Submit an online policy distillation job",
         "operationId": "training_submit_opd_post_v1_train_opd",
         "x-kiln-handler": "training::submit_opd",
         "x-kiln-rust-signature": "async fn submit_opd( State(state): State<AppState>, payload: Result<Json<OpdRequest>, JsonRejection>, ) -> Result<Json<TrainingResponse>, ApiError>",
@@ -4125,7 +4126,7 @@
         "tags": [
           "training"
         ],
-        "summary": "List queue",
+        "summary": "List queued and running training jobs",
         "operationId": "training_list_queue_get_v1_train_queue",
         "x-kiln-handler": "training::list_queue",
         "x-kiln-rust-signature": "async fn list_queue(State(state): State<AppState>) -> Json<QueueResponse>",
@@ -4153,7 +4154,7 @@
         "tags": [
           "training"
         ],
-        "summary": "Cancel queued job",
+        "summary": "Cancel a queued training job",
         "operationId": "training_cancel_queued_job_delete_v1_train_queue_job_id",
         "x-kiln-handler": "training::cancel_queued_job",
         "x-kiln-rust-signature": "async fn cancel_queued_job( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, ) -> Result<Json<CancelTrainingJobResponse>, ApiError>",
@@ -4192,7 +4193,7 @@
         "tags": [
           "training"
         ],
-        "summary": "Submit sft",
+        "summary": "Submit a supervised fine-tuning job",
         "operationId": "training_submit_sft_post_v1_train_sft",
         "x-kiln-handler": "training::submit_sft",
         "x-kiln-rust-signature": "async fn submit_sft( State(state): State<AppState>, payload: Result<Json<SftRequest>, JsonRejection>, ) -> Result<Json<TrainingResponse>, ApiError>",
@@ -4231,7 +4232,7 @@
         "tags": [
           "training"
         ],
-        "summary": "Training status",
+        "summary": "List tracked training-job statuses",
         "operationId": "training_training_status_get_v1_train_status",
         "x-kiln-handler": "training::training_status",
         "x-kiln-rust-signature": "async fn training_status(State(state): State<AppState>) -> Json<Vec<TrainingStatus>>",
@@ -4259,7 +4260,7 @@
         "tags": [
           "training"
         ],
-        "summary": "Job status",
+        "summary": "Get one training-job status",
         "operationId": "training_job_status_get_v1_train_status_job_id",
         "x-kiln-handler": "training::job_status",
         "x-kiln-rust-signature": "async fn job_status( State(state): State<AppState>, AxumPath(job_id): AxumPath<String>, ) -> Result<Json<TrainingStatus>, ApiError>",

@@ -64,7 +64,7 @@
     },
     {
       "path": "crates/kiln-train/src/opd.rs",
-      "max_lines": 8453,
+      "max_lines": 8446,
       "rationale": "On-policy distillation still combines data flow, resume, teacher, and optimization orchestration; this cap forbids growth pending method-owned modules."
     },
     {

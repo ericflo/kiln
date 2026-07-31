@@ -1,94 +1,149 @@
-# Base-Weight Provenance
+# Base-weight identity and compatibility
 
-Kiln assigns one canonical identity to the complete set of safetensors shards
-behind the resident base model. The loader creates this manifest while hashing
-the immutable startup snapshot. It retains the result in memory and carries it
-through GPU transfer, training, and evaluation; status and artifact writes do
-not re-read weight files during inference.
+Kiln gives the complete set of safetensors shards behind a resident model one
+canonical content identity. The model loader builds the identity while hashing
+its startup snapshot, retains it in memory, and carries it through GPU
+transfer, training, evaluation, checkpoints, and receipts.
 
-Production model startup requires a valid manifest. `None` is reserved for
-legacy archives and explicitly synthetic or mock model paths.
+Use the aggregate to answer “are these the same base-weight bytes?” Do not use
+a model name, directory name, Hub ID, or filename list as a substitute.
+
+Production model startup requires a valid shard manifest. A missing manifest is
+reserved for legacy archives and explicitly synthetic or mock model paths.
+
+## Read the identity
+
+For a quick resident-model check, inspect either health route:
+
+```bash
+curl -fsS http://localhost:8420/health \
+  | jq '.base_weight_identity'
+```
+
+`/health` and `/v1/health` return a bounded summary:
+
+```json
+{
+  "manifest_type": "kiln.base-weight-shards.v1",
+  "aggregate_algorithm": "kiln.base-model-content.v1",
+  "aggregate_sha256": "sha256:<64 lowercase hex>",
+  "shard_count": 2,
+  "total_size_bytes": 9319828096
+}
+```
+
+The aggregate is enough for a content-equivalence comparison. Use the gated
+`/v1/debug/model-state` endpoint or a receipt/checkpoint that already carries
+the complete manifest when you need per-shard audit detail.
 
 ## Manifest schema
 
-The current type is `kiln.base-weight-shards.v1` with schema version `1`:
+The current contract is `kiln.base-weight-shards.v1`, schema version 1:
 
 ```json
 {
   "schema_version": 1,
   "manifest_type": "kiln.base-weight-shards.v1",
   "aggregate_algorithm": "kiln.base-model-content.v1",
-  "aggregate_sha256": "sha256:<64 lowercase hex digits>",
-  "total_size_bytes": 123456,
+  "aggregate_sha256": "sha256:<64 lowercase hex>",
+  "total_size_bytes": 9319828096,
   "shards": [
     {
       "filename": "model-00001-of-00002.safetensors",
-      "size_bytes": 61728,
-      "sha256": "sha256:<64 lowercase hex digits>"
+      "size_bytes": 5329398688,
+      "sha256": "sha256:<64 lowercase hex>"
+    },
+    {
+      "filename": "model-00002-of-00002.safetensors",
+      "size_bytes": 3990429408,
+      "sha256": "sha256:<64 lowercase hex>"
     }
   ]
 }
 ```
 
-Each shard digest covers every byte in the named file. Shards that contribute
-no tensor requested by the current model implementation are still included.
-The strict validator requires at least one and at most 4,096 shards, non-zero
-sizes, unique portable `.safetensors` filenames sorted lexicographically, valid
-lowercase prefixed SHA-256 values, an exact byte total, and no unknown fields.
+Each shard digest covers every byte in the named file. A shard remains part of
+the identity even when the current model implementation does not request a
+tensor from it.
 
-## Content identity
+The strict validator requires:
 
-`kiln.base-model-content.v1` deliberately separates byte identity from audit
-filenames. To compute `aggregate_sha256`:
+- schema version 1, the exact manifest type, and the exact aggregate algorithm;
+- between 1 and 4,096 shards;
+- a nonzero byte size and lowercase `sha256:` digest for every shard;
+- unique portable `.safetensors` filenames, no more than 255 bytes each,
+  sorted lexicographically;
+- an exact, non-overflowing total of all shard sizes;
+- an aggregate recomputed from the shard records; and
+- no unknown fields.
 
-1. Decode every shard SHA-256 and pair it with its unsigned 64-bit byte size.
-2. Sort records by digest bytes and then size. Preserve duplicate records.
-3. Hash the ASCII domain `kiln.base-model-content.v1` followed by a NUL byte,
-   the record count as little-endian `u64`, then for each record its size as
-   little-endian `u64` followed by the 32 digest bytes.
+## How the aggregate is computed
+
+`kiln.base-model-content.v1` separates content identity from audit filenames:
+
+1. Decode every shard SHA-256 and pair it with the shard's unsigned 64-bit
+   byte size.
+2. Sort those records by digest bytes and then by size. Preserve repeated
+   content records from differently named shards.
+3. Hash the ASCII domain `kiln.base-model-content.v1`, a NUL byte, the record
+   count as little-endian `u64`, and then each little-endian size followed by
+   its raw 32-byte digest.
 4. Encode the result as lowercase `sha256:<hex>`.
 
-The aggregate changes when any shard byte, size, or multiplicity changes. It is
-independent of absolute path, filename, safetensors-index order, and directory
-enumeration order. Filenames remain in the manifest so an operator can locate
-and audit a shard, but renaming identical shard bytes does not make an exact
-resume incompatible.
+The aggregate changes if any shard byte, size, or multiplicity changes. It is
+independent of absolute paths, filenames, safetensors-index order, and
+directory enumeration order.
 
-## Runtime and artifact surfaces
+Filenames stay in the full manifest for diagnosis. Renaming the same shard
+bytes changes the audit manifest but not the content aggregate.
 
-- `/health` and `/v1/health` expose the bounded `base_weight_identity` summary:
-  type, aggregate algorithm/digest, shard count, and total bytes.
-- Gated `/v1/debug/model-state` exposes `base_weight_shard_manifest` in full.
-  Enable it only through the existing eval/debug endpoint policy.
-- Exact SFT, GRPO, and OPD checkpoints store the full manifest in
-  `auxiliary_state.base_weight_shard_manifest` and retain the aggregate in
-  `base_model_weights_sha256` as a consistency check.
-- Completed `train_receipt.json` files store it under
-  `model.base_weight_shard_manifest`; `adapter_manifest.json` copies it to the
-  top level. Both readers reject internally inconsistent manifests.
-- Eval admission snapshots the resident manifest. Job list/detail responses,
-  terminal archives, raw result JSON, CLI output, and dashboard drill-ins retain
-  it. Dashboard outcome JSONL exports include it on each self-contained row.
+## Where the identity appears
 
-The browser and CLI show the aggregate, count, and byte total for routine use;
-raw JSON carries the complete shard list.
+| Surface | Representation | Reader job |
+| --- | --- | --- |
+| `/health`, `/v1/health` | Aggregate, algorithm, shard count, total bytes | Compare resident base content quickly. |
+| Gated `/v1/debug/model-state` | Complete shard manifest | Diagnose an exact shard or filename difference. |
+| Exact SFT, GRPO, and OPD checkpoints | Full manifest plus aggregate consistency field | Reject incompatible resume before GPU ownership. |
+| `train_receipt.json` | `model.base_weight_shard_manifest` | Audit the base used for a completed run. |
+| `adapter_manifest.json` | Top-level copy | Carry base provenance with the serving adapter. |
+| Eval jobs, terminal archives, and raw result JSON | Full manifest | Bind eval outcomes to exact base bytes. |
+| Dashboard outcome JSONL | Full manifest on each self-contained row | Preserve identity outside the dashboard. |
 
-## Exact resume and compatibility
+Routine browser and CLI views show the bounded summary. Raw JSON retains the
+complete shard list where the contract calls for it.
 
-Exact resume validates both the checkpoint and current manifests before any GPU
-ownership. Their validated content aggregates must match. A byte, size, or
-multiplicity change fails closed; a path or filename-only change is accepted.
+## Decide what “compatible” means
 
-Legacy exact checkpoints that contain only `base_model_weights_sha256` cannot
-prove their constituent shard artifacts and are rejected with a migration
-error. They remain ordinary files and may still be used as documented
-serving-only or weights-only inputs where exact optimizer continuation is not
-claimed. Legacy train/eval archives may deserialize without the optional full
-manifest, but all newly admitted production jobs include one.
+| Comparison | Same aggregate required? | Other identity required? |
+| --- | :---: | --- |
+| “These model directories contain the same base weights.” | yes | No; paths and filenames can differ. |
+| “This adapter was trained from these base bytes.” | compare the adapter manifest or receipt aggregate | Also inspect model config, tokenizer/template, and adapter lineage. |
+| “This eval result used the resident base.” | yes | Also inspect execution, tokenizer/template, request, and adapter identities. |
+| “This checkpoint can resume exactly.” | yes | Yes: exact checkpoint, execution, data, optimizer, scheduler, RNG, adapter, tokenizer, and configuration contracts must all pass. |
 
-The manifest proves loaded base-weight bytes, not the entire replay envelope.
-Tokenizer/template identity, adapter revision, data, and seed remain separate
-provenance inputs. The process-level executable/source, backend, device,
-driver/runtime, precision, kernel, and effective-configuration identity is
-defined by the separate [Execution Provenance](EXECUTION_PROVENANCE.md)
-contract.
+The shard manifest proves only the loaded base-weight bytes. It does not bind
+model configuration, tokenizer, chat template, adapter revision, training
+data, seed, executable, backend, driver, precision, or kernels.
+
+## Exact-resume behavior
+
+Exact resume validates both the checkpoint's manifest and the current
+resident manifest before GPU ownership. Their validated content aggregates
+must match:
+
+- a byte, size, or multiplicity change fails closed;
+- a path or filename-only change passes the base-weight comparison; and
+- a matching aggregate can still fail resume at another identity boundary.
+
+Legacy checkpoints that recorded only `base_model_weights_sha256` cannot prove
+their constituent shards and are rejected for exact resume. They remain
+archival checkpoint files; they do not become PEFT serving adapters or valid
+weights-only restore inputs.
+
+Legacy train and eval archives may deserialize without the optional full
+manifest. Every newly admitted production job records one.
+
+See [execution provenance](EXECUTION_PROVENANCE.md) for process, backend,
+device, runtime, precision, kernel, and effective-configuration identity; see
+[native training checkpoints](training-checkpoints.md) for the rest of the
+exact-resume envelope.

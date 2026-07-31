@@ -71,7 +71,7 @@
   --font-display: var(--font-sans);
   --font-mono: 'JetBrains Mono', 'JetBrains Mono Fallback', 'SF Mono', 'Berkeley Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
 
-  --text-2xs: 11px;
+  --text-2xs: 12px;
   --text-xs:  12px;
   --text-sm:  13px;
   --text-md:  14px;
@@ -180,7 +180,7 @@ hr { border: 0; height: 1px; background: var(--border); margin: var(--space-8) 0
 .skip-link {
   position: absolute;
   top: 0; left: var(--space-4);
-  transform: translateY(-120%);
+  transform: translateY(calc(-100% + 1px));
   z-index: 100;
   background: var(--accent);
   color: #1a0c00;
@@ -434,7 +434,7 @@ code, kbd, pre, samp {
   border: 1px solid var(--border);
   padding: 1px 6px;
   border-radius: var(--radius-xs);
-  font-size: 0.85em;
+  font-size: max(0.85em, 12px);
   color: var(--kiln-200);
 }
 pre {
@@ -1570,7 +1570,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
   border-radius: var(--radius-md); padding: 8px 12px;
 }
 .connect-keychip .icn { color: var(--success-fg); }
-.connect-keychip code { font-size: 11px; background: var(--surface-2); border: 1px solid var(--border); padding: 0 5px; border-radius: var(--radius-xs); color: var(--kiln-200); }
+.connect-keychip code { font-size: 12px; background: var(--surface-2); border: 1px solid var(--border); padding: 0 5px; border-radius: var(--radius-xs); color: var(--kiln-200); }
 .connect-note {
   font-size: var(--text-xs); color: var(--text-muted); line-height: 1.5; margin: 0;
 }
@@ -1593,7 +1593,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
   border-radius: var(--radius-sm);
 }
 .connect-snippet .code-block-path {
-  font-family: var(--font-mono); font-size: 11px; color: var(--text-quiet);
+  font-family: var(--font-mono); font-size: 12px; color: var(--text-quiet);
   padding: 6px var(--space-4); border-bottom: 1px solid var(--border); background: rgba(0,0,0,0.22);
 }
 
@@ -1631,7 +1631,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
   letter-spacing: -0.01em; line-height: 1.15;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.flywheel-node .fw-sub { font-size: 11px; color: var(--text-quiet); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flywheel-node .fw-sub { font-size: 12px; color: var(--text-quiet); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .flywheel-node.hot { background: var(--accent-soft); }
 .flywheel-node.hot .fw-eyebrow, .flywheel-node.hot .fw-eyebrow .icn { color: var(--accent-hover); }
 .flywheel-arrow {
@@ -1971,7 +1971,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
   border: 1px solid rgba(249,115,22,0.22);
   border-radius: var(--radius-pill);
   background: rgba(249,115,22,0.07);
-  font: 600 11px/1.3 var(--font-mono);
+  font: 600 12px/1.3 var(--font-mono);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
@@ -2119,7 +2119,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
 .learning-pass-title,
 .learning-pass-live {
   color: var(--text-quiet);
-  font: 500 11px/1.2 var(--font-mono);
+  font: 500 12px/1.2 var(--font-mono);
 }
 
 .learning-pass-live {
@@ -2153,7 +2153,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
 
 .learning-label {
   color: var(--text-quiet);
-  font: 600 10px/1 var(--font-mono);
+  font: 600 12px/1 var(--font-mono);
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
@@ -2197,7 +2197,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
 .score {
   padding: 3px 7px;
   border-radius: var(--radius-pill);
-  font: 600 10px/1 var(--font-mono);
+  font: 600 12px/1 var(--font-mono);
 }
 
 .score-bad {
@@ -2281,7 +2281,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
 
 .learning-heat-event code {
   color: var(--text-quiet);
-  font-size: 10px;
+  font-size: 12px;
   background: transparent;
   border: 0;
   padding: 0;
@@ -2289,7 +2289,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
 
 .learning-event-time {
   color: var(--text-quiet);
-  font: 500 10px/1 var(--font-mono);
+  font: 500 12px/1 var(--font-mono);
 }
 
 .learning-pass-footer {
@@ -2301,7 +2301,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
   padding-top: 14px;
   border-top: 1px solid rgba(117,107,91,0.18);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .learning-pass-footer > span {
@@ -2328,7 +2328,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  font: 500 11px/1 var(--font-sans);
+  font: 500 12px/1 var(--font-sans);
   cursor: pointer;
 }
 
@@ -2387,7 +2387,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
   gap: 3px;
   padding: 14px 20px;
   color: var(--text-quiet);
-  font-size: 11px;
+  font-size: 12px;
   border-left: 1px solid rgba(117,107,91,0.2);
 }
 
@@ -2491,7 +2491,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
   top: 18px;
   right: 18px;
   color: var(--text-quiet);
-  font: 500 10px/1 var(--font-mono);
+  font: 500 12px/1 var(--font-mono);
 }
 
 .loop-step > .icn {
@@ -2579,7 +2579,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
   padding: 0 15px;
   color: var(--text-muted);
   border-bottom: 1px solid var(--border);
-  font: 500 10px/1 var(--font-mono);
+  font: 500 12px/1 var(--font-mono);
   background: #14120f;
 }
 
@@ -2629,7 +2629,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
 
 .product-points article > span {
   color: var(--accent);
-  font: 600 10px/1.4 var(--font-mono);
+  font: 600 12px/1.4 var(--font-mono);
 }
 
 .product-points h3 {
@@ -2641,6 +2641,27 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
   color: var(--text-muted);
   font-size: var(--text-sm);
   line-height: 1.52;
+}
+
+.product-profile-note {
+  margin: 0;
+  padding: 17px 20px;
+  border-bottom: 1px solid rgba(117,107,91,0.2);
+  background: rgba(249,115,22,0.04);
+}
+
+.product-profile-note strong {
+  color: var(--kiln-200);
+}
+
+.product-profile-note code {
+  color: var(--text-2);
+  font-size: 0.86em;
+}
+
+.product-profile-note a {
+  color: var(--kiln-300);
+  font-weight: 600;
 }
 
 .product-demo-link {
@@ -2677,7 +2698,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
   display: block;
   margin-bottom: 30px;
   color: var(--accent);
-  font: 600 10px/1 var(--font-mono);
+  font: 600 12px/1 var(--font-mono);
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
@@ -2769,7 +2790,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
   color: var(--text-3);
   border-top: 1px solid var(--border);
   background: rgba(29,27,23,0.52);
-  font: 500 10px/1.4 var(--font-mono);
+  font: 500 12px/1.4 var(--font-mono);
 }
 
 .install-terminal-status span:first-child {
@@ -2820,7 +2841,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
   justify-content: space-between;
   gap: 18px;
   color: var(--text-quiet);
-  font: 600 10px/1.4 var(--font-mono);
+  font: 600 12px/1.4 var(--font-mono);
   text-transform: uppercase;
   letter-spacing: 0.055em;
 }
@@ -2876,7 +2897,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
 .evidence-result-main p {
   margin-top: 16px;
   color: var(--text-muted);
-  font: 500 11px/1.5 var(--font-mono);
+  font: 500 12px/1.5 var(--font-mono);
 }
 
 .evidence-metrics {
@@ -2899,7 +2920,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
 .evidence-metrics dt {
   margin-bottom: 8px;
   color: var(--text-quiet);
-  font: 600 9px/1.2 var(--font-mono);
+  font: 600 12px/1.2 var(--font-mono);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
@@ -2916,7 +2937,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
 
 .evidence-metrics dd small {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 12px;
   letter-spacing: 0;
 }
 
@@ -3007,7 +3028,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
 
 .release-platforms small {
   color: var(--text-quiet);
-  font: 500 10px/1.3 var(--font-mono);
+  font: 500 12px/1.3 var(--font-mono);
   text-align: right;
 }
 
@@ -3036,7 +3057,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
 .release-proof-foot > span {
   margin-bottom: 8px;
   color: var(--text-quiet);
-  font: 500 9px/1.5 var(--font-mono);
+  font: 500 12px/1.5 var(--font-mono);
   text-transform: uppercase;
   letter-spacing: 0.045em;
 }
@@ -3062,7 +3083,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
 
 .evidence-boundary > span {
   color: var(--kiln-300);
-  font: 650 10px/1.3 var(--font-mono);
+  font: 650 12px/1.3 var(--font-mono);
   text-transform: uppercase;
   letter-spacing: 0.055em;
 }
@@ -3198,6 +3219,10 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
   }
 
   .product-demo-link {
+    grid-column: 1 / -1;
+  }
+
+  .product-profile-note {
     grid-column: 1 / -1;
   }
 
@@ -3489,7 +3514,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
 
   .architecture-mark {
     gap: 8px;
-    font-size: 10px;
+    font-size: 12px;
   }
 
   .install-copy h2 {
@@ -3507,7 +3532,7 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
 
   .install-terminal pre {
     padding: 19px 16px;
-    font-size: 10px;
+    font-size: 12px;
   }
 
   .install-terminal-status {
@@ -3572,11 +3597,11 @@ pre code { background: transparent; border: 0; padding: 0; color: inherit; font-
   }
 
   .learning-answer p {
-    font-size: 11px;
+    font-size: 12px;
   }
 
   .learning-heat-event strong {
-    font-size: 10px;
+    font-size: 12px;
   }
 
   .evidence-result {

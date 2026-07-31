@@ -223,9 +223,12 @@ test('build copies the static site and emits complete deterministic docs', async
   assert.match(guide, /href="\.\.\/configuration\/#load-order"/);
 
   const hub = await readFile(resolve(first, 'docs/index.html'), 'utf8');
-  assert.match(hub, /Start with the answer/);
-  assert.match(hub, /Choose the outcome you need/);
+  assert.match(hub, /Choose a path/);
+  assert.match(hub, /Start with a product workflow below/);
+  assert.match(hub, /Search 3 guides and references/);
+  assert.match(hub, /<title>Guides and reference &mdash; Kiln Documentation<\/title>/);
   assert.match(hub, /Start with a workflow/);
+  assert.match(hub, /Core documentation/);
   assert.match(hub, /Reference library/);
   assert.match(hub, /href="\.\/configuration\/"/);
 
@@ -284,7 +287,7 @@ test('JSON Schema documents render fields, constraints, definitions, and search 
       required: ['schema_version', 'result'],
       properties: {
         schema_version: { type: 'integer', const: 1, description: 'Envelope version.' },
-        result: { $ref: '#/$defs/result', description: 'One result.' },
+        result: { $ref: '#/$defs/result' },
       },
       allOf: [
         {
@@ -345,6 +348,8 @@ test('JSON Schema documents render fields, constraints, definitions, and search 
   assert.match(html, /Root fields/);
   assert.match(html, /<code>schema_version<\/code>/);
   assert.match(html, /const 1/);
+  assert.match(html, /<td>Result\. Closed result record\.<\/td>/);
+  assert.match(html, /<td>Duration ms\.<\/td>/);
   assert.match(html, /Definitions/);
   assert.match(html, /id="result"/);
   assert.match(html, /enum &quot;passed&quot;, &quot;failed&quot;/);
@@ -355,8 +360,10 @@ test('JSON Schema documents render fields, constraints, definitions, and search 
   assert.match(html, /Profile gate/);
   assert.match(html, /experimental when const true/);
   assert.match(html, /Composition and conditional rules/);
+  assert.match(html, /Show exact composition rules/);
   assert.match(html, /&quot;then&quot;: \{/);
   assert.match(html, /Kiln contract annotations/);
+  assert.match(html, /Show exact Kiln annotations and examples/);
   assert.match(html, /x-kiln-field-schema-status/);
   assert.match(html, /content media type text\/event-stream/);
   assert.match(html, /x-kiln-event-types/);
@@ -371,6 +378,66 @@ test('JSON Schema documents render fields, constraints, definitions, and search 
     loadAndValidateManifest({ repoRoot: fixture.root, manifestPath: fixture.manifestPath }),
     (error) => error instanceof DocsBuildError && /not valid JSON/.test(error.message),
   );
+});
+
+test('union JSON Schemas lead with linked public entrypoints', async () => {
+  const fixture = await createFixture();
+  const manifest = fixtureManifest();
+  manifest.documents.push({
+    source: 'contracts/union.schema.json',
+    kind: 'json_schema',
+    slug: 'union-schema',
+    title: 'Union schema',
+    section: 'start',
+    description: 'Generated union contract.',
+  });
+  await write(fixture.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  await write(
+    resolve(fixture.root, 'contracts/union.schema.json'),
+    `${JSON.stringify({
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      title: 'Union fixture',
+      oneOf: [
+        { $ref: '#/$defs/AlphaRequest' },
+        { $ref: '#/$defs/AlphaResponse' },
+      ],
+      $defs: {
+        AlphaRequest: {
+          description: 'Submit one alpha.',
+          type: 'object',
+          additionalProperties: true,
+          required: ['value'],
+          properties: { value: { type: 'string' } },
+        },
+        AlphaResponse: {
+          description: 'Return the accepted alpha.',
+          type: 'object',
+          additionalProperties: false,
+          required: ['value', 'accepted'],
+          properties: {
+            value: { type: 'string' },
+            accepted: { type: 'boolean' },
+          },
+        },
+      },
+    }, null, 2)}\n`,
+  );
+
+  const output = resolve(fixture.root, '.union-schema-output');
+  await buildDocsSite({
+    repoRoot: fixture.root,
+    siteSourceDir: fixture.site,
+    manifestPath: fixture.manifestPath,
+    outDir: output,
+  });
+  const html = await readFile(resolve(output, 'docs/union-schema/index.html'), 'utf8');
+  assert.match(html, /<h2 id="entrypoints">Entrypoints<\/h2>/);
+  assert.match(html, /Union of 2 public entrypoints/);
+  assert.match(html, /href="#alpharequest"/);
+  assert.match(html, /Submit one alpha/);
+  assert.match(html, /Unknown fields accepted and ignored/);
+  assert.match(html, /Unknown fields rejected/);
+  assert.doesNotMatch(html, /<h2 id="root-fields">Root fields<\/h2>/);
 });
 
 test('OpenAPI documents render every operation, transport, owner, and payload status', async () => {
@@ -396,6 +463,7 @@ test('OpenAPI documents render every operation, transport, owner, and payload st
         description: 'Canonical fixture operation inventory.',
       },
       servers: [{ url: 'http://127.0.0.1:8420' }],
+      security: [],
       tags: [
         { name: 'status', description: 'Operational status.' },
         { name: 'terminal', description: 'Terminal transport.' },
@@ -474,6 +542,8 @@ test('OpenAPI documents render every operation, transport, owner, and payload st
   assert.match(html, /WebSocket/);
   assert.match(html, /query: HealthQuery/);
   assert.match(html, /headers: Origin/);
+  assert.match(html, /Authentication/);
+  assert.match(html, /none declared/);
   assert.match(html, /terminal::terminal_ws/);
   assert.match(html, /Payload components/);
   assert.match(html, /migration pending/);
@@ -615,6 +685,13 @@ test('search loads its index and resolves product and reference results over HTT
     await page.waitForFunction(() => document.querySelector('.docs-search-result')?.textContent.includes('Configuration'));
     const referenceHref = await page.$eval('.docs-search-result', (element) => element.getAttribute('href'));
     assert.equal(referenceHref, './configuration/');
+
+    await page.locator('#docs-search-hub').fill('not-a-published-kiln-term');
+    await page.waitForFunction(() => document.querySelector('.docs-search-empty')?.textContent.includes('Try fewer or broader words.'));
+    assert.match(
+      await page.$eval('.docs-search-empty', (element) => element.textContent),
+      /No documents match .* Try fewer or broader words\./,
+    );
   } finally {
     await browser?.close();
     await server.close();

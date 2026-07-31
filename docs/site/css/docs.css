@@ -93,14 +93,14 @@ body.docs-body {
 .skip-link {
   position: fixed;
   z-index: 200;
-  top: 8px;
+  top: 0;
   left: 12px;
   padding: 8px 12px;
   background: var(--docs-accent);
   color: #180b02 !important;
   border-radius: 5px;
   font-weight: 700;
-  transform: translateY(-150%);
+  transform: translateY(calc(-100% + 1px));
 }
 
 .skip-link:focus {
@@ -661,6 +661,57 @@ body.docs-body {
   cursor: pointer;
 }
 
+.docs-article .docs-schema-definition {
+  margin: 10px 0;
+  padding: 0;
+}
+
+.docs-schema-definition > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 13px 15px;
+}
+
+.docs-schema-definition > summary span,
+.docs-schema-definition > summary small {
+  display: block;
+}
+
+.docs-schema-definition > summary code {
+  color: var(--docs-text);
+  font-size: 13px;
+}
+
+.docs-schema-definition > summary small {
+  margin-top: 4px;
+  color: var(--docs-text-muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.docs-schema-definition > summary b {
+  flex: 0 0 auto;
+  color: var(--docs-accent);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.docs-schema-definition[open] > summary {
+  border-bottom: 1px solid var(--docs-border);
+}
+
+.docs-schema-definition > :not(summary) {
+  margin-right: 15px;
+  margin-left: 15px;
+}
+
+.docs-schema-definition > :last-child {
+  margin-bottom: 15px;
+}
+
 .docs-table-scroll {
   max-width: 100%;
   margin: 22px 0;
@@ -697,6 +748,12 @@ body.docs-body {
   word-break: normal;
 }
 
+.docs-table-cell-value {
+  min-width: 0;
+  overflow-wrap: inherit;
+  word-break: inherit;
+}
+
 .docs-table-scroll th:last-child,
 .docs-table-scroll td:last-child {
   border-right: 0;
@@ -710,6 +767,71 @@ body.docs-body {
   background: var(--docs-surface-raised);
   color: var(--docs-text);
   font-weight: 680;
+}
+
+/*
+ * Capability inventory rows contain long source paths, commands, and typed
+ * method names. A conventional seven- or eight-column matrix becomes
+ * unreadable inside the documentation article even on desktop, so the
+ * generated report opts into labeled records at every viewport width.
+ */
+.docs-capability-inventory .docs-table-scroll {
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+}
+
+.docs-capability-inventory .docs-table-scroll table,
+.docs-capability-inventory .docs-table-scroll tbody,
+.docs-capability-inventory .docs-table-scroll tbody tr {
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
+
+.docs-capability-inventory .docs-table-scroll thead {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.docs-capability-inventory .docs-table-scroll tbody tr {
+  margin-bottom: 12px;
+  overflow: hidden;
+  border: 1px solid var(--docs-border);
+  border-radius: 6px;
+  background: var(--docs-surface);
+}
+
+.docs-capability-inventory .docs-table-scroll tbody tr:last-child {
+  margin-bottom: 0;
+}
+
+.docs-capability-inventory .docs-table-scroll tbody td {
+  display: grid;
+  grid-template-columns: minmax(180px, 28%) minmax(0, 1fr);
+  gap: 16px;
+  width: 100%;
+  padding: 10px 11px;
+  overflow-wrap: anywhere;
+  border-right: 0;
+}
+
+.docs-capability-inventory .docs-table-scroll tbody td::before {
+  content: attr(data-label);
+  color: var(--docs-text-muted);
+  font: 650 10px/1.45 var(--docs-font-mono);
+  letter-spacing: 0.025em;
+  text-transform: uppercase;
+}
+
+.docs-capability-inventory .docs-table-scroll tbody td:last-child {
+  border-bottom: 0;
 }
 
 .docs-toc {
@@ -745,7 +867,9 @@ body.docs-body {
 }
 
 .docs-toc a {
-  display: block;
+  display: flex;
+  min-height: 28px;
+  align-items: center;
   padding: 4px 0;
   color: var(--docs-text-muted);
   font-size: 11px;
@@ -870,6 +994,14 @@ body.docs-body {
   color: var(--docs-text);
   font-size: 27px;
   letter-spacing: -0.02em;
+}
+
+.docs-core-library > p {
+  max-width: 66ch;
+  margin: 10px 0 0;
+  color: var(--docs-text-muted);
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .docs-product-guides h2,
@@ -1222,6 +1354,70 @@ body.docs-body {
 
   .docs-article h2 {
     font-size: 23px;
+  }
+
+  .docs-table-scroll {
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .docs-table-scroll table,
+  .docs-table-scroll tbody,
+  .docs-table-scroll tbody tr {
+    display: block;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .docs-table-scroll thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .docs-table-scroll tbody tr {
+    margin-bottom: 12px;
+    overflow: hidden;
+    border: 1px solid var(--docs-border);
+    border-radius: 6px;
+    background: var(--docs-surface);
+  }
+
+  .docs-table-scroll tbody tr:last-child {
+    margin-bottom: 0;
+  }
+
+  .docs-table-scroll tbody td {
+    display: grid;
+    grid-template-columns: minmax(92px, 34%) minmax(0, 1fr);
+    gap: 10px;
+    width: 100%;
+    padding: 10px 11px;
+    overflow-wrap: anywhere;
+    border-right: 0;
+  }
+
+  .docs-capability-inventory .docs-table-scroll tbody td {
+    grid-template-columns: minmax(92px, 34%) minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .docs-table-scroll tbody td::before {
+    content: attr(data-label);
+    color: var(--docs-text-muted);
+    font: 650 10px/1.45 var(--docs-font-mono);
+    letter-spacing: 0.025em;
+    text-transform: uppercase;
+  }
+
+  .docs-table-scroll tbody td:last-child {
+    border-bottom: 0;
   }
 
   .docs-pager {

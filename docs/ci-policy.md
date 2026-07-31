@@ -1,175 +1,230 @@
-# CI And Local Hardware Qualification Policy
+# CI and local hardware qualification policy
 
-Kiln uses GitHub Actions as a small platform-independent safety net. It does
-not use hosted CI as proof that a GPU backend is correct, stable, or fast.
-Backend qualification runs locally on named hardware and produces compact,
-validated receipts under `qualification/receipts/`. Detailed cross-engine
-serving measurements live separately under `benchmarks/receipts/` and are
-validated by the shared serving driver.
+Kiln separates inexpensive repository checks from accelerator evidence.
+GitHub-hosted CI can prove that selected code builds, tests pass, contracts
+validate, and repository policy holds. It cannot, by itself, prove that a real
+CUDA, ROCm, Vulkan, or Metal device is correct, stable, or fast.
 
-## Automatic Work
+## Start here
 
-An ordinary Rust push or pull request may run:
+| If you need to know… | Use this evidence |
+| --- | --- |
+| Did the changed code pass portable checks? | The path-matched GitHub Actions jobs below |
+| Does an accelerator feature still compile? | The corresponding manually dispatched backend job |
+| Did the change run correctly on a real accelerator? | A validated local qualification receipt |
+| Did latency, throughput, or memory improve? | Comparable before/after receipts from the same workload and policy |
+| Is a release ready to publish? | Green portable checks, relevant local receipts, and a manual packaging run from the intended tag |
 
-- Rust formatting.
-- One Linux default-feature build/test job, including the focused substrate,
-  dependency-tree, qualification-tool, and portable-receipt checks.
-- Dependency advisory, license, source, and ban policy.
-- UI smoke, Pages, or release-version checks only when their narrowly scoped
-  paths change.
-- The small OPD gate-parser self-test when its own paths change.
+A skipped job usually means its path filter or manual-dispatch condition did
+not match. It is not a pass. Open the workflow file and confirm the trigger
+before drawing a conclusion from the check list.
 
-Automatic jobs must be cheap and useful without a GPU. A passing automatic run
-does not qualify CUDA, ROCm, Vulkan, Metal, packaging, or performance.
+## What a green check proves
 
-## Manual Work
+Every check has a bounded claim:
 
-Compile-only backend jobs remain available for deliberate compatibility checks:
+- A CPU test proves only the behavior exercised by that test.
+- A feature build proves that the selected source and toolchain compiled and
+  linked. It does not prove on-device execution.
+- A software Vulkan run can catch API and shader regressions, but it does not
+  qualify a physical Vulkan implementation.
+- A portable receipt check proves that checked-in evidence matches its schema
+  and retained-artifact policy. It does not rerun the workload.
+- A local receipt proves only the declared source, model, workload, backend,
+  device, and pass criteria. One machine never becomes a device allowlist or a
+  universal performance claim.
 
-```bash
-gh workflow run ci.yml --ref main -f backend_build=metal
-gh workflow run ci.yml --ref main -f backend_build=vulkan
-gh workflow run ci.yml --ref main -f backend_build=cuda
-gh workflow run ci.yml --ref main -f backend_build=rocm
-gh workflow run ci.yml --ref main -f backend_build=all
-```
+Mocks, source-text assertions, and tests that return success after skipping
+required hardware do not count as accelerator evidence.
 
-These jobs still do not count as hardware evidence. The real device must run
-the qualification workload and produce a receipt.
+## Automatic checks
 
-Release packaging is also deliberate. Create and inspect the tag first, verify
-the relevant local receipts, and dispatch from that tag:
+The repository currently uses these automatic workflows:
 
-```bash
-gh workflow run server-release.yml --ref kiln-vX.Y.Z
-gh workflow run docker-server-release.yml --ref kiln-vX.Y.Z
-gh workflow run desktop-build.yml --ref desktop-vX.Y.Z
-gh workflow run runpod-image.yml --ref main
-```
+| Workflow | Trigger | Primary claim |
+| --- | --- | --- |
+| `ci.yml` | Matching Rust, manifest, toolchain, or policy changes | Formatting, the Linux default-feature build and tests, focused substrate checks, qualification-tool tests, portable receipts, and dependency policy |
+| `repository-hygiene.yml` | Every push and pull request | Tracked artifacts and production-file budgets satisfy repository policy |
+| `qualification-contract.yml` | Matching contract, qualification, benchmark-receipt, or related source changes | Environment and source-parsing ratchets, qualification tooling, retained evidence, and portable receipts validate |
+| `ui-smoke.yml` | Matching server-dashboard, desktop-UI, or thinking-budget changes | Browser and static UI contracts pass |
+| `release-version-drift.yml` | Matching version-owning or version-consuming changes | User-facing release examples and runtime defaults agree with their canonical owners |
+| `opd-bench-gate.yml` | Matching pull-request paths | The inexpensive OPD gate parser detects known pass and regression fixtures |
+| `pages.yml` | Matching changes merged to `main`, or manual dispatch | The documentation contracts, build, browser smoke, and Pages artifact pass before deployment |
 
-The old performance-fixture workflow has no schedule or pull-request trigger.
-It is retained temporarily as a manual compatibility path while the structured
-local qualification runner replaces it.
+Path filters intentionally avoid unrelated work. When a change crosses a
+contract boundary that the filters do not express, run the affected checker
+locally and update the workflow filter in the same change.
 
-## Measured Cost Before This Policy
+The ordinary `ci.yml` path launches three automatic jobs: Rust formatting, one
+Linux default-feature job, and dependency policy. Its accelerator jobs require
+manual dispatch.
 
-The measurements below came from recent completed GitHub runs on 2026-07-09.
-They are wall times unless aggregate runner-minutes are stated.
+## Manual backend checks
 
-| Workflow | Previous automatic trigger | Hosted platform | Average wall time | Distinct signal |
-| --- | --- | --- | ---: | --- |
-| Rust CI | Rust push/PR | Ubuntu and macOS | 17m53s | Formatting, CPU tests, dependency policy, and compile-only backend compatibility |
-| Desktop build | Desktop push/PR/tag | Ubuntu, Windows, and macOS | 10m40s | Cross-platform package construction |
-| Server release | `kiln-v*` tag | Ubuntu, Windows, and macOS | 94m50s | Cross-platform release archives |
-| CUDA Docker release | `kiln-v*` tag | Ubuntu | 48m25s | CUDA image construction and publication |
-| RunPod image | Relevant push and weekly schedule | Ubuntu | 19m39s | Container heartbeat and manifest smoke |
-| OPD bench gate | Selected PR paths | Ubuntu | 13s | Gate-parser self-test; its CUDA work was already manual |
-| Pages | Site changes on `main` | Ubuntu | 1m27s | Site smoke and deployment |
-| Performance nightly | Nightly and selected PR paths | Ubuntu, optional self-hosted | 17s | No useful signal: 10 of 10 recent runs failed before hardware work |
-| Release-version drift | Broad docs and UI paths | Ubuntu | 1m43s | Release example consistency; browser checks duplicated Pages/UI smoke |
-| UI smoke | UI changes | Ubuntu | 1m23s | Headless server-dashboard behavior |
-
-The old Rust workflow started nine jobs on an ordinary matching change. Four
-were Metal, Vulkan, CUDA, and ROCm compile jobs. A representative run spent
-40.5 of 46.75 aggregate runner-minutes on those jobs; CUDA and ROCm alone used
-31.3 minutes. A desktop run used 23.8 aggregate runner-minutes. One server
-release used 173.4, with another 51 for its Docker release. RunPod runs ranged
-from 5m53s to 26m40s.
-
-Platform billing multipliers can make macOS and Windows more expensive than
-the raw minute totals imply.
-
-After this policy, an ordinary Rust change launches three jobs: formatting,
-one Linux CPU job, and dependency policy. Backend jobs require an explicit
-dispatch, and packaging and performance workflows have no automatic trigger.
-The first successful post-change run, GitHub Actions run `29049575526`, measured
-3m52s wall time and approximately 4m36s of aggregate hosted time. This is one
-sample, not a stable range; retain measurements from later representative Rust
-changes before treating 4-6 aggregate minutes as the established baseline.
-
-## Local Receipt Flow
-
-On Linux qualification hosts, run ad hoc Cargo verification through
-`scripts/cargo-bounded.sh`. The wrapper serializes build work, preflights
-available memory, preserves a host-memory reserve, and places the compiler and
-linker process tree in one memory-capped, no-swap systemd scope. Source-bound
-qualification cases run inside a bubblewrap PID namespace, which cannot attach
-its namespaced Cargo PID to the host user manager as a scope. Those declared
-builds use the wrapper's transient-service mode instead: the service has the
-same aggregate memory/no-swap cgroup, a private network, a hard runtime limit,
-and control-group teardown. Its versioned closed-source environment policy
-admits only the pinned Cargo/ROCm paths, locale, user-home, and user-systemd
-connection variables required to build; ambient compiler flags, target paths,
-credentials, and API tokens do not enter the wrapper or service. The device
-runtime remains in the original network/PID-isolated case. Qualification
-workloads must not overlap a separate Cargo build; build first, then run the
-device workload.
-
-Qualification workloads must not introduce host-model, temperature-sensor, or
-single-architecture policy. Hardware-specific receipts identify the machine
-that produced them, while current workload admission remains backend-generic.
+Dispatch a backend check against the exact ref under review:
 
 ```bash
-scripts/cargo-bounded.sh check --locked -p kiln-server --lib
-scripts/cargo-bounded.sh test --locked -p kiln-server --lib config::tests -- --test-threads=1
+gh workflow run ci.yml --ref <commit-or-branch> -f backend_build=metal
+gh workflow run ci.yml --ref <commit-or-branch> -f backend_build=vulkan
+gh workflow run ci.yml --ref <commit-or-branch> -f backend_build=cuda
+gh workflow run ci.yml --ref <commit-or-branch> -f backend_build=rocm
+gh workflow run ci.yml --ref <commit-or-branch> -f backend_build=all
 ```
 
-Always name `--lib`, `--bin`, or `--test` for a filtered Cargo test. A filter
-changes which tests execute, but without a target selector Cargo still builds
-every integration-test executable in the package before applying that filter.
+The lanes do not all provide the same evidence:
 
-Raw logs, traces, and profiles belong under ignored `.qualification/` paths.
-Only compact receipts, workload manifests, schemas, and useful summaries are
-checked in. The complete new-machine, workload, validation, comparison, and
-check-in procedure is in [Local Hardware Qualification](qualification.md).
+| Lane | What it currently does | Remaining proof |
+| --- | --- | --- |
+| Metal | Builds and tests on a hosted Apple Silicon runner | Run the intended production workload and retain a source-bound receipt |
+| Vulkan | Checks the server feature and runs the Vulkan kernel suite with a software implementation | Run on each physical implementation relevant to the claim |
+| CUDA | Compiles and links with the CUDA toolkit, without a device | Run on a physical CUDA device |
+| ROCm | Compiles and links with the ROCm toolkit, without a device | Run on a physical ROCm device |
 
-Capture this machine's backend environment:
+The CUDA and ROCm architecture values in those workflow jobs are compile-time
+targets chosen to bound hosted cost. They are not runtime support policy.
+Backend dispatch and user-facing defaults must remain capability-driven.
+
+## Local qualification
+
+Use [Local hardware qualification](qualification.md) for the complete
+new-machine, workload, validation, comparison, and publication procedure. The
+short form is:
+
+1. Start from the exact source revision you intend to claim.
+2. Select an existing backend-generic workload, or add one with explicit pass
+   criteria.
+3. Build before starting the device workload; do not overlap another Cargo or
+   accelerator job.
+4. Capture the environment and run the workload on the requested real device.
+5. Validate the receipt, required cases, source identity, and local artifact
+   hashes.
+6. Compare only receipts with compatible workload and comparison policy.
+7. Commit compact receipts and manifests; keep raw logs, traces, and profiles
+   in ignored `.qualification/` storage.
+
+Capture an environment receipt with an operator-chosen stable host label:
 
 ```bash
 python3 scripts/qualification/environment.py \
-  --backend rocm --host-id strix-halo
-
-python3 scripts/qualification/environment.py \
-  --backend vulkan --host-id strix-halo
+  --backend vulkan \
+  --host-id <stable-host-id>
 ```
 
-Validate portable receipts on any clone:
+Replace the backend with `cuda`, `rocm`, or `metal` as appropriate. The
+captured device identity belongs in the receipt; do not copy it into runtime
+dispatch, workload admission, or product defaults.
+
+Validate every portable qualification and serving-benchmark receipt:
 
 ```bash
 mapfile -d '' receipts < <(
   find qualification/receipts -type f -name '*.json' -print0 | sort -z
 )
-python3 scripts/qualification/receipt.py "${receipts[@]}"
+if ((${#receipts[@]})); then
+  python3 scripts/qualification/receipt.py "${receipts[@]}"
+fi
 
 mapfile -d '' benchmark_receipts < <(
   find benchmarks/receipts -type f -name '*.json' -print0 | sort -z
 )
-python3 scripts/bench-concurrent-batch.py \
-  --validate-receipt "${benchmark_receipts[@]}"
+if ((${#benchmark_receipts[@]})); then
+  python3 scripts/bench-concurrent-batch.py \
+    --validate-receipt "${benchmark_receipts[@]}"
+fi
 ```
 
-On the machine that still has ignored raw artifacts, also require local hashes
-and the current source identity:
+On the qualification machine, add the strict local checks to the relevant
+receipt paths:
 
 ```bash
 python3 scripts/qualification/receipt.py \
   --require-current-source \
   --require-local-artifacts \
-  qualification/receipts/rocm/strix-halo/*.json
+  qualification/receipts/<backend>/<host-id>/*.json
 ```
 
-Passing hardware evidence requires a clean source tree, a real requested
-device, no skipped required test, exact source/model/workload identity, and a
-validated receipt. Compile-only jobs, mocks, source-string assertions, and
-tests that return success after skipping the GPU do not satisfy that contract.
+A passing hardware claim requires a clean source tree, the requested real
+device, no skipped required case, exact source/model/workload identity, and a
+validated receipt.
+
+## Bounded local Cargo work
+
+On Linux qualification hosts, run ad hoc Cargo work through
+`scripts/cargo-bounded.sh`. It serializes builds, checks available memory,
+reserves host memory, and contains the compiler/linker process tree within a
+memory-capped, no-swap cgroup.
+
+Source-bound qualification cases run inside a PID and network boundary.
+Declared builds use the wrapper’s transient-service mode so the build retains
+an aggregate memory limit, private network, runtime limit, and control-group
+cleanup. Its versioned environment policy admits only the paths, locale, home,
+and user-service variables required for the build; ambient compiler flags,
+target directories, credentials, and API tokens are excluded.
+
+Examples:
+
+```bash
+scripts/cargo-bounded.sh check --locked -p kiln-server --lib
+scripts/cargo-bounded.sh test --locked \
+  -p kiln-server --lib config::tests -- --test-threads=1
+```
+
+Always name `--lib`, `--bin`, or `--test` for a filtered package test. A test
+name filters execution, but Cargo otherwise still builds every integration
+test target in that package.
+
+## Manual packaging
+
+Packaging is deliberate and is not triggered by tag creation alone. Inspect
+the intended tag and relevant local receipts before dispatch:
+
+```bash
+gh workflow run server-release.yml --ref kiln-vX.Y.Z
+gh workflow run docker-server-release.yml --ref kiln-vX.Y.Z
+gh workflow run desktop-build.yml --ref desktop-vX.Y.Z
+gh workflow run runpod-image.yml --ref <commit-or-branch>
+```
+
+A run from the wrong ref is not release evidence. Confirm the checked-out ref,
+artifact version, digests or attestations, and publication result in the
+workflow summary.
+
+## Failure triage
+
+| Symptom | First response |
+| --- | --- |
+| Expected job is absent | Check the workflow path filter and event; dispatch it manually if the claim needs it |
+| Portable contract check fails | Run the named checker locally; change the canonical schema, generator, or implementation rather than editing generated output |
+| Backend build fails | Reproduce with the same feature, locked dependencies, and toolchain; do not weaken an on-device claim |
+| Hardware case skips | Treat it as missing evidence; fix device admission or run on a qualifying device |
+| Receipt rejects source identity | Return to the claimed clean revision and rerun; do not edit the identity by hand |
+| Before/after receipts are incompatible | Rerun one side with the same workload and comparison policy |
+| Packaging succeeds but qualification is absent | Do not publish; obtain and validate the relevant local receipt first |
+
+## Historical cost record
+
+The automatic/manual split was introduced after measurements from completed
+GitHub runs on 2026-07-09. The previous Rust workflow started nine jobs for an
+ordinary matching change. In one representative run, accelerator compile jobs
+used 40.5 of 46.75 aggregate runner-minutes; CUDA and ROCm used 31.3 minutes.
+The first successful run after the split used 3m52s wall time and about 4m36s
+of aggregate hosted time.
+
+Those figures explain the policy; they are not a current performance promise.
+Re-measure representative runs before using them for capacity or cost
+planning.
+
+The legacy performance-fixture workflow remains manual while structured local
+qualification replaces it. Its machine-bound thresholds are compatibility
+fixtures, not backend support policy or portable performance baselines.
 
 ## Ownership
 
-- GitHub Actions owns cheap syntax, CPU behavior, dependency policy, and
-  portable receipt validation.
-- The named local machine owns backend correctness, latency, memory, soak, and
-  performance evidence.
-- Release operators own verifying the local receipt set before manually
-  dispatching packaging.
-- `docs/plans/confidence-hardening-goal.md` is the temporary execution source of
-  truth until the final common-source-tree qualification is complete.
+- GitHub Actions owns inexpensive syntax, CPU behavior, dependency and
+  repository policy, and portable evidence validation.
+- The operator of each declared local machine owns backend correctness,
+  latency, memory, soak, and performance evidence from that machine.
+- Release operators own checking the relevant receipt set and dispatching
+  packaging from the intended tag.
+- Contributors own updating path filters when a new source begins to affect an
+  existing contract.

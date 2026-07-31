@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ericflo.github.io/kiln/contracts/kiln-artifacts-v1.schema.json",
   "title": "Kiln Artifact Lifecycle API",
-  "description": "Complete field-level wire contract for installed adapters, live adapter transitions, immutable HF/TRL handoffs and PEFT imports, adapter audit receipts, and teacher registry identities. Open input objects explicitly identify serde-compatible ignored unknown fields; emitted objects are closed.",
+  "description": "Request and response shapes for listing, uploading, merging, loading, unloading, and deleting adapters; creating or deleting immutable HF/TRL exports; importing verified PEFT results; and managing teacher identities. Start with the entrypoint for your HTTP operation, then open only the definitions it references. Deletion is permanent, live adapters must be unloaded before deletion, generic upload does not provide verified HF/TRL provenance, and remote teacher registration currently supports only vLLM. Unknown-field behavior is listed per shape. The x-kiln-examples use explicit CPU and placeholder build identities so they remain illustrative payloads, not hardware receipts or backend support claims.",
   "x-kiln-field-schema-status": "complete",
   "x-kiln-entrypoints": [
     "AdapterDetail",
@@ -32,6 +32,7 @@
     "kiln-observability-v1.schema.json",
     "kiln-inference-v1.schema.json"
   ],
+  "x-kiln-example-boundary": "Illustrative payloads only. Example backend and build values are not runtime defaults, support predicates, qualification evidence, or benchmark receipts.",
   "oneOf": [
     {
       "$ref": "#/$defs/AdapterDetail"
@@ -119,7 +120,7 @@
           "$ref": "#/$defs/NonEmptyString"
         }
       },
-      "description": "One adapter smoke-check outcome.",
+      "description": "Outcome of one adapter canary or smoke check.",
       "x-kiln-rust-type": "kiln_train::AdapterCanaryCheckReceipt",
       "x-kiln-field-schema-status": "complete"
     },
@@ -130,7 +131,7 @@
         "passed",
         "quarantined"
       ],
-      "description": "The current adapter canary result.",
+      "description": "Result of the adapter's latest recorded canary check.",
       "x-kiln-rust-type": "String",
       "x-kiln-field-schema-status": "complete"
     },
@@ -185,7 +186,7 @@
           "$ref": "#/$defs/AnyJson"
         }
       },
-      "description": "Adapter file inventory plus retained training, evaluation, and lineage evidence.",
+      "description": "Adapter files plus the training, evaluation, and lineage evidence Kiln still retains.",
       "x-kiln-rust-type": "AdapterDetail",
       "x-kiln-field-schema-status": "complete"
     },
@@ -424,7 +425,7 @@
           ]
         }
       },
-      "description": "One adapter directory discovered by the server, including invalid and quarantined entries.",
+      "description": "One adapter directory discovered by Kiln, including directories it classifies as invalid or quarantined.",
       "x-kiln-rust-type": "AdapterDiskEntry",
       "x-kiln-field-schema-status": "complete"
     },
@@ -443,7 +444,7 @@
           "$ref": "#/$defs/NonNegativeInteger"
         }
       },
-      "description": "One regular file in an adapter directory.",
+      "description": "One regular file stored in an adapter directory.",
       "x-kiln-rust-type": "AdapterFileEntry",
       "x-kiln-field-schema-status": "complete"
     },
@@ -477,7 +478,7 @@
           "$ref": "#/$defs/EvalJobState"
         }
       },
-      "description": "A retained evaluation linked to an adapter.",
+      "description": "Retained summary of an evaluation linked to the adapter.",
       "x-kiln-rust-type": "AdapterLinkedEval",
       "x-kiln-field-schema-status": "complete"
     },
@@ -516,7 +517,7 @@
           ]
         }
       },
-      "description": "A retained training job linked to an adapter.",
+      "description": "Retained summary of a training job that produced or used the adapter.",
       "x-kiln-rust-type": "AdapterLinkedJob",
       "x-kiln-field-schema-status": "complete"
     },
@@ -640,7 +641,7 @@
           "$ref": "#/$defs/AdapterManifestFiles"
         }
       },
-      "description": "Audit and content identity metadata for an installed adapter.",
+      "description": "Content, lineage, model, and training identity recorded for an installed adapter.",
       "x-kiln-rust-type": "kiln_train::AdapterManifest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -670,7 +671,7 @@
           ]
         }
       },
-      "description": "Canonical filenames bound by an adapter manifest.",
+      "description": "Canonical adapter filenames bound by the manifest.",
       "x-kiln-rust-type": "kiln_train::AdapterManifestFiles",
       "x-kiln-field-schema-status": "complete"
     },
@@ -679,7 +680,7 @@
       "minLength": 1,
       "pattern": "^(?!\\.)(?![\\s\\S]*\\.\\.)(?![\\s\\S]*[\\\\/])[\\s\\S]+$",
       "x-kiln-runtime-footgun": "adapter names currently have no byte limit or control-character restriction",
-      "description": "An adapter registry name: non-empty, relative, not dot-prefixed, and without separators or '..'.",
+      "description": "An adapter registry name: non-empty, relative, not dot-prefixed, and without separators or `..`. The generic adapter routes currently impose no byte limit or control-character restriction.",
       "x-kiln-rust-type": "String",
       "x-kiln-field-schema-status": "complete"
     },
@@ -691,7 +692,7 @@
         "quarantined",
         "invalid"
       ],
-      "description": "The registry state of an adapter directory.",
+      "description": "How Kiln currently classifies an adapter directory.",
       "x-kiln-rust-type": "String",
       "x-kiln-field-schema-status": "complete"
     },
@@ -716,7 +717,7 @@
       "x-kiln-max-body-bytes": 2147483648,
       "x-kiln-max-extracted-bytes": 4294967296,
       "x-kiln-max-extracted-entries": 100000,
-      "description": "Multipart adapter installation body. Unknown parts are drained and ignored.",
+      "description": "Generic multipart adapter upload. This route validates archive safety and adapter files but does not provide the HF/TRL export/result identity checks; use verified PEFT import for that handoff. Unknown multipart fields are consumed and ignored.",
       "x-kiln-rust-type": "AdapterUploadMultipart",
       "x-kiln-field-schema-status": "complete"
     },
@@ -796,7 +797,7 @@
           }
         }
       },
-      "description": "The complete resident and on-disk adapter registry view.",
+      "description": "Current live-adapter identity and all adapter directories visible to the server.",
       "x-kiln-rust-type": "AdaptersResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -862,18 +863,18 @@
           ]
         }
       ],
-      "description": "A prompt and its group-relative scored rollouts. rollouts is a request alias for completions.",
+      "description": "One prompt and 2\u20131,024 provenance-complete scored rollouts. `rollouts` is an input alias for `completions`.",
       "x-kiln-rust-type": "kiln_train::GrpoGroup",
       "x-kiln-field-schema-status": "complete"
     },
     "AnyJson": {
-      "description": "Any JSON value carried without field-level interpretation.",
+      "description": "Any valid JSON value; Kiln does not interpret its nested fields here.",
       "x-kiln-rust-type": "serde_json::Value",
       "x-kiln-field-schema-status": "complete"
     },
     "Boolean": {
       "type": "boolean",
-      "description": "A serialized Rust boolean.",
+      "description": "Either true or false.",
       "x-kiln-rust-type": "bool",
       "x-kiln-field-schema-status": "complete"
     },
@@ -892,7 +893,7 @@
           "$ref": "#/$defs/AdapterName"
         }
       },
-      "description": "Confirmation that an adapter directory was deleted.",
+      "description": "Confirmation of permanent adapter deletion. The route refuses a live or active adapter and also removes matching `<name>-checkpoint-*` directories.",
       "x-kiln-rust-type": "DeleteAdapterResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -911,7 +912,7 @@
           "$ref": "#/$defs/ExportName"
         }
       },
-      "description": "Confirmation that an immutable export bundle was deleted.",
+      "description": "Confirmation that the server copy of an immutable export was permanently deleted.",
       "x-kiln-rust-type": "DeleteExportResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -930,7 +931,7 @@
           "$ref": "#/$defs/NonEmptyString"
         }
       },
-      "description": "Confirmation that a teacher alias was removed.",
+      "description": "Confirmation that a teacher alias was removed from the registry. Existing adapter receipts are unchanged.",
       "x-kiln-rust-type": "DeleteTeacherResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -958,7 +959,7 @@
           "$ref": "#/$defs/EchoDiagnosticSummary"
         }
       },
-      "description": "Coarse post-mortem diagnostics from an adapter training run.",
+      "description": "High-level diagnostics retained after an adapter training run.",
       "x-kiln-rust-type": "kiln_train::DiagnosticSummary",
       "x-kiln-field-schema-status": "complete"
     },
@@ -995,7 +996,7 @@
           "$ref": "#/$defs/FiniteNumber"
         }
       },
-      "description": "Receipt-grade ECHO training diagnostics.",
+      "description": "ECHO measurements retained in an adapter receipt.",
       "x-kiln-rust-type": "kiln_train::EchoDiagnosticSummary",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1027,7 +1028,7 @@
           "$ref": "#/$defs/HfTrlExportManifestV1"
         }
       },
-      "description": "An export summary plus its full self-verifying handoff manifest.",
+      "description": "One export summary and its complete self-verifying manifest.",
       "x-kiln-rust-type": "ExportDetail",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1054,7 +1055,7 @@
       "minLength": 1,
       "maxLength": 128,
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
-      "description": "A server-owned HF/TRL export name.",
+      "description": "A server-owned HF/TRL export name: 1\u2013128 ASCII characters, beginning with a letter or number and containing only letters, numbers, hyphens, or underscores.",
       "x-kiln-rust-type": "String",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1108,7 +1109,7 @@
           "$ref": "#/$defs/NonEmptyString"
         }
       },
-      "description": "Compact immutable HF/TRL export identity.",
+      "description": "List-view identity and download path for one immutable HF/TRL export.",
       "x-kiln-rust-type": "ExportSummary",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1195,7 +1196,7 @@
           }
         }
       ],
-      "description": "Create an immutable GRPO handoff from exactly one inline or filesystem source.",
+      "description": "Create an immutable recorded-GRPO handoff from exactly one source: inline groups or a canonical server-local JSONL file.",
       "x-kiln-rust-type": "GrpoExportRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1293,7 +1294,7 @@
           }
         }
       ],
-      "description": "Dataset bytes and selection/provenance policy exported to HF/TRL.",
+      "description": "Dataset file identity and either SFT selection evidence or the recorded-GRPO provenance contract.",
       "x-kiln-rust-type": "kiln_train::HfTrlDataExport",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1413,7 +1414,7 @@
         "base_weight_shard_manifest matches source_execution_provenance model content",
         "export_sha256 matches the canonical manifest digest"
       ],
-      "description": "Immutable identity of one server-owned Kiln-to-HF/TRL export directory.",
+      "description": "Self-verifying identity of one immutable Kiln-to-HF/TRL export directory.",
       "x-kiln-rust-type": "kiln_train::HfTrlExportManifestV1",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1436,7 +1437,7 @@
           "$ref": "#/$defs/Sha256"
         }
       },
-      "description": "Exact identity of one regular file in an interoperability bundle.",
+      "description": "Relative path, byte length, and SHA-256 identity for one regular file in an interoperability bundle.",
       "x-kiln-rust-type": "kiln_train::HfTrlFileIdentity",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1495,7 +1496,7 @@
           ]
         }
       },
-      "description": "Exact optional Kiln adapter copied into an interoperability bundle.",
+      "description": "Optional input adapter copied into the bundle with its exact configuration and weights.",
       "x-kiln-rust-type": "kiln_train::HfTrlInputAdapter",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1593,7 +1594,7 @@
           ]
         }
       },
-      "description": "Model bytes and template identities an external trainer must use.",
+      "description": "Resident model, tokenizer, and template identities the external trainer must match.",
       "x-kiln-rust-type": "kiln_train::HfTrlModelIdentity",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1655,7 +1656,7 @@
       "x-kiln-semantic-constraints": [
         "rows_read = rows_kept + rows_rejected"
       ],
-      "description": "Compact SFT row-selection evidence.",
+      "description": "SFT admission counts, row policy, corpus digest, and ingestion-receipt identity.",
       "x-kiln-rust-type": "kiln_train::HfTrlSftSelection",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1674,7 +1675,7 @@
       "minLength": 1,
       "maxLength": 128,
       "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9_-]|\\.(?!\\.))*$",
-      "description": "A path-safe adapter name accepted by verified HF/TRL PEFT import.",
+      "description": "A path-safe adapter name accepted by verified HF/TRL PEFT import: 1\u2013128 ASCII characters with no consecutive periods.",
       "x-kiln-rust-type": "String",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1725,7 +1726,7 @@
           "$ref": "#/$defs/PositiveInteger"
         }
       },
-      "description": "The verified external PEFT result installed into Kiln's adapter registry.",
+      "description": "Identity and size of a verified external PEFT result installed as six files in Kiln's adapter registry.",
       "x-kiln-rust-type": "ImportPeftResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1749,7 +1750,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Load an installed adapter, optionally overriding quarantine admission or forcing the already-live exact on-disk revision through a between-requests reload.",
+      "description": "Load an installed adapter between requests. `allow_quarantined` explicitly overrides canary quarantine; `reload` re-reads and republishes the exact on-disk revision even when that adapter name is already live.",
       "x-kiln-rust-type": "LoadAdapterRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1772,7 +1773,7 @@
           "$ref": "#/$defs/RawSha256"
         }
       },
-      "description": "Confirmation that an exact adapter revision is live.",
+      "description": "Confirmation that the named adapter revision is live.",
       "x-kiln-rust-type": "LoadAdapterResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1791,7 +1792,7 @@
           "$ref": "#/$defs/RawSha256"
         }
       },
-      "description": "The exact name and immutable content revision published by the live runner.",
+      "description": "Adapter name and immutable content revision currently published by the live model runner.",
       "x-kiln-rust-type": "LoadedAdapterIdentity",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1833,7 +1834,7 @@
           ]
         }
       },
-      "description": "Resolved scoring capabilities for a teacher source.",
+      "description": "Scoring capabilities Kiln resolved from a teacher source.",
       "x-kiln-rust-type": "kiln_train::LogitSourceCaps",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1905,7 +1906,7 @@
         "source names must be distinct",
         "output_name must not already exist"
       ],
-      "description": "Create an immutable merged adapter. Density is accepted only for TIES and defaults to 0.2 there.",
+      "description": "Create a new merged adapter without replacing an existing name. `density` applies only to TIES and defaults to 0.2 for that mode.",
       "x-kiln-rust-type": "MergeAdapterRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1940,7 +1941,7 @@
           "$ref": "#/$defs/PositiveInteger"
         }
       },
-      "description": "The published adapter merge summary.",
+      "description": "Summary of the newly published merged adapter.",
       "x-kiln-rust-type": "MergeAdapterResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1951,7 +1952,7 @@
         "ties",
         "concat"
       ],
-      "description": "The adapter merge algorithm.",
+      "description": "Algorithm used to merge source adapters.",
       "x-kiln-rust-type": "String",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1971,7 +1972,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "One weighted source adapter.",
+      "description": "One source adapter and its merge weight.",
       "x-kiln-rust-type": "MergeSource",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1990,28 +1991,28 @@
           "$ref": "#/$defs/FiniteNumber"
         }
       },
-      "description": "One source echoed after a merge.",
+      "description": "One source adapter recorded in the merge result.",
       "x-kiln-rust-type": "MergeSourceInfo",
       "x-kiln-field-schema-status": "complete"
     },
     "NonEmptyString": {
       "type": "string",
       "minLength": 1,
-      "description": "A non-empty UTF-8 string.",
+      "description": "A text string containing at least one character.",
       "x-kiln-rust-type": "String",
       "x-kiln-field-schema-status": "complete"
     },
     "NonNegativeInteger": {
       "type": "integer",
       "minimum": 0,
-      "description": "A non-negative integer.",
+      "description": "A whole number greater than or equal to zero.",
       "x-kiln-rust-type": "u64 | u32 | usize",
       "x-kiln-field-schema-status": "complete"
     },
     "PositiveInteger": {
       "type": "integer",
       "minimum": 1,
-      "description": "A positive integer.",
+      "description": "A whole number greater than or equal to one.",
       "x-kiln-rust-type": "u64 | u32 | usize",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2034,7 +2035,7 @@
           "$ref": "#/$defs/NonNegativeInteger"
         }
       },
-      "description": "Seed prompt-source audit descriptor.",
+      "description": "Source, manifest digest, and row count for the prompts used by training.",
       "x-kiln-rust-type": "kiln_train::PromptSourceDescriptor",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2190,7 +2191,7 @@
           }
         }
       ],
-      "description": "Caller-controlled teacher registration fields. Identity, capabilities, and secret environment names are rejected.",
+      "description": "Fields callers may set when registering a teacher. Kiln rejects caller-supplied identity, capabilities, and secret environment-variable names.",
       "x-kiln-rust-type": "RegisterTeacherRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2206,7 +2207,7 @@
         "deep_infra",
         "tgi"
       ],
-      "description": "A named remote scoring protocol. Registration currently admits only vllm.",
+      "description": "Remote scoring protocol identifier. The schema retains compatibility values, but teacher registration currently accepts only `vllm`.",
       "x-kiln-rust-type": "kiln_train::RemoteProvider",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2249,7 +2250,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "One reward-scored rollout with optional multi-turn and generation provenance.",
+      "description": "One reward-scored completion with optional trajectory and generation provenance.",
       "x-kiln-rust-type": "kiln_train::ScoredRollout",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2266,7 +2267,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "One supervised conversation.",
+      "description": "One conversation submitted for supervised fine-tuning.",
       "x-kiln-rust-type": "kiln_train::SftExample",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2383,7 +2384,7 @@
           }
         }
       ],
-      "description": "Create an immutable SFT handoff from exactly one inline, filesystem, or named-dataset source.",
+      "description": "Create an immutable SFT handoff from exactly one source: inline examples, a server-local file, or a registered dataset.",
       "x-kiln-rust-type": "SftExportRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2393,20 +2394,20 @@
         "fail",
         "skip"
       ],
-      "description": "How invalid SFT rows are admitted.",
+      "description": "Whether an invalid SFT row rejects the export or is skipped and recorded.",
       "x-kiln-rust-type": "SftInvalidRowPolicy",
       "x-kiln-field-schema-status": "complete"
     },
     "Sha256": {
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$",
-      "description": "A lowercase SHA-256 digest with the sha256: prefix.",
+      "description": "A lowercase SHA-256 digest prefixed with `sha256:`.",
       "x-kiln-rust-type": "String",
       "x-kiln-field-schema-status": "complete"
     },
     "String": {
       "type": "string",
-      "description": "A serialized UTF-8 Rust string.",
+      "description": "A text string.",
       "x-kiln-rust-type": "String",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2429,7 +2430,7 @@
           "$ref": "#/$defs/RawSha256"
         }
       },
-      "description": "Exact static adapter identity served by a teacher.",
+      "description": "Exact static adapter identity served with a teacher model.",
       "x-kiln-rust-type": "kiln_train::TeacherAdapterIdentityV1",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2457,7 +2458,7 @@
           "$ref": "#/$defs/NonEmptyString"
         }
       },
-      "description": "Teacher audit identity retained by a legacy adapter receipt.",
+      "description": "Teacher identity retained by a legacy adapter receipt.",
       "x-kiln-rust-type": "kiln_train::TeacherDescriptor",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2500,7 +2501,7 @@
           "$ref": "#/$defs/NonEmptyString"
         }
       },
-      "description": "A persisted teacher plus its resolved identity, capabilities, and usability state.",
+      "description": "Stored teacher configuration plus its resolved identity, capabilities, and current usability.",
       "x-kiln-rust-type": "TeacherEntry",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2582,7 +2583,7 @@
           "$ref": "#/$defs/RawSha256"
         }
       },
-      "description": "Canonical content and protocol identity pinned by teacher registration.",
+      "description": "Model, tokenizer, adapter, protocol, and serving-capability identity pinned during teacher registration.",
       "x-kiln-rust-type": "kiln_train::TeacherIdentityV1",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2710,7 +2711,7 @@
           ]
         }
       },
-      "description": "Persisted teacher registry description. Identity and capability claims are server-controlled.",
+      "description": "Stored teacher configuration. Kiln derives identity and capability claims instead of accepting them from this object.",
       "x-kiln-rust-type": "TeacherSpec",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2740,7 +2741,7 @@
           }
         }
       },
-      "description": "The complete teacher registry view.",
+      "description": "All teachers currently stored in the server registry.",
       "x-kiln-rust-type": "TeachersListResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2806,7 +2807,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "A training chat message. Text content parts are concatenated and non-text parts ignored.",
+      "description": "A chat message accepted for export. Text content parts are concatenated; non-text parts are ignored.",
       "x-kiln-rust-type": "kiln_core::tokenizer::ChatMessage",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2864,7 +2865,7 @@
         "completed",
         "failed"
       ],
-      "description": "A training job lifecycle state.",
+      "description": "Training-job lifecycle state. Cancelled training jobs are represented as `failed` with a cancellation error.",
       "x-kiln-rust-type": "kiln_train::TrainingState",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2926,7 +2927,7 @@
       "type": "number",
       "exclusiveMinimum": 0,
       "maximum": 1,
-      "description": "A merge density in the interval (0, 1].",
+      "description": "A merge density greater than 0 and no greater than 1.",
       "x-kiln-rust-type": "f32",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2941,7 +2942,7 @@
           "const": "unloaded"
         }
       },
-      "description": "Confirmation that the runtime adapter is unloaded.",
+      "description": "Confirmation that no runtime adapter is loaded.",
       "x-kiln-rust-type": "UnloadAdapterResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2964,7 +2965,7 @@
           "$ref": "#/$defs/PositiveInteger"
         }
       },
-      "description": "The atomically installed adapter archive summary.",
+      "description": "Summary of an adapter archive installed without replacing an existing directory.",
       "x-kiln-rust-type": "UploadAdapterResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3027,7 +3028,7 @@
           }
         }
       },
-      "description": "Legacy adapter audit receipt. It supports drift analysis, not exact replay.",
+      "description": "Legacy adapter audit receipt. It records useful provenance and diagnostics but does not contain enough identity for exact replay.",
       "x-kiln-rust-type": "kiln_train::AdapterReceipt",
       "x-kiln-field-schema-status": "complete"
     }
@@ -3207,13 +3208,13 @@
             "schema_version": 1,
             "provenance_type": "kiln.execution-provenance.v1",
             "backend": {
-              "name": "rocm",
-              "device": "gfx1151",
+              "name": "cpu",
+              "device": "cpu",
               "numerical_runtime_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
             },
             "build": {
-              "package_version": "0.1.0",
-              "target": "x86_64-unknown-linux-gnu",
+              "package_version": "0.0.0",
+              "target": "example-target-triple",
               "executable_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
             },
             "model": {
@@ -3230,11 +3231,9 @@
             "kernels": {
               "contract_type": "kiln.kernel-contract.v1",
               "versions": {
-                "kiln": "0.1.0"
+                "kiln": "0.0.0"
               },
-              "compiled_features": [
-                "rocm"
-              ],
+              "compiled_features": [],
               "contract_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
             },
             "configuration": {
@@ -3390,7 +3389,7 @@
                     "served_model_id": "Qwen/Qwen3.5-4B",
                     "base_model_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "inference_config_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    "implementation": "kiln/rocm"
+                    "implementation": "kiln/cpu"
                   },
                   "tokenizer": {
                     "vocab_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -3409,7 +3408,7 @@
                     "stop": []
                   },
                   "seed": 42,
-                  "generation_backend": "rocm"
+                  "generation_backend": "cpu"
                 }
               },
               {
@@ -3436,7 +3435,7 @@
                     "served_model_id": "Qwen/Qwen3.5-4B",
                     "base_model_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "inference_config_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    "implementation": "kiln/rocm"
+                    "implementation": "kiln/cpu"
                   },
                   "tokenizer": {
                     "vocab_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -3455,7 +3454,7 @@
                     "stop": []
                   },
                   "seed": 43,
-                  "generation_backend": "rocm"
+                  "generation_backend": "cpu"
                 }
               }
             ]
@@ -3474,7 +3473,7 @@
         "content_revision": "6666666666666666666666666666666666666666666666666666666666666666",
         "used_exported_reference_script": true,
         "size_bytes": 4096,
-        "files": 3
+        "files": 6
       }
     ],
     "LoadAdapterRequest": [

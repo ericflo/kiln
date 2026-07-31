@@ -125,15 +125,15 @@ def add_object(
 
 
 def build_primitives_and_enums() -> None:
-    add_definition("AnyJson", "serde_json::Value", {}, "Any JSON value carried without field-level interpretation.")
-    add_definition("Boolean", "bool", {"type": "boolean"}, "A serialized Rust boolean.")
-    add_definition("String", "String", {"type": "string"}, "A serialized UTF-8 Rust string.")
-    add_definition("NonEmptyString", "String", {"type": "string", "minLength": 1}, "A non-empty UTF-8 string.")
+    add_definition("AnyJson", "serde_json::Value", {}, "Any valid JSON value; Kiln does not interpret its nested fields here.")
+    add_definition("Boolean", "bool", {"type": "boolean"}, "Either true or false.")
+    add_definition("String", "String", {"type": "string"}, "A text string.")
+    add_definition("NonEmptyString", "String", {"type": "string", "minLength": 1}, "A text string containing at least one character.")
     add_definition(
         "ExportName",
         "String",
         {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"},
-        "A server-owned HF/TRL export name.",
+        "A server-owned HF/TRL export name: 1–128 ASCII characters, beginning with a letter or number and containing only letters, numbers, hyphens, or underscores.",
     )
     add_definition(
         "AdapterName",
@@ -144,7 +144,7 @@ def build_primitives_and_enums() -> None:
             "pattern": r"^(?!\.)(?![\s\S]*\.\.)(?![\s\S]*[\\/])[\s\S]+$",
             "x-kiln-runtime-footgun": "adapter names currently have no byte limit or control-character restriction",
         },
-        "An adapter registry name: non-empty, relative, not dot-prefixed, and without separators or '..'.",
+        "An adapter registry name: non-empty, relative, not dot-prefixed, and without separators or `..`. The generic adapter routes currently impose no byte limit or control-character restriction.",
     )
     add_definition(
         "ImportAdapterName",
@@ -155,33 +155,33 @@ def build_primitives_and_enums() -> None:
             "maxLength": 128,
             "pattern": r"^[A-Za-z0-9](?:[A-Za-z0-9_-]|\.(?!\.))*$",
         },
-        "A path-safe adapter name accepted by verified HF/TRL PEFT import.",
+        "A path-safe adapter name accepted by verified HF/TRL PEFT import: 1–128 ASCII characters with no consecutive periods.",
     )
-    add_definition("NonNegativeInteger", "u64 | u32 | usize", {"type": "integer", "minimum": 0}, "A non-negative integer.")
-    add_definition("PositiveInteger", "u64 | u32 | usize", {"type": "integer", "minimum": 1}, "A positive integer.")
+    add_definition("NonNegativeInteger", "u64 | u32 | usize", {"type": "integer", "minimum": 0}, "A whole number greater than or equal to zero.")
+    add_definition("PositiveInteger", "u64 | u32 | usize", {"type": "integer", "minimum": 1}, "A whole number greater than or equal to one.")
     add_definition("FiniteNumber", "f32 | f64", {"type": "number"}, "A finite JSON number.")
-    add_definition("UnitInterval", "f32", {"type": "number", "exclusiveMinimum": 0, "maximum": 1}, "A merge density in the interval (0, 1].")
-    add_definition("Sha256", "String", {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "A lowercase SHA-256 digest with the sha256: prefix.")
+    add_definition("UnitInterval", "f32", {"type": "number", "exclusiveMinimum": 0, "maximum": 1}, "A merge density greater than 0 and no greater than 1.")
+    add_definition("Sha256", "String", {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "A lowercase SHA-256 digest prefixed with `sha256:`.")
     add_definition("RawSha256", "String", {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "A raw lowercase 64-character SHA-256 digest.")
     add_definition("Rfc3339Timestamp", "String", {"type": "string", "format": "date-time"}, "An RFC 3339 timestamp.")
 
-    add_enum("AdapterRegistryStatus", "String", ["loaded", "available", "quarantined", "invalid"], "The registry state of an adapter directory.")
-    add_enum("AdapterCanaryStatus", "String", ["unknown", "passed", "quarantined"], "The current adapter canary result.")
+    add_enum("AdapterRegistryStatus", "String", ["loaded", "available", "quarantined", "invalid"], "How Kiln currently classifies an adapter directory.")
+    add_enum("AdapterCanaryStatus", "String", ["unknown", "passed", "quarantined"], "Result of the adapter's latest recorded canary check.")
     add_enum("TrainingJobType", "TrainingJobType", ["sft", "grpo", "opd"], "The native training workflow that produced a linked job.")
-    add_enum("TrainingState", "kiln_train::TrainingState", ["queued", "running", "completed", "failed"], "A training job lifecycle state.")
+    add_enum("TrainingState", "kiln_train::TrainingState", ["queued", "running", "completed", "failed"], "Training-job lifecycle state. Cancelled training jobs are represented as `failed` with a cancellation error.")
     add_enum("EvalJobState", "kiln_eval::EvalJobState", ["queued", "running", "completed", "failed", "cancelled"], "An evaluation job lifecycle state.")
-    add_enum("MergeMode", "String", ["weighted_average", "ties", "concat"], "The adapter merge algorithm.")
+    add_enum("MergeMode", "String", ["weighted_average", "ties", "concat"], "Algorithm used to merge source adapters.")
     add_enum("HfTrlTask", "kiln_train::HfTrlTask", ["sft", "grpo"], "The external HF/TRL training task.")
     add_enum("HfTrlDatasetFormat", "HfTrlDatasetFormat", ["sft_messages_jsonl", "grpo_groups_jsonl"], "The exported JSONL row format.")
     add_enum("HfTrlSftLabelPolicy", "HfTrlSftLabelPolicy", ["assistant_only_generation_spans"], "How the exported SFT template selects labels.")
-    add_enum("SftInvalidRowPolicy", "SftInvalidRowPolicy", ["fail", "skip"], "How invalid SFT rows are admitted.")
+    add_enum("SftInvalidRowPolicy", "SftInvalidRowPolicy", ["fail", "skip"], "Whether an invalid SFT row rejects the export or is skipped and recorded.")
     add_enum("TurnKind", "kiln_train::TurnKind", ["context", "action", "observation"], "The supervision role of one trajectory segment.")
     add_enum("TeacherKind", "TeacherKind", ["fixture", "local", "remote"], "The teacher implementation family.")
     add_enum(
         "RemoteProvider",
         "kiln_train::RemoteProvider",
         ["vllm", "sglang", "llama_cpp", "open_router", "together", "fireworks", "deep_infra", "tgi"],
-        "A named remote scoring protocol. Registration currently admits only vllm.",
+        "Remote scoring protocol identifier. The schema retains compatibility values, but teacher registration currently accepts only `vllm`.",
     )
     add_enum("TeacherStatus", "TeacherStatus", ["verified", "configured", "legacy_unverified", "unavailable"], "The registry's stable usability state.")
 
@@ -191,13 +191,13 @@ def build_adapter_definitions() -> None:
         "LoadedAdapterIdentity",
         "LoadedAdapterIdentity",
         {"name": ref("AdapterName"), "content_revision": ref("RawSha256")},
-        "The exact name and immutable content revision published by the live runner.",
+        "Adapter name and immutable content revision currently published by the live model runner.",
     )
     add_object(
         "AdapterCanaryCheckReceipt",
         "kiln_train::AdapterCanaryCheckReceipt",
         {"name": ref("NonEmptyString"), "passed": ref("Boolean"), "failure_reason": ref("NonEmptyString")},
-        "One adapter smoke-check outcome.",
+        "Outcome of one adapter canary or smoke check.",
         optional=("failure_reason",),
     )
     add_object(
@@ -220,7 +220,7 @@ def build_adapter_definitions() -> None:
             "adapter_config": ref("NonEmptyString"),
             "train_receipt": nullable(ref("NonEmptyString")),
         },
-        "Canonical filenames bound by an adapter manifest.",
+        "Canonical adapter filenames bound by the manifest.",
     )
     add_object(
         "AdapterManifest",
@@ -244,7 +244,7 @@ def build_adapter_definitions() -> None:
             "training_data_path": nullable(ref("NonEmptyString")),
             "files": ref("AdapterManifestFiles"),
         },
-        "Audit and content identity metadata for an installed adapter.",
+        "Content, lineage, model, and training identity recorded for an installed adapter.",
         optional=("training_chat_template_hash", "base_weight_shard_manifest", "execution_provenance", "training_precision"),
     )
     add_object(
@@ -278,7 +278,7 @@ def build_adapter_definitions() -> None:
             "last_load_error": nullable(ref("NonEmptyString")),
             "error": nullable(ref("NonEmptyString")),
         },
-        "One adapter directory discovered by the server, including invalid and quarantined entries.",
+        "One adapter directory discovered by Kiln, including directories it classifies as invalid or quarantined.",
     )
     add_object(
         "AdaptersResponse",
@@ -293,7 +293,7 @@ def build_adapter_definitions() -> None:
             "available": array(ref("AdapterDiskEntry")),
             "available_adapters": array(ref("AdapterDiskEntry")),
         },
-        "The complete resident and on-disk adapter registry view.",
+        "Current live-adapter identity and all adapter directories visible to the server.",
     )
     add_object(
         "LoadAdapterRequest",
@@ -303,7 +303,7 @@ def build_adapter_definitions() -> None:
             "allow_quarantined": {"type": "boolean", "default": False},
             "reload": {"type": "boolean", "default": False},
         },
-        "Load an installed adapter, optionally overriding quarantine admission or forcing the already-live exact on-disk revision through a between-requests reload.",
+        "Load an installed adapter between requests. `allow_quarantined` explicitly overrides canary quarantine; `reload` re-reads and republishes the exact on-disk revision even when that adapter name is already live.",
         optional=("allow_quarantined", "reload"),
         open_input=True,
     )
@@ -311,16 +311,16 @@ def build_adapter_definitions() -> None:
         "LoadAdapterResponse",
         "LoadAdapterResponse",
         {"status": {"const": "loaded"}, "name": ref("AdapterName"), "content_revision": ref("RawSha256")},
-        "Confirmation that an exact adapter revision is live.",
+        "Confirmation that the named adapter revision is live.",
     )
-    add_object("UnloadAdapterResponse", "UnloadAdapterResponse", {"status": {"const": "unloaded"}}, "Confirmation that the runtime adapter is unloaded.")
+    add_object("UnloadAdapterResponse", "UnloadAdapterResponse", {"status": {"const": "unloaded"}}, "Confirmation that no runtime adapter is loaded.")
     add_object(
         "DeleteAdapterResponse",
         "DeleteAdapterResponse",
         {"status": {"const": "deleted"}, "name": ref("AdapterName")},
-        "Confirmation that an adapter directory was deleted.",
+        "Confirmation of permanent adapter deletion. The route refuses a live or active adapter and also removes matching `<name>-checkpoint-*` directories.",
     )
-    add_object("MergeSource", "MergeSource", {"name": ref("AdapterName"), "weight": ref("FiniteNumber")}, "One weighted source adapter.", open_input=True)
+    add_object("MergeSource", "MergeSource", {"name": ref("AdapterName"), "weight": ref("FiniteNumber")}, "One source adapter and its merge weight.", open_input=True)
     add_object(
         "MergeAdapterRequest",
         "MergeAdapterRequest",
@@ -330,7 +330,7 @@ def build_adapter_definitions() -> None:
             "mode": nullable(ref("MergeMode")),
             "density": nullable(ref("UnitInterval")),
         },
-        "Create an immutable merged adapter. Density is accepted only for TIES and defaults to 0.2 there.",
+        "Create a new merged adapter without replacing an existing name. `density` applies only to TIES and defaults to 0.2 for that mode.",
         optional=("mode", "density"),
         open_input=True,
         extra={
@@ -343,7 +343,7 @@ def build_adapter_definitions() -> None:
             "x-kiln-semantic-constraints": ["source names must be distinct", "output_name must not already exist"],
         },
     )
-    add_object("MergeSourceInfo", "MergeSourceInfo", {"name": ref("AdapterName"), "weight": ref("FiniteNumber")}, "One source echoed after a merge.")
+    add_object("MergeSourceInfo", "MergeSourceInfo", {"name": ref("AdapterName"), "weight": ref("FiniteNumber")}, "One source adapter recorded in the merge result.")
     add_object(
         "MergeAdapterResponse",
         "MergeAdapterResponse",
@@ -354,7 +354,7 @@ def build_adapter_definitions() -> None:
             "sources": array(ref("MergeSourceInfo"), min_items=1),
             "num_tensors": ref("PositiveInteger"),
         },
-        "The published adapter merge summary.",
+        "Summary of the newly published merged adapter.",
     )
     add_object(
         "AdapterUploadMultipart",
@@ -363,7 +363,7 @@ def build_adapter_definitions() -> None:
             "name": ref("AdapterName"),
             "archive": {"type": "string", "format": "binary", "contentMediaType": "application/gzip"},
         },
-        "Multipart adapter installation body. Unknown parts are drained and ignored.",
+        "Generic multipart adapter upload. This route validates archive safety and adapter files but does not provide the HF/TRL export/result identity checks; use verified PEFT import for that handoff. Unknown multipart fields are consumed and ignored.",
         open_input=True,
         extra={"x-kiln-max-body-bytes": 2147483648, "x-kiln-max-extracted-bytes": 4294967296, "x-kiln-max-extracted-entries": 100000},
     )
@@ -371,9 +371,9 @@ def build_adapter_definitions() -> None:
         "UploadAdapterResponse",
         "UploadAdapterResponse",
         {"name": ref("AdapterName"), "size_bytes": ref("NonNegativeInteger"), "files": ref("PositiveInteger")},
-        "The atomically installed adapter archive summary.",
+        "Summary of an adapter archive installed without replacing an existing directory.",
     )
-    add_object("AdapterFileEntry", "AdapterFileEntry", {"name": ref("NonEmptyString"), "size_bytes": ref("NonNegativeInteger")}, "One regular file in an adapter directory.")
+    add_object("AdapterFileEntry", "AdapterFileEntry", {"name": ref("NonEmptyString"), "size_bytes": ref("NonNegativeInteger")}, "One regular file stored in an adapter directory.")
     add_object(
         "AdapterLinkedJob",
         "AdapterLinkedJob",
@@ -384,7 +384,7 @@ def build_adapter_definitions() -> None:
             "elapsed_secs": {"type": "number", "minimum": 0},
             "final_loss": nullable(ref("FiniteNumber")),
         },
-        "A retained training job linked to an adapter.",
+        "Retained summary of a training job that produced or used the adapter.",
     )
     add_object(
         "AdapterLinkedEval",
@@ -395,7 +395,7 @@ def build_adapter_definitions() -> None:
             "accuracy": nullable(ref("FiniteNumber")),
             "state": ref("EvalJobState"),
         },
-        "A retained evaluation linked to an adapter.",
+        "Retained summary of an evaluation linked to the adapter.",
     )
     add_object(
         "AdapterDetail",
@@ -411,7 +411,7 @@ def build_adapter_definitions() -> None:
             "eval_jobs": array(ref("AdapterLinkedEval")),
             "lineage": ref("AnyJson"),
         },
-        "Adapter file inventory plus retained training, evaluation, and lineage evidence.",
+        "Adapter files plus the training, evaluation, and lineage evidence Kiln still retains.",
         optional=("lineage",),
     )
 
@@ -421,7 +421,7 @@ def build_receipt_definitions() -> None:
         "TeacherAdapterIdentityV1",
         "kiln_train::TeacherAdapterIdentityV1",
         {"name": ref("NonEmptyString"), "weights_sha256": ref("RawSha256"), "config_sha256": ref("RawSha256")},
-        "Exact static adapter identity served by a teacher.",
+        "Exact static adapter identity served with a teacher model.",
     )
     add_object(
         "TeacherIdentityV1",
@@ -442,7 +442,7 @@ def build_receipt_definitions() -> None:
             "implementation": ref("NonEmptyString"),
             "inference_config_sha256": ref("RawSha256"),
         },
-        "Canonical content and protocol identity pinned by teacher registration.",
+        "Model, tokenizer, adapter, protocol, and serving-capability identity pinned during teacher registration.",
     )
     add_object(
         "TeacherDescriptor",
@@ -454,14 +454,14 @@ def build_receipt_definitions() -> None:
             "identity": ref("TeacherIdentityV1"),
             "snapshot_url": ref("NonEmptyString"),
         },
-        "Teacher audit identity retained by a legacy adapter receipt.",
+        "Teacher identity retained by a legacy adapter receipt.",
         optional=("model_version_hash", "identity", "snapshot_url"),
     )
     add_object(
         "PromptSourceDescriptor",
         "kiln_train::PromptSourceDescriptor",
         {"source": ref("NonEmptyString"), "manifest_hash": ref("Sha256"), "count": ref("NonNegativeInteger")},
-        "Seed prompt-source audit descriptor.",
+        "Source, manifest digest, and row count for the prompts used by training.",
     )
     add_object(
         "EchoDiagnosticSummary",
@@ -476,7 +476,7 @@ def build_receipt_definitions() -> None:
             "dynamics_holdout_ce_initial": ref("FiniteNumber"),
             "dynamics_holdout_ce_final": ref("FiniteNumber"),
         },
-        "Receipt-grade ECHO training diagnostics.",
+        "ECHO measurements retained in an adapter receipt.",
         optional=("env_ce_initial", "env_ce_final", "env_ce_drop_pct", "lambda_effective_final", "dynamics_holdout_ce_initial", "dynamics_holdout_ce_final"),
     )
     add_object(
@@ -489,7 +489,7 @@ def build_receipt_definitions() -> None:
             "final_loss": ref("FiniteNumber"),
             "echo": ref("EchoDiagnosticSummary"),
         },
-        "Coarse post-mortem diagnostics from an adapter training run.",
+        "High-level diagnostics retained after an adapter training run.",
         optional=("overlap_ratio_final", "rep_rate_max", "guardrail_triggers", "final_loss", "echo"),
     )
     add_object(
@@ -509,7 +509,7 @@ def build_receipt_definitions() -> None:
             "diagnostic_summary": ref("DiagnosticSummary"),
             "post_eval": mapping(ref("FiniteNumber")),
         },
-        "Legacy adapter audit receipt. It supports drift analysis, not exact replay.",
+        "Legacy adapter audit receipt. It records useful provenance and diagnostics but does not contain enough identity for exact replay.",
         optional=("teacher", "prompts"),
     )
 
@@ -547,7 +547,7 @@ def build_hf_trl_definitions() -> None:
             "name": nullable(ref("String")),
             "tool_call_id": nullable(ref("String")),
         },
-        "A training chat message. Text content parts are concatenated and non-text parts ignored.",
+        "A chat message accepted for export. Text content parts are concatenated; non-text parts are ignored.",
         optional=("content", "tool_calls", "name", "tool_call_id"),
         open_input=True,
     )
@@ -555,7 +555,7 @@ def build_hf_trl_definitions() -> None:
         "SftExample",
         "kiln_train::SftExample",
         {"messages": array(ref("TrainingChatMessage"))},
-        "One supervised conversation.",
+        "One conversation submitted for supervised fine-tuning.",
         optional=("messages",),
         open_input=True,
     )
@@ -582,7 +582,7 @@ def build_hf_trl_definitions() -> None:
             "trajectory": array(ref("TurnSegment")),
             "provenance": nullable(external_ref(INFERENCE_SCHEMA, "RolloutProvenanceV1")),
         },
-        "One reward-scored rollout with optional multi-turn and generation provenance.",
+        "One reward-scored completion with optional trajectory and generation provenance.",
         optional=("trajectory", "provenance"),
         open_input=True,
     )
@@ -602,7 +602,7 @@ def build_hf_trl_definitions() -> None:
                 max_items=1024,
             ),
         },
-        "A prompt and its group-relative scored rollouts. rollouts is a request alias for completions.",
+        "One prompt and 2–1,024 provenance-complete scored rollouts. `rollouts` is an input alias for `completions`.",
         optional=("completions", "rollouts"),
         open_input=True,
         extra={"oneOf": [{"required": ["completions"]}, {"required": ["rollouts"]}]},
@@ -619,7 +619,7 @@ def build_hf_trl_definitions() -> None:
             "input_adapter": nullable(ref("AdapterName")),
             "split_manifest": nullable(ref("AnyJson")),
         },
-        "Create an immutable SFT handoff from exactly one inline, filesystem, or named-dataset source.",
+        "Create an immutable SFT handoff from exactly one source: inline examples, a server-local file, or a registered dataset.",
         optional=("examples", "dataset_path", "dataset", "invalid_row_policy", "input_adapter", "split_manifest"),
         extra=source_selection_rules(("examples", "dataset_path", "dataset"), "examples"),
     )
@@ -633,7 +633,7 @@ def build_hf_trl_definitions() -> None:
             "input_adapter": nullable(ref("AdapterName")),
             "split_manifest": nullable(ref("AnyJson")),
         },
-        "Create an immutable GRPO handoff from exactly one inline or filesystem source.",
+        "Create an immutable recorded-GRPO handoff from exactly one source: inline groups or a canonical server-local JSONL file.",
         optional=("groups", "dataset_path", "input_adapter", "split_manifest"),
         extra=source_selection_rules(("groups", "dataset_path"), "groups"),
     )
@@ -641,7 +641,7 @@ def build_hf_trl_definitions() -> None:
         "HfTrlFileIdentity",
         "kiln_train::HfTrlFileIdentity",
         {"relative_path": ref("NonEmptyString"), "size_bytes": ref("PositiveInteger"), "sha256": ref("Sha256")},
-        "Exact identity of one regular file in an interoperability bundle.",
+        "Relative path, byte length, and SHA-256 identity for one regular file in an interoperability bundle.",
     )
     add_object(
         "HfTrlModelIdentity",
@@ -656,7 +656,7 @@ def build_hf_trl_definitions() -> None:
             "native_training_chat_template": exact_file("kiln_training_chat_template.jinja"),
             "trl_training_chat_template": exact_file("training_chat_template.jinja"),
         },
-        "Model bytes and template identities an external trainer must use.",
+        "Resident model, tokenizer, and template identities the external trainer must match.",
     )
     add_object(
         "HfTrlSftSelection",
@@ -670,7 +670,7 @@ def build_hf_trl_definitions() -> None:
             "kept_corpus_sha256": ref("Sha256"),
             "ingestion_receipt": exact_file("sft_ingestion.json"),
         },
-        "Compact SFT row-selection evidence.",
+        "SFT admission counts, row policy, corpus digest, and ingestion-receipt identity.",
         extra={"x-kiln-semantic-constraints": ["rows_read = rows_kept + rows_rejected"]},
     )
     add_object(
@@ -686,7 +686,7 @@ def build_hf_trl_definitions() -> None:
             "rollout_provenance_schema": ref("NonEmptyString"),
             "split_manifest": exact_file("split_manifest.json"),
         },
-        "Dataset bytes and selection/provenance policy exported to HF/TRL.",
+        "Dataset file identity and either SFT selection evidence or the recorded-GRPO provenance contract.",
         optional=("sft_selection", "rollout_provenance_schema", "split_manifest"),
         extra={
             "allOf": [
@@ -707,7 +707,7 @@ def build_hf_trl_definitions() -> None:
             "model": exact_file("input_adapter/adapter_model.safetensors"),
             "kiln_manifest": exact_file("input_adapter/adapter_manifest.json"),
         },
-        "Exact optional Kiln adapter copied into an interoperability bundle.",
+        "Optional input adapter copied into the bundle with its exact configuration and weights.",
         optional=("kiln_manifest",),
     )
     add_object(
@@ -725,7 +725,7 @@ def build_hf_trl_definitions() -> None:
             "input_adapter": ref("HfTrlInputAdapter"),
             "export_sha256": ref("Sha256"),
         },
-        "Immutable identity of one server-owned Kiln-to-HF/TRL export directory.",
+        "Self-verifying identity of one immutable Kiln-to-HF/TRL export directory.",
         optional=("input_adapter",),
         extra={
             "allOf": [
@@ -756,11 +756,11 @@ def build_hf_trl_definitions() -> None:
             "bundle_filename": ref("NonEmptyString"),
             "download_url": ref("NonEmptyString"),
         },
-        "Compact immutable HF/TRL export identity.",
+        "List-view identity and download path for one immutable HF/TRL export.",
     )
     add_object("ExportList", "ExportList", {"data": array(ref("ExportSummary"))}, "All immutable HF/TRL exports currently retained by the server.")
-    add_object("ExportDetail", "ExportDetail", {"summary": ref("ExportSummary"), "manifest": ref("HfTrlExportManifestV1")}, "An export summary plus its full self-verifying handoff manifest.")
-    add_object("DeleteExportResponse", "DeleteExportResponse", {"status": {"const": "deleted"}, "name": ref("ExportName")}, "Confirmation that an immutable export bundle was deleted.")
+    add_object("ExportDetail", "ExportDetail", {"summary": ref("ExportSummary"), "manifest": ref("HfTrlExportManifestV1")}, "One export summary and its complete self-verifying manifest.")
+    add_object("DeleteExportResponse", "DeleteExportResponse", {"status": {"const": "deleted"}, "name": ref("ExportName")}, "Confirmation that the server copy of an immutable export was permanently deleted.")
     add_object(
         "ImportPeftResponse",
         "ImportPeftResponse",
@@ -776,7 +776,7 @@ def build_hf_trl_definitions() -> None:
             "size_bytes": ref("PositiveInteger"),
             "files": ref("PositiveInteger"),
         },
-        "The verified external PEFT result installed into Kiln's adapter registry.",
+        "Identity and size of a verified external PEFT result installed as six files in Kiln's adapter registry.",
     )
 
 
@@ -792,7 +792,7 @@ def build_teacher_definitions() -> None:
             "supports_batched": ref("Boolean"),
             "tokenizer_hash": nullable(ref("NonEmptyString")),
         },
-        "Resolved scoring capabilities for a teacher source.",
+        "Scoring capabilities Kiln resolved from a teacher source.",
     )
     add_object(
         "TeacherSpec",
@@ -812,7 +812,7 @@ def build_teacher_definitions() -> None:
             "notes": nullable(ref("String")),
             "adapter": nullable(ref("AdapterName")),
         },
-        "Persisted teacher registry description. Identity and capability claims are server-controlled.",
+        "Stored teacher configuration. Kiln derives identity and capability claims instead of accepting them from this object.",
         optional=("identity", "credential_id"),
     )
     add_object(
@@ -827,10 +827,10 @@ def build_teacher_definitions() -> None:
             "off_policy_manifest": ref("NonEmptyString"),
             "status_message": ref("NonEmptyString"),
         },
-        "A persisted teacher plus its resolved identity, capabilities, and usability state.",
+        "Stored teacher configuration plus its resolved identity, capabilities, and current usability.",
         optional=("identity_revision", "off_policy_manifest", "status_message"),
     )
-    add_object("TeachersListResponse", "TeachersListResponse", {"teachers": array(ref("TeacherEntry"))}, "The complete teacher registry view.")
+    add_object("TeachersListResponse", "TeachersListResponse", {"teachers": array(ref("TeacherEntry"))}, "All teachers currently stored in the server registry.")
     add_object(
         "RegisterTeacherRequest",
         "RegisterTeacherRequest",
@@ -844,7 +844,7 @@ def build_teacher_definitions() -> None:
             "notes": nullable(ref("String")),
             "adapter": nullable(ref("AdapterName")),
         },
-        "Caller-controlled teacher registration fields. Identity, capabilities, and secret environment names are rejected.",
+        "Fields callers may set when registering a teacher. Kiln rejects caller-supplied identity, capabilities, and secret environment-variable names.",
         optional=("provider", "model_id", "url", "credential_id", "notes", "adapter"),
         extra={
             "allOf": [
@@ -880,7 +880,7 @@ def build_teacher_definitions() -> None:
         "DeleteTeacherResponse",
         "DeleteTeacherResponse",
         {"status": {"const": "deleted"}, "alias": ref("NonEmptyString")},
-        "Confirmation that a teacher alias was removed.",
+        "Confirmation that a teacher alias was removed from the registry. Existing adapter receipts are unchanged.",
     )
 
 
@@ -908,8 +908,16 @@ def execution_provenance() -> dict[str, Any]:
     return {
         "schema_version": 1,
         "provenance_type": "kiln.execution-provenance.v1",
-        "backend": {"name": "rocm", "device": "gfx1151", "numerical_runtime_sha256": hashes("c")},
-        "build": {"package_version": "0.1.0", "target": "x86_64-unknown-linux-gnu", "executable_sha256": hashes("d")},
+        "backend": {
+            "name": "cpu",
+            "device": "cpu",
+            "numerical_runtime_sha256": hashes("c"),
+        },
+        "build": {
+            "package_version": "0.0.0",
+            "target": "example-target-triple",
+            "executable_sha256": hashes("d"),
+        },
         "model": {
             "model_config_sha256": hashes("e"),
             "tokenizer_vocab_sha256": hashes("f"),
@@ -920,8 +928,8 @@ def execution_provenance() -> dict[str, Any]:
         "precision": {"inference_dtype": "bf16", "training_policy": "bf16"},
         "kernels": {
             "contract_type": "kiln.kernel-contract.v1",
-            "versions": {"kiln": "0.1.0"},
-            "compiled_features": ["rocm"],
+            "versions": {"kiln": "0.0.0"},
+            "compiled_features": [],
             "contract_sha256": hashes("4"),
         },
         "configuration": {"effective_server_config_sha256": hashes("5"), "effective_environment_sha256": hashes("6")},
@@ -948,7 +956,7 @@ def rollout_provenance(seed: int, token_id: int) -> dict[str, Any]:
             "served_model_id": "Qwen/Qwen3.5-4B",
             "base_model_sha256": hashes("a"),
             "inference_config_sha256": hashes("b"),
-            "implementation": "kiln/rocm",
+            "implementation": "kiln/cpu",
         },
         "tokenizer": {
             "vocab_sha256": hashes("c"),
@@ -967,7 +975,7 @@ def rollout_provenance(seed: int, token_id: int) -> dict[str, Any]:
             "stop": [],
         },
         "seed": seed,
-        "generation_backend": "rocm",
+        "generation_backend": "cpu",
     }
 
 
@@ -1108,7 +1116,7 @@ def build_examples() -> dict[str, list[Any]]:
             "status": "imported", "name": "math-sft-result", "task": "sft",
             "export_sha256": hashes("3"), "result_sha256": hashes("4"), "import_sha256": hashes("5"),
             "content_revision": hashes("6", prefixed=False), "used_exported_reference_script": True,
-            "size_bytes": 4096, "files": 3,
+            "size_bytes": 4096, "files": 6,
         }],
         "LoadAdapterRequest": [
             {"name": "reasoning-v1"},
@@ -1155,13 +1163,21 @@ def build_schema() -> dict[str, Any]:
         "$id": "https://ericflo.github.io/kiln/contracts/kiln-artifacts-v1.schema.json",
         "title": "Kiln Artifact Lifecycle API",
         "description": (
-            "Complete field-level wire contract for installed adapters, live adapter transitions, "
-            "immutable HF/TRL handoffs and PEFT imports, adapter audit receipts, and teacher registry identities. "
-            "Open input objects explicitly identify serde-compatible ignored unknown fields; emitted objects are closed."
+            "Request and response shapes for listing, uploading, merging, loading, unloading, and deleting adapters; "
+            "creating or deleting immutable HF/TRL exports; importing verified PEFT results; and managing teacher identities. "
+            "Start with the entrypoint for your HTTP operation, then open only the definitions it references. "
+            "Deletion is permanent, live adapters must be unloaded before deletion, generic upload does not provide verified "
+            "HF/TRL provenance, and remote teacher registration currently supports only vLLM. Unknown-field behavior is listed per shape. "
+            "The x-kiln-examples use explicit CPU and placeholder build identities so they remain illustrative payloads, not hardware receipts "
+            "or backend support claims."
         ),
         "x-kiln-field-schema-status": "complete",
         "x-kiln-entrypoints": list(ENTRYPOINTS),
         "x-kiln-external-contracts": [OBSERVABILITY_SCHEMA, INFERENCE_SCHEMA],
+        "x-kiln-example-boundary": (
+            "Illustrative payloads only. Example backend and build values are not "
+            "runtime defaults, support predicates, qualification evidence, or benchmark receipts."
+        ),
         "oneOf": [ref(name) for name in ENTRYPOINTS],
         "$defs": dict(sorted(DEFS.items())),
         "x-kiln-examples": examples,

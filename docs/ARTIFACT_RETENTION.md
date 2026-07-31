@@ -6,6 +6,23 @@ Git. The normative policy is
 enforced by `scripts/check_repository_artifacts.py` on every push and pull
 request.
 
+The policy governs what may enter the repository. It does not create a backup
+service or a time-based deletion job for local and external artifacts.
+
+## Choose where an artifact belongs
+
+| Artifact | Location | Retention owner |
+| --- | --- | --- |
+| Source, contract, compact receipt, or reviewed summary | Tracked repository path allowed by policy | Normal Git review and history |
+| Raw qualification output | Ignored `.qualification/` path | Operator or qualification host |
+| Raw profiler, trace, server log, scrape, SSE stream, or large export | Ignored local storage or an external artifact store | Operator or external service |
+| Digest and locator for raw evidence | Compact tracked receipt, summary, or manifest | Repository |
+
+If a file is required to interpret a claim but is too large or too sensitive
+for Git, retain the file elsewhere and commit its exact SHA-256, byte count,
+role, and locator. A digest identifies bytes; it does not preserve them,
+authenticate their producer, or grant a reviewer access.
+
 ## Retention boundary
 
 Check in evidence that a reviewer can understand and validate without replaying
@@ -22,6 +39,35 @@ profiler captures, traces, or large tabular exports. Local qualification writes
 these under ignored `.qualification/` directories. Other experiments should use
 an equivalently ignored output directory and reduce their result to a compact
 receipt or summary before commit.
+
+Review raw output for secrets and personal or customer data before copying it
+to any external store. Redaction changes file bytes, so record the digest of the
+retained, reviewed form rather than a discarded unredacted input.
+
+## Retention duration and deletion
+
+The v1 contract sets no automatic expiry:
+
+- Tracked compact evidence remains in the current tree until an ordinary
+  reviewed change removes it. Its old bytes normally remain in Git history.
+- Ignored `.qualification/` output remains until the operator or host cleanup
+  policy deletes it. Kiln does not prune it on a timer.
+- External workflow or object-store artifacts follow that service’s configured
+  retention period. The repository policy neither extends nor verifies it.
+- Removing raw evidence after review preserves the committed digest and
+  conclusion, but future reviewers can no longer recompute that digest unless
+  another retained copy exists.
+
+Before deleting raw evidence, decide whether future independent revalidation is
+required. If it is, move the exact bytes to controlled external storage,
+confirm the stored digest and byte count, and update the compact locator when
+the contract permits it. If it is not, document that the raw payload will no
+longer be available.
+
+Deletion is deliberately not automated by
+`scripts/check_repository_artifacts.py`. The checker reports policy violations
+and can write a removal manifest, but a reviewer must choose what to archive or
+remove.
 
 ## Enforced limits
 
@@ -45,6 +91,10 @@ content SHA-256, and a substantive rationale. Exceptions cannot authorize a
 forbidden raw-artifact suffix or a CSV over 1 MiB. Stale, moved, or content-drifted
 exceptions fail the check.
 
+An exception permits one exact blob; it is not a directory pattern, suffix
+waiver, or standing size increase. The current v1 policy has no large-file
+exceptions.
+
 ## Local check
 
 Run the same check used by the lightweight hosted workflow:
@@ -56,6 +106,10 @@ python3 scripts/check_repository_artifacts.py
 The checker reads NUL-delimited index records and Git object metadata, so spaces
 and newlines in tracked names cannot bypass it. It rejects unresolved index
 stages and validates exception content against the indexed blob.
+
+The check evaluates the Git index. An untracked local file is outside this
+repository policy until someone stages it; other security and storage policies
+still apply.
 
 ## Historical audit artifacts
 
@@ -79,6 +133,10 @@ ordinary retained Git history. The cleanup did not run a history filter, force
 push, or garbage collection, so it reduces the current checkout and review
 surface but does not claim to reduce historical clone transfer size.
 
+Recovery depends on the source commit still being reachable in the available
+repository history. A shallow clone or a future history rewrite may not contain
+it.
+
 ## Creating a removal manifest
 
 Before removing a previously tracked raw-artifact set, record its exact indexed
@@ -94,6 +152,21 @@ between each offender's worktree bytes and indexed blob, and records the source
 commit, policy hash, byte totals, per-reason counts, paths, and SHA-256 digests.
 Review the compact manifest, move it to an appropriate audit location, and only
 then remove the recorded files. No removal command is built into the checker.
+
+The manifest proves which indexed bytes were selected for removal. It does not
+prove that an external archive exists; record external custody separately when
+the bytes must remain recoverable.
+
+## Failure triage
+
+| Failure | Inspect |
+| --- | --- |
+| Forbidden suffix | Keep the raw file ignored or external; commit a compact summary instead |
+| CSV over 1 MiB | Aggregate the table and retain the source bytes by digest |
+| Blob over 10 MiB | Remove or externalize it, or propose one exact reviewed exception |
+| Exception mismatch | Path, indexed byte count, content SHA-256, and rationale |
+| Unresolved index stage | Finish the merge before evaluating artifact policy |
+| Removal-manifest refusal | Existing output path, dirty worktree/index mismatch, or changed offender bytes |
 
 ## CI scope
 

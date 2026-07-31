@@ -260,9 +260,10 @@ derived canonical environment name instead.
 | `gdn_decode_qk_norm_recurrent_rmsnorm` | on | off |
 | `fused_conv1d` | on | off |
 | `lora_decode_add` | on | off |
-| `gdn_full_chunk_forward_multiblock` | on | off |
+| `gdn_full_chunk_forward_multiblock` | off | off |
 | `fused_paged_decode` | on | off |
 | `fused_rotary_qk` | on | off |
+| `attn_decode_qkv_prep` | on | off |
 | `fused_mlp_silu_mul` | on | off |
 | `fused_mlp_gate_up_prefill` | on | off |
 | `fused_attn_sigmoid_mul` | on | off |
@@ -594,8 +595,8 @@ The capability policy owns these decisions:
 | Bounded operator tiling | Flash attention uses a 2048-row tile and a 10,000,000-element row-work budget. Frozen-BF16-weight matmul uses 128-row tiles. Generic elementwise work uses 1,048,576 elements per dispatch and exponentiation uses 65,536. All are positive immutable policy leaves. |
 | Profiling and references | Kernel-stage and resident-decode profiling are disabled. GDN and normalization CPU-reference functions remain available for parity tests and offline diagnosis, but process environment cannot change live route selection. |
 
-Receipts for earlier `v3` Strix Halo execution describe that historical binary,
-not the current product policy, and do not by themselves qualify `v6`.
+Receipts for earlier policy versions describe those historical binaries, not
+the current product policy, and do not by themselves qualify `v6`.
 
 The former variables represented by this table, including the applicable
 `KILN_DISABLE_VULKAN_*`, `KILN_ENABLE_VULKAN_*`, kernel-threshold, split-K,
@@ -613,8 +614,8 @@ The serving library and product kernel paths no longer read residual
 `vulkan_decode_microbench` research executable also has no `KILN_*` input: its
 complete experiment policy is a typed, fail-fast command line documented
 below. It is not server configuration, and invoking it does not create a
-product qualification receipt. Phase 8.1 remains open for non-Vulkan runtime
-controls elsewhere in the repository.
+product qualification receipt. Non-Vulkan internal runtime controls are tracked
+separately in the environment inventory.
 
 ### Standalone benchmark configuration
 
@@ -646,14 +647,14 @@ controlled A/B work. The executable has no direct `KILN_BENCH_*`,
 | `--force-mtp` | flag; false | Bypasses benchmark shape routing; it does not enable serving. |
 | `--log-tokens` | flag; false | Emits generated token IDs for the paged non-speculative arm. |
 | `--log-itl` | flag; false | Emits each measured ITL for the paged non-speculative arm. |
-| `--allow-experimental-speculative` | flag; false | Required for a non-`off` method. Acknowledges unsupported research behavior; it does not make a run qualification evidence. |
+| `--allow-experimental-speculative` | flag; false | Required for a non-`off` method. Acknowledges unsupported research behavior; it does not make the run qualification evidence. |
+| `-v`, `--verbose`, `-vv` | count; `0` | Selects info or trace diagnostics. |
+| `-q`, `--quiet` | flag; false | Selects warning diagnostics and wins over verbosity. |
 
 The speculative benchmark opt-in is deliberately not named `qualification`.
 Only a declared workload executed by `scripts/qualification/run.py` and a
 strictly checked retained receipt constitute qualification evidence. A direct
 benchmark command, including one using the experimental opt-in, does not.
-| `-v`, `--verbose`, `-vv` | count; `0` | Selects info or trace diagnostics. |
-| `-q`, `--quiet` | flag; false | Selects warning diagnostics and wins over verbosity. |
 
 `vulkan_decode_microbench` is an offline kernel research tool. It parses all
 arguments before opening a Vulkan device. Unknown arguments/cases, empty list
@@ -729,58 +730,10 @@ Product execution uses `portable_fallback`, disables the W8 token-only LM-head
 routes, and retains the ordinary BF16 LM head. Historical W8/W8A8 route
 attribution is available only in the explicit `hardware-qualification` example
 build; it is not a server profile or environment-selectable product path.
+See [Local Hardware Qualification](qualification.md) for fixture behavior,
+telemetry, and receipt interpretation.
 
-Greedy contiguous decode batches use W8A16 projection into an internal F32
-score scratch, perform a stable lower-token-id argmax on the device, and copy
-one token vector to the host. Sampled batches may mix greedy and stochastic
-rows. Stochastic rows support `top_k` from 1 through 64 and apply the public
-sampling contract in this order: sign-conditional repetition penalty, presence
-and frequency penalties over unique generated-token counts, temperature,
-top-k, stable softmax, min-p, top-p, and categorical selection. The qualified
-profile quantizes each final-normalized activation row once and uses W8A8 for
-the sampled projection; the same kernel contract has a W8A16 implementation for
-profiles that retain W8 projection but do not select sampled W8A8. Parameter
-and sparse-history uploads are ordered on the active HIP stream without an
-extra trailing synchronization. The full vocabulary score scratch never leaves
-the device; successful dispatch reads back only the `[batch]` I64 token tensor.
-
-`temperature = 0` and positive-temperature `top_k = 1` are greedy and ignore
-history penalties, matching `SamplingParams`. A stochastic `top_k = 0`, a
-value above 64, an incompatible dtype/shape, active gradient tracking, a profile
-that disables the route, or an unavailable packed LM head declines to the
-existing full-logit sampler. The single-row unfiltered `top_k = 0` ROCm route
-may use the existing full-distribution W8 Gumbel sampler. Invalid dimensions,
-non-finite sampling parameters, non-positive repetition penalty, duplicate
-row/token history, zero counts, and out-of-range row/token indices fail closed;
-they are not coerced into a supported request.
-
-Seeded categorical rows use the device SplitMix64 mapping defined by this ROCm
-kernel. The same binary, device path, inputs, and seed replay exactly; the seed
-does not promise the same token as Rust `StdRng`, Vulkan's device RNG, another
-backend, or a later kernel contract. Use greedy decoding where a comparison
-requires backend-independent bit-exact output.
-
-`GET /health` and `GET /v1/health` expose process-lifetime route evidence at
-`decode_runtime.rocm_w8_lm_head`: successful argmax/sample dispatches and rows,
-sample history entries, W8A16/W8A8 sampled dispatches, failures, maximum batch
-rows, and maximum sampled top-k. `/metrics` exports the same fixed-cardinality
-state as `kiln_rocm_w8_lm_head_dispatches_total{operation}`,
-`kiln_rocm_w8_lm_head_rows_total{operation}`,
-`kiln_rocm_w8_lm_head_sample_dispatches_total{activation}`,
-`kiln_rocm_w8_lm_head_sample_history_entries_total`,
-`kiln_rocm_w8_lm_head_dispatch_failures_total`,
-`kiln_rocm_w8_lm_head_max_batch_rows`, and
-`kiln_rocm_w8_lm_head_max_sample_top_k`. Reading either surface only loads host
-atomics. It does not probe or synchronize the accelerator.
-
-These counters describe route ownership, not total response ownership. Prefill
-emits the first completion token for each admitted request before the request
-becomes a decode-continuation row. Consequently an eight-request sampled wave
-with 32 completions per request has 256 response tokens but exactly 248 fused
-sample rows. Qualification requires both exact counts: the response oracle and
-usage fields cover all 256 tokens, while the LM-head counter covers the 248
-decode-continuation tokens. Treating the eight prefill-owned tokens as missing
-fused work is a contract error.
+### ROCm synchronization telemetry and quarantine
 
 The primary ROCm context stores the immutable policy. A second caller asking
 for a different policy on the same device receives a startup error naming the
@@ -1025,7 +978,7 @@ families cover state; cache, slot, owner, retained-byte and opaque-object
 gauges; admissions, evictions and their four causes; three post-capture
 rejection reasons; five pre-capture skip reasons; capture/replay outcomes;
 batched capture attempts/outcomes; first-launch parity checks/outcomes, logical
-bytes, and duration; and all 14 fallback reasons and latency. The new
+bytes, and duration; and all 14 fallback reasons and latency. The
 fixed-cardinality families are
 `kiln_rocm_graph_batched_capture_attempts_total`,
 `kiln_rocm_graph_batched_capture_outcomes_total{outcome="success|deferred|failure"}`,
@@ -1037,7 +990,7 @@ the one-hot current phase, active elapsed seconds, calls/slow/total/max duration
 for all six phases, and last/peak transient bytes. Every label set is closed;
 request, shape, allocation, and configured-byte values never become labels.
 
-Graph-stable paged metadata is now a correctness invariant rather than a knob.
+Graph-stable paged metadata is a correctness invariant rather than a knob.
 The runtime no longer reads `KILN_ROCM_GRAPH_STABLE_PAGED_METADATA`, graph
 cache/capture flags, matmul synchronization thresholds, or full-attention
 handoff flags inside decode. The three historical graph variables listed in
@@ -1296,8 +1249,8 @@ or remapping controls such as `CUDA_VISIBLE_DEVICES`,
 `ROCR_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES`, `MESA_VK_DEVICE_SELECT`, or
 `DRI_PRIME` are rejected. The canonical `KILN_ACCELERATOR_VULKAN_DEVICE_INDEX`
 override is typed application configuration, not a driver remap; the retired
-`KILN_VULKAN_DEVICE` and `GGML_VK_VISIBLE_DEVICES` names are ignored. `Auto`
-memory probing remains diagnostic-only;
+`KILN_VULKAN_DEVICE` and `GGML_VK_VISIBLE_DEVICES` names are ignored.
+Automatic memory probing remains diagnostic-only;
 CPU performs no accelerator probe, and Apple Silicon uses its single unified
 physical memory pool. Multi-device startup remains unavailable until backend
 selection and probing share a typed PCI address or UUID.
@@ -1320,9 +1273,11 @@ snapshot for the lifetime of the process:
 If any variable relevant to the selected family is present, device/probe
 identity fails closed rather than interpreting its value or potentially
 budgeting one physical device from another device's memory counters. Unset the
-driver remap and select the device with Kiln's typed accelerator configuration.
-Multi-device support requires a future shared PCI-address or UUID identity; it
-cannot be enabled by adding another environment spelling.
+driver remap. Vulkan exposes the typed
+`accelerator.vulkan_device_index` selector, subject to the single-device
+identity restriction above; CUDA and ROCm do not yet expose a product
+multi-device selector. Multi-device support requires a shared PCI-address or
+UUID identity and cannot be enabled by adding another environment spelling.
 
 ## `[training]`
 
@@ -1715,7 +1670,7 @@ The admitted enum is stored with the queued SFT job. The worker revalidates it
 against the resident runner before memory reservation or reclamation, and the
 trainer revalidates it against its execution backend before resident or
 trainable allocations. The pinned value drives each forward/backward step,
-appears in new SFT receipts as `runtime.sft_loss_route`, and participates in
+appears in SFT receipts as `runtime.sft_loss_route`, and participates in
 the SFT exact-resume planning identity. `full_logits` is not compatible with a
 multi-segment checkpoint plan; that combination returns
 `training_invalid_request` before queue publication and is checked again by the
@@ -1855,10 +1810,11 @@ without introducing a second configuration path. `kiln config --file ...`
 applies the same availability gate as `serve`, native MTP weights remain
 deferred (`load_mtp=false`), request dispatch contains no speculative branch,
 and Desktop always launches with speculative serving off. Benchmark-only
-speculative paths require both `KILN_QUALIFICATION=1` and the qualification
-harness result-path contract before model loading.
+speculative paths require the explicit
+`--allow-experimental-speculative` acknowledgment. That flag permits research
+benchmarks only; it does not qualify a serving route.
 
-The former Phase B/C `KILN_MTP_DEBUG`, `KILN_MTP_DUMP_*`,
+The former `KILN_MTP_DEBUG`, `KILN_MTP_DUMP_*`,
 `KILN_MTP_SWAP_*`, and `KILN_MTP_*FP32*` experiment controls are retired and
 are not configuration inputs. They have no typed replacements because they
 selected completed diagnostic branches rather than supported runtime policy.
@@ -1895,11 +1851,11 @@ are inclusive. Tile counts are tokens:
 `mode = "enabled"` can deliberately force non-empty CPU or Vulkan inputs onto
 the streaming path; this is an operator override, not a claim that the route is
 qualified or faster on that backend. Conversely, `mode = "disabled"` is the
-clean isolation control for a monolithic-prefill A/B. A threshold override
-only adjusts an existing CUDA, ROCm, or Metal automatic crossover. Dispatch
-eligibility and physical splitting are distinct: an eligible route creates
-multiple tiles only when its sequence is longer than the effective tile for
-that route.
+clean isolation control for a monolithic-prefill A/B on backends that admit
+it; ROCm rejects this setting. A threshold override only adjusts an existing
+CUDA, ROCm, or Metal automatic crossover. Dispatch eligibility and physical
+splitting are distinct: an eligible route creates multiple tiles only when
+its sequence is longer than the effective tile for that route.
 
 Startup resolves this section once after backend selection and injects the same
 immutable execution policy into ordinary generation, prompt-logprob scoring,
@@ -1920,24 +1876,6 @@ the BF16 dtype boundary, before a request can yield and resume. Layer-group
 yields inside one token chunk retain their existing in-progress state and do
 not add an extra numerical boundary.
 
-The quarantine is evidence-based. On the clean `967e1f799` Vulkan release,
-disabling both prompt and decode recurrent-state residency produced the exact
-required 32-token prefix `000000 000001 000002 000003 0000` for the 138-token
-q128 production prompt. The same binary with prompt residency active and decode
-residency disabled produced plausible but incorrect sequence text. The prior
-fully resident arm was more severely corrupt. Focused device tests still match
-the small host BF16 oracle bit-for-bit, which proves those tests are necessary
-but not sufficient; they do not justify exposing the full-model route.
-
-The exact pushed quarantine revision `7dcad0d95` also passed without injecting
-the disable guard, while the checked profile retained its historical decode
-opt-in. It emitted the identical 32 token IDs and required text with no direct
-prompt-registry activation. This proves that neither public configuration nor
-the legacy decode opt-in can bypass the source quarantine. Its 31.34-second
-prefill was slower than the fully materialized rollback arm's 24.16 seconds, so
-the result is semantic acceptance only; it does not close the q128 performance
-or soak gates.
-
 The lower-level registry, stable `(serving row ID, linear-attention layer
 index)` ownership, TensorId alias transfer, device-side BF16 boundary, exact
 owner eviction, and observability remain compiled and test-covered so the fault
@@ -1945,8 +1883,10 @@ can be investigated without reconstructing the experiment. Production cannot
 enter those prompt scopes. Re-enabling them requires a source change, the
 focused real-device suite, a clean full-model semantic pass with prompt
 residency enabled and decode residency disabled, the cancellation/drain probe,
-and the checked soak. A micro-kernel or small-state parity result alone is not a
-release gate.
+and a checked soak. A micro-kernel or small-state parity result alone is not a
+release gate. The source-bound failure and rollback receipts belong in
+[Local Hardware Qualification](qualification.md); they do not define a
+machine-specific product default.
 
 Prompt recurrent-state residency remains disabled by
 `kiln.vulkan-kernel-policy.v6`; resident decode is enabled only when the
@@ -1976,20 +1916,11 @@ identity-bound logit-cache key. A deployment must re-register the teacher and
 must not resume an OPD checkpoint pinned to the previous revision.
 
 Prompt-logprob selection has no environment variable or runtime tuning field.
-CUDA and ROCm deterministically use the compact device route: each chunk stays
-resident while the device checks every original logit and every derived F32
-log-probability, computes stable normalization and the observed token's exact
-full rank, and selects top K from original logits with token-ID tie breaking.
-Only 36 fixed bytes plus 12 bytes per requested candidate per scored row cross
-to the host, so transfer and host work are O(TK). Vulkan, Metal, and CPU use the
-bounded host fallback and therefore perform O(TV) host transfer/work. Both
-routes retain the 64 MiB projection budget and 32-row maximum chunk size, the
-same exclusive accelerator admission, cancellation settlement, and backend
-quarantine behavior. Operators can verify the resolved runtime route from the
-fixed-cardinality Prometheus counters
-`kiln_prompt_logprob_selection_chunks_total{route=...}` and
-`kiln_prompt_logprob_selection_rows_total{route=...}`; the only route labels
-are `compact_device` and `bounded_host_fallback`.
+The runtime chooses either `compact_device` or `bounded_host_fallback` from the
+backend implementation, and fixed-cardinality Prometheus counters report the
+resolved route. The [HTTP API Contract](../contracts/kiln-http-api-v1.openapi.json)
+defines scoring behavior and the [Latency Observability](LATENCY_OBSERVABILITY.md)
+guide defines its operational evidence.
 
 `GET /v1/config` exposes the complete resolved object at
 `streaming_prefill`. Health repeats it at
@@ -2024,18 +1955,22 @@ last_token_lm_head = true
 ```
 
 ```toml
-# Isolate a suspected tiled-prefill pause while keeping actor ownership.
+# On non-ROCm backends, isolate a suspected tiled-prefill pause while keeping
+# actor ownership.
 [streaming_prefill]
 mode = "disabled"
 ```
 
 ```toml
-# ROCm tuning experiment: stream from 4096 tokens and use one base tile for
-# all ordinary, tape, detached, boundary, and replay routes.
+# ROCm diagnostic: lower the actor and streaming tile boundaries together.
+[server]
+max_batch_tokens = 256
+max_prefill_tokens_per_cycle = 128
+
 [streaming_prefill]
-mode = "auto"
-threshold_tokens = 4096
-tile_tokens = 2048
+mode = "enabled"
+threshold_tokens = 128
+tile_tokens = 128
 tape_tile_tokens = "auto"
 detached_full_attn_tile_tokens = "auto"
 ```
@@ -2385,10 +2320,13 @@ former boolean-to-mode and force/disable controls require an explicit value:
 - `KILN_ROCM_GRAPHS` maps false to `disabled` and true to `profile`.
   `KILN_ROCM_GRAPH_CAPTURE` maps false to `warmup_then_eager` and true to
   `profile`.
-- For the two ROCm matmul force/disable pairs, a false value maps to `auto`.
-  True force-strided maps to `enabled`, true disable-strided maps to
-  `disabled`, true force-F32-output maps to `f32_then_cast`, and true
-  disable-F32-output maps to `native_bf16`.
+- For the two retired ROCm matmul force/disable pairs, `true` force-strided maps
+  to `enabled`, `true` disable-strided maps to `disabled`, `true`
+  force-F32-output maps to `f32_then_cast`, and `true` disable-F32-output maps
+  to `native_bf16`. A former `false` value delegated to the removed
+  machine-shaped `auto` policy and therefore has no exact replacement. Choose
+  the portable defaults (`disabled` and `f32_then_cast`) or explicitly qualify
+  the corresponding experimental route.
 - `KILN_SPECULATIVE_ENABLED` and `KILN_SPEC_ENABLED` map false to `off` and
   true to `skip_layer` on `KILN_SPECULATIVE_METHOD`. Non-off serving remains
   fail-closed. The method override now accepts only `off`, `skip_layer`, and

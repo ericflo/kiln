@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ericflo.github.io/kiln/contracts/kiln-evals-v1.schema.json",
   "title": "Kiln Eval, Dataset Synthesis, and Judgment API",
-  "description": "Complete field-level wire contract for eval suites and jobs, uploaded datasets, deterministic suite synthesis, and the pairwise-judgment flywheel. Open input objects explicitly preserve serde's accepted-and-ignored unknown-field behavior; emitted objects are closed.",
+  "description": "JSON Schema for eval suites, jobs and results; uploaded datasets and deterministic synthesis; and pairwise judgments. Each request shape states whether unrecognized fields are ignored. Server-emitted objects are closed unless a definition explicitly says otherwise.",
   "x-kiln-field-schema-status": "complete",
   "x-kiln-entrypoints": [
     "AppendJudgmentBody",
@@ -334,7 +334,7 @@
       "x-kiln-field-schema-status": "complete"
     },
     "AnyJson": {
-      "description": "Any JSON value carried without field-level interpretation.",
+      "description": "Any JSON value; Kiln does not interpret its internal shape at this boundary.",
       "x-kiln-rust-type": "serde_json::Value",
       "x-kiln-field-schema-status": "complete"
     },
@@ -411,7 +411,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Append one exact A/B preference row.",
+      "description": "Store one human preference over two exact responses to the same prompt.",
       "x-kiln-rust-type": "AppendJudgmentBody",
       "x-kiln-field-schema-status": "complete"
     },
@@ -541,7 +541,7 @@
     },
     "Boolean": {
       "type": "boolean",
-      "description": "A serialized Rust boolean.",
+      "description": "Either true or false.",
       "x-kiln-rust-type": "bool",
       "x-kiln-field-schema-status": "complete"
     },
@@ -676,7 +676,7 @@
           "x-kiln-unknown-field-policy": "accepted_and_ignored"
         }
       ],
-      "description": "Code comparison policy. Variant-specific defaulted fields may be omitted on input.",
+      "description": "How the code scorer compares extracted code. Omitted variant settings use the scorer defaults.",
       "x-kiln-rust-type": "kiln_eval::scorers::CodeStyle",
       "x-kiln-field-schema-status": "complete"
     },
@@ -743,7 +743,7 @@
           }
         }
       },
-      "description": "Compiled SFT dataset and exact train/validation boundary.",
+      "description": "The swap-augmented SFT output, reserved holdout count, source-row boundary, dataset manifest, and warnings.",
       "x-kiln-rust-type": "CompileJudgmentResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1115,14 +1115,14 @@
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
       "x-kiln-default-format": "sft_chat",
-      "description": "Multipart dataset upload. Unknown parts are drained and ignored.",
+      "description": "Multipart dataset upload. Unrecognized multipart fields are read and ignored.",
       "x-kiln-rust-type": "DatasetUploadMultipart",
       "x-kiln-field-schema-status": "complete"
     },
     "DecimalU64": {
       "type": "string",
       "pattern": "^(0|[1-9][0-9]*)$",
-      "description": "An exact unsigned 64-bit value serialized as a base-10 string for JavaScript safety.",
+      "description": "An unsigned 64-bit value encoded as decimal text so JavaScript clients do not round it.",
       "x-kiln-rust-type": "u64",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1320,7 +1320,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Canonical chat message. Non-string input content is normalized by the runtime's compatibility deserializer.",
+      "description": "Chat message shared by inference, training, and evals. Kiln normalizes supported structured content into its internal message form.",
       "x-kiln-rust-type": "kiln_core::tokenizer::ChatMessage",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1612,7 +1612,7 @@
           "$ref": "#/$defs/EvalReplayVerdict"
         }
       },
-      "description": "Tracked eval-job list record; runtime-only Instants and cancellation handles are never serialized.",
+      "description": "List-view record for a queued, running, or retained eval job. Process-local timers and cancellation handles are not part of the wire response.",
       "x-kiln-rust-type": "EvalJobInfo",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1922,7 +1922,7 @@
       "type": "string",
       "minLength": 1,
       "pattern": "^(?![\\s\\S]*(?:/|\\\\|\\.\\.))(?=[\\s\\S]*\\S)[\\s\\S]+$",
-      "description": "A non-blank suite, dataset, or judgment name without path separators or '..'.",
+      "description": "A non-blank suite, dataset, or judgment name without path separators or the sequence '..'.",
       "x-kiln-rust-type": "String",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2173,7 +2173,7 @@
         "every effective generation.n equals aggregation.k",
         "schema version 1 permits only single aggregation and n=1"
       ],
-      "description": "A validated evaluation suite. Defaulted fields may be omitted on input and are materialized when serialized.",
+      "description": "A named set of examples with shared scoring, generation, aggregation, prompt, and tool settings. Omitted settings use documented defaults.",
       "x-kiln-rust-type": "EvalSuite",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2305,7 +2305,7 @@
     },
     "FiniteNumber": {
       "type": "number",
-      "description": "A finite JSON number.",
+      "description": "A finite JSON number; NaN and infinities are not valid JSON.",
       "x-kiln-rust-type": "f32 | f64",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2477,14 +2477,14 @@
     "NonEmptyString": {
       "type": "string",
       "minLength": 1,
-      "description": "A non-empty UTF-8 string.",
+      "description": "Text containing at least one character.",
       "x-kiln-rust-type": "String",
       "x-kiln-field-schema-status": "complete"
     },
     "NonNegativeInteger": {
       "type": "integer",
       "minimum": 0,
-      "description": "A non-negative integer.",
+      "description": "A whole number greater than or equal to zero.",
       "x-kiln-rust-type": "u64 | u32 | usize",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2514,7 +2514,7 @@
     "PositiveInteger": {
       "type": "integer",
       "minimum": 1,
-      "description": "A positive integer.",
+      "description": "A whole number greater than zero.",
       "x-kiln-rust-type": "u64 | u32 | usize",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2529,7 +2529,7 @@
       ],
       "properties": {
         "min_accuracy": {
-          "$ref": "#/$defs/FiniteNumber"
+          "$ref": "#/$defs/UnitInterval"
         },
         "relative_recovery": {
           "$ref": "#/$defs/FiniteNumber"
@@ -2547,7 +2547,7 @@
           "$ref": "#/$defs/Boolean"
         }
       },
-      "description": "Post-training promotion thresholds retained on an eval job.",
+      "description": "Fail-closed post-training promotion settings retained with the paired eval job.",
       "x-kiln-rust-type": "PostEvalGate",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2996,7 +2996,7 @@
           "x-kiln-unknown-field-policy": "accepted_and_ignored"
         }
       ],
-      "description": "Complete built-in scorer union. Unknown fields are accepted and ignored within each input variant.",
+      "description": "Select one built-in scorer. Each variant accepts and ignores unrecognized input fields; use only documented fields so mistakes remain visible in review.",
       "x-kiln-rust-type": "kiln_eval::scorers::Scorer",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3096,7 +3096,7 @@
     },
     "String": {
       "type": "string",
-      "description": "A serialized UTF-8 Rust string.",
+      "description": "Text, including an empty string.",
       "x-kiln-rust-type": "String",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3374,7 +3374,7 @@
           }
         }
       },
-      "description": "Complete synthesis filtering and deterministic seed statistics. The u64 seed is emitted as an exact decimal string.",
+      "description": "Synthesis input, filtering, sampling, output, scorer, and effective-seed counts.",
       "x-kiln-rust-type": "kiln_eval::synthesis::SynthesisStats",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3579,7 +3579,7 @@
       "type": "number",
       "minimum": 0,
       "maximum": 1,
-      "description": "A score or rate in the closed interval [0, 1].",
+      "description": "A score or rate from 0 through 1, inclusive.",
       "x-kiln-rust-type": "f32",
       "x-kiln-field-schema-status": "complete"
     },
@@ -4249,7 +4249,7 @@
     "SuiteSaveResponse": [
       {
         "name": "math-smoke",
-        "path": "/srv/kiln/.eval/suites/math-smoke.json",
+        "path": "/srv/kiln/.eval/suites/math-smoke/suite.json",
         "status": "created"
       }
     ],

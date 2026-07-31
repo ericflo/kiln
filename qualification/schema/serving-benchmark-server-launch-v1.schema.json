@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ericflo.github.io/kiln/schemas/serving-benchmark-server-launch-v1.schema.json",
   "title": "Kiln Serving Benchmark Server Launch v1",
+  "description": "Owned-server launch contract for a local serving benchmark. It records an argv vector, working and log directories, readiness cadence, bounded startup and shutdown, and acceptable exit statuses; hardware names in an instance ID are evidence labels, never runtime dispatch policy.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -17,48 +18,59 @@
   ],
   "properties": {
     "schema": {
+      "description": "Schema identifier for this launch contract.",
       "const": "kiln.serving-benchmark-server-launch.v1"
     },
     "id": {
+      "description": "Stable, path-safe identifier for this launch recipe. It may name the evidence environment but does not control backend routing.",
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
     },
     "command": {
+      "description": "Executable and arguments passed directly as an argv vector, without shell evaluation. The executable must resolve to an explicit absolute or relative path.",
       "type": "array",
       "minItems": 1,
       "maxItems": 256,
       "items": {
+        "description": "One nonempty argv element; index zero is the executable and later elements are its arguments.",
         "type": "string",
         "minLength": 1
       }
     },
     "working_directory": {
+      "description": "Directory from which the owned server process is launched. A relative path is resolved from the launch-contract directory.",
       "type": "string",
       "minLength": 1
     },
     "log_directory": {
+      "description": "Directory reserved for this owned server's captured logs. A relative path is resolved from the launch-contract directory.",
       "type": "string",
       "minLength": 1
     },
     "readiness_poll_interval_ms": {
+      "description": "Delay in milliseconds between `/v1/models` readiness probes while the owned server is starting.",
       "type": "integer",
       "minimum": 1,
       "maximum": 60000
     },
     "startup_timeout_seconds": {
+      "description": "Positive wall-clock deadline for the owned server to remain alive and answer the readiness probe.",
       "type": "number",
       "exclusiveMinimum": 0
     },
     "shutdown_timeout_seconds": {
+      "description": "Positive wall-clock deadline for the owned process group to exit after graceful shutdown begins, before forced termination is considered a failure.",
       "type": "number",
       "exclusiveMinimum": 0
     },
     "acceptable_exit_codes": {
+      "description": "Sorted, unique process exit statuses accepted after a fully verified graceful shutdown. A listed status does not excuse forced termination or surviving child processes.",
       "type": "array",
       "minItems": 1,
       "maxItems": 16,
       "uniqueItems": true,
       "items": {
+        "description": "One integer process exit status accepted for this server implementation.",
         "type": "integer"
       }
     }

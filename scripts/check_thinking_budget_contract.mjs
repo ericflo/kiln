@@ -88,14 +88,8 @@ const requiredLinks = new Map([
   ['README.md', 'docs/THINKING_BUDGET_CONTRACT.md'],
   ['QUICKSTART.md', 'docs/THINKING_BUDGET_CONTRACT.md'],
   ['docs/EVAL_GUIDE.md', 'THINKING_BUDGET_CONTRACT.md'],
-  [
-    'docs/site/api.html',
-    'https://github.com/ericflo/kiln/blob/main/docs/THINKING_BUDGET_CONTRACT.md',
-  ],
-  [
-    'docs/site/quickstart.html',
-    'https://github.com/ericflo/kiln/blob/main/docs/THINKING_BUDGET_CONTRACT.md',
-  ],
+  ['docs/site/api.html', 'docs/thinking-budgets/'],
+  ['docs/site/quickstart.html', 'docs/thinking-budgets/'],
 ]);
 for (const [path, target] of requiredLinks) {
   if (!read(path).includes(target)) {

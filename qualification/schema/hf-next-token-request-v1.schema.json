@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ericflo.github.io/kiln/schemas/hf-next-token-request-v1.schema.json",
   "title": "Kiln Hugging Face Next-Token Request v1",
-  "description": "Closed source-paired input contract for an independent eager Hugging Face next-token attribution.",
+  "description": "Exact input contract for an independent eager Hugging Face next-token comparison. It binds the source revision, model bytes, rendered prompt, continuation prefix, and disputed Kiln and vLLM candidates; the oracle result is recorded separately.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -17,26 +17,42 @@
     "candidates"
   ],
   "properties": {
-    "schema": { "const": "kiln.hf-next-token-request.v1" },
+    "schema": {
+      "description": "Schema identifier for this request format.",
+      "const": "kiln.hf-next-token-request.v1"
+    },
     "id": {
+      "description": "Stable, path-safe identifier for this attribution request.",
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
     },
     "source": {
+      "description": "Source revision and qualification receipts that produced the two disputed candidate tokens.",
       "type": "object",
       "additionalProperties": false,
       "required": ["source_commit", "kiln_receipt", "vllm_receipt"],
       "properties": {
         "source_commit": {
+          "description": "Full Git commit hash shared by the candidate-producing Kiln and vLLM qualification runs.",
           "type": "string",
           "pattern": "^[0-9a-f]{40}$"
         },
-        "kiln_receipt": { "$ref": "#/$defs/receiptReference" },
-        "vllm_receipt": { "$ref": "#/$defs/receiptReference" }
+        "kiln_receipt": {
+          "description": "Repository-relative Kiln qualification receipt and its file and canonical-content hashes.",
+          "$ref": "#/$defs/receiptReference"
+        },
+        "vllm_receipt": {
+          "description": "Repository-relative vLLM qualification receipt and its file and canonical-content hashes.",
+          "$ref": "#/$defs/receiptReference"
+        }
       }
     },
-    "model_identity": { "$ref": "#/$defs/modelIdentity" },
+    "model_identity": {
+      "description": "Content identity of the exact model, tokenizer, chat template, configuration, and weight shards used for attribution.",
+      "$ref": "#/$defs/modelIdentity"
+    },
     "prompt": {
+      "description": "Single-user prompt recipe and the exact rendered token sequence before the continuation prefix is appended.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -50,6 +66,7 @@
       ],
       "properties": {
         "generator": {
+          "description": "Deterministic benchmark-generator coordinates that identify how this prompt was selected and rendered.",
           "type": "object",
           "additionalProperties": false,
           "required": [
@@ -60,14 +77,32 @@
             "template_version"
           ],
           "properties": {
-            "run_id": { "type": "string", "minLength": 1 },
-            "phase": { "type": "string", "minLength": 1 },
-            "request_index": { "const": 0 },
-            "profile": { "const": "short" },
-            "template_version": { "const": "fixed-serving-profiles-v1" }
+            "run_id": {
+              "description": "Identifier of the benchmark generation run that emitted the prompt.",
+              "type": "string",
+              "minLength": 1
+            },
+            "phase": {
+              "description": "Named generation phase within the benchmark run.",
+              "type": "string",
+              "minLength": 1
+            },
+            "request_index": {
+              "description": "Zero-based prompt index; this attribution contract is fixed to the first short-profile request.",
+              "const": 0
+            },
+            "profile": {
+              "description": "Serving workload profile used to generate the disputed request.",
+              "const": "short"
+            },
+            "template_version": {
+              "description": "Version of the deterministic serving-profile prompt generator.",
+              "const": "fixed-serving-profiles-v1"
+            }
           }
         },
         "messages": {
+          "description": "The single user message passed to the chat template.",
           "type": "array",
           "minItems": 1,
           "maxItems": 1,
@@ -77,36 +112,69 @@
               "additionalProperties": false,
               "required": ["role", "content"],
               "properties": {
-                "role": { "const": "user" },
-                "content": { "type": "string", "minLength": 1 }
+                "role": {
+                  "description": "Chat role for the only input message.",
+                  "const": "user"
+                },
+                "content": {
+                  "description": "Nonempty user-message text before chat-template rendering.",
+                  "type": "string",
+                  "minLength": 1
+                }
               }
             }
           ],
           "items": false
         },
-        "add_generation_prompt": { "const": true },
+        "add_generation_prompt": {
+          "description": "Whether chat-template rendering appends the assistant-generation marker; fixed to true for this attribution.",
+          "const": true
+        },
         "template_kwargs": {
+          "description": "Chat-template options fixed by the qualification workload.",
           "type": "object",
           "additionalProperties": false,
           "required": ["enable_thinking"],
           "properties": {
-            "enable_thinking": { "const": false }
+            "enable_thinking": {
+              "description": "Whether the chat template opens a reasoning span; fixed to false for this comparison.",
+              "const": false
+            }
           }
         },
-        "utf8_sha256": { "$ref": "#/$defs/sha256" },
-        "token_count": { "type": "integer", "minimum": 1, "maximum": 4096 },
-        "token_ids": { "$ref": "#/$defs/tokenIds" }
+        "utf8_sha256": {
+          "description": "SHA-256 identity of the exact UTF-8 rendered prompt before tokenization.",
+          "$ref": "#/$defs/sha256"
+        },
+        "token_count": {
+          "description": "Number of tokens in the rendered prompt, excluding the continuation prefix.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "token_ids": {
+          "description": "Exact tokenizer output for the rendered prompt, excluding the continuation prefix.",
+          "$ref": "#/$defs/tokenIds"
+        }
       }
     },
     "continuation_prefix": {
+      "description": "Ordered token sequence forced after the rendered prompt to reproduce the first divergent next-token state.",
       "type": "array",
       "minItems": 1,
       "maxItems": 64,
       "items": { "$ref": "#/$defs/token" }
     },
-    "input_token_ids": { "$ref": "#/$defs/tokenIds" },
-    "input_token_ids_sha256": { "$ref": "#/$defs/sha256" },
+    "input_token_ids": {
+      "description": "Complete oracle input: the rendered prompt token IDs followed by the continuation-prefix token IDs.",
+      "$ref": "#/$defs/tokenIds"
+    },
+    "input_token_ids_sha256": {
+      "description": "SHA-256 identity of the canonical complete input-token sequence.",
+      "$ref": "#/$defs/sha256"
+    },
     "candidates": {
+      "description": "Exactly two disputed next-token candidates, ordered as Kiln first and vLLM second.",
       "type": "array",
       "minItems": 2,
       "maxItems": 2,
@@ -114,13 +182,27 @@
         {
           "allOf": [
             { "$ref": "#/$defs/candidate" },
-            { "properties": { "engine": { "const": "kiln" } } }
+            {
+              "properties": {
+                "engine": {
+                  "description": "The first candidate must come from Kiln.",
+                  "const": "kiln"
+                }
+              }
+            }
           ]
         },
         {
           "allOf": [
             { "$ref": "#/$defs/candidate" },
-            { "properties": { "engine": { "const": "vllm" } } }
+            {
+              "properties": {
+                "engine": {
+                  "description": "The second candidate must come from vLLM.",
+                  "const": "vllm"
+                }
+              }
+            }
           ]
         }
       ],
@@ -129,60 +211,104 @@
   },
   "$defs": {
     "sha256": {
+      "description": "Lowercase SHA-256 digest with the `sha256:` algorithm prefix.",
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
     },
     "tokenId": {
+      "description": "Tokenizer vocabulary ID for the bound Qwen3.5-4B model identity.",
       "type": "integer",
       "minimum": 0,
       "maximum": 248319
     },
     "tokenIds": {
+      "description": "Bounded, nonempty sequence of tokenizer vocabulary IDs.",
       "type": "array",
       "minItems": 1,
       "maxItems": 4096,
       "items": { "$ref": "#/$defs/tokenId" }
     },
     "token": {
+      "description": "One continuation token represented by both vocabulary ID and decoded text.",
       "type": "object",
       "additionalProperties": false,
       "required": ["token_id", "text"],
       "properties": {
-        "token_id": { "$ref": "#/$defs/tokenId" },
-        "text": { "type": "string" }
+        "token_id": {
+          "description": "Vocabulary ID of this continuation token.",
+          "$ref": "#/$defs/tokenId"
+        },
+        "text": {
+          "description": "Tokenizer-decoded text for this token; it may be empty or contain nonprinting content.",
+          "type": "string"
+        }
       }
     },
     "candidate": {
+      "description": "One engine's disputed next-token prediction at the bound prompt and continuation state.",
       "type": "object",
       "additionalProperties": false,
       "required": ["engine", "token_id", "text"],
       "properties": {
-        "engine": { "enum": ["kiln", "vllm"] },
-        "token_id": { "$ref": "#/$defs/tokenId" },
-        "text": { "type": "string" }
+        "engine": {
+          "description": "Candidate-producing inference engine.",
+          "enum": ["kiln", "vllm"]
+        },
+        "token_id": {
+          "description": "Vocabulary ID predicted by the named engine.",
+          "$ref": "#/$defs/tokenId"
+        },
+        "text": {
+          "description": "Tokenizer-decoded text for the predicted token.",
+          "type": "string"
+        }
       }
     },
     "receiptReference": {
+      "description": "Repository-relative qualification receipt with hashes of both its file bytes and canonical content.",
       "type": "object",
       "additionalProperties": false,
       "required": ["path", "file_sha256", "content_sha256"],
       "properties": {
-        "path": { "type": "string", "minLength": 1 },
-        "file_sha256": { "$ref": "#/$defs/sha256" },
-        "content_sha256": { "$ref": "#/$defs/sha256" }
+        "path": {
+          "description": "Repository-relative path to the retained receipt.",
+          "type": "string",
+          "minLength": 1
+        },
+        "file_sha256": {
+          "description": "SHA-256 identity of the receipt file's exact bytes.",
+          "$ref": "#/$defs/sha256"
+        },
+        "content_sha256": {
+          "description": "SHA-256 identity of the receipt's canonical content, excluding incidental serialization differences.",
+          "$ref": "#/$defs/sha256"
+        }
       }
     },
     "weightFile": {
+      "description": "One model weight shard and its exact size and content identity.",
       "type": "object",
       "additionalProperties": false,
       "required": ["path", "bytes", "sha256"],
       "properties": {
-        "path": { "type": "string", "minLength": 1 },
-        "bytes": { "type": "integer", "minimum": 1 },
-        "sha256": { "$ref": "#/$defs/sha256" }
+        "path": {
+          "description": "Path or stable shard name within the bound model source.",
+          "type": "string",
+          "minLength": 1
+        },
+        "bytes": {
+          "description": "Exact weight-shard size in bytes.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "description": "SHA-256 identity of the shard's exact bytes.",
+          "$ref": "#/$defs/sha256"
+        }
       }
     },
     "modelIdentity": {
+      "description": "Complete content identity for the model inputs used by every candidate and oracle process.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -194,12 +320,29 @@
         "weight_files"
       ],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "content_sha256": { "$ref": "#/$defs/sha256" },
-        "config_hash": { "$ref": "#/$defs/sha256" },
-        "tokenizer_hash": { "$ref": "#/$defs/sha256" },
-        "chat_template_hash": { "$ref": "#/$defs/sha256" },
+        "id": {
+          "description": "Human-readable model identifier recorded alongside the content hashes.",
+          "type": "string",
+          "minLength": 1
+        },
+        "content_sha256": {
+          "description": "Aggregate content identity for the complete model source.",
+          "$ref": "#/$defs/sha256"
+        },
+        "config_hash": {
+          "description": "SHA-256 identity of the effective model configuration.",
+          "$ref": "#/$defs/sha256"
+        },
+        "tokenizer_hash": {
+          "description": "SHA-256 identity of the tokenizer inputs.",
+          "$ref": "#/$defs/sha256"
+        },
+        "chat_template_hash": {
+          "description": "SHA-256 identity of the chat template used to render the prompt.",
+          "$ref": "#/$defs/sha256"
+        },
         "weight_files": {
+          "description": "Complete ordered inventory of model weight shards.",
           "type": "array",
           "minItems": 1,
           "items": { "$ref": "#/$defs/weightFile" }

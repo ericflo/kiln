@@ -6,22 +6,25 @@ regression analysis and raw receipts follow below.
 
 ## Current measured position
 
-**Vulkan decode is back in its historical range. Prefill is better than the
-regressed build, but still behind the May baseline.**
+**On the tracked short diagnostic, Vulkan decode is back in its historical
+range. Prefill is better than the regressed build, but still behind the May
+baseline.**
 
 > **Latest verified source result:** 13.46 decode tok/s, 74.29 ms mean
-> inter-token latency, and 2.805 s prefill at `f3ae29e4a`. This correction is
-> verified locally; it is not yet a published release.
+> inter-token latency, and 2.805 s prefill time at
+> [`f3ae29e4a`](https://github.com/ericflo/kiln/commit/f3ae29e4a). This
+> correction is verified locally; it is not yet a published release.
 
-| Build | Prefill | Mean ITL | Decode rate |
+| Build | Prefill time | Mean ITL | Decode rate |
 |---|---:|---:|---:|
 | Capability correction, `f3ae29e4a` | 2,805 ms | 74.29 ms | **13.46 tok/s** |
 | [Kiln v0.5.1](https://github.com/ericflo/kiln/releases/tag/kiln-v0.5.1) | 2,588 ms | 74.48 ms | **13.43 tok/s** |
 | Regression, [`48fb3f7b`](https://github.com/ericflo/kiln/commit/48fb3f7bd) | 11,343 ms | 7,059.9 ms | **0.142 tok/s** |
 | May 9 checkpoint A113 | 996 ms | 81.1 ms | **about 12.3 tok/s** |
 
-v0.5.1 is the current release. It restored decode speed, but its global route
-table is superseded by the capability-derived correction above.
+As of July 30, 2026, v0.5.1 is the latest published release. It restored decode
+speed, but its global route table is superseded on `main` by the
+capability-derived correction above.
 
 These rows use the same Qwen3.5-4B short serial workload on the same AMD Radeon
 8060S test system. They answer one narrow question: did single-stream Vulkan
@@ -79,7 +82,7 @@ Measured environment:
 | GPU | AMD Radeon 8060S Graphics |
 | Driver | RADV Strix Halo, Mesa 26.1.5 |
 | Realized workload | 56 prompt tokens, 9 generated tokens |
-| Source | `f3ae29e4a` |
+| Source | [`f3ae29e4a`](https://github.com/ericflo/kiln/commit/f3ae29e4a) |
 
 This is intentionally a short latency diagnostic. A release claim needs wider
 correctness, workload, device, and soak coverage.
@@ -90,6 +93,7 @@ correctness, workload, device, and soak coverage.
 |---|---|---|
 | Decode rate | `1000 / mean inter-token latency in ms` for a defined request path | How quickly are tokens emitted after the first one? |
 | TTFT | Request arrival to first token | How long does the user wait before output begins? |
+| Prefill time | Time spent processing the prompt before decode | How long did prompt processing take for this request? |
 | Prefill throughput | Prompt tokens divided by prefill time | How quickly is the prompt processed? |
 | Request-window throughput | All output tokens divided by the full measured request window | What did this exact concurrent workload deliver end to end? |
 | SLO goodput | Output from requests that met declared latency and correctness gates | How much useful work met the service objective? |

@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Kiln GRPO Guide &mdash; Live feedback loop</title>
-  <meta name="description" content="A concise site-local guide to Kiln GRPO: generate rollouts, score completions, submit /v1/train/grpo, and watch training status.">
+  <title>Kiln GRPO Guide &mdash; Train and evaluate a LoRA adapter</title>
+  <meta name="description" content="Generate provenance-bound or text-only rollouts, score completions, train a LoRA adapter with Kiln GRPO, inspect its receipt, and evaluate it before activation.">
   <meta name="theme-color" content="#0a0908">
   <meta name="color-scheme" content="dark">
   <link rel="canonical" href="https://ericflo.github.io/kiln/grpo.html">
@@ -12,8 +12,8 @@
   <link rel="alternate icon" type="image/png" href="assets/logo.png">
   <link rel="apple-touch-icon" href="assets/logo.png">
 
-  <meta property="og:title" content="Kiln GRPO Guide &mdash; Live feedback loop">
-  <meta property="og:description" content="Generate rollouts, score completions, submit /v1/train/grpo, and watch Kiln hot-swap the resulting LoRA adapter.">
+  <meta property="og:title" content="Kiln GRPO Guide &mdash; Train from scored completions">
+  <meta property="og:description" content="Generate and score rollouts, submit a GRPO job, inspect its policy audit, and evaluate the saved LoRA adapter before activation.">
   <meta property="og:type" content="website">
   <meta property="og:locale" content="en_US">
   <meta property="og:site_name" content="Kiln">
@@ -24,8 +24,8 @@
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Kiln GRPO Guide &mdash; Live feedback loop">
-  <meta name="twitter:description" content="Generate rollouts, score completions, submit /v1/train/grpo, and watch Kiln hot-swap the resulting LoRA adapter.">
+  <meta name="twitter:title" content="Kiln GRPO Guide &mdash; Train from scored completions">
+  <meta name="twitter:description" content="Generate and score rollouts, submit a GRPO job, inspect its policy audit, and evaluate the saved LoRA adapter before activation.">
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image-v3.png">
   <meta name="twitter:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
 
@@ -80,7 +80,7 @@
       position: absolute;
       left: 1rem;
       top: 0;
-      transform: translateY(-120%);
+      transform: translateY(calc(-100% + 1px));
       z-index: 50;
       background: var(--accent);
       color: #1a0c00;
@@ -259,7 +259,7 @@
       <nav class="site-nav text-sm">
         <a href="quickstart.html">Quickstart</a>
         <a href="docs/">Documentation</a>
-        <a href="grpo.html" aria-current=page>GRPO Guide</a>
+        <a href="grpo.html" aria-current="page">GRPO Guide</a>
         <a href="evals.html">Evals</a>
         <a href="api.html">API Reference</a>
         <a href="cli.html">CLI Reference</a>
@@ -274,23 +274,25 @@
   <!-- hero -->
   <section class="hero-glow">
     <div class="max-w-4xl mx-auto px-6 pt-16 pb-10">
-      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">GRPO &middot; live feedback loop</span>
+      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">GRPO &middot; experimental training workflow</span>
       <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">
-        Train from scored completions without leaving the server.
+        Train a LoRA adapter from scored completions.
       </h1>
       <p class="text-lg leading-relaxed max-w-3xl" style="color: var(--fg-dim);">
-        Kiln's GRPO path is a compact generate &rarr; score &rarr; train loop: produce several completions for each prompt,
-        assign rewards with your own verifier, submit the scored batch to <code>/v1/train/grpo</code>, and let Kiln write and hot-swap a LoRA adapter.
+        Kiln's GRPO path is a generate &rarr; score &rarr; train loop: produce several
+        completions for each prompt, assign rewards with your own verifier, submit the
+        scored batch to <code>/v1/train/grpo</code>, and let Kiln save a LoRA
+        adapter for evaluation and explicit activation.
       </p>
       <div class="flex flex-wrap gap-3 mt-8">
         <a href="api.html#training" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
-          Training API &rarr;
+          Inspect training endpoints &rarr;
         </a>
         <a href="demo/" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
-          Demo &rarr;
+          See the dashboard fixture &rarr;
         </a>
         <a href="https://github.com/ericflo/kiln/blob/main/docs/GRPO_GUIDE.md" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
-          Full GitHub guide &rarr;
+          Read the full GRPO guide &rarr;
         </a>
       </div>
     </div>
@@ -304,9 +306,10 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#what-grpo-does">What GRPO does</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#rollouts">Rollouts</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#submit-training">Submit training</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#promotion-gate">Gate promotion</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#checkpoint-resume">Checkpoint &amp; resume</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#watch-status">Watch status</a>
-          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#audit-policy">Audit update</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#audit-policy">Audit the receipt</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#where-to-go-next">Where to go next</a>
         </div>
       </div>
@@ -319,19 +322,52 @@
         <div class="label mb-3">Concept</div>
         <h2 id="what-grpo-does" class="text-2xl font-semibold mb-4">What GRPO does in Kiln</h2>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
-          GRPO is the feedback-training endpoint for cases where you can score model outputs better than you can write one perfect answer.
-          Each request contains groups. A group has the original chat-format <code>messages</code> and several <code>completions</code>, each with generated <code>text</code> and a numeric <code>reward</code>.
+          Group Relative Policy Optimization (GRPO) fits tasks where you can
+          score model outputs more reliably than you can write one ideal answer.
+          Each group contains the original chat-format <code>messages</code> and
+          several <code>completions</code>, each with generated <code>text</code>
+          and a finite numeric <code>reward</code>.
         </p>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
-          Kiln normalizes the rewards within each group, applies the GRPO loss to LoRA parameters, saves the resulting adapter, and auto-loads it by default when training completes. Inference can keep serving while the training job runs in the background queue.
+          Kiln derives relative advantages within each group, applies the selected
+          GRPO-family loss to LoRA parameters, and atomically publishes the completed
+          adapter. The request enters a background queue, but GPU training takes exclusive
+          accelerator ownership; inference resumes only after that ownership is released.
         </p>
+        <div class="card p-5 mt-5" style="background: rgba(249, 115, 22, 0.08); border-color: rgba(249, 115, 22, 0.22);">
+          <h3 class="font-semibold mb-2">Run this loop only in the experimental profile</h3>
+          <p style="color: var(--fg-dim);">
+            The default <code>stable</code> profile rejects training and adapter-weight
+            transitions. <code>maintenance</code> admits drained mutation but disables the
+            generation and evaluation halves of this workflow. The current release also
+            cannot start a <code>stable</code> process with a saved LoRA adapter. Use a
+            separate <code>experimental</code> process for the complete generate, train,
+            evaluate, and activate loop. See
+            <a href="docs/serving-profiles/">Serving profiles</a>.
+          </p>
+        </div>
+        <div class="card p-5 mt-5">
+          <h3 class="font-semibold mb-2">Before you run the commands</h3>
+          <p style="color: var(--fg-dim);">
+            Start Kiln with real <code>Qwen/Qwen3.5-4B</code> weights and
+            <code>KILN_SERVER_SERVING_PROFILE=experimental</code>. The CLI examples
+            assume that the extracted <code>kiln</code> binary is on your
+            <code>PATH</code>; otherwise replace <code>kiln</code> with its local path.
+            Generate and score data from a trusted client because Kiln does not
+            authenticate its HTTP API.
+          </p>
+        </div>
       </article>
 
       <article class="card p-6">
         <div class="label mb-3">Rollouts</div>
         <h2 id="rollouts" class="text-2xl font-semibold mb-4">Generate multiple completions per prompt</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          Use <code>kiln rollout-generate</code> when training with recorded importance correction. It requests one seeded, non-streaming choice at a time, validates the server-issued token and behavior-policy provenance before scoring, and atomically publishes GRPO JSONL only after every rollout passes.
+          Use <code>kiln rollout-generate</code> when training with recorded importance
+          correction. It requests one seeded, non-streaming choice at a time,
+          validates the server-issued token and behavior-policy provenance before
+          scoring, and atomically publishes trainer-ready GRPO JSONL only after every
+          rollout passes.
         </p>
         <section class="endpoint">
           <h3 class="font-semibold mb-2">Provenance-bound rollout dataset</h3>
@@ -351,13 +387,17 @@
         </p>
         <section class="endpoint mt-5">
           <h3 class="font-semibold mb-2">Text-only batch alternative</h3>
-          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/completions/batch \
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/completions/batch \
   -H "Content-Type: application/json" \
   -d '{"prompts": [[{"role": "user", "content": "What is 47 + 138?"}]],
        "n": 8, "temperature": 0.9, "max_tokens": 64, "seed": 42}' \
   | python3 -m json.tool</code></pre>
           <p class="text-sm mt-3" style="color: var(--fg-dim);">
-            This endpoint does not emit per-token behavior probabilities. Train its outputs only with <code>behavior_policy: "no_importance_correction"</code>; Kiln will not substitute the KL reference for the missing behavior denominator.
+            This endpoint does not emit per-token behavior probabilities or a
+            trainer-ready scored-group file. Score its completions, reshape them into
+            <code>groups</code>, and train only with
+            <code>behavior_policy: "no_importance_correction"</code>. Kiln will not
+            substitute the KL reference for the missing behavior denominator.
           </p>
         </section>
       </article>
@@ -366,11 +406,16 @@
         <div class="label mb-3">Training</div>
         <h2 id="submit-training" class="text-2xl font-semibold mb-4">Submit scored completions to <code>/v1/train/grpo</code></h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          The minimal request is <code>{"groups": [...]}</code>; every <code>config</code> field has a server default. Use <code>output_name</code> when you want a stable adapter name, and leave <code>auto_load</code> at its default if the new adapter should become active immediately after training.
+          The minimal request is <code>{"groups": [...]}</code>; every
+          <code>config</code> field has a server default. Set
+          <code>output_name</code> for a predictable artifact name. Although
+          <code>auto_load</code> defaults to <code>true</code>, the safer
+          train-then-evaluate workflow sets it to <code>false</code> and activates the
+          adapter only after held-out comparison.
         </p>
         <section class="endpoint">
           <h3 class="font-semibold mb-2">First GRPO training request</h3>
-          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/train/grpo \
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/train/grpo \
   -H "Content-Type: application/json" \
   -d '{
     "groups": [{
@@ -388,10 +433,51 @@
       "clip_epsilon": 0.2,
       "lora_rank": 16,
       "output_name": "math-correctness",
-      "auto_load": true
+      "auto_load": false
     }
   }' \
   | python3 -m json.tool</code></pre>
+        </section>
+        <section id="promotion-gate" class="endpoint mt-5">
+          <h3 class="font-semibold mb-2">Recommended: bind activation to held-out evidence</h3>
+          <p class="text-sm mb-3" style="color: var(--fg-dim);">
+            After registering one versioned held-out suite, submit the server-visible
+            JSONL through the streamed route with a <code>post_eval</code> gate. Replace
+            both example names and the absolute dataset path. Kiln publishes the
+            adapter but defers activation until the exact trained revision passes the
+            fixed paired statistical policy:
+          </p>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/train/grpo \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dataset_path": "/absolute/path/scored-groups.jsonl",
+    "config": {
+      "behavior_policy": "recorded",
+      "output_name": "math-correctness",
+      "auto_load": true
+    },
+    "post_eval": {
+      "suite": "math-held-out-v1",
+      "data_scope": "held-out",
+      "include_baseline": true,
+      "min_accuracy": 0.85,
+      "generation": {
+        "temperature": 0.0,
+        "max_tokens": 128,
+        "seed": 42
+      }
+    }
+  }' \
+  | python3 -m json.tool</code></pre>
+          <p class="text-sm mt-3" style="color: var(--fg-mute);">
+            The gate requires at least 20 independent reduced examples, an exact
+            sign test, and a Wilson confidence floor. Its terminal outcome is
+            <code>promoted</code>, <code>kept</code>, <code>regression</code>,
+            <code>demoted</code>, <code>inconclusive</code>, or <code>error</code>;
+            only <code>promoted</code> activates the adapter. See
+            <a href="evals.html#post-eval">Post-training auto-eval</a> for the full
+            policy and suite requirements.
+          </p>
         </section>
         <div class="grid sm:grid-cols-2 gap-4 mt-5">
           <div class="endpoint">
@@ -403,13 +489,13 @@
               <li><code>behavior_policy</code> selects recorded rollout probabilities or an explicit fixed-one ratio; <code>kl_reference_policy</code> independently selects the frozen KL anchor.</li>
               <li><code>lora_rank</code> and <code>lora_alpha</code> control adapter capacity.</li>
               <li><code>base_adapter</code> continues from an existing adapter.</li>
-              <li><code>seed</code> selects the run seed; when omitted, admission materializes one before queue publication and returns it as an exact decimal string.</li>
+              <li><code>seed</code> selects the run seed. When omitted, Kiln assigns one before queueing the job and returns it as an exact decimal string.</li>
               <li><code>output_name</code> names the saved adapter.</li>
-              <li><code>auto_load</code> defaults to <code>true</code>.</li>
-              <li><code>checkpoint_interval</code> publishes exact state every N committed optimizer groups.</li>
+              <li><code>auto_load</code> defaults to <code>true</code>; set it to <code>false</code> when evaluation should gate activation.</li>
+              <li><code>checkpoint_interval</code> writes exact state every positive N committed optimizer groups.</li>
               <li><code>resume_checkpoint</code> continues from the immutable basename reported by job detail.</li>
               <li><code>adapter_smoke_test</code> enables the post-training canary; <code>adapter_smoke_prompts</code> supplies request-local replacement prompts.</li>
-              <li><code>shared_prefix_reference</code> defaults true and reuses qualified prompt-side reference state. Disable it only for an explicit comparison.</li>
+              <li><code>shared_prefix_reference</code> defaults to <code>true</code> and reuses qualified prompt-side reference state. Disable it only for an explicit comparison.</li>
               <li><code>detect_anomaly</code> is an off-by-default, request-local backward diagnostic. It scans each operation's returned gradients and fails at the first NaN or Inf; use <code>kiln train grpo --detect-anomaly</code> to enable it.</li>
             </ul>
           </div>
@@ -419,7 +505,7 @@
               <li>Put options under <code>config</code>, not at the top level.</li>
               <li>Use <code>groups</code>, <code>messages</code>, <code>completions</code>, <code>text</code>, and <code>reward</code>.</li>
               <li>GRPO does not use SFT's <code>epochs</code> field.</li>
-              <li>Use at least a few completions per group so rewards can be compared.</li>
+              <li>Use at least two completions with different rewards; equal rewards produce zero normalized advantage.</li>
             </ul>
           </div>
         </div>
@@ -436,10 +522,10 @@ kiln train grpo \
   --checkpoint-interval 25 \
   --resume-checkpoint math-correctness-checkpoint-step-00000025.kiln-checkpoint</code></pre>
           <p class="text-sm mt-3" style="color: var(--fg-dim);">
-            A <code>.jsonl</code> file uses the memory-bounded streamed route; JSON containing <code>groups</code> uses the inline route. Resume requires the identical source bytes, route, adapter, and effective configuration. Kiln validates and restores adapter, optimizer, reference/EMA, cursor/RNG, loss, and diagnostic state before GPU setup. Cancellation publishes at the next settled group boundary; a crash can lose the in-flight group but not the newest committed checkpoint. The browser job drill can copy the basename or prepare the matching form, and the full fail-closed contract is in <a href="https://github.com/ericflo/kiln/blob/main/docs/training-checkpoints.md">Native Training Checkpoints</a>.
+            A <code>.jsonl</code> file uses the memory-bounded streamed route; JSON containing <code>groups</code> uses the inline route. Resume requires identical source bytes, route, adapter, and effective configuration. Before GPU setup, Kiln validates and restores adapter, optimizer, reference or EMA, cursor and RNG, loss, and diagnostic state. Cancellation settles at the next group boundary. A crash can lose the in-flight group, but not the newest committed checkpoint. Dashboard job details can copy the checkpoint basename or prepare the matching form. See <a href="docs/training-checkpoints/">Native training checkpoints</a> for the fail-closed contract.
           </p>
           <p class="text-sm mt-3" style="color: var(--fg-dim);">
-            Submission and status report the immutable <code>effective_seed</code> as a decimal string. Exact resume inherits the checkpoint&rsquo;s original LoRA-initialization seed and rejects a conflicting request. Same-seed fresh runs are comparable only with the same weights, data, tokenizer, build, backend, runtime, and precision environment.
+            Submission and status report the immutable <code>effective_seed</code> as a decimal string. Exact resume inherits the checkpoint's original LoRA-initialization seed and rejects a conflicting request. Fresh runs that reuse a seed are comparable only when weights, data, tokenizer, build, backend, runtime, and precision also match.
           </p>
         </section>
       </article>
@@ -451,7 +537,7 @@ kiln train grpo \
           <code>/v1/train/grpo</code> returns a queued job immediately. Poll <code>/v1/train/status</code> to see pending, running, completed, or failed jobs. <code>GET /v1/train/jobs/{job_id}</code> reports the latest exact checkpoint basename, inline/JSONL route, and next group cursor; then confirm the trained adapter through the adapter APIs or the web UI.
         </p>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          If the <code>kiln</code> CLI is on your <code>PATH</code>, run <code>kiln train status</code> for the same info as a readable summary (use <code>--url http://host:8420</code> for remote servers). The curl command below is the equivalent HTTP probe &mdash; handy for CI, scripts, or any environment without the CLI.
+          If the <code>kiln</code> CLI is on your <code>PATH</code>, run <code>kiln train status</code> for the same status as a readable summary (use <code>--url http://host:8420</code> for a trusted remote server). The <code>curl</code> command below is the equivalent HTTP probe for CI, scripts, or environments without the CLI.
         </p>
         <section class="endpoint">
           <h3 class="font-semibold mb-2">Training status from the CLI</h3>
@@ -459,10 +545,15 @@ kiln train grpo \
         </section>
         <section class="endpoint mt-4">
           <h3 class="font-semibold mb-2">Training status</h3>
-          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/train/status | python3 -m json.tool</code></pre>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/train/status | python3 -m json.tool</code></pre>
         </section>
         <p class="leading-relaxed mt-5 mb-5" style="color: var(--fg-dim);">
-          Once a job is <code>completed</code>, confirm the new adapter actually landed and is active. If the <code>kiln</code> CLI is on your <code>PATH</code>, <code>kiln adapters list</code> shows the new adapter and which one is active. The curl command below hits the same endpoint for CI or scripted use.
+          After a job is <code>completed</code>, confirm that Kiln saved the new
+          adapter. <code>kiln adapters list</code> shows every saved adapter and
+          identifies the active one. With the recommended
+          <code>auto_load: false</code>, <code>math-correctness</code> should be
+          present but inactive. The <code>curl</code> command below calls the same
+          endpoint for CI or scripts.
         </p>
         <section class="endpoint mt-4">
           <h3 class="font-semibold mb-2">Confirm the trained adapter from the CLI</h3>
@@ -470,7 +561,27 @@ kiln train grpo \
         </section>
         <section class="endpoint mt-4">
           <h3 class="font-semibold mb-2">Confirm the trained adapter</h3>
-          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/adapters | python3 -m json.tool</code></pre>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/adapters | python3 -m json.tool</code></pre>
+        </section>
+        <section class="endpoint mt-4">
+          <h3 class="font-semibold mb-2">Manual review for an ungated artifact</h3>
+          <p class="text-sm mb-3" style="color: var(--fg-dim);">
+            Compare <code>math-correctness</code> with the no-adapter baseline on a
+            held-out suite in the <a href="evals.html#compare">Evals guide</a>. A
+            manual comparison does not create the atomic promotion gate above. If an
+            operator nevertheless approves activation, recheck the adapter detail and
+            receipt immediately before loading it by name, then record the
+            <code>content_revision</code> returned by this request:
+          </p>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/adapters/load \
+  -H "Content-Type: application/json" \
+  -d '{"name": "math-correctness"}' \
+  | python3 -m json.tool</code></pre>
+          <p class="text-sm mt-3" style="color: var(--fg-mute);">
+            This is an operator-controlled <code>experimental</code>-profile action,
+            not evidence-bound automatic promotion. The current <code>stable</code>
+            profile cannot load or start with a saved LoRA adapter.
+          </p>
         </section>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">
           If a GRPO request is rejected or stays queued longer than expected, start with the <a href="troubleshooting.html">troubleshooting guide</a> and the full endpoint map in <a href="api.html#training">API training</a>.
@@ -485,8 +596,9 @@ kiln train grpo \
         </p>
         <section class="endpoint">
           <h3 class="font-semibold mb-2">Read the policy audit</h3>
-          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>ADAPTER=math-correctness
-curl -s http://localhost:8420/v1/adapters/$ADAPTER/receipt \
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code># This filtered view requires jq.
+ADAPTER=math-correctness
+curl -fsS http://localhost:8420/v1/adapters/$ADAPTER/receipt \
   | jq '.grpo.policy_audit'</code></pre>
         </section>
         <ul class="space-y-2 text-sm mt-5" style="color: var(--fg-dim);">
@@ -506,8 +618,8 @@ curl -s http://localhost:8420/v1/adapters/$ADAPTER/receipt \
       <h2 id="where-to-go-next" class="text-2xl font-semibold tracking-tight mb-4">Where to go next</h2>
       <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <a class="card p-5 block" href="api.html#training">
-          <h3 class="font-semibold mb-2">API training</h3>
-          <p style="color: var(--fg-dim);">Endpoint details for SFT, GRPO, batch rollouts, status, and adapter lifecycle requests.</p>
+          <h3 class="font-semibold mb-2">Training API</h3>
+          <p style="color: var(--fg-dim);">Inspect the exact SFT, GRPO, batch-rollout, status, and adapter-lifecycle requests and responses.</p>
         </a>
         <a class="card p-5 block" href="troubleshooting.html">
           <h3 class="font-semibold mb-2">Troubleshooting</h3>
@@ -515,11 +627,11 @@ curl -s http://localhost:8420/v1/adapters/$ADAPTER/receipt \
         </a>
         <a class="card p-5 block" href="demo/">
           <h3 class="font-semibold mb-2">Demo</h3>
-          <p style="color: var(--fg-dim);">A visual walkthrough of the dashboard, training monitoring, and adapter management flow.</p>
+          <p style="color: var(--fg-dim);">Inspect the dashboard fixture captured from source revision <code>f3ae29e4a</code> on July 30, 2026; simulated values are labelled.</p>
         </a>
         <a class="card p-5 block" href="https://github.com/ericflo/kiln/blob/main/docs/GRPO_GUIDE.md">
           <h3 class="font-semibold mb-2">Deep dive</h3>
-          <p style="color: var(--fg-dim);">Worked reward functions, loop scripts, tuning notes, and troubleshooting for longer GRPO runs.</p>
+          <p style="color: var(--fg-dim);">Run the complete workflow with worked reward functions, loop scripts, policy semantics, and failure diagnosis.</p>
         </a>
       </div>
     </div>
@@ -544,7 +656,7 @@ curl -s http://localhost:8420/v1/adapters/$ADAPTER/receipt \
         <a href="demo/">Demo</a>
         <a href="troubleshooting.html">Troubleshooting</a>
         <a href="architecture.html">Architecture</a>
-        <a href="https://github.com/ericflo/kiln/blob/main/BENCHMARKS.md">Benchmarks</a>
+        <a href="docs/benchmarks/">Benchmarks</a>
         <a href="https://github.com/ericflo/kiln/blob/main/CHANGELOG.md">Changelog</a>
         <a href="https://github.com/ericflo/kiln/blob/main/SECURITY.md">Security</a>
         <a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License</a>

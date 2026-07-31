@@ -2237,7 +2237,9 @@
     },
     {
       "command": "cargo test -p kiln-tensor device_op_host_fallback_counts_are_backend_and_arity_specific",
-      "coverage_blockers": [],
+      "coverage_blockers": [
+        "the counter test proves backend and arity attribution, not that end-to-end decode and training hot paths keep fallback counts at zero"
+      ],
       "evidence": [
         "crates/kiln-tensor/src/device_op.rs",
         "crates/kiln-model/src/generate.rs",
@@ -2251,7 +2253,7 @@
       ],
       "gate": "no_unexpected_host_fallback",
       "phase8_requirement": "no unexpected host fallback in decode/training hot paths",
-      "status": "covered",
+      "status": "partial",
       "supplemental_commands": []
     },
     {
@@ -3771,12 +3773,13 @@
       "migration_signals": [],
       "phase": 8,
       "remaining": [
-        "hardware_latency_thresholds remains fixture_required until real known-hardware result artifacts satisfy --require-covered"
+        "add end-to-end decode and training assertions that accelerator host-fallback counters remain at zero",
+        "import real hardware receipts and lock portable, backend-scoped latency thresholds"
       ],
       "report_sections": [
         "Conformance And Performance Gates"
       ],
-      "status": "fixture_required",
+      "status": "partial",
       "title": "Conformance and performance gates"
     }
   ],
@@ -3879,7 +3882,7 @@
         "crates/kiln-model/src/rocm_graph.rs"
       ],
       "parity_tests": [
-        "ROCm graph runner byte-identical eager/replay source contract"
+        "source contract: ROCm graph runner keeps eager and replay output handling byte-identical"
       ],
       "production_authority": "model_level_runner",
       "runner_paths": [
@@ -4300,6 +4303,10 @@
     }
   },
   "source": {
+    "audited_on": "2026-07-30",
+    "does_not_execute_commands": true,
+    "generated_on": "2026-07-30",
+    "scope": "static source and contract inventory",
     "script": "scripts/generate_backend_capability_report.py"
   },
   "streaming_prefill_backend_policy": {

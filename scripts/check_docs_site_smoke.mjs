@@ -22,6 +22,9 @@ const runtimeEnvironmentContract = JSON.parse(
   readFileSync(resolve(repoRoot, 'contracts/runtime-env-direct-reads-v1.json'), 'utf8'),
 );
 const runtimeEnvironmentSummary = runtimeEnvironmentContract.summary;
+const docsManifest = JSON.parse(
+  readFileSync(resolve(repoRoot, 'docs/site/docs-manifest.json'), 'utf8'),
+);
 
 function publishedPath(relativePath) {
   const path = relative(repoRoot, resolve(siteRoot, relativePath)).split(sep).join('/');
@@ -62,8 +65,28 @@ const expectedFooterLinks = [
   { label: 'Demo', localPath: publishedPath('demo/') },
   { label: 'Troubleshooting', localPath: publishedPath('troubleshooting.html') },
   { label: 'Architecture', localPath: publishedPath('architecture.html') },
+  { label: 'Benchmarks', localPath: publishedPath('docs/benchmarks/') },
   { label: 'Changelog', href: 'https://github.com/ericflo/kiln/blob/main/CHANGELOG.md' },
+  { label: 'Security', href: 'https://github.com/ericflo/kiln/blob/main/SECURITY.md' },
   { label: 'License', href: 'https://github.com/ericflo/kiln/blob/main/LICENSE' },
+];
+
+const expectedProductFooterOrder = [
+  'Home',
+  'README',
+  'Quickstart',
+  'Documentation',
+  'GRPO Guide',
+  'Evals',
+  'API Reference',
+  'CLI Reference',
+  'Demo',
+  'Troubleshooting',
+  'Architecture',
+  'Benchmarks',
+  'Changelog',
+  'Security',
+  'License',
 ];
 
 const expectedEmbeddedUiHelpLinks = [
@@ -104,30 +127,30 @@ const generatedDocsPages = [
     canonical: 'https://ericflo.github.io/kiln/docs/',
     h1: 'Kiln documentation',
     terms: [
-      'Configuration Reference',
+      'Configuration reference',
       'GRPO Guide',
       'Evals Guide',
-      'Configuration Schema',
-      'HTTP API Contract',
-      'Observability API Schema',
-      'Architecture Deep Dive',
-      'Native SFT Profile',
-      'SFT Ingestion and Row Identity',
-      'SFT Tokenization and Loss',
-      'Native Training Checkpoints',
-      'Dataset Splits and Train/Eval Separation',
-      'Thinking Budget Contract',
-      'CI and Local Qualification Policy',
-      'Verification Policy',
-      'Runtime Environment Inventory',
-      'Verification Test Inventory',
+      'Configuration schema',
+      'HTTP API contract',
+      'Observability API schema',
+      'Architecture deep dive',
+      'Native SFT profile',
+      'SFT ingestion and row identity',
+      'SFT tokenization and loss',
+      'Native training checkpoints',
+      'Dataset splits and train/eval separation',
+      'Thinking budgets',
+      'CI and local qualification policy',
+      'Verification policy',
+      'Runtime environment inventory',
+      'Source-parsing test debt',
     ],
   },
   {
-    label: 'Serving Benchmark Protocol',
+    label: 'Serving benchmark protocol',
     path: publishedPath('docs/serving-benchmark-protocol/index.html'),
     canonical: 'https://ericflo.github.io/kiln/docs/serving-benchmark-protocol/',
-    h1: 'Serving Benchmark Protocol',
+    h1: 'Serving benchmark protocol',
     anchors: ['process-boundary', 'timing', 'retention'],
     terms: [
       'ordinary wall-clock timing',
@@ -138,6 +161,67 @@ const generatedDocsPages = [
       'Telemetry is diagnostic evidence',
       'do not inject gfx1151',
       'historical records and are not accepted',
+    ],
+  },
+  {
+    label: 'Serving profiles',
+    path: publishedPath('docs/serving-profiles/index.html'),
+    canonical: 'https://ericflo.github.io/kiln/docs/serving-profiles/',
+    h1: 'Serving profiles',
+    anchors: ['exact-policy', 'stable', 'experimental', 'maintenance', 'move-between-profiles'],
+    terms: [
+      'A serving profile is an immutable, process-wide GPU ownership policy',
+      'The profile is one policy boundary, not a hardware selector',
+      'Device marketing names, vendor or device IDs, driver strings',
+      'has no startup setting for selecting a saved adapter',
+      'This is a product limitation, not a hidden configuration option',
+      'Start a separate experimental process to load, evaluate, or serve the unmerged adapter',
+    ],
+  },
+  {
+    label: 'Latency observability',
+    path: publishedPath('docs/latency-observability/index.html'),
+    canonical: 'https://ericflo.github.io/kiln/docs/latency-observability/',
+    h1: 'Latency observability',
+    anchors: ['choose-an-observation-surface', 'understand-the-clocks', 'use-the-rolling-decode-endpoint', 'diagnose-a-pause'],
+    terms: [
+      'Tokens from concurrent streams are never paired with one another',
+      'Decode cadence, not end-to-end throughput',
+      'does not mean that the remote client received or rendered the bytes',
+      'Never sum every phase',
+      'It is not evidence by itself of allocator activity',
+      'Do not compare it with end-to-end output throughput',
+      'Hardware receipts and host names are evidence about specific benchmark runs',
+    ],
+  },
+  {
+    label: 'Thinking budgets',
+    path: publishedPath('docs/thinking-budgets/index.html'),
+    canonical: 'https://ericflo.github.io/kiln/docs/thinking-budgets/',
+    h1: 'Thinking budgets',
+    anchors: ['set-a-request-budget', 'know-when-a-budget-applies', 'understand-enforcement', 'find-the-record-on-each-api-surface'],
+    terms: [
+      'limits an open model reasoning block without disabling thinking or ending the completion',
+      'Explicitly unlimited, even when the server has a finite default',
+      'If both are reached at the same token boundary, the token trigger is reported',
+      'A budget does not turn thinking on',
+      'Those close tokens enter KV history',
+      'Do not treat triggered as proof of successful closure',
+      'Kiln does not manufacture one aggregate batch outcome',
+    ],
+  },
+  {
+    label: 'Thinking budget schema',
+    path: publishedPath('docs/thinking-budget-schema/index.html'),
+    canonical: 'https://ericflo.github.io/kiln/docs/thinking-budget-schema/',
+    h1: 'Thinking budget schema',
+    anchors: [],
+    terms: [
+      'The token and decode-time dimensions resolve independently',
+      'Maximum generated thinking tokens before Kiln closes an open reasoning block',
+      'Maximum decode time in milliseconds, starting at the first decode candidate',
+      "Whether the tokenizer's complete reasoning close sequence entered model history",
+      'Recent-request form of the effective record',
     ],
   },
   {
@@ -520,6 +604,9 @@ const generatedDocsPages = [
       'identity_revision',
       'Composition and conditional rules',
       'x-kiln-entrypoints',
+      'explicit CPU and placeholder build identities',
+      'not hardware receipts or backend support claims',
+      'runtime defaults, support predicates, qualification evidence, or benchmark receipts',
     ],
   },
   {
@@ -675,29 +762,53 @@ const generatedDocsPages = [
     ],
   },
   {
-    label: 'Architecture Deep Dive',
+    label: 'Backend capability report',
+    path: publishedPath('docs/backend-capabilities/index.html'),
+    canonical: 'https://ericflo.github.io/kiln/docs/backend-capabilities/',
+    h1: 'Backend capability report',
+    anchors: [
+      'read-this-first',
+      'current-source-snapshot',
+      'open-coverage-work',
+      'runtime-fallback-policy',
+      'how-to-read-status-labels',
+      'detailed-generated-inventory',
+      'regenerate-and-validate',
+    ],
+    terms: [
+      'It is a static source inventory',
+      'does not compile a backend, execute the listed commands, detect hardware, or measure throughput',
+      'determine support from capabilities and request constraints, not a device name',
+      'must never become runtime dispatch, a default, or a support promise',
+      'Feature fanout exists; it does not prove operation coverage or performance',
+      'the host-fallback counter test validates counter attribution',
+      'The report therefore marks that gate partial',
+      'Commands are prescriptions, not execution receipts',
+      'regeneration alone is not verification',
+    ],
+  },
+  {
+    label: 'Architecture deep dive',
     path: publishedPath('docs/architecture-deep-dive/index.html'),
     canonical: 'https://ericflo.github.io/kiln/docs/architecture-deep-dive/',
-    h1: 'Architecture Deep Dive',
-    anchors: ['backend-owned-sft-loss-routing'],
+    h1: 'Architecture deep dive',
+    anchors: ['vulkan-policy-is-capability-driven', 'accelerator-ownership-and-serving-profiles', 'failure-and-health-boundaries'],
     terms: [
-      'Backend-owned SFT loss routing',
-      'TrainingLossBackend',
-      'kt_tape_flce',
-      'vulkan_active_rows',
-      'full_logits',
-      'route-specific saturating working-set estimate',
-      'PreparedSftAdmission.loss_route',
-      'resident-runner recheck before governor reservation/reclamation',
-      'fresh execution-backend recheck before resident/trainable allocation',
-      'loss workspace',
-      'HTTP 413',
-      'training_invalid_request',
-      'KILN_USE_FLCE',
-      'no mechanically derived environment name',
-      'runtime.sft_loss_route',
-      'SFT exact checkpoint planning identity v4',
-      'GRPO and OPD retain planning identity v3',
+      'Startup establishes the runtime contract',
+      'The production block manager divides K/V storage into 64-token blocks',
+      'Vulkan runtime selection does not branch on a marketing device name',
+      'vendor ID, or device ID',
+      'VulkanKernelPolicy::from_capabilities',
+      'A benchmark result is evidence about that recorded run',
+      'it is never a device-name dispatch rule',
+      'stable',
+      'experimental',
+      'maintenance',
+      'inference takes shared ownership',
+      'training and physical mutations take exclusive ownership',
+      'vulkan_correctness_quarantine',
+      "Kiln's HTTP API has no built-in authentication",
+      'unknown accelerator state',
     ],
   },
   {
@@ -810,43 +921,29 @@ const generatedDocsPages = [
     h1: 'Native Training Checkpoints',
     anchors: ['checkpoint-planning-identity'],
     terms: [
-      'Current server training records {"mode":"round_to_nearest"}',
-      'legacy exact checkpoint',
-      'records {"mode":"stochastic","seed":...}',
-      'fails closed during precision comparison before GPU ownership',
-      'KILN_BF16_STOCHASTIC_ROUND',
-      'KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK',
-      'KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK',
-      'Admission and compatibility ordering',
-      'before checkpoint loading or corpus scanning',
-      'exact native backend/device identity',
-      'no Marlin-packed projection',
-      'kt_tape_authoritative',
-      'backend_implementation',
-      'optimizer_tuple',
-      'allowed_optimizer_kinds',
-      'GET /v1/recipes',
-      'fails its static guard before an effective seed or queue entry exists',
-      'distill_refresh is unavailable until admission pins separate exact SFT and OPD phase plans, prepares the exact SFT rows, and reserves the maximum sequential working set',
-      'Queued resume revalidation',
-      'fully validated manifest',
-      'effective seed',
+      'Checkpoint or adapter?',
+      'A resume continues the same optimizer run',
+      'Start a checkpointed run',
+      'Find the checkpoint to resume',
+      'latest_checkpoint',
+      'Resume the run',
+      'Resume is continuation, not warm-starting',
+      'capability-derived backend routes',
+      'not device-name',
+      'Queue-time revalidation',
       'before memory reservation',
-      'revalidation, not a filesystem snapshot',
-      'mutation race after the dequeue reload',
       'GRPO and OPD use schema kiln.training-checkpoint-planning.v3',
-      'SFT uses kiln.training-checkpoint-planning.v4',
+      'SFT uses schema kiln.training-checkpoint-planning.v4',
       'sft_loss_route',
       'kt_tape_flce',
       'vulkan_active_rows',
       'full_logits',
-      'worker compares it with the resident runner before memory reservation',
-      'trainer compares it with its execution backend before allocation',
-      'planning drift',
-      'SFT v3 identity cannot authorize continuation under SFT v4',
-      'KILN_USE_FLCE',
-      'no alias or current effect',
-      'runtime.sft_loss_route',
+      'Crash and cancellation behavior',
+      'What the checkpoint restores',
+      'Checkpoint validation and security',
+      'Promotion is a separate decision',
+      'Recovery checklist',
+      'does not prune checkpoints on a timer',
     ],
   },
   {
@@ -879,31 +976,37 @@ const generatedDocsPages = [
     canonical: 'https://ericflo.github.io/kiln/docs/hardware-qualification/',
     h1: 'Local Hardware Qualification',
     terms: [
-      'Product behavior stays portable',
-      'Historical receipts remain historical',
-      'no CPU quota',
-      'no fixed memory ceiling',
-      'typed read-only observations',
-      'readings do not pace workloads',
-      'Current Metal Platform Evidence',
-      'macos-sandbox-loopback-only-v1',
-      '20260728t223911446266z-metal-macbook-air-m1-local-environment-v1',
-      'explicitly unavailable',
-      'Current Metal Core Evidence',
-      '20260728t225405419496z-metal-macbook-air-m1-cuda-metal-core-correctn-d119e83143-v1',
-      'twenty-step BF16 AdamW trajectory',
-      'Current Metal Unified-Memory Lifecycle Evidence',
-      '20260728t230542216939z-metal-macbook-air-m1-metal-memory-lifecycle-v-dfc8d17c13-v1',
-      '10,241-block request',
-      '268,435,456 bytes reclaimed',
-      'does not select a single ROCm architecture',
-      'Ordinary wall-clock timing',
-      'small process runner',
+      'did this declared workload pass',
+      'Portable runtime policy must continue to discover and use the capabilities',
+      'does not require a named laptop, GPU model, or temperature sensor',
+      'a conformant Vulkan loader and driver',
+      'invoke case commands through a shell',
+      'command case-result file is not the qualification verdict',
+      'no fixed CPU quota or machine-sized memory ceiling',
+      'does not pin one ROCm architecture',
+      'The receipt itself has no signature or self-digest',
+      '--require-local-artifacts',
+      'comparison policy',
+      'Retained Evidence Examples',
+      'historical snapshots, not current defaults or a device allowlist',
+      'Metal/macOS environment',
+      'Core correctness',
+      'Controlled admission, allocation-failure, reclaim, and cleanup cases',
+      'Targeted serving closure',
+      'Hosted build checkpoint',
       'Version 1 oracle results',
-      'Keep machine-specific evidence out of portable defaults',
+      'Do not “fix” a missing capability',
+      'Keep every machine-specific fact out of portable product defaults',
     ],
   },
 ];
+
+for (const expected of generatedDocsPages) {
+  if (expected.label === 'Documentation hub') continue;
+  const slug = expected.path.split('/').filter(Boolean).at(-2);
+  const document = docsManifest.documents.find((candidate) => candidate.slug === slug);
+  if (document) expected.h1 = document.title;
+}
 
 const configurationGuideExpectation = generatedDocsPages.find(
   (page) => page.label === 'Configuration Reference',
@@ -926,21 +1029,21 @@ configurationGuideExpectation.terms = [
 ];
 
 const expectedQuickstartSections = [
-  { label: 'Desktop App path', terms: ['desktop app', 'recommended'] },
+  { label: 'Kiln Desktop path', terms: ['kiln desktop', 'recommended'] },
   { label: 'server binary path', terms: ['server binary', 'terminal-first'] },
   { label: 'Docker path', terms: ['docker', 'nvidia container toolkit'] },
-  { label: 'prerequisites', terms: ['prerequisites'] },
+  { label: 'requirements', terms: ['before you download', '20 gb', 'accelerator runtime', 'cpu architecture'] },
   { label: 'start server', terms: ['run the server', 'kiln serve'] },
   { label: 'test inference', terms: ['send chat', '/v1/chat/completions'] },
   { label: 'pi agent setup', terms: ['configure pi', 'kiln pi-setup', 'Qwen3.5-4B'] },
   { label: 'open UI', terms: ['open the ui', '/ui'] },
-  { label: 'first inference checkpoint', terms: ['first inference checkpoint'] },
-  { label: 'SFT next step', terms: ['sft corrections', '/v1/train/sft'] },
-  { label: 'GRPO next step', terms: ['grpo guide', 'generate', 'score', 'train'] },
-  { label: 'training payload shapes', terms: ['sft jsonl', 'one chat correction per line', 'messages array', 'grpo json request/batch', 'jsonl with one group per line', 'groups', 'candidate completions', 'reward scores', 'opd request object', 'kiln train sft', 'kiln train grpo', 'kiln train opd', 'registered exact teacher identity'] },
-  { label: 'exact training resume', terms: ['checkpoint-interval', '.kiln-checkpoint', 'resume-checkpoint', 'identical source', 'exact optimizer and loop state', 'opd defaults to 25', 'exact registered teacher revision'] },
+  { label: 'first inference checkpoint', terms: ['get one response before moving on to training'] },
+  { label: 'SFT next step', terms: ['correct with sft', 'kiln train sft'] },
+  { label: 'GRPO next step', terms: ['optimize with grpo', 'generate candidates', 'score them', 'train'] },
+  { label: 'training payload shapes', terms: ['sft jsonl', 'one chat correction', 'messages array', 'grpo json request or batch', 'jsonl with one candidate-and-reward group per line', 'opd request object', 'kiln train sft', 'kiln train grpo', 'kiln train opd', 'registered exact teacher identity'] },
+  { label: 'exact training resume', terms: ['checkpoint-interval', '.kiln-checkpoint', 'resume-checkpoint', 'same source', 'restores optimizer and loop state', 'opd defaults to 25', 'exact registered teacher revision'] },
   { label: 'base-weight provenance', terms: ['base-weight shard manifest', 'changed shard bytes', 'legacy aggregate-only checkpoints', 'base-weight provenance contract'] },
-  { label: 'Where to go next', terms: ['where to go next'] },
+  { label: 'next-task guides', terms: ['open the guide for your next task'] },
 ];
 
 const expectedQuickstartDashboardTerms = [
@@ -961,12 +1064,13 @@ const expectedQuickstartLinks = [
 ];
 
 const expectedDemoSections = [
-  { label: 'freshness', terms: ['captured july 30, 2026', 'current repository ui'] },
-  { label: 'provenance', terms: ['ui: current repository source', 'data: deterministic seeded demo fixtures', 'not a live performance run'] },
+  { label: 'freshness', terms: ['captured july 30, 2026', 'ui source 1eacf5100'] },
+  { label: 'provenance', terms: ['ui: embedded dashboard source at', '1eacf5100', 'data: deterministic seeded demo fixtures', 'not a live performance run'] },
   { label: 'observe', terms: ['know what is actually running', 'backend truth', 'request evidence'] },
   { label: 'serve', terms: ['test the exact request path', 'openai-compatible', 'adapter-explicit'] },
   { label: 'teach', terms: ['turn evidence into a named training job', 'admission first', 'evaluation separate'] },
   { label: 'promote', terms: ['compare, inspect, then activate', 'base identity bound', 'hot-swap explicit'] },
+  { label: 'profile boundary', terms: ['works in the default stable profile', 'interactive train, evaluate, and adapter-activation loop', 'requires the experimental profile', 'current saved-adapter limitation'] },
   { label: 'historical archive', terms: ['historical terminal recordings', 'captured may 4, 2026', 'not current product proof'] },
 ];
 
@@ -1103,12 +1207,6 @@ const expectedApiSections = [
   { label: 'response shapes', terms: ['response shapes'] },
 ];
 
-const expectedApiTrainingAnchors = [
-  'training-tape-scope',
-  'training-frozen-parameter-ownership',
-  'training-exact-gradient-boundary',
-];
-
 const expectedApiCodeExamples = [
   { label: 'accelerator runtime v16 shape', terms: ['"accelerator_runtime"', '"schema_id": "kiln.accelerator-runtime-policy.v16"', '"version": 16', '"vulkan_kernel_policy_schema_id": "kiln.vulkan-kernel-policy.v6"', '"vulkan_device_policy_schema_id": "kiln.vulkan-device-policy.v1"', '"kt_api_mode"', '"full_attention_score_budget_mib"', '"configured": 2048', '"effective": 2048', '"vulkan_device_index"', '"configured": null', '"effective": null', '"vulkan_validation"', '"configured": false', '"effective": false', '"cuda_kernel_profile"', '"metal_kernel_profile"', '"configured": "native_default"', '"effective": "native_default"', '"rocm_synchronization_mode"', '"rocm_strided_batched_matmul_mode"', '"rocm_bf16_matmul_output_mode"', '"rocm_kernel_profile"', '"configured": "portable_fallback"', '"effective": "portable_fallback"', '"rocm_graph_mode"', '"rocm_graph_cache_entries"', '"rocm_graph_cache_max_bytes"', '"configured": 1073741824', '"effective": 1073741824'] },
   { label: 'CUDA startup policy shape', terms: ['"cuda_marlin_profile"', '"configured": "disabled"', '"effective": "disabled"', '"cuda_flash_backward_mode"', '"configured": "fast"', '"effective": "fast"'] },
@@ -1130,8 +1228,37 @@ const expectedApiCodeExamples = [
   { label: 'webhook', terms: ['kiln.toml', 'webhook_url', 'kiln_training_webhook_url'] },
 ];
 
+// The public API page is a task-oriented map, not a duplicate of every generated
+// runtime contract. Keep this smoke coverage focused on its visible reading path;
+// the generated references and schema tests own exhaustive field-level coverage.
+const expectedApiReaderSections = [
+  { label: 'server status', terms: ['server status, metrics, ui, and config'] },
+  { label: 'first requests', terms: ['copy-paste first requests'] },
+  { label: 'advanced requests', terms: ['copyable advanced requests'] },
+  { label: 'generation', terms: ['openai-compatible generation'] },
+  { label: 'adapter lifecycle', terms: ['lora lifecycle', 'stable profile cannot serve or evaluate one'] },
+  { label: 'training', terms: ['sft, grpo, opd, status, and queue control', 'current hybrid vulkan server rejects it before dataset admission'] },
+  { label: 'teachers', terms: ['verified remote teachers and identity-bound cache'] },
+  { label: 'evals', terms: ['run eval suites, synthesize datasets, train a local judge'] },
+  { label: 'training safety', terms: ['treat every training endpoint as privileged'] },
+  { label: 'response shapes', terms: ['response shapes'] },
+  { label: 'structured errors', terms: ['branch on http status and error.code', 'do not infer retry safety from prose alone'] },
+];
+
+const expectedApiReaderCodeExamples = [
+  { label: 'first chat', terms: ['/v1/chat/completions', 'messages', 'max_tokens'] },
+  { label: 'first SFT', terms: ['/v1/train/sft', 'examples', 'config', 'epochs'] },
+  { label: 'first GRPO', terms: ['/v1/train/grpo', 'groups', 'completions', 'reward'] },
+  { label: 'training status', terms: ['/v1/train/status'] },
+  { label: 'batch completions', terms: ['/v1/completions/batch', 'prompts'] },
+  { label: 'adapter download/upload', terms: ['/v1/adapters/default/download', '/v1/adapters/upload'] },
+  { label: 'merge', terms: ['/v1/adapters/merge', 'mode', 'ties'] },
+  { label: 'composition', terms: ['/v1/chat/completions', 'adapters', 'scale'] },
+  { label: 'webhook', terms: ['kiln.toml', 'webhook_url', 'kiln_training_webhook_url'] },
+];
+
 const expectedCliSections = [
-  { label: 'command chooser', terms: ['if you want to'] },
+  { label: 'command chooser', terms: ['choose a task'] },
   { label: 'serve/start-server path', terms: ['start serving Qwen3.5-4B', 'kiln_model_path', 'kiln serve'] },
   { label: 'no-subcommand serve path', terms: ['running kiln with no subcommand starts the server'] },
   { label: 'health/readiness path', terms: ['check server readiness', 'kiln health'] },
@@ -1175,6 +1302,35 @@ const expectedCliCodeExamples = [
   { label: 'verbosity commands', terms: ['kiln -v serve', 'kiln -vv serve', 'kiln -q health'] },
 ];
 
+const expectedCliReaderSections = [
+  { label: 'command chooser', terms: ['choose a task'] },
+  { label: 'binary availability', terms: ['know which commands the release archive includes'] },
+  { label: 'serve', terms: ['start serving qwen3.5-4b'] },
+  { label: 'config', terms: ['use config files and model ids'] },
+  { label: 'startup policy', terms: ['advanced startup policy'] },
+  { label: 'health', terms: ['check server readiness'] },
+  { label: 'agent clients', terms: ['point pi or opencode at kiln'] },
+  { label: 'training', terms: ['run native jobs or move a verified hf/trl handoff'] },
+  { label: 'evals', terms: ['run, compare, and strictly replay evals'] },
+  { label: 'offline tools', terms: ['configure benchmark runs explicitly'] },
+  { label: 'adapters', terms: ['manage lora adapters'] },
+  { label: 'related docs', terms: ['related docs'] },
+];
+
+const expectedCliReaderCodeExamples = [
+  { label: 'serve command', terms: ['kiln_model_path=./qwen3.5-4b', 'kiln serve'] },
+  { label: 'health commands', terms: ['kiln health', 'kiln health --json'] },
+  { label: 'pi setup command', terms: ['kiln pi-setup', '--kiln-url http://office-kiln:8420'] },
+  { label: 'SFT training command', terms: ['kiln train sft', '--file corrections.jsonl', '--adapter support-bot'] },
+  { label: 'GRPO training command', terms: ['kiln train grpo', '--file scored-groups.jsonl', '--adapter support-bot'] },
+  { label: 'OPD training command', terms: ['kiln train opd', '--file opd-request.json', '--teacher qwen35@vllm'] },
+  { label: 'training status command', terms: ['kiln train status'] },
+  { label: 'eval commands', terms: ['kiln-eval run', 'kiln-eval compare', 'kiln-eval replay'] },
+  { label: 'offline benchmark commands', terms: ['kiln-bench --model-path', 'vulkan_decode_microbench --only'] },
+  { label: 'adapter commands', terms: ['kiln adapters list', 'kiln adapters load support-bot', 'kiln adapters unload'] },
+  { label: 'config validation commands', terms: ['kiln config --file kiln.toml', 'kiln serve --config kiln.toml'] },
+];
+
 const expectedCliLinks = [
   { label: 'Quickstart', href: 'quickstart.html' },
   { label: 'API Reference', href: 'api.html' },
@@ -1186,8 +1342,10 @@ const expectedCliLinks = [
 const expectedCliHeroFragments = [
   { label: 'Start the server', href: '#serve' },
   { label: 'Check health', href: '#health' },
+  { label: 'Configure pi', href: '#pi-setup' },
   { label: 'Submit training', href: '#training' },
-  { label: 'Run benchmarks', href: '#benchmarks' },
+  { label: 'Run evals', href: '#evals' },
+  { label: 'Run offline tools', href: '#benchmarks' },
   { label: 'Manage adapters', href: '#adapters' },
 ];
 
@@ -1206,51 +1364,19 @@ const expectedCliModelSetupCue = {
   href: 'quickstart.html',
 };
 
-const expectedArchitectureSections = [
-  { label: 'single-process server', terms: ['single process', 'rust binary', 'axum http api'] },
-  { label: 'request path and batching', terms: ['request path and batching', 'iteration-level scheduler', 'continuous batching'] },
-  { label: 'prefix-cache route invariance', terms: ['prefix-cache route invariance', 'cache admission changes storage and reuse, not numerical prefill geometry', 'block-aligned final prompt boundary', 'no lookup', 'recurrent-state snapshot', 'prompt registration', 'rolling snapshot', 'Every resumable prompt-chunk boundary', 'first token', 'following decode token', 'Accelerator qualification remains required', 'Strix Halo ROCm', 'all ten deterministic and eight sampled requests', 'historical failed receipt remains published'] },
-  { label: 'conservative terminal drain', terms: ['conservative terminal drain', 'terminal row publicly active', 'graph owner', 'recurrent-state lease', 'prefix-cache ownership', 'private KV blocks', 'cannot run again', 'resource-ownership boundary', 'cannot race terminal cleanup'] },
-  { label: 'immutable batching authority', terms: ['BatchingRuntimeConfig', 'None of those paths rereads', 'mandatory real-backend batching actor', 'actor_active', 'decode_runtime.batching_configuration', 'batching_engine.configuration'] },
-  { label: 'immutable streaming-prefill authority', terms: ['one streaming-prefill authority for inference and training', 'StreamingPrefillRuntimeConfig', 'none of those paths rereads', 'SFT/GRPO/OPD', 'checkpoint planning', 'base tiles / tape tiles / detached full-attention tiles', 'prompt-logprob', 'local teacher', 'MTP alignment', 'inference-contract-v2', 'logit-cache identity', 'CPU/Vulkan', '8192 / 65536 / 65536', 'prefill_runtime.streaming_prefill', 'prompt-length dependent'] },
-  { label: 'immutable CUDA graph authority', terms: ['CUDA graph policy is startup-owned', 'memory.cuda_graphs', 'memory.cuda_graph_cache_entries', '1..=64', 'Stable paged metadata is mandatory', 'batched CUDA capture remains unavailable', '/v1/config.cuda_graphs', 'decode_runtime.cuda_graphs', 'has no environment opt-in'] },
-  { label: 'portable accelerator execution policy', terms: ['Immutable accelerator routes, attention geometry, ROCm stream ordering, and graph lifecycle', 'kiln.accelerator-runtime-policy.v16', 'Vulkan device creation is typed startup policy', 'kiln.vulkan-kernel-policy.v6', 'ROCm product execution is portable-only', 'hardware-qualification', 'portable_fallback', 'rocm_strided_batched_matmul_mode', 'rocm_bf16_matmul_output_mode', 'per-row GEMMs', 'F32 output', 'retired machine-shaped', 'stream_ordered', 'rocm_graph_cache_max_bytes', 'cleanup-quarantined'] },
-  { label: 'complete CUDA route authority', terms: ['Fixed model, loader, and fallback policy', 'twenty-five CUDA model/backend hot-path', 'fused_rotary_qk', 'fused_attn_sigmoid_mul', 'rmsnorm_backward', 'fused_l2_qk_norm', 'gdn_chunk_pre_permute', 'KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE', 'KILN_DECODE_HOT_PATH_DEBUG_FALLBACK', 'KILN_DISABLE_GPU_TRAINING_MLP_CHUNKING', 'KILN_KEEP_PROJECTION_ORIGINALS', 'KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER', 'KILN_DISABLE_WEIGHTED_LM_HEAD_PREP', 'KILN_ARENA_FORCE_ZERO', 'KILN_CUDA_NATIVE_TRAINING', 'KILN_METAL_GRAPHS', 'KILN_FORCE_EAGER_DECODE', 'KILN_METAL_GRAPH_STABLE_PAGED_METADATA', 'KILN_TAPE_GDN_OFFLOAD_SAVED_TENSORS', 'KILN_TAPE_OFFLOAD_MATMUL_A', 'KILN_TAPE_OFFLOAD_MIN_BYTES', 'KILN_SDPA_SPLIT', 'KILN_SDPA_PREFILL_MIN', 'CANDLE_METAL_COMPUTE_PER_BUFFER', 'KILN_SERVER_DETERMINISTIC', 'Standalone tensor-library use defaults'] },
-  { label: 'capability-derived Vulkan policy', terms: ['Vulkan routes are derived from device capabilities', 'kiln.vulkan-kernel-policy.v6', 'workgroup', 'shared-memory', 'descriptor', 'push-constant', 'subgroup', 'memory-topology', 'device-name, vendor-ID, device-ID, driver-name, or PCI-ID surface', 'Unsupported optional routes retain narrow fallbacks', 'Machine-specific receipts do not alter product dispatch', 'cross-device correctness', 'negotiates the loader API up to Vulkan 1.2', 'common shader set targets Vulkan 1.0', 'Former Vulkan route controls', 'have no aliases or replacement fields', 'vulkan_decode_microbench', 'not a product configuration path'] },
-  { label: 'ROCm graph product telemetry surfaces', terms: ['rocm_graphs_unavailable_reason', 'rocm_graph_telemetry', 'rocm_graph_telemetry_unavailable_reason', 'phase_telemetry_available', 'phase_telemetry_unavailable_reason', 'state is busy only for lock contention', 'unavailable for no-runner or poisoned-lock state', 'backend_without_graph_runner', 'model_runner_busy', 'model_runner_lock_poisoned', 'graph_runner_busy', 'graph_runner_lock_poisoned', 'kiln_rocm_graph_telemetry_available', 'kiln_rocm_graph_snapshot_unavailable', 'kiln_rocm_graph_phase_telemetry_available', 'kiln_rocm_graph_phase_telemetry_unavailable', 'kiln_rocm_graph_state', 'kiln_rocm_graph_slots', 'kiln_rocm_graph_owner_lifecycle_total', 'kiln_rocm_graph_retained_bytes', 'kiln_rocm_graph_cache_admissions_total', 'kiln_rocm_graph_cache_evictions_total', 'kiln_rocm_graph_cache_admission_rejections_total', 'kiln_rocm_graph_capture_outcomes_total', 'kiln_rocm_graph_replay_outcomes_total', 'kiln_rocm_graph_fallbacks_total', 'full cache/counter families are omitted', 'phase/current/transient families remain authoritative'] },
-  { label: 'ROCm graph outcome, phase, and active-slot semantics', terms: ['every runner-owned recurrent/conv slot', 'active graphless slot state remains', 'peak_retained_bytes', 'never below the current total', 'capture_successes means', 'first launch succeeded', 'cache_admission_successes is the retained', 'entry, byte, and accounting post-capture rejection counters', 'memoized by geometry and runner generation', 'blocks new capture rather than dropping live continuity state', 'pre_candidate_headroom', 'candidate_warm', 'pre_native_reservation', 'native_capture', 'native_replay', 'rejected_candidate_cleanup', 'defensive cache admission/publication', 'blocking committed governor debit', 'point-in-time copies', 'authoritative active-phase source', 'successful physical settlement', 'logical restoration', 'post-STOP diagnostic drain'] },
-  { label: 'Gated DeltaNet/GDN hybrid', terms: ['gated deltanet', 'gdn', 'hybrid'] },
-  { label: 'paged KV/block manager', terms: ['paged kv', 'block manager'] },
-  { label: 'Qwen3.5-4B', terms: ['Qwen3.5-4B'] },
-  { label: 'LoRA hot-swap', terms: ['lora hot-swap', 'iteration boundary'] },
-  { label: 'training queue', terms: ['training queue', 'fifo background queue'] },
-  { label: 'backend-owned SFT loss routing', terms: ['backend-owned sft loss routing', 'SftFlceLossRoute', 'kt_tape_flce', 'vulkan_active_rows', 'full_logits', 'no TOML field', 'no mechanically derived environment name', 'KILN_USE_FLCE', 'no compatibility alias', 'loss workspace ... (route=<route>)', 'HTTP 413', 'training_invalid_request', 'PreparedSftAdmission', 'before governor reservation / KV replacement / allocator reclamation', 'fresh execution-backend comparison', 'runtime.sft_loss_route', 'kiln.training-checkpoint-planning.v4', 'prior SFT v3', 'GRPO and OPD remain', 'kiln.training-checkpoint-planning.v3'] },
-  {
-    label: 'CUDA weight and training startup authority',
-    terms: [
-      'CUDA weight layout and training backward are startup policy',
-      'accelerator.cuda_marlin_profile',
-      'KILN_ACCELERATOR_CUDA_MARLIN_PROFILE',
-      'disabled',
-      'attention_mlp',
-      'attention_mlp_gdn',
-      'quality-sensitive GDN output projection',
-      'parallel path',
-      'accelerator.cuda_flash_backward_mode',
-      'KILN_ACCELERATOR_CUDA_FLASH_BACKWARD_MODE',
-      'split-accumulation',
-      'Kernel calls receive this mode explicitly',
-      'KILN_W4A16',
-      'KILN_W4A16_GDN_OUT_PROJ',
-      'KILN_DISABLE_PARALLEL_PACK',
-      'KILN_FLASH_ATTN_BWD_DETERMINISTIC',
-      'KILN_DISABLE_OPD_LOSS_KERNEL',
-      'KILN_FLCE_ACTIVE_ROW_TILE',
-      '4,096-row',
-    ],
-  },
-  { label: 'GPU backend crates', terms: ['gpu backend crates', 'kiln-flash-attn', 'kiln-vulkan-kernel'] },
-  { label: 'where-to-go-next links', terms: ['where to go next', 'deep dive', 'grpo guide', 'quickstart', 'troubleshooting'] },
+const expectedArchitectureReaderSections = [
+  { label: 'single process', terms: ['single-process server', 'one deployable rust binary'] },
+  { label: 'prefill authority', terms: ['one streaming-prefill authority for inference and training', 'immutable streamingprefillruntimeconfig'] },
+  { label: 'accelerator policy', terms: ['accelerator policy is resolved once before execution', 'kiln.accelerator-runtime-policy.v16'] },
+  { label: 'Vulkan capability policy', terms: ['device-capability policy derived from standardized limits and features', 'not a device name'] },
+  { label: 'request path', terms: ['request path and batching', 'iteration-level scheduler', 'paged kv block manager'] },
+  { label: 'Vulkan correctness quarantine', terms: ['vulkan currently uses generic prefill', 'disables cross-request prefix reuse on every vulkan device'] },
+  { label: 'model architecture', terms: ['why the gated deltanet hybrid matters', '24 gated deltanet', '8 full gqa layers'] },
+  { label: 'training queue', terms: ['lora hot-swap and training queue', 'fifo background queue'] },
+  { label: 'SFT route', terms: ['backend-owned sft loss routing', 'does not claim that the complete training path is available'] },
+  { label: 'GPU crates', terms: ['gpu backend crates', 'kiln-vulkan-kernel'] },
+  { label: 'eval pipeline', terms: ['evals as a peer of training', 'waits while training holds exclusive gpu ownership'] },
+  { label: 'next steps', terms: ['where to go next'] },
 ];
 
 const expectedArchitectureFlowTerms = [
@@ -1263,39 +1389,34 @@ const expectedArchitectureFlowTerms = [
 ];
 
 const expectedArchitectureLinks = [
-  { label: 'full ARCHITECTURE.md', href: 'https://github.com/ericflo/kiln/blob/main/ARCHITECTURE.md' },
+  { label: 'architecture deep dive', href: 'docs/architecture-deep-dive/' },
   { label: 'quickstart', href: 'quickstart.html' },
   { label: 'troubleshooting', href: 'troubleshooting.html' },
   { label: 'API reference', href: 'api.html' },
   { label: 'GRPO guide', href: 'grpo.html' },
-  { label: 'generated Native SFT profile', href: 'https://ericflo.github.io/kiln/docs/native-sft-profile/#backend-owned-sft-loss-routing' },
+  { label: 'generated Native SFT profile', href: 'docs/native-sft-profile/#backend-owned-sft-loss-routing' },
 ];
 
 const expectedArchitectureFragments = ['rocm-execution-policy', 'backend-owned-sft-loss-routing'];
 
-const expectedTroubleshootingSections = [
-  { label: 'first-run diagnostic framing', terms: ['first-run', 'diagnostic'] },
+const expectedTroubleshootingReaderSections = [
+  { label: 'diagnostic framing', terms: ['start with the symptom', 'task-oriented diagnosis guide'] },
   { label: 'three probes', terms: ['start with three probes'] },
   { label: 'Desktop App first launch', terms: ['desktop app first launch'] },
-  { label: 'wrong binary/GPU path', terms: ['wrong binary or gpu path'] },
-  { label: 'batching pause diagnosis', terms: ['inference pauses or throughput collapses at concurrency', 'actor_queue_ms', 'rowwise_decode', 'four controls in', 'do not label a scheduling pause as vram rebalancing'] },
-  { label: 'CUDA graph policy diagnosis', terms: ['CUDA graph capture is absent, unstable, or unexpectedly eager', 'memory.cuda_graph_cache_entries', '1..=64', 'stable paged metadata is mandatory', 'batched capture is unavailable', 'Former stable-metadata, batched-enable, no-replay, force-eager, and batched-KV environment probes are retired', 'real NVIDIA sanitizer', 'cannot be promoted through configuration'] },
-  { label: 'CUDA weight and backward diagnosis', terms: ['CUDA backend-profile diagnosis', 'cuda_marlin_profile', 'cuda_flash_backward_mode', 'server.serving_profile = "experimental"', 'attention_mlp', 'attention_mlp_gdn', 'record load time and resident memory', 'task-quality evaluation', 'fast', 'deterministic', 'identical source, shapes, seed, and optimizer state', 'does not make unrelated CUDA kernels deterministic', 'KILN_W4A16', 'KILN_W4A16_GDN_OUT_PROJ', 'KILN_DISABLE_PARALLEL_PACK', 'KILN_FLASH_ATTN_BWD_DETERMINISTIC', 'not aliases'] },
-  { label: 'ROCm decode-pause attribution and A/B', terms: ['rocm token pauses or irregular decode latency', 'a pause alone is not evidence', 'waited_ns', 'where the host observed unfinished gpu work', 'telemetry_available=false', 'active ROCm telemetry loss is equally fatal', 'inference, adapter, training, and import admission', 'same binary', 'run the arms serially', 'both explicitly disable graphs', 'token or logit parity', 'p50/p95/p99/max inter-token latency', 'legacy_host_barriers remains the qualified default', 'stream_ordered skips only', 'isolate graph lifecycle separately', 'both-off-prefix-cache-off', 'prefix_cache.enabled = false', 'zero cache capacity, lookup, hit, lease, pending-release, retained-block, entry, and recurrent-state-byte evidence', 'route invariance', 'final long-prompt chunk boundary', 'portable first-token, recurrent-state', 'clean source-bound Strix Halo ROCm replacement arm', 'formerly failing 2,432-token prompt', 'Preserve both receipts', 'run graph lifecycle and byte-budget A/Bs separately', 'rocm_graph_cache_max_bytes', 'KILN_ACCELERATOR_ROCM_GRAPH_CACHE_MAX_BYTES', 'rocm_graphs_unavailable_reason', 'rocm_graph_telemetry', 'rocm_graph_telemetry_unavailable_reason', 'max_retained_bytes', 'byte_budget_rejections', 'retained_stable_io_bytes', 'retained_capture_arena_bytes', 'retained_blaslt_workspace_bytes', 'retained_slot_state_bytes', 'opaque_native_object_count', 'least-recently-used idle owners', 'Tight pressure', 'Critical or unavailable pressure', 'pre-drop settlement', 'post-drop settlement', 'quarantined_retained_bytes', 'capture_rollback', 'error_recovery', 'sticky STOP', 'effective graph mode disabled'] },
-  { label: 'ROCm graph metric diagnosis', terms: ['kiln_rocm_graph_telemetry_available 1', 'zero availability value', 'kiln_rocm_graph_snapshot_unavailable{reason}', 'kiln_rocm_graph_phase_telemetry_available 1', 'kiln_rocm_graph_phase_telemetry_unavailable{reason}', 'state="busy" only for model_runner_busy or graph_runner_busy', 'state="unavailable"', 'backend_without_graph_runner', 'model_runner_lock_poisoned', 'graph_runner_lock_poisoned', 'live_graphs: .rocm_graphs', 'live_phase: .rocm_graph_telemetry', 'kiln_rocm_graph_retained_bytes{kind="total"}', 'kiln_rocm_graph_retained_byte_limit', 'kiln_rocm_graph_retained_byte_accounting_complete 1', 'kiln_rocm_graph_cache_admissions_total', 'kiln_rocm_graph_cache_evictions_total', 'kiln_rocm_graph_cache_evicted_bytes_total', 'kiln_rocm_graph_cache_evictions_by_cause_total', 'kiln_rocm_graph_cache_admission_rejections_total', 'kiln_rocm_graph_pre_capture_skips_total', 'kiln_rocm_graph_capture_attempts_total', 'kiln_rocm_graph_capture_outcomes_total', 'kiln_rocm_graph_replay_attempts_total', 'kiln_rocm_graph_replay_outcomes_total', 'kiln_rocm_graph_fallbacks_total{reason}', 'kiln_rocm_graph_current_phase{phase}', 'kiln_rocm_graph_transient_candidate_bytes{kind="last|peak"}', 'two availability gauges govern only their own metric families'] },
-  { label: 'ROCm multi-row graph-route diagnosis', terms: ['Current ROCm capture supports contiguous BF16 multi-row decode', 'multi_row_batch_unsupported', 'retained shared width slot that is idle between cohorts', 'not proof of VRAM rebalancing', 'graph-performance qualification must still fail'] },
-  { label: 'ROCm graph admission, phase, and live-slot accounting', terms: ['geometry non-capture-safe for the runner lifetime', 'Aggregate budget suppression clears only after owner or budget relief', 'reservation denial retries only after matching-device cached headroom', 'typed eager fallback without another full warm/allocation pass', 'active graphless slot state', 'block new capture when it consumes the budget', 'peak_retained_bytes >= retained_bytes', 'every runner-owned recurrent/conv owner slot', 'active graphless slots remain in retained_slot_state_bytes', 'Do not equate capture success with cache retention', 'instantiation and first launch succeeded', 'counts only the retained/replayable subset', 'it is not a capture failure', 'five completed phase totals do not overlap', 'defensive cache admission/publication', 'blocking committed governor debit', 'safely settled and destroyed rejected candidate', 'capture_failure eager continuation', 'Treat quarantine as failure evidence'] },
-  { label: 'ROCm stable mixed-load evidence', terms: ['clean-source Strix Halo ROCm stable arm', 'requested autoscaling', 'automatic reclaim', 'KV stayed at 4,096 blocks', 'graph warmup/capture/replay', 'all deterministic and sampled requests passed', '479.783/488.150 ms', '13.632 output tokens/second', '88.875 C package peak', 'not a substitute for the 30-minute development soak'] },
-  { label: 'ROCm decode-width selection', terms: ['ROCm decode-width selection', 'bounded, offline autotuner', 'accepted width-4 control', 'tests widths 6 and 8', 'one source-built release binary', 'fresh server process', '97 C package-temperature guard', '1,312 fixed deterministic output tokens', 'fused W8A8 sampled LM-head route reaches the same width', 'minimum of the deterministic and sampled throughput ratios', 'peak GPU allocation grows by more than 1 GiB', 'narrowest width within 2% of the best score', 'promotion above width 4', 'qualification-time autotuning, not online self-tuning', 'never changes a live scheduler', 'never mutates this field'] },
-  { label: 'ROCm false-drain and retained-slot soak rejections', terms: ['development-soak attempt rejected a false-drained snapshot', 'all 29 warmup responses were valid', 'all 39 entries', 'terminal model cleanup still retained one ROCm graph owner', 'resource-ownership boundary', 'accelerator telemetry correctly remain zero', 'conservative terminal publication', 'reached the same 29-request, 39-entry boundary', 'classified the reservation itself as active', 'width reservation is not live request ownership', 'neither rejected receipt is throughput evidence'] },
-  { label: 'ROCm streaming-prefill pause/OOM diagnosis', terms: ['rocm long prefill pauses or runs out of memory', 'prefill_runtime.streaming_prefill', 'base/tape tiles of 256', 'server.max_prefill_tokens_per_cycle=256', 'server.max_batch_tokens=512', 'startup rejects a mismatched actor-prefill contract before loading model weights', 'detached/boundary/replay tiles of 8192', 'mode="disabled"', 'startup rejects either before loading weights', 'multiples of 64', 'do not broadly raise the timeout', 'hosted gpu ci is not hardware evidence'] },
-  { label: 'internal tape-scope diagnosis', terms: ['tape switches do not isolate training or inference', 'training.optimizer_support.workloads', 'KILN_USE_TAPE_FORWARD', 'KILN_USE_TAPE_FLASH_ATTN', 'KILN_USE_TAPE_SDPA', 'KILN_USE_TAPE_LORA_ADD', 'four KILN_USE_TAPE_GDN', 'historical tape variable is not evidence that a tape scope exists', 'removed without aliases or replacement fields', 'internal training scope', 'GDN chunkwise recurrence', 'weight-aware embedding lookup', 'Only LoRA A/B are trainable model leaves', 'saved constants', 'must not emit a frozen-weight gradient', 'original full A/B IDs', 'tape-aware reshapes', 'Metal', 'synchronized full-gradient host scan', 'native finite reducer', 'do not bypass the check', 'must not sever the gradient graph', 'portable static evidence, not hardware qualification'] },
-  { label: 'model weights not found', terms: ['model weights are not found'] },
-  { label: 'health not green', terms: ['/health', 'not green'] },
-  { label: 'remote server not reachable', terms: ['remote server is not reachable'] },
-  { label: 'long-prefill/tool-call timeouts', terms: ['long-prefill', 'tool-call', 'timeouts'] },
+  { label: 'GPU selection', terms: ['wrong binary or gpu path', 'vulkan-capable gpus', 'identity-safety gate'] },
+  { label: 'memory pressure', terms: ['memory admission fails or vulkan pauses under pressure'] },
+  { label: 'batching diagnosis', terms: ['inference pauses or throughput collapses at concurrency', 'do not label a scheduling pause as vram rebalancing'] },
+  { label: 'CUDA graph policy', terms: ['cuda graph capture is absent, unstable, or unexpectedly eager'] },
+  { label: 'ROCm latency', terms: ['rocm token pauses or irregular decode latency', 'a pause alone is not evidence', 'rollback'] },
+  { label: 'ROCm prefill', terms: ['rocm long prefill pauses or runs out of memory'] },
+  { label: 'training tape', terms: ['tape switches do not isolate training or inference'] },
+  { label: 'model weights', terms: ['model weights are not found'] },
+  { label: 'health', terms: ['/health is not green'] },
+  { label: 'remote access', terms: ['remote server is not reachable'] },
+  { label: 'historical timeout', terms: ['older-release long-prefill and tool-call timeouts'] },
   { label: 'mock mode', terms: ['mock mode is not real training'] },
-  { label: 'adapter directory', terms: ['adapters are in a different directory'] },
+  { label: 'adapter directory', terms: ['adapters are in a different directory than expected'] },
+  { label: 'adapter conflicts', terms: ['an adapter mutation or training publication was rejected'] },
 ];
 
 const expectedTroubleshootingProbeExamples = [
@@ -1304,7 +1425,7 @@ const expectedTroubleshootingProbeExamples = [
   { label: 'minimal chat probe', terms: ['/v1/chat/completions', 'messages', 'max_tokens'] },
   { label: 'batching policy probe', terms: ['/v1/config', "jq '.batching, .decode_runtime.max_decode_batch'"] },
   { label: 'CUDA graph policy probe', terms: ["jq '.cuda_graphs'", "jq '.decode_runtime.cuda_graphs'", 'kiln config --file kiln.toml'] },
-  { label: 'ROCm execution-policy probe', terms: ["jq '.accelerator_runtime,", 'rocm_graphs_unavailable_reason', 'rocm_graph_telemetry', 'rocm_graph_telemetry_unavailable_reason', '.decode_runtime.rocm_synchronization', '.decode_runtime.rocm_graphs', 'rocm_graph_cache_max_bytes', 'cleanup_quarantined=false', 'kiln_rocm_cleanup_quarantined', 'hard safety fault', 'kiln_rocm_(cleanup_quarantined|synchronization|synchronizations)', "grep '^kiln_rocm_graph_'", 'kiln_rocm_graph_telemetry_available 1', 'kiln_rocm_graph_snapshot_unavailable{reason}', 'kiln_rocm_graph_phase_telemetry_available 1', 'kiln_rocm_graph_phase_telemetry_unavailable{reason}'] },
+  { label: 'ROCm execution-policy probe', terms: ['rocm_graphs_unavailable_reason', 'rocm_graph_telemetry', 'rocm_graph_telemetry_unavailable_reason', 'rocm_synchronization', "grep -e '^kiln_rocm_"] },
   { label: 'streaming-prefill policy probe', terms: ["jq '.streaming_prefill'", "jq '.prefill_runtime.streaming_prefill'"] },
 ];
 
@@ -1316,6 +1437,8 @@ const expectedTroubleshootingLinks = [
   { label: 'Architecture', href: 'architecture.html' },
   { label: 'API Reference', href: 'api.html' },
   { label: 'CLI Reference', href: 'cli.html' },
+  { label: 'Configuration', href: 'docs/configuration/' },
+  { label: 'Benchmarks', href: 'docs/benchmarks/' },
 ];
 
 function fail(message) {
@@ -1525,18 +1648,23 @@ function validateSftLossRouteDocumentationSourceContract() {
   const staticArchitecturePath = resolve(repoRoot, 'docs/site/architecture.html');
   const staticArchitectureHtml = readFileSync(staticArchitecturePath, 'utf8');
   const staticArchitectureText = normalizedHtmlText(staticArchitectureHtml);
-  const missingMetalArchitectureRoutes = missingNormalizedTerms(
-    staticArchitectureText,
-    metalPolicyRoutes,
-  );
-  if (missingMetalArchitectureRoutes.length > 0) {
-    fail(`docs/site/architecture.html: incomplete Metal route matrix: ${missingMetalArchitectureRoutes.join(', ')}`);
-  }
-  const routeSection = expectedArchitectureSections
-    .find((section) => section.label === 'backend-owned SFT loss routing');
-  const missingArchitectureTerms = missingNormalizedTerms(staticArchitectureText, routeSection.terms);
+  const missingArchitectureTerms = missingNormalizedTerms(staticArchitectureText, [
+    'device-capability policy derived from standardized limits and features',
+    'not a device name',
+    'qualification records correctness and performance',
+    'never rewrites product dispatch',
+    'each optional Vulkan route is admitted only when',
+    'unrelated fast paths remain eligible',
+    'without appearing in an allowlist',
+    'source-level quarantine',
+    'not device-name routing',
+    'SftFlceLossRoute',
+    'requests cannot select it',
+    'no TOML field',
+    'does not claim that the complete training path is available',
+  ]);
   if (missingArchitectureTerms.length > 0) {
-    fail(`docs/site/architecture.html: backend-owned SFT route contract missing terms: ${missingArchitectureTerms.join(', ')}`);
+    fail(`docs/site/architecture.html: reader architecture contract missing terms: ${missingArchitectureTerms.join(', ')}`);
   }
   if (!staticArchitectureHtml.includes('id="backend-owned-sft-loss-routing"')) {
     fail('docs/site/architecture.html: missing stable #backend-owned-sft-loss-routing anchor');
@@ -1545,28 +1673,6 @@ function validateSftLossRouteDocumentationSourceContract() {
     .find((link) => link.label === 'generated Native SFT profile')?.href;
   if (!nativeSftLink || !staticArchitectureHtml.includes(`href="${nativeSftLink}"`)) {
     fail('docs/site/architecture.html: missing generated Native SFT profile route-contract link');
-  }
-  const missingRocmGraphTerms = missingNormalizedTerms(staticArchitectureText, [
-    'only at actual global entry or byte saturation',
-    'pre_capture_active_fair_share',
-    'guarantees one retained graph per active owner',
-    'selected owner may differ from the candidate owner',
-    'no unused global headroom',
-    'reusable exact geometries without forced recapture',
-  ]);
-  if (missingRocmGraphTerms.length > 0) {
-    fail(`docs/site/architecture.html: ROCm owner-geometry contract missing terms: ${missingRocmGraphTerms.join(', ')}`);
-  }
-  const missingAcceleratorTelemetryTerms = missingNormalizedTerms(staticArchitectureText, [
-    'qualification-only device sampler',
-    'exactly one AMD 0x1002 DRM device',
-    'samples at or above 50 percent busy',
-    'minimum/p50/maximum SCLK',
-    'below half the advertised pp_dpm_sclk maximum',
-    'Vulkan records the same closed metric schema',
-  ]);
-  if (missingAcceleratorTelemetryTerms.length > 0) {
-    fail(`docs/site/architecture.html: accelerator telemetry contract missing terms: ${missingAcceleratorTelemetryTerms.join(', ')}`);
   }
 
   const apiHtml = readFileSync(resolve(repoRoot, 'docs/site/api.html'), 'utf8');
@@ -1577,15 +1683,6 @@ function validateSftLossRouteDocumentationSourceContract() {
     'prior SFT v3 checkpoints fail closed',
     'GRPO and OPD',
     'kiln.training-checkpoint-planning.v3',
-    'actor_cycle_idle',
-    'actor_cycle_idle_ms',
-    'actor_cycle_idle_source',
-    'actor_cycle_idle_count',
-    'total_actor_cycle_idle_ms',
-    'max_actor_cycle_idle_ms',
-    'kiln_batching_engine_actor_cycle_idle_seconds_total',
-    'Serving benchmark driver v18',
-    'actor_cycle_idle_accounted',
     'variant_invariant_fixed_output_v5',
     'exactly 64 ascending six-digit integers',
     'server truncation before the target is expected',
@@ -1608,15 +1705,10 @@ function validateSftLossRouteDocumentationSourceContract() {
     'bounded_host_fallback',
   ]);
   if (missingApiTerms.length > 0) {
-    fail(`docs/site/api.html: SFT v4 versus GRPO/OPD v3 checkpoint wording missing terms: ${missingApiTerms.join(', ')}`);
+    fail(`docs/site/api.html: retained deep-reference wording missing terms: ${missingApiTerms.join(', ')}`);
   }
   if (apiText.includes('current path performs correctness-first o(tv) host readback')) {
     fail('docs/site/api.html: remove the stale blanket O(TV) prompt-logprob claim');
-  }
-  const missingApiTrainingAnchors = expectedApiTrainingAnchors
-    .filter((anchor) => !apiHtml.includes(`id="${anchor}"`));
-  if (missingApiTrainingAnchors.length > 0) {
-    fail(`docs/site/api.html: training contract missing stable anchors: ${missingApiTrainingAnchors.join(', ')}`);
   }
 }
 
@@ -1694,10 +1786,11 @@ function validateCurrentPerformancePositioning() {
     '74.29',
     '2.81',
     'Vulkan decode · recovered',
-    'correction branch',
+    'verified source · f3ae29e4a',
     'Capability-led Vulkan',
     'never a GPU name, vendor ID, PCI ID, or',
     'machine allowlist',
+    'Latest server release',
     'Five native artifacts',
     'CUDA 12.4',
     'ROCm 7.2.4',
@@ -1706,6 +1799,9 @@ function validateCurrentPerformancePositioning() {
     'Honest boundary',
     'verified source evidence, not yet a published',
     'Kiln makes no vLLM parity claim',
+    'Serving-profile boundary:',
+    'stable',
+    'experimental',
     'docs/benchmarks/',
     'assets/og-image-v3.png',
   ];
@@ -1753,6 +1849,24 @@ function validateCurrentPerformancePositioning() {
   }
   if (staleSocialReferences.length > 0) {
     fail(`static site pages still reference the retired social preview: ${staleSocialReferences.join(', ')}`);
+  }
+
+  const retiredAssets = [
+    'desktop-about.png',
+    'desktop-dashboard.png',
+    'desktop-logs.png',
+    'desktop-settings.png',
+    'og-image.png',
+    'og-image-v2.png',
+    'server-ui-adapters.png',
+    'server-ui-playground.png',
+    'server-ui-training.png',
+  ];
+  const presentRetiredAssets = retiredAssets.filter((name) => (
+    existsSync(resolve(repoRoot, 'docs/site/assets', name))
+  ));
+  if (presentRetiredAssets.length > 0) {
+    fail(`docs/site/assets: retired, unreferenced public assets must not ship: ${presentRetiredAssets.join(', ')}`);
   }
 }
 
@@ -1833,6 +1947,44 @@ function validateStaticSocialMetadata() {
       expectedCanonicalHref(sitePage.path),
       { enforceSnippetLength: true },
     );
+  }
+}
+
+function validateNotFoundPage() {
+  const notFoundPath = resolve(siteRoot, '404.html');
+  if (!existsSync(notFoundPath)) {
+    fail(`${publishedPath('404.html')}: GitHub Pages requires a useful custom not-found page`);
+  }
+  const html = readFileSync(notFoundPath, 'utf8');
+  const requiredTerms = [
+    '<meta name="robots" content="noindex, follow">',
+    'That Kiln page isn’t here.',
+    'The documentation directory and search cover every published Kiln guide and reference.',
+    'Open the documentation',
+    'Start the quickstart',
+    'Diagnose a problem',
+    'Check current performance',
+    'Inspect the API',
+    'Return to Kiln home',
+  ];
+  const missingTerms = requiredTerms.filter((term) => !html.includes(term));
+  if (missingTerms.length > 0) {
+    fail(`${publishedPath('404.html')}: incomplete recovery copy: ${missingTerms.join(', ')}`);
+  }
+  if (/<link\b[^>]*\brel\s*=\s*["']?canonical/i.test(html)) {
+    fail(`${publishedPath('404.html')}: a not-found response must not declare a canonical content URL`);
+  }
+  const requiredLinks = [
+    'https://ericflo.github.io/kiln/',
+    'https://ericflo.github.io/kiln/docs/',
+    'https://ericflo.github.io/kiln/quickstart.html',
+    'https://ericflo.github.io/kiln/troubleshooting.html',
+    'https://ericflo.github.io/kiln/docs/benchmarks/',
+    'https://ericflo.github.io/kiln/api.html',
+  ];
+  const missingLinks = requiredLinks.filter((href) => !html.includes(`href="${href}"`));
+  if (missingLinks.length > 0) {
+    fail(`${publishedPath('404.html')}: missing path-safe recovery links: ${missingLinks.join(', ')}`);
   }
 }
 
@@ -2235,11 +2387,11 @@ function validateGrpoDemoPayloadCue() {
 function validateLandingDesktopVersionSplitCue() {
   const index = readFileSync(resolve(repoRoot, 'docs/site/index.html'), 'utf8');
   const requiredTerms = [
-    'Provenance-attested release archives are available',
-    'macOS binary is also signed',
+    'The latest server release publishes five provenance-attested archives',
+    'macOS binary is signed',
     'notarized',
-    'newest provenance-attested server release',
-    'Linux CUDA',
+    'current provenance-attested server release',
+    'Linux',
     'ROCm',
     'Vulkan',
     'Apple Silicon',
@@ -2257,9 +2409,9 @@ function validateLandingDesktopVersionSplitCue() {
 
 function validateQuickstartDesktopVersionSplitCue() {
   const quickstart = readFileSync(resolve(repoRoot, 'docs/site/quickstart.html'), 'utf8');
-  const desktopInstallMatch = quickstart.match(/<h3[^>]*>Desktop App &middot; recommended<\/h3>([\s\S]*?)<table class="installer-table/);
+  const desktopInstallMatch = quickstart.match(/<h3[^>]*>Kiln Desktop &middot; recommended<\/h3>([\s\S]*?)<table class="installer-table/);
   if (!desktopInstallMatch) {
-    fail('docs/site/quickstart.html: missing Desktop App install card copy');
+    fail('docs/site/quickstart.html: missing Kiln Desktop install card copy');
   }
 
   const desktopInstallCopy = desktopInstallMatch[1];
@@ -2273,7 +2425,7 @@ function validateQuickstartDesktopVersionSplitCue() {
     'verifies',
   ];
   for (const term of requiredTerms) {
-    assertIncludes(desktopInstallCopy, term, 'docs/site/quickstart.html: Desktop App version-split cue');
+    assertIncludes(desktopInstallCopy, term, 'docs/site/quickstart.html: Kiln Desktop version-split cue');
   }
 
   const desktopAssetLinks = [
@@ -2290,9 +2442,12 @@ function validateQuickstartDesktopVersionSplitCue() {
   const releaseIntegrityTerms = [
     'Release integrity',
     'Verify provenance before extraction',
-    'Sigstore-backed GitHub build-provenance',
-    'macOS binary is also code-signed',
-    'Linux and Windows archives are intentionally not platform code-signed',
+    'Sigstore-backed GitHub',
+    'build-provenance attestation',
+    'macOS binary is',
+    'also code-signed and notarized',
+    'Linux and Windows archives do not carry',
+    'gh attestation verify ARCHIVE',
     'gh attestation verify kiln-linux-cuda.tar.gz',
     '--repo ericflo/kiln',
     '--signer-workflow ericflo/kiln/.github/workflows/server-release.yml',
@@ -2300,7 +2455,113 @@ function validateQuickstartDesktopVersionSplitCue() {
   for (const term of releaseIntegrityTerms) {
     assertIncludes(quickstart, term, 'docs/site/quickstart.html: server release integrity cue');
   }
+  for (const term of [
+    '-p 127.0.0.1:8420:8420',
+    '-e KILN_SERVER_HOST=0.0.0.0',
+    'ghcr.io/ericflo/kiln-server:latest',
+    'replace <code>latest</code> with the release version or immutable digest you validated',
+    'Device names and IDs are never routing inputs',
+  ]) {
+    assertIncludes(quickstart, term, 'docs/site/quickstart.html: safe capability-based runtime guidance');
+  }
+  if (quickstart.includes('Strix Halo')) {
+    fail('docs/site/quickstart.html: install guidance must not route by a named machine or product');
+  }
   assertIncludes(quickstart, 'Four checkpoints. One working endpoint.', 'docs/site/quickstart.html: first-success path');
+}
+
+function validateGrpoSafetyAndPromotionCues() {
+  const grpo = readFileSync(resolve(repoRoot, 'docs/site/grpo.html'), 'utf8')
+    .replace(/\s+/g, ' ');
+  for (const term of [
+    'experimental training workflow',
+    'cannot start a <code>stable</code> process with a saved LoRA adapter',
+    '<code>KILN_SERVER_SERVING_PROFILE=experimental</code>',
+    '"auto_load": false',
+    'evaluation should gate activation',
+    'Recommended: bind activation to held-out evidence',
+    '"post_eval": {',
+    '"data_scope": "held-out"',
+    'only <code>promoted</code> activates the adapter',
+    'Manual review for an ungated artifact',
+    '/v1/adapters/load',
+    'The current <code>stable</code> profile cannot load or start with a saved LoRA adapter',
+  ]) {
+    assertIncludes(grpo, term, 'docs/site/grpo.html: safe profile-gated GRPO workflow');
+  }
+}
+
+function validateEvalsOperationAndDistributionCues() {
+  const evals = readFileSync(resolve(repoRoot, 'docs/site/evals.html'), 'utf8')
+    .replace(/\s+/g, ' ');
+  for (const term of [
+    'subset diagnostic, not reproduction',
+    'same bound identities and raw decoder bytes',
+    'did this exact trained revision satisfy the declared evidence gate',
+    '<code>eval_dir = "/path/to/eval"</code> in <code>[eval]</code>',
+    '<code>eval.root</code> is not an accepted field',
+    '<code>auto_detect</code> checks the target in this order',
+    'It never selects <code>llm_judge</code> implicitly',
+    'A compare job is diagnostic: it never activates an adapter',
+    '"auto_load": true',
+    'It is not included in the current prebuilt server archives',
+    '-p kiln-server --bin kiln-eval',
+  ]) {
+    assertIncludes(evals, term, 'docs/site/evals.html: exact eval workflow and distribution guidance');
+  }
+  if (evals.includes('set the root with <code>[eval] root</code>')) {
+    fail('docs/site/evals.html: eval.root is not a valid configuration field');
+  }
+}
+
+function validateApiProfileAndMutationCues() {
+  const api = readFileSync(resolve(repoRoot, 'docs/site/api.html'), 'utf8')
+    .replace(/\s+/g, ' ');
+  for (const term of [
+    '<code>KILN_SERVER_SERVING_PROFILE=experimental</code>',
+    '"output_name": "first-sft"',
+    '"behavior_policy": "no_importance_correction"',
+    '"auto_load": false',
+    'returns text, not trainer-ready scored groups',
+    'current hybrid Vulkan server rejects it before dataset admission',
+    '<code>?force=true</code> to replace an existing name deliberately',
+    '<code>data_scope: "held-out"</code>',
+    'Diagnostic post-eval runs do not imply promotion',
+    'A job can create or replace an adapter artifact',
+    '"code": "serving_profile_conflict"',
+    'curl -sS -w',
+  ]) {
+    assertIncludes(api, term, 'docs/site/api.html: profile-safe API workflow');
+  }
+  if (api.includes('<template>')) {
+    fail('docs/site/api.html: dead template payload must not ship in the public API guide');
+  }
+}
+
+function validateCliDistributionAndProfileCues() {
+  const cli = readFileSync(resolve(repoRoot, 'docs/site/cli.html'), 'utf8')
+    .replace(/\s+/g, ' ');
+  for (const term of [
+    'Release archives contain the <code>kiln</code> binary only',
+    'Current prebuilt server archives contain only <code>kiln</code>',
+    '--bin kiln-eval --bin kiln-bench',
+    '--bin kiln-replay',
+    '--bin vulkan_decode_microbench',
+    'These CLI commands do not expose <code>auto_load</code> or <code>post_eval</code>',
+    'server&rsquo;s <code>auto_load: true</code> training default',
+    '<code>auto_load: false</code> or a held-out',
+    '<code>kiln-eval</code> is a source-built client',
+    'source-built developer tools rather than release-archive binaries',
+    'The default <code>stable</code> profile cannot load a saved LoRA',
+    'There is no trash or automatic undo',
+    'OpenCode&rsquo;s OpenAI-compatible provider accepts a local endpoint without an <code>apiKey</code>',
+    'https://opencode.ai/docs/providers/#custom-provider',
+  ]) {
+    assertIncludes(cli, term, 'docs/site/cli.html: exact distribution and profile boundary');
+  }
+  if (cli.includes('"apiKey": "unused"')) {
+    fail('docs/site/cli.html: OpenCode custom-provider apiKey is optional for Kiln and must not be presented as required');
+  }
 }
 
 function validateSelfHostedProductPageAssets() {
@@ -3264,6 +3525,62 @@ function validateGeneratedDocsArtifacts() {
     fail(`generated documentation artifact is incomplete: ${missing.join(', ')}`);
   }
 
+  const routeForStaticPage = (sitePage) => {
+    const outputRelative = relative(siteRoot, resolve(repoRoot, sitePage.path)).split(sep).join('/');
+    if (outputRelative === 'index.html') return '/';
+    if (outputRelative.endsWith('/index.html')) return `/${outputRelative.slice(0, -'index.html'.length)}`;
+    return `/${outputRelative}`;
+  };
+  const expectedChecklistRoutes = [
+    ...pages.map(routeForStaticPage),
+    '/docs/',
+    ...docsManifest.documents.map((document) => `/docs/${document.slug}/`),
+  ].sort();
+  const auditPlanPath = resolve(repoRoot, 'docs/plans/public-site-audit-and-copyediting-plan.md');
+  const auditPlan = readFileSync(auditPlanPath, 'utf8');
+  const checklistRoutes = Array.from(
+    auditPlan.matchAll(/^\| `([^`]+)` — /gm),
+    (match) => match[1],
+  ).sort();
+  if (JSON.stringify(checklistRoutes) !== JSON.stringify(expectedChecklistRoutes)) {
+    const missingRoutes = expectedChecklistRoutes.filter((route) => !checklistRoutes.includes(route));
+    const staleRoutes = checklistRoutes.filter((route) => !expectedChecklistRoutes.includes(route));
+    fail(`public-site audit checklist drifted; missing: ${missingRoutes.join(', ') || 'none'}; stale: ${staleRoutes.join(', ') || 'none'}`);
+  }
+  if (!auditPlan.includes(`Scope: ${expectedChecklistRoutes.length} public HTML routes`)) {
+    fail(`public-site audit plan must declare the current ${expectedChecklistRoutes.length}-route scope`);
+  }
+
+  const publishedHtmlPaths = [
+    ...pages.map((page) => resolve(repoRoot, page.path)),
+    resolve(siteRoot, 'docs/index.html'),
+    ...docsManifest.documents.map((document) => (
+      resolve(siteRoot, 'docs', document.slug, 'index.html')
+    )),
+  ];
+  for (const [label, values] of [
+    ['title', publishedHtmlPaths.map((path) => {
+      const html = readFileSync(path, 'utf8');
+      return decodeHtmlAttribute(html.match(/<title>([\s\S]*?)<\/title>/i)?.[1] ?? '')
+        .replace(/<[^>]+>/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    })],
+    ['description', publishedHtmlPaths.map((path) => (
+      metaContent(readFileSync(path, 'utf8'), 'name', 'description')
+    ))],
+  ]) {
+    const counts = new Map();
+    for (const value of values) counts.set(value, (counts.get(value) || 0) + 1);
+    const emptyCount = values.filter((value) => !value).length;
+    const duplicates = [...counts]
+      .filter(([value, count]) => value && count > 1)
+      .map(([value]) => value);
+    if (emptyCount > 0 || duplicates.length > 0) {
+      fail(`published HTML ${label} values must be non-empty and unique; empty: ${emptyCount}; duplicates: ${duplicates.join(' | ') || 'none'}`);
+    }
+  }
+
   let searchIndex;
   try {
     searchIndex = JSON.parse(readFileSync(resolve(siteRoot, 'docs/search-index.json'), 'utf8'));
@@ -3272,6 +3589,18 @@ function validateGeneratedDocsArtifacts() {
   }
   if (!Array.isArray(searchIndex) || searchIndex.length === 0) {
     fail('generated documentation search index must contain published documents');
+  }
+  const expectedSearchCount = docsManifest.site.product_guides.length + docsManifest.documents.length;
+  if (searchIndex.length !== expectedSearchCount) {
+    fail(`generated documentation search index must contain exactly ${expectedSearchCount} published entries, got ${searchIndex.length}`);
+  }
+  const expectedReferenceSlugs = docsManifest.documents.map((document) => document.slug).sort();
+  const actualReferenceSlugs = searchIndex
+    .filter((entry) => entry?.kind === 'reference')
+    .map((entry) => entry.slug)
+    .sort();
+  if (JSON.stringify(actualReferenceSlugs) !== JSON.stringify(expectedReferenceSlugs)) {
+    fail('generated documentation search index contains a missing or unpublished reference');
   }
   const expectedProductGuideOrder = [
     'Quickstart',
@@ -3292,8 +3621,9 @@ function validateGeneratedDocsArtifacts() {
   for (const expected of generatedDocsPages.filter((page) => page.label !== 'Documentation hub')) {
     const slug = expected.path.split('/').filter(Boolean).at(-2);
     const entry = searchIndex.find((candidate) => candidate?.slug === slug);
-    if (!entry || entry.title !== expected.label) {
-      fail(`generated documentation search index is missing ${expected.label}`);
+    const manifestDocument = docsManifest.documents.find((candidate) => candidate.slug === slug);
+    if (!entry || !manifestDocument || entry.title !== manifestDocument.title) {
+      fail(`generated documentation search index is missing the manifest title for ${expected.label}`);
     }
   }
 
@@ -3331,16 +3661,41 @@ function validateGeneratedDocsArtifacts() {
   }
 
   const sitemap = readFileSync(resolve(siteRoot, 'sitemap.xml'), 'utf8');
-  for (const url of generatedDocsPages.map((page) => page.canonical)) {
-    if (!sitemap.includes(`<loc>${url}</loc>`)) {
-      fail(`generated sitemap is missing ${url}`);
-    }
+  const sitemapUrls = Array.from(sitemap.matchAll(/<loc>([^<]+)<\/loc>/g), (match) => match[1]);
+  const expectedSitemapUrls = [
+    ...pages.map((page) => expectedCanonicalHref(page.path)),
+    `${docsManifest.site.base_url}/docs/`,
+    ...docsManifest.documents.map((document) => `${docsManifest.site.base_url}/docs/${document.slug}/`),
+  ].sort();
+  const uniqueSitemapUrls = [...new Set(sitemapUrls)].sort();
+  if (sitemapUrls.length !== uniqueSitemapUrls.length) {
+    fail('generated sitemap contains a canonical URL more than once');
+  }
+  if (JSON.stringify(uniqueSitemapUrls) !== JSON.stringify(expectedSitemapUrls)) {
+    const missing = expectedSitemapUrls.filter((url) => !uniqueSitemapUrls.includes(url));
+    const unexpected = uniqueSitemapUrls.filter((url) => !expectedSitemapUrls.includes(url));
+    fail(`generated sitemap must contain exactly every canonical HTML route; missing: ${missing.join(', ') || 'none'}; unexpected: ${unexpected.join(', ') || 'none'}`);
+  }
+  if (sitemapUrls.some((url) => /(?:^|\/)404(?:\.html|\/|$)/.test(url))) {
+    fail('generated sitemap must not publish the custom not-found page');
+  }
+
+  const robots = readFileSync(resolve(siteRoot, 'robots.txt'), 'utf8');
+  for (const term of [
+    'User-agent: *',
+    'Allow: /',
+    'Sitemap: https://ericflo.github.io/kiln/sitemap.xml',
+  ]) {
+    if (!robots.includes(term)) fail(`robots.txt is missing ${term}`);
   }
 
   const llms = readFileSync(resolve(siteRoot, 'llms.txt'), 'utf8');
   const requiredLlmsTerms = [
     '# Kiln',
     '> Kiln is a pure-Rust, single-GPU server for Qwen3.5-4B',
+    'CUDA, ROCm, Metal, and Vulkan builds are available',
+    'reported capabilities, not device names or machine allowlists',
+    'performance claims are bounded by the published benchmark receipts',
     '## Product guides',
     '[Quickstart](https://ericflo.github.io/kiln/quickstart.html)',
     '[GRPO Guide](https://ericflo.github.io/kiln/grpo.html)',
@@ -3465,9 +3820,10 @@ async function validateGeneratedDocsBrowser(browser) {
           const h1 = normalize(document.querySelector('h1')?.textContent);
           const canonical = document.querySelector('link[rel="canonical"]')?.getAttribute('href') || '';
           const logo = document.querySelector('.docs-brand img');
-          const configurationLink = Array.from(document.querySelectorAll('main a[href]'))
-            .find((link) => normalize(link.textContent).includes('Configuration Reference'));
+          const configurationLink = document.querySelector('main a[href="./configuration/"]');
           const current = document.querySelector('.docs-sidebar a[aria-current="page"]');
+          const tableCells = Array.from(document.querySelectorAll('.docs-table-scroll tbody td'));
+          const firstTableRow = document.querySelector('.docs-table-scroll tbody tr');
 
           return {
             bodyText,
@@ -3483,7 +3839,17 @@ async function validateGeneratedDocsBrowser(browser) {
             configurationHref: configurationLink?.getAttribute('href') || '',
             currentText: normalize(current?.textContent),
             hasConfigTable: Boolean(document.querySelector('.docs-table-scroll table')),
+            unlabeledTableCells: tableCells
+              .filter((cell) => !normalize(cell.dataset.label))
+              .length,
+            unwrappedTableCells: tableCells
+              .filter((cell) => !cell.querySelector(':scope > .docs-table-cell-value'))
+              .length,
+            firstTableRowDisplay: firstTableRow
+              ? window.getComputedStyle(firstTableRow).display
+              : '',
             hasMobileMenu: Boolean(document.querySelector('button[data-docs-menu]')),
+            sidebarInert: document.querySelector('#docs-sidebar')?.inert ?? null,
             scrollWidth: document.documentElement.scrollWidth,
             clientWidth: document.documentElement.clientWidth,
             missingTerms: pageSpec.terms.filter((term) => !documentText.includes(term)),
@@ -3507,6 +3873,12 @@ async function validateGeneratedDocsBrowser(browser) {
         if (!result.hasMobileMenu) {
           fail(`${expected.path}: generated documentation navigation is missing its menu control`);
         }
+        if (viewport.label === 'mobile' && result.sidebarInert !== true) {
+          fail(`${expected.path}: closed mobile documentation navigation must start inert`);
+        }
+        if (viewport.label === 'desktop' && result.sidebarInert !== false) {
+          fail(`${expected.path}: desktop documentation navigation must remain interactive`);
+        }
         if (result.missingTerms.length > 0) {
           fail(`${expected.path}: ${viewport.label} content missing terms: ${result.missingTerms.join(', ')}`);
         }
@@ -3516,15 +3888,55 @@ async function validateGeneratedDocsBrowser(browser) {
         if (result.scrollWidth > result.clientWidth + mobileOverflowTolerancePx) {
           fail(`${expected.path}: ${viewport.label} horizontal overflow: scrollWidth ${result.scrollWidth} > clientWidth ${result.clientWidth} + tolerance ${mobileOverflowTolerancePx}`);
         }
+        if (result.hasConfigTable && result.unlabeledTableCells > 0) {
+          fail(`${expected.path}: ${viewport.label} table has ${result.unlabeledTableCells} cells without mobile labels`);
+        }
+        if (result.hasConfigTable && result.unwrappedTableCells > 0) {
+          fail(`${expected.path}: ${viewport.label} table has ${result.unwrappedTableCells} cells without a single grouped value`);
+        }
+        if (viewport.label === 'mobile' && result.hasConfigTable && result.firstTableRowDisplay !== 'block') {
+          fail(`${expected.path}: mobile documentation tables must render as labeled row cards`);
+        }
         if (expected.label === 'Documentation hub' && result.configurationHref !== './configuration/') {
           fail(`${expected.path}: documentation hub must link to ./configuration/`);
         }
         if (expected.label === 'Configuration Reference') {
-          if (result.currentText !== 'Configuration Reference') {
+          if (result.currentText !== expected.h1) {
             fail(`${expected.path}: configuration sidebar current-page state is missing`);
           }
           if (!result.hasConfigTable) {
             fail(`${expected.path}: configuration reference is missing its responsive field table`);
+          }
+        }
+        if (viewport.label === 'mobile') {
+          await page.click('[data-docs-menu]');
+          const openNavigation = await page.evaluate(() => ({
+            expanded: document.querySelector('[data-docs-menu]')?.getAttribute('aria-expanded'),
+            open: document.body.classList.contains('docs-nav-open'),
+            sidebarInert: document.querySelector('#docs-sidebar')?.inert,
+          }));
+          if (
+            openNavigation.expanded !== 'true'
+            || !openNavigation.open
+            || openNavigation.sidebarInert !== false
+          ) {
+            fail(`${expected.path}: opening mobile documentation navigation must make it interactive`);
+          }
+
+          await page.keyboard.press('Escape');
+          const closedNavigation = await page.evaluate(() => ({
+            expanded: document.querySelector('[data-docs-menu]')?.getAttribute('aria-expanded'),
+            open: document.body.classList.contains('docs-nav-open'),
+            sidebarInert: document.querySelector('#docs-sidebar')?.inert,
+            focusRestored: document.activeElement === document.querySelector('[data-docs-menu]'),
+          }));
+          if (
+            closedNavigation.expanded !== 'false'
+            || closedNavigation.open
+            || closedNavigation.sidebarInert !== true
+            || !closedNavigation.focusRestored
+          ) {
+            fail(`${expected.path}: Escape must close and inert mobile documentation navigation`);
           }
         }
       }
@@ -3534,11 +3946,182 @@ async function validateGeneratedDocsBrowser(browser) {
   }
 }
 
+async function validateNotFoundBrowser(browser) {
+  for (const viewport of [
+    { label: 'desktop', value: desktopViewport },
+    { label: 'mobile', value: mobileViewport },
+  ]) {
+    const page = await browser.newPage();
+    await page.setViewport(viewport.value);
+    try {
+      await page.goto(pathToFileURL(resolve(siteRoot, '404.html')).href, {
+        waitUntil: 'load',
+        timeout: 10000,
+      });
+      const result = await page.evaluate(() => ({
+        h1: document.querySelector('h1')?.textContent?.replace(/\s+/g, ' ').trim(),
+        main: Boolean(document.querySelector('main#main-content')),
+        skipTarget: document.querySelector('.skip-link')?.getAttribute('href'),
+        navLabels: Array.from(document.querySelectorAll('nav[aria-label]'))
+          .map((nav) => nav.getAttribute('aria-label')),
+        emptyLinks: Array.from(document.querySelectorAll('a[href]'))
+          .filter((link) => !(link.textContent || '').trim() && !link.getAttribute('aria-label'))
+          .length,
+        scrollWidth: document.documentElement.scrollWidth,
+        clientWidth: document.documentElement.clientWidth,
+      }));
+      if (result.h1 !== 'That Kiln page isn’t here.') {
+        fail(`${publishedPath('404.html')}: ${viewport.label} H1 is missing or incorrect`);
+      }
+      if (!result.main || result.skipTarget !== '#main-content') {
+        fail(`${publishedPath('404.html')}: ${viewport.label} skip-link target is incomplete`);
+      }
+      for (const label of ['Primary', 'Useful destinations']) {
+        if (!result.navLabels.includes(label)) {
+          fail(`${publishedPath('404.html')}: ${viewport.label} is missing the ${label} navigation label`);
+        }
+      }
+      if (result.emptyLinks > 0) {
+        fail(`${publishedPath('404.html')}: ${viewport.label} has ${result.emptyLinks} empty links`);
+      }
+      if (result.scrollWidth > result.clientWidth + mobileOverflowTolerancePx) {
+        fail(`${publishedPath('404.html')}: ${viewport.label} horizontal overflow`);
+      }
+    } finally {
+      await page.close();
+    }
+  }
+}
+
+async function validateEveryPublishedRouteAccessibilityShell(browser) {
+  const routePaths = [
+    ...pages.map((page) => page.path),
+    publishedPath('docs/index.html'),
+    ...docsManifest.documents.map((document) => (
+      publishedPath(`docs/${document.slug}/index.html`)
+    )),
+    publishedPath('404.html'),
+  ];
+  const page = await browser.newPage();
+  await page.setViewport(mobileViewport);
+  try {
+    for (const routePath of routePaths) {
+      await page.goto('about:blank');
+      await page.goto(pathToFileURL(resolve(repoRoot, routePath)).href, {
+        waitUntil: 'load',
+        timeout: 10000,
+      });
+      const result = await page.evaluate((overflowTolerancePx) => {
+        const duplicateIds = Array.from(document.querySelectorAll('[id]'))
+          .map((element) => element.id)
+          .filter((id, index, ids) => id && ids.indexOf(id) !== index);
+        const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6'))
+          .filter((heading) => (
+            heading.getClientRects().length > 0
+            && !heading.closest('[inert]')
+            && !heading.closest('details:not([open])')
+          ))
+          .map((heading) => Number(heading.tagName.slice(1)));
+        const skippedHeadings = headings
+          .slice(1)
+          .filter((level, index) => level > headings[index] + 1);
+        const likelyOverflowingElements = Array.from(document.body.querySelectorAll('*'))
+          .filter((element) => {
+            const rect = element.getBoundingClientRect();
+            return (
+              rect.left < -overflowTolerancePx
+              || rect.right > window.innerWidth + overflowTolerancePx
+            );
+          })
+          .slice(0, 5)
+          .map((element) => `${element.tagName.toLowerCase()}${element.id ? `#${element.id}` : ''}`);
+        return {
+          lang: document.documentElement.lang,
+          h1Count: document.querySelectorAll('h1').length,
+          hasMain: Boolean(document.querySelector('main[id]')),
+          hasSkipLink: document.querySelector('.skip-link')?.getAttribute('href')?.startsWith('#'),
+          skipLinkIsFirstInteractive: document.querySelector(
+            'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])',
+          )?.classList.contains('skip-link'),
+          sidebarInert: document.querySelector('#docs-sidebar')?.inert ?? null,
+          imagesMissingAlt: document.querySelectorAll('img:not([alt])').length,
+          duplicateIds: [...new Set(duplicateIds)],
+          skippedHeadingCount: skippedHeadings.length,
+          scrollWidth: document.documentElement.scrollWidth,
+          clientWidth: document.documentElement.clientWidth,
+          likelyOverflowingElements,
+        };
+      }, mobileOverflowTolerancePx);
+
+      if (result.lang !== 'en') fail(`${routePath}: document language must be en`);
+      if (result.h1Count !== 1) fail(`${routePath}: expected one H1, got ${result.h1Count}`);
+      if (!result.hasMain || !result.hasSkipLink || !result.skipLinkIsFirstInteractive) {
+        fail(`${routePath}: main landmark or skip link is missing`);
+      }
+      if (result.sidebarInert === false) {
+        fail(`${routePath}: closed mobile documentation navigation must be inert`);
+      }
+      if (result.imagesMissingAlt > 0) {
+        fail(`${routePath}: ${result.imagesMissingAlt} images have no alt attribute`);
+      }
+      if (result.duplicateIds.length > 0) {
+        fail(`${routePath}: duplicate IDs: ${result.duplicateIds.join(', ')}`);
+      }
+      if (result.skippedHeadingCount > 0) {
+        fail(`${routePath}: visible heading outline skips ${result.skippedHeadingCount} levels`);
+      }
+      if (result.scrollWidth > result.clientWidth + mobileOverflowTolerancePx) {
+        fail(`${routePath}: mobile accessibility pass found horizontal overflow; likely elements: ${result.likelyOverflowingElements.join(', ') || 'none'}`);
+      }
+
+      await page.$eval('.skip-link', (link) => link.focus());
+      const focusedSkipLink = await page.evaluate(() => {
+        const active = document.activeElement;
+        const rect = active?.getBoundingClientRect();
+        return {
+          active: active?.classList.contains('skip-link'),
+          visible: Boolean(rect && rect.bottom > 0 && rect.top < window.innerHeight),
+          target: active?.getAttribute('href'),
+        };
+      });
+      if (!focusedSkipLink.active || !focusedSkipLink.visible) {
+        fail(`${routePath}: the skip link cannot receive visible keyboard focus`);
+      }
+      await page.keyboard.press('Enter');
+      const skipLinkActivated = await page.evaluate((target) => (
+        window.location.hash === target
+      ), focusedSkipLink.target);
+      if (!skipLinkActivated) {
+        fail(`${routePath}: keyboard activation of the skip link did not reach its target`);
+      }
+
+      const accessibilityTree = await page.accessibility.snapshot({ interestingOnly: true });
+      const unnamedInteractiveRoles = [];
+      const visit = (node) => {
+        if (
+          ['button', 'checkbox', 'combobox', 'link', 'radio', 'searchbox', 'textbox'].includes(node.role)
+          && !node.name?.trim()
+        ) {
+          unnamedInteractiveRoles.push(node.role);
+        }
+        for (const child of node.children || []) visit(child);
+      };
+      if (accessibilityTree) visit(accessibilityTree);
+      if (unnamedInteractiveRoles.length > 0) {
+        fail(`${routePath}: accessibility tree has unnamed interactive roles: ${unnamedInteractiveRoles.join(', ')}`);
+      }
+    }
+  } finally {
+    await page.close();
+  }
+}
+
 async function runSmoke() {
   validateReadmeStartupBanner();
   validateReadmeMedia();
   validateCurrentPerformancePositioning();
   validateStaticSocialMetadata();
+  validateNotFoundPage();
   validateReadmeColdReaderCoverage();
   validateReadmeImageReferences();
   validateReadmeQuickStartPaths();
@@ -3548,6 +4131,10 @@ async function runSmoke() {
   validateGrpoDemoPayloadCue();
   validateLandingDesktopVersionSplitCue();
   validateQuickstartDesktopVersionSplitCue();
+  validateGrpoSafetyAndPromotionCues();
+  validateEvalsOperationAndDistributionCues();
+  validateApiProfileAndMutationCues();
+  validateCliDistributionAndProfileCues();
   validateSelfHostedProductPageAssets();
   validateQuickstartMarkdownMedia();
   validateQuickstartServerBinaryPath();
@@ -3572,6 +4159,8 @@ async function runSmoke() {
   try {
     await validateEmbeddedUiControlAccessibleNames(browser);
     if (hasGeneratedDocs) await validateGeneratedDocsBrowser(browser);
+    await validateNotFoundBrowser(browser);
+    await validateEveryPublishedRouteAccessibilityShell(browser);
 
     const page = await browser.newPage();
     await page.setViewport(mobileViewport);
@@ -3642,6 +4231,7 @@ async function runSmoke() {
           h1Text: normalize(h1?.textContent),
           hasNav: Boolean(nav),
           hasFooter: Boolean(footer),
+          footerLabels: footerLinks.map((link) => link.label),
           missingLabels,
           missingFooterLinks,
           currentLabel: normalize(current?.textContent),
@@ -3661,6 +4251,12 @@ async function runSmoke() {
       }
       if (result.missingFooterLinks.length > 0) {
         fail(`${sitePage.path}: footer missing visible links: ${result.missingFooterLinks.join(', ')}`);
+      }
+      if (
+        sitePage.path !== homePagePath
+        && JSON.stringify(result.footerLabels) !== JSON.stringify(expectedProductFooterOrder)
+      ) {
+        fail(`${sitePage.path}: footer links must use the shared order; got ${result.footerLabels.join(', ')}`);
       }
       if (!result.currentMatches) {
         const expected = sitePage.currentLabel || 'an aria-current="page" marker';
@@ -3869,7 +4465,9 @@ async function runSmoke() {
         );
         const quickstartResult = await page.evaluate(() => {
           const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
-          const bodyText = normalize(document.body.innerText);
+          // Include closed disclosure content: the quickstart deliberately keeps
+          // exact training contracts behind a progressive-disclosure summary.
+          const bodyText = normalize(document.body.textContent);
           const headings = normalize(Array.from(document.querySelectorAll('h1, h2, h3'))
             .map((heading) => heading.textContent || '')
             .join('\n'));
@@ -3881,12 +4479,15 @@ async function runSmoke() {
             text: normalize(link.textContent),
           }));
           const dashboardImage = document.querySelector('main img[src="assets/server-ui-dashboard.webp"]');
+          const nextTaskHeading = Array.from(document.querySelectorAll('#train h2'))
+            .find((heading) => heading.textContent?.includes('Open the guide for your next task'));
 
           return {
             bodyText,
             headings,
             codeText,
             links,
+            nextTaskInsideContainer: nextTaskHeading?.parentElement?.classList.contains('max-w-5xl') === true,
             dashboardImage: dashboardImage ? {
               alt: normalize(dashboardImage.getAttribute('alt')),
               complete: dashboardImage.complete,
@@ -3915,6 +4516,9 @@ async function runSmoke() {
           .filter((term) => !quickstartResult.bodyText.includes(term));
         if (missingDashboardTerms.length > 0) {
           fail(`${sitePage.path}: dashboard checkpoint missing terms: ${missingDashboardTerms.join(', ')}`);
+        }
+        if (!quickstartResult.nextTaskInsideContainer) {
+          fail(`${sitePage.path}: next-task guide grid escaped the bounded training-section container`);
         }
 
         if (!quickstartResult.dashboardImage) {
@@ -4018,7 +4622,7 @@ async function runSmoke() {
           }
         }
 
-        const missingSections = expectedApiSections
+        const missingSections = expectedApiReaderSections
           .map((section) => ({
             label: section.label,
             missingTerms: section.terms.filter((term) => {
@@ -4034,7 +4638,7 @@ async function runSmoke() {
             .join('; ')}`);
         }
 
-        const missingCodeExamples = expectedApiCodeExamples
+        const missingCodeExamples = expectedApiReaderCodeExamples
           .filter((example) => !apiResult.copyableCodeBlocks.some((codeBlock) => (
             example.terms.every((term) => codeBlock.includes(term.toLowerCase()))
           )))
@@ -4117,7 +4721,7 @@ async function runSmoke() {
           fail(`${sitePage.path}: ${expectedCliModelSetupCue.label} must link to Quickstart`);
         }
 
-        const missingSections = expectedCliSections
+        const missingSections = expectedCliReaderSections
           .filter((section) => !section.terms.every((term) => {
             const normalizedTerm = term.toLowerCase();
             return cliResult.headings.includes(normalizedTerm)
@@ -4129,7 +4733,7 @@ async function runSmoke() {
           fail(`${sitePage.path}: missing CLI cold-reader coverage: ${missingSections.join(', ')}`);
         }
 
-        const missingCodeExamples = expectedCliCodeExamples
+        const missingCodeExamples = expectedCliReaderCodeExamples
           .filter((example) => !cliResult.copyableCodeBlocks.some((codeBlock) => (
             example.terms.every((term) => codeBlock.includes(term.toLowerCase()))
           )))
@@ -4192,7 +4796,7 @@ async function runSmoke() {
           };
         });
 
-        const missingSections = expectedArchitectureSections
+        const missingSections = expectedArchitectureReaderSections
           .filter((section) => !section.terms.every((term) => {
             const normalizedTerm = term.toLowerCase();
             return architectureResult.headings.includes(normalizedTerm)
@@ -4249,7 +4853,7 @@ async function runSmoke() {
           };
         });
 
-        const missingSections = expectedTroubleshootingSections
+        const missingSections = expectedTroubleshootingReaderSections
           .filter((section) => !section.terms.every((term) => {
             const normalizedTerm = term.toLowerCase();
             return troubleshootingResult.headings.includes(normalizedTerm)

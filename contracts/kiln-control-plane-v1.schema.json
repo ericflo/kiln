@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ericflo.github.io/kiln/contracts/kiln-control-plane-v1.schema.json",
   "title": "Kiln Training and Agent Control Plane API",
-  "description": "Complete field-level wire contract for native training, distillation, preflight, embedded agents, recipes, corrections, and the adapter-library surface. Open inputs explicitly preserve accepted-and-ignored unknown fields; emitted objects are closed.",
+  "description": "Request and response shapes for training, distillation, preflight estimates, embedded agents, recipes, corrections, and the adapter-library routes. Start with the entrypoint for your HTTP operation, then open only the definitions it references. Unknown-field behavior is listed per shape. Preflight compatibility and capacity values are modeled estimates, and the library routes do not yet perform remote installs or uploads.",
   "x-kiln-field-schema-status": "complete",
   "x-kiln-entrypoints": [
     "AgentRunAbortResponse",
@@ -227,7 +227,7 @@
         "vanilla",
         "dr_grpo"
       ],
-      "description": "Group-relative advantage normalization.",
+      "description": "Method used to normalize rewards within each rollout group.",
       "x-kiln-rust-type": "kiln_train::AdvantageMode",
       "x-kiln-field-schema-status": "complete"
     },
@@ -242,7 +242,7 @@
           "const": true
         }
       },
-      "description": "Cooperative abort accepted.",
+      "description": "Acknowledgment that a cooperative abort was requested.",
       "x-kiln-rust-type": "AgentRunAbortResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -261,7 +261,7 @@
           "$ref": "#/$defs/AnyJson"
         }
       },
-      "description": "One sequenced raw pi event.",
+      "description": "One ordered event emitted by `pi`.",
       "x-kiln-rust-type": "AgentRunEvent",
       "x-kiln-field-schema-status": "complete"
     },
@@ -302,7 +302,7 @@
           "$ref": "#/$defs/Boolean"
         }
       },
-      "description": "Incremental event page with replay-gap detection.",
+      "description": "Incremental event page with sequence information that lets clients detect truncated history.",
       "x-kiln-rust-type": "AgentRunEventsResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -320,7 +320,7 @@
           }
         }
       },
-      "description": "Retained embedded-agent runs.",
+      "description": "Embedded agent runs Kiln currently retains.",
       "x-kiln-rust-type": "AgentRunListResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -335,7 +335,7 @@
           "const": true
         }
       },
-      "description": "Control message accepted for delivery.",
+      "description": "Acknowledgment that a steering or follow-up message was queued for delivery.",
       "x-kiln-rust-type": "AgentRunQueuedResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -403,7 +403,7 @@
           "$ref": "#/$defs/String"
         }
       },
-      "description": "One persisted embedded-agent run.",
+      "description": "Stored metadata and outcome for one embedded agent run.",
       "x-kiln-rust-type": "AgentRunRecord",
       "x-kiln-field-schema-status": "complete"
     },
@@ -456,7 +456,7 @@
           "$ref": "#/$defs/String"
         }
       },
-      "description": "Embedded-run security gate and local pi availability.",
+      "description": "Whether embedded runs are enabled, whether the local `pi` executable is available, and current concurrency.",
       "x-kiln-rust-type": "AgentRunsStatusResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -547,7 +547,7 @@
           }
         }
       },
-      "description": "Indexed pi session and canonical training trajectory.",
+      "description": "Indexed `pi` session and its normalized training trajectory.",
       "x-kiln-rust-type": "AgentTrace",
       "x-kiln-field-schema-status": "complete"
     },
@@ -565,7 +565,7 @@
           }
         }
       },
-      "description": "All indexed agent traces.",
+      "description": "All agent traces currently indexed by Kiln.",
       "x-kiln-rust-type": "AgentTracesListResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -618,12 +618,12 @@
           }
         }
       ],
-      "description": "One prompt and its scored rollouts; rollouts is an input alias for completions.",
+      "description": "One prompt and its scored rollouts. `rollouts` is an input alias for `completions`; send exactly one of them.",
       "x-kiln-rust-type": "kiln_train::AgenticGroup",
       "x-kiln-field-schema-status": "complete"
     },
     "AnyJson": {
-      "description": "Any JSON value.",
+      "description": "Any valid JSON value.",
       "x-kiln-rust-type": "serde_json::Value",
       "x-kiln-field-schema-status": "complete"
     },
@@ -633,13 +633,13 @@
         "no_importance_correction",
         "recorded"
       ],
-      "description": "Behavior-probability source.",
+      "description": "Whether training uses no importance correction or the probabilities recorded during rollout generation.",
       "x-kiln-rust-type": "kiln_train::BehaviorPolicy",
       "x-kiln-field-schema-status": "complete"
     },
     "Boolean": {
       "type": "boolean",
-      "description": "A serialized Rust boolean.",
+      "description": "Either true or false.",
       "x-kiln-rust-type": "bool",
       "x-kiln-field-schema-status": "complete"
     },
@@ -682,7 +682,7 @@
           }
         }
       ],
-      "description": "Cooperative running cancellation or immediate queued cancellation.",
+      "description": "Cancellation result. Queued jobs stop immediately; running jobs stop cooperatively at the next training-step boundary and later appear as failed with a cancellation error.",
       "x-kiln-rust-type": "CancelTrainingJobResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -726,7 +726,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Preflight information-capacity estimate inputs.",
+      "description": "Inputs to the preflight capacity model. `num_layers` and `hidden_size` default to Qwen3.5-4B values when omitted, so send both for any other model.",
       "x-kiln-rust-type": "CapacityRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -760,7 +760,7 @@
           }
         }
       },
-      "description": "Capacity estimate and admission warnings.",
+      "description": "Modeled capacity estimate and any preflight warnings. This is not a measured performance result.",
       "x-kiln-rust-type": "CapacityResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -779,7 +779,7 @@
           "$ref": "#/$defs/NonNegativeInteger"
         }
       },
-      "description": "Active-correction clear result; trained history remains.",
+      "description": "Number of active corrections removed. Previously trained history remains.",
       "x-kiln-rust-type": "ClearCorrectionsResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -808,7 +808,7 @@
           ]
         }
       },
-      "description": "Filtered compatibility-table results.",
+      "description": "Filtered rows from Kiln's small, model-specific built-in estimate table.",
       "x-kiln-rust-type": "CompatibilityResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -873,7 +873,7 @@
           "$ref": "#/$defs/FiniteNumber"
         }
       },
-      "description": "One teacher/student/domain compatibility estimate.",
+      "description": "One built-in teacher, student, and domain estimate. Values are modeled planning inputs, not benchmark measurements or compatibility guarantees.",
       "x-kiln-rust-type": "CompatibilityRow",
       "x-kiln-field-schema-status": "complete"
     },
@@ -929,7 +929,7 @@
           "$ref": "#/$defs/Rfc3339Timestamp"
         }
       },
-      "description": "Closed emitted correction row.",
+      "description": "One stored correction returned by Kiln.",
       "x-kiln-rust-type": "CorrectionRow",
       "x-kiln-field-schema-status": "complete"
     },
@@ -994,7 +994,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Correction upsert input. Server-owned timestamps and training markers may be omitted.",
+      "description": "Create or update one correction. Kiln can supply timestamps and training markers when they are omitted.",
       "x-kiln-rust-type": "CorrectionRow",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1071,14 +1071,14 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Start one embedded agent run.",
+      "description": "Request to queue one embedded agent run.",
       "x-kiln-rust-type": "CreateRunRequest",
       "x-kiln-field-schema-status": "complete"
     },
     "DecimalU64": {
       "type": "string",
       "pattern": "^(0|[1-9][0-9]*)$",
-      "description": "An exact unsigned 64-bit value serialized as a decimal string.",
+      "description": "An unsigned 64-bit integer encoded as decimal text to preserve exact values.",
       "x-kiln-rust-type": "u64",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1097,7 +1097,7 @@
           "$ref": "#/$defs/NonEmptyString"
         }
       },
-      "description": "Single correction deletion result.",
+      "description": "Confirmation that one correction was deleted.",
       "x-kiln-rust-type": "DeleteCorrectionResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1120,7 +1120,7 @@
           "$ref": "#/$defs/Boolean"
         }
       },
-      "description": "Terminal training-record deletion result.",
+      "description": "Result of permanently deleting a terminal job from memory and, when present, its archive file. Active jobs must be cancelled first.",
       "x-kiln-rust-type": "DeleteTrainingJobResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1141,7 +1141,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Optional server-local pi sessions directory.",
+      "description": "Optional `pi` sessions directory on the Kiln server.",
       "x-kiln-rust-type": "DiscoverRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1160,7 +1160,7 @@
           "$ref": "#/$defs/String"
         }
       },
-      "description": "Trace discovery result.",
+      "description": "Number of traces indexed and the server-local directory scanned.",
       "x-kiln-rust-type": "DiscoverResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1203,7 +1203,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Behavior-space adapter merge request.",
+      "description": "Request to distill behavior from one or more source adapters into a new adapter.",
       "x-kiln-rust-type": "DistillMergeRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1222,7 +1222,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "One weighted adapter source.",
+      "description": "One source adapter and its optional merge weight.",
       "x-kiln-rust-type": "kiln_train::DistillMergeSource",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1272,7 +1272,7 @@
           "x-kiln-unknown-field-policy": "accepted_and_ignored"
         }
       ],
-      "description": "Targeted-domain, inline-example, or wide-corpus knowledge-pump mode.",
+      "description": "Choose a named domain, inline examples, or the built-in wide-corpus mode for knowledge pumping.",
       "x-kiln-rust-type": "kiln_train::DistillPumpMode",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1325,7 +1325,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Knowledge-pump request with an explicit teacher and rollout budget.",
+      "description": "Knowledge-pump request with a registered teacher alias and a rollout budget.",
       "x-kiln-rust-type": "DistillPumpRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1391,7 +1391,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Two-phase new-knowledge training and instruction-following recovery request. Automatic loading accepts at most one gated suite across post_eval, if_eval_suite, and new_knowledge_eval_suite; set config.auto_load=false for independent multi-suite diagnostics or compose one versioned suite.",
+      "description": "Two-phase request for learning new material and recovering instruction-following behavior. Automatic loading supports at most one gate across `post_eval`, `if_eval_suite`, and `new_knowledge_eval_suite`; disable `config.auto_load` for independent multi-suite diagnostics.",
       "x-kiln-rust-type": "DistillRefreshRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1463,7 +1463,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Privileged-information self-distillation request.",
+      "description": "Self-distillation request that uses information available only during training.",
       "x-kiln-rust-type": "DistillSelfRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1483,7 +1483,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "ECHO observation-token auxiliary loss.",
+      "description": "Settings for ECHO's observation-token auxiliary objective.",
       "x-kiln-rust-type": "kiln_train::EchoConfig",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1493,7 +1493,7 @@
         "env_only",
         "full_obs"
       ],
-      "description": "Observation-token mask policy.",
+      "description": "Which observation tokens contribute to the ECHO auxiliary objective.",
       "x-kiln-rust-type": "kiln_train::EnvMaskMode",
       "x-kiln-field-schema-status": "complete"
     },
@@ -1530,7 +1530,7 @@
           "x-kiln-unknown-field-policy": "accepted_and_ignored"
         }
       ],
-      "description": "Registered dataset or inline SFT examples.",
+      "description": "Either a registered dataset name or inline examples for an SFT recipe step.",
       "x-kiln-rust-type": "ExamplesSource",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2154,7 +2154,7 @@
           ]
         }
       ],
-      "description": "Single tagged training front door across all native pipelines.",
+      "description": "Tagged request accepted by the shared `/v1/train` endpoint for all supported training workflows.",
       "x-kiln-rust-type": "FrontDoorRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2180,7 +2180,7 @@
           "$ref": "#/$defs/TrainingResponse"
         }
       },
-      "description": "Selected pipeline plus its admission receipt.",
+      "description": "Training workflow selected by Kiln and the resulting queue receipt.",
       "x-kiln-rust-type": "FrontDoorResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2641,7 +2641,7 @@
         "sequence",
         "cispo"
       ],
-      "description": "Importance-sampling granularity.",
+      "description": "Granularity used for importance-sampling correction.",
       "x-kiln-rust-type": "kiln_train::IsLevel",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2674,7 +2674,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Distill a local judge from indexed agent traces.",
+      "description": "Request to distill a local judge from indexed agent traces.",
       "x-kiln-rust-type": "JudgeDistillRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2701,7 +2701,7 @@
           "$ref": "#/$defs/String"
         }
       },
-      "description": "Judge-distillation admission receipt.",
+      "description": "Queue receipt for a judge-distillation request.",
       "x-kiln-rust-type": "JudgeDistillResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2727,7 +2727,7 @@
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
       "x-kiln-current-runtime-result": "http_501_not_implemented",
-      "description": "Validated drift-check inputs. The endpoint currently returns only HTTP 501 after validation.",
+      "description": "Inputs accepted by the judge-drift route. After validation, the endpoint currently returns HTTP 501 and performs no drift check.",
       "x-kiln-rust-type": "JudgeDriftCheckRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2738,7 +2738,7 @@
         "k3",
         "none"
       ],
-      "description": "Per-token KL estimator.",
+      "description": "Estimator used for the per-token KL penalty.",
       "x-kiln-rust-type": "kiln_train::KlEstimator",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2790,7 +2790,7 @@
           "x-kiln-unknown-field-policy": "accepted_and_ignored"
         }
       ],
-      "description": "Frozen policy used only for the KL penalty.",
+      "description": "Reference-policy strategy used only to calculate the KL penalty.",
       "x-kiln-rust-type": "kiln_train::KlReferencePolicy",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2853,7 +2853,7 @@
           ]
         }
       },
-      "description": "One adapter-library catalog entry.",
+      "description": "One adapter entry in the configured library catalog.",
       "x-kiln-rust-type": "LibraryAdapterEntry",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2886,7 +2886,7 @@
           ]
         }
       },
-      "description": "Configured library backend and visible catalog entries.",
+      "description": "Configured library URL and catalog response. The current endpoint returns an empty list because remote catalog access is not operational.",
       "x-kiln-rust-type": "LibraryListResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2904,7 +2904,7 @@
           }
         }
       },
-      "description": "Active or historical corrections.",
+      "description": "Corrections from the active set or training history.",
       "x-kiln-rust-type": "ListResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2914,7 +2914,7 @@
         "per_sample",
         "token_level"
       ],
-      "description": "GRPO surrogate aggregation.",
+      "description": "Whether Kiln aggregates the GRPO objective by completion or by token.",
       "x-kiln-rust-type": "kiln_train::LossAggregation",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2948,7 +2948,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Composition of policy, ECHO, and reserved OPD objectives.",
+      "description": "GRPO objective settings. ECHO is supported; `loss.opd` is reserved and currently rejects the request.",
       "x-kiln-rust-type": "kiln_train::LossConfig",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2972,7 +2972,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Mark selected correction rows as consumed by an adapter.",
+      "description": "Mark selected corrections as used to train a named adapter.",
       "x-kiln-rust-type": "MarkTrainedRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -2991,7 +2991,7 @@
           "$ref": "#/$defs/NonNegativeInteger"
         }
       },
-      "description": "Number of correction rows marked.",
+      "description": "Number of corrections marked as trained.",
       "x-kiln-rust-type": "MarkTrainedResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3044,21 +3044,21 @@
           "x-kiln-unknown-field-policy": "accepted_and_ignored"
         }
       ],
-      "description": "Registered dataset or inline prompts for a refresh recipe.",
+      "description": "Either a registered dataset name or inline prompts for a refresh workflow.",
       "x-kiln-rust-type": "kiln_train::NewKnowledgeSource",
       "x-kiln-field-schema-status": "complete"
     },
     "NonEmptyString": {
       "type": "string",
       "minLength": 1,
-      "description": "A non-empty UTF-8 string.",
+      "description": "A text string containing at least one character.",
       "x-kiln-rust-type": "String",
       "x-kiln-field-schema-status": "complete"
     },
     "NonNegativeInteger": {
       "type": "integer",
       "minimum": 0,
-      "description": "A non-negative integer.",
+      "description": "A whole number greater than or equal to zero.",
       "x-kiln-rust-type": "u64 | u32 | usize",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3072,7 +3072,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Reserved OPD auxiliary-loss slot.",
+      "description": "Reserved GRPO auxiliary-objective shape. Supplying `loss.opd` currently rejects the request; use `/v1/train/opd` instead.",
       "x-kiln-rust-type": "kiln_train::OpdAuxConfig",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3239,7 +3239,7 @@
         "discount and clip_epsilon are zero",
         "max_cost_usd is null"
       ],
-      "description": "Complete OPD rollout, objective, optimizer, checkpoint, and optional ECHO configuration.",
+      "description": "OPD rollout, objective, optimizer, checkpoint, and optional ECHO settings. The semantic constraints list values the server currently accepts.",
       "x-kiln-rust-type": "kiln_train::OpdConfig",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3250,7 +3250,7 @@
         "teacher_top_k",
         "full_vocab"
       ],
-      "description": "OPD teacher-support granularity; only teacher_top_k is server executable.",
+      "description": "Amount of teacher-distribution data used by OPD. The server currently executes only `teacher_top_k`.",
       "x-kiln-rust-type": "kiln_train::OpdLossGranularity",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3260,7 +3260,7 @@
         "reverse_kl",
         "cross_entropy"
       ],
-      "description": "OPD objective; cross_entropy is a rejected compatibility value.",
+      "description": "OPD objective. `cross_entropy` is parsed for compatibility but rejected by the server.",
       "x-kiln-rust-type": "kiln_train::OpdObjective",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3291,7 +3291,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Student-visible prompt with optional asymmetric teacher context and agentic replay.",
+      "description": "Student-visible prompt with optional teacher-only context and an optional agent trajectory to replay.",
       "x-kiln-rust-type": "kiln_train::OpdPrompt",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3374,7 +3374,7 @@
       "x-kiln-semantic-constraints": [
         "teacher alias is registered"
       ],
-      "description": "Direct OPD submission using inline prompts or a server-local replay dataset.",
+      "description": "Direct OPD submission using either inline prompts or a replay dataset path on the server.",
       "x-kiln-rust-type": "OpdRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3384,7 +3384,7 @@
         "legacy_action_boundary",
         "chat_template"
       ],
-      "description": "Student rollout-prefix construction algorithm; chat_template is experimental.",
+      "description": "How Kiln constructs the student rollout prefix. `chat_template` is experimental.",
       "x-kiln-rust-type": "kiln_train::OpdRolloutPromptRendering",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3394,7 +3394,7 @@
         "on_policy",
         "off_policy"
       ],
-      "description": "Fresh-rollout versus teacher-authored replay mode.",
+      "description": "Whether OPD generates fresh student rollouts or replays teacher-authored data.",
       "x-kiln-rust-type": "kiln_train::OpdTrainingMode",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3461,14 +3461,14 @@
           }
         }
       ],
-      "description": "Fail-closed optimizer selection and variant-specific controls.",
+      "description": "Optimizer selection and the settings accepted by each optimizer. Unknown optimizer settings are rejected.",
       "x-kiln-rust-type": "kiln_train::Optimizer",
       "x-kiln-field-schema-status": "complete"
     },
     "PositiveInteger": {
       "type": "integer",
       "minimum": 1,
-      "description": "A positive integer.",
+      "description": "A whole number greater than or equal to one.",
       "x-kiln-rust-type": "u64 | u32 | usize",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3520,7 +3520,7 @@
       "x-kiln-semantic-constraints": [
         "train-set-eval is diagnostic only and cannot set min_accuracy"
       ],
-      "description": "Optional post-training eval and promotion gate.",
+      "description": "Optional evaluation after training. A minimum accuracy can prevent automatic adapter loading when the candidate misses the gate.",
       "x-kiln-rust-type": "kiln_eval::PostEvalConfig",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3659,7 +3659,7 @@
           ]
         }
       },
-      "description": "Persisted paired-test and confidence-bound evidence for one post-eval promotion decision.",
+      "description": "Stored paired-test and confidence-interval evidence for one post-training promotion decision.",
       "x-kiln-rust-type": "kiln_train::PostEvalGateEvidence",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3696,7 +3696,7 @@
           "x-kiln-unknown-field-policy": "accepted_and_ignored"
         }
       ],
-      "description": "Registered dataset or inline OPD prompts.",
+      "description": "Either a registered dataset name or inline prompts for an OPD recipe step.",
       "x-kiln-rust-type": "PromptsSource",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3727,7 +3727,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Optional publication metadata.",
+      "description": "Optional description and uploader label for a future library publication.",
       "x-kiln-rust-type": "PublishPayload",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3781,7 +3781,7 @@
         }
       },
       "x-kiln-current-runtime-result": "contract_only_no_remote_upload",
-      "description": "Validated local publication bundle. Remote upload is not yet operational.",
+      "description": "Result of validating that a local adapter has the receipt required for publication. No remote upload occurs.",
       "x-kiln-rust-type": "PublishToLibraryResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3817,7 +3817,7 @@
           }
         }
       },
-      "description": "Training queue grouped into running, queued, and terminal jobs.",
+      "description": "Training jobs grouped into running, queued, and terminal collections.",
       "x-kiln-rust-type": "QueueResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3844,7 +3844,7 @@
           "$ref": "#/$defs/PositiveInteger"
         }
       },
-      "description": "One queued training job and its FIFO position.",
+      "description": "One queued training job and its first-in, first-out position.",
       "x-kiln-rust-type": "QueueStatusEntry",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3878,7 +3878,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Inline multi-step training recipe.",
+      "description": "A named, inline sequence of training and post-evaluation steps.",
       "x-kiln-rust-type": "Recipe",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3904,7 +3904,7 @@
           ]
         }
       },
-      "description": "Current substrate admission for a built-in recipe.",
+      "description": "Whether the current server can run a built-in recipe and, if not, why.",
       "x-kiln-rust-type": "RecipeAdmissionDescriptor",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3938,7 +3938,7 @@
           "$ref": "#/$defs/RecipeAdmissionDescriptor"
         }
       },
-      "description": "List projection for a built-in recipe.",
+      "description": "Summary of one built-in recipe and its current availability.",
       "x-kiln-rust-type": "RecipeDescriptor",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3983,7 +3983,7 @@
           "x-kiln-unknown-field-policy": "accepted_and_ignored"
         }
       ],
-      "description": "Named or inline recipe invocation with optional placeholder inputs.",
+      "description": "Run either a built-in recipe by name or an inline recipe body, with optional placeholder values.",
       "x-kiln-rust-type": "RecipeRunRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -4016,7 +4016,7 @@
           "$ref": "#/$defs/String"
         }
       },
-      "description": "Queued jobs for one recipe execution.",
+      "description": "Jobs and effective seeds queued for one recipe run.",
       "x-kiln-rust-type": "RecipeRunResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -4227,7 +4227,7 @@
           "x-kiln-unknown-field-policy": "accepted_and_ignored"
         }
       ],
-      "description": "One typed recipe step.",
+      "description": "One training or post-evaluation step in a recipe.",
       "x-kiln-rust-type": "RecipeStep",
       "x-kiln-field-schema-status": "complete"
     },
@@ -4245,7 +4245,7 @@
           }
         }
       },
-      "description": "All built-in recipes and their current admission state.",
+      "description": "All built-in recipes and whether the current server can run each one.",
       "x-kiln-rust-type": "RecipesListResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -4256,7 +4256,7 @@
         "train-all",
         "skip"
       ],
-      "description": "Behavior when variance filtering keeps too few groups.",
+      "description": "What to do when reward-variance filtering retains too few groups.",
       "x-kiln-rust-type": "kiln_train::RewardFilterOnEmpty",
       "x-kiln-field-schema-status": "complete"
     },
@@ -4278,7 +4278,7 @@
         "timed_out",
         "interrupted"
       ],
-      "description": "Embedded agent-run lifecycle state.",
+      "description": "Lifecycle state for an embedded agent run.",
       "x-kiln-rust-type": "crate::agent_runs::RunStatus",
       "x-kiln-field-schema-status": "complete"
     },
@@ -4319,7 +4319,7 @@
         "document_as_pi",
         "reverse_teacher"
       ],
-      "description": "Privileged-information self-distillation mode.",
+      "description": "Self-distillation strategy for using information available only during training.",
       "x-kiln-rust-type": "kiln_train::SelfDistillMode",
       "x-kiln-field-schema-status": "complete"
     },
@@ -4352,7 +4352,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Queue the agentic self-improvement loop.",
+      "description": "Request to queue the phases of one agent self-improvement round.",
       "x-kiln-rust-type": "SelfImproveRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -4386,7 +4386,7 @@
           "$ref": "#/$defs/String"
         }
       },
-      "description": "All phases admitted for one self-improvement round.",
+      "description": "Job IDs and seeds queued for one self-improvement round.",
       "x-kiln-rust-type": "SelfImproveResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -4523,7 +4523,7 @@
           ]
         }
       },
-      "description": "Complete native SFT configuration. Unknown fields fail admission.",
+      "description": "Native SFT settings. Omitted fields use server defaults; unknown fields reject the request.",
       "x-kiln-rust-type": "kiln_train::SftConfig",
       "x-kiln-field-schema-status": "complete"
     },
@@ -4540,7 +4540,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "One SFT conversation.",
+      "description": "One conversation submitted for supervised fine-tuning.",
       "x-kiln-rust-type": "kiln_train::SftExample",
       "x-kiln-field-schema-status": "complete"
     },
@@ -4550,7 +4550,7 @@
         "fail",
         "skip"
       ],
-      "description": "Malformed-row admission policy.",
+      "description": "Whether a malformed dataset row rejects the request or is skipped.",
       "x-kiln-rust-type": "kiln_train::SftInvalidRowPolicy",
       "x-kiln-field-schema-status": "complete"
     },
@@ -4732,14 +4732,14 @@
       "enum": [
         "native_online_lora_v1"
       ],
-      "description": "Versioned native SFT training shape.",
+      "description": "Versioned identifier for the native SFT workflow.",
       "x-kiln-rust-type": "kiln_train::SftTrainingProfile",
       "x-kiln-field-schema-status": "complete"
     },
     "Sha256": {
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$",
-      "description": "A prefixed SHA-256 digest.",
+      "description": "A lowercase SHA-256 digest prefixed with `sha256:`.",
       "x-kiln-rust-type": "String",
       "x-kiln-field-schema-status": "complete"
     },
@@ -4793,13 +4793,13 @@
           "x-kiln-unknown-field-policy": "accepted_and_ignored"
         }
       ],
-      "description": "Stable-OPD mode; only off is currently executable.",
+      "description": "Stable-OPD setting. Only `off` is currently executable.",
       "x-kiln-rust-type": "kiln_train::StableOpdMode",
       "x-kiln-field-schema-status": "complete"
     },
     "String": {
       "type": "string",
-      "description": "A UTF-8 string.",
+      "description": "A text string.",
       "x-kiln-rust-type": "String",
       "x-kiln-field-schema-status": "complete"
     },
@@ -4848,7 +4848,7 @@
           "$ref": "#/$defs/Boolean"
         }
       },
-      "description": "Embedded terminal security gate, binary, cwd, and session status.",
+      "description": "Embedded-terminal security status, local `pi` path, working directory, and session state.",
       "x-kiln-rust-type": "TerminalStatusResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -4933,7 +4933,7 @@
           }
         }
       },
-      "description": "Paper-cited defaults for one hardware/deployment tier.",
+      "description": "Built-in planning defaults for a coarse deployment tier. Tier names are presets, not hardware detection, measured performance classes, or device-specific tuning.",
       "x-kiln-rust-type": "TierDefaults",
       "x-kiln-field-schema-status": "complete"
     },
@@ -4952,7 +4952,7 @@
           "minItems": 3
         }
       },
-      "description": "All built-in tier defaults.",
+      "description": "All built-in deployment-tier presets.",
       "x-kiln-rust-type": "TierDefaultsListResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -4975,7 +4975,7 @@
           "$ref": "#/$defs/TierDefaults"
         }
       },
-      "description": "One named tier and its defaults.",
+      "description": "One requested preset and its built-in planning defaults.",
       "x-kiln-rust-type": "TierDefaultsResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -5015,7 +5015,7 @@
           ]
         }
       },
-      "description": "Best-effort outcome signals inferred from a pi session.",
+      "description": "Outcome signals inferred from a `pi` session. These values are best-effort observations, not verified success criteria.",
       "x-kiln-rust-type": "TraceOutcome",
       "x-kiln-field-schema-status": "complete"
     },
@@ -5080,7 +5080,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "Canonical training chat input. Content-part arrays are reduced to text by the compatibility decoder.",
+      "description": "A chat message accepted by training endpoints. `content` may be text, null, or a structured content-parts array; structured arrays are converted to text before training.",
       "x-kiln-rust-type": "kiln_core::tokenizer::ChatMessage",
       "x-kiln-field-schema-status": "complete"
     },
@@ -5111,7 +5111,7 @@
           "$ref": "#/$defs/String"
         }
       },
-      "description": "Closed emitted training chat message.",
+      "description": "A normalized chat message returned by Kiln.",
       "x-kiln-rust-type": "kiln_core::tokenizer::ChatMessage",
       "x-kiln-field-schema-status": "complete"
     },
@@ -5183,7 +5183,7 @@
           "$ref": "#/$defs/String"
         }
       },
-      "description": "Newest manifest-valid resumable checkpoint summary.",
+      "description": "Summary of the newest checkpoint whose manifest is valid and can be resumed.",
       "x-kiln-rust-type": "TrainingCheckpointSummary",
       "x-kiln-field-schema-status": "complete"
     },
@@ -5218,7 +5218,7 @@
           "$ref": "#/$defs/NonNegativeInteger"
         }
       },
-      "description": "Immutable corpus, dataset, and partition identity captured by authoritative training admission.",
+      "description": "Dataset and split identity recorded when Kiln accepts the training request.",
       "x-kiln-rust-type": "kiln_train::TrainingDataProvenance",
       "x-kiln-field-schema-status": "complete"
     },
@@ -5403,7 +5403,7 @@
           ]
         }
       },
-      "description": "Training status plus curves, receipts, replay summary, and newest checkpoint.",
+      "description": "Detailed job status with its loss curve, receipts, replay request, linked evals, and newest checkpoint.",
       "x-kiln-rust-type": "TrainingJobDetail",
       "x-kiln-field-schema-status": "complete"
     },
@@ -5414,7 +5414,7 @@
         "grpo",
         "opd"
       ],
-      "description": "Native training pipeline identity.",
+      "description": "Training pipeline used by the job.",
       "x-kiln-rust-type": "crate::state::TrainingJobType",
       "x-kiln-field-schema-status": "complete"
     },
@@ -5426,7 +5426,7 @@
         "opd",
         "capability-distillation"
       ],
-      "description": "Immutable checkpoint training kind.",
+      "description": "Training workflow recorded in a checkpoint.",
       "x-kiln-rust-type": "kiln_train::checkpoint::TrainingKind",
       "x-kiln-field-schema-status": "complete"
     },
@@ -5453,7 +5453,7 @@
           "$ref": "#/$defs/FiniteNumber"
         }
       },
-      "description": "One bounded live loss-curve sample.",
+      "description": "One retained sample from the live training-loss curve.",
       "x-kiln-rust-type": "crate::state::TrainingLossSample",
       "x-kiln-field-schema-status": "complete"
     },
@@ -5480,7 +5480,7 @@
           "$ref": "#/$defs/String"
         }
       },
-      "description": "Immutable training admission receipt.",
+      "description": "Receipt returned after Kiln validates and queues a training request.",
       "x-kiln-rust-type": "TrainingResponse",
       "x-kiln-field-schema-status": "complete"
     },
@@ -5492,7 +5492,7 @@
         "completed",
         "failed"
       ],
-      "description": "Training-job lifecycle state.",
+      "description": "Training-job lifecycle state. Cancelled jobs are represented as `failed` with a cancellation error.",
       "x-kiln-rust-type": "kiln_train::TrainingState",
       "x-kiln-field-schema-status": "complete"
     },
@@ -5582,7 +5582,7 @@
           }
         }
       },
-      "description": "Live or archived training-job status.",
+      "description": "Current or archived status for one training job.",
       "x-kiln-rust-type": "TrainingStatus",
       "x-kiln-field-schema-status": "complete"
     },
@@ -5615,7 +5615,7 @@
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "One trajectory segment accepted by training.",
+      "description": "One context, model-action, or environment-observation segment accepted by training.",
       "x-kiln-rust-type": "kiln_train::TurnSegment",
       "x-kiln-field-schema-status": "complete"
     },
@@ -5648,7 +5648,7 @@
           "$ref": "#/$defs/NonNegativeInteger"
         }
       },
-      "description": "Closed emitted trajectory segment.",
+      "description": "One normalized trajectory segment returned by Kiln.",
       "x-kiln-rust-type": "kiln_train::TurnSegment",
       "x-kiln-field-schema-status": "complete"
     },
@@ -5656,7 +5656,7 @@
       "type": "number",
       "minimum": 0,
       "maximum": 1,
-      "description": "A number in the closed interval [0, 1].",
+      "description": "A number from 0 through 1, inclusive.",
       "x-kiln-rust-type": "f32 | f64",
       "x-kiln-field-schema-status": "complete"
     },
@@ -5665,7 +5665,7 @@
       "items": {
         "$ref": "#/$defs/TrainingStatus"
       },
-      "description": "All retained training statuses.",
+      "description": "All training statuses Kiln currently retains.",
       "x-kiln-rust-type": "Vec<TrainingStatus>",
       "x-kiln-field-schema-status": "complete"
     }
@@ -5949,7 +5949,7 @@
     "DistillPumpRequest": [
       {
         "name": "rust-v1",
-        "teacher": "qwen-27b",
+        "teacher": "teacher-large@local",
         "mode": {
           "domain": "rust"
         },
@@ -6075,7 +6075,7 @@
     "JudgeDistillRequest": [
       {
         "name": "judge-pi-v1",
-        "teacher": "qwen-27b",
+        "teacher": "teacher-large@local",
         "include_pi_share": false,
         "config": {
           "training_mode": "on_policy",
@@ -6102,7 +6102,7 @@
     "JudgeDriftCheckRequest": [
       {
         "judge": "judge-pi-v1",
-        "teacher": "qwen-27b",
+        "teacher": "teacher-large@local",
         "sample_size": 50,
         "agreement_threshold": 0.8
       }
@@ -6161,7 +6161,7 @@
             ]
           }
         ],
-        "teacher": "qwen-27b",
+        "teacher": "teacher-large@local",
         "config": {
           "training_mode": "on_policy",
           "objective": "reverse_kl",
@@ -6190,7 +6190,7 @@
         "uploader": "local-user",
         "description": "Math adapter",
         "receipt_schema_version": 1,
-        "note": "Library publish endpoint is contract-only until launch."
+        "note": "Local validation passed; no remote upload occurred."
       }
     ],
     "QueueResponse": [

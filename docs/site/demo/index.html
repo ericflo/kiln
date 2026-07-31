@@ -69,7 +69,7 @@
       top: 0;
       left: 1rem;
       padding: .65rem .85rem;
-      transform: translateY(-120%);
+      transform: translateY(calc(-100% + 1px));
       border-radius: 0 0 .45rem .45rem;
       background: var(--accent);
       color: #1b0c00;
@@ -383,8 +383,10 @@
       gap: 50px;
       align-items: start;
     }
+    .try-grid > * { min-width: 0; }
     .try h2 { margin: 0; font-size: 34px; letter-spacing: -.025em; }
     .try p { color: var(--muted); line-height: 1.7; }
+    .try p code { overflow-wrap: anywhere; }
     pre {
       margin: 0;
       padding: 20px;
@@ -430,6 +432,7 @@
     .demo-footer { padding: 34px 0; border-top: 1px solid var(--line); color: var(--quiet); font-size: 12px; }
     .demo-footer-inner { display: flex; justify-content: space-between; gap: 20px; }
     .demo-footer nav { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px 14px; }
+    .demo-footer nav a { display: inline-flex; min-height: 28px; align-items: center; }
     @media (max-width: 980px) {
       body.nav-open { overflow: hidden; }
       .product-page-enhanced .site-nav-bar {
@@ -536,21 +539,24 @@
   <main id="content">
     <section class="hero">
       <div class="demo-page">
-        <div class="freshness"><i aria-hidden="true"></i>Captured July 30, 2026 &middot; current repository UI</div>
+        <div class="freshness"><i aria-hidden="true"></i>Captured July 30, 2026 &middot; UI source 1eacf5100</div>
         <h1>See the whole loop, <span>from request to promoted adapter.</span></h1>
         <p class="hero-lede">
           Observe the server, test the real API path, train a named adapter, compare the
-          evidence, and activate the winner. Every screen below comes from the current embedded
-          dashboard source, with staged data and measured performance kept clearly separate.
+          evidence, and activate the winner. Every screen below was rendered from the embedded
+          dashboard at source commit <code>1eacf5100</code>. Its seeded fixture data is kept
+          separate from measured performance.
         </p>
         <div class="hero-actions">
-          <a class="demo-btn demo-btn-primary" href="../quickstart.html">Run Kiln in 5 minutes <span aria-hidden="true">&nbsp;→</span></a>
-          <a class="demo-btn" href="../docs/benchmarks/">Read the benchmark receipts</a>
+          <a class="demo-btn demo-btn-primary" href="../quickstart.html">Start the quickstart <span aria-hidden="true">&nbsp;→</span></a>
+          <a class="demo-btn" href="../docs/benchmarks/">Read the benchmark evidence</a>
         </div>
         <div class="truth-note">
-          <span class="stamp">Verified tour</span>
-          <span><strong>UI:</strong> current repository source. <strong>Data:</strong> deterministic seeded
-          demo fixtures, not a live performance run. <strong>Captured:</strong> July 30, 2026 at 1440 px.
+          <span class="stamp">Source-verified tour</span>
+          <span><strong>UI:</strong> embedded dashboard source at
+          <a href="https://github.com/ericflo/kiln/commit/1eacf51007535a58827b025d0bb2d505d72ba1ea"><code>1eacf5100</code></a>.
+          <strong>Data:</strong> deterministic seeded demo fixtures, not a live performance run.
+          <strong>Captured:</strong> July 30, 2026 at 1440 px.
           Performance claims live on the <a href="../docs/benchmarks/">benchmark page</a>, never in a
           staged screenshot.</span>
         </div>
@@ -569,11 +575,11 @@
           </div>
         </div>
         <figure class="screen">
-          <div class="screen-bar"><span class="screen-dots"><i></i><i></i><i></i></span><span>http://127.0.0.1:8420/ui/#overview</span><span>current source</span></div>
+          <div class="screen-bar"><span class="screen-dots"><i></i><i></i><i></i></span><span>http://127.0.0.1:8420/ui/#overview</span><span>source 1eacf5100</span></div>
           <img src="../assets/server-ui-dashboard.webp"
                srcset="../assets/server-ui-dashboard-720.webp 720w, ../assets/server-ui-dashboard-1440.webp 1440w, ../assets/server-ui-dashboard.webp 2880w"
                sizes="(max-width: 780px) calc(100vw - 32px), 1180px"
-               alt="Current Kiln overview dashboard showing server, accelerator, traffic, memory, and adapter state"
+               alt="Kiln overview dashboard at source 1eacf5100, showing server, accelerator, traffic, memory, and adapter state"
                width="2880" height="3534" loading="lazy" decoding="async">
         </figure>
         <div class="tour-points">
@@ -600,7 +606,7 @@
           <img src="../assets/server-ui-playground.webp"
                srcset="../assets/server-ui-playground-720.webp 720w, ../assets/server-ui-playground-1440.webp 1440w, ../assets/server-ui-playground.webp 2880w"
                sizes="(max-width: 780px) calc(100vw - 32px), 1180px"
-               alt="Current Kiln playground with OpenAI-compatible request controls and streamed response"
+               alt="Kiln playground at source 1eacf5100, with OpenAI-compatible request controls and a seeded streamed response"
                width="2880" height="1912" loading="lazy" decoding="async">
         </figure>
         <div class="tour-points">
@@ -627,7 +633,7 @@
           <img src="../assets/server-ui-training.webp"
                srcset="../assets/server-ui-training-720.webp 720w, ../assets/server-ui-training-1440.webp 1440w, ../assets/server-ui-training.webp 2880w"
                sizes="(max-width: 780px) calc(100vw - 32px), 1180px"
-               alt="Current Kiln training dashboard showing jobs, datasets, progress, and loss"
+               alt="Kiln training dashboard at source 1eacf5100, showing seeded jobs, datasets, progress, and loss"
                width="2880" height="3212" loading="lazy" decoding="async">
         </figure>
         <div class="tour-points">
@@ -654,7 +660,7 @@
           <img src="../assets/server-ui-adapters.webp"
                srcset="../assets/server-ui-adapters-720.webp 720w, ../assets/server-ui-adapters-1440.webp 1440w, ../assets/server-ui-adapters.webp 2880w"
                sizes="(max-width: 780px) calc(100vw - 32px), 1180px"
-               alt="Current Kiln adapter library showing active adapter, manifests, and evaluation evidence"
+               alt="Kiln adapter library at source 1eacf5100, showing seeded active-adapter, manifest, and evaluation evidence"
                width="2880" height="2216" loading="lazy" decoding="async">
         </figure>
         <div class="tour-points">
@@ -672,9 +678,14 @@
           <p>Start with a real health check and one real request. The complete platform-specific
           path is in the <a href="../quickstart.html">Quickstart</a>; training and evaluation continue
           in the <a href="../grpo.html">GRPO</a> and <a href="../evals.html">Evals</a> guides.</p>
+          <p>That request works in the default <code>stable</code> profile. The interactive
+            train, evaluate, and adapter-activation loop shown above requires the
+            <code>experimental</code> profile. See
+            <a href="../docs/serving-profiles/">Serving profiles</a> for the exact ownership policy
+            and current saved-adapter limitation.</p>
         </div>
         <pre><code># Verify readiness and the selected backend
-curl -fsS http://127.0.0.1:8420/health | jq
+curl -fsS http://127.0.0.1:8420/health | python3 -m json.tool
 
 # Send the same API shape used by the playground
 curl -fsS http://127.0.0.1:8420/v1/chat/completions \
@@ -684,10 +695,10 @@ curl -fsS http://127.0.0.1:8420/v1/chat/completions \
     "messages": [{"role":"user","content":"Give one debugging rule."}],
     "temperature": 0,
     "max_tokens": 64
-  }' | jq
+  }' | python3 -m json.tool
 
-# Open the operational UI
-xdg-open http://127.0.0.1:8420/ui/</code></pre>
+# Then open the operational UI in your browser:
+# http://127.0.0.1:8420/ui/</code></pre>
       </div>
     </section>
 
@@ -702,8 +713,8 @@ xdg-open http://127.0.0.1:8420/ui/</code></pre>
             <p>
               These six recordings are retained because they document earlier workflows and output.
               They were previously presented as the current demo without a capture date, which was
-              misleading. Some endpoints, CLI output, and timing no longer represent the current
-              release. Use the current guides above for reproduction.
+              misleading. Some endpoints, CLI output, and timing no longer represent the latest
+              published release. Use the current guides above for reproduction.
             </p>
             <div class="archive-links">
               <a href="first-token.cast">first-token.cast &middot; cold start</a>
@@ -715,7 +726,7 @@ xdg-open http://127.0.0.1:8420/ui/</code></pre>
             </div>
             <p>Original scripts remain in the
               <a href="https://github.com/ericflo/kiln/tree/main/docs/site/demo">repository archive</a>
-              for audit.</p>
+              for auditing.</p>
           </div>
         </details>
       </div>
@@ -726,8 +737,10 @@ xdg-open http://127.0.0.1:8420/ui/</code></pre>
     <div class="demo-page demo-footer-inner">
       <span>Kiln &middot; MIT licensed</span>
       <nav aria-label="Footer">
-        <a href="../docs/">Documentation</a>
+        <a href="../">Home</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/README.md">README</a>
         <a href="../quickstart.html">Quickstart</a>
+        <a href="../docs/">Documentation</a>
         <a href="../grpo.html">GRPO Guide</a>
         <a href="../evals.html">Evals</a>
         <a href="../api.html">API Reference</a>
@@ -735,7 +748,9 @@ xdg-open http://127.0.0.1:8420/ui/</code></pre>
         <a href="./">Demo</a>
         <a href="../troubleshooting.html">Troubleshooting</a>
         <a href="../architecture.html">Architecture</a>
+        <a href="../docs/benchmarks/">Benchmarks</a>
         <a href="https://github.com/ericflo/kiln/blob/main/CHANGELOG.md">Changelog</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/SECURITY.md">Security</a>
         <a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License</a>
       </nav>
     </div>

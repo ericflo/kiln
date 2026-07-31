@@ -19,6 +19,28 @@ and the effective configuration in train receipts and exact checkpoints
 records it. Unknown profile names, unknown SFT config fields, unknown optimizer
 fields, and invalid numeric values fail before queue publication or GPU work.
 
+## Contract at a glance
+
+- One admitted conversation produces one optimizer update. There is no
+  multi-row batch, gradient accumulation, learning-rate schedule, warmup, or
+  gradient clipping.
+- Only LoRA A/B tensors are trainable. Base-model parameters remain frozen.
+- The resident backend chooses the SFT loss route. A request, configuration
+  file, or environment variable cannot override it.
+- Admission binds the loss route, optimizer tuple, checkpoint plan, memory
+  estimate, and execution identity before the job enters the queue.
+- Exact checkpoints preserve the data cursor, optimizer and scheduler state,
+  random state, model and tokenizer identity, execution provenance, and
+  backend-owned loss route.
+- Use the [HF/TRL interoperability workflow](HF_TRL_INTEROP.md) when a run
+  needs general trainer controls, another PEFT method, distributed execution,
+  or broader model support.
+
+Read [SFT Ingestion](sft-ingestion.md) for row admission and content identity,
+[SFT Tokenization and Assistant-Only Loss](sft-tokenization.md) for labels and
+masking, and [Exact Training Checkpoints](training-checkpoints.md) for the
+resume boundary.
+
 ## Update contract
 
 For the main-model LoRA phase:

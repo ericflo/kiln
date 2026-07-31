@@ -42,9 +42,11 @@ eval / comparison gate
 explicit adapter activation
 ```
 
-Training does not silently replace the model a client is using. Jobs produce
-named artifacts; requests or operators select an adapter explicitly. Manifests
-bind the artifact to its base model, training inputs, configuration, and
+Jobs produce named adapter artifacts. By default, a completed training job
+loads its adapter at an iteration boundary after in-flight requests finish;
+`config.auto_load = false` leaves it idle for explicit selection. A configured
+post-eval promotion gate defers that load until the adapter passes. Manifests
+bind each artifact to its base model, training inputs, configuration, and
 provenance.
 
 ## Shared accelerator ownership

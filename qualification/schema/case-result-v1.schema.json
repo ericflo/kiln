@@ -1,7 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://kiln.local/schemas/qualification-case-result-v1.json",
-  "title": "Kiln qualification case result",
+  "title": "Kiln qualification command case result",
+  "description": "Closed command-to-runner evidence for one qualification case execution. JSON Schema validates the wire shape; scripts/qualification/run.py also enforces finite numbers, canonical ordering, declared metric ownership, the selected variant's effective configuration, file safety, and size limits. The runner normalizes this record before aggregation, and the resulting qualification receipt—not this file—is the run verdict.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -15,31 +16,49 @@
     "details"
   ],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": {
+      "const": 1,
+      "description": "Command case-result contract version. The runner accepts only version 1."
+    },
     "case_id": {
       "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$",
+      "description": "Case identifier copied exactly from the selected workload case. A syntactically valid but different identifier is rejected."
     },
-    "status": { "enum": ["passed", "failed", "skipped"] },
-    "duration_seconds": { "type": "number", "minimum": 0 },
-    "effective_config": { "$ref": "#/$defs/configObject" },
+    "status": {
+      "enum": ["passed", "failed", "skipped"],
+      "description": "Command-reported case outcome. The runner can downgrade this status when execution, output, evidence, source, model, or infrastructure checks fail; it never treats this field alone as the qualification verdict."
+    },
+    "duration_seconds": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Non-negative finite duration reported by the command. The normalized evidence and receipt use the runner's monotonic wall-clock duration instead."
+    },
+    "effective_config": {
+      "$ref": "#/$defs/configObject",
+      "description": "Configuration the command says it actually used. It must exactly equal the selected workload variant's effective_config; a mismatch fails the case and prevents the receipt from claiming that configuration."
+    },
     "metrics": {
       "type": "array",
-      "items": { "$ref": "#/$defs/metric" }
+      "items": { "$ref": "#/$defs/metric" },
+      "description": "Measurements emitted by the command, sorted by unique name. Their names must exactly match result_protocol.declared_metrics for this case."
     },
     "tolerances": {
       "type": "array",
-      "items": { "$ref": "#/$defs/tolerance" }
+      "items": { "$ref": "#/$defs/tolerance" },
+      "description": "Optional, command-reported tolerances for metrics in this same file, sorted by unique metric name. The runner preserves them only in per-execution case-result artifacts; workload comparison_policy remains the authority for receipt comparison."
     },
     "details": {
       "oneOf": [
         { "type": "string", "maxLength": 2048 },
         { "type": "null" }
-      ]
+      ],
+      "description": "Optional diagnostic text from the command. The runner may append execution or contract failures and caps the normalized text at 2,048 characters."
     }
   },
   "$defs": {
     "configValue": {
+      "description": "One finite JSON scalar, null, or recursively nested configuration object. Arrays are not valid configuration values.",
       "oneOf": [
         { "type": ["string", "number", "boolean", "null"] },
         { "$ref": "#/$defs/configObject" }
@@ -47,6 +66,7 @@
     },
     "configObject": {
       "type": "object",
+      "description": "Closed-shape configuration namespace whose lowercase keys can be addressed as dot-separated comparison paths. Values may be finite scalars, null, or nested objects; list values are excluded.",
       "propertyNames": {
         "pattern": "^[a-z][a-z0-9_-]*$"
       },
@@ -54,30 +74,56 @@
     },
     "metric": {
       "type": "object",
+      "description": "One finite command-owned measurement with the definition needed to interpret and aggregate it. The runner checks this definition against any matching committed comparison rule.",
       "additionalProperties": false,
       "required": ["name", "value", "unit", "aggregation", "lower_is_better"],
       "properties": {
         "name": {
           "type": "string",
-          "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+          "pattern": "^[a-z][a-z0-9_.-]{0,127}$",
+          "description": "Stable metric identifier declared by the workload case. Metric entries must be unique and sorted by this field."
         },
-        "value": { "type": "number" },
-        "unit": { "type": "string", "minLength": 1 },
-        "aggregation": { "type": "string", "minLength": 1 },
-        "lower_is_better": { "type": "boolean" }
+        "value": {
+          "type": "number",
+          "description": "Finite observed value. JSON Schema accepts a number; the runner explicitly rejects NaN and infinity."
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Non-empty unit label, such as s, bytes, tokens_per_second, or bool. This text is part of the metric definition and must match committed policy when the metric is compared."
+        },
+        "aggregation": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Non-empty description of how the command produced this value. Across repeated executions, the runner requires the same definition and emits a mean_of_<count>_<aggregation> result."
+        },
+        "lower_is_better": {
+          "type": "boolean",
+          "description": "Metric direction supplied by the command. This does not choose the comparison operator; any committed workload metric rule must declare the same direction."
+        }
       }
     },
     "tolerance": {
       "type": "object",
+      "description": "Advisory tolerance attached to one reported metric. It is retained in normalized case-result artifacts but is not copied into qualification receipt results and does not override workload comparison policy.",
       "additionalProperties": false,
       "required": ["metric", "absolute_tolerance", "relative_tolerance"],
       "properties": {
         "metric": {
           "type": "string",
-          "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+          "pattern": "^[a-z][a-z0-9_.-]{0,127}$",
+          "description": "Name of a metric present in this result. Tolerance entries must be unique and sorted by this field."
         },
-        "absolute_tolerance": { "type": "number", "minimum": 0 },
-        "relative_tolerance": { "type": "number", "minimum": 0 }
+        "absolute_tolerance": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Non-negative finite absolute allowance reported by the command, expressed in the named metric's unit."
+        },
+        "relative_tolerance": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Non-negative finite proportional allowance reported by the command, where 0.05 represents five percent."
+        }
       }
     }
   }
