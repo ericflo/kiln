@@ -54,6 +54,13 @@
   without it while retaining v2/v3 compatibility. Rollout requests fail closed
   on every training-only field. Training → OpenEnv now exposes the same
   **Prove it after training** static-suite workflow as native SFT and GRPO.
+  Native inline and streamed GRPO now validate all-OpenEnv corpora as a
+  first-class `kiln.openenv-training-data.v1` contract: partial provenance,
+  mixed ordinary/OpenEnv groups, group task drift, endpoint schema drift, and
+  reward/return disagreement fail admission. Environment identities, ordered
+  group-plan digest, seed range, steps, and termination counts survive through
+  training status, train receipts, adapter manifests, and the dashboard, while
+  checkpoint resume continues to bind the exact corpus bytes.
   CI drives all twenty-two pinned
   text-profiled arcade and math servers plus a native
   collect/submit/verify/replay batch end to end.

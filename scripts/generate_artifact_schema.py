@@ -159,6 +159,7 @@ def build_primitives_and_enums() -> None:
     )
     add_definition("NonNegativeInteger", "u64 | u32 | usize", {"type": "integer", "minimum": 0}, "A whole number greater than or equal to zero.")
     add_definition("PositiveInteger", "u64 | u32 | usize", {"type": "integer", "minimum": 1}, "A whole number greater than or equal to one.")
+    add_definition("DecimalU64", "u64", {"type": "string", "pattern": "^(0|[1-9][0-9]*)$"}, "An unsigned 64-bit integer encoded as decimal text to preserve exact values.")
     add_definition("FiniteNumber", "f32 | f64", {"type": "number"}, "A finite JSON number.")
     add_definition("UnitInterval", "f32", {"type": "number", "exclusiveMinimum": 0, "maximum": 1}, "A merge density greater than 0 and no greater than 1.")
     add_definition("Sha256", "String", {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "A lowercase SHA-256 digest prefixed with `sha256:`.")
@@ -187,6 +188,59 @@ def build_primitives_and_enums() -> None:
 
 
 def build_adapter_definitions() -> None:
+    add_object(
+        "OpenEnvTerminationCountsV1",
+        "kiln_train::OpenEnvTerminationCountsV1",
+        {
+            "done": ref("NonNegativeInteger"),
+            "max_steps": ref("NonNegativeInteger"),
+            "invalid_model_action": ref("NonNegativeInteger"),
+            "protocol_error": ref("NonNegativeInteger"),
+        },
+        "Corpus counts for each explicit OpenEnv episode termination class.",
+    )
+    add_object(
+        "OpenEnvTrainingEnvironmentV1",
+        "kiln_train::OpenEnvTrainingEnvironmentV1",
+        {
+            "environment_name": ref("NonEmptyString"),
+            "environment_base_url": ref("NonEmptyString"),
+            "openapi_version": ref("NonEmptyString"),
+            "environment_schema_sha256": ref("Sha256"),
+            "action_schema_sha256": ref("Sha256"),
+            "groups": ref("PositiveInteger"),
+            "rollouts": ref("PositiveInteger"),
+            "total_steps": ref("NonNegativeInteger"),
+            "terminations": ref("OpenEnvTerminationCountsV1"),
+        },
+        "One protocol endpoint and immutable schema identity represented in an OpenEnv training corpus.",
+        optional=("openapi_version",),
+    )
+    add_object(
+        "OpenEnvTrainingDataProvenanceV1",
+        "kiln_train::OpenEnvTrainingDataProvenanceV1",
+        {
+            "schema": {"const": "kiln.openenv-training-data.v1"},
+            "groups": ref("PositiveInteger"),
+            "rollouts": ref("PositiveInteger"),
+            "unique_seeds": ref("PositiveInteger"),
+            "seed_min": ref("DecimalU64"),
+            "seed_max": ref("DecimalU64"),
+            "total_steps": ref("NonNegativeInteger"),
+            "terminations": ref("OpenEnvTerminationCountsV1"),
+            "group_plan_sha256": ref("Sha256"),
+            "environments": array(ref("OpenEnvTrainingEnvironmentV1"), min_items=1),
+        },
+        "Validated semantic identity for an all-OpenEnv GRPO training corpus.",
+        extra={
+            "x-kiln-semantic-constraints": [
+                "every completion has OpenEnv provenance",
+                "all candidates in a group share endpoint, schema, reset hash, and seed",
+                "completion reward equals OpenEnv episode_return",
+                "per-environment and termination totals equal corpus totals",
+            ]
+        },
+    )
     add_object(
         "LoadedAdapterIdentity",
         "LoadedAdapterIdentity",
@@ -242,10 +296,11 @@ def build_adapter_definitions() -> None:
             "training_data_hash": nullable(ref("Sha256")),
             "training_data_source": nullable(ref("NonEmptyString")),
             "training_data_path": nullable(ref("NonEmptyString")),
+            "openenv_training_data": ref("OpenEnvTrainingDataProvenanceV1"),
             "files": ref("AdapterManifestFiles"),
         },
         "Content, lineage, model, and training identity recorded for an installed adapter.",
-        optional=("training_chat_template_hash", "base_weight_shard_manifest", "execution_provenance", "training_precision"),
+        optional=("training_chat_template_hash", "base_weight_shard_manifest", "execution_provenance", "training_precision", "openenv_training_data"),
     )
     add_object(
         "AdapterDiskEntry",

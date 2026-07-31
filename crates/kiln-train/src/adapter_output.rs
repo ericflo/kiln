@@ -46,6 +46,8 @@ pub struct AdapterManifest {
     pub training_data_hash: Option<String>,
     pub training_data_source: Option<String>,
     pub training_data_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openenv_training_data: Option<crate::OpenEnvTrainingDataProvenanceV1>,
     pub files: AdapterManifestFiles,
 }
 
@@ -273,6 +275,11 @@ pub fn build_adapter_manifest_from_train_receipt(
             .validate()
             .context("validate train-receipt precision for adapter manifest")?;
     }
+    if let Some(openenv) = receipt.training_data.openenv.as_ref() {
+        openenv.validate().map_err(anyhow::Error::msg).context(
+            "validate train-receipt OpenEnv training-data provenance for adapter manifest",
+        )?;
+    }
     let resolved = validate_adapter_output_dir(adapter_dir)?;
     let adapter_model = resolved.join("adapter_model.safetensors");
     let adapter_config = resolved.join("adapter_config.json");
@@ -304,6 +311,7 @@ pub fn build_adapter_manifest_from_train_receipt(
         training_data_hash: receipt.training_data.sha256.clone(),
         training_data_source: Some(receipt.training_data.source.clone()),
         training_data_path: receipt.training_data.path.clone(),
+        openenv_training_data: receipt.training_data.openenv.clone(),
         files: AdapterManifestFiles {
             adapter_model: "adapter_model.safetensors".to_string(),
             adapter_config: "adapter_config.json".to_string(),
@@ -345,6 +353,17 @@ pub fn read_adapter_manifest(path: &Path) -> Result<AdapterManifest> {
         precision
             .validate()
             .with_context(|| format!("validate training precision in {}", path.display()))?;
+    }
+    if let Some(openenv) = manifest.openenv_training_data.as_ref() {
+        openenv
+            .validate()
+            .map_err(anyhow::Error::msg)
+            .with_context(|| {
+                format!(
+                    "validate OpenEnv training-data provenance in {}",
+                    path.display()
+                )
+            })?;
     }
     Ok(manifest)
 }
@@ -786,7 +805,30 @@ mod tests {
             source: "jsonl_grpo_groups".to_string(),
             path: Some("/data/groups.jsonl".to_string()),
             sha256: Some("sha256:training-data".to_string()),
+            openenv: None,
         };
+        let episode = crate::OpenEnvRolloutProvenanceV1::new(
+            "math-env",
+            "https://env.test",
+            Some("3.1.0".to_string()),
+            format!("sha256:{}", "a".repeat(64)),
+            format!("sha256:{}", "b".repeat(64)),
+            format!("sha256:{}", "c".repeat(64)),
+            11,
+            1,
+            1.0,
+            true,
+            crate::OpenEnvEpisodeTerminationV1::Done,
+            None,
+        )
+        .unwrap();
+        let groups = vec![crate::GrpoGroup {
+            messages: vec![crate::ChatMessage::new("user", "solve")],
+            completions: vec![
+                crate::ScoredCompletion::legacy("answer".to_string(), 1.0).with_openenv(episode),
+            ],
+        }];
+        receipt.training_data.openenv = crate::openenv_training_data_provenance(&groups).unwrap();
         receipt
     }
 
@@ -872,6 +914,10 @@ mod tests {
         assert_eq!(
             manifest.training_data_hash.as_deref(),
             Some("sha256:training-data")
+        );
+        assert_eq!(
+            manifest.openenv_training_data,
+            receipt.training_data.openenv
         );
         assert_eq!(manifest.files.adapter_model, "adapter_model.safetensors");
         assert_eq!(manifest.files.adapter_config, "adapter_config.json");

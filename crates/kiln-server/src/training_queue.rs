@@ -711,6 +711,7 @@ pub struct GrpoJsonlAdmissionReceipt {
     pub groups: usize,
     pub completions: usize,
     pub max_seq_len: usize,
+    pub openenv: Option<kiln_train::OpenEnvTrainingDataProvenanceV1>,
     /// Conservative peak host allocation retained or overlapped by streamed
     /// preflight. Admission charges this alongside the disk snapshot.
     pub preflight_host_bytes: u64,
@@ -729,6 +730,7 @@ impl GrpoJsonlAdmissionReceipt {
         completions: usize,
         max_seq_len: usize,
         preflight_host_bytes: u64,
+        openenv: Option<kiln_train::OpenEnvTrainingDataProvenanceV1>,
     ) -> std::result::Result<Self, String> {
         let metadata = snapshot_file
             .metadata()
@@ -741,6 +743,15 @@ impl GrpoJsonlAdmissionReceipt {
         size_bytes
             .checked_add(preflight_host_bytes)
             .ok_or_else(|| "GRPO prepared-data admission weight overflow".to_string())?;
+        if let Some(openenv) = openenv.as_ref() {
+            openenv.validate()?;
+            if openenv.groups != groups || openenv.rollouts != completions {
+                return Err(
+                    "OpenEnv provenance totals differ from admitted GRPO snapshot totals"
+                        .to_string(),
+                );
+            }
+        }
         Ok(Self {
             path,
             source_sha256,
@@ -748,6 +759,7 @@ impl GrpoJsonlAdmissionReceipt {
             groups,
             completions,
             max_seq_len,
+            openenv,
             preflight_host_bytes,
             server_owned: true,
             snapshot_file: Some(snapshot_file),
@@ -2210,6 +2222,7 @@ fn run_opd(
             source: "jsonl_off_policy_opd_teacher".to_string(),
             path: Some(path.to_string()),
             sha256: Some(source_sha256.clone()),
+            openenv: None,
         };
         let opd = receipt.opd.as_mut().ok_or_else(|| {
             "OPD trainer receipt is missing its required OPD provenance section".to_string()
@@ -6918,6 +6931,7 @@ mod tests {
                 1,
                 8,
                 1024,
+                None,
             )
             .unwrap(),
         );
@@ -6947,6 +6961,7 @@ mod tests {
             1,
             8,
             1024,
+            None,
         )
         .unwrap()
     }

@@ -187,7 +187,7 @@ CONTROL_COMPONENT_TYPES = {name: name for name in CONTROL_ENTRYPOINTS}
 CONTROL_COMPONENT_TYPES["CorrectionRowInput"] = "CorrectionRow"
 CONTROL_COMPONENT_TYPES["Vec_TrainingStatus"] = "Vec<TrainingStatus>"
 EXPECTED_OBSERVABILITY_DEFINITION_COUNT = 172
-EXPECTED_CONTROL_PLANE_DEFINITION_COUNT = 156
+EXPECTED_CONTROL_PLANE_DEFINITION_COUNT = 159
 EXPECTED_COMPONENT_SCHEMA_COUNTS = {
     "complete": 144,
     "migration_pending": 0,
@@ -1176,8 +1176,8 @@ def validate_artifact_schema(
     if not isinstance(definitions, dict):
         errors.append("artifact schema $defs must be an object")
         return errors
-    if len(definitions) != 80:
-        errors.append(f"artifact schema must contain 80 definitions, got {len(definitions)}")
+    if len(definitions) != 84:
+        errors.append(f"artifact schema must contain 84 definitions, got {len(definitions)}")
     if list(definitions) != sorted(definitions):
         errors.append("artifact schema definitions must be sorted")
     open_input_objects = {

@@ -1302,6 +1302,59 @@ def build_training_responses() -> None:
         ),
     )
     add_object(
+        "OpenEnvTerminationCountsV1",
+        "kiln_train::OpenEnvTerminationCountsV1",
+        {
+            "done": ref("NonNegativeInteger"),
+            "max_steps": ref("NonNegativeInteger"),
+            "invalid_model_action": ref("NonNegativeInteger"),
+            "protocol_error": ref("NonNegativeInteger"),
+        },
+        "Corpus counts for each explicit OpenEnv episode termination class.",
+    )
+    add_object(
+        "OpenEnvTrainingEnvironmentV1",
+        "kiln_train::OpenEnvTrainingEnvironmentV1",
+        {
+            "environment_name": ref("NonEmptyString"),
+            "environment_base_url": ref("NonEmptyString"),
+            "openapi_version": ref("NonEmptyString"),
+            "environment_schema_sha256": ref("Sha256"),
+            "action_schema_sha256": ref("Sha256"),
+            "groups": ref("PositiveInteger"),
+            "rollouts": ref("PositiveInteger"),
+            "total_steps": ref("NonNegativeInteger"),
+            "terminations": ref("OpenEnvTerminationCountsV1"),
+        },
+        "One protocol endpoint and immutable schema identity represented in an OpenEnv training corpus.",
+        optional=("openapi_version",),
+    )
+    add_object(
+        "OpenEnvTrainingDataProvenanceV1",
+        "kiln_train::OpenEnvTrainingDataProvenanceV1",
+        {
+            "schema": {"const": "kiln.openenv-training-data.v1"},
+            "groups": ref("PositiveInteger"),
+            "rollouts": ref("PositiveInteger"),
+            "unique_seeds": ref("PositiveInteger"),
+            "seed_min": ref("DecimalU64"),
+            "seed_max": ref("DecimalU64"),
+            "total_steps": ref("NonNegativeInteger"),
+            "terminations": ref("OpenEnvTerminationCountsV1"),
+            "group_plan_sha256": ref("Sha256"),
+            "environments": array(ref("OpenEnvTrainingEnvironmentV1"), min_items=1),
+        },
+        "Validated semantic identity for an all-OpenEnv GRPO training corpus.",
+        extra={
+            "x-kiln-semantic-constraints": [
+                "every completion has OpenEnv provenance",
+                "all candidates in a group share endpoint, schema, reset hash, and seed",
+                "completion reward equals OpenEnv episode_return",
+                "per-environment and termination totals equal corpus totals",
+            ]
+        },
+    )
+    add_object(
         "TrainingDataProvenance",
         "kiln_train::TrainingDataProvenance",
         {
@@ -1312,9 +1365,10 @@ def build_training_responses() -> None:
             "split_manifest_sha256": external_ref(EVAL_SCHEMA, "Sha256Digest"),
             "admitted_corpus_sha256": external_ref(EVAL_SCHEMA, "Sha256Digest"),
             "rows": ref("NonNegativeInteger"),
+            "openenv": ref("OpenEnvTrainingDataProvenanceV1"),
         },
         "Dataset and split identity recorded when Kiln accepts the training request.",
-        optional=("dataset", "split", "dataset_corpus_sha256", "split_manifest_sha256"),
+        optional=("dataset", "split", "dataset_corpus_sha256", "split_manifest_sha256", "openenv"),
     )
     status_fields = {
         "job_id": ref("NonEmptyString"), "state": ref("TrainingState"), "progress": ref("FiniteNumber"),

@@ -4672,6 +4672,33 @@
       "x-kiln-rust-type": "kiln_openenv::OpenEnvTaskSplit",
       "x-kiln-field-schema-status": "complete"
     },
+    "OpenEnvTerminationCountsV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "done",
+        "max_steps",
+        "invalid_model_action",
+        "protocol_error"
+      ],
+      "properties": {
+        "done": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "max_steps": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "invalid_model_action": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "protocol_error": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "description": "Corpus counts for each explicit OpenEnv episode termination class.",
+      "x-kiln-rust-type": "kiln_train::OpenEnvTerminationCountsV1",
+      "x-kiln-field-schema-status": "complete"
+    },
     "OpenEnvTrainingCapacitySnapshot": {
       "type": "object",
       "additionalProperties": false,
@@ -4723,6 +4750,113 @@
       },
       "description": "Immutable materialized native GRPO and optional post-evaluation settings admitted before OpenEnv collection.",
       "x-kiln-rust-type": "OpenEnvTrainingContract",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvTrainingDataProvenanceV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "groups",
+        "rollouts",
+        "unique_seeds",
+        "seed_min",
+        "seed_max",
+        "total_steps",
+        "terminations",
+        "group_plan_sha256",
+        "environments"
+      ],
+      "properties": {
+        "schema": {
+          "const": "kiln.openenv-training-data.v1"
+        },
+        "groups": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "rollouts": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "unique_seeds": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "seed_min": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "seed_max": {
+          "$ref": "#/$defs/DecimalU64"
+        },
+        "total_steps": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "terminations": {
+          "$ref": "#/$defs/OpenEnvTerminationCountsV1"
+        },
+        "group_plan_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "environments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpenEnvTrainingEnvironmentV1"
+          },
+          "minItems": 1
+        }
+      },
+      "x-kiln-semantic-constraints": [
+        "every completion has OpenEnv provenance",
+        "all candidates in a group share endpoint, schema, reset hash, and seed",
+        "completion reward equals OpenEnv episode_return",
+        "per-environment and termination totals equal corpus totals"
+      ],
+      "description": "Validated semantic identity for an all-OpenEnv GRPO training corpus.",
+      "x-kiln-rust-type": "kiln_train::OpenEnvTrainingDataProvenanceV1",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvTrainingEnvironmentV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "environment_name",
+        "environment_base_url",
+        "environment_schema_sha256",
+        "action_schema_sha256",
+        "groups",
+        "rollouts",
+        "total_steps",
+        "terminations"
+      ],
+      "properties": {
+        "environment_name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "environment_base_url": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "openapi_version": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "environment_schema_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "action_schema_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "groups": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "rollouts": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "total_steps": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "terminations": {
+          "$ref": "#/$defs/OpenEnvTerminationCountsV1"
+        }
+      },
+      "description": "One protocol endpoint and immutable schema identity represented in an OpenEnv training corpus.",
+      "x-kiln-rust-type": "kiln_train::OpenEnvTrainingEnvironmentV1",
       "x-kiln-field-schema-status": "complete"
     },
     "OpenEnvTrainingPreflightReceipt": {
@@ -6657,6 +6791,9 @@
         },
         "rows": {
           "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "openenv": {
+          "$ref": "#/$defs/OpenEnvTrainingDataProvenanceV1"
         }
       },
       "description": "Dataset and split identity recorded when Kiln accepts the training request.",

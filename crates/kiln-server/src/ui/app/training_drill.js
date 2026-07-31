@@ -175,6 +175,13 @@ function renderTrainMetadata(j) {
   const data = receipt?.data || {};
   const source = receipt?.training_data || {};
   const admitted = j.training_data || {};
+  const openenv = admitted.openenv || source.openenv || null;
+  const openenvNames = Array.isArray(openenv?.environments)
+    ? openenv.environments.map((environment) => environment.environment_name).join(', ')
+    : null;
+  const openenvTerminations = openenv?.terminations
+    ? `done=${openenv.terminations.done || 0}, max_steps=${openenv.terminations.max_steps || 0}, invalid=${openenv.terminations.invalid_model_action || 0}, protocol=${openenv.terminations.protocol_error || 0}`
+    : null;
   const config = replay?.request_body?.config || null;
   const rows = [
     renderDrillKv('Mode', hp.mode || replay?.kind || j.job_type),
@@ -195,6 +202,12 @@ function renderTrainMetadata(j) {
     renderDrillKv('Admitted corpus SHA-256', admitted.admitted_corpus_sha256),
     renderDrillKv('Split manifest SHA-256', admitted.split_manifest_sha256),
     renderDrillKv('Full dataset SHA-256', admitted.dataset_corpus_sha256),
+    renderDrillKv('OpenEnv environments', openenvNames),
+    renderDrillKv('OpenEnv groups / rollouts', openenv ? `${openenv.groups} / ${openenv.rollouts}` : null),
+    renderDrillKv('OpenEnv seed range', openenv ? `${openenv.seed_min}–${openenv.seed_max} (${openenv.unique_seeds} unique)` : null),
+    renderDrillKv('OpenEnv total steps', openenv?.total_steps),
+    renderDrillKv('OpenEnv terminations', openenvTerminations),
+    renderDrillKv('OpenEnv group plan SHA-256', openenv?.group_plan_sha256),
   ].join('');
   const receiptRaw = receipt
     ? `<details style="margin-top:12px;"><summary>Raw train receipt</summary><pre class="req-pre">${escapeHtml(JSON.stringify(receipt, null, 2))}</pre></details>`

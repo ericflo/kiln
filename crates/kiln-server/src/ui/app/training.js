@@ -281,8 +281,12 @@ function renderTrainingCard(j, state) {
     : '';
   const cancelBtn = actionBtn;
   const admitted = j.training_data || null;
+  const admittedOpenEnv = admitted?.openenv || null;
+  const admittedOpenEnvNames = Array.isArray(admittedOpenEnv?.environments)
+    ? admittedOpenEnv.environments.map((environment) => environment.environment_name).join(', ')
+    : '';
   const admittedDataLine = admitted
-    ? `<div class="training-card-data" title="Exact admitted training corpus ${escapeHtml(admitted.admitted_corpus_sha256 || '')}">${icon('stack', 'icn-sm')} ${escapeHtml(admitted.dataset || admitted.source || 'training data')}${admitted.split ? ` · ${escapeHtml(admitted.split)}` : ''} · ${Number(admitted.rows || 0).toLocaleString()} row${Number(admitted.rows || 0) === 1 ? '' : 's'}</div>`
+    ? `<div class="training-card-data" title="Exact admitted training corpus ${escapeHtml(admitted.admitted_corpus_sha256 || '')}${admittedOpenEnv?.group_plan_sha256 ? `; OpenEnv plan ${escapeHtml(admittedOpenEnv.group_plan_sha256)}` : ''}">${icon('stack', 'icn-sm')} ${admittedOpenEnv ? `OpenEnv · ${escapeHtml(admittedOpenEnvNames || 'compatible environment')} · ${Number(admittedOpenEnv.groups || 0).toLocaleString()} group${Number(admittedOpenEnv.groups || 0) === 1 ? '' : 's'} · ${Number(admittedOpenEnv.rollouts || 0).toLocaleString()} rollout${Number(admittedOpenEnv.rollouts || 0) === 1 ? '' : 's'}` : `${escapeHtml(admitted.dataset || admitted.source || 'training data')}${admitted.split ? ` · ${escapeHtml(admitted.split)}` : ''} · ${Number(admitted.rows || 0).toLocaleString()} row${Number(admitted.rows || 0) === 1 ? '' : 's'}`}</div>`
     : '';
   // Prefer the wall-clock timestamps (`submitted_unix_ms` /
   // `finished_unix_ms`) introduced with the on-disk archive — those

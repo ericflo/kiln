@@ -77,6 +77,7 @@ manifest_type: kiln_adapter_manifest
 | `training_data_hash` | no | Exact training-data digest when the source supplied one. |
 | `training_data_source` | no | Receipt label for the training-data route. |
 | `training_data_path` | no | Recorded source path when known. This is provenance, not a portable restore location. |
+| `openenv_training_data` | no | Validated `kiln.openenv-training-data.v1` environment, schema, ordered group-plan, seed, step, and termination identity copied from an all-OpenEnv GRPO receipt. |
 
 Legacy manifests can omit the newer lineage fields. Missing provenance means
 “not recorded,” not “compatible.”

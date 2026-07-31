@@ -577,6 +577,7 @@ fn validate_grpo_jsonl_submission(
     let mut completions = 0usize;
     let mut max_seq_len = 0usize;
     let mut max_row_bytes = 0u64;
+    let mut openenv_accumulator = kiln_train::OpenEnvTrainingDataAccumulator::default();
 
     loop {
         row.clear();
@@ -684,6 +685,13 @@ fn validate_grpo_jsonl_submission(
             .ok_or_else(|| {
                 ApiError::training_invalid_request("GRPO dataset completion count overflow")
             })?;
+        openenv_accumulator
+            .observe_group(groups, &group)
+            .map_err(|error| {
+                ApiError::training_invalid_request(format!(
+                    "invalid OpenEnv corpus provenance at GRPO JSONL line {line_no} in '{dataset_path}': {error}"
+                ))
+            })?;
         let projected_host_bytes = kiln_train::trainer::streamed_grpo_preflight_host_bytes(
             groups,
             completions,
@@ -781,6 +789,11 @@ fn validate_grpo_jsonl_submission(
         })?;
     let digest: [u8; 32] = hasher.finalize().into();
     let source_sha256 = kiln_train::train_receipt::format_sha256_digest(&digest);
+    let openenv = openenv_accumulator.finish().map_err(|error| {
+        ApiError::training_invalid_request(format!(
+            "invalid OpenEnv corpus provenance in GRPO dataset_path '{dataset_path}': {error}"
+        ))
+    })?;
     let receipt = crate::training_queue::GrpoJsonlAdmissionReceipt::new_server_owned(
         snapshot_path,
         snapshot_reader,
@@ -790,6 +803,7 @@ fn validate_grpo_jsonl_submission(
         completions,
         max_seq_len,
         preflight_host_bytes,
+        openenv,
     )
     .map_err(ApiError::internal)?;
     cleanup_incomplete.armed = false;
@@ -2589,6 +2603,7 @@ fn named_training_provenance(
     source: &NamedDatasetAdmission,
     admitted_corpus_sha256: String,
     rows: u64,
+    openenv: Option<kiln_train::OpenEnvTrainingDataProvenanceV1>,
 ) -> TrainingDataProvenance {
     TrainingDataProvenance {
         source: "named_dataset".to_string(),
@@ -2598,6 +2613,7 @@ fn named_training_provenance(
         split_manifest_sha256: Some(source.manifest.split_manifest_sha256.clone()),
         admitted_corpus_sha256,
         rows,
+        openenv,
     }
 }
 
@@ -3503,6 +3519,7 @@ fn prepare_training_entry_admission(
                     source,
                     prepared.ingestion.kept_corpus_sha256.clone(),
                     prepared.ingestion.rows_kept as u64,
+                    None,
                 )
             } else {
                 TrainingDataProvenance {
@@ -3513,6 +3530,7 @@ fn prepare_training_entry_admission(
                     split_manifest_sha256: None,
                     admitted_corpus_sha256: prepared.ingestion.kept_corpus_sha256.clone(),
                     rows: prepared.ingestion.rows_kept as u64,
+                    openenv: None,
                 }
             });
             let admission_weight_bytes =
@@ -3590,88 +3608,106 @@ fn prepare_training_entry_admission(
                 .as_ref()
                 .map(|source| source.path.as_path())
                 .or_else(|| req.dataset_path.as_deref().map(std::path::Path::new));
-            let (max_seq_len, prepared, admitted_corpus_sha256, admitted_rows) = if let Some(path) =
-                source_path
-            {
-                let receipt = match std::mem::take(&mut entry.prepared_data) {
-                    PreparedTrainingData::None => validate_grpo_jsonl_submission(
-                        &path.to_string_lossy(),
-                        &state.adapter_dir.join(".training-inputs"),
-                        &mut entry.prepared_data_permit,
-                        state.tokenizer.as_ref(),
-                        &req.config,
-                        state.model_config.num_layers,
-                        contamination.as_ref().map(|index| {
-                            (
-                                index,
+            let (max_seq_len, prepared, admitted_corpus_sha256, admitted_rows, admitted_openenv) =
+                if let Some(path) = source_path {
+                    let receipt = match std::mem::take(&mut entry.prepared_data) {
+                        PreparedTrainingData::None => validate_grpo_jsonl_submission(
+                            &path.to_string_lossy(),
+                            &state.adapter_dir.join(".training-inputs"),
+                            &mut entry.prepared_data_permit,
+                            state.tokenizer.as_ref(),
+                            &req.config,
+                            state.model_config.num_layers,
+                            contamination.as_ref().map(|index| {
+                                (
+                                    index,
+                                    req.post_eval
+                                        .as_ref()
+                                        .expect("contamination index requires post_eval"),
+                                )
+                            }),
+                        )?
+                        .source_receipt
+                        .ok_or_else(|| ApiError::internal("GRPO scan omitted source receipt"))?,
+                        PreparedTrainingData::GrpoJsonl(receipt) => receipt,
+                        _ => {
+                            return Err(ApiError::internal(
+                                "GRPO queue entry carried mismatched prepared training data",
+                            ));
+                        }
+                    };
+                    let admitted_corpus_sha256 = receipt.source_sha256.clone();
+                    let admitted_rows = receipt.groups as u64;
+                    let admitted_openenv = receipt.openenv.clone();
+                    req.dataset_path = Some(receipt.path.to_string_lossy().into_owned());
+                    (
+                        receipt.max_seq_len,
+                        PreparedTrainingData::GrpoJsonl(receipt),
+                        admitted_corpus_sha256,
+                        admitted_rows,
+                        admitted_openenv,
+                    )
+                } else {
+                    if !matches!(entry.prepared_data, PreparedTrainingData::None) {
+                        return Err(ApiError::internal(
+                            "inline GRPO queue entry carried external source data",
+                        ));
+                    }
+                    let mut maximum = 0usize;
+                    for (index, group) in req.groups.iter().enumerate() {
+                        if let Some(contamination) = contamination.as_ref()
+                            && let Some(overlap) =
+                                check_grpo_group_contamination(contamination, group)
+                        {
+                            return Err(contamination_error(
                                 req.post_eval
                                     .as_ref()
                                     .expect("contamination index requires post_eval"),
+                                overlap,
+                            ));
+                        }
+                        let row_max =
+                            kiln_train::trainer::validate_grpo_group_policy_data_and_max_seq_len(
+                                group,
+                                &req.config,
+                                state.tokenizer.as_ref(),
+                                index + 1,
                             )
-                        }),
-                    )?
-                    .source_receipt
-                    .ok_or_else(|| ApiError::internal("GRPO scan omitted source receipt"))?,
-                    PreparedTrainingData::GrpoJsonl(receipt) => receipt,
-                    _ => {
-                        return Err(ApiError::internal(
-                            "GRPO queue entry carried mismatched prepared training data",
-                        ));
+                            .map_err(|error| {
+                                ApiError::training_invalid_request(format!(
+                                    "invalid inline GRPO group {index}: {error:#}"
+                                ))
+                            })?;
+                        maximum = maximum.max(row_max);
                     }
+                    let corpus = serde_json::to_value(&req.groups).map_err(|error| {
+                        ApiError::internal(format!(
+                            "serialize admitted inline GRPO groups: {error}"
+                        ))
+                    })?;
+                    let admitted_openenv = kiln_train::openenv_training_data_provenance(
+                        &req.groups,
+                    )
+                    .map_err(|error| {
+                        ApiError::training_invalid_request(format!(
+                            "invalid inline OpenEnv corpus provenance: {error}"
+                        ))
+                    })?;
+                    (
+                        maximum,
+                        PreparedTrainingData::None,
+                        kiln_eval::sha256_json(&corpus),
+                        req.groups.len() as u64,
+                        admitted_openenv,
+                    )
                 };
-                let admitted_corpus_sha256 = receipt.source_sha256.clone();
-                let admitted_rows = receipt.groups as u64;
-                req.dataset_path = Some(receipt.path.to_string_lossy().into_owned());
-                (
-                    receipt.max_seq_len,
-                    PreparedTrainingData::GrpoJsonl(receipt),
+            info.training_data = Some(if let Some(source) = named_source.as_ref() {
+                named_training_provenance(
+                    source,
                     admitted_corpus_sha256,
                     admitted_rows,
+                    admitted_openenv,
                 )
-            } else {
-                if !matches!(entry.prepared_data, PreparedTrainingData::None) {
-                    return Err(ApiError::internal(
-                        "inline GRPO queue entry carried external source data",
-                    ));
-                }
-                let mut maximum = 0usize;
-                for (index, group) in req.groups.iter().enumerate() {
-                    if let Some(contamination) = contamination.as_ref()
-                        && let Some(overlap) = check_grpo_group_contamination(contamination, group)
-                    {
-                        return Err(contamination_error(
-                            req.post_eval
-                                .as_ref()
-                                .expect("contamination index requires post_eval"),
-                            overlap,
-                        ));
-                    }
-                    let row_max =
-                        kiln_train::trainer::validate_grpo_group_policy_data_and_max_seq_len(
-                            group,
-                            &req.config,
-                            state.tokenizer.as_ref(),
-                            index + 1,
-                        )
-                        .map_err(|error| {
-                            ApiError::training_invalid_request(format!(
-                                "invalid inline GRPO group {index}: {error:#}"
-                            ))
-                        })?;
-                    maximum = maximum.max(row_max);
-                }
-                let corpus = serde_json::to_value(&req.groups).map_err(|error| {
-                    ApiError::internal(format!("serialize admitted inline GRPO groups: {error}"))
-                })?;
-                (
-                    maximum,
-                    PreparedTrainingData::None,
-                    kiln_eval::sha256_json(&corpus),
-                    req.groups.len() as u64,
-                )
-            };
-            info.training_data = Some(if let Some(source) = named_source.as_ref() {
-                named_training_provenance(source, admitted_corpus_sha256, admitted_rows)
             } else {
                 TrainingDataProvenance {
                     source: if req.dataset_path.is_some() {
@@ -3685,6 +3721,7 @@ fn prepare_training_entry_admission(
                     split_manifest_sha256: None,
                     admitted_corpus_sha256,
                     rows: admitted_rows,
+                    openenv: admitted_openenv,
                 }
             });
             req.dataset = None;
@@ -4763,6 +4800,9 @@ fn routes_with_body_limit(limit_bytes: usize) -> Router<AppState> {
 pub fn routes() -> Router<AppState> {
     routes_with_body_limit(TRAINING_REQUEST_BODY_LIMIT_BYTES)
 }
+
+#[cfg(test)]
+mod grpo_jsonl_tests;
 
 #[cfg(test)]
 mod tests {
@@ -6348,108 +6388,6 @@ mod tests {
         req.config.loss.echo = None;
         let err = validate_grpo_submission_source(&req, None).unwrap_err();
         assert!(err.message.contains("no_policy_loss"), "{}", err.message);
-    }
-
-    #[test]
-    fn grpo_dataset_path_submission_rejects_an_invalid_tail_row() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("grpo.jsonl");
-        let mut first_group = grpo_group();
-        first_group.messages = vec![ChatMessage::new("user", "a")];
-        first_group.completions[0].text = "b".to_string();
-        let first = serde_json::to_string(&first_group).unwrap();
-        std::fs::write(&path, format!("{first}\nthis is not json\n")).unwrap();
-        let tokenizer = crate::api::test_tokenizer().with_chat_template(
-            "{% for message in messages %}{{ message.content }}{% endfor %}".to_string(),
-        );
-
-        let mut permit = crate::training_queue::PreparedTrainingDataPermit::default();
-        let error = validate_grpo_jsonl_submission(
-            path.to_str().unwrap(),
-            dir.path(),
-            &mut permit,
-            &tokenizer,
-            &GrpoConfig::default(),
-            2,
-            None,
-        )
-        .unwrap_err();
-        assert!(error.message.contains("line 2"), "{}", error.message);
-        assert!(
-            std::fs::read_dir(dir.path())
-                .unwrap()
-                .filter_map(Result::ok)
-                .all(|entry| !entry.file_name().to_string_lossy().starts_with("grpo-")),
-            "invalid admission must remove its incomplete private snapshot"
-        );
-    }
-
-    #[test]
-    fn grpo_dataset_path_submission_scans_every_row_for_the_maximum_shape() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("grpo.jsonl");
-        let mut short = grpo_group();
-        short.messages = vec![ChatMessage::new("user", "a")];
-        short.completions[0].text = "b".to_string();
-        let mut long = grpo_group();
-        long.messages = vec![ChatMessage::new("user", "a")];
-        long.completions[0].text = "ab".repeat(64);
-        std::fs::write(
-            &path,
-            format!(
-                "{}\n{}\n",
-                serde_json::to_string(&short).unwrap(),
-                serde_json::to_string(&long).unwrap()
-            ),
-        )
-        .unwrap();
-        let tokenizer = crate::api::test_tokenizer().with_chat_template(
-            "{% for message in messages %}{{ message.content }}{% endfor %}".to_string(),
-        );
-
-        let mut permit = crate::training_queue::PreparedTrainingDataPermit::default();
-        let stats = validate_grpo_jsonl_submission(
-            path.to_str().unwrap(),
-            dir.path(),
-            &mut permit,
-            &tokenizer,
-            &GrpoConfig::default(),
-            2,
-            None,
-        )
-        .unwrap();
-        assert!(stats.streaming_dataset);
-        assert_eq!(stats.num_groups, Some(2));
-        assert_eq!(stats.total_completions, Some(2));
-        assert!(stats.max_seq_len > 0);
-        let receipt = stats.source_receipt.unwrap();
-        assert_eq!(receipt.groups, 2);
-        assert_eq!(receipt.completions, 2);
-        assert_eq!(receipt.max_seq_len, stats.max_seq_len);
-        assert!(receipt.source_sha256.starts_with("sha256:"));
-        let original = std::fs::canonicalize(&path).unwrap();
-        assert_ne!(receipt.path, original);
-        assert!(receipt.server_owned);
-        assert!(
-            std::fs::metadata(&receipt.path)
-                .unwrap()
-                .permissions()
-                .readonly()
-        );
-        let snapshot_path = receipt.path.clone();
-        let snapshot_sha256 = kiln_train::train_receipt::sha256_file(&snapshot_path).unwrap();
-        std::fs::write(&path, b"caller replaced the original after admission\n").unwrap();
-        assert_eq!(
-            kiln_train::train_receipt::sha256_file(&snapshot_path).unwrap(),
-            snapshot_sha256,
-            "the trainer source must be independent of the caller path"
-        );
-        assert_eq!(
-            permit.bytes(),
-            receipt.size_bytes + receipt.preflight_host_bytes
-        );
-        drop(receipt);
-        assert!(!snapshot_path.exists());
     }
 
     #[test]

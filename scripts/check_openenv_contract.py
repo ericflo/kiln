@@ -369,12 +369,45 @@ def main() -> int:
     client = (ROOT / "crates" / "kiln-openenv" / "src" / "client.rs").read_text(
         encoding="utf-8"
     )
+    corpus_source = (
+        ROOT / "crates" / "kiln-train" / "src" / "openenv_provenance.rs"
+    ).read_text(encoding="utf-8")
+    training_api_source = (
+        ROOT / "crates" / "kiln-server" / "src" / "api" / "training.rs"
+    ).read_text(encoding="utf-8")
+    train_receipt_source = (
+        ROOT / "crates" / "kiln-train" / "src" / "train_receipt.rs"
+    ).read_text(encoding="utf-8")
+    adapter_manifest_source = (
+        ROOT / "crates" / "kiln-train" / "src" / "adapter_output.rs"
+    ).read_text(encoding="utf-8")
     guide = (ROOT / "docs" / "OPENENV_GUIDE.md").read_text(encoding="utf-8")
     http_api = json.loads(
         (ROOT / "contracts" / "kiln-http-api-v1.openapi.json").read_text(
             encoding="utf-8"
         )
     )
+    control_plane = json.loads(CONTROL_PLANE_SCHEMA_PATH.read_text(encoding="utf-8"))
+    openenv_training_data_schema = control_plane.get("$defs", {}).get(
+        "OpenEnvTrainingDataProvenanceV1", {}
+    )
+    if (
+        openenv_training_data_schema.get("properties", {})
+        .get("schema", {})
+        .get("const")
+        != "kiln.openenv-training-data.v1"
+    ):
+        failures.append("control-plane schema is missing OpenEnv training-data v1")
+    training_data_openenv = (
+        control_plane.get("$defs", {})
+        .get("TrainingDataProvenance", {})
+        .get("properties", {})
+        .get("openenv")
+    )
+    if training_data_openenv != {
+        "$ref": "#/$defs/OpenEnvTrainingDataProvenanceV1"
+    }:
+        failures.append("training status does not expose typed OpenEnv corpus provenance")
     required_source_terms = [
         "kiln.openenv-replay.v1",
         "kiln.openenv-verification.v1",
@@ -383,6 +416,22 @@ def main() -> int:
     for term in required_source_terms:
         if term not in source:
             failures.append(f"openenv_replay.rs is missing contract identifier {term}")
+    for term in [
+        "kiln.openenv-training-data.v1",
+        "OpenEnvTrainingDataAccumulator",
+        "group_plan_sha256",
+        "completion.reward != provenance.episode_return",
+        "mixes ordinary and OpenEnv groups",
+        "changed name or schema within the training corpus",
+    ]:
+        if term not in corpus_source:
+            failures.append(f"OpenEnv corpus validator is missing contract term {term}")
+    if "OpenEnvTrainingDataAccumulator" not in training_api_source:
+        failures.append("native GRPO admission is missing OpenEnv corpus validation")
+    if "openenv: Option<crate::OpenEnvTrainingDataProvenanceV1>" not in train_receipt_source:
+        failures.append("train receipt is missing typed OpenEnv corpus provenance")
+    if "openenv_training_data" not in adapter_manifest_source:
+        failures.append("adapter manifest is missing OpenEnv corpus lineage")
     for term in [
         "BoundedVecWriter",
         "encode_replay_with_limit",

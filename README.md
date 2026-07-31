@@ -120,6 +120,10 @@ generation, stateful episode sessions, reward aggregation, canonical agentic
 trajectories, ECHO masks, GRPO submission, and audit artifacts.
 The runtime is implementation-neutral: miniopenenv is a pinned CI oracle, not
 a dependency, configuration namespace, or special execution path.
+Native GRPO admission preserves a validated OpenEnv corpus identity through
+live job status, the train receipt, and the installed adapter manifest. Its
+ordered plan digest binds each endpoint, schema, reset hash, seed, and candidate
+count; checkpoint resume separately binds every exact input byte.
 
 OpenEnv is also native to the embedded dashboard and control plane. Use
 **Training → OpenEnv** in `/ui/`, submit `POST /v1/openenv/runs`, or use

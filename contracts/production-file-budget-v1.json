@@ -29,8 +29,8 @@
     },
     {
       "path": "crates/kiln-server/src/api/training.rs",
-      "max_lines": 6602,
-      "rationale": "Queue-entry initialization is centralized with its training-queue owner while this API retains only bounded request admission, including the explicit server-owned promotion-gate flag; the lowered exact cap prevents orchestration from drifting back."
+      "max_lines": 6540,
+      "rationale": "Streaming GRPO admission tests now live in a focused child module while this API retains the shared inline/JSONL OpenEnv corpus validation and bounded request admission; the lowered exact cap prevents orchestration from drifting back."
     },
     {
       "path": "crates/kiln-server/src/batching_engine.rs",
@@ -54,8 +54,8 @@
     },
     {
       "path": "crates/kiln-server/src/training_queue.rs",
-      "max_lines": 7792,
-      "rationale": "Training admission, execution, and publication retain coupled transactional invariants, while adapter canary and activation mechanics now live with adapter_swap; this lowered exact cap permits no ownership drift."
+      "max_lines": 7807,
+      "rationale": "Training admission, execution, and publication retain coupled transactional invariants; this exact increase is limited to validating and carrying typed OpenEnv corpus provenance in the server-owned streamed-GRPO receipt."
     },
     {
       "path": "crates/kiln-tensor/src/cuda_storage.rs",
@@ -64,8 +64,8 @@
     },
     {
       "path": "crates/kiln-train/src/opd.rs",
-      "max_lines": 8446,
-      "rationale": "On-policy distillation still combines data flow, resume, teacher, and optimization orchestration; this cap forbids growth pending method-owned modules."
+      "max_lines": 8447,
+      "rationale": "On-policy distillation still combines data flow, resume, teacher, and optimization orchestration; the one-line increase explicitly marks its non-OpenEnv training-data receipt while preserving the exact cap."
     },
     {
       "path": "crates/kiln-vulkan-kernel/src/kernels.rs",

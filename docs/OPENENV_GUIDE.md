@@ -150,11 +150,15 @@ may accompany paired evaluation, but only one gate can own promotion.
 
 ### Held-out environment returns
 
-`environment_eval` runs the behavior and candidate policies with identical URLs, resets, seeds, candidate indices, generation seeds, and bounds. Its default seed range follows training; overlap is rejected. Both sides get canonical dataset, replay, and summary artifacts, and identity drift fails closed.
+`environment_eval` compares behavior and candidate policies on identical URLs, resets, seeds, candidate indices, generation seeds, and bounds. Training-seed overlap and identity drift fail closed; both sides retain canonical artifacts.
 
-Without `gate`, results are diagnostic and normal `auto_load` remains. A gate defers loading and requires 20 seed groups, a two-sided exact sign-test win over per-seed means (`p < 0.05`), and configured thresholds. Same-seed replications do not inflate significance. It cannot coexist with `post_eval.min_accuracy`.
+Without `gate`, results are diagnostic and `auto_load` remains. A gate defers
+loading and requires 20 seed groups, a two-sided exact sign-test win (`p <
+0.05`), and configured thresholds. Replications do not inflate significance;
+`post_eval.min_accuracy` cannot coexist.
 
-The `kiln.openenv-environment-evaluation.v1` receipt binds policy identities, execution provenance, both summary hashes, evidence, decision, and promotion. Status and dashboard show both phases and returns.
+The evaluation receipt binds policy identities, execution, summary hashes,
+evidence, decision, and promotion. Status and dashboard show both phases.
 
 ## Reset tasks and multiple environments
 
@@ -187,12 +191,9 @@ while the complete wire observation remains present; it is not a protocol
 field or requirement. The environment remains authoritative: recoverable
 validation/execution errors are feedback turns on the same episode.
 
-Actions and observations become their corresponding `TurnKind` segments.
-Native GRPO applies policy-gradient loss to actions and ECHO cross-entropy to
-observation tokens. Full-warning harness errors stay outside ECHO imitation.
-The prompt retains reset and turn history. Kiln pumps Ping/Pong control frames
-while the policy thinks; stateless HTTP routes cannot preserve the episode.
-One-step exact-verifier environments, including eight math families, need no adapter. Their string actions, `input_text`, integer rewards, and terminal observations flow unchanged through collection, GRPO, verification, replay, and held-out evaluation.
+Actions and observations become `TurnKind` segments. GRPO trains actions; ECHO trains observation tokens, excluding full-warning harness errors. Prompts retain reset and turn history, and Kiln pumps Ping/Pong control frames while the policy thinks.
+One-step exact-verifier environments—including eight math families—need no
+adapter; their text actions flow unchanged end to end.
 
 ## Identity and artifacts
 
@@ -200,6 +201,8 @@ Each scored rollout may carry `kiln.openenv-rollout.v1` provenance: environment
 name and URL, schema and reset hashes, seed, steps, return, termination, and an
 optional protocol-error code. This identity participates in the scored-rollout
 payload hash and fails closed when malformed.
+
+Native GRPO lifts episode records into `kiln.openenv-training-data.v1`. One validator covers inline and JSONL data: provenance must be complete; group endpoint, schema, reset, and seed must agree; reward must equal return; and an endpoint cannot drift schema. Status, receipts, and manifests expose the ordered plan digest, environments, seeds, steps, and termination counts. Checkpoint resume separately binds input bytes.
 
 JSONL trains; replay retains exchanges; summary binds config, stats, hashes,
 and submission. Collection charges each turn against a

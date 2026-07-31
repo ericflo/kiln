@@ -1743,6 +1743,57 @@ fn grpo_dry_run_success_records_counts_and_receipt() -> Result<()> {
 }
 
 #[test]
+fn grpo_dry_run_preserves_openenv_identity_in_receipt() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let tokenizer = make_echo_smoke_tokenizer()?;
+    let episode = |reward: f64| {
+        crate::OpenEnvRolloutProvenanceV1::new(
+            "math-env",
+            "https://env.test",
+            Some("3.1.0".to_string()),
+            format!("sha256:{}", "a".repeat(64)),
+            format!("sha256:{}", "b".repeat(64)),
+            format!("sha256:{}", "c".repeat(64)),
+            42,
+            1,
+            reward,
+            true,
+            crate::OpenEnvEpisodeTerminationV1::Done,
+            None,
+        )
+        .unwrap()
+    };
+    let group = dry_run_group(vec![
+        crate::ScoredRollout::legacy("a".to_string(), 0.0).with_openenv(episode(0.0)),
+        crate::ScoredRollout::legacy("b".to_string(), 1.0).with_openenv(episode(1.0)),
+    ]);
+    let data = dry_run_dataset(tmp.path(), "openenv.jsonl", &[group]);
+    let output = tmp.path().join("out");
+
+    let report = grpo_dry_run_jsonl(
+        &data,
+        &dry_run_config(false, false),
+        &ModelConfig::qwen3_5_4b(),
+        &tokenizer,
+        &output,
+        "openenv",
+        false,
+    )?;
+    let receipt =
+        crate::train_receipt::TrainReceipt::read_from_adapter_dir(&report.adapter_dir)?.unwrap();
+    let openenv = receipt
+        .training_data
+        .openenv
+        .as_ref()
+        .expect("OpenEnv receipt provenance");
+    assert_eq!(openenv.groups, 1);
+    assert_eq!(openenv.rollouts, 2);
+    assert_eq!(openenv.terminations.done, 2);
+
+    Ok(())
+}
+
+#[test]
 fn grpo_dry_run_receipt_reports_warning_filter_counts() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let tok = make_echo_smoke_tokenizer()?;
@@ -1891,6 +1942,7 @@ fn grpo_policy_audit_persists_at_public_receipt_path() -> Result<()> {
             source: "inline".to_string(),
             path: None,
             sha256: None,
+            openenv: None,
         },
         crate::train_receipt::DataStatsReceipt::default(),
         crate::train_receipt::RewardStatsReceipt::default(),

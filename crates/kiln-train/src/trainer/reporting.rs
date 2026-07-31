@@ -776,6 +776,7 @@ pub(super) fn write_sft_train_receipt_best_effort(
         source: ingestion.source.clone(),
         path: ingestion.source_locator.clone(),
         sha256: training_data_sha256,
+        openenv: None,
     };
     receipt.adapters.base = crate::train_receipt::adapter_file_receipt(base_adapter_dir);
     receipt.adapters.output = crate::train_receipt::adapter_file_receipt(Some(output_dir));

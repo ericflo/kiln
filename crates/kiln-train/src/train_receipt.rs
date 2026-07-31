@@ -181,6 +181,10 @@ pub struct TrainingDataReceipt {
     pub source: String,
     pub path: Option<String>,
     pub sha256: Option<String>,
+    /// Semantic OpenEnv corpus identity when every admitted GRPO completion
+    /// carries validated OpenEnv episode provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openenv: Option<crate::OpenEnvTrainingDataProvenanceV1>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1124,6 +1128,7 @@ impl TrainReceipt {
                 source: mode,
                 path: None,
                 sha256: None,
+                openenv: None,
             },
             hyperparameters,
             grpo: None,
@@ -1192,6 +1197,12 @@ impl TrainReceipt {
             precision
                 .validate()
                 .context("validate train-receipt precision")?;
+        }
+        if let Some(openenv) = self.training_data.openenv.as_ref() {
+            openenv
+                .validate()
+                .map_err(anyhow::Error::msg)
+                .context("validate train-receipt OpenEnv training-data provenance")?;
         }
         std::fs::create_dir_all(adapter_dir).with_context(|| {
             format!(
@@ -1267,6 +1278,17 @@ impl TrainReceipt {
                     path.display()
                 )
             })?;
+        }
+        if let Some(openenv) = receipt.training_data.openenv.as_ref() {
+            openenv
+                .validate()
+                .map_err(anyhow::Error::msg)
+                .with_context(|| {
+                    format!(
+                        "validate OpenEnv training-data provenance in train receipt {}",
+                        path.display()
+                    )
+                })?;
         }
         Ok(Some(receipt))
     }
@@ -3069,6 +3091,7 @@ mod tests {
             source: prepared.ingestion.source.clone(),
             path: prepared.ingestion.source_locator.clone(),
             sha256: Some(prepared.ingestion.kept_corpus_sha256.clone()),
+            openenv: None,
         };
         receipt.data.examples_read = prepared.ingestion.rows_read;
         receipt.data.examples_filtered = prepared.ingestion.rows_rejected;

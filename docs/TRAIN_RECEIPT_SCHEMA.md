@@ -80,7 +80,7 @@ The receipt groups identity, effective inputs, measurements, and diagnostics:
 | `model` | Optional model path, model-config hash, and optional complete base-weight shard manifest. | A path and config hash do not identify weight bytes; use the shard manifest. |
 | `tokenizer` | Legacy combined config hash plus separate tokenizer, serving-template, and training-template hashes. | Optional fields reflect what the run could capture. |
 | `adapters` | Base and output paths, model-file byte counts, and model-file SHA-256 values. | Paths are informational and can change after publication. |
-| `training_data` | Source kind, optional path, and source-specific content digest. | A path alone does not bind mutable bytes. Interpret the digest by source kind. |
+| `training_data` | Source kind, optional path, source-specific content digest, and optional validated `kiln.openenv-training-data.v1` corpus identity. | A path alone does not bind mutable bytes. OpenEnv's group-plan digest describes endpoint/reset/seed semantics; the ordinary digest still binds every input byte. |
 | `hyperparameters` | Mode, rank, alpha, effective alpha/rank, learning rate, epochs, resolved seed, and shuffle selector. | Reconstructing shuffled order also requires identical data and ordering code. |
 | `grpo` | GRPO policy, clipping, sampling, KL, behavior-source, and optional policy-audit fields; null otherwise. | Importance ratios and KL use separate denominators. |
 | `opd` | OPD mode, objective, loss granularity, teacher identity, top-K, losses, token counts, and ECHO combination; omitted otherwise. | Teacher identity must be interpreted with its own content-revision contract. |

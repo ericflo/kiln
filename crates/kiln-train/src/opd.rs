@@ -5697,6 +5697,7 @@ fn write_opd_train_receipt(
         source: "inline_opd_prompts".to_string(),
         path: None,
         sha256: training_data_sha256,
+        openenv: None,
     };
     receipt.lora_grad_norms = lora_grad_norms;
     receipt.opd = Some(crate::train_receipt::OpdReceipt {

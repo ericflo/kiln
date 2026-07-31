@@ -47,6 +47,7 @@ pub mod logit_source;
 pub mod long_context_fixture;
 pub mod lora_scaling;
 pub mod opd;
+pub mod openenv_provenance;
 // (#1082) Candle↔kt boundary for the OPD trainer — relocated out of
 // `kiln-opd-loss-kernel` so that kernel crate became 100% candle-free
 // (the first kernel-crate candle drop). Holds the pure-candle Phase A
@@ -1298,6 +1299,11 @@ impl Default for SftConfig {
 //
 // See `docs/plans/echo-integration-plan.md` §2 and §B.1 for the design.
 
+pub use crate::openenv_provenance::{
+    OPENENV_TRAINING_DATA_PROVENANCE_SCHEMA_V1, OpenEnvTerminationCountsV1,
+    OpenEnvTrainingDataAccumulator, OpenEnvTrainingDataProvenanceV1, OpenEnvTrainingEnvironmentV1,
+    openenv_training_data_provenance,
+};
 pub use crate::trajectory::{
     AgenticGroup, OPENENV_ROLLOUT_PROVENANCE_SCHEMA_V1, OpenEnvEpisodeTerminationV1,
     OpenEnvRolloutProvenanceV1, ROLLOUT_PROVENANCE_SCHEMA_V1, RolloutActionTokenSourceV1,
@@ -2108,6 +2114,10 @@ pub struct TrainingDataProvenance {
     /// Identity of the exact selected rows/groups admitted for training.
     pub admitted_corpus_sha256: String,
     pub rows: u64,
+    /// Semantic environment/task-plan identity for an all-OpenEnv GRPO
+    /// corpus. The ordinary admitted corpus digest still binds every byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openenv: Option<OpenEnvTrainingDataProvenanceV1>,
 }
 
 /// Persisted statistical evidence for one post-eval promotion decision.

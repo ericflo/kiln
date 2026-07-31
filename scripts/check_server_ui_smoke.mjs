@@ -1337,6 +1337,28 @@ async function startServer({
     },
     provenance_sha256: `sha256:${'b'.repeat(64)}`,
   };
+  const smokeOpenEnvTrainingData = {
+    schema: 'kiln.openenv-training-data.v1',
+    groups: 2,
+    rollouts: 4,
+    unique_seeds: 2,
+    seed_min: '7',
+    seed_max: '8',
+    total_steps: 8,
+    terminations: { done: 4, max_steps: 0, invalid_model_action: 0, protocol_error: 0 },
+    group_plan_sha256: `sha256:${'d'.repeat(64)}`,
+    environments: [{
+      environment_name: 'math-env',
+      environment_base_url: 'https://env.test',
+      openapi_version: '3.1.0',
+      environment_schema_sha256: `sha256:${'e'.repeat(64)}`,
+      action_schema_sha256: `sha256:${'f'.repeat(64)}`,
+      groups: 2,
+      rollouts: 4,
+      total_steps: 8,
+      terminations: { done: 4, max_steps: 0, invalid_model_action: 0, protocol_error: 0 },
+    }],
+  };
   const smokeEvalJobs = [
     {
       job_id: 'smoke-eval-full',
@@ -2276,6 +2298,12 @@ async function startServer({
         progress: 1,
         adapter_name: body.config.output_name,
         elapsed_secs: 1,
+        training_data: {
+          source: 'inline',
+          admitted_corpus_sha256: `sha256:${'c'.repeat(64)}`,
+          rows: 2,
+          openenv: smokeOpenEnvTrainingData,
+        },
         train_receipt: {
           model: {
             path: '/models/qwen3.5-4b',
@@ -2295,6 +2323,11 @@ async function startServer({
           hyperparameters: {
             mode: 'grpo',
             seed: '18446744073709551614',
+          },
+          training_data: {
+            source: 'inline_grpo_groups',
+            sha256: `sha256:${'c'.repeat(64)}`,
+            openenv: smokeOpenEnvTrainingData,
           },
         },
         replay_request: {
@@ -5012,6 +5045,7 @@ async function runSmoke(baseUrl, {
     await expectActiveTrainingTab(page, 'queue', 'Submitting GRPO should switch back to the training queue tab');
     await waitForPanelText(page, '#tab-queue', /smoke-gr/, 'Training queue should refresh after GRPO submit');
     await waitForPanelText(page, '#tab-queue', /Adapter:\s*grpo-adapter/, 'Training queue should show the submitted GRPO adapter name');
+    await waitForPanelText(page, '#tab-queue', /OpenEnv · math-env · 2 groups · 4 rollouts/, 'Training queue should surface admitted OpenEnv corpus identity');
 
     // The completed GRPO job recorded no loss samples — Copy loss CSV must
     // disable with a title that explains what unlocks it.
@@ -5032,6 +5066,7 @@ async function runSmoke(baseUrl, {
     await expectTrainingToast(page, 'Base-weight identity copied');
     await waitForPanelText(page, '#train-drill-content', /Execution[\s\S]*rocm · gfx1151/, 'Training drill should show the persisted execution identity');
     await waitForPanelText(page, '#train-drill-content', /Concrete precision[\s\S]*bf16 parameters[\s\S]*f32 optimizer[\s\S]*round_to_nearest/, 'Training drill should show the concrete precision contract');
+    await waitForPanelText(page, '#train-drill-content', /OpenEnv environments[\s\S]*math-env[\s\S]*OpenEnv groups \/ rollouts[\s\S]*2 \/ 4[\s\S]*OpenEnv seed range[\s\S]*7–8 \(2 unique\)/, 'Training drill should show the admitted OpenEnv lineage contract');
     await page.evaluate(() => { window.__copiedText = ''; });
     await clickAndWait(page, '#train-drill-content [data-copy-execution]', 'Could not copy the training execution identity');
     await page.waitForFunction(

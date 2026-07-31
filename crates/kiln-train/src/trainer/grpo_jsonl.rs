@@ -320,6 +320,7 @@ pub(super) fn grpo_dry_run_jsonl_with_pass_hook(
         source: "jsonl_grpo_groups_dry_run".to_string(),
         path: Some(dataset_path.display().to_string()),
         sha256: None,
+        openenv: None,
     };
     let dataset_source = PinnedGrpoJsonlSource::open(dataset_path);
     let source_sha256 = dataset_source
@@ -366,12 +367,19 @@ pub(super) fn grpo_dry_run_jsonl_with_pass_hook(
         let filter_enabled = reward_filter_enabled(config);
         let mut reward_accumulator = DryRunRewardStatsAccumulator::default();
         let mut reward_filter_inputs = Vec::new();
+        let mut openenv_accumulator = crate::OpenEnvTrainingDataAccumulator::default();
         let first_scan = scan_pinned_grpo_jsonl(
             dataset_source,
             model_config.num_layers,
             filter_enabled,
             "dry-run reward preflight",
             |line_no, source_index, group| {
+                openenv_accumulator
+                    .observe_group(source_index, group)
+                    .map_err(anyhow::Error::msg)
+                    .with_context(|| {
+                        format!("validate OpenEnv corpus provenance at GRPO JSONL line {line_no}")
+                    })?;
                 data_stats.groups_read = source_index;
                 data_stats.completions_read = data_stats
                     .completions_read
@@ -398,6 +406,10 @@ pub(super) fn grpo_dry_run_jsonl_with_pass_hook(
                 && first_scan.completions == data_stats.completions_read,
             "GRPO dry-run reward preflight count mismatch"
         );
+        training_data.openenv = openenv_accumulator
+            .finish()
+            .map_err(anyhow::Error::msg)
+            .context("finalize GRPO dry-run OpenEnv corpus provenance")?;
         if let Some(hook) = after_first_pass.take() {
             hook()?;
         }
@@ -892,6 +904,7 @@ pub(super) struct GrpoJsonlPreflightPlan {
     pub(super) trainable_order_sha256: String,
     pub(super) gradient_checkpoint_plan_sha256: String,
     pub(super) skip_training: bool,
+    pub(super) openenv: Option<crate::OpenEnvTrainingDataProvenanceV1>,
 }
 
 impl GrpoJsonlPreflightPlan {
@@ -969,6 +982,7 @@ pub(super) fn build_grpo_jsonl_preflight_plan(
     let filter_enabled = reward_filter_enabled(config);
     let mut reward_stats_accumulator = StreamedRewardStatsAccumulator::default();
     let mut reward_filter_inputs = Vec::new();
+    let mut openenv_accumulator = crate::OpenEnvTrainingDataAccumulator::default();
 
     loop {
         line.clear();
@@ -1018,6 +1032,12 @@ pub(super) fn build_grpo_jsonl_preflight_plan(
         source_index = source_index
             .checked_add(1)
             .context("streamed GRPO source index overflow")?;
+        openenv_accumulator
+            .observe_group(source_index, &group)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| {
+                format!("validate OpenEnv corpus provenance at GRPO JSONL line {line_no}")
+            })?;
         data_stats.groups_read = data_stats
             .groups_read
             .checked_add(1)
@@ -1054,6 +1074,10 @@ pub(super) fn build_grpo_jsonl_preflight_plan(
         bytes_read == total_bytes,
         "GRPO JSONL dataset length changed during preflight: expected {total_bytes}, read {bytes_read}"
     );
+    let openenv = openenv_accumulator
+        .finish()
+        .map_err(anyhow::Error::msg)
+        .context("finalize streamed GRPO OpenEnv corpus provenance")?;
 
     let preflight_host_bytes = streamed_grpo_preflight_host_bytes(
         data_stats.groups_read,
@@ -1112,6 +1136,7 @@ pub(super) fn build_grpo_jsonl_preflight_plan(
             trainable_order_sha256: StreamingJsonArraySha256::new().finish(),
             gradient_checkpoint_plan_sha256: StreamingJsonArraySha256::new().finish(),
             skip_training,
+            openenv,
         });
     }
 
@@ -1285,6 +1310,7 @@ pub(super) fn build_grpo_jsonl_preflight_plan(
         trainable_order_sha256: order_identity.finish(),
         gradient_checkpoint_plan_sha256: gradient_identity.finish(),
         skip_training,
+        openenv,
     })
 }
 
@@ -1517,10 +1543,11 @@ pub fn grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
         .with_context(|| format!("hash GRPO JSONL dataset {}", dataset_path.display()))?;
     let training_data_checkpoint_sha256 =
         checkpoint_sha256_hex(Some(&training_data_sha256), "GRPO JSONL training data")?;
-    let training_data = crate::train_receipt::TrainingDataReceipt {
+    let mut training_data = crate::train_receipt::TrainingDataReceipt {
         source: "jsonl_grpo_groups".to_string(),
         path: Some(dataset_path.display().to_string()),
         sha256: Some(training_data_sha256.clone()),
+        openenv: None,
     };
     let requested_base_adapter_dir = config.base_adapter.as_deref().map(|name| {
         resolve_base_adapter_dir_from_roots(name, adapter_dir, output_adapter_dir, adapter_name)
@@ -1774,6 +1801,7 @@ pub fn grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
             return Err(crate::train_receipt::annotate_training_error(err));
         }
     };
+    training_data.openenv = preflight.openenv.clone();
     let post_preflight_sha256 = dataset_source
         .sha256()
         .with_context(|| format!("rehash GRPO JSONL dataset {}", dataset_path.display()))?;

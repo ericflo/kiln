@@ -192,6 +192,9 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
 
     let output_dir = output_adapter_dir.join(adapter_name);
     let training_data_sha256 = crate::train_receipt::sha256_json_serializable(&groups);
+    let openenv_training_data = crate::openenv_training_data_provenance(groups)
+        .map_err(anyhow::Error::msg)
+        .context("validate inline GRPO OpenEnv corpus provenance")?;
     let training_data_checkpoint_sha256 =
         checkpoint_sha256_hex(training_data_sha256.as_deref(), "GRPO training data")?;
     let requested_base_adapter_dir = config.base_adapter.as_deref().map(|name| {
@@ -375,6 +378,7 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
                     source: "inline_grpo_groups".to_string(),
                     path: None,
                     sha256: training_data_sha256,
+                    openenv: openenv_training_data.clone(),
                 },
                 data_stats,
                 reward_stats,
@@ -465,6 +469,7 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
                     source: "inline_grpo_groups".to_string(),
                     path: None,
                     sha256: training_data_sha256,
+                    openenv: openenv_training_data.clone(),
                 },
                 data_stats,
                 reward_stats,
@@ -1285,6 +1290,7 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
             source: "inline_grpo_groups".to_string(),
             path: None,
             sha256: training_data_sha256,
+            openenv: openenv_training_data,
         },
         data_stats,
         reward_stats,
