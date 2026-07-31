@@ -8,6 +8,7 @@ on:
     branches: [main]
     paths:
       - 'crates/**'
+      - 'contracts/production-file-budget-v1.json'
       - 'contracts/repository-artifact-policy-v1.json'
       - 'contracts/runtime-env-direct-reads-v1.json'
       - 'contracts/source-parsing-test-inventory-v1.json'
@@ -27,6 +28,7 @@ on:
   pull_request:
     paths:
       - 'crates/**'
+      - 'contracts/production-file-budget-v1.json'
       - 'contracts/repository-artifact-policy-v1.json'
       - 'contracts/runtime-env-direct-reads-v1.json'
       - 'contracts/source-parsing-test-inventory-v1.json'
