@@ -22,7 +22,6 @@ use std::{
 };
 
 use crate::error::ApiError;
-use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
 use crate::state::TrainingWorkload;
 use crate::state::{AppState, ModelBackend, TrainingJobInfo, TrainingJobType};
 use crate::training_preflight::{
@@ -4284,62 +4283,18 @@ async fn cancel_queued_job(
     State(state): State<AppState>,
     AxumPath(job_id): AxumPath<String>,
 ) -> Result<Json<CancelTrainingJobResponse>, ApiError> {
-    // Check job state; flag running jobs for cooperative cancellation.
-    {
-        let jobs = state.training_jobs.read().unwrap();
-        let job = jobs
-            .get(&job_id)
-            .ok_or_else(|| ApiError::training_job_not_found(&job_id))?;
-        if job.state == TrainingState::Running {
-            job.cancel_requested
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            tracing::info!(job_id = %job_id, "cancellation requested for running training job");
-            return Ok(Json(CancelTrainingJobResponse::Cancelling {
+    let outcome = crate::job_cancellation::request_training_job_cancellation(&state, &job_id)?;
+    Ok(Json(match outcome {
+        crate::job_cancellation::TrainingCancellation::Cancelling => {
+            CancelTrainingJobResponse::Cancelling {
                 job_id,
                 message: "stop requested — the trainer aborts at the next step boundary",
-            }));
-        }
-        if job.state != TrainingState::Queued {
-            return Err(ApiError::training_job_not_cancellable(
-                &job_id,
-                format!("{:?}", job.state),
-            ));
-        }
-    }
-
-    // Remove from queue
-    let removed = {
-        let mut q = state.training_queue.lock().unwrap();
-        q.remove(&job_id)
-    };
-
-    if removed {
-        // Mark as failed (cancelled) in the tracking map
-        let metric_type = {
-            let mut jobs = state.training_jobs.write().unwrap();
-            let jt = jobs.get(&job_id).map(|j| j.job_type);
-            if let Some(job) = jobs.get_mut(&job_id) {
-                job.state = TrainingState::Failed;
-                job.error = Some("cancelled while queued".to_string());
-                job.finished_at = Some(std::time::Instant::now());
-                job.finished_unix_ms = Some(crate::recent_requests::now_unix_ms());
             }
-            jt
-        };
-        if let Some(jt) = metric_type {
-            let mt = match jt {
-                TrainingJobType::Sft => TrainingMetricType::Sft,
-                TrainingJobType::Grpo => TrainingMetricType::Grpo,
-                TrainingJobType::Opd => TrainingMetricType::Opd,
-            };
-            state
-                .metrics
-                .inc_training(mt, TrainingMetricStatus::Cancelled);
         }
-        Ok(Json(CancelTrainingJobResponse::Cancelled { job_id }))
-    } else {
-        Err(ApiError::training_job_already_started(&job_id))
-    }
+        crate::job_cancellation::TrainingCancellation::Cancelled => {
+            CancelTrainingJobResponse::Cancelled { job_id }
+        }
+    }))
 }
 
 #[derive(Serialize)]

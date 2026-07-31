@@ -646,72 +646,46 @@ async fn cancel_job(
     State(state): State<AppState>,
     AxumPath(job_id): AxumPath<String>,
 ) -> Result<Json<CancelEvalJobResponse>, ApiError> {
-    // Remove from queue if still pending.
-    let removed = {
-        let mut q = state.eval_queue.lock().unwrap();
-        q.remove(&job_id)
-    };
-    // Look up current state. We may mutate (cancel) or delete (terminal).
-    let current_state = {
-        let jobs = state.eval_jobs.read().unwrap();
-        jobs.get(&job_id).map(|j| j.state)
-    };
-    match current_state {
-        None => Err(ApiError::eval_job_not_found(&job_id)),
-        Some(EvalJobState::Queued) => {
-            let mut jobs = state.eval_jobs.write().unwrap();
-            if let Some(job) = jobs.get_mut(&job_id) {
-                job.state = EvalJobState::Cancelled;
-                job.finished_at_iso = Some(chrono::Utc::now().to_rfc3339());
-                job.finished_at = Some(std::time::Instant::now());
-            }
+    match crate::job_cancellation::request_eval_job_cancellation(&state, &job_id)? {
+        Some(crate::job_cancellation::EvalCancellation::Cancelled { was_in_queue }) => {
             Ok(Json(CancelEvalJobResponse::Cancelled {
                 job_id,
-                was_in_queue: removed,
+                was_in_queue,
             }))
         }
-        Some(EvalJobState::Running) => {
-            // Cooperative cancellation: flip the executor's flag (checked at
-            // example boundaries) and mark the tracked state. The worker
-            // preserves Cancelled when the run returns, archiving whatever
-            // partial outcomes completed.
-            let mut jobs = state.eval_jobs.write().unwrap();
-            if let Some(job) = jobs.get_mut(&job_id) {
-                job.state = EvalJobState::Cancelled;
-                if let Some(flag) = job.cancel_flag.as_ref() {
-                    flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
+        Some(crate::job_cancellation::EvalCancellation::Cancelling) => {
             Ok(Json(CancelEvalJobResponse::Cancelling {
                 job_id,
                 note: "running job will exit at the next example boundary",
             }))
         }
-        Some(EvalJobState::Cancelled | EvalJobState::Completed | EvalJobState::Failed) => {
-            // Terminal — DELETE means "remove from tracking + archive".
-            {
-                let mut jobs = state.eval_jobs.write().unwrap();
-                jobs.remove(&job_id);
-            }
-            let archive_path =
-                crate::eval_history::archive_dir(&state.adapter_dir).join(format!("{job_id}.json"));
-            let removed_file = match std::fs::remove_file(&archive_path) {
-                Ok(_) => true,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-                Err(e) => {
-                    return Err(ApiError::internal(format!(
-                        "failed to delete archive file {}: {}",
-                        archive_path.display(),
-                        e
-                    )));
-                }
-            };
-            Ok(Json(CancelEvalJobResponse::Deleted {
-                job_id,
-                removed_archive_file: removed_file,
-            }))
-        }
+        None => delete_terminal_eval_job(&state, job_id).map(Json),
     }
+}
+
+fn delete_terminal_eval_job(
+    state: &AppState,
+    job_id: String,
+) -> Result<CancelEvalJobResponse, ApiError> {
+    // Terminal DELETE means remove from tracking and its retained archive.
+    state.eval_jobs.write().unwrap().remove(&job_id);
+    let archive_path =
+        crate::eval_history::archive_dir(&state.adapter_dir).join(format!("{job_id}.json"));
+    let removed_file = match std::fs::remove_file(&archive_path) {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            return Err(ApiError::internal(format!(
+                "failed to delete archive file {}: {}",
+                archive_path.display(),
+                e
+            )));
+        }
+    };
+    Ok(CancelEvalJobResponse::Deleted {
+        job_id,
+        removed_archive_file: removed_file,
+    })
 }
 
 #[derive(Debug, Serialize)]

@@ -1,9 +1,7 @@
 # OpenEnv training
-OpenEnv is Kiln's native path from an interactive reinforcement-learning
-environment to a trained LoRA adapter. The environment owns the task, state
-transition, observation, terminal signal, and reward. Kiln owns policy
-generation, seed-matched sampling, canonical multi-turn trajectories, grouped
-GRPO, ECHO supervision, receipts, and adapter publication.
+OpenEnv is Kiln's native path from an interactive reinforcement-learning environment
+to a trained LoRA adapter. The environment owns task, state, observations, terminal
+signals, and rewards; Kiln owns policy sampling, trajectories, GRPO, receipts, and publication.
 
 The shortest complete loop is:
 
@@ -29,26 +27,20 @@ all three with the adapter's normal `train_receipt.json`: together they bind
 the environment-facing rollout, its exact executable transcript, and the
 optimizer-facing training attempt.
 
-The same loop is a first-class server workflow. Open `/ui/`, choose
-**Training → OpenEnv**, inspect one or more environment URLs, and launch either
-a rollout-only run or a rollout-and-train run. Kiln persists progress, artifacts,
-failure details, cancellation state, and the linked native GRPO job; a browser
-refresh or server restart does not erase the run record.
+The same loop is a first-class server workflow under **Training → OpenEnv** in
+`/ui/`. Kiln persists artifacts, native GRPO progress/loss, linked eval and
+gate outcomes, failures, and cancellation. Restarts preserve terminal history
+and explicitly fail interrupted work.
 
 ## How the loop works
 
-For each group, Kiln selects an environment and deterministic seed, opens one
-stateful `WS /ws` session per candidate, resets every candidate identically,
-asks the policy for JSON actions, and records each observation, tagged reward,
-and `done`. Recoverable errors become policy feedback on the same socket.
-Collection stops at environment completion, a configured bound, invalid model
-JSON, or a terminal protocol error. Kiln writes the candidates as one
-`AgenticGroup` and, for a train run, submits it to native GRPO.
+For each group, Kiln selects an environment and seed, opens one stateful `WS /ws`
+session per candidate, resets them identically, asks for JSON actions, and records
+observations, rewards, and `done`. Recoverable errors become same-socket feedback.
+Kiln writes one `AgenticGroup` and submits train runs to native GRPO.
 
-Candidates in a group always share the same initial messages, environment,
-reset payload, and seed. That is the comparison unit for group-relative
-advantages. Different groups increment the seed and may be assigned
-round-robin across multiple `--environment` URLs.
+Candidates share initial messages, environment, reset payload, and seed: the unit
+for group-relative advantages. Groups increment seeds and rotate across URLs.
 
 Reset rewards are preserved in the reset observation but do not contribute to
 episode return: reset is not a transition. Step rewards retain OpenEnv's wire
@@ -71,20 +63,28 @@ curl -sS localhost:8420/v1/openenv/runs \
        "groups":8,"group_size":4,"max_steps":8}'
 ```
 
-Use `POST /v1/openenv/inspect` for discovery, poll or list
-`GET /v1/openenv/runs`, fetch one run by ID, and cancel active collection with
-`DELETE /v1/openenv/runs/{run_id}`. Status persists under
-`<adapter_dir>/.openenv/runs/<run_id>/` beside dataset, replay, and summary
-downloads. Restart-interrupted work fails explicitly; cancellation closes at
-training handoff.
+Use `POST /v1/openenv/inspect` for discovery, `GET /v1/openenv/runs` for status,
+and `DELETE /v1/openenv/runs/{run_id}` to cancel any active phase. Version 2
+continues from `training_queued` through `training_running`, optional
+`post_evaluating`, and `completed`. Cancellation reaches the authoritative
+trainer or evaluator. Status and artifacts persist under
+`<adapter_dir>/.openenv/runs/<run_id>/`.
 
-Server runs accept loopback origins by default. `[openenv]` controls enablement,
-remote-origin permission, active capacity, retained history, and status TTL;
-each field has a canonical `KILN_OPENENV_*` override. Prometheus publishes the
-`kiln_openenv_*` family. See the
-[replay and recovery reference](OPENENV_REPLAY_REFERENCE.md) and
-[complete configuration reference](CONFIGURATION.md) for lifecycle,
-artifact, security, retention, and metric details.
+The CLI exposes the same lifecycle:
+
+```bash
+kiln openenv runs
+kiln openenv status 80a26e21-8451-4a64-8666-890c06fd80bd --follow
+kiln openenv cancel 80a26e21-8451-4a64-8666-890c06fd80bd
+```
+
+`status --follow --json` emits one terminal snapshot; human output includes
+trainer loss, eval accuracy, and gate outcome.
+
+Server runs accept loopback origins by default. `[openenv]` controls remote
+origins, capacity, retention, and TTL; each field has a canonical
+`KILN_OPENENV_*` override. See the [recovery reference](OPENENV_REPLAY_REFERENCE.md)
+and [configuration reference](CONFIGURATION.md).
 
 ### Inspect
 

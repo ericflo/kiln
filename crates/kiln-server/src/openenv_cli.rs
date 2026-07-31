@@ -172,6 +172,18 @@ pub(crate) const OPENENV_EXAMPLES: &str = r#"Examples:
       Collect a native on-policy batch, submit GRPO training, and auto-load the
       completed adapter.
 
+  kiln openenv runs
+      List server-owned OpenEnv workflows, including live trainer and linked
+      post-evaluation state.
+
+  kiln openenv status 80a26e21-8451-4a64-8666-890c06fd80bd --follow
+      Follow one persisted server workflow through collection, native GRPO,
+      requested evaluation, and its terminal outcome.
+
+  kiln openenv cancel 80a26e21-8451-4a64-8666-890c06fd80bd
+      Cooperatively cancel whichever collection, training, or evaluation
+      phase currently owns the work.
+
   kiln openenv verify --summary openenv.rollout-summary.json
       Verify the dataset, replay transcript, receipt hashes, rollout
       provenance, rewards, and counts entirely offline.
@@ -309,6 +321,49 @@ pub enum OpenEnvCommands {
             default_value_t = true
         )]
         auto_load: bool,
+    },
+
+    /// List server-owned OpenEnv workflow runs
+    Runs {
+        /// Running Kiln server URL
+        #[arg(long = "url", default_value_t = default_server_url())]
+        kiln_url: String,
+
+        /// Emit the complete retained run list as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Inspect or follow one server-owned OpenEnv workflow
+    Status {
+        /// Persisted OpenEnv run UUID
+        run_id: String,
+
+        /// Running Kiln server URL
+        #[arg(long = "url", default_value_t = default_server_url())]
+        kiln_url: String,
+
+        /// Poll until the complete workflow reaches a terminal outcome
+        #[arg(long)]
+        follow: bool,
+
+        /// Emit JSON (only the terminal snapshot when following)
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Cooperatively cancel a server-owned OpenEnv workflow
+    Cancel {
+        /// Persisted OpenEnv run UUID
+        run_id: String,
+
+        /// Running Kiln server URL
+        #[arg(long = "url", default_value_t = default_server_url())]
+        kiln_url: String,
+
+        /// Emit the updated workflow status as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Verify a rollout dataset, replay transcript, and summary receipt offline
@@ -547,6 +602,67 @@ pub async fn run_openenv(command: &OpenEnvCommands) -> Result<()> {
             .await?;
             print_openenv_summary(&summary, true)?;
         }
+        OpenEnvCommands::Runs { kiln_url, json } => {
+            let value = openenv_control_plane_request(kiln_url, None, reqwest::Method::GET).await?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else if let Some(runs) = value.get("runs").and_then(Value::as_array) {
+                if runs.is_empty() {
+                    println!("No server-owned OpenEnv runs are retained.");
+                }
+                for run in runs {
+                    print_openenv_server_run(run);
+                }
+            } else {
+                anyhow::bail!("Kiln returned an invalid OpenEnv run-list response");
+            }
+        }
+        OpenEnvCommands::Status {
+            run_id,
+            kiln_url,
+            follow,
+            json,
+        } => {
+            validate_openenv_run_id(run_id)?;
+            let mut previous_state = None;
+            loop {
+                let value =
+                    openenv_control_plane_request(kiln_url, Some(run_id), reqwest::Method::GET)
+                        .await?;
+                let state = value
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .context("Kiln OpenEnv status omitted state")?;
+                if !json && previous_state.as_deref() != Some(state) {
+                    print_openenv_server_run(&value);
+                }
+                if !follow || openenv_server_run_terminal(&value) {
+                    if *json {
+                        println!("{}", serde_json::to_string_pretty(&value)?);
+                    } else if previous_state.as_deref() == Some(state) {
+                        print_openenv_server_run(&value);
+                    }
+                    break;
+                }
+                previous_state = Some(state.to_string());
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+        OpenEnvCommands::Cancel {
+            run_id,
+            kiln_url,
+            json,
+        } => {
+            validate_openenv_run_id(run_id)?;
+            let value =
+                openenv_control_plane_request(kiln_url, Some(run_id), reqwest::Method::DELETE)
+                    .await?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                print_openenv_server_run(&value);
+            }
+        }
         OpenEnvCommands::Verify {
             summary,
             dataset,
@@ -619,6 +735,134 @@ pub async fn run_openenv(command: &OpenEnvCommands) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn validate_openenv_run_id(run_id: &str) -> Result<()> {
+    uuid::Uuid::parse_str(run_id)
+        .with_context(|| format!("OpenEnv run ID {run_id:?} is not a UUID"))?;
+    Ok(())
+}
+
+async fn openenv_control_plane_request(
+    kiln_url: &str,
+    run_id: Option<&str>,
+    method: reqwest::Method,
+) -> Result<Value> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(CHAT_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("build OpenEnv control-plane client")?;
+    let suffix = run_id.map_or_else(
+        || "/v1/openenv/runs".to_string(),
+        |run_id| format!("/v1/openenv/runs/{run_id}"),
+    );
+    let response = client
+        .request(
+            method,
+            format!("{}{suffix}", kiln_url.trim_end_matches('/')),
+        )
+        .send()
+        .await
+        .context("send OpenEnv control-plane request")?;
+    let status = response.status();
+    let body = read_kiln_json_bounded(response, "OpenEnv workflow status").await?;
+    anyhow::ensure!(
+        status.is_success(),
+        "Kiln OpenEnv control plane returned HTTP {status}: {}",
+        serde_json::to_string(&body).unwrap_or_default()
+    );
+    Ok(body)
+}
+
+fn openenv_server_run_terminal(run: &Value) -> bool {
+    let state = run.get("state").and_then(Value::as_str).unwrap_or_default();
+    matches!(
+        state,
+        "rollout_ready" | "completed" | "failed" | "cancelled"
+    ) || (run.get("schema").and_then(Value::as_str) == Some("kiln.openenv-run.v1")
+        && state == "training_queued")
+}
+
+fn print_openenv_server_run(run: &Value) {
+    let run_id = run
+        .get("run_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let state = run
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let kind = run.get("kind").and_then(Value::as_str).unwrap_or("unknown");
+    let progress = run.get("progress").unwrap_or(&Value::Null);
+    let episodes_done = progress
+        .get("rollouts_completed")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let episodes_total = progress
+        .get("rollouts_total")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    println!(
+        "{} {} {} · {episodes_done}/{episodes_total} episodes",
+        style(run_id).cyan(),
+        style(kind).bold(),
+        state.replace('_', " ")
+    );
+    if let Some(training) = run.get("training") {
+        let training_state = training
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let training_progress = training
+            .get("progress")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        let loss = training
+            .get("current_loss")
+            .and_then(Value::as_f64)
+            .map(|loss| format!(" · loss {loss:.6}"))
+            .unwrap_or_default();
+        println!(
+            "  Trainer: {training_state} · {:.1}%{loss}",
+            training_progress * 100.0
+        );
+        if let Some(outcome) = training.get("gate_outcome").and_then(Value::as_str) {
+            println!("  Promotion gate: {outcome}");
+        }
+    }
+    if let Some(evaluations) = run.get("post_evaluations").and_then(Value::as_array) {
+        for evaluation in evaluations {
+            println!(
+                "  Eval {}: {} · {}/{} examples{}",
+                evaluation
+                    .get("suite_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown"),
+                evaluation
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown"),
+                evaluation
+                    .get("examples_completed")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                evaluation
+                    .get("examples_total")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                evaluation
+                    .get("headline_accuracy")
+                    .and_then(Value::as_f64)
+                    .map(|accuracy| format!(" · {:.1}% accuracy", accuracy * 100.0))
+                    .unwrap_or_default()
+            );
+        }
+    }
+    if let Some(error) = run.get("error").and_then(Value::as_str) {
+        println!("  Error: {error}");
+    }
 }
 
 fn openenv_rollout_options(args: &OpenEnvRolloutArgs) -> OpenEnvRolloutOptions {
@@ -1747,7 +1991,7 @@ mod tests {
     use crate::cli::{Cli, Commands};
 
     #[test]
-    fn cli_parses_inspect_rollout_and_train_as_first_class_commands() {
+    fn cli_parses_local_and_server_owned_openenv_commands() {
         let inspect = Cli::try_parse_from([
             "kiln",
             "openenv",
@@ -1816,6 +2060,35 @@ mod tests {
             })) if output_adapter == "agent-v2"
         ));
 
+        let status = Cli::try_parse_from([
+            "kiln",
+            "openenv",
+            "status",
+            "80a26e21-8451-4a64-8666-890c06fd80bd",
+            "--follow",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            status.command,
+            Some(Commands::Openenv(OpenEnvCommands::Status {
+                follow: true,
+                json: true,
+                ..
+            }))
+        ));
+        let cancel = Cli::try_parse_from([
+            "kiln",
+            "openenv",
+            "cancel",
+            "80a26e21-8451-4a64-8666-890c06fd80bd",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cancel.command,
+            Some(Commands::Openenv(OpenEnvCommands::Cancel { .. }))
+        ));
+
         let verify = Cli::try_parse_from([
             "kiln",
             "openenv",
@@ -1857,6 +2130,19 @@ mod tests {
             Cli::try_parse_from(["kiln", "openenv", "rollout", "--groups", "2"]).is_err(),
             "an OpenEnv command without an environment must fail during parsing"
         );
+    }
+
+    #[test]
+    fn server_run_terminal_detection_preserves_v1_handoffs() {
+        assert!(openenv_server_run_terminal(
+            &json!({"schema":"kiln.openenv-run.v2","state":"completed"})
+        ));
+        assert!(!openenv_server_run_terminal(
+            &json!({"schema":"kiln.openenv-run.v2","state":"training_queued"})
+        ));
+        assert!(openenv_server_run_terminal(
+            &json!({"schema":"kiln.openenv-run.v1","state":"training_queued"})
+        ));
     }
 
     #[test]

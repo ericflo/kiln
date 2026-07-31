@@ -520,6 +520,9 @@ def build_openenv_types() -> None:
             "submitting",
             "rollout_ready",
             "training_queued",
+            "training_running",
+            "post_evaluating",
+            "completed",
             "failed",
             "cancelled",
         ],
@@ -546,6 +549,56 @@ def build_openenv_types() -> None:
             "bytes": ref("NonNegativeInteger"),
         },
         "Content-addressed artifact downloadable from a retained OpenEnv run.",
+    )
+    add_object(
+        "OpenEnvTrainingStatus",
+        "OpenEnvTrainingStatus",
+        {
+            "job_id": ref("NonEmptyString"),
+            "state": ref("TrainingState"),
+            "progress": ref("FiniteNumber"),
+            "current_loss": ref("FiniteNumber"),
+            "epoch": ref("NonNegativeInteger"),
+            "adapter_path": ref("String"),
+            "linked_eval_job_ids": array(ref("String")),
+            "post_eval_verdict": ref("String"),
+            "gate_outcome": {
+                "enum": [
+                    "promoted",
+                    "kept",
+                    "regression",
+                    "demoted",
+                    "inconclusive",
+                    "error",
+                ]
+            },
+            "error": ref("String"),
+        },
+        "Authoritative bounded projection of the native trainer owned by an OpenEnv run.",
+        optional=(
+            "current_loss",
+            "epoch",
+            "adapter_path",
+            "linked_eval_job_ids",
+            "post_eval_verdict",
+            "gate_outcome",
+            "error",
+        ),
+    )
+    add_object(
+        "OpenEnvPostEvalStatus",
+        "OpenEnvPostEvalStatus",
+        {
+            "job_id": ref("NonEmptyString"),
+            "suite_name": ref("NonEmptyString"),
+            "state": external_ref(EVAL_SCHEMA, "EvalJobState"),
+            "examples_completed": ref("NonNegativeInteger"),
+            "examples_total": ref("NonNegativeInteger"),
+            "headline_accuracy": ref("FiniteNumber"),
+            "error": ref("String"),
+        },
+        "Bounded projection of one post-training evaluation linked to an OpenEnv run.",
+        optional=("headline_accuracy", "error"),
     )
     add_object(
         "OpenEnvRunRequest",
@@ -605,7 +658,9 @@ def build_openenv_types() -> None:
         "OpenEnvRunStatus",
         "OpenEnvRunStatus",
         {
-            "schema": {"const": "kiln.openenv-run.v1"},
+            "schema": {
+                "enum": ["kiln.openenv-run.v1", "kiln.openenv-run.v2"]
+            },
             "run_id": ref("String"),
             "kind": ref("OpenEnvRunKind"),
             "state": ref("OpenEnvRunState"),
@@ -617,15 +672,19 @@ def build_openenv_types() -> None:
             "artifacts": array(ref("OpenEnvArtifact")),
             "training_job_id": ref("String"),
             "training_submission": ref("TrainingResponse"),
+            "training": ref("OpenEnvTrainingStatus"),
+            "post_evaluations": array(ref("OpenEnvPostEvalStatus")),
             "error": ref("String"),
         },
-        "Persisted status, progress, discovered identities, artifacts, and optional GRPO handoff for one OpenEnv run.",
+        "Persisted status, collection artifacts, and authoritative training and post-evaluation lifecycle for one OpenEnv run. Version 1 records may retain the historical terminal training_queued handoff; version 2 follows learning to completion.",
         optional=(
             "finished_unix_ms",
             "environments",
             "artifacts",
             "training_job_id",
             "training_submission",
+            "training",
+            "post_evaluations",
             "error",
         ),
     )
@@ -633,7 +692,7 @@ def build_openenv_types() -> None:
         "OpenEnvRunList",
         "OpenEnvRunList",
         {
-            "schema": {"const": "kiln.openenv-run-list.v1"},
+            "schema": {"const": "kiln.openenv-run-list.v2"},
             "runs": array(ref("OpenEnvRunStatus")),
         },
         "Newest-first retained OpenEnv run records.",
@@ -1165,10 +1224,10 @@ def build_examples() -> dict[str, list[Any]]:
         "auto_load": True,
     }
     openenv_status = {
-        "schema": "kiln.openenv-run.v1",
+        "schema": "kiln.openenv-run.v2",
         "run_id": "80a26e21-8451-4a64-8666-890c06fd80bd",
         "kind": "train",
-        "state": "collecting",
+        "state": "training_running",
         "request": openenv_request,
         "submitted_unix_ms": 1_700_000_000_000,
         "progress": {
@@ -1178,6 +1237,14 @@ def build_examples() -> dict[str, list[Any]]:
             "rollouts_total": 32,
         },
         "environments": [openenv_inspection["identity"]],
+        "training_job_id": "grpo-openenv-1",
+        "training": {
+            "job_id": "grpo-openenv-1",
+            "state": "running",
+            "progress": 0.375,
+            "current_loss": 0.42,
+            "epoch": 1,
+        },
     }
     examples: dict[str, list[Any]] = {
         "AgentRunAbortResponse": [{"aborting": True}],
@@ -1218,7 +1285,7 @@ def build_examples() -> dict[str, list[Any]]:
         "OpdRequest": [opd],
         "OpenEnvInspectRequest": [{"environment_urls": ["http://127.0.0.1:8000"]}],
         "OpenEnvInspectResponse": [{"schema": "kiln.openenv-inspection.v1", "environments": [openenv_inspection]}],
-        "OpenEnvRunList": [{"schema": "kiln.openenv-run-list.v1", "runs": [openenv_status]}],
+        "OpenEnvRunList": [{"schema": "kiln.openenv-run-list.v2", "runs": [openenv_status]}],
         "OpenEnvRunRequest": [openenv_request],
         "OpenEnvRunStatus": [openenv_status],
         "PublishPayload": [{"description": "Math adapter", "uploader": "local-user"}],

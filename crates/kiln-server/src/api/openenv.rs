@@ -12,6 +12,7 @@ use std::sync::{
     Arc, RwLock,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use axum::body::Body;
@@ -21,8 +22,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::{StreamExt, stream};
+use kiln_eval::EvalJobState;
 use kiln_openenv::{OpenEnvClient, OpenEnvIdentity, OpenEnvInspection};
-use kiln_train::{BehaviorPolicy, GrpoConfig, GrpoRequest, TrainingResponse};
+use kiln_train::{BehaviorPolicy, GrpoConfig, GrpoRequest, TrainingResponse, TrainingState};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio::io::AsyncReadExt;
@@ -40,12 +42,16 @@ use crate::recent_requests::now_unix_ms;
 use crate::state::AppState;
 
 const OPENENV_RUN_SCHEMA_V1: &str = "kiln.openenv-run.v1";
-const OPENENV_RUN_LIST_SCHEMA_V1: &str = "kiln.openenv-run-list.v1";
+const OPENENV_RUN_SCHEMA_V2: &str = "kiln.openenv-run.v2";
+const OPENENV_RUN_LIST_SCHEMA_V2: &str = "kiln.openenv-run-list.v2";
 const OPENENV_INSPECTION_SCHEMA_V1: &str = "kiln.openenv-inspection.v1";
 const OPENENV_API_BODY_LIMIT: usize = 1024 * 1024;
 const MAX_ENVIRONMENTS: usize = 64;
 const MAX_PERSISTED_STATUS_BYTES: u64 = 2 * 1024 * 1024;
 const ARTIFACT_CHUNK_BYTES: usize = 64 * 1024;
+const LIFECYCLE_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const POST_EVAL_PUBLICATION_GRACE: Duration = Duration::from_secs(5);
+const POST_EVAL_GATE_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn default_groups() -> usize {
     8
@@ -112,15 +118,18 @@ pub enum OpenEnvRunState {
     Submitting,
     RolloutReady,
     TrainingQueued,
+    TrainingRunning,
+    PostEvaluating,
+    Completed,
     Failed,
     Cancelled,
 }
 
 impl OpenEnvRunState {
-    fn terminal(self) -> bool {
+    fn unconditionally_terminal(self) -> bool {
         matches!(
             self,
-            Self::RolloutReady | Self::TrainingQueued | Self::Failed | Self::Cancelled
+            Self::RolloutReady | Self::Completed | Self::Failed | Self::Cancelled
         )
     }
 }
@@ -171,7 +180,7 @@ pub struct OpenEnvRunRequest {
     pub post_eval: Option<kiln_eval::PostEvalConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OpenEnvRunProgress {
     pub groups_completed: usize,
     pub groups_total: usize,
@@ -179,12 +188,52 @@ pub struct OpenEnvRunProgress {
     pub rollouts_total: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OpenEnvArtifact {
     pub kind: String,
     pub url: String,
     pub sha256: String,
     pub bytes: usize,
+}
+
+/// Authoritative projection of the native trainer owned by this OpenEnv run.
+///
+/// The trainer remains the source of truth; this bounded snapshot makes an
+/// OpenEnv workflow observable without forcing clients to stitch together two
+/// unrelated control planes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OpenEnvTrainingStatus {
+    pub job_id: String,
+    pub state: TrainingState,
+    pub progress: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_loss: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_eval_job_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_eval_verdict: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Bounded projection of one post-training evaluation linked to the trainer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OpenEnvPostEvalStatus {
+    pub job_id: String,
+    pub suite_name: String,
+    pub state: EvalJobState,
+    pub examples_completed: u32,
+    pub examples_total: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headline_accuracy: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,7 +256,23 @@ pub struct OpenEnvRunStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub training_submission: Option<TrainingResponse>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training: Option<OpenEnvTrainingStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_evaluations: Vec<OpenEnvPostEvalStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+impl OpenEnvRunStatus {
+    fn terminal(&self) -> bool {
+        self.state.unconditionally_terminal()
+            // Before v2, `training_queued` explicitly meant the OpenEnv
+            // orchestrator had handed ownership off and finished. Preserve
+            // that historical record on upgrade while v2 runs keep following
+            // the trainer to a real terminal outcome.
+            || (self.schema == OPENENV_RUN_SCHEMA_V1
+                && self.state == OpenEnvRunState::TrainingQueued)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -307,7 +372,7 @@ impl OpenEnvRunRegistry {
                 .with_context(|| format!("read OpenEnv status {}", status_path.display()))?;
             let mut status: OpenEnvRunStatus = serde_json::from_slice(&bytes)
                 .with_context(|| format!("decode OpenEnv status {}", status_path.display()))?;
-            if !status.state.terminal() {
+            if !status.terminal() {
                 status.state = OpenEnvRunState::Failed;
                 status.finished_unix_ms = Some(now_unix_ms());
                 status.error =
@@ -362,7 +427,7 @@ impl OpenEnvRunRegistry {
         while runs.len() >= self.policy.max_tracked_runs {
             let oldest_terminal = runs
                 .iter()
-                .filter(|(_, tracked)| tracked.status.state.terminal())
+                .filter(|(_, tracked)| tracked.status.terminal())
                 .min_by_key(|(_, tracked)| tracked.status.submitted_unix_ms)
                 .map(|(run_id, _)| run_id.clone());
             let Some(run_id) = oldest_terminal else {
@@ -379,7 +444,7 @@ impl OpenEnvRunRegistry {
         self.make_room_locked(&mut runs);
         let active = runs
             .values()
-            .filter(|tracked| !tracked.status.state.terminal())
+            .filter(|tracked| !tracked.status.terminal())
             .count();
         anyhow::ensure!(
             active < self.policy.max_active_runs,
@@ -401,7 +466,7 @@ impl OpenEnvRunRegistry {
             .checked_mul(request.group_size)
             .context("OpenEnv rollout count overflow")?;
         let status = OpenEnvRunStatus {
-            schema: OPENENV_RUN_SCHEMA_V1.to_string(),
+            schema: OPENENV_RUN_SCHEMA_V2.to_string(),
             run_id: run_id.clone(),
             kind: request.kind,
             state: OpenEnvRunState::Queued,
@@ -418,6 +483,8 @@ impl OpenEnvRunRegistry {
             artifacts: Vec::new(),
             training_job_id: None,
             training_submission: None,
+            training: None,
+            post_evaluations: Vec::new(),
             error: None,
         };
         persist_status_to(&run_dir.join("run.json"), &status)?;
@@ -456,7 +523,7 @@ impl OpenEnvRunRegistry {
         self.prune_locked(&mut runs);
         (
             runs.values()
-                .filter(|tracked| !tracked.status.state.terminal())
+                .filter(|tracked| !tracked.status.terminal())
                 .count(),
             runs.len(),
         )
@@ -525,12 +592,7 @@ impl OpenEnvRunRegistry {
             .map(|tracked| (tracked.status.clone(), tracked.cancel.clone()))
             .with_context(|| format!("OpenEnv run {run_id} was not found"))?;
         anyhow::ensure!(
-            matches!(
-                tracked.0.state,
-                OpenEnvRunState::Queued
-                    | OpenEnvRunState::Discovering
-                    | OpenEnvRunState::Collecting
-            ),
+            !tracked.0.terminal(),
             "OpenEnv run {run_id} cannot be cancelled from state {:?}",
             tracked.0.state
         );
@@ -874,67 +936,38 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
         Ordering::Relaxed,
     );
 
-    let mut training_submission = None;
-    if request.kind == OpenEnvRunKind::Train {
+    let artifacts = artifacts_for(run_id, &collection.summary);
+    if request.kind == OpenEnvRunKind::Rollout {
         state.openenv_runs.update(run_id, |status| {
-            status.state = OpenEnvRunState::Submitting;
+            status.state = OpenEnvRunState::RolloutReady;
+            status.finished_unix_ms = Some(now_unix_ms());
+            status.progress.groups_completed = request.groups;
+            status.progress.rollouts_completed = request.groups.saturating_mul(request.group_size);
             status.environments = collection
                 .summary
                 .environments
                 .iter()
                 .map(|inspection| inspection.identity.clone())
                 .collect();
+            status.artifacts = artifacts;
+            status.error = None;
         })?;
-        anyhow::ensure!(!cancel.load(Ordering::Relaxed), "OpenEnv run cancelled");
-        let output_adapter = request
-            .output_adapter
-            .as_ref()
-            .context("OpenEnv train run has no output adapter")?;
-        let mut config = request.training_config.clone().unwrap_or_default();
-        config.output_name = Some(output_adapter.clone());
-        config.auto_load = request.auto_load;
-        config.behavior_policy = BehaviorPolicy::NoImportanceCorrection;
-        config.base_adapter = if matches!(
-            request.adapter.trim().to_ascii_lowercase().as_str(),
-            "base" | "none" | "null"
-        ) {
-            None
-        } else {
-            Some(request.adapter.clone())
-        };
-        let submission = super::training::submit_grpo_request(
-            state,
-            GrpoRequest {
-                groups: collection.groups,
-                dataset_path: None,
-                dataset: None,
-                dataset_split: None,
-                config,
-                post_eval: request.post_eval.clone(),
-            },
-        )
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "OpenEnv GRPO admission failed with {} {}: {}",
-                error.status,
-                error.code,
-                error.message
-            )
-        })?;
-        collection.summary.training_submission =
-            Some(serde_json::to_value(&submission).context("serialize training submission")?);
-        write_summary_atomic(&summary_output, &collection.summary)?;
-        training_submission = Some(submission);
+        state
+            .metrics
+            .openenv_rollouts_ready
+            .fetch_add(1, Ordering::Relaxed);
+        tracing::info!(
+            run_id,
+            groups = request.groups,
+            rollouts = request.groups.saturating_mul(request.group_size),
+            "OpenEnv rollout run completed"
+        );
+        return Ok(());
     }
 
-    let artifacts = artifacts_for(run_id, &collection.summary);
     state.openenv_runs.update(run_id, |status| {
-        status.state = if request.kind == OpenEnvRunKind::Train {
-            OpenEnvRunState::TrainingQueued
-        } else {
-            OpenEnvRunState::RolloutReady
-        };
-        status.finished_unix_ms = Some(now_unix_ms());
+        status.state = OpenEnvRunState::Submitting;
+        status.finished_unix_ms = None;
         status.progress.groups_completed = request.groups;
         status.progress.rollouts_completed = request.groups.saturating_mul(request.group_size);
         status.environments = collection
@@ -944,34 +977,310 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
             .map(|inspection| inspection.identity.clone())
             .collect();
         status.artifacts = artifacts;
-        status.training_job_id = training_submission
-            .as_ref()
-            .map(|submission| submission.job_id.clone());
-        status.training_submission = training_submission;
         status.error = None;
     })?;
-    match request.kind {
-        OpenEnvRunKind::Rollout => {
-            state
-                .metrics
-                .openenv_rollouts_ready
-                .fetch_add(1, Ordering::Relaxed);
-        }
-        OpenEnvRunKind::Train => {
-            state
-                .metrics
-                .openenv_training_queued
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
+    anyhow::ensure!(!cancel.load(Ordering::Relaxed), "OpenEnv run cancelled");
+    let output_adapter = request
+        .output_adapter
+        .as_ref()
+        .context("OpenEnv train run has no output adapter")?;
+    let mut config = request.training_config.clone().unwrap_or_default();
+    config.output_name = Some(output_adapter.clone());
+    config.auto_load = request.auto_load;
+    config.behavior_policy = BehaviorPolicy::NoImportanceCorrection;
+    config.base_adapter = if matches!(
+        request.adapter.trim().to_ascii_lowercase().as_str(),
+        "base" | "none" | "null"
+    ) {
+        None
+    } else {
+        Some(request.adapter.clone())
+    };
+    let submission = super::training::submit_grpo_request(
+        state,
+        GrpoRequest {
+            groups: collection.groups,
+            dataset_path: None,
+            dataset: None,
+            dataset_split: None,
+            config,
+            post_eval: request.post_eval.clone(),
+        },
+    )
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "OpenEnv GRPO admission failed with {} {}: {}",
+            error.status,
+            error.code,
+            error.message
+        )
+    })?;
+    collection.summary.training_submission =
+        Some(serde_json::to_value(&submission).context("serialize training submission")?);
+    write_summary_atomic(&summary_output, &collection.summary)?;
+    let artifacts = artifacts_for(run_id, &collection.summary);
+    let training = training_status_for(state, &submission.job_id)
+        .context("admitted OpenEnv training job disappeared")?;
+    state.openenv_runs.update(run_id, |status| {
+        status.state = OpenEnvRunState::TrainingQueued;
+        status.training_job_id = Some(submission.job_id.clone());
+        status.training_submission = Some(submission.clone());
+        status.training = Some(training);
+        status.artifacts = artifacts;
+        status.error = None;
+    })?;
+    state
+        .metrics
+        .openenv_training_queued
+        .fetch_add(1, Ordering::Relaxed);
+    follow_openenv_training(state, run_id, &request, &submission.job_id, cancel).await?;
+    state
+        .metrics
+        .openenv_training_completed
+        .fetch_add(1, Ordering::Relaxed);
     tracing::info!(
         run_id,
-        kind = ?request.kind,
+        training_job_id = %submission.job_id,
         groups = request.groups,
         rollouts = request.groups.saturating_mul(request.group_size),
-        "OpenEnv run reached a terminal handoff"
+        "OpenEnv training run completed"
     );
     Ok(())
+}
+
+fn training_status_for(state: &AppState, job_id: &str) -> Option<OpenEnvTrainingStatus> {
+    state
+        .training_jobs
+        .read()
+        .unwrap()
+        .get(job_id)
+        .map(|job| OpenEnvTrainingStatus {
+            job_id: job.job_id.clone(),
+            state: job.state,
+            progress: job.progress,
+            current_loss: job.loss,
+            epoch: job.epoch,
+            adapter_path: job.adapter_path.clone(),
+            linked_eval_job_ids: job.linked_eval_job_ids.clone(),
+            post_eval_verdict: job.post_eval_verdict.clone(),
+            gate_outcome: job.gate_outcome.clone(),
+            error: job.error.clone(),
+        })
+}
+
+fn post_eval_statuses_for(
+    state: &AppState,
+    job_ids: &[String],
+) -> Result<Vec<OpenEnvPostEvalStatus>> {
+    let jobs = state.eval_jobs.read().unwrap();
+    job_ids
+        .iter()
+        .map(|job_id| {
+            let job = jobs
+                .get(job_id)
+                .with_context(|| format!("linked post-eval job {job_id} disappeared"))?;
+            Ok(OpenEnvPostEvalStatus {
+                job_id: job.job_id.clone(),
+                suite_name: job.suite_name.clone(),
+                state: job.state,
+                examples_completed: job.progress.examples_completed,
+                examples_total: job.progress.examples_total,
+                headline_accuracy: job.headline_accuracy,
+                error: job.error.clone(),
+            })
+        })
+        .collect()
+}
+
+fn publish_training_phase(
+    state: &AppState,
+    run_id: &str,
+    run_state: OpenEnvRunState,
+    training: OpenEnvTrainingStatus,
+    post_evaluations: Vec<OpenEnvPostEvalStatus>,
+) -> Result<()> {
+    let current = state
+        .openenv_runs
+        .get(run_id)
+        .context("OpenEnv run disappeared while following training")?;
+    if current.state == run_state
+        && current.training.as_ref() == Some(&training)
+        && current.post_evaluations == post_evaluations
+    {
+        return Ok(());
+    }
+    state.openenv_runs.update(run_id, |status| {
+        status.state = run_state;
+        status.training = Some(training);
+        status.post_evaluations = post_evaluations;
+    })?;
+    Ok(())
+}
+
+fn request_linked_cancellation(
+    state: &AppState,
+    training: &OpenEnvTrainingStatus,
+    evals: &[OpenEnvPostEvalStatus],
+) {
+    if matches!(
+        training.state,
+        TrainingState::Queued | TrainingState::Running
+    ) {
+        match crate::job_cancellation::request_training_job_cancellation(state, &training.job_id) {
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                training_job_id = %training.job_id,
+                error = %error.message,
+                "OpenEnv cancellation could not be forwarded to training"
+            ),
+        }
+    }
+    for eval in evals {
+        if matches!(eval.state, EvalJobState::Queued | EvalJobState::Running) {
+            match crate::job_cancellation::request_eval_job_cancellation(state, &eval.job_id) {
+                Ok(_) => {}
+                Err(error) => tracing::warn!(
+                    eval_job_id = %eval.job_id,
+                    error = %error.message,
+                    "OpenEnv cancellation could not be forwarded to post-evaluation"
+                ),
+            }
+        }
+    }
+}
+
+async fn follow_openenv_training(
+    state: &AppState,
+    run_id: &str,
+    request: &OpenEnvRunRequest,
+    training_job_id: &str,
+    cancel: Arc<AtomicBool>,
+) -> Result<()> {
+    let mut training_completed_at = None;
+    let mut gate_wait_started = None;
+    loop {
+        let training = training_status_for(state, training_job_id)
+            .with_context(|| format!("OpenEnv training job {training_job_id} disappeared"))?;
+        let evals = post_eval_statuses_for(state, &training.linked_eval_job_ids)?;
+        if cancel.load(Ordering::Relaxed) {
+            request_linked_cancellation(state, &training, &evals);
+        }
+
+        match training.state {
+            TrainingState::Queued => {
+                publish_training_phase(
+                    state,
+                    run_id,
+                    OpenEnvRunState::TrainingQueued,
+                    training,
+                    evals,
+                )?;
+            }
+            TrainingState::Running => {
+                publish_training_phase(
+                    state,
+                    run_id,
+                    OpenEnvRunState::TrainingRunning,
+                    training,
+                    evals,
+                )?;
+            }
+            TrainingState::Failed => {
+                anyhow::bail!(
+                    "OpenEnv training job {training_job_id} failed: {}",
+                    training
+                        .error
+                        .as_deref()
+                        .unwrap_or("trainer reported no failure detail")
+                );
+            }
+            TrainingState::Completed => {
+                if request.post_eval.is_none() {
+                    state.openenv_runs.update(run_id, |status| {
+                        status.state = OpenEnvRunState::Completed;
+                        status.finished_unix_ms = Some(now_unix_ms());
+                        status.training = Some(training);
+                        status.post_evaluations = evals;
+                        status.error = None;
+                    })?;
+                    return Ok(());
+                }
+
+                let completed_at = training_completed_at.get_or_insert_with(Instant::now);
+                let expected_evals = 1 + usize::from(
+                    request
+                        .post_eval
+                        .as_ref()
+                        .is_some_and(|cfg| cfg.include_baseline),
+                );
+                publish_training_phase(
+                    state,
+                    run_id,
+                    OpenEnvRunState::PostEvaluating,
+                    training.clone(),
+                    evals.clone(),
+                )?;
+                if training.linked_eval_job_ids.len() < expected_evals {
+                    anyhow::ensure!(
+                        completed_at.elapsed() < POST_EVAL_PUBLICATION_GRACE,
+                        "OpenEnv requested {expected_evals} post-training evaluation job(s), but only {} were published",
+                        training.linked_eval_job_ids.len()
+                    );
+                } else {
+                    if let Some(failed) =
+                        evals.iter().find(|eval| eval.state == EvalJobState::Failed)
+                    {
+                        anyhow::bail!(
+                            "OpenEnv post-training evaluation {} failed: {}",
+                            failed.job_id,
+                            failed
+                                .error
+                                .as_deref()
+                                .unwrap_or("evaluator reported no failure detail")
+                        );
+                    }
+                    if let Some(cancelled) = evals
+                        .iter()
+                        .find(|eval| eval.state == EvalJobState::Cancelled)
+                    {
+                        anyhow::bail!(
+                            "OpenEnv post-training evaluation {} was cancelled",
+                            cancelled.job_id
+                        );
+                    }
+                    let evaluations_done = evals
+                        .iter()
+                        .all(|eval| eval.state == EvalJobState::Completed);
+                    let gate_done = request
+                        .post_eval
+                        .as_ref()
+                        .is_none_or(|cfg| cfg.min_accuracy.is_none())
+                        || training.gate_outcome.is_some();
+                    if evaluations_done && !gate_done {
+                        let started = gate_wait_started.get_or_insert_with(Instant::now);
+                        anyhow::ensure!(
+                            started.elapsed() < POST_EVAL_GATE_TIMEOUT,
+                            "OpenEnv post-training promotion gate did not publish an outcome within {} seconds",
+                            POST_EVAL_GATE_TIMEOUT.as_secs()
+                        );
+                    }
+                    if evaluations_done && gate_done {
+                        let final_training = training_status_for(state, training_job_id)
+                            .context("OpenEnv training job disappeared at completion")?;
+                        state.openenv_runs.update(run_id, |status| {
+                            status.state = OpenEnvRunState::Completed;
+                            status.finished_unix_ms = Some(now_unix_ms());
+                            status.training = Some(final_training);
+                            status.post_evaluations = evals;
+                            status.error = None;
+                        })?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(LIFECYCLE_POLL_INTERVAL).await;
+    }
 }
 
 fn artifacts_for(run_id: &str, summary: &OpenEnvRolloutSummary) -> Vec<OpenEnvArtifact> {
@@ -1001,7 +1310,7 @@ fn artifacts_for(run_id: &str, summary: &OpenEnvRolloutSummary) -> Vec<OpenEnvAr
 
 async fn list_runs(State(state): State<AppState>) -> Json<OpenEnvRunList> {
     Json(OpenEnvRunList {
-        schema: OPENENV_RUN_LIST_SCHEMA_V1,
+        schema: OPENENV_RUN_LIST_SCHEMA_V2,
         runs: state.openenv_runs.list(),
     })
 }
@@ -1045,7 +1354,7 @@ async fn cancel_run(
                 if missing {
                     "List retained runs with GET /v1/openenv/runs."
                 } else {
-                    "Only queued or active OpenEnv runs can be cancelled."
+                    "Only non-terminal OpenEnv runs can be cancelled."
                 },
             )
         })
@@ -1138,6 +1447,8 @@ pub fn routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::eval::queue::{EvalJobInfo, EvalSubmissionKind};
+    use crate::state::{TrainingJobInfo, TrainingJobType};
     use axum::body::Body;
     use axum::http::Request;
     use kiln_core::config::ModelConfig;
@@ -1182,6 +1493,38 @@ mod tests {
             training_config: None,
             auto_load: true,
             post_eval: None,
+        }
+    }
+
+    fn training_job(job_id: &str, state: TrainingState) -> TrainingJobInfo {
+        TrainingJobInfo {
+            job_id: job_id.into(),
+            adapter_name: "agent".into(),
+            job_type: TrainingJobType::Grpo,
+            effective_seed: Some(17),
+            state,
+            progress: if state == TrainingState::Completed {
+                1.0
+            } else {
+                0.0
+            },
+            loss: None,
+            epoch: None,
+            adapter_path: None,
+            submitted_at: Instant::now(),
+            submitted_unix_ms: now_unix_ms(),
+            auto_load: false,
+            consumed_correction_ids: Vec::new(),
+            training_data: None,
+            finished_at: None,
+            finished_unix_ms: None,
+            error: None,
+            linked_eval_job_ids: Vec::new(),
+            post_eval_verdict: None,
+            gate_outcome: None,
+            post_eval_gate_evidence: Vec::new(),
+            cancel_requested: Default::default(),
+            loss_history: Vec::new(),
         }
     }
 
@@ -1258,7 +1601,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_stops_at_the_training_handoff_boundary() {
+    fn cancellation_remains_available_after_training_handoff() {
         let temp = tempfile::tempdir().unwrap();
         let registry =
             OpenEnvRunRegistry::open(temp.path().to_path_buf(), OpenEnvConfig::default()).unwrap();
@@ -1268,7 +1611,162 @@ mod tests {
                 status.state = OpenEnvRunState::Submitting;
             })
             .unwrap();
+        assert!(registry.cancel(&status.run_id).is_ok());
+        registry
+            .update(&status.run_id, |status| {
+                status.state = OpenEnvRunState::Completed;
+                status.finished_unix_ms = Some(now_unix_ms());
+            })
+            .unwrap();
         assert!(registry.cancel(&status.run_id).is_err());
+    }
+
+    #[test]
+    fn v1_training_handoffs_remain_terminal_after_upgrade() {
+        let temp = tempfile::tempdir().unwrap();
+        let policy = OpenEnvConfig {
+            max_active_runs: 1,
+            ..Default::default()
+        };
+        let registry = OpenEnvRunRegistry::open(temp.path().to_path_buf(), policy.clone()).unwrap();
+        let (legacy, _) = registry.insert(request(OpenEnvRunKind::Train)).unwrap();
+        registry
+            .update(&legacy.run_id, |status| {
+                status.schema = OPENENV_RUN_SCHEMA_V1.into();
+                status.state = OpenEnvRunState::TrainingQueued;
+                status.finished_unix_ms = Some(now_unix_ms());
+            })
+            .unwrap();
+        assert_eq!(registry.counts().0, 0);
+        assert!(
+            registry.insert(request(OpenEnvRunKind::Train)).is_ok(),
+            "a historical v1 handoff must not consume v2 active-run capacity"
+        );
+        let restored =
+            OpenEnvRunRegistry::open(temp.path().to_path_buf(), policy).expect("restore registry");
+        assert_eq!(
+            restored.get(&legacy.run_id).unwrap().state,
+            OpenEnvRunState::TrainingQueued
+        );
+    }
+
+    #[tokio::test]
+    async fn openenv_run_follows_trainer_to_actual_completion() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(&temp, OpenEnvConfig::default());
+        let (run, cancel) = state
+            .openenv_runs
+            .insert(request(OpenEnvRunKind::Train))
+            .unwrap();
+        state.training_jobs.write().unwrap().insert(
+            "train-1".into(),
+            training_job("train-1", TrainingState::Queued),
+        );
+
+        let followed_state = state.clone();
+        let followed_run_id = run.run_id.clone();
+        let follow = tokio::spawn(async move {
+            follow_openenv_training(
+                &followed_state,
+                &followed_run_id,
+                &request(OpenEnvRunKind::Train),
+                "train-1",
+                cancel,
+            )
+            .await
+        });
+        tokio::time::sleep(LIFECYCLE_POLL_INTERVAL + Duration::from_millis(50)).await;
+        assert_eq!(
+            state.openenv_runs.get(&run.run_id).unwrap().state,
+            OpenEnvRunState::TrainingQueued
+        );
+        {
+            let mut jobs = state.training_jobs.write().unwrap();
+            let job = jobs.get_mut("train-1").unwrap();
+            job.state = TrainingState::Running;
+            job.progress = 0.5;
+            job.loss = Some(0.25);
+            job.epoch = Some(1);
+        }
+        tokio::time::sleep(LIFECYCLE_POLL_INTERVAL + Duration::from_millis(50)).await;
+        let running = state.openenv_runs.get(&run.run_id).unwrap();
+        assert_eq!(running.state, OpenEnvRunState::TrainingRunning);
+        assert_eq!(running.training.unwrap().current_loss, Some(0.25));
+        {
+            let mut jobs = state.training_jobs.write().unwrap();
+            let job = jobs.get_mut("train-1").unwrap();
+            job.state = TrainingState::Completed;
+            job.progress = 1.0;
+            job.adapter_path = Some("/adapters/agent".into());
+        }
+        follow.await.unwrap().unwrap();
+        let completed = state.openenv_runs.get(&run.run_id).unwrap();
+        assert_eq!(completed.state, OpenEnvRunState::Completed);
+        assert!(completed.finished_unix_ms.is_some());
+        assert!(completed.terminal());
+    }
+
+    #[tokio::test]
+    async fn openenv_run_waits_for_requested_post_evaluation() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(&temp, OpenEnvConfig::default());
+        let mut run_request = request(OpenEnvRunKind::Train);
+        run_request.post_eval = Some(kiln_eval::PostEvalConfig {
+            suite: "held-out".into(),
+            data_scope: Default::default(),
+            generation: None,
+            min_accuracy: None,
+            include_baseline: false,
+        });
+        let (run, cancel) = state.openenv_runs.insert(run_request.clone()).unwrap();
+        let mut training = training_job("train-eval", TrainingState::Completed);
+        training.linked_eval_job_ids.push("eval-1".into());
+        state
+            .training_jobs
+            .write()
+            .unwrap()
+            .insert(training.job_id.clone(), training);
+        state.eval_jobs.write().unwrap().insert(
+            "eval-1".into(),
+            EvalJobInfo::queued(
+                "eval-1".into(),
+                "held-out".into(),
+                vec![Some("agent".into())],
+                EvalSubmissionKind::PostTraining,
+                Some("train-eval".into()),
+                19,
+            ),
+        );
+
+        let followed_state = state.clone();
+        let followed_run_id = run.run_id.clone();
+        let follow = tokio::spawn(async move {
+            follow_openenv_training(
+                &followed_state,
+                &followed_run_id,
+                &run_request,
+                "train-eval",
+                cancel,
+            )
+            .await
+        });
+        tokio::time::sleep(LIFECYCLE_POLL_INTERVAL + Duration::from_millis(50)).await;
+        assert_eq!(
+            state.openenv_runs.get(&run.run_id).unwrap().state,
+            OpenEnvRunState::PostEvaluating
+        );
+        {
+            let mut evals = state.eval_jobs.write().unwrap();
+            let eval = evals.get_mut("eval-1").unwrap();
+            eval.state = EvalJobState::Completed;
+            eval.progress.examples_completed = 20;
+            eval.progress.examples_total = 20;
+            eval.headline_accuracy = Some(0.9);
+        }
+        follow.await.unwrap().unwrap();
+        let completed = state.openenv_runs.get(&run.run_id).unwrap();
+        assert_eq!(completed.state, OpenEnvRunState::Completed);
+        assert_eq!(completed.post_evaluations[0].headline_accuracy, Some(0.9));
     }
 
     #[tokio::test]
@@ -1293,7 +1791,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             serde_json::from_slice::<Value>(&body).unwrap()["schema"],
-            OPENENV_RUN_LIST_SCHEMA_V1
+            OPENENV_RUN_LIST_SCHEMA_V2
         );
 
         let mut invalid = request(OpenEnvRunKind::Rollout);

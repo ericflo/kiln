@@ -543,7 +543,7 @@
       </div>
 
       <div class="tab-content" id="tab-openenv" role="tabpanel" aria-labelledby="training-tab-openenv" hidden inert>
-        <p class="method-lead">Train directly against any OpenEnv-compatible reinforcement-learning environment. Kiln discovers its protocol and action schema, runs seed-matched stateful WebSocket episodes with the selected policy, preserves environment-owned rewards and exact replay artifacts, then queues native GRPO.</p>
+        <p class="method-lead">Train directly against any OpenEnv-compatible reinforcement-learning environment. Kiln discovers its protocol and action schema, runs seed-matched stateful WebSocket episodes with the selected policy, preserves environment-owned rewards and exact replay artifacts, then owns native GRPO and requested evaluation through their terminal outcomes.</p>
         <form id="openenv-form">
           <div class="form-group">
             <label for="openenv-environments">Environment URLs <span class="hint">— one OpenEnv HTTP base URL per line</span></label>
@@ -608,7 +608,7 @@
           <div class="form-help" id="openenv-optimizer-support">Optimizer capability details are still loading. Training remains disabled.</div>
           <div id="openenv-submit-state" class="form-help" role="status" aria-live="polite">Ready to launch a persisted, cancellable OpenEnv run.</div>
           <div style="display:flex;gap:var(--space-3);align-items:center;padding-top:var(--space-3);border-top:1px solid var(--border);">
-            <span class="train-next-hint">Artifacts remain downloadable after collection; training appears in the normal queue.</span>
+            <span class="train-next-hint">Artifacts remain downloadable after collection; trainer, evaluation, and promotion state stay attached to this run.</span>
             <button type="submit" class="btn btn-primary" style="margin-left:auto;" disabled aria-describedby="openenv-optimizer-support">Collect &amp; train</button>
           </div>
         </form>

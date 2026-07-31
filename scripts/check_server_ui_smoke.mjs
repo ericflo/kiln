@@ -1970,7 +1970,7 @@ async function startServer({
       return;
     }
     if (url.pathname === '/v1/openenv/runs' && req.method === 'GET') {
-      json(res, { schema: 'kiln.openenv-run-list.v1', runs: openEnvRuns });
+      json(res, { schema: 'kiln.openenv-run-list.v2', runs: openEnvRuns });
       return;
     }
     if (url.pathname === '/v1/openenv/inspect' && req.method === 'POST') {
@@ -2001,7 +2001,7 @@ async function startServer({
       const request = await readJsonBody(req);
       apiState.trainingSubmitRequests.openenv += 1;
       const status = {
-        schema: 'kiln.openenv-run.v1',
+        schema: 'kiln.openenv-run.v2',
         run_id: 'smoke-openenv-run',
         kind: request.kind,
         state: 'collecting',

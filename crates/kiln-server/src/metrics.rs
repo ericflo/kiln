@@ -221,6 +221,7 @@ pub struct Metrics {
     pub openenv_runs_started: AtomicU64,
     pub openenv_rollouts_ready: AtomicU64,
     pub openenv_training_queued: AtomicU64,
+    pub openenv_training_completed: AtomicU64,
     pub openenv_runs_failed: AtomicU64,
     pub openenv_runs_cancelled: AtomicU64,
     pub openenv_episodes_collected: AtomicU64,
@@ -273,6 +274,7 @@ impl Metrics {
             openenv_runs_started: AtomicU64::new(0),
             openenv_rollouts_ready: AtomicU64::new(0),
             openenv_training_queued: AtomicU64::new(0),
+            openenv_training_completed: AtomicU64::new(0),
             openenv_runs_failed: AtomicU64::new(0),
             openenv_runs_cancelled: AtomicU64::new(0),
             openenv_episodes_collected: AtomicU64::new(0),
@@ -3067,6 +3069,10 @@ impl Metrics {
             (
                 "training_queued",
                 self.openenv_training_queued.load(Ordering::Relaxed),
+            ),
+            (
+                "training_completed",
+                self.openenv_training_completed.load(Ordering::Relaxed),
             ),
             ("failed", self.openenv_runs_failed.load(Ordering::Relaxed)),
             (

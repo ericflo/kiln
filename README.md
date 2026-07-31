@@ -124,8 +124,11 @@ a dependency, configuration namespace, or special execution path.
 OpenEnv is also native to the embedded dashboard and control plane. Use
 **Training → OpenEnv** in `/ui/`, or submit a durable run to
 `POST /v1/openenv/runs`; Kiln persists discovery and collection progress,
-canonical artifact links, failures, cancellation, and the linked native GRPO
-job across browser refreshes and server restarts.
+canonical artifact links, native GRPO progress and loss, linked evaluation
+results, promotion-gate outcomes, failures, and cancellation across browser
+refreshes. A train run is terminal only after training and every requested
+post-evaluation has reached an outcome; restart-interrupted active work fails
+explicitly instead of pretending that an orphaned trainer still belongs to it.
 
 ```bash
 # Inspect the environment's health, metadata, schemas, and content identity.
@@ -138,6 +141,9 @@ kiln openenv train \
   --group-size 4 \
   --max-steps 8 \
   --output-adapter counter-agent
+
+# Follow a dashboard/API-owned workflow through training and evaluation.
+kiln openenv status 80a26e21-8451-4a64-8666-890c06fd80bd --follow
 ```
 
 Every run first publishes canonical GRPO JSONL, an exact content-addressed

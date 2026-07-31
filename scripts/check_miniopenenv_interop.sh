@@ -8,8 +8,9 @@ base_port=${KILN_OPENENV_INTEROP_PORT:-18990}
 declare -a server_names=(counter bandit connect4 maze wordle)
 declare -a server_pids=()
 declare -a log_files=()
+forbidden_oracle_namespace='MINI''OPENENV'
 
-if rg --quiet 'MINIOPENENV' "$repo_root/crates"; then
+if rg --quiet --fixed-strings "$forbidden_oracle_namespace" "$repo_root/crates"; then
     echo "miniopenenv-specific environment namespaces are forbidden in Kiln crates; use generic OPENENV_INTEROP test controls" >&2
     exit 1
 fi
@@ -59,6 +60,10 @@ done
 
 (
     cd "$repo_root"
+    "$cargo_bin" test -p kiln-server --no-default-features \
+        api::openenv::tests --lib
+    "$cargo_bin" test -p kiln-server --no-default-features \
+        openenv_cli::tests --lib
     KILN_OPENENV_INTEROP_COUNTER_URL="http://127.0.0.1:$base_port" \
     KILN_OPENENV_INTEROP_BANDIT_URL="http://127.0.0.1:$((base_port + 1))" \
     KILN_OPENENV_INTEROP_CONNECT4_URL="http://127.0.0.1:$((base_port + 2))" \

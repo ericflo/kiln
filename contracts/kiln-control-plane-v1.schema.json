@@ -3636,6 +3636,43 @@
       "x-kiln-rust-type": "kiln_openenv::OpenEnvMetadata",
       "x-kiln-field-schema-status": "complete"
     },
+    "OpenEnvPostEvalStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "suite_name",
+        "state",
+        "examples_completed",
+        "examples_total"
+      ],
+      "properties": {
+        "job_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "suite_name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "state": {
+          "$ref": "kiln-evals-v1.schema.json#/$defs/EvalJobState"
+        },
+        "examples_completed": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "examples_total": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "headline_accuracy": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "error": {
+          "$ref": "#/$defs/String"
+        }
+      },
+      "description": "Bounded projection of one post-training evaluation linked to an OpenEnv run.",
+      "x-kiln-rust-type": "OpenEnvPostEvalStatus",
+      "x-kiln-field-schema-status": "complete"
+    },
     "OpenEnvRolloutProvenanceV1": {
       "type": "object",
       "additionalProperties": false,
@@ -3720,7 +3757,7 @@
       ],
       "properties": {
         "schema": {
-          "const": "kiln.openenv-run-list.v1"
+          "const": "kiln.openenv-run-list.v2"
         },
         "runs": {
           "type": "array",
@@ -3850,6 +3887,9 @@
         "submitting",
         "rollout_ready",
         "training_queued",
+        "training_running",
+        "post_evaluating",
+        "completed",
         "failed",
         "cancelled"
       ],
@@ -3871,7 +3911,10 @@
       ],
       "properties": {
         "schema": {
-          "const": "kiln.openenv-run.v1"
+          "enum": [
+            "kiln.openenv-run.v1",
+            "kiln.openenv-run.v2"
+          ]
         },
         "run_id": {
           "$ref": "#/$defs/String"
@@ -3912,11 +3955,20 @@
         "training_submission": {
           "$ref": "#/$defs/TrainingResponse"
         },
+        "training": {
+          "$ref": "#/$defs/OpenEnvTrainingStatus"
+        },
+        "post_evaluations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpenEnvPostEvalStatus"
+          }
+        },
         "error": {
           "$ref": "#/$defs/String"
         }
       },
-      "description": "Persisted status, progress, discovered identities, artifacts, and optional GRPO handoff for one OpenEnv run.",
+      "description": "Persisted status, collection artifacts, and authoritative training and post-evaluation lifecycle for one OpenEnv run. Version 1 records may retain the historical terminal training_queued handoff; version 2 follows learning to completion.",
       "x-kiln-rust-type": "OpenEnvRunStatus",
       "x-kiln-field-schema-status": "complete"
     },
@@ -3941,6 +3993,60 @@
       },
       "description": "JSON Schemas for OpenEnv actions, observations, and state.",
       "x-kiln-rust-type": "kiln_openenv::OpenEnvSchema",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvTrainingStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "state",
+        "progress"
+      ],
+      "properties": {
+        "job_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "state": {
+          "$ref": "#/$defs/TrainingState"
+        },
+        "progress": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "current_loss": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "epoch": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "adapter_path": {
+          "$ref": "#/$defs/String"
+        },
+        "linked_eval_job_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        },
+        "post_eval_verdict": {
+          "$ref": "#/$defs/String"
+        },
+        "gate_outcome": {
+          "enum": [
+            "promoted",
+            "kept",
+            "regression",
+            "demoted",
+            "inconclusive",
+            "error"
+          ]
+        },
+        "error": {
+          "$ref": "#/$defs/String"
+        }
+      },
+      "description": "Authoritative bounded projection of the native trainer owned by an OpenEnv run.",
+      "x-kiln-rust-type": "OpenEnvTrainingStatus",
       "x-kiln-field-schema-status": "complete"
     },
     "Optimizer": {
@@ -6775,13 +6881,13 @@
     ],
     "OpenEnvRunList": [
       {
-        "schema": "kiln.openenv-run-list.v1",
+        "schema": "kiln.openenv-run-list.v2",
         "runs": [
           {
-            "schema": "kiln.openenv-run.v1",
+            "schema": "kiln.openenv-run.v2",
             "run_id": "80a26e21-8451-4a64-8666-890c06fd80bd",
             "kind": "train",
-            "state": "collecting",
+            "state": "training_running",
             "request": {
               "kind": "train",
               "environment_urls": [
@@ -6833,7 +6939,15 @@
                 },
                 "schema_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
               }
-            ]
+            ],
+            "training_job_id": "grpo-openenv-1",
+            "training": {
+              "job_id": "grpo-openenv-1",
+              "state": "running",
+              "progress": 0.375,
+              "current_loss": 0.42,
+              "epoch": 1
+            }
           }
         ]
       }
@@ -6866,10 +6980,10 @@
     ],
     "OpenEnvRunStatus": [
       {
-        "schema": "kiln.openenv-run.v1",
+        "schema": "kiln.openenv-run.v2",
         "run_id": "80a26e21-8451-4a64-8666-890c06fd80bd",
         "kind": "train",
-        "state": "collecting",
+        "state": "training_running",
         "request": {
           "kind": "train",
           "environment_urls": [
@@ -6921,7 +7035,15 @@
             },
             "schema_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
           }
-        ]
+        ],
+        "training_job_id": "grpo-openenv-1",
+        "training": {
+          "job_id": "grpo-openenv-1",
+          "state": "running",
+          "progress": 0.375,
+          "current_loss": 0.42,
+          "epoch": 1
+        }
       }
     ],
     "PublishPayload": [

@@ -1044,7 +1044,8 @@ refreshProveRows();
 /* ====== Native OpenEnv RL =================================================
    This surface drives the persisted /v1/openenv lifecycle. Collection never
    happens in the browser: Kiln owns discovery, policy inference, WebSocket
-   sessions, reward capture, replay artifacts, cancellation, and GRPO handoff. */
+   sessions, reward capture, replay artifacts, training, post-evaluation, and
+   cancellation. The OpenEnv run remains authoritative until learning ends. */
 let openEnvRunsKey = null;
 
 function openEnvUrls() {
@@ -1172,10 +1173,31 @@ function openEnvStateLabel(state) {
 function openEnvRunCard(run) {
   const state = String(run.state || 'unknown');
   const progress = run.progress || {};
-  const total = Number(progress.groups_total || 0);
-  const done = Number(progress.groups_completed || 0);
-  const pct = total ? Math.min(100, Math.round(done / total * 100)) : 0;
-  const terminal = ['rollout_ready', 'training_queued', 'failed', 'cancelled'].includes(state);
+  const groupTotal = Number(progress.groups_total || 0);
+  const groupDone = Number(progress.groups_completed || 0);
+  const training = run.training || null;
+  const evaluations = Array.isArray(run.post_evaluations) ? run.post_evaluations : [];
+  const evalDone = evaluations.reduce((sum, item) => sum + Number(item.examples_completed || 0), 0);
+  const evalTotal = evaluations.reduce((sum, item) => sum + Number(item.examples_total || 0), 0);
+  let pct = groupTotal ? Math.min(100, Math.round(groupDone / groupTotal * 100)) : 0;
+  let statValue = `${groupDone}/${groupTotal}`;
+  let statLabel = 'seed groups';
+  if (state === 'training_queued') {
+    pct = 0;
+    statValue = 'queued';
+    statLabel = 'native GRPO';
+  } else if (state === 'training_running' && training) {
+    pct = Math.min(100, Math.max(0, Math.round(Number(training.progress || 0) * 100)));
+    statValue = `${pct}%`;
+    statLabel = 'native GRPO';
+  } else if (state === 'post_evaluating') {
+    pct = evalTotal ? Math.min(100, Math.round(evalDone / evalTotal * 100)) : 0;
+    statValue = evalTotal ? `${evalDone}/${evalTotal}` : 'queued';
+    statLabel = 'eval examples';
+  } else if (state === 'completed' || state === 'rollout_ready') {
+    pct = 100;
+  }
+  const terminal = ['rollout_ready', 'completed', 'failed', 'cancelled'].includes(state);
   const environments = (run.environments || []).map(item => item.metadata?.name || item.identity?.metadata?.name).filter(Boolean);
   const artifacts = (run.artifacts || []).map(artifact =>
     `<a class="btn btn-sm" href="${escapeHtml(artifact.url)}" download>${escapeHtml(artifact.kind)}${artifact.bytes ? ` · ${fmtBytes(artifact.bytes)}` : ''}</a>`
@@ -1185,15 +1207,31 @@ function openEnvRunCard(run) {
     : '';
   const cancel = terminal ? '' : `<button class="btn btn-sm btn-danger" type="button" data-openenv-cancel="${escapeHtml(run.run_id)}">Cancel</button>`;
   const error = run.error ? `<div class="training-card-error">${escapeHtml(run.error)}</div>` : '';
-  return `<div class="training-card ${state === 'failed' ? 'failed' : ''}">
+  const trainingDetail = training
+    ? `<div class="training-card-meta">Trainer · ${escapeHtml(String(training.state || 'unknown'))} · ${Math.round(Number(training.progress || 0) * 100)}%${training.current_loss != null ? ` · loss ${Number(training.current_loss).toFixed(4)}` : ''}${training.epoch != null ? ` · epoch ${Number(training.epoch).toLocaleString()}` : ''}</div>`
+    : '';
+  const evalDetail = evaluations.length
+    ? `<div class="training-card-meta">${evaluations.map(item => `${escapeHtml(item.suite_name)} · ${escapeHtml(String(item.state || 'unknown'))}${item.headline_accuracy != null ? ` · ${(Number(item.headline_accuracy) * 100).toFixed(1)}%` : ''}`).join('<br>')}</div>`
+    : '';
+  const gate = training?.gate_outcome
+    ? `<span class="training-card-type">${escapeHtml(training.gate_outcome)}</span>`
+    : '';
+  const cardState = state === 'failed'
+    ? 'training-card-failed'
+    : terminal
+      ? 'training-card-completed'
+      : 'training-card-running';
+  return `<div class="training-card ${cardState}">
     <div class="training-card-head">
       <div><strong>${run.kind === 'train' ? 'OpenEnv train' : 'OpenEnv rollout'}</strong> <code>${escapeHtml(run.run_id.slice(0, 8))}</code></div>
-      <span class="status-badge status-${escapeHtml(state)}">${escapeHtml(openEnvStateLabel(state))}</span>
+      <span class="training-card-type">${escapeHtml(openEnvStateLabel(state))}</span>${gate}
     </div>
     <div class="training-card-meta">${escapeHtml(run.request?.adapter || 'base')} policy · ${Number(progress.rollouts_completed || 0).toLocaleString()} / ${Number(progress.rollouts_total || 0).toLocaleString()} episodes${environments.length ? ` · ${escapeHtml(environments.join(', '))}` : ''}</div>
+    ${trainingDetail}
+    ${evalDetail}
     <div class="training-card-progress">
       <div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
-      <div class="training-stat"><span class="training-stat-num">${done}/${total}</span><span class="training-stat-label">seed groups</span></div>
+      <div class="training-stat"><span class="training-stat-num">${escapeHtml(statValue)}</span><span class="training-stat-label">${escapeHtml(statLabel)}</span></div>
     </div>
     ${error}
     <div style="display:flex;gap:var(--space-2);flex-wrap:wrap;margin-top:var(--space-3);">${artifacts}${job}${cancel}</div>
@@ -1296,7 +1334,7 @@ document.getElementById('openenv-form')?.addEventListener('submit', async event 
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify(request),
     });
-    if (status) status.textContent = `Run ${run.run_id.slice(0, 8)} accepted. Kiln now owns collection and handoff.`;
+    if (status) status.textContent = `Run ${run.run_id.slice(0, 8)} accepted. Kiln owns it through collection, training, and requested evaluation.`;
     toast(`OpenEnv ${kind} run ${run.run_id.slice(0, 8)} started`, 'ok');
     pollOpenEnvRuns(true);
   } catch (error) {

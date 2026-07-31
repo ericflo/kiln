@@ -29,8 +29,8 @@
     },
     {
       "path": "crates/kiln-server/src/api/training.rs",
-      "max_lines": 6697,
-      "rationale": "The OpenEnv control plane adds only a typed adapter into the authoritative GRPO admission function; its orchestration remains isolated in api/openenv.rs and this exact cap prevents unrelated growth."
+      "max_lines": 6652,
+      "rationale": "Shared training and evaluation cancellation moved into job_cancellation.rs so workflow orchestrators use one executor-owned primitive without expanding the training API; this lower exact cap prevents ownership from drifting back."
     },
     {
       "path": "crates/kiln-server/src/batching_engine.rs",

@@ -24,6 +24,7 @@ pub mod eval_history;
 pub mod execution_provenance;
 pub(crate) mod gpu_coordination;
 pub mod hf_train_cli;
+pub(crate) mod job_cancellation;
 pub mod kv_autoscaler;
 pub mod latency_observability;
 pub mod logging;
