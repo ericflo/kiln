@@ -197,6 +197,7 @@ pub enum OpenEnvRunState {
     Queued,
     Discovering,
     Collecting,
+    Revalidating,
     Submitting,
     RolloutReady,
     TrainingQueued,
@@ -1144,6 +1145,9 @@ impl OpenEnvRunRegistry {
                 }
                 crate::openenv_cli::OpenEnvCollectionStage::Collecting => {
                     OpenEnvRunState::Collecting
+                }
+                crate::openenv_cli::OpenEnvCollectionStage::Revalidating => {
+                    OpenEnvRunState::Revalidating
                 }
             };
             status.progress.groups_completed = progress.groups_completed;

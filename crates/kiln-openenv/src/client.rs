@@ -106,6 +106,15 @@ pub enum OpenEnvClientError {
         expected: &'static str,
         actual: &'static str,
     },
+    #[error(
+        "OpenEnv environment {endpoint} changed identity during the bounded operation: discovery fields {changed_fields:?}; expected schema {expected_schema_sha256}, observed {actual_schema_sha256}"
+    )]
+    EnvironmentIdentityChanged {
+        endpoint: String,
+        expected_schema_sha256: String,
+        actual_schema_sha256: String,
+        changed_fields: Vec<&'static str>,
+    },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -136,6 +145,75 @@ pub struct OpenEnvIdentity {
 pub struct OpenEnvInspection {
     pub identity: OpenEnvIdentity,
     pub schema: OpenEnvSchema,
+}
+
+impl OpenEnvInspection {
+    /// Require a later discovery snapshot to be exactly the same environment
+    /// identity used to generate actions and collect rewards.
+    ///
+    /// The error intentionally names only closed discovery-field labels and
+    /// content digests. Environment-authored metadata or schemas are never
+    /// copied into an error message.
+    pub fn ensure_unchanged(&self, current: &Self) -> Result<(), OpenEnvClientError> {
+        let mut changed_fields = Vec::new();
+        for (changed, field) in [
+            (
+                self.identity.schema != current.identity.schema,
+                "identity.schema",
+            ),
+            (
+                self.identity.client_profile != current.identity.client_profile,
+                "identity.client_profile",
+            ),
+            (
+                self.identity.base_url != current.identity.base_url,
+                "identity.base_url",
+            ),
+            (
+                self.identity.websocket_url != current.identity.websocket_url,
+                "identity.websocket_url",
+            ),
+            (
+                self.identity.authentication != current.identity.authentication,
+                "identity.authentication",
+            ),
+            (
+                self.identity.openapi_version != current.identity.openapi_version,
+                "identity.openapi_version",
+            ),
+            (
+                self.identity.environments != current.identity.environments,
+                "identity.environments",
+            ),
+            (
+                self.identity.metadata != current.identity.metadata,
+                "identity.metadata",
+            ),
+            (
+                self.identity.schema_sha256 != current.identity.schema_sha256,
+                "identity.schema_sha256",
+            ),
+            (self.schema.action != current.schema.action, "schema.action"),
+            (
+                self.schema.observation != current.schema.observation,
+                "schema.observation",
+            ),
+            (self.schema.state != current.schema.state, "schema.state"),
+        ] {
+            if changed {
+                changed_fields.push(field);
+            }
+        }
+        if changed_fields.is_empty() {
+            return Ok(());
+        }
+        Err(OpenEnvClientError::EnvironmentIdentityChanged {
+            endpoint: self.identity.base_url.clone(),
+            expected_schema_sha256: self.identity.schema_sha256.clone(),
+            actual_schema_sha256: current.identity.schema_sha256.clone(),
+            changed_fields,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -470,6 +548,13 @@ impl OpenEnvClient {
             },
             schema,
         })
+    }
+
+    /// Re-read every stable discovery surface and fail if the environment no
+    /// longer has the exact identity captured before a bounded operation.
+    pub async fn revalidate(&self, expected: &OpenEnvInspection) -> Result<(), OpenEnvClientError> {
+        let current = self.inspect().await?;
+        expected.ensure_unchanged(&current)
     }
 
     pub async fn connect(&self) -> Result<OpenEnvSession, OpenEnvClientError> {
@@ -1096,12 +1181,16 @@ mod tests {
     use super::*;
     use axum::{
         Json, Router,
-        extract::Path,
+        extract::{Path, State},
         http::StatusCode as AxumStatusCode,
         response::{IntoResponse, Response},
         routing::{get, post},
     };
     use serde_json::json;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
 
     async fn task_splits(Path(environment): Path<String>) -> Response {
         if environment == "unsupported" {
@@ -1186,6 +1275,79 @@ mod tests {
         (format!("http://{address}/prefix"), server)
     }
 
+    async fn mutable_discovery_fixture() -> (String, Arc<AtomicBool>, tokio::task::JoinHandle<()>) {
+        let changed = Arc::new(AtomicBool::new(false));
+        let app = Router::new()
+            .route("/health", get(|| async { AxumStatusCode::OK }))
+            .route(
+                "/metadata",
+                get(|State(changed): State<Arc<AtomicBool>>| async move {
+                    Json(json!({
+                        "name": "MutableEnvironment",
+                        "description": if changed.load(Ordering::Relaxed) {
+                            "deployment two"
+                        } else {
+                            "deployment one"
+                        },
+                        "version": if changed.load(Ordering::Relaxed) { "2" } else { "1" }
+                    }))
+                }),
+            )
+            .route(
+                "/schema",
+                get(|| async {
+                    Json(json!({
+                        "action": {"type": "object"},
+                        "observation": {"type": "object"},
+                        "state": {"type": "object"}
+                    }))
+                }),
+            )
+            .route(
+                "/list_environments",
+                get(|| async { Json(json!(["mutable"])) }),
+            )
+            .route(
+                "/openapi.json",
+                get(|| async { Json(json!({"info": {"version": "1.0"}})) }),
+            )
+            .with_state(changed.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}"), changed, server)
+    }
+
+    fn inspection_fixture() -> OpenEnvInspection {
+        OpenEnvInspection {
+            identity: OpenEnvIdentity {
+                schema: "kiln.openenv-identity.v1".into(),
+                client_profile: OPENENV_CLIENT_PROFILE.into(),
+                base_url: "https://environment.example/openenv".into(),
+                websocket_url: "wss://environment.example/openenv/ws".into(),
+                authentication: OpenEnvAuthentication::Bearer,
+                openapi_version: Some("1.0".into()),
+                environments: vec!["arcade".into()],
+                metadata: OpenEnvMetadata {
+                    name: "Arcade".into(),
+                    description: "Stable environment".into(),
+                    readme_content: None,
+                    version: Some("17".into()),
+                    author: None,
+                    documentation_url: None,
+                },
+                schema_sha256: format!("sha256:{}", "a".repeat(64)),
+            },
+            schema: OpenEnvSchema {
+                action: json!({"type": "object", "required": ["move"]}),
+                observation: json!({"type": "object"}),
+                state: json!({"type": "object"}),
+            },
+        }
+    }
+
     #[test]
     fn url_derivation_matches_openenv_client_requirement() {
         let client = OpenEnvClient::new("127.0.0.1:8000/").unwrap();
@@ -1198,6 +1360,60 @@ mod tests {
         assert!(OpenEnvClient::new("ftp://example.test").is_err());
         assert!(OpenEnvClient::new("http://token@example.test").is_err());
         assert!(OpenEnvClient::new("http://example.test?token=secret").is_err());
+    }
+
+    #[test]
+    fn environment_identity_revalidation_is_exact_and_bounded() {
+        let expected = inspection_fixture();
+        expected.ensure_unchanged(&expected).unwrap();
+
+        let mut current = expected.clone();
+        current.identity.metadata.description = "secret changed description".into();
+        current.schema.action = json!({"type": "object", "required": ["answer"]});
+        current.identity.schema_sha256 = format!("sha256:{}", "b".repeat(64));
+        let error = expected.ensure_unchanged(&current).unwrap_err();
+        let OpenEnvClientError::EnvironmentIdentityChanged {
+            endpoint,
+            expected_schema_sha256,
+            actual_schema_sha256,
+            changed_fields,
+        } = &error
+        else {
+            panic!("expected environment identity drift, got {error:?}");
+        };
+        assert_eq!(endpoint, "https://environment.example/openenv");
+        assert_eq!(
+            expected_schema_sha256,
+            &format!("sha256:{}", "a".repeat(64))
+        );
+        assert_eq!(actual_schema_sha256, &format!("sha256:{}", "b".repeat(64)));
+        assert_eq!(
+            changed_fields,
+            &[
+                "identity.metadata",
+                "identity.schema_sha256",
+                "schema.action"
+            ]
+        );
+        assert!(!error.to_string().contains("secret changed description"));
+    }
+
+    #[tokio::test]
+    async fn client_revalidation_detects_a_redeployed_discovery_surface() {
+        let (base_url, changed, server) = mutable_discovery_fixture().await;
+        let client = OpenEnvClient::new(base_url).unwrap();
+        let expected = client.inspect().await.unwrap();
+        client.revalidate(&expected).await.unwrap();
+
+        changed.store(true, Ordering::Relaxed);
+        let error = client.revalidate(&expected).await.unwrap_err();
+        assert!(matches!(
+            &error,
+            OpenEnvClientError::EnvironmentIdentityChanged { changed_fields, .. }
+                if changed_fields == &["identity.metadata"]
+        ));
+        assert!(!error.to_string().contains("deployment two"));
+        server.abort();
     }
 
     #[test]

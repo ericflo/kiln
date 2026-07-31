@@ -42,7 +42,7 @@ result. The rest are properties of the capability and your harness.
 | **OpenEnv availability** | does the capability already exist as a stateful OpenEnv server with action schema, observations, `done`, and reward? Inspect it with `kiln openenv inspect` or Training → OpenEnv in the dashboard. | Prefer the native environment loop over duplicating state transitions or reward logic in `rollout.py`. |
 | **OpenEnv task catalog** | does `kiln openenv tasks` report provider-backed splits and bounded rows, or a conforming unsupported result? | Use rows only to inventory dataset coverage. OpenEnv defines no row-to-reset binding; schedule portable training with explicit reset options and deterministic seeds. |
 | **OpenEnv trust boundary** | is the environment public, loopback, or protected by a bearer credential, and is that credential exact-origin scoped? | Use `--credential-env` for direct CLI work or a server-owned `[openenv.credentials.<id>]` handle. Never place tokens in task payloads, manifests, recipes, or receipts. |
-| **OpenEnv held-out plan** | reserve disjoint reset seeds and pin the environment deployment identity before training | OpenEnv promotion evidence must measure paired behavior-vs-candidate returns on unseen tasks, never the training episodes. |
+| **OpenEnv held-out plan** | reserve disjoint reset seeds and pin the environment deployment identity before training | OpenEnv promotion evidence must measure paired behavior-vs-candidate returns on unseen tasks, never the training episodes. Kiln revalidates complete discovery identity after each collection, but the operator still owns immutable deployment between training and held-out runs. |
 | **OpenEnv behavior policy** | does preflight name the exact base-model, inference-config, runtime implementation, and optional adapter content revision that will collect every action? | Keep one identity across the corpus. Kiln rejects drift and revalidates or snapshots the behavior adapter before training, so `no_importance_correction` means demonstrably on-policy rather than merely assumed on-policy. |
 | **OpenEnv terminal diagnosis** | does a failed persisted run expose `kiln.openenv-run-failure.v1` with a closed code, stage, retryability, and hint? | Branch pipeline recovery on the typed failure. `retryable=true` permits a corrected new attempt, never episode resume or reuse of the terminal attempt's idempotency key. |
 | **Reward variance** | sample 20 baseline rollouts on `datasets/train.tasks.jsonl`, compute group variance | < 0.03 → GRPO has no signal. ≥ 0.05 → strong signal filter applies. |
@@ -257,7 +257,8 @@ the model never learns to predict its environment. See
 **Verifier-free mode:** `--no-policy-loss` for paper §5.5 adaptation. ECHO
 gradient flows without policy gradient. Reference cap: `pi-script-fixup`.
 **Common failure modes:** stale pi sessions, schema drift (Pi 0.75.3 `toolResult`
-vs `tool` role), changed OpenEnv action schemas, non-deterministic seeded
+vs `tool` role), `environment_identity_changed` during final OpenEnv
+revalidation, changed OpenEnv action schemas, non-deterministic seeded
 resets, capacity exhaustion, reward-scale mismatch across environments, and
 warning-prefix bleed into env mask. Training-return lift alone is not promotion
 evidence. See

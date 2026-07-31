@@ -366,8 +366,9 @@ OpenEnv RL
   -> inspect identity and action schema
   -> round-robin seed-matched candidate episodes
   -> environment-owned returns
+  -> revalidate complete discovery identity
   -> immutable admitted training contract
-  -> dataset + exact replay + summary v4 receipt
+  -> dataset + exact replay + summary v5 receipt
   -> native GRPO
   -> paired held-out environment evaluation
   -> promote, retain, or reject adapter
@@ -375,8 +376,17 @@ OpenEnv RL
         <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
           Train admission atomically persists <code>kiln.openenv-training-contract.v1</code> with the
           effective GRPO config and optional post-eval suite. Restart, trainer submission, CLI, and
-          dashboard consume that sealed value instead of recomputing defaults; summary v4 embeds it
+          dashboard consume that sealed value instead of recomputing defaults; summary v5 embeds it
           before first artifact publication so a later handoff failure remains auditable.
+        </p>
+        <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
+          After the last episode and before artifact derivation, the run enters
+          <code>revalidating</code> and re-reads every endpoint&rsquo;s complete stable discovery
+          identity. Metadata, advertised names, OpenAPI version, authentication mode, URLs,
+          schema digest, and all action/observation/state schemas must exactly match the initial
+          inspection. A redeploy becomes <code>environment_identity_changed</code> at
+          <code>identity_verification</code>; no mixed-identity corpus is published or trained.
+          Live replay uses the same complete comparison.
         </p>
         <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
           Failure is part of that state machine, not an unstructured side channel. New terminal failures

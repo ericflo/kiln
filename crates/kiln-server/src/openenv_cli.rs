@@ -139,6 +139,7 @@ impl OpenEnvPolicyTransport {
 pub enum OpenEnvCollectionStage {
     Discovering,
     Collecting,
+    Revalidating,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -2441,6 +2442,24 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
         });
     }
 
+    // A collection can outlive an environment deployment. Re-read every
+    // stable discovery surface after the final episode and before deriving or
+    // publishing any artifact, so later sessions cannot be attributed to the
+    // identity captured before a mid-run redeploy.
+    control.publish(OpenEnvCollectionProgress {
+        stage: OpenEnvCollectionStage::Revalidating,
+        groups_completed: groups.len(),
+        groups_total: options.groups,
+        rollouts_completed: records.len(),
+    });
+    control.ensure_active()?;
+    stream::iter(inspections.iter())
+        .map(revalidate_openenv_identity)
+        .buffered(inspections.len())
+        .try_collect::<Vec<_>>()
+        .await?;
+    control.ensure_active()?;
+
     drop(reset_plan);
     retained_budget.replace(reset_plan_bytes, 0, "the consumed reset plan")?;
 
@@ -2524,6 +2543,17 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
         "the completed collection",
     )?;
     Ok(collection)
+}
+
+async fn revalidate_openenv_identity(
+    (environment, expected): &(OpenEnvClient, OpenEnvInspection),
+) -> Result<()> {
+    environment.revalidate(expected).await.with_context(|| {
+        format!(
+            "revalidate OpenEnv environment {} before artifact publication",
+            environment.base_url()
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

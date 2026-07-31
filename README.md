@@ -239,6 +239,14 @@ an action, so slow policies do not lose their non-resumable episode. A timeout,
 malformed or unsolicited application frame, wrong response type, or transport
 failure permanently poisons that socket; Kiln never risks assigning a late
 lock-step response to the wrong action.
+After the final episode, Kiln enters an explicit `revalidating` phase and
+re-reads every stable discovery surface for every endpoint. Metadata, advertised
+environment names, OpenAPI version, authentication mode, URLs, schema digest,
+and all action/observation/state schemas must exactly match the identities that
+started collection. A mid-run redeploy becomes the typed
+`environment_identity_changed` failure at `identity_verification`; mixed-identity
+episodes never reach an artifact or trainer. Exact live replay applies the same
+complete discovery comparison rather than accepting a matching schema alone.
 Collection charges reset data and every action, observation, error, and final
 state against a 512 MiB aggregate retained-representation budget as they
 arrive. Candidate data is moved into the canonical group rather than cloned;

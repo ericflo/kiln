@@ -77,11 +77,12 @@ const THINKING_BUDGET_OUTCOMES: [&str; 9] = [
     "interrupted",
     "unresolved",
 ];
-const OPENENV_FAILURE_STAGES: [&str; 10] = [
+const OPENENV_FAILURE_STAGES: [&str; 11] = [
     "restoration",
     "admission",
     "discovery",
     "collection",
+    "identity_verification",
     "artifact_publication",
     "training_submission",
     "training",
@@ -4003,6 +4004,7 @@ mod tests {
         m.openenv_run_queue_wait_ms_total
             .store(1_250, Ordering::Relaxed);
         m.record_openenv_run_failure("collection", true);
+        m.record_openenv_run_failure("identity_verification", true);
 
         let mut token_closed = test_thinking_budget(true, "request", "server_default");
         token_closed.max_tokens = Some(64);
@@ -4461,6 +4463,9 @@ mod tests {
         assert!(output.contains("kiln_openenv_runs_total{status=\"idempotent_replay\"} 4"));
         assert!(output.contains(
             "kiln_openenv_run_failures_total{stage=\"collection\",retryable=\"true\"} 1"
+        ));
+        assert!(output.contains(
+            "kiln_openenv_run_failures_total{stage=\"identity_verification\",retryable=\"true\"} 1"
         ));
         assert!(
             output.contains(

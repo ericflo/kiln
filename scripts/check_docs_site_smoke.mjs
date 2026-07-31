@@ -1686,6 +1686,11 @@ function validateSftLossRouteDocumentationSourceContract() {
     'Reproducible CI derives the complete published environment matrix from a pinned oracle checkout',
     'a scheduled edge lane repeats that byte-real gate against upstream main',
     'The oracle inventory is never production policy',
+    'revalidate complete discovery identity',
+    'revalidating',
+    'environment_identity_changed',
+    'identity_verification',
+    'no mixed-identity corpus is published or trained',
   ]);
   if (missingArchitectureTerms.length > 0) {
     fail(`docs/site/architecture.html: reader architecture contract missing terms: ${missingArchitectureTerms.join(', ')}`);
@@ -1723,6 +1728,10 @@ function validateSftLossRouteDocumentationSourceContract() {
     'use a new idempotency key',
     'Restore the original bundle or recollect; never edit retained artifacts in place',
     'do not edit the receipt',
+    'environment_identity_changed',
+    'identity_verification',
+    'post-episode revalidating phase',
+    "Kiln published none of that attempt's episodes",
   ]);
   if (missingTroubleshootingTerms.length > 0) {
     fail(`docs/site/troubleshooting.html: OpenEnv diagnostics missing terms: ${missingTroubleshootingTerms.join(', ')}`);
@@ -1770,6 +1779,11 @@ function validateSftLossRouteDocumentationSourceContract() {
     'Every download rechecks the exact byte count and SHA-256 on the same opened file descriptor before streaming',
     'openenv_artifact_integrity_failed',
     'stages beside the destination, rehashes the response, and publishes atomically only after all checks pass',
+    'summary v5',
+    'revalidating',
+    'environment_identity_changed',
+    'identity_verification',
+    'publishes no mixed-identity artifacts',
   ]);
   if (missingApiTerms.length > 0) {
     fail(`docs/site/api.html: retained deep-reference wording missing terms: ${missingApiTerms.join(', ')}`);

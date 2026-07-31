@@ -87,9 +87,15 @@ kiln openenv status <run-id> --follow --json
 
 Bind one stable non-secret idempotency key to each hypothesis attempt. An exact
 retained retry recovers its original run; changed semantics under that key fail
-closed. Run-status v4 exposes bounded FIFO admission. `queued` with
+closed. Run-status v5 exposes bounded FIFO admission. `queued` with
 `admission.queue_position` is accepted work, not a retry signal. Preserve the
 run ID and cancel a superseded queued attempt.
+
+After the final episode, status enters `revalidating` while Kiln requires the
+complete stable discovery identity to match its initial inspection. Treat
+`environment_identity_changed` at `identity_verification` as a discarded
+attempt: pin or stabilize the deployment and start again. No artifact from the
+mixed-identity collection is published or valid pipeline input.
 
 A failed run carries `kiln.openenv-run-failure.v1`. Persist its closed
 `code`, `stage`, `retryable`, and `hint` fields with stage evidence; exact

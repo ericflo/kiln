@@ -1370,6 +1370,10 @@ function openEnvRunCard(run) {
     pct = 0;
     statValue = admission?.queue_position ? `#${Number(admission.queue_position).toLocaleString()}` : 'queued';
     statLabel = 'execution queue';
+  } else if (state === 'revalidating') {
+    pct = 100;
+    statValue = 'checking';
+    statLabel = 'environment identity';
   } else if (state === 'training_queued') {
     pct = 0;
     statValue = 'queued';

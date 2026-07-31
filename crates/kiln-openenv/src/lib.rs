@@ -3,7 +3,8 @@
 //! The crate owns the reusable protocol boundary: HTTP discovery, the exact
 //! stateful `WS /ws` episode loop, tagged rewards, closed error vocabulary,
 //! lock-step framing, policy-inference keepalive pumping, fail-closed session
-//! poisoning, bounded messages, and content-addressed environment identity.
+//! poisoning, bounded messages, content-addressed environment identity, and
+//! exact post-operation discovery-identity revalidation.
 //! Kiln's model rollout and GRPO orchestration live in `kiln-server`, above
 //! this crate.
 

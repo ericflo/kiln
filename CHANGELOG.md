@@ -73,6 +73,13 @@
   scheduled edge lane repeats the dynamically discovered matrix against
   upstream `main`, surfacing additions and protocol drift without putting
   oracle-specific names or policy into production Kiln.
+  Collection now re-reads every endpoint's complete stable discovery identity
+  after its final episode and before artifact derivation. Persisted workflows
+  expose a `revalidating` phase; metadata, advertised names, OpenAPI version,
+  authentication mode, URLs, schema digest, and all schemas must remain exact.
+  Mid-run redeployment fails as typed `environment_identity_changed` at
+  `identity_verification`, publishes no mixed-identity corpus, and uses the same
+  strict comparison during live replay.
 - Corrected the v0.5.1 Vulkan recovery architecture. The recovered route set
   is no longer installed as a renamed global machine-tuned default. Policy v6
   is derived from the selected physical device's reported workgroup geometry,

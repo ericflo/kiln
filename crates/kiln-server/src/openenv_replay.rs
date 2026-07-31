@@ -1107,18 +1107,10 @@ pub async fn replay_openenv(
             .get(index)
             .and_then(|credential| credential.as_deref());
         let client = openenv_client(&expected.identity.base_url, credential_env)?;
-        let actual = client
-            .inspect()
+        client
+            .revalidate(expected)
             .await
-            .with_context(|| format!("inspect replay target {}", client.base_url()))?;
-        anyhow::ensure!(
-            actual.identity.metadata.name == expected.identity.metadata.name
-                && actual.identity.authentication == expected.identity.authentication
-                && actual.identity.schema_sha256 == expected.identity.schema_sha256
-                && actual.schema == expected.schema,
-            "OpenEnv replay target {} identity/schema drifted from the captured environment",
-            client.base_url()
-        );
+            .with_context(|| format!("revalidate replay target {}", client.base_url()))?;
         clients.push(client);
     }
 

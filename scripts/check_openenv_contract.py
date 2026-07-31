@@ -473,6 +473,7 @@ def main() -> int:
         "environment_unavailable",
         "environment_capacity_exhausted",
         "environment_protocol_error",
+        "environment_identity_changed",
         "collection_failed",
         "artifact_publication_failed",
         "training_submission_failed",
@@ -488,6 +489,16 @@ def main() -> int:
         .get("enum", [])
     ) != expected_failure_codes:
         failures.append("OpenEnv run failure code taxonomy is incomplete")
+    if "revalidating" not in (
+        control_plane.get("$defs", {}).get("OpenEnvRunState", {}).get("enum", [])
+    ):
+        failures.append("OpenEnv run lifecycle is missing identity revalidation")
+    if "identity_verification" not in (
+        control_plane.get("$defs", {})
+        .get("OpenEnvRunFailureStage", {})
+        .get("enum", [])
+    ):
+        failures.append("OpenEnv failure stages are missing identity verification")
     failure_fixture = {
         "schema": "kiln.openenv-run-failure.v1",
         "code": "environment_capacity_exhausted",
@@ -554,6 +565,8 @@ def main() -> int:
     for term in [
         "kiln.openenv-run-failure.v1",
         "EnvironmentCapacityExhausted",
+        "EnvironmentIdentityChanged",
+        "IdentityVerification",
         "TrainingEvidenceInvalid",
         "protocol_code",
         "http_status",
@@ -703,9 +716,19 @@ def main() -> int:
         "keep_alive_while",
         "UnsolicitedApplicationMessage",
         "fail_closed",
+        "ensure_unchanged",
+        "EnvironmentIdentityChanged",
+        "pub async fn revalidate",
     ]:
         if term not in client:
             failures.append(f"kiln-openenv client is missing session-lifecycle term {term}")
+    for term in [
+        "OpenEnvCollectionStage::Revalidating",
+        "environment.revalidate(expected)",
+        "before artifact publication",
+    ]:
+        if term not in cli:
+            failures.append(f"openenv_cli.rs is missing identity-revalidation term {term}")
     if "keep_alive_while" not in cli:
         failures.append("openenv_cli.rs does not pump control frames during policy generation")
     for term in [
@@ -731,6 +754,9 @@ def main() -> int:
         "POST /v1/openenv/training/preflight",
         "capacity_reserved: false",
         "kiln.openenv-training-contract.v1",
+        "revalidating",
+        "environment_identity_changed",
+        "identity_verification",
     ]:
         if command not in guide:
             failures.append(f"OpenEnv guide is missing {command!r}")
@@ -742,6 +768,11 @@ def main() -> int:
         "4 MiB",
         "kiln.openenv-run-failure.v1",
         "kiln_openenv_run_failures_total",
+        "revalidating",
+        "environment_identity_changed",
+        "identity_verification",
+        "stable discovery surface",
+        "requires exact equality",
     ]:
         if term not in replay_reference:
             failures.append(f"OpenEnv replay reference is missing {term!r}")

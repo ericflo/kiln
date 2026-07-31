@@ -1090,8 +1090,13 @@ curl -fsS http://localhost:8420/v1/train/opd \
           backend/workload, optimizer, and rank before persistence or environment discovery. Direct clients
           receive that config from a side-effect-free preflight and must submit it unchanged after collection.
           Accepted train status atomically retains <code>kiln.openenv-training-contract.v1</code>;
-          restart and execution use it without recomputing defaults, and summary v4 embeds the same
+          restart and execution use it without recomputing defaults, and summary v5 embeds the same
           settings before artifact publication.
+          After the final episode, status enters <code>revalidating</code> while Kiln re-reads each
+          endpoint&rsquo;s complete stable discovery identity. A metadata, advertised-name, OpenAPI,
+          authentication, URL, digest, or schema mismatch fails as
+          <code>environment_identity_changed</code> at <code>identity_verification</code> and publishes
+          no mixed-identity artifacts.
           Failed workflows retain a bounded <code>kiln.openenv-run-failure.v1</code>
           diagnosis with a closed stage and code, retryability, next-step hint, and exact
           OpenEnv protocol code or HTTP status when the peer supplied one. The legacy
@@ -1106,7 +1111,7 @@ curl -fsS http://localhost:8420/v1/train/opd \
           <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/training/preflight</code> &mdash; validate direct OpenEnv training before collection and return its exact effective GRPO config plus a non-reserving queue/tracked-capacity snapshot. Final submission rechecks live queue and memory.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/runs</code> &mdash; preflight and accept a collect-only or collect-and-train run into bounded FIFO execution. A new run returns 202; the same retained idempotency key and normalized request return the original status with 200; changed reuse returns 409.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/openenv/runs</code> &mdash; list retained runs with progress, terminal evidence, gates, and published artifact manifests.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/openenv/runs/{run_id}</code> &mdash; retrieve one durable run snapshot across collection, training, paired evaluation, completion, failure, or cancellation.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/openenv/runs/{run_id}</code> &mdash; retrieve one durable run snapshot across collection, identity revalidation, training, paired evaluation, completion, failure, or cancellation.</div>
           <div class="endpoint"><span class="method">DELETE</span> <code>/v1/openenv/runs/{run_id}</code> &mdash; immediately cancel queued work or request cooperative cancellation from the active collector, trainer, or evaluator while retaining completed evidence.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/openenv/runs/{run_id}/artifacts/{kind}</code> &mdash; download a published training or paired held-out evaluation artifact by the exact link returned in <code>artifacts</code>.</div>
         </div>

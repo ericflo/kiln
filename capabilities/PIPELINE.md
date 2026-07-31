@@ -324,7 +324,9 @@ An iter is promoted to a stage if ALL hold:
    length, and SHA-256 are independently checked. This includes the run-owned
    `train_receipt` and `adapter_manifest`, whose lineage must agree with
    `training.training_data.openenv`. Training returns cannot
-   substitute for this gate.
+   substitute for this gate. A run that failed `environment_identity_changed`
+   at `identity_verification` has no admissible corpus; stabilize the deployment
+   and start a new attempt with a new idempotency key.
 
 Promotion is mechanical once these pass. Skipping any of them is a process
 violation and the stage is invalid.

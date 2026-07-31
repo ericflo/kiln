@@ -445,6 +445,11 @@ one WS /ws connection per candidate episode
         └── repeat under explicit step/session/data bounds
         │
         ▼
+re-read complete discovery identity for every endpoint
+        ├── exact match → continue to artifact derivation
+        └── drift/unavailable → typed identity-verification failure, publish nothing
+        │
+        ▼
 AgenticGroup JSONL
         ├── Action segments → GRPO policy loss
         ├── Observation segments → ECHO environment loss
@@ -492,7 +497,12 @@ the executor submits from that field, not from request defaults. Direct train
 builds the identical type from its preflight receipt. Every sampled action
 returns the exact base-model, inference-config/runtime, and optional adapter
 content revision. Collection rejects identity drift within an episode or
-corpus; native admission compares that identity with the selected policy.
+corpus; native admission compares that identity with the selected policy. After
+the final episode, the collector enters `revalidating`, re-reads every endpoint's
+complete stable discovery identity and schemas, and requires exact equality
+with the initial inspection before it derives artifacts. A redeploy is retained
+as `environment_identity_changed` at `identity_verification`; no mixed-identity
+corpus is published or submitted.
 Summary v5 embeds both contract and identity before the first artifact
 publication, so failed handoff is still auditable. Under the adapter-mutation
 barrier, execution revalidates the identity and privately snapshots a distinct
@@ -561,7 +571,7 @@ content-addressed replay manifest retains exact reset payloads, reset
 observations, ordered action/result exchanges, and final states. The summary
 links both artifacts by digest. Offline verification cross-checks hashes,
 counts, provenance, and reward arithmetic; live replay also pins the discovered
-schema identity and compares every wire result exactly.
+discovery identity and all schemas before comparing every wire result exactly.
 
 The server's artifact manifest is the publication boundary. A known filename
 inside a run directory is not downloadable until its digest and byte count

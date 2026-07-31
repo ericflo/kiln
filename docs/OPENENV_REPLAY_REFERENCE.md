@@ -108,9 +108,16 @@ Missing, replaced, oversized, symlinked, truncated, or modified files fail with
 `409 openenv_artifact_integrity_failed`; Kiln never serves the drifted bytes.
 Restore the original bundle or recollect instead of editing retained artifacts.
 
-The summary is an audit receipt, not proof that an implementation behind the
-same URL has remained unchanged. Pin an environment image or binary and retain
-its deployment identity for serious experiments.
+After the last episode and before deriving artifacts, collection re-reads every
+stable discovery surface for every endpoint and requires exact equality with
+its initial inspection. Persisted status calls this phase `revalidating`.
+Metadata, advertised names, OpenAPI version, authentication method, URLs,
+schema digest, and action/observation/state schemas are all compared. A mismatch
+publishes no bundle. The summary therefore proves equal discovery identity at
+the collection boundaries; it cannot prove that an implementation behind the
+same URL remained unchanged between those observations or after publication.
+Pin an environment image or binary and retain its deployment identity for
+serious experiments.
 
 ### Operational rollout telemetry
 
@@ -287,8 +294,8 @@ kiln openenv replay --summary openenv.rollout-summary.json
 
 Live replay first performs the complete offline verification. It then:
 
-1. discovers every live target and requires the captured environment name and
-   schema identity;
+1. discovers every live target and requires the complete captured discovery
+   identity and action/observation/state schemas;
 2. opens fresh capacity-aware sessions;
 3. sends the exact effective reset objects and captured actions; and
 4. compares reset observations, observations, tagged rewards, `done`, protocol
@@ -409,6 +416,7 @@ The stable codes are:
 | `environment_unavailable` | Discovery or the stateful transport could not reach a usable peer. |
 | `environment_capacity_exhausted` | Fresh-session acquisition exhausted the bounded capacity wait. |
 | `environment_protocol_error` | The peer violated or terminally rejected the advertised protocol. |
+| `environment_identity_changed` | Final discovery revalidation found a mid-collection deployment change; no artifacts were published. |
 | `collection_failed` | Episode collection or policy execution failed before a complete corpus existed. |
 | `artifact_publication_failed` | A complete collection could not publish its fail-closed artifact bundle. |
 | `training_submission_failed` | Native GRPO rejected or lost the training handoff. |
@@ -426,6 +434,10 @@ the typed diagnosis directly. Prometheus exports
 `kiln_openenv_run_failures_total{stage="...",retryable="true|false"}` over a
 fixed stage × retryability matrix; endpoint, message, code payload, and run ID
 cardinality cannot leak into the metric.
+
+Identity drift uses stage `identity_verification`. It is retryable only as a
+new attempt after the environment deployment is stable or pinned; the completed
+episode sockets and mixed candidate set are never resumed or salvaged.
 
 ## Training admission
 
@@ -559,6 +571,12 @@ receipt counters before changing the budget.
 **Replay reports drift.** Confirm that the same environment build, task data,
 and reset semantics are deployed at the captured URL. Stable schema identity
 does not imply stable behavior.
+
+**A run fails with `environment_identity_changed`.** The environment's stable
+HTTP discovery identity changed between initial inspection and the post-episode
+`revalidating` phase. Pin or stabilize the deployment, inspect it again, and
+submit a new run with a new idempotency key. Kiln deliberately publishes none
+of the completed episodes from that attempt.
 
 **A protected environment returns 401 or rejects the WebSocket upgrade.**
 Confirm that the configured credential origin exactly matches the URL's

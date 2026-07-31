@@ -195,7 +195,12 @@ adapter; their text actions flow unchanged end to end.
 
 Each rollout carries `kiln.openenv-rollout.v1`: environment, schema, reset,
 seed, outcome, and exact behavior policy. Native collection rejects policy
-drift, and malformed identity fails closed.
+drift, and malformed identity fails closed. After its last episode and before
+artifact derivation, collection re-reads health, metadata, environment names,
+OpenAPI version, and all schemas for every endpoint. Exact discovery equality
+is required. Persisted status exposes this as `revalidating`; drift returns
+`environment_identity_changed` at `identity_verification` and publishes no
+mixed-deployment corpus.
 
 Native GRPO lifts episodes into `kiln.openenv-training-data.v1`. Inline and
 JSONL validators require coherent group identity, rewards, schemas, and one
@@ -207,7 +212,9 @@ and submission. Collection charges each turn against a
 512 MiB aggregate retained-representation budget. Reset files are prebounded;
 dataset, replay, and summary each stay under 256 MiB.
 Only manifest-declared artifacts download; each request rechecks bytes and SHA-256.
-Exhaustion publishes no partial bundle. Pin deployments. See the
+Exhaustion publishes no partial bundle. Final revalidation proves the deployment
+identity was equal at the collection boundaries, not that the URL will remain
+immutable later, so pin deployments. See the
 [replay and recovery reference](OPENENV_REPLAY_REFERENCE.md) for artifact and drift boundaries.
 
 Prometheus accumulates published episode terminations, recoverable errors,

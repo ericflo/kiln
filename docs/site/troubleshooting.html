@@ -1007,13 +1007,14 @@ kiln adapters list --url http://gpu-box:8420</code></pre>
         <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
           <div>
             <div class="label mb-2">Symptom</div>
-            <p>Discovery fails; admission rejects reset options; collection remains capacity-waiting; retained data reaches its aggregate budget; artifact download reports <code>openenv_artifact_integrity_failed</code>; slow policy inference loses a socket; or <code>kiln openenv verify</code> reports identity, digest, reward, or reset-plan drift.</p>
+            <p>Discovery fails; admission rejects reset options; collection remains capacity-waiting; final status reports <code>environment_identity_changed</code>; retained data reaches its aggregate budget; artifact download reports <code>openenv_artifact_integrity_failed</code>; slow policy inference loses a socket; or <code>kiln openenv verify</code> reports identity, digest, reward, or reset-plan drift.</p>
           </div>
           <div>
             <div class="label mb-2">Check</div>
             <ul class="list-disc pl-5">
               <li>Run <code>kiln openenv inspect --environment URL</code>, then inspect <code>kiln openenv status RUN_ID</code> and server metrics.</li>
               <li>For a failed run, read <code>failure.code</code>, <code>failure.stage</code>, <code>failure.retryable</code>, and <code>failure.hint</code>. Exact <code>protocol_code</code> or <code>http_status</code> evidence appears only when the environment supplied it.</li>
+              <li><code>environment_identity_changed</code> at <code>identity_verification</code> means stable discovery changed between initial inspection and the post-episode <code>revalidating</code> phase. Kiln published none of that attempt&rsquo;s episodes.</li>
               <li>Use one shared reset object, or exactly one <code>environment_reset_options</code> object per URL; groups must cover every endpoint.</li>
               <li>Protected origins need an exact-origin credential; remote server runs require explicit operator policy and HTTPS.</li>
               <li>Inspect server logs for WebSocket timeouts or unsolicited frames. Kiln pumps Ping/Pong while inference is pending and poisons ambiguous lock-step sessions.</li>
@@ -1023,7 +1024,7 @@ kiln adapters list --url http://gpu-box:8420</code></pre>
           </div>
           <div>
             <div class="label mb-2">Fix</div>
-            <p>Correct the URL, credential, aligned reset plan, or group count. Reduce concurrency or raise the bounded capacity wait when the environment reports saturation. <code>retryable=true</code> authorizes a new attempt after the stated correction, never in-place episode resume; use a new idempotency key because a retained key resolves to its original run. Keep dataset, replay, and summary together; a verification mismatch means restore the original bundle or recollect—do not edit the receipt. Then use live <code>replay</code> only after offline verification passes.</p>
+            <p>Correct the URL, credential, aligned reset plan, or group count. Pin or stabilize an environment deployment that changed identity, inspect it again, and recollect. Reduce concurrency or raise the bounded capacity wait when the environment reports saturation. <code>retryable=true</code> authorizes a new attempt after the stated correction, never in-place episode resume; use a new idempotency key because a retained key resolves to its original run. Keep dataset, replay, and summary together; a verification mismatch means restore the original bundle or recollect—do not edit the receipt. Then use live <code>replay</code> only after offline verification passes.</p>
           </div>
         </div>
         <p class="mt-5 text-sm" style="color: var(--fg-mute);">

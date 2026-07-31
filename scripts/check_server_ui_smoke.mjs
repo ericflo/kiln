@@ -406,6 +406,8 @@ function checkTrainingOptimizerSupportContract(appSource, indexSource, demoSourc
     'request.environment_eval = {',
     'environmentEvaluation?.evidence',
     "state === 'environment_evaluating'",
+    "state === 'revalidating'",
+    "statLabel = 'environment identity'",
     'exact_sign_test_p_value',
   ]) {
     if (!appSource.includes(term)) fail(`OpenEnv held-out evaluation UI is missing ${term}`);

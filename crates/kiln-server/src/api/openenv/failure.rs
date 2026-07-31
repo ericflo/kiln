@@ -29,6 +29,7 @@ pub enum OpenEnvRunFailureStage {
     Admission,
     Discovery,
     Collection,
+    IdentityVerification,
     ArtifactPublication,
     TrainingSubmission,
     Training,
@@ -44,6 +45,7 @@ impl OpenEnvRunFailureStage {
             Self::Admission => "admission",
             Self::Discovery => "discovery",
             Self::Collection => "collection",
+            Self::IdentityVerification => "identity_verification",
             Self::ArtifactPublication => "artifact_publication",
             Self::TrainingSubmission => "training_submission",
             Self::Training => "training",
@@ -64,6 +66,7 @@ pub enum OpenEnvRunFailureCode {
     EnvironmentUnavailable,
     EnvironmentCapacityExhausted,
     EnvironmentProtocolError,
+    EnvironmentIdentityChanged,
     CollectionFailed,
     ArtifactPublicationFailed,
     TrainingSubmissionFailed,
@@ -83,6 +86,7 @@ impl OpenEnvRunFailureCode {
             Self::EnvironmentUnavailable => "environment_unavailable",
             Self::EnvironmentCapacityExhausted => "environment_capacity_exhausted",
             Self::EnvironmentProtocolError => "environment_protocol_error",
+            Self::EnvironmentIdentityChanged => "environment_identity_changed",
             Self::CollectionFailed => "collection_failed",
             Self::ArtifactPublicationFailed => "artifact_publication_failed",
             Self::TrainingSubmissionFailed => "training_submission_failed",
@@ -183,6 +187,7 @@ fn failure_stage(state: OpenEnvRunState, collection_complete: bool) -> OpenEnvRu
             OpenEnvRunFailureStage::ArtifactPublication
         }
         OpenEnvRunState::Collecting => OpenEnvRunFailureStage::Collection,
+        OpenEnvRunState::Revalidating => OpenEnvRunFailureStage::IdentityVerification,
         OpenEnvRunState::Submitting => OpenEnvRunFailureStage::TrainingSubmission,
         OpenEnvRunState::TrainingQueued | OpenEnvRunState::TrainingRunning => {
             OpenEnvRunFailureStage::Training
@@ -203,6 +208,13 @@ fn client_failure(
     occurred_unix_ms: u64,
 ) -> OpenEnvRunFailure {
     let (code, retryable, hint, protocol_code, http_status) = match error {
+        OpenEnvClientError::EnvironmentIdentityChanged { .. } => (
+            OpenEnvRunFailureCode::EnvironmentIdentityChanged,
+            true,
+            "Stabilize or pin the OpenEnv deployment, inspect it again, and submit a new run; mixed-identity episodes are never published.",
+            None,
+            None,
+        ),
         OpenEnvClientError::Protocol(protocol)
             if protocol.code == OpenEnvErrorCode::CapacityReached =>
         {
@@ -321,6 +333,11 @@ fn fallback_semantics(
             true,
             "Inspect the environment, policy, and retained progress, then submit a new run; episodes cannot be resumed.",
         ),
+        OpenEnvRunFailureStage::IdentityVerification => (
+            OpenEnvRunFailureCode::EnvironmentUnavailable,
+            true,
+            "Restore a stable OpenEnv discovery endpoint and submit a new run; collected episodes are never published without final identity verification.",
+        ),
         OpenEnvRunFailureStage::ArtifactPublication => (
             OpenEnvRunFailureCode::ArtifactPublicationFailed,
             false,
@@ -419,6 +436,27 @@ mod tests {
         assert_eq!(failure.code, OpenEnvRunFailureCode::TrainingEvidenceInvalid);
         assert_eq!(failure.stage, OpenEnvRunFailureStage::Training);
         assert!(!failure.retryable);
+    }
+
+    #[test]
+    fn environment_identity_drift_has_a_distinct_revalidation_failure() {
+        let error = anyhow::Error::new(OpenEnvClientError::EnvironmentIdentityChanged {
+            endpoint: "https://environment.example/openenv".into(),
+            expected_schema_sha256: format!("sha256:{}", "a".repeat(64)),
+            actual_schema_sha256: format!("sha256:{}", "b".repeat(64)),
+            changed_fields: vec!["identity.metadata", "schema.action"],
+        });
+        let failure =
+            OpenEnvRunFailure::from_error(OpenEnvRunState::Revalidating, false, &error, 22);
+        assert_eq!(
+            failure.code,
+            OpenEnvRunFailureCode::EnvironmentIdentityChanged
+        );
+        assert_eq!(failure.stage, OpenEnvRunFailureStage::IdentityVerification);
+        assert!(failure.retryable);
+        assert!(failure.hint.contains("mixed-identity episodes"));
+        assert_eq!(failure.protocol_code, None);
+        assert_eq!(failure.http_status, None);
     }
 
     #[test]
