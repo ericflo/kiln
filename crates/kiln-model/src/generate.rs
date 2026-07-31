@@ -5750,65 +5750,84 @@ impl ModelRunner {
             .collect();
 
         let started = std::time::Instant::now();
-        let hip_graph_single_row_ready = row_count == 1
-            && paged_decode_replay_primitive_enabled(
-                self.backend.as_ref(),
-                &self.config,
-                1,
-                ReplayNativePrimitive::HipGraph,
-            )
-            && self
-                .rocm_graph
-                .lock()
-                .map(|graph| graph.is_enabled())
-                .unwrap_or(false);
-        let (hidden, graph_capture_duration, graph_replay_duration) = if hip_graph_single_row_ready
-        {
-            let pc_guard = lock_paged_cache(paged_cache)?;
-            let mut runner = self
-                .rocm_graph
-                .lock()
-                .map_err(|e| anyhow::anyhow!("failed to lock ROCm graph runner: {e}"))?;
-            let profiled = runner
-                .profile_invocation(|runner| {
-                    runner.decode_step_paged_hidden(
+        let hip_graph_ready = paged_decode_replay_primitive_enabled(
+            self.backend.as_ref(),
+            &self.config,
+            row_count,
+            ReplayNativePrimitive::HipGraph,
+        ) && self
+            .rocm_graph
+            .lock()
+            .map(|graph| graph.is_enabled())
+            .unwrap_or(false);
+        let (hidden, graph_capture_duration, graph_replay_duration) =
+            if row_count == 1 && hip_graph_ready {
+                let pc_guard = lock_paged_cache(paged_cache)?;
+                let mut runner = self
+                    .rocm_graph
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("failed to lock ROCm graph runner: {e}"))?;
+                let profiled = runner
+                    .profile_invocation(|runner| {
+                        runner.decode_step_paged_hidden(
+                            &*self.backend,
+                            input_tokens[0],
+                            &self.weights,
+                            &self.config,
+                            pc_guard,
+                            &block_tables[0],
+                            sequence_lengths[0],
+                            &mut *linear_states[0],
+                            self.active_lora.as_ref(),
+                            row_ids[0],
+                        )
+                    })
+                    .context("behavior-logprob ROCm graph hidden row failed")?;
+                (
+                    profiled.value,
+                    profiled.capture_duration,
+                    profiled.replay_duration,
+                )
+            } else if hip_graph_ready {
+                // RL rollout collection captures behavior logprobs for every
+                // sampled token. That accounting must not exile multi-row
+                // cohorts from the same profiled graph path used by ordinary
+                // sampled decode.
+                let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
+                let profiled = self
+                    .decode_hidden_paged_contiguous_batch_with_ids_profiled(
+                        &input_tokens,
+                        paged_cache,
+                        &block_table_refs,
+                        &sequence_lengths,
+                        &mut linear_states,
+                        Some(&row_ids),
+                    )
+                    .context("behavior-logprob profiled batched decode forward pass failed")?;
+                (
+                    profiled.value,
+                    profiled.capture_duration,
+                    profiled.replay_duration,
+                )
+            } else {
+                let pc_guard = lock_paged_cache(paged_cache)?;
+                (
+                    model_forward_paged_batched_decode_hidden(
                         &*self.backend,
-                        input_tokens[0],
+                        &input_tokens,
                         &self.weights,
                         &self.config,
                         pc_guard,
-                        &block_tables[0],
-                        sequence_lengths[0],
-                        &mut *linear_states[0],
+                        &block_tables,
+                        &sequence_lengths,
+                        &mut linear_states,
                         self.active_lora.as_ref(),
-                        row_ids[0],
                     )
-                })
-                .context("behavior-logprob ROCm graph hidden row failed")?;
-            (
-                profiled.value,
-                profiled.capture_duration,
-                profiled.replay_duration,
-            )
-        } else {
-            let pc_guard = lock_paged_cache(paged_cache)?;
-            (
-                model_forward_paged_batched_decode_hidden(
-                    &*self.backend,
-                    &input_tokens,
-                    &self.weights,
-                    &self.config,
-                    pc_guard,
-                    &block_tables,
-                    &sequence_lengths,
-                    &mut linear_states,
-                    self.active_lora.as_ref(),
+                    .context("behavior-logprob batched decode forward pass failed")?,
+                    None,
+                    None,
                 )
-                .context("behavior-logprob batched decode forward pass failed")?,
-                None,
-                None,
-            )
-        };
+            };
         drop(linear_states);
         let sampling_started = Instant::now();
         let sampling_result = (|| -> Result<Vec<SampledToken>> {

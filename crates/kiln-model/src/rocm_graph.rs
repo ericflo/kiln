@@ -9367,6 +9367,7 @@ mod tests {
             kiln_tensor::rocm_is_available(),
             "ROCm qualification requested but no ROCm device is available"
         );
+        crate::install_rocm_kernel_policy(crate::RocmKernelPolicy::native_default())?;
 
         let device = Device::Rocm(0);
         configure_rocm_graph_test_memory_governor(&device);
