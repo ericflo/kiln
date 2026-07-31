@@ -164,6 +164,8 @@ CONTROL_ENTRYPOINTS = (
     "OpenEnvRunStatus",
     "OpenEnvTaskCatalogRequest",
     "OpenEnvTaskCatalogResponse",
+    "OpenEnvTrainingPreflightReceipt",
+    "OpenEnvTrainingPreflightRequest",
     "PublishPayload",
     "PublishToLibraryResponse",
     "QueueResponse",
@@ -185,14 +187,14 @@ CONTROL_COMPONENT_TYPES = {name: name for name in CONTROL_ENTRYPOINTS}
 CONTROL_COMPONENT_TYPES["CorrectionRowInput"] = "CorrectionRow"
 CONTROL_COMPONENT_TYPES["Vec_TrainingStatus"] = "Vec<TrainingStatus>"
 EXPECTED_OBSERVABILITY_DEFINITION_COUNT = 172
-EXPECTED_CONTROL_PLANE_DEFINITION_COUNT = 152
+EXPECTED_CONTROL_PLANE_DEFINITION_COUNT = 155
 EXPECTED_COMPONENT_SCHEMA_COUNTS = {
-    "complete": 141,
+    "complete": 144,
     "migration_pending": 0,
-    "total": 141,
+    "total": 144,
 }
 HTTP_METHODS = ("get", "post", "put", "patch", "delete")
-EXPECTED_METHOD_COUNTS = {"DELETE": 13, "GET": 57, "POST": 51, "PUT": 1}
+EXPECTED_METHOD_COUNTS = {"DELETE": 13, "GET": 57, "POST": 52, "PUT": 1}
 EXPECTED_TAG_COUNTS = {
     "adapters": 9,
     "agents": 16,
@@ -202,7 +204,7 @@ EXPECTED_TAG_COUNTS = {
     "inference": 3,
     "library": 3,
     "observability": 8,
-    "openenv": 7,
+    "openenv": 8,
     "preflight": 5,
     "recipes": 2,
     "teachers": 5,
@@ -316,8 +318,8 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
     expected_root = {
         "openapi": "3.1.1",
         "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
-        "x-kiln-path-count": 108,
-        "x-kiln-operation-count": 122,
+        "x-kiln-path-count": 109,
+        "x-kiln-operation-count": 123,
         "x-kiln-method-counts": EXPECTED_METHOD_COUNTS,
         "x-kiln-tag-counts": EXPECTED_TAG_COUNTS,
         "x-kiln-field-schema-status": "complete",
@@ -367,8 +369,8 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
     if not isinstance(paths, dict):
         errors.append("paths must be an object")
         return errors
-    if len(paths) != 108:
-        errors.append(f"paths must contain 108 entries, got {len(paths)}")
+    if len(paths) != 109:
+        errors.append(f"paths must contain 109 entries, got {len(paths)}")
     if list(paths) != sorted(paths):
         errors.append("paths must be sorted lexicographically")
 
@@ -535,8 +537,8 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
         if path in EXPLICIT_ERROR_PATHS and "default" in responses:
             errors.append(f"{label}: explicit error responses must not retain a fictitious default error")
 
-    if operation_count != 122:
-        errors.append(f"operation count must be 122, got {operation_count}")
+    if operation_count != 123:
+        errors.append(f"operation count must be 123, got {operation_count}")
     if dict(sorted(method_counts.items())) != EXPECTED_METHOD_COUNTS:
         errors.append(f"observed method counts drifted: {dict(sorted(method_counts.items()))}")
     if dict(sorted(tag_counts.items())) != EXPECTED_TAG_COUNTS:

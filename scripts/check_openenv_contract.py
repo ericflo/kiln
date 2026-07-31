@@ -360,6 +360,17 @@ def main() -> int:
         if term not in api_source:
             failures.append(f"api/openenv.rs is missing manifest-bound artifact term {term}")
     for term in [
+        '"/v1/openenv/training/preflight"',
+        "preflight_training_inner",
+        "materialize_openenv_grpo_config",
+        "validate_openenv_training_contract",
+        "capacity_reserved: false",
+        "openenv_training_preflights_accepted",
+        "openenv_training_preflights_rejected",
+    ]:
+        if term not in api_source:
+            failures.append(f"api/openenv.rs is missing direct training-preflight term {term}")
+    for term in [
         "OpenEnvCommands::Start",
         "OpenEnvCommands::Artifact",
         "MAX_OPENENV_RUN_REQUEST_BYTES",
@@ -375,6 +386,39 @@ def main() -> int:
     ]:
         if term not in cli:
             failures.append(f"openenv_cli.rs is missing persisted lifecycle term {term}")
+    for term in [
+        "kiln.openenv-training-preflight.v1",
+        "preflight_openenv_training(&options).await?",
+        '"{}/v1/openenv/training/preflight"',
+        "&preflight.effective_config",
+        "!receipt.capacity_reserved",
+    ]:
+        if term not in cli:
+            failures.append(f"openenv_cli.rs is missing direct training-preflight term {term}")
+    preflight_operation = http_api["paths"].get(
+        "/v1/openenv/training/preflight", {}
+    ).get("post", {})
+    preflight_request = (
+        preflight_operation.get("requestBody", {})
+        .get("content", {})
+        .get("application/json", {})
+        .get("schema")
+    )
+    preflight_response = (
+        preflight_operation.get("responses", {})
+        .get("200", {})
+        .get("content", {})
+        .get("application/json", {})
+        .get("schema")
+    )
+    if preflight_request != {
+        "$ref": "#/components/schemas/OpenEnvTrainingPreflightRequest"
+    }:
+        failures.append("OpenEnv preflight OpenAPI request schema is missing")
+    if preflight_response != {
+        "$ref": "#/components/schemas/OpenEnvTrainingPreflightReceipt"
+    }:
+        failures.append("OpenEnv preflight OpenAPI receipt schema is missing")
     expected_artifact_kinds = {
         "dataset",
         "replay",
@@ -449,6 +493,8 @@ def main() -> int:
         "512 MiB aggregate retained-representation budget",
         "Only manifest-declared artifacts download; each request rechecks bytes and SHA-256.",
         "Exhaustion publishes no partial bundle",
+        "POST /v1/openenv/training/preflight",
+        "capacity_reserved: false",
     ]:
         if command not in guide:
             failures.append(f"OpenEnv guide is missing {command!r}")
@@ -456,7 +502,7 @@ def main() -> int:
     if failures:
         raise SystemExit("\n".join(failures))
     print(
-        "OpenEnv bounded collection, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, and live-replay contracts match"
+        "OpenEnv training preflight, bounded collection, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, and live-replay contracts match"
     )
     return 0
 

@@ -1,15 +1,18 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use kiln_server::openenv_cli::{OpenEnvRolloutOptions, OpenEnvTrainOptions, run_openenv_train};
 use kiln_server::openenv_replay::{replay_openenv, verify_openenv_artifacts};
-use kiln_train::OpenEnvEpisodeTerminationV1;
+use kiln_train::{GrpoConfig, OpenEnvEpisodeTerminationV1};
 use serde_json::{Value, json};
 
 #[derive(Clone, Default)]
 struct FakeKilnState {
+    training_preflight: Arc<Mutex<Option<Value>>>,
     training_submission: Arc<Mutex<Option<Value>>>,
+    chat_requests: Arc<AtomicUsize>,
 }
 
 /// End-to-end proof that the native collector can learn from recoverable
@@ -22,6 +25,7 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
         .expect("KILN_OPENENV_INTEROP_BANDIT_URL must identify the live bandit");
     let state = FakeKilnState::default();
     let app = Router::new()
+        .route("/v1/openenv/training/preflight", post(fake_preflight))
         .route("/v1/chat/completions", post(fake_chat))
         .route("/v1/train/grpo", post(fake_train))
         .with_state(state.clone());
@@ -74,6 +78,7 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
     assert_eq!(summary.rollout_count, 4);
     assert_eq!(summary.stats.recoverable_protocol_error_count, 4);
     assert_eq!(summary.stats.protocol_error_count, 0);
+    assert!(state.chat_requests.load(Ordering::Relaxed) > 0);
     assert!(
         summary.stats.capacity_retry_count >= 1,
         "max-sessions=1 must exercise capacity-aware acquisition"
@@ -83,6 +88,10 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
             && record.steps == 2
             && record.recoverable_protocol_errors == 1
     }));
+    assert_eq!(
+        state.training_preflight.lock().unwrap().as_ref().unwrap()["training_config"]["lora_rank"],
+        8
+    );
     assert_eq!(
         summary
             .training_submission
@@ -97,6 +106,20 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
         .unwrap()
         .clone()
         .expect("GRPO submission was captured");
+    let preflight_request = state
+        .training_preflight
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("training preflight was captured");
+    let submitted_config: GrpoConfig = serde_json::from_value(submitted["config"].clone()).unwrap();
+    let preflight_config: GrpoConfig =
+        serde_json::from_value(fake_effective_config(&preflight_request)).unwrap();
+    assert_eq!(
+        serde_json::to_value(submitted_config).unwrap(),
+        serde_json::to_value(preflight_config).unwrap(),
+        "the CLI must submit the complete server-owned effective config unchanged"
+    );
     assert_eq!(
         submitted["config"]["behavior_policy"],
         "no_importance_correction"
@@ -159,7 +182,113 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
     server.abort();
 }
 
-async fn fake_chat(Json(body): Json<Value>) -> Json<Value> {
+#[tokio::test]
+async fn direct_train_rejection_happens_before_environment_contact_or_artifacts() {
+    let app = Router::new().route(
+        "/v1/openenv/training/preflight",
+        post(|| async {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "code": "training_invalid_request",
+                        "message": "deliberate pre-collection rejection"
+                    }
+                })),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let dataset = directory.path().join("must-not-exist.jsonl");
+    let replay = directory.path().join("must-not-exist.replay.json");
+    let summary = directory.path().join("must-not-exist.summary.json");
+    let error = run_openenv_train(OpenEnvTrainOptions {
+        rollout: OpenEnvRolloutOptions {
+            kiln_url: format!("http://{address}"),
+            environment_urls: vec!["http://127.0.0.1:9".to_string()],
+            credential_envs: Vec::new(),
+            adapter: "base".to_string(),
+            groups: 1,
+            group_size: 1,
+            seed_start: 0,
+            reset_options: None,
+            reset_options_value: None,
+            environment_reset_options: Vec::new(),
+            environment_reset_options_values: Vec::new(),
+            max_steps: 1,
+            concurrency: 1,
+            max_action_tokens: 16,
+            temperature: 0.0,
+            thinking: false,
+            protocol_error_reward: -1.0,
+            max_recoverable_errors: 0,
+            capacity_wait_seconds: 1,
+            output: dataset.clone(),
+            replay_output: replay.clone(),
+            summary_output: summary.clone(),
+        },
+        output_adapter: "rejected-agent".to_string(),
+        lora_rank: Some(8),
+        auto_load: true,
+    })
+    .await
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("before collection"), "{message}");
+    assert!(
+        message.contains("deliberate pre-collection rejection"),
+        "{message}"
+    );
+    assert!(!dataset.exists());
+    assert!(!replay.exists());
+    assert!(!summary.exists());
+    server.abort();
+}
+
+async fn fake_preflight(
+    State(state): State<FakeKilnState>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    *state.training_preflight.lock().unwrap() = Some(body.clone());
+    let config = fake_effective_config(&body);
+    let mut receipt = json!({
+        "schema": "kiln.openenv-training-preflight.v1",
+        "effective_config": config,
+        "capacity": {
+            "checked_unix_ms": 1,
+            "queued_jobs": 0,
+            "max_queued_jobs": 8,
+            "tracked_jobs": 0,
+            "max_tracked_jobs": 32
+        },
+        "capacity_reserved": false
+    });
+    if let Some(post_eval) = body.get("post_eval") {
+        receipt["post_eval"] = post_eval.clone();
+    }
+    Json(receipt)
+}
+
+fn fake_effective_config(body: &Value) -> Value {
+    let mut config = body["training_config"].clone();
+    config["output_name"] = body["output_adapter"].clone();
+    config["auto_load"] = body["auto_load"].clone();
+    config["behavior_policy"] = Value::from("no_importance_correction");
+    config["base_adapter"] = Value::Null;
+    config
+}
+
+async fn fake_chat(State(state): State<FakeKilnState>, Json(body): Json<Value>) -> Json<Value> {
+    assert!(
+        state.training_preflight.lock().unwrap().is_some(),
+        "OpenEnv training must preflight before its first policy request"
+    );
+    state.chat_requests.fetch_add(1, Ordering::Relaxed);
     assert!(
         body["messages"].as_array().is_some_and(|messages| {
             messages.iter().any(|message| {
@@ -191,6 +320,7 @@ async fn fake_chat(Json(body): Json<Value>) -> Json<Value> {
 }
 
 async fn fake_train(State(state): State<FakeKilnState>, Json(body): Json<Value>) -> Json<Value> {
+    assert!(state.training_preflight.lock().unwrap().is_some());
     *state.training_submission.lock().unwrap() = Some(body);
     Json(json!({
         "job_id": "openenv-e2e-job",

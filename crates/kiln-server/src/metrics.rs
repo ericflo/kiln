@@ -220,6 +220,8 @@ pub struct Metrics {
     // OpenEnv orchestration counters
     pub openenv_runs_started: AtomicU64,
     pub openenv_training_preflight_rejected: AtomicU64,
+    pub openenv_training_preflights_accepted: AtomicU64,
+    pub openenv_training_preflights_rejected: AtomicU64,
     pub openenv_run_idempotent_replays: AtomicU64,
     pub openenv_runs_resumed: AtomicU64,
     pub openenv_runs_admitted: AtomicU64,
@@ -290,6 +292,8 @@ impl Metrics {
             training_opd_cancelled: AtomicU64::new(0),
             openenv_runs_started: AtomicU64::new(0),
             openenv_training_preflight_rejected: AtomicU64::new(0),
+            openenv_training_preflights_accepted: AtomicU64::new(0),
+            openenv_training_preflights_rejected: AtomicU64::new(0),
             openenv_run_idempotent_replays: AtomicU64::new(0),
             openenv_runs_resumed: AtomicU64::new(0),
             openenv_runs_admitted: AtomicU64::new(0),
@@ -3091,6 +3095,27 @@ impl Metrics {
         );
 
         out.push_str(
+            "# HELP kiln_openenv_training_preflights_total Side-effect-free OpenEnv training admission checks before environment collection.\n",
+        );
+        out.push_str("# TYPE kiln_openenv_training_preflights_total counter\n");
+        prom_counter(
+            &mut out,
+            "kiln_openenv_training_preflights_total",
+            "status",
+            "accepted",
+            self.openenv_training_preflights_accepted
+                .load(Ordering::Relaxed),
+        );
+        prom_counter(
+            &mut out,
+            "kiln_openenv_training_preflights_total",
+            "status",
+            "rejected",
+            self.openenv_training_preflights_rejected
+                .load(Ordering::Relaxed),
+        );
+
+        out.push_str(
             "# HELP kiln_openenv_runs_total Server-owned OpenEnv workflow events and lifecycle outcomes.\n",
         );
         out.push_str("# TYPE kiln_openenv_runs_total counter\n");
@@ -3915,6 +3940,10 @@ mod tests {
         m.openenv_runs_admitted.store(3, Ordering::Relaxed);
         m.openenv_training_preflight_rejected
             .store(5, Ordering::Relaxed);
+        m.openenv_training_preflights_accepted
+            .store(6, Ordering::Relaxed);
+        m.openenv_training_preflights_rejected
+            .store(7, Ordering::Relaxed);
         m.openenv_run_idempotent_replays.store(4, Ordering::Relaxed);
         m.openenv_run_queue_wait_ms_total
             .store(1_250, Ordering::Relaxed);
@@ -4370,6 +4399,8 @@ mod tests {
         assert!(
             output.contains("kiln_openenv_runs_total{status=\"training_preflight_rejected\"} 5")
         );
+        assert!(output.contains("kiln_openenv_training_preflights_total{status=\"accepted\"} 6"));
+        assert!(output.contains("kiln_openenv_training_preflights_total{status=\"rejected\"} 7"));
         assert!(output.contains("kiln_openenv_runs_total{status=\"resumed\"} 2"));
         assert!(output.contains("kiln_openenv_runs_total{status=\"idempotent_replay\"} 4"));
         assert!(output.contains("kiln_openenv_run_queue_wait_seconds_total 1.250"));

@@ -212,7 +212,10 @@ position as accepted work, retain the run ID, and cancel obsolete hypotheses.
 Attach an installed static `post_eval` suite when the stage also has a
 capability-level blind eval. Kiln preflights the exact effective GRPO config,
 behavior adapter, suite, backend/workload, optimizer, and rank before it
-persists a train run or opens an environment session. A synchronous rejection
+persists a train run or opens an environment session. Direct
+`kiln openenv train` obtains that exact config from
+`POST /v1/openenv/training/preflight` and submits it unchanged after collection;
+its capacity snapshot is not a reservation. A synchronous rejection
 therefore spent no episodes: correct the request and use a new idempotency key
 only when its semantics change. The dashboard's **Prove it after training**
 control emits this same contract.

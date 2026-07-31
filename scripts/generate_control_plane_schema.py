@@ -58,6 +58,8 @@ ENTRYPOINTS = (
     "OpenEnvRunStatus",
     "OpenEnvTaskCatalogRequest",
     "OpenEnvTaskCatalogResponse",
+    "OpenEnvTrainingPreflightReceipt",
+    "OpenEnvTrainingPreflightRequest",
     "PublishPayload",
     "PublishToLibraryResponse",
     "QueueResponse",
@@ -738,6 +740,44 @@ def build_openenv_types() -> None:
         },
         "Bounded projection of one post-training evaluation linked to an OpenEnv run.",
         optional=("headline_accuracy", "error"),
+    )
+    add_object(
+        "OpenEnvTrainingPreflightRequest",
+        "OpenEnvTrainingPreflightRequest",
+        {
+            "adapter": ref("NonEmptyString"),
+            "output_adapter": ref("NonEmptyString"),
+            "training_config": ref("GrpoConfig"),
+            "auto_load": ref("Boolean"),
+            "post_eval": ref("PostEvalConfig"),
+        },
+        "Side-effect-free OpenEnv training intent checked before direct CLI collection. Kiln owns rollout-derived GRPO fields.",
+        optional=("adapter", "training_config", "auto_load", "post_eval"),
+    )
+    add_object(
+        "OpenEnvTrainingCapacitySnapshot",
+        "OpenEnvTrainingCapacitySnapshot",
+        {
+            "checked_unix_ms": ref("NonNegativeInteger"),
+            "queued_jobs": ref("NonNegativeInteger"),
+            "max_queued_jobs": ref("PositiveInteger"),
+            "tracked_jobs": ref("NonNegativeInteger"),
+            "max_tracked_jobs": ref("PositiveInteger"),
+        },
+        "Point-in-time native trainer capacity observed during OpenEnv preflight; it is not a reservation.",
+    )
+    add_object(
+        "OpenEnvTrainingPreflightReceipt",
+        "OpenEnvTrainingPreflightReceipt",
+        {
+            "schema": {"const": "kiln.openenv-training-preflight.v1"},
+            "effective_config": ref("GrpoConfig"),
+            "post_eval": ref("PostEvalConfig"),
+            "capacity": ref("OpenEnvTrainingCapacitySnapshot"),
+            "capacity_reserved": {"const": False},
+        },
+        "Successful OpenEnv admission receipt containing the exact GRPO and optional post-evaluation contract the direct client must submit after collection.",
+        optional=("post_eval",),
     )
     add_object(
         "OpenEnvRunRequest",
@@ -1621,6 +1661,30 @@ def build_examples() -> dict[str, list[Any]]:
             },
         },
     }
+    openenv_training_preflight_request = {
+        "adapter": "base",
+        "output_adapter": "bandit-agent",
+        "training_config": {"lora_rank": 8},
+        "auto_load": True,
+    }
+    openenv_training_preflight_receipt = {
+        "schema": "kiln.openenv-training-preflight.v1",
+        "effective_config": {
+            "base_adapter": None,
+            "output_name": "bandit-agent",
+            "auto_load": True,
+            "behavior_policy": "no_importance_correction",
+            "lora_rank": 8,
+        },
+        "capacity": {
+            "checked_unix_ms": 1_700_000_000_000,
+            "queued_jobs": 1,
+            "max_queued_jobs": 64,
+            "tracked_jobs": 4,
+            "max_tracked_jobs": 256,
+        },
+        "capacity_reserved": False,
+    }
     examples: dict[str, list[Any]] = {
         "AgentRunAbortResponse": [{"aborting": True}],
         "AgentRunEventsResponse": [{"events": [{"seq": 0, "event": {"type": "message_end"}}], "next_after": 1, "status": "running", "first_available_seq": 0, "truncated": False}],
@@ -1665,6 +1729,8 @@ def build_examples() -> dict[str, list[Any]]:
         "OpenEnvRunStatus": [openenv_status],
         "OpenEnvTaskCatalogRequest": [{"environment_urls": ["http://127.0.0.1:8000"], "credential_ids": ["local-arcade"], "split": "train", "start": 0, "limit": 2}],
         "OpenEnvTaskCatalogResponse": [{"schema": "kiln.openenv-task-catalog.v1", "catalogs": [{"base_url": "http://127.0.0.1:8000", "catalog": openenv_task_catalog}]}],
+        "OpenEnvTrainingPreflightReceipt": [openenv_training_preflight_receipt],
+        "OpenEnvTrainingPreflightRequest": [openenv_training_preflight_request],
         "PublishPayload": [{"description": "Math adapter", "uploader": "local-user"}],
         "PublishToLibraryResponse": [{"status": "ready_to_publish", "backend": "https://library.kiln.run", "intended_id": "math-v1@2026-07-14", "uploader": "local-user", "description": "Math adapter", "receipt_schema_version": 1, "note": "Local validation passed; no remote upload occurred."}],
         "QueueResponse": [{"running": None, "queued": [{"job_id": "train-1", "job_type": "sft", "adapter_name": "math-v1", "position": 1}], "completed": []}],

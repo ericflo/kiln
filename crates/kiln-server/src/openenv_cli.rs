@@ -26,8 +26,8 @@ use kiln_openenv::{
     OpenEnvTaskCatalog,
 };
 use kiln_train::{
-    AgenticGroup, ChatMessage, OpenEnvEpisodeTerminationV1, OpenEnvRolloutProvenanceV1,
-    ScoredRollout, TurnKind, TurnSegment,
+    AgenticGroup, BehaviorPolicy, ChatMessage, GrpoConfig, OpenEnvEpisodeTerminationV1,
+    OpenEnvRolloutProvenanceV1, ScoredRollout, TurnKind, TurnSegment,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -62,6 +62,7 @@ const MAX_OPENENV_RESET_OPTIONS_BYTES: usize = OPENENV_MAX_CLIENT_MESSAGE_BYTES 
 const MAX_OPENENV_RUN_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_KILN_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const CHAT_TIMEOUT: Duration = Duration::from_secs(180);
+pub const OPENENV_TRAINING_PREFLIGHT_SCHEMA_V1: &str = "kiln.openenv-training-preflight.v1";
 
 /// Policy inference used while an OpenEnv episode is live.
 ///
@@ -620,6 +621,57 @@ pub struct OpenEnvTrainOptions {
     pub output_adapter: String,
     pub lora_rank: Option<usize>,
     pub auto_load: bool,
+}
+
+fn default_openenv_training_adapter() -> String {
+    "base".to_string()
+}
+
+fn default_openenv_training_auto_load() -> bool {
+    true
+}
+
+/// Device-free OpenEnv training intent sent before any environment is
+/// contacted. Kiln owns the rollout-derived GRPO fields and returns their
+/// exact effective values in [`OpenEnvTrainingPreflightReceipt`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenEnvTrainingPreflightRequest {
+    #[serde(default = "default_openenv_training_adapter")]
+    pub adapter: String,
+    pub output_adapter: String,
+    #[serde(default)]
+    pub training_config: GrpoConfig,
+    #[serde(default = "default_openenv_training_auto_load")]
+    pub auto_load: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_eval: Option<kiln_eval::PostEvalConfig>,
+}
+
+/// Point-in-time native trainer capacity observed during OpenEnv preflight.
+/// It is evidence, not a reservation; final submission remains authoritative.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OpenEnvTrainingCapacitySnapshot {
+    pub checked_unix_ms: u64,
+    pub queued_jobs: usize,
+    pub max_queued_jobs: usize,
+    pub tracked_jobs: usize,
+    pub max_tracked_jobs: usize,
+}
+
+/// Successful server-owned admission receipt for direct OpenEnv training.
+/// Both returned training fields must be submitted unchanged after collection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenEnvTrainingPreflightReceipt {
+    pub schema: String,
+    pub effective_config: GrpoConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_eval: Option<kiln_eval::PostEvalConfig>,
+    pub capacity: OpenEnvTrainingCapacitySnapshot,
+    /// Always false in v1. Collection does not hold scarce trainer capacity.
+    pub capacity_reserved: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1895,6 +1947,8 @@ pub async fn run_openenv_rollout(options: OpenEnvRolloutOptions) -> Result<OpenE
 
 pub async fn run_openenv_train(options: OpenEnvTrainOptions) -> Result<OpenEnvRolloutSummary> {
     validate_output_adapter(&options.output_adapter)?;
+    validate_options(&options.rollout)?;
+    let preflight = preflight_openenv_training(&options).await?;
     let mut collection = collect_openenv_rollouts(&options.rollout).await?;
     write_openenv_outputs(
         &options.rollout,
@@ -1905,10 +1959,8 @@ pub async fn run_openenv_train(options: OpenEnvTrainOptions) -> Result<OpenEnvRo
     let submission = submit_openenv_training(
         &options.rollout.kiln_url,
         &collection.groups,
-        &options.rollout.adapter,
-        &options.output_adapter,
-        options.lora_rank,
-        options.auto_load,
+        &preflight.effective_config,
+        preflight.post_eval.as_ref(),
     )
     .await?;
     collection.summary.training_submission = Some(submission);
@@ -3006,6 +3058,96 @@ fn validate_output_adapter(adapter: &str) -> Result<()> {
     Ok(())
 }
 
+fn openenv_training_preflight_request(
+    options: &OpenEnvTrainOptions,
+) -> OpenEnvTrainingPreflightRequest {
+    let mut training_config = GrpoConfig::default();
+    if let Some(rank) = options.lora_rank {
+        training_config.lora_rank = rank;
+    }
+    OpenEnvTrainingPreflightRequest {
+        adapter: options.rollout.adapter.clone(),
+        output_adapter: options.output_adapter.clone(),
+        training_config,
+        auto_load: options.auto_load,
+        post_eval: None,
+    }
+}
+
+fn validate_openenv_training_preflight_receipt(
+    request: &OpenEnvTrainingPreflightRequest,
+    receipt: &OpenEnvTrainingPreflightReceipt,
+) -> Result<()> {
+    anyhow::ensure!(
+        receipt.schema == OPENENV_TRAINING_PREFLIGHT_SCHEMA_V1,
+        "Kiln returned unsupported OpenEnv training preflight schema {:?}",
+        receipt.schema
+    );
+    anyhow::ensure!(
+        !receipt.capacity_reserved,
+        "Kiln OpenEnv training preflight v1 cannot claim a capacity reservation"
+    );
+    let expected_base = if matches!(
+        request.adapter.trim().to_ascii_lowercase().as_str(),
+        "base" | "none" | "null"
+    ) {
+        None
+    } else {
+        Some(request.adapter.trim())
+    };
+    let mut expected_config = request.training_config.clone();
+    expected_config.output_name = Some(request.output_adapter.clone());
+    expected_config.base_adapter = expected_base.map(str::to_string);
+    expected_config.auto_load = request.auto_load;
+    expected_config.behavior_policy = BehaviorPolicy::NoImportanceCorrection;
+    anyhow::ensure!(
+        serde_json::to_value(&receipt.effective_config)? == serde_json::to_value(&expected_config)?,
+        "Kiln OpenEnv training preflight changed a requested or rollout-owned GRPO field"
+    );
+    anyhow::ensure!(
+        receipt.capacity.queued_jobs < receipt.capacity.max_queued_jobs
+            && receipt.capacity.tracked_jobs < receipt.capacity.max_tracked_jobs,
+        "Kiln accepted OpenEnv training preflight with no native queue capacity"
+    );
+    anyhow::ensure!(
+        serde_json::to_value(&receipt.post_eval)? == serde_json::to_value(&request.post_eval)?,
+        "Kiln OpenEnv training preflight changed the requested post-evaluation contract"
+    );
+    Ok(())
+}
+
+async fn preflight_openenv_training(
+    options: &OpenEnvTrainOptions,
+) -> Result<OpenEnvTrainingPreflightReceipt> {
+    let request = openenv_training_preflight_request(options);
+    let response = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(CHAT_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("build OpenEnv training preflight client")?
+        .post(format!(
+            "{}/v1/openenv/training/preflight",
+            options.rollout.kiln_url.trim_end_matches('/')
+        ))
+        .header("x-kiln-client", "openenv")
+        .json(&request)
+        .send()
+        .await
+        .context("preflight OpenEnv GRPO training before collection")?;
+    let status = response.status();
+    let body = read_kiln_json_bounded(response, "training preflight").await?;
+    anyhow::ensure!(
+        status.is_success(),
+        "OpenEnv training preflight returned HTTP {status} before collection: {}",
+        serde_json::to_string(&body).unwrap_or_default()
+    );
+    let receipt: OpenEnvTrainingPreflightReceipt =
+        serde_json::from_value(body).context("decode Kiln OpenEnv training preflight receipt")?;
+    validate_openenv_training_preflight_receipt(&request, &receipt)?;
+    Ok(receipt)
+}
+
 struct AdapterSelection {
     request_value: Value,
     label: String,
@@ -3031,29 +3173,16 @@ fn parse_adapter_selection(adapter: &str) -> AdapterSelection {
 async fn submit_openenv_training(
     kiln_url: &str,
     groups: &[AgenticGroup],
-    behavior_adapter: &str,
-    output_adapter: &str,
-    lora_rank: Option<usize>,
-    auto_load: bool,
+    config: &GrpoConfig,
+    post_eval: Option<&kiln_eval::PostEvalConfig>,
 ) -> Result<Value> {
-    let mut config = json!({
-        "output_name": output_adapter,
-        "auto_load": auto_load,
-        "behavior_policy": "no_importance_correction"
-    });
-    if let Some(rank) = lora_rank {
-        config["lora_rank"] = Value::from(rank);
-    }
-    if !matches!(
-        behavior_adapter.trim().to_ascii_lowercase().as_str(),
-        "base" | "none" | "null"
-    ) {
-        config["base_adapter"] = Value::from(behavior_adapter);
-    }
-    let body = json!({
+    let mut body = json!({
         "groups": groups,
         "config": config
     });
+    if let Some(post_eval) = post_eval {
+        body["post_eval"] = serde_json::to_value(post_eval)?;
+    }
     let response = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(CHAT_TIMEOUT)
@@ -3570,6 +3699,64 @@ mod tests {
         assert!(openenv_server_run_terminal(
             &json!({"schema":"kiln.openenv-run.v1","state":"training_queued"})
         ));
+    }
+
+    #[test]
+    fn direct_training_preflight_receipt_binds_rollout_owned_fields_and_capacity() {
+        let request = OpenEnvTrainingPreflightRequest {
+            adapter: " behavior-agent ".into(),
+            output_adapter: "candidate-agent".into(),
+            training_config: GrpoConfig {
+                lora_rank: 16,
+                ..GrpoConfig::default()
+            },
+            auto_load: false,
+            post_eval: None,
+        };
+        let mut effective_config = request.training_config.clone();
+        effective_config.output_name = Some(request.output_adapter.clone());
+        effective_config.base_adapter = Some("behavior-agent".into());
+        effective_config.auto_load = false;
+        effective_config.behavior_policy = BehaviorPolicy::NoImportanceCorrection;
+        let mut receipt = OpenEnvTrainingPreflightReceipt {
+            schema: OPENENV_TRAINING_PREFLIGHT_SCHEMA_V1.into(),
+            effective_config,
+            post_eval: None,
+            capacity: OpenEnvTrainingCapacitySnapshot {
+                checked_unix_ms: 17,
+                queued_jobs: 1,
+                max_queued_jobs: 8,
+                tracked_jobs: 2,
+                max_tracked_jobs: 32,
+            },
+            capacity_reserved: false,
+        };
+        validate_openenv_training_preflight_receipt(&request, &receipt).unwrap();
+
+        receipt.effective_config.output_name = Some("wrong-agent".into());
+        assert!(
+            validate_openenv_training_preflight_receipt(&request, &receipt)
+                .unwrap_err()
+                .to_string()
+                .contains("rollout-owned")
+        );
+        receipt.effective_config.output_name = Some(request.output_adapter.clone());
+        receipt.post_eval =
+            Some(serde_json::from_value(json!({"suite": "unexpected-suite"})).unwrap());
+        assert!(
+            validate_openenv_training_preflight_receipt(&request, &receipt)
+                .unwrap_err()
+                .to_string()
+                .contains("post-evaluation")
+        );
+        receipt.post_eval = None;
+        receipt.capacity.queued_jobs = receipt.capacity.max_queued_jobs;
+        assert!(
+            validate_openenv_training_preflight_receipt(&request, &receipt)
+                .unwrap_err()
+                .to_string()
+                .contains("no native queue capacity")
+        );
     }
 
     #[test]

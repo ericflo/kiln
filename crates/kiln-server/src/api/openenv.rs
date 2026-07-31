@@ -34,10 +34,11 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::config::OpenEnvConfig;
 use crate::error::ApiError;
 use crate::openenv_cli::{
-    MAX_OPENENV_TASK_PAGE_SIZE, OpenEnvCollectionControl, OpenEnvCollectionProgress,
-    OpenEnvPolicyTransport, OpenEnvRolloutOptions, OpenEnvRolloutSummary,
-    collect_openenv_rollouts_with_policy, validate_options, write_openenv_outputs,
-    write_summary_atomic,
+    MAX_OPENENV_TASK_PAGE_SIZE, OPENENV_TRAINING_PREFLIGHT_SCHEMA_V1, OpenEnvCollectionControl,
+    OpenEnvCollectionProgress, OpenEnvPolicyTransport, OpenEnvRolloutOptions,
+    OpenEnvRolloutSummary, OpenEnvTrainingCapacitySnapshot, OpenEnvTrainingPreflightReceipt,
+    OpenEnvTrainingPreflightRequest, collect_openenv_rollouts_with_policy, validate_options,
+    write_openenv_outputs, write_summary_atomic,
 };
 use crate::openenv_evaluation::{
     OpenEnvEnvironmentEvalConfig, OpenEnvEnvironmentEvalDecision, OpenEnvEnvironmentEvalOutcome,
@@ -1380,20 +1381,60 @@ fn validate_run_request(
 /// Materialize the exact native-GRPO configuration owned by an OpenEnv train
 /// workflow. The request may customize ordinary trainer controls, while Kiln
 /// fixes all fields whose meaning is determined by the live rollout.
-fn effective_openenv_grpo_config(request: &OpenEnvRunRequest, output_adapter: &str) -> GrpoConfig {
-    let mut config = request.training_config.clone().unwrap_or_default();
+fn materialize_openenv_grpo_config(
+    mut config: GrpoConfig,
+    behavior_adapter: &str,
+    output_adapter: &str,
+    auto_load: bool,
+    external_promotion_gate_pending: bool,
+) -> GrpoConfig {
     config.output_name = Some(output_adapter.to_string());
     // A native environment gate owns promotion. Keep the prior policy active
     // until paired held-out returns pass; diagnostic environment evaluation
     // preserves the ordinary training auto-load behavior.
-    config.auto_load = request.auto_load
-        && !request
+    config.auto_load = auto_load && !external_promotion_gate_pending;
+    config.behavior_policy = BehaviorPolicy::NoImportanceCorrection;
+    config.base_adapter = normalized_adapter(behavior_adapter);
+    config
+}
+
+fn effective_openenv_grpo_config(request: &OpenEnvRunRequest, output_adapter: &str) -> GrpoConfig {
+    materialize_openenv_grpo_config(
+        request.training_config.clone().unwrap_or_default(),
+        &request.adapter,
+        output_adapter,
+        request.auto_load,
+        request
             .environment_eval
             .as_ref()
-            .is_some_and(|config| config.gate.is_some());
-    config.behavior_policy = BehaviorPolicy::NoImportanceCorrection;
-    config.base_adapter = normalized_adapter(&request.adapter);
-    config
+            .is_some_and(|config| config.gate.is_some()),
+    )
+}
+
+fn validate_openenv_training_contract(
+    state: &AppState,
+    behavior_adapter: &str,
+    config: &GrpoConfig,
+    post_eval: Option<&kiln_eval::PostEvalConfig>,
+) -> Result<(), ApiError> {
+    // OpenEnv trajectories always carry explicit observation segments, so
+    // validate the environment-token branch of the native kt-tape contract.
+    super::training::validate_grpo_config_at_submit(config, true)?;
+    super::training::validate_post_eval_suite(state, post_eval)?;
+    if let Some(adapter) = normalized_adapter(behavior_adapter) {
+        super::adapters::validate_loadable_adapter_dir(&state.adapter_dir.join(adapter))?;
+    }
+    super::training::ensure_training_backend_admission(state)?;
+    if state.shutdown.load(Ordering::Relaxed) {
+        return Err(ApiError::shutting_down());
+    }
+    super::training::enforce_training_workload_admission(state, TrainingWorkload::Grpo)?;
+    super::training::enforce_training_optimizer_admission(
+        state,
+        config.optimizer,
+        config.lora_rank,
+    )?;
+    Ok(())
 }
 
 /// Reject a doomed OpenEnv train workflow before it is persisted or opens an
@@ -1416,25 +1457,99 @@ fn validate_openenv_training_preflight(
         )
     })?;
     let config = effective_openenv_grpo_config(request, output_adapter);
+    validate_openenv_training_contract(state, &request.adapter, &config, request.post_eval.as_ref())
+}
 
-    // OpenEnv trajectories always carry explicit observation segments, so
-    // validate the environment-token branch of the native kt-tape contract.
-    super::training::validate_grpo_config_at_submit(&config, true)?;
-    super::training::validate_post_eval_suite(state, request.post_eval.as_ref())?;
-    if let Some(adapter) = normalized_adapter(&request.adapter) {
-        super::adapters::validate_loadable_adapter_dir(&state.adapter_dir.join(adapter))?;
+fn openenv_training_capacity_snapshot(
+    state: &AppState,
+) -> Result<OpenEnvTrainingCapacitySnapshot, ApiError> {
+    // Match native admission's tracked-jobs -> queue lock order and retain
+    // both guards while reading, so the returned evidence is one coherent
+    // point-in-time snapshot. It deliberately stops being authoritative as
+    // soon as the guards are released.
+    let tracked = state
+        .training_jobs
+        .read()
+        .map_err(|_| ApiError::internal("training job map poisoned during OpenEnv preflight"))?;
+    let queue = state
+        .training_queue
+        .lock()
+        .map_err(|_| ApiError::internal("training queue lock poisoned during OpenEnv preflight"))?;
+    let queued_jobs = queue.len();
+    if queued_jobs >= state.max_queued_training_jobs {
+        return Err(ApiError::training_queue_full(
+            state.max_queued_training_jobs,
+        ));
     }
-    super::training::ensure_training_backend_admission(state)?;
-    if state.shutdown.load(Ordering::Relaxed) {
-        return Err(ApiError::shutting_down());
+    let tracked_jobs = tracked.len();
+    if tracked_jobs >= state.max_tracked_jobs {
+        return Err(ApiError::training_tracked_full(state.max_tracked_jobs));
     }
-    super::training::enforce_training_workload_admission(state, TrainingWorkload::Grpo)?;
-    super::training::enforce_training_optimizer_admission(
-        state,
-        config.optimizer,
-        config.lora_rank,
-    )?;
-    Ok(())
+    Ok(OpenEnvTrainingCapacitySnapshot {
+        checked_unix_ms: now_unix_ms(),
+        queued_jobs,
+        max_queued_jobs: state.max_queued_training_jobs,
+        tracked_jobs,
+        max_tracked_jobs: state.max_tracked_jobs,
+    })
+}
+
+fn preflight_training_inner(
+    state: &AppState,
+    request: OpenEnvTrainingPreflightRequest,
+) -> Result<OpenEnvTrainingPreflightReceipt, ApiError> {
+    super::adapters::validate_adapter_name(&request.output_adapter)?;
+    if normalized_adapter(&request.adapter).is_some() {
+        super::adapters::validate_adapter_name(request.adapter.trim())?;
+    }
+    let config = materialize_openenv_grpo_config(
+        request.training_config,
+        &request.adapter,
+        &request.output_adapter,
+        request.auto_load,
+        false,
+    );
+    let post_eval = request.post_eval;
+    validate_openenv_training_contract(state, &request.adapter, &config, post_eval.as_ref())?;
+    let capacity = openenv_training_capacity_snapshot(state)?;
+    tracing::info!(
+        behavior_adapter = %request.adapter,
+        output_adapter = %request.output_adapter,
+        lora_rank = config.lora_rank,
+        optimizer = ?config.optimizer.kind(),
+        queued_jobs = capacity.queued_jobs,
+        tracked_jobs = capacity.tracked_jobs,
+        "OpenEnv training preflight accepted before collection"
+    );
+    Ok(OpenEnvTrainingPreflightReceipt {
+        schema: OPENENV_TRAINING_PREFLIGHT_SCHEMA_V1.to_string(),
+        effective_config: config,
+        post_eval,
+        capacity,
+        capacity_reserved: false,
+    })
+}
+
+async fn preflight_training(
+    State(state): State<AppState>,
+    Json(request): Json<OpenEnvTrainingPreflightRequest>,
+) -> Result<Json<OpenEnvTrainingPreflightReceipt>, ApiError> {
+    match preflight_training_inner(&state, request) {
+        Ok(receipt) => {
+            state
+                .metrics
+                .openenv_training_preflights_accepted
+                .fetch_add(1, Ordering::Relaxed);
+            Ok(Json(receipt))
+        }
+        Err(error) => {
+            state
+                .metrics
+                .openenv_training_preflights_rejected
+                .fetch_add(1, Ordering::Relaxed);
+            Err(error)
+        }
+    }
 }
 
 fn validate_environment_eval(
@@ -1846,7 +1961,17 @@ async fn create_run(
             .metrics
             .openenv_training_preflight_rejected
             .fetch_add(1, Ordering::Relaxed);
+        state
+            .metrics
+            .openenv_training_preflights_rejected
+            .fetch_add(1, Ordering::Relaxed);
         return Err(error);
+    }
+    if request.kind == OpenEnvRunKind::Train {
+        state
+            .metrics
+            .openenv_training_preflights_accepted
+            .fetch_add(1, Ordering::Relaxed);
     }
     let authenticated = request.credential_ids.iter().any(Option::is_some);
     let outcome = state
@@ -2908,6 +3033,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/v1/openenv/tasks",
             post(inspect_tasks).layer(DefaultBodyLimit::max(OPENENV_API_BODY_LIMIT)),
+        )
+        .route(
+            "/v1/openenv/training/preflight",
+            post(preflight_training).layer(DefaultBodyLimit::max(OPENENV_API_BODY_LIMIT)),
         )
         .route(
             "/v1/openenv/runs",
@@ -4001,6 +4130,12 @@ mod tests {
                 .load(Ordering::Relaxed),
             1
         );
+        assert_eq!(
+            metrics
+                .openenv_training_preflights_rejected
+                .load(Ordering::Relaxed),
+            1
+        );
         assert!(
             temp.path()
                 .join(".openenv")
@@ -4009,6 +4144,54 @@ mod tests {
                 .unwrap()
                 .next()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_training_preflight_uses_the_same_fail_closed_backend_contract() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(&temp, OpenEnvConfig::default());
+        let metrics = state.metrics.clone();
+        let app = routes().with_state(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/openenv/training/preflight")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&OpenEnvTrainingPreflightRequest {
+                            adapter: "base".into(),
+                            output_adapter: "direct-agent".into(),
+                            training_config: GrpoConfig::default(),
+                            auto_load: true,
+                            post_eval: None,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"],
+            "mock_mode"
+        );
+        assert_eq!(
+            metrics
+                .openenv_training_preflights_rejected
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            metrics
+                .openenv_training_preflights_accepted
+                .load(Ordering::Relaxed),
+            0
         );
     }
 

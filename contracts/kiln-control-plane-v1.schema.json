@@ -48,6 +48,8 @@
     "OpenEnvRunStatus",
     "OpenEnvTaskCatalogRequest",
     "OpenEnvTaskCatalogResponse",
+    "OpenEnvTrainingPreflightReceipt",
+    "OpenEnvTrainingPreflightRequest",
     "PublishPayload",
     "PublishToLibraryResponse",
     "QueueResponse",
@@ -198,6 +200,12 @@
     },
     {
       "$ref": "#/$defs/OpenEnvTaskCatalogResponse"
+    },
+    {
+      "$ref": "#/$defs/OpenEnvTrainingPreflightReceipt"
+    },
+    {
+      "$ref": "#/$defs/OpenEnvTrainingPreflightRequest"
     },
     {
       "$ref": "#/$defs/PublishPayload"
@@ -4583,6 +4591,94 @@
       "x-kiln-rust-type": "kiln_openenv::OpenEnvTaskSplit",
       "x-kiln-field-schema-status": "complete"
     },
+    "OpenEnvTrainingCapacitySnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "checked_unix_ms",
+        "queued_jobs",
+        "max_queued_jobs",
+        "tracked_jobs",
+        "max_tracked_jobs"
+      ],
+      "properties": {
+        "checked_unix_ms": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "queued_jobs": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "max_queued_jobs": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "tracked_jobs": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "max_tracked_jobs": {
+          "$ref": "#/$defs/PositiveInteger"
+        }
+      },
+      "description": "Point-in-time native trainer capacity observed during OpenEnv preflight; it is not a reservation.",
+      "x-kiln-rust-type": "OpenEnvTrainingCapacitySnapshot",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvTrainingPreflightReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "effective_config",
+        "capacity",
+        "capacity_reserved"
+      ],
+      "properties": {
+        "schema": {
+          "const": "kiln.openenv-training-preflight.v1"
+        },
+        "effective_config": {
+          "$ref": "#/$defs/GrpoConfig"
+        },
+        "post_eval": {
+          "$ref": "#/$defs/PostEvalConfig"
+        },
+        "capacity": {
+          "$ref": "#/$defs/OpenEnvTrainingCapacitySnapshot"
+        },
+        "capacity_reserved": {
+          "const": false
+        }
+      },
+      "description": "Successful OpenEnv admission receipt containing the exact GRPO and optional post-evaluation contract the direct client must submit after collection.",
+      "x-kiln-rust-type": "OpenEnvTrainingPreflightReceipt",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvTrainingPreflightRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_adapter"
+      ],
+      "properties": {
+        "adapter": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "output_adapter": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "training_config": {
+          "$ref": "#/$defs/GrpoConfig"
+        },
+        "auto_load": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "post_eval": {
+          "$ref": "#/$defs/PostEvalConfig"
+        }
+      },
+      "description": "Side-effect-free OpenEnv training intent checked before direct CLI collection. Kiln owns rollout-derived GRPO fields.",
+      "x-kiln-rust-type": "OpenEnvTrainingPreflightRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
     "OpenEnvTrainingStatus": {
       "type": "object",
       "additionalProperties": false,
@@ -7809,6 +7905,36 @@
             }
           }
         ]
+      }
+    ],
+    "OpenEnvTrainingPreflightReceipt": [
+      {
+        "schema": "kiln.openenv-training-preflight.v1",
+        "effective_config": {
+          "base_adapter": null,
+          "output_name": "bandit-agent",
+          "auto_load": true,
+          "behavior_policy": "no_importance_correction",
+          "lora_rank": 8
+        },
+        "capacity": {
+          "checked_unix_ms": 1700000000000,
+          "queued_jobs": 1,
+          "max_queued_jobs": 64,
+          "tracked_jobs": 4,
+          "max_tracked_jobs": 256
+        },
+        "capacity_reserved": false
+      }
+    ],
+    "OpenEnvTrainingPreflightRequest": [
+      {
+        "adapter": "base",
+        "output_adapter": "bandit-agent",
+        "training_config": {
+          "lora_rank": 8
+        },
+        "auto_load": true
       }
     ],
     "PublishPayload": [

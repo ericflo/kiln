@@ -132,14 +132,19 @@ workflow slots are occupied; CLI and dashboard expose live queue position,
 admission wait, immediate cancellation before execution, and safe restart of
 entries that never acquired a slot. Persisted non-secret idempotency keys make
 submission retry-safe: an identical retained request recovers its original run,
-while changed semantics under that key fail closed. Before a train run is
-persisted or opens an environment session, Kiln
+while changed semantics under that key fail closed. Every training path
 materializes its exact native-GRPO config and preflights the behavior adapter,
 loss and checkpoint contract, installed static eval suite, serving profile,
 backend workload, optimizer, and LoRA rank. The dashboard's **Prove it after
 training** control uses that same `post_eval` path; rollout-only requests reject
-all training fields instead of silently ignoring them. The
-`training_preflight_rejected` OpenEnv metric makes this saved work observable.
+all training fields instead of silently ignoring them. Persisted runs do this
+before persistence. One-shot `kiln openenv train` calls
+`POST /v1/openenv/training/preflight` before discovery, accepts the returned
+effective config as authoritative, and submits those exact values after
+collection. The capacity snapshot is evidence, not a reservation, so final
+native queue and memory admission still recheck live conditions. The
+`kiln_openenv_training_preflights_total{status="accepted"|"rejected"}` metric
+covers both paths; persisted rejection also retains its run-specific metric.
 After training, it can pair behavior and candidate policies on
 identical, disjoint held-out environment seeds, compare environment-owned
 returns with an exact sign test, and defer auto-load until the candidate earns

@@ -246,6 +246,10 @@ Before any GPU work in a stage N ≥ 2:
      capability eval should run automatically; a synchronous train-preflight
      rejection creates no run and consumes no environment episode, so correct
      its effective-GRPO/adapter/suite/backend/optimizer contract before retry;
+     if an explicitly direct stage uses `kiln openenv train`, require its
+     `/v1/openenv/training/preflight` receipt before collection and preserve the
+     returned effective config through final submission; treat its capacity
+     snapshot as evidence rather than a reservation;
      bind one stable non-secret `idempotency_key` to the stage so a
      lost response recovers the same retained run; if v4 status is `queued`,
      record its FIFO position and follow that run ID; Task API catalogs may document coverage but never imply a

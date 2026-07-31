@@ -37,10 +37,15 @@
   interrupted stateful work still fails explicitly. Optional bounded,
   non-secret idempotency keys atomically recover identical retained submissions
   across concurrency and restart, while conflicting reuse returns HTTP 409.
-  Train runs now materialize and validate their exact effective GRPO config,
+  Every OpenEnv training entrance now materializes and validates its exact effective GRPO config,
   behavior adapter, installed static eval suite, backend/workload, optimizer,
-  and rank before persistence or environment collection; rejected preflights
-  consume no episodes and are separately metered. Rollout requests fail closed
+  and rank before persistence or environment collection. Direct
+  `kiln openenv train` uses the new side-effect-free
+  `POST /v1/openenv/training/preflight` contract, validates its receipt, and
+  submits the returned effective config unchanged. Its capacity snapshot is
+  explicitly non-reserving, so final native admission remains authoritative;
+  rejected preflights consume no episodes or artifacts and both paths are
+  separately metered. Rollout requests fail closed
   on every training-only field. Training → OpenEnv now exposes the same
   **Prove it after training** static-suite workflow as native SFT and GRPO.
   CI drives all twenty-two pinned

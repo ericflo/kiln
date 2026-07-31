@@ -368,20 +368,28 @@ training observations.
 
 ## Training admission
 
-For a persisted `kind=train` request, Kiln materializes the exact native-GRPO
-configuration before it creates a run directory or contacts an environment.
+For every training request, Kiln materializes the exact native-GRPO
+configuration before persistence or direct environment contact.
 It overrides rollout-owned `behavior_policy`, `base_adapter`, `output_name`,
 and `auto_load`, then validates the environment-token loss and policy contract,
 LoRA scale, checkpoint interval, behavior-adapter layout, installed
 `post_eval` suite, serving profile, backend GRPO workload, optimizer, and model
-rank ceiling. Failure is synchronous, consumes no episode, and increments
+rank ceiling. Persisted `kind=train` does this before creating its run
+directory. Direct `kiln openenv train` first calls
+`POST /v1/openenv/training/preflight`, validates the v1 receipt, and later
+submits its exact `effective_config` and returned optional `post_eval`;
+rejection contacts no environment and writes no artifacts. Both paths increment
+`kiln_openenv_training_preflights_total{status="accepted"|"rejected"}`;
+persisted rejection also increments
 `kiln_openenv_runs_total{status="training_preflight_rejected"}`. Rollout-only
 requests reject `output_adapter`, `training_config`, `post_eval`, and
 `environment_eval` instead of ignoring them.
 
-The final native GRPO admission repeats immutable checks after collection and
-adds time-varying queue and live-memory capacity. This second gate remains
-authoritative because capacity can change while episodes run.
+Direct preflight returns the exact current queue/tracked-job snapshot with
+`capacity_reserved: false`. The final native GRPO admission repeats immutable
+checks after collection and adds time-varying queue and live-memory capacity.
+This second gate remains authoritative because capacity can change while
+episodes run.
 
 The dashboard's **Prove it after training** control emits ordinary
 `post_eval`. The named suite must already be installed; Kiln follows adapter
@@ -460,11 +468,12 @@ SFT bootstrap for the JSON action format.
 **Rewards have no variance.** GRPO has no within-group signal. Use harder tasks,
 more policy sampling, a more informative reward, or an SFT/OPD bootstrap.
 
-**Training is rejected.** Persisted workflows preflight immutable failures
-before collection; correct the returned config, adapter, suite, backend, or
-optimizer error. A direct CLI collection can still encounter time-varying
-queue or memory rejection at final native admission; its rollout artifacts
-remain valid and can be resubmitted with `kiln train grpo`.
+**Training is rejected.** Persisted and direct workflows preflight immutable
+failures before collection; correct the returned config, adapter, suite,
+backend, or optimizer error. A direct CLI collection can still encounter a
+time-varying queue or memory rejection at final native admission because the
+preflight snapshot is not a reservation; its rollout artifacts remain valid
+and can be resubmitted with `kiln train grpo`.
 
 **A remote environment redirects.** Redirects are rejected at the trust
 boundary. Pass the canonical base URL directly.

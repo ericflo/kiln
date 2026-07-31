@@ -140,19 +140,15 @@ kiln openenv train \
   --lora-rank 16
 ```
 
-`--adapter` selects the behavior policy; `base`, `none`, and `null` select the base model.
-`--output-adapter` names the new LoRA. The trainer receives
-`behavior_policy: "no_importance_correction"` because multi-turn chat does not expose exact
-per-action token log-probability provenance. Kiln never labels it `recorded`.
+`--adapter` selects behavior (`base`, `none`, or `null` mean the base model);
+`--output-adapter` names the LoRA. Chat lacks exact per-action log probabilities, so Kiln sets `behavior_policy: "no_importance_correction"`, never `recorded`.
 
-Training admission, memory checks, checkpointing, cancellation, atomic adapter
-publication, and serving-profile rules are the same as any other native GRPO
-job. Use `kiln train status --job-id …`, the dashboard, and the adapter's
-`train_receipt.json` normally.
+Before discovery, direct training obtains its exact GRPO/post-eval contract from `POST /v1/openenv/training/preflight`. Rejection writes no artifacts; `capacity_reserved: false` means final queue and live-memory admission rechecks. See the [admission reference](OPENENV_REPLAY_REFERENCE.md#training-admission).
+
+Subsequent admission, checkpoints, cancellation, publication, and status are ordinary native GRPO; use `kiln train status`, the dashboard, and `train_receipt.json`.
 
 **Prove it after training** attaches an installed static `post_eval` suite. It
-may accompany paired evaluation, but only one gate can own promotion. See the
-[admission reference](OPENENV_REPLAY_REFERENCE.md#training-admission).
+may accompany paired evaluation, but only one gate can own promotion.
 
 ### Held-out environment returns
 
