@@ -27,6 +27,9 @@
     "training": {
       "$ref": "#/$defs/training"
     },
+    "openenv": {
+      "$ref": "#/$defs/openenv"
+    },
     "logging": {
       "$ref": "#/$defs/logging"
     },
@@ -1084,6 +1087,73 @@
         }
       ]
     },
+    "openenv": {
+      "type": "object",
+      "description": "Native OpenEnv discovery, stateful rollout, artifact retention, and GRPO handoff policy for the server HTTP/dashboard control plane.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the native OpenEnv discovery and asynchronous run lifecycle routes.",
+          "x-kiln-path": "openenv.enabled",
+          "x-kiln-type-and-default": "boolean; true",
+          "x-kiln-canonical-env": "KILN_OPENENV_ENABLED (implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "Enables discovery and asynchronous run lifecycle routes. Disabling it does not remove the local CLI."
+        },
+        "max_active_runs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 4,
+          "description": "Maximum concurrent server-owned OpenEnv rollout collectors.",
+          "x-kiln-path": "openenv.max_active_runs",
+          "x-kiln-type-and-default": "unsigned integer; 4",
+          "x-kiln-canonical-env": "KILN_OPENENV_MAX_ACTIVE_RUNS (implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "Must be greater than zero and no greater than max_tracked_runs. Bounds concurrent live rollout collectors; submitted GRPO jobs subsequently use the normal training queue."
+        },
+        "max_tracked_runs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 128,
+          "description": "Maximum retained in-memory OpenEnv run records, including terminal runs.",
+          "x-kiln-path": "openenv.max_tracked_runs",
+          "x-kiln-type-and-default": "unsigned integer; 128",
+          "x-kiln-canonical-env": "KILN_OPENENV_MAX_TRACKED_RUNS (implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "Must be greater than zero and at least max_active_runs. Bounds retained in-memory run records."
+        },
+        "tracked_run_ttl_secs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 604800,
+          "description": "Retention window for terminal OpenEnv run records. Replay artifacts remain under the adapter root.",
+          "x-kiln-path": "openenv.tracked_run_ttl_secs",
+          "x-kiln-type-and-default": "unsigned integer; 604800",
+          "x-kiln-canonical-env": "KILN_OPENENV_TRACKED_RUN_TTL_SECS (implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "Must be greater than zero. Terminal status records age out after this window; the content-addressed dataset, replay, and summary artifacts remain under <adapter_dir>/.openenv/runs/."
+        },
+        "allow_remote_environments": {
+          "type": "boolean",
+          "default": false,
+          "description": "Permit server-owned runs to connect to non-loopback OpenEnv origins. Keep disabled unless the unauthenticated Kiln API is confined to trusted operators.",
+          "x-kiln-path": "openenv.allow_remote_environments",
+          "x-kiln-type-and-default": "boolean; false",
+          "x-kiln-canonical-env": "KILN_OPENENV_ALLOW_REMOTE_ENVIRONMENTS (implemented)",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "When false, server-launched discovery and runs reject non-loopback origins before network access. Enable only for trusted operators and origins; Kiln's HTTP API is unauthenticated unless protected by your deployment."
+        }
+      },
+      "default": {},
+      "x-kiln-dependent-order": [
+        {
+          "less-or-equal": "max_active_runs",
+          "greater-or-equal": "max_tracked_runs"
+        }
+      ]
+    },
     "logging": {
       "type": "object",
       "description": "Tracing filter and output format.",
@@ -1940,9 +2010,9 @@
       }
     }
   ],
-  "x-kiln-field-count": 112,
+  "x-kiln-field-count": 117,
   "x-kiln-dynamic-field-template-count": 2,
-  "x-kiln-canonical-environment-count": 107,
+  "x-kiln-canonical-environment-count": 112,
   "x-kiln-config-file-only-count": 5,
   "x-kiln-compatibility-field-count": 0,
   "x-kiln-compatibility-alias-count": 0,

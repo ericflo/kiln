@@ -9,12 +9,10 @@ The shortest complete loop is:
 
 ```bash
 # Terminal 1: serve the model with training enabled.
-KILN_SERVER_SERVING_PROFILE=experimental \
-KILN_MODEL_PATH=./Qwen3.5-4B \
-./kiln serve
+KILN_SERVER_SERVING_PROFILE=experimental KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
 
-# Terminal 2: serve any OpenEnv environment.
-../miniopenenv/build/rel/bin/counter --host 127.0.0.1 --port 8990
+# Terminal 2: start any OpenEnv-compatible environment on port 8990.
+# Use that environment implementation's normal server command.
 
 # Terminal 3: discover it, then collect episodes and train.
 ./kiln openenv inspect --environment http://127.0.0.1:8990
@@ -31,23 +29,21 @@ all three with the adapter's normal `train_receipt.json`: together they bind
 the environment-facing rollout, its exact executable transcript, and the
 optimizer-facing training attempt.
 
+The same loop is a first-class server workflow. Open `/ui/`, choose
+**Training → OpenEnv**, inspect one or more environment URLs, and launch either
+a rollout-only run or a rollout-and-train run. Kiln persists progress, artifacts,
+failure details, cancellation state, and the linked native GRPO job; a browser
+refresh or server restart does not erase the run record.
+
 ## How the loop works
 
-For each group, Kiln:
-
-1. selects one configured environment;
-2. derives one deterministic seed;
-3. opens one stateful `WS /ws` session per candidate;
-4. resets every candidate with the same seed and reset options;
-5. asks the selected Kiln policy for exactly one JSON action;
-6. sends that action to the environment and records the observation, tagged
-   reward, and `done`;
-7. feeds recoverable protocol errors back to the policy on the same socket and
-   repeats until `done`, `--max-steps`, an invalid model action, a terminal
-   protocol error, or the configured recovery budget is exhausted;
-8. sums step rewards into the episode return; and
-9. writes all candidates as one `AgenticGroup`, then submits the groups to the
-   ordinary native GRPO trainer when `train` was selected.
+For each group, Kiln selects an environment and deterministic seed, opens one
+stateful `WS /ws` session per candidate, resets every candidate identically,
+asks the policy for JSON actions, and records each observation, tagged reward,
+and `done`. Recoverable errors become policy feedback on the same socket.
+Collection stops at environment completion, a configured bound, invalid model
+JSON, or a terminal protocol error. Kiln writes the candidates as one
+`AgenticGroup` and, for a train run, submits it to native GRPO.
 
 Candidates in a group always share the same initial messages, environment,
 reset payload, and seed. That is the comparison unit for group-relative
@@ -60,6 +56,35 @@ type (`null`, boolean, integer, or float) in the trajectory and map to a finite
 training scalar (`null = 0`, `false = 0`, `true = 1`).
 
 ## Commands
+
+### Dashboard and server API
+
+The dashboard and API use the same collector, in-process chat handler, artifact
+writer, and GRPO admission path as the CLI. In `/ui/`, choose
+**Training → OpenEnv**. The equivalent API is:
+
+```bash
+curl -sS localhost:8420/v1/openenv/runs \
+  -H 'content-type: application/json' \
+  -d '{"kind":"train","environment_urls":["http://127.0.0.1:8990"],
+       "adapter":"base","output_adapter":"counter-agent",
+       "groups":8,"group_size":4,"max_steps":8}'
+```
+
+Use `POST /v1/openenv/inspect` for discovery, poll or list
+`GET /v1/openenv/runs`, fetch one run by ID, and cancel active collection with
+`DELETE /v1/openenv/runs/{run_id}`. Status persists under
+`<adapter_dir>/.openenv/runs/<run_id>/` beside dataset, replay, and summary
+downloads. Restart-interrupted work fails explicitly; cancellation closes at
+training handoff.
+
+Server runs accept loopback origins by default. `[openenv]` controls enablement,
+remote-origin permission, active capacity, retained history, and status TTL;
+each field has a canonical `KILN_OPENENV_*` override. Prometheus publishes the
+`kiln_openenv_*` family. See the
+[replay and recovery reference](OPENENV_REPLAY_REFERENCE.md) and
+[complete configuration reference](CONFIGURATION.md) for lifecycle,
+artifact, security, retention, and metric details.
 
 ### Inspect
 
@@ -114,7 +139,6 @@ transcript exactly. Move or archive the three files together; use `--dataset`
 and `--replay` when their recorded paths have changed. See the
 [replay and recovery reference](OPENENV_REPLAY_REFERENCE.md) for the complete
 verification, drift, and prefix-only semantics.
-
 
 ### Collect and train
 
@@ -212,29 +236,11 @@ recoverable and terminal code, retry rule, and resource bound.
 ## Security boundary
 
 OpenEnv actions and observations are untrusted external data that enter the
-model context and training corpus.
-
-- Prefer loopback or a private network. Kiln does not add an authentication
-  extension to the OpenEnv protocol.
-- Use HTTPS/WSS for a remote environment and terminate authentication in a
-  trusted gateway.
-- Inspect the action schema and environment implementation before training.
-- Credentials, query strings, and fragments in an environment URL are
-  rejected.
-- Treat environment prompts and observations as capable of prompt injection.
-  The action schema constrains syntax, not intent.
-- Retain the rollout summary and environment deployment identity before
-  accepting a trained adapter into a higher-trust setting.
-
-## Protocol interoperability oracle
-
-Kiln's reusable `kiln-openenv` crate and native training loop are tested
-against the OpenEnv HTTP/1.x protocol. Its byte-real oracle happens to use
-miniopenenv for speed, but production Kiln has no implementation-specific type,
-setting, command, or branch: every compatible `--environment` follows the same
-runtime path. The
-[replay and recovery reference](OPENENV_REPLAY_REFERENCE.md) documents the
-five-environment gate.
+model context and corpus. Prefer loopback or a private network; use HTTPS/WSS
+and a trusted authentication gateway remotely. Inspect the schema and
+implementation, reject prompts and observations as potentially injected, and
+retain the summary plus deployment identity before promoting an adapter.
+Environment URL credentials, queries, and fragments are rejected.
 
 ## Troubleshooting
 

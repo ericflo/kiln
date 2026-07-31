@@ -26,6 +26,7 @@ SECTIONS = (
     "paths",
     "memory",
     "training",
+    "openenv",
     "logging",
     "prefix_cache",
     "speculative",

@@ -44,6 +44,7 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
             group_size: 2,
             seed_start: 71,
             reset_options: None,
+            reset_options_value: None,
             max_steps: 2,
             concurrency: 2,
             max_action_tokens: 32,

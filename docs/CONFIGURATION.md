@@ -1735,6 +1735,26 @@ group renders mode, threshold, explicit-or-auto stride, cache target, and the
 restart requirement. These are observations of immutable application state,
 not live controls or fresh environment reads.
 
+## `[openenv]`
+
+This section governs server-owned OpenEnv runs launched from the dashboard or
+`/v1/openenv/*`. The `kiln openenv` CLI uses the same protocol client and
+artifacts but is not disabled or origin-restricted by this server control-plane
+policy.
+
+| TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |
+|---|---|---|---|---|
+| `openenv.enabled` | boolean; `true` | `KILN_OPENENV_ENABLED` (implemented) | none | Enables discovery and asynchronous run lifecycle routes. Disabling it does not remove the local CLI. |
+| `openenv.max_active_runs` | unsigned integer; `4` | `KILN_OPENENV_MAX_ACTIVE_RUNS` (implemented) | none | Must be greater than zero and no greater than `max_tracked_runs`. Bounds concurrent live rollout collectors; submitted GRPO jobs subsequently use the normal training queue. |
+| `openenv.max_tracked_runs` | unsigned integer; `128` | `KILN_OPENENV_MAX_TRACKED_RUNS` (implemented) | none | Must be greater than zero and at least `max_active_runs`. Bounds retained in-memory run records. |
+| `openenv.tracked_run_ttl_secs` | unsigned integer; `604800` | `KILN_OPENENV_TRACKED_RUN_TTL_SECS` (implemented) | none | Must be greater than zero. Terminal status records age out after this window; the content-addressed dataset, replay, and summary artifacts remain under `<adapter_dir>/.openenv/runs/`. |
+| `openenv.allow_remote_environments` | boolean; `false` | `KILN_OPENENV_ALLOW_REMOTE_ENVIRONMENTS` (implemented) | none | When false, server-launched discovery and runs reject non-loopback origins before network access. Enable only for trusted operators and origins; Kiln's HTTP API is unauthenticated unless protected by your deployment. |
+
+Each active run uses the selected resident policy through Kiln's authoritative
+in-process chat handler, so normal inference admission, adapter identity,
+metrics, and limits apply. A `train` run then enters the same bounded native
+GRPO queue as `POST /v1/train/grpo`; it does not create a second trainer.
+
 ## `[logging]`
 
 | TOML field | Type and exact default | Canonical env target | Alternate env spelling(s) | Validation and effective semantics |

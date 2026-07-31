@@ -46,6 +46,10 @@
       "description": "Native SFT, GRPO, OPD, distillation, queue, and job lifecycle."
     },
     {
+      "name": "openenv",
+      "description": "Native OpenEnv discovery, stateful rollout collection, replay artifacts, and GRPO handoff."
+    },
+    {
       "name": "hf-trl",
       "description": "Immutable Hugging Face/TRL exports and verified PEFT imports."
     },
@@ -3141,6 +3145,244 @@
         }
       }
     },
+    "/v1/openenv/inspect": {
+      "post": {
+        "tags": [
+          "openenv"
+        ],
+        "summary": "Discover and content-address OpenEnv servers",
+        "operationId": "openenv_inspect_post_v1_openenv_inspect",
+        "x-kiln-handler": "openenv::inspect",
+        "x-kiln-rust-signature": "async fn inspect(State(state): State<AppState>, Json(request): Json<OpenEnvInspectRequest>) -> Result<Json<OpenEnvInspectResponse>, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenEnvInspectRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "OpenEnvInspectRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Complete health, metadata, schema, protocol profile, and content identity for every requested environment.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenEnvInspectResponse"
+                }
+              }
+            },
+            "x-kiln-rust-type": "OpenEnvInspectResponse"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/openenv/runs": {
+      "get": {
+        "tags": [
+          "openenv"
+        ],
+        "summary": "List retained OpenEnv rollout and training runs",
+        "operationId": "openenv_list_runs_get_v1_openenv_runs",
+        "x-kiln-handler": "openenv::list_runs",
+        "x-kiln-rust-signature": "async fn list_runs(State(state): State<AppState>) -> Json<OpenEnvRunList>",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Newest-first persisted OpenEnv run records.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenEnvRunList"
+                }
+              }
+            },
+            "x-kiln-rust-type": "OpenEnvRunList"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "openenv"
+        ],
+        "summary": "Start a persisted OpenEnv rollout or rollout-and-train run",
+        "operationId": "openenv_create_run_post_v1_openenv_runs",
+        "x-kiln-handler": "openenv::create_run",
+        "x-kiln-rust-signature": "async fn create_run(State(state): State<AppState>, Json(request): Json<OpenEnvRunRequest>) -> Result<impl IntoResponse, ApiError>",
+        "x-kiln-transport": "http",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenEnvRunRequest"
+              }
+            }
+          },
+          "x-kiln-rust-type": "OpenEnvRunRequest"
+        },
+        "responses": {
+          "202": {
+            "description": "The bounded run was persisted and accepted for asynchronous execution.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenEnvRunStatus"
+                }
+              }
+            },
+            "x-kiln-rust-type": "OpenEnvRunStatus"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/openenv/runs/{run_id}": {
+      "get": {
+        "tags": [
+          "openenv"
+        ],
+        "summary": "Get one OpenEnv run",
+        "operationId": "openenv_get_run_get_v1_openenv_runs_run_id",
+        "x-kiln-handler": "openenv::get_run",
+        "x-kiln-rust-signature": "async fn get_run(State(state): State<AppState>, AxumPath(run_id): AxumPath<String>) -> Result<Json<OpenEnvRunStatus>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current persisted lifecycle, progress, environment identities, artifacts, and training handoff.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenEnvRunStatus"
+                }
+              }
+            },
+            "x-kiln-rust-type": "OpenEnvRunStatus"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "openenv"
+        ],
+        "summary": "Cooperatively cancel an active OpenEnv run",
+        "operationId": "openenv_cancel_run_delete_v1_openenv_runs_run_id",
+        "x-kiln-handler": "openenv::cancel_run",
+        "x-kiln-rust-signature": "async fn cancel_run(State(state): State<AppState>, AxumPath(run_id): AxumPath<String>) -> Result<Json<OpenEnvRunStatus>, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancellation was requested and will settle at the active protocol boundary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenEnvRunStatus"
+                }
+              }
+            },
+            "x-kiln-rust-type": "OpenEnvRunStatus"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
+    "/v1/openenv/runs/{run_id}/artifacts/{kind}": {
+      "get": {
+        "tags": [
+          "openenv"
+        ],
+        "summary": "Stream a retained OpenEnv dataset, replay transcript, or summary receipt",
+        "operationId": "openenv_download_artifact_get_v1_openenv_runs_run_id_artifacts_kind",
+        "x-kiln-handler": "openenv::download_artifact",
+        "x-kiln-rust-signature": "async fn download_artifact(State(state): State<AppState>, AxumPath((run_id, kind)): AxumPath<(String, String)>) -> Result<Response, ApiError>",
+        "x-kiln-transport": "http",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "enum": [
+                "dataset",
+                "replay",
+                "summary"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The immutable run artifact, streamed with a content-disposition filename.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryArchive"
+                }
+              },
+              "application/x-ndjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryArchive"
+                }
+              }
+            },
+            "x-kiln-rust-type": "Body"
+          },
+          "default": {
+            "$ref": "#/components/responses/ApiError"
+          }
+        }
+      }
+    },
     "/v1/preflight/capacity": {
       "post": {
         "tags": [
@@ -4863,6 +5105,31 @@
         "x-kiln-rust-type": "OpdRequest",
         "x-kiln-field-schema-status": "complete"
       },
+      "OpenEnvInspectRequest": {
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/OpenEnvInspectRequest",
+        "x-kiln-rust-type": "OpenEnvInspectRequest",
+        "x-kiln-field-schema-status": "complete"
+      },
+      "OpenEnvInspectResponse": {
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/OpenEnvInspectResponse",
+        "x-kiln-rust-type": "OpenEnvInspectResponse",
+        "x-kiln-field-schema-status": "complete"
+      },
+      "OpenEnvRunList": {
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/OpenEnvRunList",
+        "x-kiln-rust-type": "OpenEnvRunList",
+        "x-kiln-field-schema-status": "complete"
+      },
+      "OpenEnvRunRequest": {
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/OpenEnvRunRequest",
+        "x-kiln-rust-type": "OpenEnvRunRequest",
+        "x-kiln-field-schema-status": "complete"
+      },
+      "OpenEnvRunStatus": {
+        "$ref": "kiln-control-plane-v1.schema.json#/$defs/OpenEnvRunStatus",
+        "x-kiln-rust-type": "OpenEnvRunStatus",
+        "x-kiln-field-schema-status": "complete"
+      },
       "PrometheusText": {
         "type": "string",
         "description": "Prometheus text exposition response body.",
@@ -5081,12 +5348,12 @@
       }
     }
   },
-  "x-kiln-path-count": 103,
-  "x-kiln-operation-count": 115,
+  "x-kiln-path-count": 107,
+  "x-kiln-operation-count": 121,
   "x-kiln-method-counts": {
-    "DELETE": 12,
-    "GET": 54,
-    "POST": 48,
+    "DELETE": 13,
+    "GET": 57,
+    "POST": 50,
     "PUT": 1
   },
   "x-kiln-tag-counts": {
@@ -5098,6 +5365,7 @@
     "inference": 3,
     "library": 3,
     "observability": 8,
+    "openenv": 6,
     "preflight": 5,
     "recipes": 2,
     "teachers": 5,
@@ -5106,8 +5374,8 @@
   },
   "x-kiln-field-schema-status": "complete",
   "x-kiln-component-schema-counts": {
-    "complete": 134,
+    "complete": 139,
     "migration_pending": 0,
-    "total": 134
+    "total": 139
   }
 }

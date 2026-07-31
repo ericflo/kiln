@@ -229,8 +229,9 @@ Before any GPU work in a stage N ≥ 2:
    - confirm the recommended method == this stage's method
      OR the pipeline.md stage_transition_rationale documents an override
 
-   - if Rule A selected OpenEnv, `kiln openenv inspect --json` succeeds for
-     every environment and its schema identity matches the planned stage
+   - if Rule A selected OpenEnv, CLI or server inspection succeeds for every
+     environment and its schema identity matches the planned stage; retain the
+     server `run_id` and linked `training_job_id` when using the control plane
 
 3. Verify hypothesis is falsifiable:
    - stage_transition_rationale names the sub-score(s) expected to move

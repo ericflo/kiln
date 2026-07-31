@@ -426,7 +426,7 @@ identity contracts.
 OpenEnv is the environment-facing half of native reinforcement learning:
 
 ```text
-kiln openenv inspect / rollout / train
+CLI · dashboard · /v1/openenv/inspect and /v1/openenv/runs
         │
         ├── bounded GET health · metadata · schema · environments · OpenAPI
         │
@@ -454,9 +454,23 @@ ordinary /v1/train/grpo admission and training queue
 
 `kiln-openenv` owns the protocol boundary and has no model or optimizer
 responsibility. `kiln-server::openenv_cli` composes sessions with the existing
-chat and training APIs. `kiln-train` owns the optional OpenEnv provenance
-inside canonical `ScoredRollout`; this lets the same JSONL travel through
-native GRPO without a parallel training representation.
+chat and training APIs. The server control plane invokes the authoritative chat
+handler in process, so OpenEnv policy actions retain the ordinary serving
+profile, adapter, scheduler, metrics, and request-log semantics without a
+loopback HTTP dependency. It submits completed groups through the same typed
+GRPO admission function used by `POST /v1/train/grpo`. `kiln-train` owns the
+optional OpenEnv provenance inside canonical `ScoredRollout`; this lets the
+same JSONL travel through native GRPO without a parallel training
+representation.
+
+Server-owned runs are bounded by `[openenv]` policy and persisted below
+`<adapter_dir>/.openenv/runs/<run-id>/`. `run.json` records request, discovery
+identity, progress, lifecycle state, artifacts, error, and optional training
+job. A restart converts an interrupted active run into an explicit terminal
+failure; it never guesses whether a stateful external episode can resume.
+Dataset, replay, and summary downloads stream from those owned paths. Collection
+is cooperatively cancellable through capacity backoff and episode boundaries,
+but cancellation closes once the run enters the native training handoff.
 
 The WebSocket path is load-bearing. OpenEnv's HTTP `/reset` and `/step` routes
 construct a fresh environment for each request and cannot carry episode state.
@@ -485,7 +499,9 @@ environment count, sessions, groups, candidates, steps, recoveries, capacity
 wait, action tokens, replay/data artifact bytes, and the inline corpus are
 capped, and terminal OpenEnv errors latch the session closed. Pinned
 miniopenenv counter and representative arcade servers are the live
-interoperability oracles in CI.
+interoperability oracles in CI only. No production setting, type, or runtime
+branch identifies that implementation; every server follows the same OpenEnv
+contract.
 
 See the [OpenEnv training guide](docs/OPENENV_GUIDE.md) for the operator
 workflow and artifact contract.

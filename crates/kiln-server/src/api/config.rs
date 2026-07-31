@@ -1123,11 +1123,11 @@ mod tests {
         let effective = &json["effective_configuration"];
         assert_eq!(effective["schema_id"], "kiln.effective-configuration.v1");
         assert_eq!(effective["schema_version"], 1);
-        assert_eq!(effective["fixed_field_count"], 112);
+        assert_eq!(effective["fixed_field_count"], 117);
         assert_eq!(effective["dynamic_field_count"], 0);
         assert_eq!(
             effective["fields"].as_object().unwrap().len(),
-            112,
+            117,
             "the API snapshot must include every fixed typed leaf"
         );
         assert_eq!(effective["fields"]["server.port"]["source"], "default");

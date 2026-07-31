@@ -1305,6 +1305,13 @@ async fn main() -> Result<()> {
     state.max_queued_training_jobs = config.training.max_queued_jobs;
     state.max_tracked_jobs = config.training.max_tracked_jobs;
     state.tracked_job_ttl = std::time::Duration::from_secs(config.training.tracked_job_ttl_secs);
+    state.openenv_runs = Arc::new(
+        kiln_server::api::openenv::OpenEnvRunRegistry::open(
+            state.adapter_dir.clone(),
+            config.openenv.clone(),
+        )
+        .context("initialize persisted OpenEnv run registry")?,
+    );
     state.teacher_credentials = Arc::new(config.teachers.clone());
     state.eval_mode = config.server.eval_mode;
     state.debug_model_state = config.server.debug_model_state;
@@ -1343,6 +1350,15 @@ async fn main() -> Result<()> {
         cap = state.max_tracked_jobs,
         ttl_secs = config.training.tracked_job_ttl_secs,
         "training tracked-jobs cap and TTL configured"
+    );
+    tracing::info!(
+        enabled = config.openenv.enabled,
+        max_active_runs = config.openenv.max_active_runs,
+        max_tracked_runs = config.openenv.max_tracked_runs,
+        tracked_run_ttl_secs = config.openenv.tracked_run_ttl_secs,
+        allow_remote_environments = config.openenv.allow_remote_environments,
+        artifact_root = %state.adapter_dir.join(".openenv").join("runs").display(),
+        "OpenEnv control plane configured"
     );
     tracing::debug!(
         threshold_secs = config.server.slow_request_warn_secs,

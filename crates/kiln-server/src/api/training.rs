@@ -1741,7 +1741,18 @@ async fn submit_grpo(
     State(state): State<AppState>,
     payload: Result<Json<GrpoRequest>, JsonRejection>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
-    let mut req = parse_training_json(payload, "GRPO request")?;
+    let req = parse_training_json(payload, "GRPO request")?;
+    submit_grpo_request(&state, req).map(Json)
+}
+
+/// Admit a typed GRPO request through the same bounded queue path used by the
+/// public HTTP handler. Server-owned OpenEnv runs call this after collection,
+/// avoiding a loopback HTTP dependency without creating a second training
+/// implementation.
+pub(crate) fn submit_grpo_request(
+    state: &AppState,
+    mut req: GrpoRequest,
+) -> Result<TrainingResponse, ApiError> {
     ensure_training_backend_admission(&state)?;
     // Reject new jobs during shutdown
     if state.shutdown.load(Ordering::Relaxed) {
@@ -1884,7 +1895,7 @@ async fn submit_grpo(
     let queue_position = admission.queue_position;
     let effective_seed = admission.effective_seed(&job_id)?;
 
-    Ok(Json(TrainingResponse {
+    Ok(TrainingResponse {
         job_id,
         state: TrainingState::Queued,
         effective_seed: effective_seed.to_string(),
@@ -1899,7 +1910,7 @@ async fn submit_grpo(
                 "Queued GRPO training with {num_groups} groups ({total_completions} completions, position {queue_position} in queue)"
             )
         },
-    }))
+    })
 }
 
 /// `POST /v1/train/opd` — submit an On-Policy Distillation training run.

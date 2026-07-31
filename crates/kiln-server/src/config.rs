@@ -130,7 +130,7 @@ pub enum ConfigValueSource {
 
 pub const EFFECTIVE_CONFIGURATION_SCHEMA_ID: &str = "kiln.effective-configuration.v1";
 pub const EFFECTIVE_CONFIGURATION_SCHEMA_VERSION: u32 = 1;
-pub const EFFECTIVE_CONFIGURATION_FIXED_FIELD_COUNT: usize = 112;
+pub const EFFECTIVE_CONFIGURATION_FIXED_FIELD_COUNT: usize = 117;
 
 /// One post-precedence typed startup value in the complete configuration dump.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -2914,6 +2914,8 @@ pub struct KilnConfig {
     pub paths: PathsConfig,
     pub memory: MemoryConfig,
     pub training: TrainingConfig,
+    /// Native OpenEnv rollout and training control-plane policy.
+    pub openenv: OpenEnvConfig,
     pub logging: LoggingConfig,
     pub prefix_cache: PrefixCacheConfig,
     pub speculative: SpeculativeDecodingConfig,
@@ -3930,6 +3932,28 @@ pub struct TrainingConfig {
     /// week's runs, while `max_tracked_jobs` (default 1024) still bounds
     /// memory.
     pub tracked_job_ttl_secs: u64,
+}
+
+/// `[openenv]` server-owned rollout orchestration policy.
+///
+/// CLI-driven OpenEnv workflows remain available independently. These limits
+/// govern only the asynchronous HTTP/dashboard control plane.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OpenEnvConfig {
+    /// Enable OpenEnv discovery and run lifecycle API routes.
+    pub enabled: bool,
+    /// Maximum concurrent rollout collectors. Training jobs submitted by a
+    /// run subsequently use the normal bounded training queue.
+    pub max_active_runs: usize,
+    /// Maximum in-memory tracked run records, including terminal runs.
+    pub max_tracked_runs: usize,
+    /// Retention window for terminal run records.
+    pub tracked_run_ttl_secs: u64,
+    /// Permit the server control plane to connect to non-loopback OpenEnv
+    /// origins. Disabled by default to make the HTTP API safe against SSRF;
+    /// the local CLI remains unrestricted.
+    pub allow_remote_environments: bool,
 }
 
 /// Logging settings. Startup overrides use `KILN_LOGGING_<FIELD>`.
@@ -5242,6 +5266,11 @@ static PUBLIC_ENV_FIELDS: &[PublicEnvField] = &[
     public_env_field!(usize, training.max_queued_jobs),
     public_env_field!(usize, training.max_tracked_jobs),
     public_env_field!(u64, training.tracked_job_ttl_secs),
+    public_env_field!(bool, openenv.enabled),
+    public_env_field!(usize, openenv.max_active_runs),
+    public_env_field!(usize, openenv.max_tracked_runs),
+    public_env_field!(u64, openenv.tracked_run_ttl_secs),
+    public_env_field!(bool, openenv.allow_remote_environments),
     public_env_field!(text, logging.level),
     public_env_field!(text, logging.format),
     public_env_field!(bool, prefix_cache.enabled),
@@ -5312,6 +5341,7 @@ impl Default for KilnConfig {
             paths: PathsConfig::default(),
             memory: MemoryConfig::default(),
             training: TrainingConfig::default(),
+            openenv: OpenEnvConfig::default(),
             logging: LoggingConfig::default(),
             prefix_cache: PrefixCacheConfig::default(),
             speculative: SpeculativeDecodingConfig::default(),
@@ -5482,6 +5512,18 @@ impl Default for TrainingConfig {
             max_queued_jobs: 32,
             max_tracked_jobs: 1024,
             tracked_job_ttl_secs: 604_800,
+        }
+    }
+}
+
+impl Default for OpenEnvConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_active_runs: 4,
+            max_tracked_runs: 128,
+            tracked_run_ttl_secs: 604_800,
+            allow_remote_environments: false,
         }
     }
 }
@@ -6122,6 +6164,31 @@ impl KilnConfig {
                 self.training.max_tracked_jobs
             );
         }
+        if self.openenv.max_active_runs == 0 {
+            anyhow::bail!(
+                "openenv.max_active_runs must be > 0, got {}",
+                self.openenv.max_active_runs
+            );
+        }
+        if self.openenv.max_tracked_runs == 0 {
+            anyhow::bail!(
+                "openenv.max_tracked_runs must be > 0, got {}",
+                self.openenv.max_tracked_runs
+            );
+        }
+        if self.openenv.max_tracked_runs < self.openenv.max_active_runs {
+            anyhow::bail!(
+                "openenv.max_tracked_runs must be at least openenv.max_active_runs ({}), got {}",
+                self.openenv.max_active_runs,
+                self.openenv.max_tracked_runs
+            );
+        }
+        if self.openenv.tracked_run_ttl_secs == 0 {
+            anyhow::bail!(
+                "openenv.tracked_run_ttl_secs must be > 0, got {}",
+                self.openenv.tracked_run_ttl_secs
+            );
+        }
         validate_optional_webhook_url(
             "training.webhook_url",
             self.training.webhook_url.as_deref(),
@@ -6547,6 +6614,11 @@ mod tests {
         "KILN_MODEL_TOKENIZER_PATH",
         "KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM",
         "KILN_MODEL_VULKAN_DECODE_WEIGHT_PREWARM_MIB_PER_SECOND",
+        "KILN_OPENENV_ALLOW_REMOTE_ENVIRONMENTS",
+        "KILN_OPENENV_ENABLED",
+        "KILN_OPENENV_MAX_ACTIVE_RUNS",
+        "KILN_OPENENV_MAX_TRACKED_RUNS",
+        "KILN_OPENENV_TRACKED_RUN_TTL_SECS",
         "KILN_PATHS_CACHE_ROOT",
         "KILN_PREFIX_CACHE_ENABLED",
         "KILN_PREFIX_CACHE_MAX_BLOCKS",
@@ -7838,7 +7910,7 @@ rocm_graph_cache_max_bytes = 17179869184
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
         expected.sort();
-        assert_eq!(original_len, 107);
+        assert_eq!(original_len, 112);
         assert_eq!(names.len(), original_len, "canonical names must be unique");
         assert_eq!(names, expected);
 
@@ -7922,9 +7994,9 @@ rocm_graph_cache_max_bytes = 17179869184
                 .as_object()
                 .unwrap()
                 .len(),
-            16
+            17
         );
-        assert_eq!(serialized_leaves.len(), 112);
+        assert_eq!(serialized_leaves.len(), 117);
         assert_eq!(CONFIG_FILE_ONLY_FIXED_FIELDS.len(), 5);
 
         let mut classified = PUBLIC_ENV_FIELDS
@@ -8010,9 +8082,9 @@ api_key_env = "{SECRET_ENV}"
 
         assert_eq!(effective.schema_id, EFFECTIVE_CONFIGURATION_SCHEMA_ID);
         assert_eq!(effective.schema_version, 1);
-        assert_eq!(effective.fixed_field_count, 112);
+        assert_eq!(effective.fixed_field_count, 117);
         assert_eq!(effective.dynamic_field_count, 2);
-        assert_eq!(effective.fields.len(), 114);
+        assert_eq!(effective.fields.len(), 119);
         assert!(effective.all_fields_restart_required_to_change);
         assert!(
             effective

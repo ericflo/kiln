@@ -345,6 +345,43 @@ async fn chat_completions(
     result.map(|response| response_with_runtime_headers(&state, response))
 }
 
+/// Execute an OpenEnv policy action through the authoritative chat handler
+/// without requiring the server to call its own listening socket.
+///
+/// This intentionally preserves normal inference admission, adapter loading,
+/// request attribution, metrics, timeout behavior, and response construction.
+pub(crate) async fn openenv_chat_completion(
+    state: &AppState,
+    body: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let request: ChatCompletionRequest =
+        serde_json::from_value(body).context("decode OpenEnv policy chat request")?;
+    let mut headers = HeaderMap::new();
+    headers.insert("x-kiln-client", HeaderValue::from_static("openenv"));
+    let response = chat_completions(State(state.clone()), headers, Json(request))
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "Kiln action generation failed with {} {}: {}",
+                error.status,
+                error.code,
+                error.message
+            )
+        })?;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), CHAT_BODY_LIMIT)
+        .await
+        .context("read in-process OpenEnv policy response")?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).context("decode in-process OpenEnv policy response")?;
+    anyhow::ensure!(
+        status.is_success(),
+        "Kiln action generation returned HTTP {status}: {}",
+        serde_json::to_string(&value).unwrap_or_default()
+    );
+    Ok(value)
+}
+
 async fn completions(
     State(state): State<AppState>,
     Json(req): Json<TextCompletionRequest>,

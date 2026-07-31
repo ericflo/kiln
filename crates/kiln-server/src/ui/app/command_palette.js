@@ -51,6 +51,7 @@ function buildCmdkIndex() {
   items.push({ kind: 'action', icon: icon('plus'), title: 'Run a new eval',   sub: 'Submit a suite against an adapter', action: () => { selectPage('evals'); document.getElementById('evals-tab-suites')?.click(); } });
   items.push({ kind: 'action', icon: icon('plus'), title: 'Train a new SFT adapter', sub: 'Open the SFT submit form', action: () => { selectPage('training'); document.getElementById('training-tab-sft')?.click(); } });
   items.push({ kind: 'action', icon: icon('plus'), title: 'Train a new GRPO adapter', sub: 'Open the GRPO submit form', action: () => { selectPage('training'); document.getElementById('training-tab-grpo')?.click(); } });
+  items.push({ kind: 'action', icon: icon('plus'), title: 'Train against OpenEnv', sub: 'Discover an RL environment, collect episodes, and queue GRPO', action: () => { selectPage('training'); document.getElementById('training-tab-openenv')?.click(); } });
   items.push({ kind: 'action', icon: icon('plus'), title: 'Upload a dataset', sub: 'Drop an SFT JSONL', action: () => { selectPage('evals'); document.getElementById('evals-tab-datasets')?.click(); document.getElementById('dataset-name')?.focus(); } });
   items.push({ kind: 'action', icon: icon('plus'), title: 'Create judgment dataset', sub: 'Start the A/B flywheel', action: () => { selectPage('evals'); document.getElementById('evals-tab-judgments')?.click(); document.getElementById('judgment-create-name')?.focus(); } });
   // Adapters

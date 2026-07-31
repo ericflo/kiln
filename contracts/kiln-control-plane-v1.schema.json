@@ -41,6 +41,11 @@
     "MarkTrainedResponse",
     "MessageRequest",
     "OpdRequest",
+    "OpenEnvInspectRequest",
+    "OpenEnvInspectResponse",
+    "OpenEnvRunList",
+    "OpenEnvRunRequest",
+    "OpenEnvRunStatus",
     "PublishPayload",
     "PublishToLibraryResponse",
     "QueueResponse",
@@ -170,6 +175,21 @@
     },
     {
       "$ref": "#/$defs/OpdRequest"
+    },
+    {
+      "$ref": "#/$defs/OpenEnvInspectRequest"
+    },
+    {
+      "$ref": "#/$defs/OpenEnvInspectResponse"
+    },
+    {
+      "$ref": "#/$defs/OpenEnvRunList"
+    },
+    {
+      "$ref": "#/$defs/OpenEnvRunRequest"
+    },
+    {
+      "$ref": "#/$defs/OpenEnvRunStatus"
     },
     {
       "$ref": "#/$defs/PublishPayload"
@@ -3398,6 +3418,37 @@
       "x-kiln-rust-type": "kiln_train::OpdTrainingMode",
       "x-kiln-field-schema-status": "complete"
     },
+    "OpenEnvArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "url",
+        "sha256",
+        "bytes"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "dataset",
+            "replay",
+            "summary"
+          ]
+        },
+        "url": {
+          "$ref": "#/$defs/String"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "bytes": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        }
+      },
+      "description": "Content-addressed artifact downloadable from a retained OpenEnv run.",
+      "x-kiln-rust-type": "OpenEnvArtifact",
+      "x-kiln-field-schema-status": "complete"
+    },
     "OpenEnvEpisodeTerminationV1": {
       "type": "string",
       "enum": [
@@ -3408,6 +3459,181 @@
       ],
       "description": "Why an OpenEnv episode ended from Kiln's point of view.",
       "x-kiln-rust-type": "kiln_train::OpenEnvEpisodeTerminationV1",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "client_profile",
+        "base_url",
+        "websocket_url",
+        "environments",
+        "metadata",
+        "schema_sha256"
+      ],
+      "properties": {
+        "schema": {
+          "$ref": "#/$defs/String"
+        },
+        "client_profile": {
+          "$ref": "#/$defs/String"
+        },
+        "base_url": {
+          "$ref": "#/$defs/String"
+        },
+        "websocket_url": {
+          "$ref": "#/$defs/String"
+        },
+        "openapi_version": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "environments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/String"
+          }
+        },
+        "metadata": {
+          "$ref": "#/$defs/OpenEnvMetadata"
+        },
+        "schema_sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "description": "Content-addressed identity established by OpenEnv discovery.",
+      "x-kiln-rust-type": "kiln_openenv::OpenEnvIdentity",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvInspectRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "environment_urls"
+      ],
+      "properties": {
+        "environment_urls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NonEmptyString"
+          },
+          "minItems": 1
+        }
+      },
+      "x-kiln-input-aliases": {
+        "environments": "environment_urls"
+      },
+      "description": "One or more OpenEnv HTTP base URLs to discover. `environments` is accepted as an input alias.",
+      "x-kiln-rust-type": "OpenEnvInspectRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvInspectResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "environments"
+      ],
+      "properties": {
+        "schema": {
+          "const": "kiln.openenv-inspection.v1"
+        },
+        "environments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpenEnvInspection"
+          },
+          "minItems": 1
+        }
+      },
+      "description": "Complete discovery results for the requested OpenEnv servers.",
+      "x-kiln-rust-type": "OpenEnvInspectResponse",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvInspection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity",
+        "schema"
+      ],
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/OpenEnvIdentity"
+        },
+        "schema": {
+          "$ref": "#/$defs/OpenEnvSchema"
+        }
+      },
+      "description": "Complete protocol discovery result for one OpenEnv server.",
+      "x-kiln-rust-type": "kiln_openenv::OpenEnvInspection",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "description"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/String"
+        },
+        "description": {
+          "$ref": "#/$defs/String"
+        },
+        "readme_content": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "version": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "author": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "documentation_url": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Environment-authored metadata discovered from an OpenEnv server.",
+      "x-kiln-rust-type": "kiln_openenv::OpenEnvMetadata",
       "x-kiln-field-schema-status": "complete"
     },
     "OpenEnvRolloutProvenanceV1": {
@@ -3473,6 +3699,248 @@
       ],
       "description": "Fail-closed environment, task, and outcome identity attached to a native OpenEnv rollout.",
       "x-kiln-rust-type": "kiln_train::OpenEnvRolloutProvenanceV1",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvRunKind": {
+      "type": "string",
+      "enum": [
+        "rollout",
+        "train"
+      ],
+      "description": "Whether a server-owned run stops after artifacts or queues native GRPO.",
+      "x-kiln-rust-type": "OpenEnvRunKind",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvRunList": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "runs"
+      ],
+      "properties": {
+        "schema": {
+          "const": "kiln.openenv-run-list.v1"
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpenEnvRunStatus"
+          }
+        }
+      },
+      "description": "Newest-first retained OpenEnv run records.",
+      "x-kiln-rust-type": "OpenEnvRunList",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvRunProgress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "groups_completed",
+        "groups_total",
+        "rollouts_completed",
+        "rollouts_total"
+      ],
+      "properties": {
+        "groups_completed": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "groups_total": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "rollouts_completed": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "rollouts_total": {
+          "$ref": "#/$defs/PositiveInteger"
+        }
+      },
+      "description": "Bounded group and episode progress for one OpenEnv run.",
+      "x-kiln-rust-type": "OpenEnvRunProgress",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvRunRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "environment_urls"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/OpenEnvRunKind"
+        },
+        "environment_urls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NonEmptyString"
+          },
+          "minItems": 1
+        },
+        "adapter": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "groups": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "group_size": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "seed_start": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "reset_options": {
+          "type": "object"
+        },
+        "max_steps": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "concurrency": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "max_action_tokens": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "temperature": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "thinking": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "protocol_error_reward": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "max_recoverable_errors": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "capacity_wait_seconds": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "output_adapter": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "training_config": {
+          "$ref": "#/$defs/GrpoConfig"
+        },
+        "auto_load": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "post_eval": {
+          "$ref": "#/$defs/PostEvalConfig"
+        }
+      },
+      "x-kiln-input-aliases": {
+        "environments": "environment_urls"
+      },
+      "x-kiln-semantic-constraints": [
+        "kind=train requires output_adapter",
+        "kind=rollout rejects output_adapter",
+        "Kiln overrides behavior_policy, base_adapter, output_name, and auto_load in training_config"
+      ],
+      "description": "A persisted OpenEnv rollout or rollout-and-train request. `environments` is accepted as an input alias for `environment_urls`.",
+      "x-kiln-rust-type": "OpenEnvRunRequest",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvRunState": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "discovering",
+        "collecting",
+        "submitting",
+        "rollout_ready",
+        "training_queued",
+        "failed",
+        "cancelled"
+      ],
+      "description": "Persisted OpenEnv orchestration lifecycle state.",
+      "x-kiln-rust-type": "OpenEnvRunState",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvRunStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "run_id",
+        "kind",
+        "state",
+        "request",
+        "submitted_unix_ms",
+        "progress"
+      ],
+      "properties": {
+        "schema": {
+          "const": "kiln.openenv-run.v1"
+        },
+        "run_id": {
+          "$ref": "#/$defs/String"
+        },
+        "kind": {
+          "$ref": "#/$defs/OpenEnvRunKind"
+        },
+        "state": {
+          "$ref": "#/$defs/OpenEnvRunState"
+        },
+        "request": {
+          "$ref": "#/$defs/OpenEnvRunRequest"
+        },
+        "submitted_unix_ms": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "finished_unix_ms": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "progress": {
+          "$ref": "#/$defs/OpenEnvRunProgress"
+        },
+        "environments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpenEnvIdentity"
+          }
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpenEnvArtifact"
+          }
+        },
+        "training_job_id": {
+          "$ref": "#/$defs/String"
+        },
+        "training_submission": {
+          "$ref": "#/$defs/TrainingResponse"
+        },
+        "error": {
+          "$ref": "#/$defs/String"
+        }
+      },
+      "description": "Persisted status, progress, discovered identities, artifacts, and optional GRPO handoff for one OpenEnv run.",
+      "x-kiln-rust-type": "OpenEnvRunStatus",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "observation",
+        "state"
+      ],
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/AnyJson"
+        },
+        "observation": {
+          "$ref": "#/$defs/AnyJson"
+        },
+        "state": {
+          "$ref": "#/$defs/AnyJson"
+        }
+      },
+      "description": "JSON Schemas for OpenEnv actions, observations, and state.",
+      "x-kiln-rust-type": "kiln_openenv::OpenEnvSchema",
       "x-kiln-field-schema-status": "complete"
     },
     "Optimizer": {
@@ -6254,6 +6722,206 @@
             "kind": "muon"
           }
         }
+      }
+    ],
+    "OpenEnvInspectRequest": [
+      {
+        "environment_urls": [
+          "http://127.0.0.1:8000"
+        ]
+      }
+    ],
+    "OpenEnvInspectResponse": [
+      {
+        "schema": "kiln.openenv-inspection.v1",
+        "environments": [
+          {
+            "identity": {
+              "schema": "kiln.openenv-identity.v1",
+              "client_profile": "openenv-python-sdk-v1",
+              "base_url": "http://127.0.0.1:8000",
+              "websocket_url": "ws://127.0.0.1:8000/ws",
+              "openapi_version": "3.1.0",
+              "environments": [
+                "bandit"
+              ],
+              "metadata": {
+                "name": "bandit",
+                "description": "Choose an arm.",
+                "readme_content": null,
+                "version": "1.0.0",
+                "author": null,
+                "documentation_url": null
+              },
+              "schema_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "schema": {
+              "action": {
+                "type": "object",
+                "required": [
+                  "arm"
+                ]
+              },
+              "observation": {
+                "type": "object"
+              },
+              "state": {
+                "type": "object"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "OpenEnvRunList": [
+      {
+        "schema": "kiln.openenv-run-list.v1",
+        "runs": [
+          {
+            "schema": "kiln.openenv-run.v1",
+            "run_id": "80a26e21-8451-4a64-8666-890c06fd80bd",
+            "kind": "train",
+            "state": "collecting",
+            "request": {
+              "kind": "train",
+              "environment_urls": [
+                "http://127.0.0.1:8000"
+              ],
+              "adapter": "base",
+              "groups": 8,
+              "group_size": 4,
+              "seed_start": 0,
+              "reset_options": {},
+              "max_steps": 8,
+              "concurrency": 4,
+              "max_action_tokens": 256,
+              "temperature": 1.0,
+              "thinking": false,
+              "protocol_error_reward": -1.0,
+              "max_recoverable_errors": 3,
+              "capacity_wait_seconds": 300,
+              "output_adapter": "bandit-agent",
+              "training_config": {
+                "lora_rank": 8
+              },
+              "auto_load": true
+            },
+            "submitted_unix_ms": 1700000000000,
+            "progress": {
+              "groups_completed": 3,
+              "groups_total": 8,
+              "rollouts_completed": 12,
+              "rollouts_total": 32
+            },
+            "environments": [
+              {
+                "schema": "kiln.openenv-identity.v1",
+                "client_profile": "openenv-python-sdk-v1",
+                "base_url": "http://127.0.0.1:8000",
+                "websocket_url": "ws://127.0.0.1:8000/ws",
+                "openapi_version": "3.1.0",
+                "environments": [
+                  "bandit"
+                ],
+                "metadata": {
+                  "name": "bandit",
+                  "description": "Choose an arm.",
+                  "readme_content": null,
+                  "version": "1.0.0",
+                  "author": null,
+                  "documentation_url": null
+                },
+                "schema_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "OpenEnvRunRequest": [
+      {
+        "kind": "train",
+        "environment_urls": [
+          "http://127.0.0.1:8000"
+        ],
+        "adapter": "base",
+        "groups": 8,
+        "group_size": 4,
+        "seed_start": 0,
+        "reset_options": {},
+        "max_steps": 8,
+        "concurrency": 4,
+        "max_action_tokens": 256,
+        "temperature": 1.0,
+        "thinking": false,
+        "protocol_error_reward": -1.0,
+        "max_recoverable_errors": 3,
+        "capacity_wait_seconds": 300,
+        "output_adapter": "bandit-agent",
+        "training_config": {
+          "lora_rank": 8
+        },
+        "auto_load": true
+      }
+    ],
+    "OpenEnvRunStatus": [
+      {
+        "schema": "kiln.openenv-run.v1",
+        "run_id": "80a26e21-8451-4a64-8666-890c06fd80bd",
+        "kind": "train",
+        "state": "collecting",
+        "request": {
+          "kind": "train",
+          "environment_urls": [
+            "http://127.0.0.1:8000"
+          ],
+          "adapter": "base",
+          "groups": 8,
+          "group_size": 4,
+          "seed_start": 0,
+          "reset_options": {},
+          "max_steps": 8,
+          "concurrency": 4,
+          "max_action_tokens": 256,
+          "temperature": 1.0,
+          "thinking": false,
+          "protocol_error_reward": -1.0,
+          "max_recoverable_errors": 3,
+          "capacity_wait_seconds": 300,
+          "output_adapter": "bandit-agent",
+          "training_config": {
+            "lora_rank": 8
+          },
+          "auto_load": true
+        },
+        "submitted_unix_ms": 1700000000000,
+        "progress": {
+          "groups_completed": 3,
+          "groups_total": 8,
+          "rollouts_completed": 12,
+          "rollouts_total": 32
+        },
+        "environments": [
+          {
+            "schema": "kiln.openenv-identity.v1",
+            "client_profile": "openenv-python-sdk-v1",
+            "base_url": "http://127.0.0.1:8000",
+            "websocket_url": "ws://127.0.0.1:8000/ws",
+            "openapi_version": "3.1.0",
+            "environments": [
+              "bandit"
+            ],
+            "metadata": {
+              "name": "bandit",
+              "description": "Choose an arm.",
+              "readme_content": null,
+              "version": "1.0.0",
+              "author": null,
+              "documentation_url": null
+            },
+            "schema_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        ]
       }
     ],
     "PublishPayload": [

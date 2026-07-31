@@ -34,6 +34,15 @@ reset controls; group, rollout, step, model-token, and latency counts; return
 distribution and outcome counts; artifact identities; and the response from
 `openenv train`.
 
+Server-owned runs publish the same three representations below
+`<adapter_dir>/.openenv/runs/<run-id>/` and expose them as `dataset`, `replay`,
+and `summary` artifact links in `GET /v1/openenv/runs/<run-id>`. The adjacent
+`run.json` is the durable orchestration record, not a fourth training
+representation. It records lifecycle progress, failure or cancellation, and
+the linked native training job. An interrupted active run is marked failed
+after restart because a stateful environment session cannot be assumed
+resumable.
+
 The summary is an audit receipt, not proof that an implementation behind the
 same URL has remained unchanged. Pin an environment image or binary and retain
 its deployment identity for serious experiments.

@@ -51,6 +51,11 @@ ENTRYPOINTS = (
     "MarkTrainedResponse",
     "MessageRequest",
     "OpdRequest",
+    "OpenEnvInspectRequest",
+    "OpenEnvInspectResponse",
+    "OpenEnvRunList",
+    "OpenEnvRunRequest",
+    "OpenEnvRunStatus",
     "PublishPayload",
     "PublishToLibraryResponse",
     "QueueResponse",
@@ -446,6 +451,208 @@ def build_grpo_types() -> None:
             }],
             "x-kiln-semantic-constraints": ["recorded behavior policy requires provenance on every rollout", "dataset_split requires a registered named dataset and defaults to train"],
         },
+    )
+
+
+def build_openenv_types() -> None:
+    add_object(
+        "OpenEnvMetadata",
+        "kiln_openenv::OpenEnvMetadata",
+        {
+            "name": ref("String"),
+            "description": ref("String"),
+            "readme_content": nullable(ref("String")),
+            "version": nullable(ref("String")),
+            "author": nullable(ref("String")),
+            "documentation_url": nullable(ref("String")),
+        },
+        "Environment-authored metadata discovered from an OpenEnv server.",
+        optional=("readme_content", "version", "author", "documentation_url"),
+    )
+    add_object(
+        "OpenEnvSchema",
+        "kiln_openenv::OpenEnvSchema",
+        {
+            "action": ref("AnyJson"),
+            "observation": ref("AnyJson"),
+            "state": ref("AnyJson"),
+        },
+        "JSON Schemas for OpenEnv actions, observations, and state.",
+    )
+    add_object(
+        "OpenEnvIdentity",
+        "kiln_openenv::OpenEnvIdentity",
+        {
+            "schema": ref("String"),
+            "client_profile": ref("String"),
+            "base_url": ref("String"),
+            "websocket_url": ref("String"),
+            "openapi_version": nullable(ref("String")),
+            "environments": array(ref("String")),
+            "metadata": ref("OpenEnvMetadata"),
+            "schema_sha256": ref("Sha256"),
+        },
+        "Content-addressed identity established by OpenEnv discovery.",
+        optional=("openapi_version",),
+    )
+    add_object(
+        "OpenEnvInspection",
+        "kiln_openenv::OpenEnvInspection",
+        {
+            "identity": ref("OpenEnvIdentity"),
+            "schema": ref("OpenEnvSchema"),
+        },
+        "Complete protocol discovery result for one OpenEnv server.",
+    )
+    add_enum(
+        "OpenEnvRunKind",
+        "OpenEnvRunKind",
+        ["rollout", "train"],
+        "Whether a server-owned run stops after artifacts or queues native GRPO.",
+    )
+    add_enum(
+        "OpenEnvRunState",
+        "OpenEnvRunState",
+        [
+            "queued",
+            "discovering",
+            "collecting",
+            "submitting",
+            "rollout_ready",
+            "training_queued",
+            "failed",
+            "cancelled",
+        ],
+        "Persisted OpenEnv orchestration lifecycle state.",
+    )
+    add_object(
+        "OpenEnvRunProgress",
+        "OpenEnvRunProgress",
+        {
+            "groups_completed": ref("NonNegativeInteger"),
+            "groups_total": ref("PositiveInteger"),
+            "rollouts_completed": ref("NonNegativeInteger"),
+            "rollouts_total": ref("PositiveInteger"),
+        },
+        "Bounded group and episode progress for one OpenEnv run.",
+    )
+    add_object(
+        "OpenEnvArtifact",
+        "OpenEnvArtifact",
+        {
+            "kind": {"enum": ["dataset", "replay", "summary"]},
+            "url": ref("String"),
+            "sha256": ref("Sha256"),
+            "bytes": ref("NonNegativeInteger"),
+        },
+        "Content-addressed artifact downloadable from a retained OpenEnv run.",
+    )
+    add_object(
+        "OpenEnvRunRequest",
+        "OpenEnvRunRequest",
+        {
+            "kind": ref("OpenEnvRunKind"),
+            "environment_urls": array(ref("NonEmptyString"), min_items=1),
+            "adapter": ref("NonEmptyString"),
+            "groups": ref("PositiveInteger"),
+            "group_size": ref("PositiveInteger"),
+            "seed_start": ref("NonNegativeInteger"),
+            "reset_options": {"type": "object"},
+            "max_steps": ref("PositiveInteger"),
+            "concurrency": ref("PositiveInteger"),
+            "max_action_tokens": ref("PositiveInteger"),
+            "temperature": ref("FiniteNumber"),
+            "thinking": ref("Boolean"),
+            "protocol_error_reward": ref("FiniteNumber"),
+            "max_recoverable_errors": ref("NonNegativeInteger"),
+            "capacity_wait_seconds": ref("PositiveInteger"),
+            "output_adapter": ref("NonEmptyString"),
+            "training_config": ref("GrpoConfig"),
+            "auto_load": ref("Boolean"),
+            "post_eval": ref("PostEvalConfig"),
+        },
+        "A persisted OpenEnv rollout or rollout-and-train request. `environments` is accepted as an input alias for `environment_urls`.",
+        optional=(
+            "kind",
+            "adapter",
+            "groups",
+            "group_size",
+            "seed_start",
+            "reset_options",
+            "max_steps",
+            "concurrency",
+            "max_action_tokens",
+            "temperature",
+            "thinking",
+            "protocol_error_reward",
+            "max_recoverable_errors",
+            "capacity_wait_seconds",
+            "output_adapter",
+            "training_config",
+            "auto_load",
+            "post_eval",
+        ),
+        extra={
+            "x-kiln-input-aliases": {"environments": "environment_urls"},
+            "x-kiln-semantic-constraints": [
+                "kind=train requires output_adapter",
+                "kind=rollout rejects output_adapter",
+                "Kiln overrides behavior_policy, base_adapter, output_name, and auto_load in training_config",
+            ],
+        },
+    )
+    add_object(
+        "OpenEnvRunStatus",
+        "OpenEnvRunStatus",
+        {
+            "schema": {"const": "kiln.openenv-run.v1"},
+            "run_id": ref("String"),
+            "kind": ref("OpenEnvRunKind"),
+            "state": ref("OpenEnvRunState"),
+            "request": ref("OpenEnvRunRequest"),
+            "submitted_unix_ms": ref("NonNegativeInteger"),
+            "finished_unix_ms": ref("NonNegativeInteger"),
+            "progress": ref("OpenEnvRunProgress"),
+            "environments": array(ref("OpenEnvIdentity")),
+            "artifacts": array(ref("OpenEnvArtifact")),
+            "training_job_id": ref("String"),
+            "training_submission": ref("TrainingResponse"),
+            "error": ref("String"),
+        },
+        "Persisted status, progress, discovered identities, artifacts, and optional GRPO handoff for one OpenEnv run.",
+        optional=(
+            "finished_unix_ms",
+            "environments",
+            "artifacts",
+            "training_job_id",
+            "training_submission",
+            "error",
+        ),
+    )
+    add_object(
+        "OpenEnvRunList",
+        "OpenEnvRunList",
+        {
+            "schema": {"const": "kiln.openenv-run-list.v1"},
+            "runs": array(ref("OpenEnvRunStatus")),
+        },
+        "Newest-first retained OpenEnv run records.",
+    )
+    add_object(
+        "OpenEnvInspectRequest",
+        "OpenEnvInspectRequest",
+        {"environment_urls": array(ref("NonEmptyString"), min_items=1)},
+        "One or more OpenEnv HTTP base URLs to discover. `environments` is accepted as an input alias.",
+        extra={"x-kiln-input-aliases": {"environments": "environment_urls"}},
+    )
+    add_object(
+        "OpenEnvInspectResponse",
+        "OpenEnvInspectResponse",
+        {
+            "schema": {"const": "kiln.openenv-inspection.v1"},
+            "environments": array(ref("OpenEnvInspection"), min_items=1),
+        },
+        "Complete discovery results for the requested OpenEnv servers.",
     )
 
 
@@ -913,6 +1120,65 @@ def build_examples() -> dict[str, list[Any]]:
     correction = {**correction_input, "created_at": "2026-07-14T12:00:00Z"}
     tier = {"tier": "prosumer", "default_logit_source": "LocalTeacher", "default_loss": "teacher_top_k (K=32)", "default_top_k": 32, "lora_rank": 32, "batch_size": 16, "samples_per_prompt_default": 4, "samples_per_prompt_data_multiplier": 32, "max_rollout_tokens": 7168, "auto_checkpoint_cadence_steps": 10, "cost_cap_default_usd": 25.0, "cold_start_overlap_threshold": 0.5, "mixture_distillation_golden_fraction": 0.25, "eval_gate_required": True, "notifications_channels": ["desktop_tray", "email", "webhook"]}
     recipe = {"name": "quick-sft", "description": "Train one adapter", "steps": [{"kind": "sft", "name": "math-v1", "examples_from": {"examples": sft["examples"]}}]}
+    openenv_inspection = {
+        "identity": {
+            "schema": "kiln.openenv-identity.v1",
+            "client_profile": "openenv-python-sdk-v1",
+            "base_url": "http://127.0.0.1:8000",
+            "websocket_url": "ws://127.0.0.1:8000/ws",
+            "openapi_version": "3.1.0",
+            "environments": ["bandit"],
+            "metadata": {
+                "name": "bandit",
+                "description": "Choose an arm.",
+                "readme_content": None,
+                "version": "1.0.0",
+                "author": None,
+                "documentation_url": None,
+            },
+            "schema_sha256": "sha256:" + "0" * 64,
+        },
+        "schema": {
+            "action": {"type": "object", "required": ["arm"]},
+            "observation": {"type": "object"},
+            "state": {"type": "object"},
+        },
+    }
+    openenv_request = {
+        "kind": "train",
+        "environment_urls": ["http://127.0.0.1:8000"],
+        "adapter": "base",
+        "groups": 8,
+        "group_size": 4,
+        "seed_start": 0,
+        "reset_options": {},
+        "max_steps": 8,
+        "concurrency": 4,
+        "max_action_tokens": 256,
+        "temperature": 1.0,
+        "thinking": False,
+        "protocol_error_reward": -1.0,
+        "max_recoverable_errors": 3,
+        "capacity_wait_seconds": 300,
+        "output_adapter": "bandit-agent",
+        "training_config": {"lora_rank": 8},
+        "auto_load": True,
+    }
+    openenv_status = {
+        "schema": "kiln.openenv-run.v1",
+        "run_id": "80a26e21-8451-4a64-8666-890c06fd80bd",
+        "kind": "train",
+        "state": "collecting",
+        "request": openenv_request,
+        "submitted_unix_ms": 1_700_000_000_000,
+        "progress": {
+            "groups_completed": 3,
+            "groups_total": 8,
+            "rollouts_completed": 12,
+            "rollouts_total": 32,
+        },
+        "environments": [openenv_inspection["identity"]],
+    }
     examples: dict[str, list[Any]] = {
         "AgentRunAbortResponse": [{"aborting": True}],
         "AgentRunEventsResponse": [{"events": [{"seq": 0, "event": {"type": "message_end"}}], "next_after": 1, "status": "running", "first_available_seq": 0, "truncated": False}],
@@ -950,6 +1216,11 @@ def build_examples() -> dict[str, list[Any]]:
         "MarkTrainedResponse": [{"status": "marked", "marked": 1}],
         "MessageRequest": [{"message": "Also run the focused test."}],
         "OpdRequest": [opd],
+        "OpenEnvInspectRequest": [{"environment_urls": ["http://127.0.0.1:8000"]}],
+        "OpenEnvInspectResponse": [{"schema": "kiln.openenv-inspection.v1", "environments": [openenv_inspection]}],
+        "OpenEnvRunList": [{"schema": "kiln.openenv-run-list.v1", "runs": [openenv_status]}],
+        "OpenEnvRunRequest": [openenv_request],
+        "OpenEnvRunStatus": [openenv_status],
         "PublishPayload": [{"description": "Math adapter", "uploader": "local-user"}],
         "PublishToLibraryResponse": [{"status": "ready_to_publish", "backend": "https://library.kiln.run", "intended_id": "math-v1@2026-07-14", "uploader": "local-user", "description": "Math adapter", "receipt_schema_version": 1, "note": "Local validation passed; no remote upload occurred."}],
         "QueueResponse": [{"running": None, "queued": [{"job_id": "train-1", "job_type": "sft", "adapter_name": "math-v1", "position": 1}], "completed": []}],
@@ -981,6 +1252,7 @@ def build_schema() -> dict[str, Any]:
     build_grpo_types()
     build_opd_types()
     build_training_responses()
+    build_openenv_types()
     build_preflight_types()
     build_agent_types()
     build_recipe_types()

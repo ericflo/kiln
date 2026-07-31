@@ -8,6 +8,10 @@
 
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
@@ -29,8 +33,8 @@ use crate::config::default_server_url;
 use crate::openenv_replay::{
     OPENENV_REPLAY_SCHEMA_V1, OpenEnvReplayCandidate, OpenEnvReplayExchange,
     OpenEnvReplayExchangeResult, OpenEnvReplayGroup, OpenEnvReplayManifest,
-    connect_and_reset_with_capacity, encode_replay, replay_openenv, sha256_bytes as replay_sha256,
-    verify_openenv_artifacts,
+    connect_and_reset_with_capacity_checked, encode_replay, replay_openenv,
+    sha256_bytes as replay_sha256, verify_openenv_artifacts,
 };
 
 const MAX_OPENENV_ENVIRONMENTS: usize = 64;
@@ -45,6 +49,108 @@ const MAX_OPENENV_CAPACITY_WAIT_SECONDS: u64 = 3_600;
 const MAX_OPENENV_DATASET_BYTES: usize = 256 * 1024 * 1024;
 const MAX_KILN_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const CHAT_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Policy inference used while an OpenEnv episode is live.
+///
+/// The CLI uses `Http`; the server control plane uses `InProcess` so a
+/// server-owned run traverses the exact chat handler, admission, metrics, and
+/// adapter-selection path without depending on a loopback listener.
+#[derive(Clone)]
+pub(crate) enum OpenEnvPolicyTransport {
+    Http {
+        client: reqwest::Client,
+        kiln_url: String,
+    },
+    InProcess(crate::state::AppState),
+}
+
+impl OpenEnvPolicyTransport {
+    async fn complete(&self, body: Value) -> Result<Value> {
+        match self {
+            Self::Http { client, kiln_url } => {
+                let response = client
+                    .post(format!(
+                        "{}/v1/chat/completions",
+                        kiln_url.trim_end_matches('/')
+                    ))
+                    .header("x-kiln-client", "openenv")
+                    .json(&body)
+                    .send()
+                    .await
+                    .context("send OpenEnv policy completion request")?;
+                let status = response.status();
+                let response_body = read_kiln_json_bounded(response, "action generation").await?;
+                anyhow::ensure!(
+                    status.is_success(),
+                    "Kiln action generation returned HTTP {status}: {}",
+                    serde_json::to_string(&response_body).unwrap_or_default()
+                );
+                Ok(response_body)
+            }
+            Self::InProcess(state) => {
+                crate::api::completions::openenv_chat_completion(state, body).await
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenEnvCollectionStage {
+    Discovering,
+    Collecting,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct OpenEnvCollectionProgress {
+    pub stage: OpenEnvCollectionStage,
+    pub groups_completed: usize,
+    pub groups_total: usize,
+    pub rollouts_completed: usize,
+}
+
+/// Cooperative cancellation and low-cost progress publication for a
+/// server-owned OpenEnv run.
+#[derive(Clone, Default)]
+pub(crate) struct OpenEnvCollectionControl {
+    cancel: Arc<AtomicBool>,
+    progress: Option<Arc<dyn Fn(OpenEnvCollectionProgress) + Send + Sync>>,
+    discovered: Option<Arc<dyn Fn(Vec<OpenEnvInspection>) + Send + Sync>>,
+}
+
+impl OpenEnvCollectionControl {
+    pub(crate) fn new(
+        cancel: Arc<AtomicBool>,
+        progress: Option<Arc<dyn Fn(OpenEnvCollectionProgress) + Send + Sync>>,
+        discovered: Option<Arc<dyn Fn(Vec<OpenEnvInspection>) + Send + Sync>>,
+    ) -> Self {
+        Self {
+            cancel,
+            progress,
+            discovered,
+        }
+    }
+
+    fn publish(&self, progress: OpenEnvCollectionProgress) {
+        if let Some(callback) = &self.progress {
+            callback(progress);
+        }
+    }
+
+    fn publish_discovered(&self, environments: Vec<OpenEnvInspection>) {
+        if let Some(callback) = &self.discovered {
+            callback(environments);
+        }
+    }
+
+    fn ensure_active(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.cancel.load(Ordering::Relaxed),
+            "OpenEnv run cancelled"
+        );
+        Ok(())
+    }
+}
 
 pub(crate) const OPENENV_OVERVIEW: &str = r#"Inspect OpenEnv servers, collect grouped stateful episodes, and train a Kiln LoRA directly from environment-owned rewards.
 
@@ -261,6 +367,9 @@ pub struct OpenEnvRolloutOptions {
     pub group_size: usize,
     pub seed_start: u64,
     pub reset_options: Option<PathBuf>,
+    /// Server/API callers provide reset options directly; CLI callers use
+    /// `reset_options` as a file. The two sources are mutually exclusive.
+    pub reset_options_value: Option<Value>,
     pub max_steps: usize,
     pub concurrency: usize,
     pub max_action_tokens: usize,
@@ -521,6 +630,7 @@ fn openenv_rollout_options(args: &OpenEnvRolloutArgs) -> OpenEnvRolloutOptions {
         group_size: args.group_size,
         seed_start: args.seed_start,
         reset_options: args.reset_options.clone(),
+        reset_options_value: None,
         max_steps: args.max_steps,
         concurrency: args.concurrency,
         max_action_tokens: args.max_action_tokens,
@@ -624,6 +734,7 @@ pub async fn run_openenv_train(options: OpenEnvTrainOptions) -> Result<OpenEnvRo
     let submission = submit_openenv_training(
         &options.rollout.kiln_url,
         &collection.groups,
+        &options.rollout.adapter,
         &options.output_adapter,
         options.lora_rank,
         options.auto_load,
@@ -637,16 +748,39 @@ pub async fn run_openenv_train(options: OpenEnvTrainOptions) -> Result<OpenEnvRo
 pub async fn collect_openenv_rollouts(
     options: &OpenEnvRolloutOptions,
 ) -> Result<OpenEnvCollection> {
-    validate_options(options)?;
-    let reset_options = read_reset_options(options.reset_options.as_deref())?;
-    let reset_options_sha256 = sha256_json(&reset_options)?;
-    let adapter = parse_adapter_selection(&options.adapter);
-    let chat = reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(CHAT_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("build Kiln chat client")?;
+    let policy = OpenEnvPolicyTransport::Http {
+        client,
+        kiln_url: options.kiln_url.clone(),
+    };
+    collect_openenv_rollouts_with_policy(options, &policy, &OpenEnvCollectionControl::default())
+        .await
+}
+
+pub(crate) async fn collect_openenv_rollouts_with_policy(
+    options: &OpenEnvRolloutOptions,
+    policy: &OpenEnvPolicyTransport,
+    control: &OpenEnvCollectionControl,
+) -> Result<OpenEnvCollection> {
+    validate_options(options)?;
+    control.ensure_active()?;
+    let reset_options = read_reset_options(
+        options.reset_options.as_deref(),
+        options.reset_options_value.as_ref(),
+    )?;
+    let reset_options_sha256 = sha256_json(&reset_options)?;
+    let adapter = parse_adapter_selection(&options.adapter);
+    control.publish(OpenEnvCollectionProgress {
+        stage: OpenEnvCollectionStage::Discovering,
+        groups_completed: 0,
+        groups_total: options.groups,
+        rollouts_completed: 0,
+    });
 
     let inspections = stream::iter(options.environment_urls.iter().cloned())
         .map(|url| async move {
@@ -662,6 +796,19 @@ pub async fn collect_openenv_rollouts(
         .await
         .into_iter()
         .collect::<Result<Vec<_>>>()?;
+    control.ensure_active()?;
+    control.publish_discovered(
+        inspections
+            .iter()
+            .map(|(_, inspection)| inspection.clone())
+            .collect(),
+    );
+    control.publish(OpenEnvCollectionProgress {
+        stage: OpenEnvCollectionStage::Collecting,
+        groups_completed: 0,
+        groups_total: options.groups,
+        rollouts_completed: 0,
+    });
 
     let mut groups = Vec::with_capacity(options.groups);
     let mut replay_groups = Vec::with_capacity(options.groups);
@@ -669,6 +816,7 @@ pub async fn collect_openenv_rollouts(
     let mut dataset_bytes = 0usize;
 
     for group_index in 0..options.groups {
+        control.ensure_active()?;
         let environment_index = group_index % inspections.len();
         let (environment, inspection) = &inspections[environment_index];
         let seed = options
@@ -685,7 +833,7 @@ pub async fn collect_openenv_rollouts(
         let mut candidates = stream::iter(0..options.group_size)
             .map(|candidate_index| {
                 run_candidate_episode(
-                    &chat,
+                    policy,
                     environment.clone(),
                     inspection.clone(),
                     adapter.request_value.clone(),
@@ -695,6 +843,7 @@ pub async fn collect_openenv_rollouts(
                     group_index,
                     candidate_index,
                     options,
+                    control,
                 )
             })
             .buffer_unordered(options.concurrency.min(options.group_size))
@@ -747,6 +896,12 @@ pub async fn collect_openenv_rollouts(
         );
         records.extend(candidates.into_iter().map(|candidate| candidate.record));
         groups.push(group);
+        control.publish(OpenEnvCollectionProgress {
+            stage: OpenEnvCollectionStage::Collecting,
+            groups_completed: groups.len(),
+            groups_total: options.groups,
+            rollouts_completed: records.len(),
+        });
     }
 
     let dataset_sha256 = sha256_jsonl(&groups)?;
@@ -807,7 +962,7 @@ pub async fn collect_openenv_rollouts(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_candidate_episode(
-    chat: &reqwest::Client,
+    policy: &OpenEnvPolicyTransport,
     environment: OpenEnvClient,
     inspection: OpenEnvInspection,
     adapter: Value,
@@ -817,11 +972,14 @@ async fn run_candidate_episode(
     group_index: usize,
     candidate_index: usize,
     options: &OpenEnvRolloutOptions,
+    control: &OpenEnvCollectionControl,
 ) -> Result<CandidateRollout> {
-    let (mut session, reset, capacity_retries) = connect_and_reset_with_capacity(
+    control.ensure_active()?;
+    let (mut session, reset, capacity_retries) = connect_and_reset_with_capacity_checked(
         &environment,
         &reset_payload,
         Duration::from_secs(options.capacity_wait_seconds),
+        || control.ensure_active(),
     )
     .await?;
     anyhow::ensure!(
@@ -844,10 +1002,10 @@ async fn run_candidate_episode(
     let mut terminal_protocol_error = false;
 
     for step_index in 0..options.max_steps {
+        control.ensure_active()?;
         let generation_seed = generation_seed(seed, candidate_index, step_index);
         let model_action = generate_model_action(
-            chat,
-            &options.kiln_url,
+            policy,
             &messages,
             &trajectory,
             &adapter,
@@ -1015,8 +1173,7 @@ async fn run_candidate_episode(
 
 #[allow(clippy::too_many_arguments)]
 async fn generate_model_action(
-    chat: &reqwest::Client,
-    kiln_url: &str,
+    policy: &OpenEnvPolicyTransport,
     messages: &[ChatMessage],
     trajectory: &[TurnSegment],
     adapter: &Value,
@@ -1046,31 +1203,12 @@ async fn generate_model_action(
         }
     });
     let started = Instant::now();
-    let response = chat
-        .post(format!(
-            "{}/v1/chat/completions",
-            kiln_url.trim_end_matches('/')
-        ))
-        .header("x-kiln-client", "openenv")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|error| {
-            ModelActionFailure::Request(anyhow!(error).context(format!(
-                "request OpenEnv action from Kiln using adapter {adapter_label}"
-            )))
-        })?;
+    let response_body = policy.complete(body).await.map_err(|error| {
+        ModelActionFailure::Request(error.context(format!(
+            "request OpenEnv action from Kiln using adapter {adapter_label}"
+        )))
+    })?;
     let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
-    let status = response.status();
-    let response_body = read_kiln_json_bounded(response, "action generation")
-        .await
-        .map_err(ModelActionFailure::Request)?;
-    if !status.is_success() {
-        return Err(ModelActionFailure::Request(anyhow!(
-            "Kiln action generation returned HTTP {status}: {}",
-            serde_json::to_string(&response_body).unwrap_or_default()
-        )));
-    }
     let total_tokens = response_body
         .pointer("/usage/total_tokens")
         .and_then(Value::as_u64)
@@ -1217,7 +1355,18 @@ fn reset_payload(base: &Value, seed: u64) -> Result<Value> {
     Ok(Value::Object(object))
 }
 
-fn read_reset_options(path: Option<&Path>) -> Result<Value> {
+fn read_reset_options(path: Option<&Path>, direct: Option<&Value>) -> Result<Value> {
+    anyhow::ensure!(
+        path.is_none() || direct.is_none(),
+        "OpenEnv reset options must come from either a file or an inline value, not both"
+    );
+    if let Some(value) = direct {
+        anyhow::ensure!(
+            value.is_object(),
+            "OpenEnv inline reset options must be one JSON object"
+        );
+        return Ok(value.clone());
+    }
     let Some(path) = path else {
         return Ok(Value::Object(Map::new()));
     };
@@ -1233,7 +1382,7 @@ fn read_reset_options(path: Option<&Path>) -> Result<Value> {
     Ok(value)
 }
 
-fn validate_options(options: &OpenEnvRolloutOptions) -> Result<()> {
+pub(crate) fn validate_options(options: &OpenEnvRolloutOptions) -> Result<()> {
     anyhow::ensure!(
         !options.environment_urls.is_empty()
             && options.environment_urls.len() <= MAX_OPENENV_ENVIRONMENTS,
@@ -1293,6 +1442,10 @@ fn validate_options(options: &OpenEnvRolloutOptions) -> Result<()> {
         "OpenEnv capacity wait must be in 1..={MAX_OPENENV_CAPACITY_WAIT_SECONDS} seconds"
     );
     anyhow::ensure!(
+        options.reset_options.is_none() || options.reset_options_value.is_none(),
+        "OpenEnv reset options file and inline reset options are mutually exclusive"
+    );
+    anyhow::ensure!(
         options.output != options.replay_output
             && options.output != options.summary_output
             && options.replay_output != options.summary_output,
@@ -1334,6 +1487,7 @@ fn parse_adapter_selection(adapter: &str) -> AdapterSelection {
 async fn submit_openenv_training(
     kiln_url: &str,
     groups: &[AgenticGroup],
+    behavior_adapter: &str,
     output_adapter: &str,
     lora_rank: Option<usize>,
     auto_load: bool,
@@ -1345,6 +1499,12 @@ async fn submit_openenv_training(
     });
     if let Some(rank) = lora_rank {
         config["lora_rank"] = Value::from(rank);
+    }
+    if !matches!(
+        behavior_adapter.trim().to_ascii_lowercase().as_str(),
+        "base" | "none" | "null"
+    ) {
+        config["base_adapter"] = Value::from(behavior_adapter);
     }
     let body = json!({
         "groups": groups,
@@ -1401,7 +1561,7 @@ async fn read_kiln_json_bounded(mut response: reqwest::Response, label: &str) ->
         .with_context(|| format!("decode Kiln OpenEnv {label} response as JSON"))
 }
 
-fn write_openenv_outputs(
+pub(crate) fn write_openenv_outputs(
     options: &OpenEnvRolloutOptions,
     groups: &[AgenticGroup],
     replay: &OpenEnvReplayManifest,
@@ -1456,7 +1616,7 @@ fn write_groups_atomic(path: &Path, groups: &[AgenticGroup]) -> Result<()> {
     Ok(())
 }
 
-fn write_summary_atomic(path: &Path, summary: &OpenEnvRolloutSummary) -> Result<()> {
+pub(crate) fn write_summary_atomic(path: &Path, summary: &OpenEnvRolloutSummary) -> Result<()> {
     let parent = output_parent(path)?;
     let mut staged = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("create staged OpenEnv summary beside {}", path.display()))?;

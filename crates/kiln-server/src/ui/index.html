@@ -522,12 +522,13 @@
     <div class="card">
       <div class="card-head">
         <h2>Training jobs</h2>
-        <span class="eyebrow">SFT &amp; GRPO over HTTP</span>
+        <span class="eyebrow">SFT · GRPO · OpenEnv RL</span>
       </div>
       <div class="tabs" role="tablist" aria-label="Training views" data-training-tabs>
         <button class="tab active" id="training-tab-queue" data-tab="queue" type="button" role="tab" aria-selected="true" aria-controls="tab-queue" tabindex="0">Queue</button>
         <button class="tab" id="training-tab-sft" data-tab="sft" type="button" role="tab" aria-selected="false" aria-controls="tab-sft" tabindex="-1">Train · SFT</button>
         <button class="tab" id="training-tab-grpo" data-tab="grpo" type="button" role="tab" aria-selected="false" aria-controls="tab-grpo" tabindex="-1">Train · GRPO</button>
+        <button class="tab" id="training-tab-openenv" data-tab="openenv" type="button" role="tab" aria-selected="false" aria-controls="tab-openenv" tabindex="-1">Train · OpenEnv</button>
       </div>
 
       <!-- Screen-reader channel for training transitions (started / completed
@@ -539,6 +540,82 @@
 
       <div class="tab-content active" id="tab-queue" role="tabpanel" aria-labelledby="training-tab-queue" aria-busy="true" data-panel-id="training-queue-panel">
         <div class="empty">Loading queued training jobs…</div>
+      </div>
+
+      <div class="tab-content" id="tab-openenv" role="tabpanel" aria-labelledby="training-tab-openenv" hidden inert>
+        <p class="method-lead">Train directly against any OpenEnv-compatible reinforcement-learning environment. Kiln discovers its protocol and action schema, runs seed-matched stateful WebSocket episodes with the selected policy, preserves environment-owned rewards and exact replay artifacts, then queues native GRPO.</p>
+        <form id="openenv-form">
+          <div class="form-group">
+            <label for="openenv-environments">Environment URLs <span class="hint">— one OpenEnv HTTP base URL per line</span></label>
+            <textarea id="openenv-environments" rows="3" required spellcheck="false" placeholder="http://127.0.0.1:8000"></textarea>
+            <div class="form-help">Groups are assigned round-robin across environments. Server-launched runs accept loopback origins by default; an operator can explicitly allow trusted remote origins in <code>[openenv]</code>.</div>
+            <div style="display:flex;gap:var(--space-2);align-items:center;margin-top:var(--space-2);">
+              <button class="btn btn-sm" id="openenv-inspect" type="button">Inspect protocol</button>
+              <span id="openenv-inspection" class="form-help" role="status" aria-live="polite">Add an environment URL to inspect its identity and action schema.</span>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="openenv-kind">Outcome</label>
+              <select id="openenv-kind">
+                <option value="train" selected>Collect &amp; train</option>
+                <option value="rollout">Collect artifacts only</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="openenv-adapter">Behavior policy</label>
+              <input id="openenv-adapter" value="base" autocomplete="off" spellcheck="false">
+              <div class="form-help"><code>base</code> or an existing adapter. Training continues from this same policy.</div>
+            </div>
+            <div class="form-group" id="openenv-output-group">
+              <label for="openenv-output-adapter">Output adapter</label>
+              <input id="openenv-output-adapter" value="openenv-agent" required autocomplete="off" spellcheck="false">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group"><label for="openenv-groups">Seed groups</label><input id="openenv-groups" type="number" value="8" min="1" max="16384"></div>
+            <div class="form-group"><label for="openenv-group-size">Episodes per seed</label><input id="openenv-group-size" type="number" value="4" min="1" max="256"></div>
+            <div class="form-group"><label for="openenv-seed-start">First seed</label><input id="openenv-seed-start" type="number" value="0" min="0"></div>
+            <div class="form-group"><label for="openenv-max-steps">Max actions</label><input id="openenv-max-steps" type="number" value="8" min="1" max="256"></div>
+            <div class="form-group"><label for="openenv-concurrency">Concurrency</label><input id="openenv-concurrency" type="number" value="4" min="1" max="256"></div>
+          </div>
+          <div class="adv-row">
+            <button type="button" class="btn btn-sm btn-ghost" id="openenv-adv-toggle" aria-expanded="false" aria-controls="openenv-advanced"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-gear"></use></svg> Advanced</button>
+            <span class="adv-summary">JSON actions · temperature 1 · LoRA rank 8 · thinking off · exact replay on</span>
+          </div>
+          <div class="adv-body" id="openenv-advanced" hidden>
+            <div class="form-row">
+              <div class="form-group"><label for="openenv-temperature">Action temperature</label><input id="openenv-temperature" type="number" value="1" min="0" step="0.1"></div>
+              <div class="form-group"><label for="openenv-max-action-tokens">Max action tokens</label><input id="openenv-max-action-tokens" type="number" value="256" min="1" max="16384"></div>
+              <div class="form-group"><label for="openenv-lora-rank">LoRA rank</label><input id="openenv-lora-rank" type="number" value="8" min="1" max="128" disabled aria-describedby="openenv-optimizer-support"></div>
+              <div class="form-group"><label for="openenv-protocol-error-reward">Protocol-error reward</label><input id="openenv-protocol-error-reward" type="number" value="-1" step="0.1"></div>
+              <div class="form-group"><label for="openenv-max-recoverable-errors">Recoverable errors</label><input id="openenv-max-recoverable-errors" type="number" value="3" min="0" max="64"></div>
+              <div class="form-group"><label for="openenv-capacity-wait">Capacity wait (seconds)</label><input id="openenv-capacity-wait" type="number" value="300" min="1" max="3600"></div>
+            </div>
+            <div class="form-group">
+              <label for="openenv-reset-options">Reset options</label>
+              <textarea id="openenv-reset-options" rows="3" spellcheck="false">{}</textarea>
+              <div class="form-help">One JSON object merged into every reset. Kiln always owns and inserts the deterministic group seed.</div>
+            </div>
+            <div class="form-group">
+              <label for="openenv-training-config">Native GRPO overrides</label>
+              <textarea id="openenv-training-config" rows="3" spellcheck="false" placeholder='{"learning_rate":0.00001,"kl_coeff":0.1}'>{}</textarea>
+              <div class="form-help">Any native GRPO config fields. Kiln fixes the behavior policy contract, source adapter, output name, and auto-load fields to match this live rollout.</div>
+            </div>
+            <label style="display:inline-flex;gap:var(--space-2);align-items:center;text-transform:none;font-weight:500;"><input id="openenv-thinking" type="checkbox"> Enable policy thinking</label>
+            <label style="display:inline-flex;gap:var(--space-2);align-items:center;text-transform:none;font-weight:500;margin-left:var(--space-4);"><input id="openenv-auto-load" type="checkbox" checked> Auto-load trained adapter</label>
+          </div>
+          <div class="form-help" id="openenv-optimizer-support">Optimizer capability details are still loading. Training remains disabled.</div>
+          <div id="openenv-submit-state" class="form-help" role="status" aria-live="polite">Ready to launch a persisted, cancellable OpenEnv run.</div>
+          <div style="display:flex;gap:var(--space-3);align-items:center;padding-top:var(--space-3);border-top:1px solid var(--border);">
+            <span class="train-next-hint">Artifacts remain downloadable after collection; training appears in the normal queue.</span>
+            <button type="submit" class="btn btn-primary" style="margin-left:auto;" disabled aria-describedby="openenv-optimizer-support">Collect &amp; train</button>
+          </div>
+        </form>
+        <div style="margin-top:var(--space-5);padding-top:var(--space-4);border-top:1px solid var(--border);">
+          <div class="card-head" style="padding:0 0 var(--space-3);"><h3>OpenEnv runs</h3><button class="btn btn-sm" id="openenv-refresh" type="button">Refresh</button></div>
+          <div id="openenv-runs" class="empty" aria-busy="true">Loading OpenEnv runs…</div>
+        </div>
       </div>
 
       <div class="tab-content" id="tab-sft" role="tabpanel" aria-labelledby="training-tab-sft" hidden inert>

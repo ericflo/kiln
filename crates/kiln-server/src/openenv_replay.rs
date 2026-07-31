@@ -338,13 +338,26 @@ pub async fn connect_and_reset_with_capacity(
     reset_payload: &Value,
     capacity_wait: Duration,
 ) -> Result<(OpenEnvSession, OpenEnvObservation, usize)> {
+    connect_and_reset_with_capacity_checked(client, reset_payload, capacity_wait, || Ok(())).await
+}
+
+/// Connect and reset while allowing a caller-owned lifecycle to interrupt
+/// capacity backoff at every network and sleep boundary.
+pub async fn connect_and_reset_with_capacity_checked(
+    client: &OpenEnvClient,
+    reset_payload: &Value,
+    capacity_wait: Duration,
+    mut ensure_active: impl FnMut() -> Result<()>,
+) -> Result<(OpenEnvSession, OpenEnvObservation, usize)> {
     let started = Instant::now();
     let mut retries = 0usize;
     loop {
+        ensure_active()?;
         let mut session = client
             .connect()
             .await
             .with_context(|| format!("connect OpenEnv episode at {}", client.base_url()))?;
+        ensure_active()?;
         match session.reset(reset_payload).await {
             Ok(observation) => return Ok((session, observation, retries)),
             Err(OpenEnvClientError::Protocol(error))
@@ -366,7 +379,15 @@ pub async fn connect_and_reset_with_capacity(
                     .saturating_mul(multiplier)
                     .min(CAPACITY_RETRY_CEILING)
                     .min(capacity_wait.saturating_sub(elapsed));
-                tokio::time::sleep(delay).await;
+                let retry_started = Instant::now();
+                while retry_started.elapsed() < delay {
+                    ensure_active()?;
+                    tokio::time::sleep(
+                        Duration::from_millis(100)
+                            .min(delay.saturating_sub(retry_started.elapsed())),
+                    )
+                    .await;
+                }
             }
             Err(error) => {
                 return Err(anyhow!(error))

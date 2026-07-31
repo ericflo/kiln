@@ -800,6 +800,7 @@ function applyTrainingOptimizerSupportState() {
   applyTrainingOptimizerForm('grpo');
   applyOpdOptimizerSupport();
   updateFixedTrainingSurfaceStates();
+  syncOpenEnvKind();
   updateCorrFoot();
   applyRecipeAdmissionButtons();
 }
@@ -1039,6 +1040,275 @@ document.querySelectorAll('[data-goto-datasets]').forEach(b => b.addEventListene
 document.getElementById('training-tab-sft')?.addEventListener('click', () => { refreshDatasetPicker('sft'); refreshProveRows(); });
 document.getElementById('training-tab-grpo')?.addEventListener('click', () => { refreshDatasetPicker('grpo'); refreshProveRows(); });
 refreshProveRows();
+
+/* ====== Native OpenEnv RL =================================================
+   This surface drives the persisted /v1/openenv lifecycle. Collection never
+   happens in the browser: Kiln owns discovery, policy inference, WebSocket
+   sessions, reward capture, replay artifacts, cancellation, and GRPO handoff. */
+let openEnvRunsKey = null;
+
+function openEnvUrls() {
+  return (document.getElementById('openenv-environments')?.value || '')
+    .split(/\r?\n/)
+    .map(url => url.trim())
+    .filter(Boolean);
+}
+
+function openEnvNumber(id, label, integer = true) {
+  const value = Number(document.getElementById(id)?.value);
+  if (!Number.isFinite(value) || (integer && !Number.isSafeInteger(value))) {
+    throw new Error(`${label} must be a ${integer ? 'whole ' : ''}number.`);
+  }
+  return value;
+}
+
+function openEnvObject(id, label) {
+  const text = (document.getElementById(id)?.value || '').trim() || '{}';
+  let value;
+  try { value = JSON.parse(text); }
+  catch { throw new Error(`${label} must be valid JSON.`); }
+  if (!value || Array.isArray(value) || typeof value !== 'object') {
+    throw new Error(`${label} must be one JSON object.`);
+  }
+  return value;
+}
+
+function openEnvOptimizerKind(config) {
+  if (config.optimizer == null) return 'muon';
+  if (Array.isArray(config.optimizer) || typeof config.optimizer !== 'object') {
+    throw new Error('Native GRPO optimizer must be an object such as {"kind":"muon"}.');
+  }
+  const kind = config.optimizer.kind;
+  if (!['muon', 'adam_w', 'sgd'].includes(kind)) {
+    throw new Error('Native GRPO optimizer.kind must be muon, adam_w, or sgd.');
+  }
+  return kind;
+}
+
+function syncOpenEnvKind() {
+  const train = document.getElementById('openenv-kind')?.value === 'train';
+  const outputGroup = document.getElementById('openenv-output-group');
+  const output = document.getElementById('openenv-output-adapter');
+  const rank = document.getElementById('openenv-lora-rank');
+  const optimizerStatus = document.getElementById('openenv-optimizer-support');
+  if (outputGroup) outputGroup.hidden = !train;
+  if (output) {
+    output.disabled = !train;
+    output.required = train;
+  }
+  const submit = document.querySelector('#openenv-form button[type="submit"]');
+  if (!train) {
+    if (rank) rank.disabled = true;
+    if (optimizerStatus) optimizerStatus.textContent = 'Rollout-only runs do not require native optimizer admission.';
+    if (submit) {
+      submit.disabled = false;
+      submit.title = '';
+      submit.textContent = 'Collect replayable rollouts';
+    }
+    return;
+  }
+  let admission;
+  let optimizerKind = 'muon';
+  try {
+    const config = openEnvObject('openenv-training-config', 'Native GRPO overrides');
+    optimizerKind = openEnvOptimizerKind(config);
+    admission = trainingOptimizerAdmissionState('grpo', optimizerKind, rank?.value);
+  } catch (error) {
+    admission = { ready: false, reason: error.message };
+  }
+  if (rank) {
+    rank.disabled = !trainingOptimizerKindState('grpo', optimizerKind).ready;
+    applyOptimizerRankBounds(rank, optimizerSupportEntry(optimizerKind));
+  }
+  if (optimizerStatus) {
+    optimizerStatus.textContent = admission.ready
+      ? optimizerSupportStatusFromState(admission, optimizerKind)
+      : `${admission.reason}. Training remains disabled.`;
+  }
+  if (submit) {
+    submit.disabled = !admission.ready;
+    submit.title = admission.ready ? '' : admission.reason || 'Native GRPO is unavailable';
+    submit.textContent = 'Collect & train';
+  }
+}
+
+async function inspectOpenEnv() {
+  const result = document.getElementById('openenv-inspection');
+  const button = document.getElementById('openenv-inspect');
+  const environment_urls = openEnvUrls();
+  if (!environment_urls.length) {
+    if (result) result.textContent = 'Add at least one environment URL first.';
+    return;
+  }
+  if (button) button.disabled = true;
+  if (result) result.textContent = 'Discovering health, metadata, schemas, and protocol identity…';
+  try {
+    const response = await api('/v1/openenv/inspect', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ environment_urls }),
+    });
+    const environments = response.environments || [];
+    if (result) {
+      result.innerHTML = environments.map(environment => {
+        const identity = environment.identity || {};
+        const metadata = identity.metadata || {};
+        const action = environment.schema?.action || {};
+        return `<span><strong>${escapeHtml(metadata.name || 'OpenEnv')}</strong> · ${escapeHtml(identity.client_profile || 'compatible')} · schema <code>${escapeHtml((identity.schema_sha256 || '').slice(0, 12))}</code> · action <code>${escapeHtml(JSON.stringify(action))}</code></span>`;
+      }).join('<br>');
+    }
+  } catch (error) {
+    if (result) result.textContent = error.message;
+    toast(error.message, 'err');
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function openEnvStateLabel(state) {
+  return String(state || 'unknown').replaceAll('_', ' ');
+}
+
+function openEnvRunCard(run) {
+  const state = String(run.state || 'unknown');
+  const progress = run.progress || {};
+  const total = Number(progress.groups_total || 0);
+  const done = Number(progress.groups_completed || 0);
+  const pct = total ? Math.min(100, Math.round(done / total * 100)) : 0;
+  const terminal = ['rollout_ready', 'training_queued', 'failed', 'cancelled'].includes(state);
+  const environments = (run.environments || []).map(item => item.metadata?.name || item.identity?.metadata?.name).filter(Boolean);
+  const artifacts = (run.artifacts || []).map(artifact =>
+    `<a class="btn btn-sm" href="${escapeHtml(artifact.url)}" download>${escapeHtml(artifact.kind)}${artifact.bytes ? ` · ${fmtBytes(artifact.bytes)}` : ''}</a>`
+  ).join('');
+  const job = run.training_job_id
+    ? `<button class="btn btn-sm" type="button" data-openenv-training-job="${escapeHtml(run.training_job_id)}">Training ${escapeHtml(run.training_job_id.slice(0, 8))}</button>`
+    : '';
+  const cancel = terminal ? '' : `<button class="btn btn-sm btn-danger" type="button" data-openenv-cancel="${escapeHtml(run.run_id)}">Cancel</button>`;
+  const error = run.error ? `<div class="training-card-error">${escapeHtml(run.error)}</div>` : '';
+  return `<div class="training-card ${state === 'failed' ? 'failed' : ''}">
+    <div class="training-card-head">
+      <div><strong>${run.kind === 'train' ? 'OpenEnv train' : 'OpenEnv rollout'}</strong> <code>${escapeHtml(run.run_id.slice(0, 8))}</code></div>
+      <span class="status-badge status-${escapeHtml(state)}">${escapeHtml(openEnvStateLabel(state))}</span>
+    </div>
+    <div class="training-card-meta">${escapeHtml(run.request?.adapter || 'base')} policy · ${Number(progress.rollouts_completed || 0).toLocaleString()} / ${Number(progress.rollouts_total || 0).toLocaleString()} episodes${environments.length ? ` · ${escapeHtml(environments.join(', '))}` : ''}</div>
+    <div class="training-card-progress">
+      <div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
+      <div class="training-stat"><span class="training-stat-num">${done}/${total}</span><span class="training-stat-label">seed groups</span></div>
+    </div>
+    ${error}
+    <div style="display:flex;gap:var(--space-2);flex-wrap:wrap;margin-top:var(--space-3);">${artifacts}${job}${cancel}</div>
+  </div>`;
+}
+
+async function pollOpenEnvRuns(force = false) {
+  const list = document.getElementById('openenv-runs');
+  if (!list) return;
+  try {
+    const response = await api('/v1/openenv/runs');
+    const runs = response.runs || [];
+    const key = JSON.stringify(runs);
+    if (force || key !== openEnvRunsKey) {
+      openEnvRunsKey = key;
+      list.className = runs.length ? '' : 'empty';
+      list.innerHTML = runs.length
+        ? runs.map(openEnvRunCard).join('')
+        : '<div class="empty">No OpenEnv runs yet. Inspect an environment, then launch your first rollout.</div>';
+    }
+    list.setAttribute('aria-busy', 'false');
+  } catch (error) {
+    list.className = 'empty error';
+    list.textContent = error.message;
+    list.setAttribute('aria-busy', 'false');
+  }
+}
+
+document.getElementById('openenv-kind')?.addEventListener('change', syncOpenEnvKind);
+document.getElementById('openenv-lora-rank')?.addEventListener('input', syncOpenEnvKind);
+document.getElementById('openenv-training-config')?.addEventListener('input', syncOpenEnvKind);
+document.getElementById('openenv-inspect')?.addEventListener('click', inspectOpenEnv);
+document.getElementById('openenv-refresh')?.addEventListener('click', () => pollOpenEnvRuns(true));
+document.getElementById('training-tab-openenv')?.addEventListener('click', () => pollOpenEnvRuns(true));
+document.getElementById('openenv-adv-toggle')?.addEventListener('click', event => {
+  const body = document.getElementById('openenv-advanced');
+  const open = body?.hidden;
+  if (body) body.hidden = !open;
+  event.currentTarget.setAttribute('aria-expanded', String(open));
+});
+document.getElementById('openenv-runs')?.addEventListener('click', async event => {
+  const cancel = event.target.closest('[data-openenv-cancel]');
+  if (cancel) {
+    cancel.disabled = true;
+    cancel.textContent = 'Cancelling…';
+    try {
+      await api('/v1/openenv/runs/' + encodeURIComponent(cancel.dataset.openenvCancel), {method:'DELETE'});
+      toast('OpenEnv cancellation requested', 'ok');
+      pollOpenEnvRuns(true);
+    } catch (error) {
+      cancel.disabled = false;
+      cancel.textContent = 'Cancel';
+      toast(error.message, 'err');
+    }
+    return;
+  }
+  const job = event.target.closest('[data-openenv-training-job]');
+  if (job) document.getElementById('training-tab-queue')?.click();
+});
+document.getElementById('openenv-form')?.addEventListener('submit', async event => {
+  event.preventDefault();
+  const submit = event.currentTarget.querySelector('button[type="submit"]');
+  const status = document.getElementById('openenv-submit-state');
+  try {
+    const kind = document.getElementById('openenv-kind').value;
+    const environment_urls = openEnvUrls();
+    if (!environment_urls.length) throw new Error('Add at least one OpenEnv environment URL.');
+    const training_config = openEnvObject('openenv-training-config', 'Native GRPO overrides');
+    const rank = openEnvNumber('openenv-lora-rank', 'LoRA rank');
+    const optimizerKind = openEnvOptimizerKind(training_config);
+    if (kind === 'train') requireTrainingOptimizerAdmission('grpo', optimizerKind, rank, 'OpenEnv GRPO');
+    training_config.lora_rank = rank;
+    const request = {
+      kind,
+      environment_urls,
+      adapter: document.getElementById('openenv-adapter').value.trim() || 'base',
+      groups: openEnvNumber('openenv-groups', 'Seed groups'),
+      group_size: openEnvNumber('openenv-group-size', 'Episodes per seed'),
+      seed_start: openEnvNumber('openenv-seed-start', 'First seed'),
+      reset_options: openEnvObject('openenv-reset-options', 'Reset options'),
+      max_steps: openEnvNumber('openenv-max-steps', 'Max actions'),
+      concurrency: openEnvNumber('openenv-concurrency', 'Concurrency'),
+      max_action_tokens: openEnvNumber('openenv-max-action-tokens', 'Max action tokens'),
+      temperature: openEnvNumber('openenv-temperature', 'Action temperature', false),
+      thinking: document.getElementById('openenv-thinking').checked,
+      protocol_error_reward: openEnvNumber('openenv-protocol-error-reward', 'Protocol-error reward', false),
+      max_recoverable_errors: openEnvNumber('openenv-max-recoverable-errors', 'Recoverable errors'),
+      capacity_wait_seconds: openEnvNumber('openenv-capacity-wait', 'Capacity wait'),
+      auto_load: document.getElementById('openenv-auto-load').checked,
+    };
+    if (kind === 'train') {
+      request.output_adapter = document.getElementById('openenv-output-adapter').value.trim();
+      if (!request.output_adapter) throw new Error('Choose an output adapter name.');
+      request.training_config = training_config;
+    }
+    submit.disabled = true;
+    if (status) status.textContent = 'Creating persisted OpenEnv run…';
+    const run = await api('/v1/openenv/runs', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(request),
+    });
+    if (status) status.textContent = `Run ${run.run_id.slice(0, 8)} accepted. Kiln now owns collection and handoff.`;
+    toast(`OpenEnv ${kind} run ${run.run_id.slice(0, 8)} started`, 'ok');
+    pollOpenEnvRuns(true);
+  } catch (error) {
+    if (status) status.textContent = error.message;
+    toast(error.message, 'err');
+  } finally {
+    syncOpenEnvKind();
+  }
+});
+syncOpenEnvKind();
+pollOpenEnvRuns();
+setInterval(pollOpenEnvRuns, 4000);
 
 function parseJsonArrayField(value, label) {
   const text = value.trim();

@@ -157,6 +157,11 @@ CONTROL_ENTRYPOINTS = (
     "MarkTrainedResponse",
     "MessageRequest",
     "OpdRequest",
+    "OpenEnvInspectRequest",
+    "OpenEnvInspectResponse",
+    "OpenEnvRunList",
+    "OpenEnvRunRequest",
+    "OpenEnvRunStatus",
     "PublishPayload",
     "PublishToLibraryResponse",
     "QueueResponse",
@@ -178,14 +183,14 @@ CONTROL_COMPONENT_TYPES = {name: name for name in CONTROL_ENTRYPOINTS}
 CONTROL_COMPONENT_TYPES["CorrectionRowInput"] = "CorrectionRow"
 CONTROL_COMPONENT_TYPES["Vec_TrainingStatus"] = "Vec<TrainingStatus>"
 EXPECTED_OBSERVABILITY_DEFINITION_COUNT = 172
-EXPECTED_CONTROL_PLANE_DEFINITION_COUNT = 121
+EXPECTED_CONTROL_PLANE_DEFINITION_COUNT = 134
 EXPECTED_COMPONENT_SCHEMA_COUNTS = {
-    "complete": 134,
+    "complete": 139,
     "migration_pending": 0,
-    "total": 134,
+    "total": 139,
 }
 HTTP_METHODS = ("get", "post", "put", "patch", "delete")
-EXPECTED_METHOD_COUNTS = {"DELETE": 12, "GET": 54, "POST": 48, "PUT": 1}
+EXPECTED_METHOD_COUNTS = {"DELETE": 13, "GET": 57, "POST": 50, "PUT": 1}
 EXPECTED_TAG_COUNTS = {
     "adapters": 9,
     "agents": 16,
@@ -195,6 +200,7 @@ EXPECTED_TAG_COUNTS = {
     "inference": 3,
     "library": 3,
     "observability": 8,
+    "openenv": 6,
     "preflight": 5,
     "recipes": 2,
     "teachers": 5,
@@ -206,6 +212,7 @@ ALLOWED_MEDIA_TYPES = {
     "application/javascript",
     "application/json",
     "application/octet-stream",
+    "application/x-ndjson",
     "multipart/form-data",
     "text/css",
     "text/event-stream",
@@ -307,8 +314,8 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
     expected_root = {
         "openapi": "3.1.1",
         "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
-        "x-kiln-path-count": 103,
-        "x-kiln-operation-count": 115,
+        "x-kiln-path-count": 107,
+        "x-kiln-operation-count": 121,
         "x-kiln-method-counts": EXPECTED_METHOD_COUNTS,
         "x-kiln-tag-counts": EXPECTED_TAG_COUNTS,
         "x-kiln-field-schema-status": "complete",
@@ -358,8 +365,8 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
     if not isinstance(paths, dict):
         errors.append("paths must be an object")
         return errors
-    if len(paths) != 103:
-        errors.append(f"paths must contain 103 entries, got {len(paths)}")
+    if len(paths) != 107:
+        errors.append(f"paths must contain 107 entries, got {len(paths)}")
     if list(paths) != sorted(paths):
         errors.append("paths must be sorted lexicographically")
 
@@ -522,8 +529,8 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
         if path in EXPLICIT_ERROR_PATHS and "default" in responses:
             errors.append(f"{label}: explicit error responses must not retain a fictitious default error")
 
-    if operation_count != 115:
-        errors.append(f"operation count must be 115, got {operation_count}")
+    if operation_count != 121:
+        errors.append(f"operation count must be 121, got {operation_count}")
     if dict(sorted(method_counts.items())) != EXPECTED_METHOD_COUNTS:
         errors.append(f"observed method counts drifted: {dict(sorted(method_counts.items()))}")
     if dict(sorted(tag_counts.items())) != EXPECTED_TAG_COUNTS:
@@ -788,6 +795,11 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
         ("get", "/v1/library"): (None, "200", "LibraryListResponse"),
         ("post", "/v1/library/install/{id}"): (None, "400", "ApiError"),
         ("post", "/v1/library/publish/{name}"): ("PublishPayload", "200", "PublishToLibraryResponse"),
+        ("post", "/v1/openenv/inspect"): ("OpenEnvInspectRequest", "200", "OpenEnvInspectResponse"),
+        ("get", "/v1/openenv/runs"): (None, "200", "OpenEnvRunList"),
+        ("post", "/v1/openenv/runs"): ("OpenEnvRunRequest", "202", "OpenEnvRunStatus"),
+        ("delete", "/v1/openenv/runs/{run_id}"): (None, "200", "OpenEnvRunStatus"),
+        ("get", "/v1/openenv/runs/{run_id}"): (None, "200", "OpenEnvRunStatus"),
         ("post", "/v1/preflight/capacity"): ("CapacityRequest", "200", "CapacityResponse"),
         ("get", "/v1/preflight/compatibility"): (None, "200", "CompatibilityResponse"),
         ("get", "/v1/preflight/tier_defaults"): (None, "200", "TierDefaultsResponse"),
@@ -1747,6 +1759,17 @@ def validate_control_schema(
         "AgenticGroup": ("crates/kiln-train/src/trajectory.rs", "AgenticGroup", {"rollouts"}, set()),
         "GrpoConfig": ("crates/kiln-train/src/lib.rs", "GrpoConfig", {"reference_policy"}, set()),
         "GrpoRequest": ("crates/kiln-train/src/lib.rs", "GrpoRequest", {"agentic_groups"}, set()),
+        "OpenEnvMetadata": ("crates/kiln-openenv/src/types.rs", "OpenEnvMetadata", set(), set()),
+        "OpenEnvSchema": ("crates/kiln-openenv/src/types.rs", "OpenEnvSchema", set(), set()),
+        "OpenEnvIdentity": ("crates/kiln-openenv/src/client.rs", "OpenEnvIdentity", set(), set()),
+        "OpenEnvInspection": ("crates/kiln-openenv/src/client.rs", "OpenEnvInspection", set(), set()),
+        "OpenEnvRunProgress": ("crates/kiln-server/src/api/openenv.rs", "OpenEnvRunProgress", set(), set()),
+        "OpenEnvArtifact": ("crates/kiln-server/src/api/openenv.rs", "OpenEnvArtifact", set(), set()),
+        "OpenEnvRunRequest": ("crates/kiln-server/src/api/openenv.rs", "OpenEnvRunRequest", set(), set()),
+        "OpenEnvRunStatus": ("crates/kiln-server/src/api/openenv.rs", "OpenEnvRunStatus", set(), set()),
+        "OpenEnvRunList": ("crates/kiln-server/src/api/openenv.rs", "OpenEnvRunList", set(), set()),
+        "OpenEnvInspectRequest": ("crates/kiln-server/src/api/openenv.rs", "OpenEnvInspectRequest", set(), set()),
+        "OpenEnvInspectResponse": ("crates/kiln-server/src/api/openenv.rs", "OpenEnvInspectResponse", set(), set()),
         "OpdPrompt": ("crates/kiln-train/src/opd.rs", "OpdPrompt", set(), set()),
         "OpdConfig": ("crates/kiln-train/src/opd.rs", "OpdConfig", set(), set()),
         "OpdRequest": ("crates/kiln-train/src/opd.rs", "OpdRequest", set(), set()),

@@ -216,6 +216,14 @@ pub struct Metrics {
     pub training_opd_completed: AtomicU64,
     pub training_opd_failed: AtomicU64,
     pub training_opd_cancelled: AtomicU64,
+
+    // OpenEnv orchestration counters
+    pub openenv_runs_started: AtomicU64,
+    pub openenv_rollouts_ready: AtomicU64,
+    pub openenv_training_queued: AtomicU64,
+    pub openenv_runs_failed: AtomicU64,
+    pub openenv_runs_cancelled: AtomicU64,
+    pub openenv_episodes_collected: AtomicU64,
 }
 
 impl Metrics {
@@ -262,6 +270,12 @@ impl Metrics {
             training_opd_completed: AtomicU64::new(0),
             training_opd_failed: AtomicU64::new(0),
             training_opd_cancelled: AtomicU64::new(0),
+            openenv_runs_started: AtomicU64::new(0),
+            openenv_rollouts_ready: AtomicU64::new(0),
+            openenv_training_queued: AtomicU64::new(0),
+            openenv_runs_failed: AtomicU64::new(0),
+            openenv_runs_cancelled: AtomicU64::new(0),
+            openenv_episodes_collected: AtomicU64::new(0),
         }
     }
 
@@ -3040,6 +3054,54 @@ impl Metrics {
             self.training_opd_cancelled.load(Ordering::Relaxed),
         );
 
+        out.push_str(
+            "# HELP kiln_openenv_runs_total Server-owned OpenEnv runs by lifecycle outcome.\n",
+        );
+        out.push_str("# TYPE kiln_openenv_runs_total counter\n");
+        for (status, value) in [
+            ("started", self.openenv_runs_started.load(Ordering::Relaxed)),
+            (
+                "rollout_ready",
+                self.openenv_rollouts_ready.load(Ordering::Relaxed),
+            ),
+            (
+                "training_queued",
+                self.openenv_training_queued.load(Ordering::Relaxed),
+            ),
+            ("failed", self.openenv_runs_failed.load(Ordering::Relaxed)),
+            (
+                "cancelled",
+                self.openenv_runs_cancelled.load(Ordering::Relaxed),
+            ),
+        ] {
+            prom_counter(&mut out, "kiln_openenv_runs_total", "status", status, value);
+        }
+        out.push_str(
+            "# HELP kiln_openenv_episodes_collected_total Completed OpenEnv episodes persisted into canonical rollout artifacts.\n",
+        );
+        out.push_str("# TYPE kiln_openenv_episodes_collected_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_openenv_episodes_collected_total {}",
+                self.openenv_episodes_collected.load(Ordering::Relaxed)
+            ),
+        );
+        out.push_str(
+            "# HELP kiln_openenv_runs_active Currently active server-owned OpenEnv runs.\n",
+        );
+        out.push_str("# TYPE kiln_openenv_runs_active gauge\n");
+        push_line(
+            &mut out,
+            &format!("kiln_openenv_runs_active {}", gauges.openenv_runs_active),
+        );
+        out.push_str("# HELP kiln_openenv_runs_tracked Retained OpenEnv run records.\n");
+        out.push_str("# TYPE kiln_openenv_runs_tracked gauge\n");
+        push_line(
+            &mut out,
+            &format!("kiln_openenv_runs_tracked {}", gauges.openenv_runs_tracked),
+        );
+
         out.push_str("# HELP kiln_training_active Currently running training job.\n");
         out.push_str("# TYPE kiln_training_active gauge\n");
         push_line(
@@ -3352,6 +3414,8 @@ pub struct SnapshotGauges {
     pub batching_engine_enabled: bool,
     pub batching_engine: BatchingEngineSnapshot,
     pub training_active: u8,
+    pub openenv_runs_active: usize,
+    pub openenv_runs_tracked: usize,
     pub active_adapter: Option<String>,
 }
 
@@ -4086,6 +4150,8 @@ mod tests {
                 ..BatchingEngineSnapshot::default()
             },
             training_active: 0,
+            openenv_runs_active: 0,
+            openenv_runs_tracked: 0,
             active_adapter: Some("my-adapter".to_string()),
         };
 
@@ -4572,6 +4638,8 @@ mod tests {
             batching_engine_enabled: false,
             batching_engine: BatchingEngineSnapshot::default(),
             training_active: 0,
+            openenv_runs_active: 0,
+            openenv_runs_tracked: 0,
             active_adapter: None,
         };
         let output = m.render(&gauges);

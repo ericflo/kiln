@@ -367,6 +367,7 @@ function checkTrainingOptimizerSupportContract(appSource, indexSource, demoSourc
   assertGuardBefore('Corrections', 'async function trainFromCorrections()', '// Resolve an in-flight corrections-train receipt', "requireTrainingOptimizerAdmission('sft', 'muon', 8", 'corrFlushToServer(trainable)');
   assertGuardBefore('SFT', "document.getElementById('sft-form').addEventListener('submit'", '// --- GRPO Form ---', "requireTrainingOptimizerAdmission('sft'", "api('/v1/train/sft'");
   assertGuardBefore('GRPO', "document.getElementById('grpo-form').addEventListener('submit'", '// --- Chat ---', "requireTrainingOptimizerAdmission('grpo'", "api('/v1/train/grpo'");
+  assertGuardBefore('OpenEnv', "document.getElementById('openenv-form')?.addEventListener('submit'", 'syncOpenEnvKind();', "requireTrainingOptimizerAdmission('grpo'", "api('/v1/openenv/runs'");
   assertGuardBefore('OPD', "document.getElementById('opd-form')?.addEventListener('submit'", '// --- Distill / Refresh', "requireTrainingOptimizerAdmission('opd'", "api('/v1/train/opd'");
   assertGuardBefore('Refresh', "document.getElementById('distill-refresh-form')?.addEventListener('submit'", '// --- Distill / Pump', "requireTrainingOptimizerAdmission('distill_refresh'", "api('/v1/distill/refresh'");
   assertGuardBefore('Pump', "document.getElementById('distill-pump-form')?.addEventListener('submit'", '// --- Distill / Merge', "requireTrainingOptimizerAdmission('opd'", "api('/v1/distill/pump'");
@@ -377,6 +378,7 @@ function checkTrainingOptimizerSupportContract(appSource, indexSource, demoSourc
     'corr-optimizer-support',
     'sft-optimizer-support',
     'grpo-optimizer-support',
+    'openenv-optimizer-support',
     'opd-optimizer-support',
     'refresh-optimizer-support',
     'pump-optimizer-support',
@@ -389,6 +391,7 @@ function checkTrainingOptimizerSupportContract(appSource, indexSource, demoSourc
     'aria-describedby="corr-optimizer-support"',
     'aria-describedby="sft-optimizer-support"',
     'aria-describedby="grpo-optimizer-support"',
+    'aria-describedby="openenv-optimizer-support"',
     'aria-describedby="opd-optimizer-support"',
     'aria-describedby="refresh-optimizer-support"',
     'aria-describedby="pump-optimizer-support"',
@@ -398,12 +401,13 @@ function checkTrainingOptimizerSupportContract(appSource, indexSource, demoSourc
     if (!indexSource.includes(describedBy)) fail(`Training optimizer controls are missing ${describedBy}`);
   }
   const loadingStatusCount = (indexSource.match(/Optimizer capability details are still loading\. Training remains disabled\./g) || []).length;
-  if (loadingStatusCount < 8) {
+  if (loadingStatusCount < 9) {
     fail(`Every training-producing surface must start with visible loading/disabled optimizer copy; found ${loadingStatusCount}`);
   }
   for (const formId of [
     'sft-form',
     'grpo-form',
+    'openenv-form',
     'opd-form',
     'distill-refresh-form',
     'distill-pump-form',
@@ -417,7 +421,7 @@ function checkTrainingOptimizerSupportContract(appSource, indexSource, demoSourc
       fail(`#${formId} must be disabled in static HTML until optimizer capabilities load`);
     }
   }
-  for (const controlId of ['corr-train', 'sft-optimizer', 'sft-rank', 'grpo-optimizer', 'grpo-rank', 'opd-rank', 'pump-rank']) {
+  for (const controlId of ['corr-train', 'sft-optimizer', 'sft-rank', 'grpo-optimizer', 'grpo-rank', 'openenv-lora-rank', 'opd-rank', 'pump-rank']) {
     const control = indexSource.match(new RegExp(`<[^>]+id="${controlId}"[^>]*>`))?.[0] || '';
     if (!/\sdisabled(?:\s|>)/.test(control)) fail(`#${controlId} must start disabled in static HTML`);
   }
@@ -1152,7 +1156,7 @@ async function startServer({
     modelsRequests: 0,
     evalSuites: [],
     trainingOptimizerAvailable: false,
-    trainingSubmitRequests: { sft: 0, grpo: 0, opd: 0, refresh: 0, pump: 0, merge: 0, self: 0, recipe: 0 },
+    trainingSubmitRequests: { sft: 0, grpo: 0, openenv: 0, opd: 0, refresh: 0, pump: 0, merge: 0, self: 0, recipe: 0 },
   };
   const uiHtml = await readFile(uiIndexPath, 'utf8');
   const uiStyles = await readFile(uiStylesPath, 'utf8');
@@ -1161,6 +1165,7 @@ async function startServer({
   availableAdapters = availableAdapters.map((adapter) => ({ ...adapter }));
   let activeAdapter = availableAdapters.find((adapter) => adapter.active)?.name || null;
   const completedTrainingJobs = [];
+  const openEnvRuns = [];
   const smokeTeacherRevision = `sha256:${'7'.repeat(64)}`;
   const smokeTeacherContentRevision = `sha256:${'6'.repeat(64)}`;
   const smokeTeachers = [{
@@ -1462,6 +1467,10 @@ async function startServer({
       }
       if (url.pathname === '/v1/train/queue' || url.pathname === '/v1/train/status') {
         apiFailure(res, 'Training queue', url.pathname);
+        return;
+      }
+      if (url.pathname === '/v1/openenv/runs') {
+        apiFailure(res, 'OpenEnv runs', url.pathname);
         return;
       }
       // The eval-jobs background poll runs in every scenario — return
@@ -1958,6 +1967,57 @@ async function startServer({
     }
     if (url.pathname === '/v1/train/queue' || url.pathname === '/v1/train/status') {
       json(res, { running: runningTrainingJob, queued: [], completed: completedTrainingJobs });
+      return;
+    }
+    if (url.pathname === '/v1/openenv/runs' && req.method === 'GET') {
+      json(res, { schema: 'kiln.openenv-run-list.v1', runs: openEnvRuns });
+      return;
+    }
+    if (url.pathname === '/v1/openenv/inspect' && req.method === 'POST') {
+      await readJsonBody(req);
+      json(res, {
+        schema: 'kiln.openenv-inspection.v1',
+        environments: [{
+          identity: {
+            schema: 'kiln.openenv-identity.v1',
+            client_profile: 'openenv-python-sdk-v1',
+            base_url: 'http://127.0.0.1:8990',
+            websocket_url: 'ws://127.0.0.1:8990/ws',
+            openapi_version: '3.1.0',
+            environments: ['smoke-bandit'],
+            metadata: { name: 'smoke-bandit', description: 'Choose an arm.', version: '1.0.0' },
+            schema_sha256: `sha256:${'a'.repeat(64)}`,
+          },
+          schema: {
+            action: { type: 'object', required: ['arm'], properties: { arm: { type: 'integer' } } },
+            observation: { type: 'object' },
+            state: { type: 'object' },
+          },
+        }],
+      });
+      return;
+    }
+    if (url.pathname === '/v1/openenv/runs' && req.method === 'POST') {
+      const request = await readJsonBody(req);
+      apiState.trainingSubmitRequests.openenv += 1;
+      const status = {
+        schema: 'kiln.openenv-run.v1',
+        run_id: 'smoke-openenv-run',
+        kind: request.kind,
+        state: 'collecting',
+        request,
+        submitted_unix_ms: 1_700_000_000_000,
+        progress: {
+          groups_completed: 2,
+          groups_total: request.groups,
+          rollouts_completed: 8,
+          rollouts_total: request.groups * request.group_size,
+        },
+        environments: [],
+        artifacts: [],
+      };
+      openEnvRuns.unshift(status);
+      json(res, status, 202);
       return;
     }
     // Parameterized training-job routes, mirroring the real API:
@@ -2835,7 +2895,7 @@ async function expectActiveTrainingTab(page, tabName, message) {
 
 async function expectTrainingTabA11yState(page, activeName, message, { focused = true } = {}) {
   const state = await page.evaluate(() => {
-    const tabNames = ['queue', 'sft', 'grpo'];
+    const tabNames = ['queue', 'sft', 'grpo', 'openenv'];
     return Object.fromEntries(tabNames.map((tabName) => {
       const tab = document.querySelector(`#training-tab-${tabName}`);
       const panel = document.querySelector(`#tab-${tabName}`);
@@ -2877,6 +2937,12 @@ async function expectTrainingTabKeyboardNavigation(page) {
   await page.keyboard.press('ArrowRight');
   await expectTrainingTabA11yState(page, 'grpo', 'ArrowRight should activate the GRPO training tab');
 
+  await page.keyboard.press('ArrowRight');
+  await expectTrainingTabA11yState(page, 'openenv', 'ArrowRight should activate the OpenEnv training tab');
+
+  await page.keyboard.press('ArrowLeft');
+  await expectTrainingTabA11yState(page, 'grpo', 'ArrowLeft should return to the GRPO training tab');
+
   await page.keyboard.press('ArrowLeft');
   await expectTrainingTabA11yState(page, 'sft', 'ArrowLeft should return to the SFT training tab');
 
@@ -2884,7 +2950,7 @@ async function expectTrainingTabKeyboardNavigation(page) {
   await expectTrainingTabA11yState(page, 'queue', 'Home should activate the Queue training tab');
 
   await page.keyboard.press('End');
-  await expectTrainingTabA11yState(page, 'grpo', 'End should activate the GRPO training tab');
+  await expectTrainingTabA11yState(page, 'openenv', 'End should activate the OpenEnv training tab');
 }
 
 async function expectTrainingToast(page, text) {
@@ -4237,23 +4303,27 @@ async function runSmoke(baseUrl, {
     const unavailableOptimizerControls = await page.evaluate(() => ({
       sftSelectDisabled: document.getElementById('sft-optimizer')?.disabled,
       grpoSelectDisabled: document.getElementById('grpo-optimizer')?.disabled,
+      openenvSubmitDisabled: document.querySelector('#openenv-form button[type="submit"]')?.disabled,
       opdSubmitDisabled: document.querySelector('#opd-form button[type="submit"]')?.disabled,
       refreshSubmitDisabled: document.querySelector('#distill-refresh-form button[type="submit"]')?.disabled,
       pumpSubmitDisabled: document.querySelector('#distill-pump-form button[type="submit"]')?.disabled,
       mergeSubmitDisabled: document.querySelector('#distill-merge-form button[type="submit"]')?.disabled,
       selfSubmitDisabled: document.querySelector('#distill-self-form button[type="submit"]')?.disabled,
       sftSubmitTitle: document.querySelector('#sft-form button[type="submit"]')?.title,
+      openenvSubmitTitle: document.querySelector('#openenv-form button[type="submit"]')?.title,
       opdSubmitTitle: document.querySelector('#opd-form button[type="submit"]')?.title,
       refreshStatus: document.getElementById('refresh-optimizer-support')?.textContent,
     }));
     if (!unavailableOptimizerControls.sftSelectDisabled
       || !unavailableOptimizerControls.grpoSelectDisabled
+      || !unavailableOptimizerControls.openenvSubmitDisabled
       || !unavailableOptimizerControls.opdSubmitDisabled
       || !unavailableOptimizerControls.refreshSubmitDisabled
       || !unavailableOptimizerControls.pumpSubmitDisabled
       || !unavailableOptimizerControls.mergeSubmitDisabled
       || !unavailableOptimizerControls.selfSubmitDisabled
       || !/CPU-host serving weights/.test(unavailableOptimizerControls.sftSubmitTitle || '')
+      || !/CPU-host serving weights/.test(unavailableOptimizerControls.openenvSubmitTitle || '')
       || !/CPU-host serving weights/.test(unavailableOptimizerControls.opdSubmitTitle || '')
       || !/Distill refresh is unavailable/.test(unavailableOptimizerControls.refreshStatus || '')) {
       fail(`Unavailable optimizer support did not gate every training form: ${JSON.stringify(unavailableOptimizerControls)}`);
@@ -4264,6 +4334,9 @@ async function runSmoke(baseUrl, {
       await expectTrainingToast(page, 'SFT cannot submit: SFT is unavailable: native Vulkan training is unavailable for CPU-host serving weights.');
       await page.$eval('#grpo-form', form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
       await expectTrainingToast(page, 'GRPO cannot submit: GRPO is unavailable: native Vulkan training is unavailable for CPU-host serving weights.');
+      await page.$eval('#openenv-environments', input => { input.value = 'http://127.0.0.1:8990'; });
+      await page.$eval('#openenv-form', form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+      await expectTrainingToast(page, 'OpenEnv GRPO cannot submit: GRPO is unavailable: native Vulkan training is unavailable for CPU-host serving weights.');
       await page.$eval('#opd-form', form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
       await expectTrainingToast(page, 'OPD cannot submit: OPD is unavailable: native Vulkan training is unavailable for CPU-host serving weights.');
       for (const formId of ['distill-refresh-form', 'distill-pump-form', 'distill-merge-form', 'distill-self-form']) {
@@ -4555,6 +4628,35 @@ async function runSmoke(baseUrl, {
     await waitForVisiblePanel(page, '#tab-sft', 'Empty training queue should land on the Train·SFT form');
     await clickAndWait(page, '#training-tab-queue', 'Could not activate Queue tab before keyboard checks');
     await expectTrainingTabKeyboardNavigation(page);
+
+    await clickAndWait(page, '#training-tab-openenv', 'Could not open OpenEnv training tab');
+    await waitForVisiblePanel(page, '#tab-openenv', 'OpenEnv training tab did not activate');
+    await waitForPanelText(page, '#openenv-optimizer-support', /Muon · bf16 LoRA · round-to-nearest · rank 8 \(supported 2–32\)/, 'OpenEnv train should render the native GRPO optimizer tuple');
+    await expectDisabled(page, '#openenv-form button[type="submit"]', false, 'OpenEnv train should enable after native GRPO capability admission');
+    await page.$eval('#openenv-environments', input => { input.value = 'http://127.0.0.1:8990'; });
+    const inspectRequest = page.waitForRequest(
+      request => request.method() === 'POST' && request.url().endsWith('/v1/openenv/inspect'),
+      { timeout: 5000 },
+    );
+    await clickAndWait(page, '#openenv-inspect', 'Could not inspect the OpenEnv server');
+    await inspectRequest.catch(() => fail('OpenEnv Inspect did not POST /v1/openenv/inspect'));
+    await waitForPanelText(page, '#openenv-inspection', /smoke-bandit[\s\S]*schema sha256:aaaa/, 'OpenEnv inspection should render discovered identity and action schema');
+    const openEnvSubmitRequest = page.waitForRequest(
+      request => request.method() === 'POST' && request.url().endsWith('/v1/openenv/runs'),
+      { timeout: 5000 },
+    );
+    await clickAndWait(page, '#openenv-form button[type="submit"]', 'Could not submit the OpenEnv train run');
+    const openEnvRequest = await openEnvSubmitRequest.catch(() => fail('OpenEnv form did not POST /v1/openenv/runs'));
+    const openEnvBody = JSON.parse(openEnvRequest.postData() || '{}');
+    if (openEnvBody.kind !== 'train'
+      || openEnvBody.environment_urls?.[0] !== 'http://127.0.0.1:8990'
+      || openEnvBody.adapter !== 'base'
+      || openEnvBody.output_adapter !== 'openenv-agent'
+      || openEnvBody.training_config?.lora_rank !== 8) {
+      fail(`OpenEnv train request lost its protocol or native-GRPO controls: ${JSON.stringify(openEnvBody)}`);
+    }
+    await expectTrainingToast(page, 'OpenEnv train run smoke-op started');
+    await waitForPanelText(page, '#openenv-runs', /OpenEnv train[\s\S]*smoke-op[\s\S]*collecting[\s\S]*8 \/ 32 episodes/, 'OpenEnv run history should render persisted lifecycle progress');
 
     await clickAndWait(page, '#training-tab-sft', 'Could not open SFT tab');
     await waitForVisiblePanel(page, '#tab-sft', 'SFT tab did not activate');

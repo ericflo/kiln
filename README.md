@@ -121,6 +121,12 @@ trajectories, ECHO masks, GRPO submission, and audit artifacts.
 The runtime is implementation-neutral: miniopenenv is a pinned CI oracle, not
 a dependency, configuration namespace, or special execution path.
 
+OpenEnv is also native to the embedded dashboard and control plane. Use
+**Training → OpenEnv** in `/ui/`, or submit a durable run to
+`POST /v1/openenv/runs`; Kiln persists discovery and collection progress,
+canonical artifact links, failures, cancellation, and the linked native GRPO
+job across browser refreshes and server restarts.
+
 ```bash
 # Inspect the environment's health, metadata, schemas, and content identity.
 kiln openenv inspect --environment http://127.0.0.1:8990

@@ -98,6 +98,7 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
     };
 
     let active_adapter = state.active_adapter_name.read().unwrap().clone();
+    let (openenv_runs_active, openenv_runs_tracked) = state.openenv_runs.counts();
     let (rendered_prompt_cache_hits, rendered_prompt_cache_misses, rendered_prompt_cache_entries) =
         state.rendered_prompt_cache.lock().unwrap().stats();
     let (prompt_token_cache_hits, prompt_token_cache_misses, prompt_token_cache_entries) =
@@ -146,6 +147,8 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         batching_engine_enabled,
         batching_engine,
         training_active,
+        openenv_runs_active,
+        openenv_runs_tracked,
         active_adapter,
     };
 

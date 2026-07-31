@@ -19,6 +19,7 @@ mod hf_trl_import;
 pub(crate) mod library;
 mod metrics;
 mod models;
+pub mod openenv;
 pub(crate) mod pit_of_success;
 pub(crate) mod recipes;
 pub mod self_improve;
@@ -89,6 +90,7 @@ pub fn router(state: AppState) -> Router {
         .merge(library::routes())
         .merge(agent_runs::routes())
         .merge(agent_traces::routes())
+        .merge(openenv::routes())
         .merge(self_improve::routes())
         .merge(pit_of_success::routes())
         .merge(training::routes())

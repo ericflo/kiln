@@ -2435,6 +2435,9 @@ pub struct AppState {
     /// Embedded pi agent runs — the server-driven rollout engine
     /// (`/v1/agent/runs`). Records persist under `<adapter_dir>/agent_runs/`.
     pub agent_runs: Arc<crate::agent_runs::AgentRunRegistry>,
+    /// Native OpenEnv rollout/training runs. Records and replayable artifacts
+    /// persist under `<adapter_dir>/.openenv/runs/`.
+    pub openenv_runs: Arc<crate::api::openenv::OpenEnvRunRegistry>,
     /// Last adapter load failure by adapter name. Used by the registry so
     /// automation can distinguish "not loaded" from "failed to load".
     pub adapter_load_errors: Arc<std::sync::RwLock<HashMap<String, String>>>,
@@ -3354,6 +3357,9 @@ impl AppState {
             loaded_adapter: Arc::new(std::sync::RwLock::new(None)),
             self_improve_scheduler: Arc::new(std::sync::RwLock::new(None)),
             agent_runs: Arc::new(crate::agent_runs::AgentRunRegistry::new(PathBuf::from(
+                "adapters",
+            ))),
+            openenv_runs: Arc::new(crate::api::openenv::OpenEnvRunRegistry::new(PathBuf::from(
                 "adapters",
             ))),
             adapter_load_errors: Arc::new(std::sync::RwLock::new(HashMap::new())),
@@ -4383,6 +4389,9 @@ impl AppState {
             }),
             tokenizer: Arc::new(tokenizer),
             agent_runs: Arc::new(crate::agent_runs::AgentRunRegistry::new(
+                adapter_dir.clone(),
+            )),
+            openenv_runs: Arc::new(crate::api::openenv::OpenEnvRunRegistry::new(
                 adapter_dir.clone(),
             )),
             adapter_dir,
