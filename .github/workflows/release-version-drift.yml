@@ -73,7 +73,7 @@ jobs:
     name: Check user-facing release examples
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - run: node scripts/check_thinking_budget_contract.mjs
       - run: node scripts/check_runtime_defaults.mjs
       - run: python3 scripts/check_release_versions.py

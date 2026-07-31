@@ -58,7 +58,7 @@ jobs:
     name: regression-check script self-test
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.sha }}
           fetch-depth: 0
@@ -240,7 +240,7 @@ jobs:
           - native
           - generic
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.sha }}
           fetch-depth: 0
@@ -316,7 +316,7 @@ jobs:
     needs: gate-self-test
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.latency_fixture_id != 'none' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.sha }}
 

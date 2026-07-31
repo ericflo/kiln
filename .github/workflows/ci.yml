@@ -46,7 +46,7 @@ jobs:
     name: Rust formatting
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install repository Rust toolchain
         run: |
@@ -63,7 +63,7 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && (inputs.backend_build == 'all' || inputs.backend_build == 'metal') }}
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust stable
         # Use the rustup that's pre-installed on every GitHub-hosted runner
@@ -107,7 +107,7 @@ jobs:
     name: Linux / default features
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Free disk space for the workspace test suite
         # The full workspace build plus test binaries can exhaust the hosted
@@ -195,7 +195,7 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && (inputs.backend_build == 'all' || inputs.backend_build == 'vulkan') }}
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust stable
         # Use the rustup that's pre-installed on every GitHub-hosted runner
@@ -242,7 +242,7 @@ jobs:
     # production backend.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Free disk space for the CUDA toolkit
         run: |
@@ -298,7 +298,7 @@ jobs:
     # gfx1151 runner; this job needs no GPU.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Free disk space for the ROCm toolchain
         # GitHub-hosted runners ship ~14 GB free on /; the ROCm HIP SDK needs
@@ -356,7 +356,7 @@ jobs:
     name: cargo-deny (license / source / bans policy)
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # Pin to an exact commit SHA so the bundled cargo-deny CLI version cannot
       # drift on us. v2.0.17 bundles cargo-deny 0.19.2, which is the version the
       # `unmaintained = "workspace"` Scope syntax in deny.toml is validated
