@@ -177,7 +177,11 @@ captured environment exchange. Candidates in a group share the same
 environment reset and seed;
 environment step rewards determine episode return; `done`, max-step cutoffs,
 invalid model actions, and OpenEnv protocol errors remain distinct. The
-rollouts carry environment name, URL, action-schema hash, reset hash, seed,
+shared reset object can be replaced by an ordered object per environment for
+heterogeneous portfolios. Kiln strips caller-supplied seeds, assigns groups
+round-robin, and publishes a receipt-verifiable reset-plan digest; every listed
+endpoint must be exercised. Rollouts carry environment name, URL,
+action-schema hash, reset hash, seed,
 steps, return, and termination identity directly into Kiln's scored-payload
 hash.
 

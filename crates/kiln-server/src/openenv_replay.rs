@@ -405,11 +405,19 @@ pub fn verify_openenv_artifacts(
     let summary_bytes = read_bounded(summary_path, MAX_ARTIFACT_BYTES)?;
     let summary: OpenEnvRolloutSummary = serde_json::from_slice(&summary_bytes)
         .with_context(|| format!("decode OpenEnv summary {}", summary_path.display()))?;
-    anyhow::ensure!(
-        summary.schema == "kiln.openenv-rollout-summary.v2",
-        "OpenEnv replay verification requires kiln.openenv-rollout-summary.v2, got {:?}",
-        summary.schema
-    );
+    match summary.schema.as_str() {
+        "kiln.openenv-rollout-summary.v2" => anyhow::ensure!(
+            summary.reset_options_sha256.is_some() && summary.reset_plan_sha256.is_none(),
+            "OpenEnv v2 summary must contain reset_options_sha256 and omit reset_plan_sha256"
+        ),
+        "kiln.openenv-rollout-summary.v3" => anyhow::ensure!(
+            summary.reset_options_sha256.is_none() && summary.reset_plan_sha256.is_some(),
+            "OpenEnv v3 summary must contain reset_plan_sha256 and omit reset_options_sha256"
+        ),
+        schema => anyhow::bail!(
+            "OpenEnv replay verification requires kiln.openenv-rollout-summary.v2 or .v3, got {schema:?}"
+        ),
+    }
 
     let dataset_path = resolve_artifact_path(
         summary_path,
@@ -470,6 +478,9 @@ pub fn verify_openenv_artifacts(
         groups.len() == summary.groups && replay.groups.len() == summary.groups,
         "OpenEnv group count differs across dataset, replay, and summary"
     );
+    if summary.schema == "kiln.openenv-rollout-summary.v3" {
+        verify_reset_plan(summary.reset_plan_sha256.as_deref(), &replay)?;
+    }
 
     let mut rollout_count = 0usize;
     let mut exchange_count = 0usize;
@@ -493,6 +504,14 @@ pub fn verify_openenv_artifacts(
             replay_group.seed == expected_seed
                 && replay_group.environment_index == group_index % replay.environments.len(),
             "OpenEnv group {group_index} seed or round-robin environment assignment differs from the summary controls"
+        );
+        anyhow::ensure!(
+            replay_group
+                .reset_payload
+                .get("seed")
+                .and_then(Value::as_u64)
+                == Some(expected_seed),
+            "OpenEnv group {group_index} reset payload does not contain its deterministic seed"
         );
         let environment = &replay.environments[replay_group.environment_index];
         anyhow::ensure!(
@@ -605,6 +624,53 @@ pub fn verify_openenv_artifacts(
         replay,
         report,
     })
+}
+
+fn verify_reset_plan(expected_digest: Option<&str>, replay: &OpenEnvReplayManifest) -> Result<()> {
+    let mut plan = vec![None; replay.environments.len()];
+    for group in &replay.groups {
+        let mut template = group.reset_payload.as_object().cloned().with_context(|| {
+            format!(
+                "OpenEnv group {} reset payload is not one JSON object",
+                group.group_index
+            )
+        })?;
+        template.remove("seed");
+        let template = Value::Object(template);
+        let slot = plan.get_mut(group.environment_index).with_context(|| {
+            format!(
+                "OpenEnv group {} references unavailable environment {}",
+                group.group_index, group.environment_index
+            )
+        })?;
+        if let Some(previous) = slot.as_ref() {
+            anyhow::ensure!(
+                previous == &template,
+                "OpenEnv reset template changed across groups for environment {}",
+                group.environment_index
+            );
+        } else {
+            *slot = Some(template);
+        }
+    }
+    let plan = plan
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value.with_context(|| {
+                format!(
+                    "OpenEnv v3 receipt cannot be verified because environment {index} was never exercised"
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let actual = sha256_json(&Value::Array(plan))?;
+    anyhow::ensure!(
+        expected_digest == Some(actual.as_str()),
+        "OpenEnv reset-plan digest mismatch: receipt {}, replay {actual}",
+        expected_digest.unwrap_or("<missing>")
+    );
+    Ok(())
 }
 
 fn verify_recovery_budget(
@@ -1137,6 +1203,54 @@ mod tests {
         manifest.validate().unwrap();
         manifest.groups[0].candidates[0].episode_return = 0.0;
         assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn v3_reset_plan_is_reconstructed_in_environment_order() {
+        let replay = OpenEnvReplayManifest {
+            schema: OPENENV_REPLAY_SCHEMA_V1.to_string(),
+            client_profile: OPENENV_CLIENT_PROFILE.to_string(),
+            dataset_sha256: format!("sha256:{}", "b".repeat(64)),
+            protocol_error_reward: -1.0,
+            max_steps: 1,
+            environments: vec![inspection(), inspection()],
+            groups: vec![
+                OpenEnvReplayGroup {
+                    group_index: 0,
+                    environment_index: 0,
+                    seed: 7,
+                    reset_payload: json!({"difficulty": "hard", "seed": 7}),
+                    reset_observation: observation(OpenEnvReward::Null, false),
+                    candidates: Vec::new(),
+                },
+                OpenEnvReplayGroup {
+                    group_index: 1,
+                    environment_index: 1,
+                    seed: 8,
+                    reset_payload: json!({"seed": 8, "split": "train"}),
+                    reset_observation: observation(OpenEnvReward::Null, false),
+                    candidates: Vec::new(),
+                },
+            ],
+        };
+        let expected = sha256_json(&json!([
+            {"difficulty": "hard"},
+            {"split": "train"}
+        ]))
+        .unwrap();
+        verify_reset_plan(Some(&expected), &replay).unwrap();
+        assert!(verify_reset_plan(Some(&format!("sha256:{}", "0".repeat(64))), &replay).is_err());
+
+        let mut inconsistent = replay.clone();
+        inconsistent.groups.push(OpenEnvReplayGroup {
+            group_index: 2,
+            environment_index: 0,
+            seed: 9,
+            reset_payload: json!({"difficulty": "easy", "seed": 9}),
+            reset_observation: observation(OpenEnvReward::Null, false),
+            candidates: Vec::new(),
+        });
+        assert!(verify_reset_plan(Some(&expected), &inconsistent).is_err());
     }
 
     #[test]

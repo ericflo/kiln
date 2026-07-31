@@ -1071,6 +1071,26 @@ function openEnvCredentialIds(environmentCount) {
   });
 }
 
+function openEnvEnvironmentResetOptions(environmentCount) {
+  const text = (document.getElementById('openenv-environment-reset-options')?.value || '').trim();
+  if (!text) return [];
+  let values;
+  try {
+    values = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Per-environment reset options must be valid JSON: ${error.message}`);
+  }
+  if (!Array.isArray(values) || values.length !== environmentCount) {
+    throw new Error(`Per-environment reset options must be an array with exactly one object per environment URL (expected ${environmentCount}, got ${Array.isArray(values) ? values.length : 'a non-array value'}).`);
+  }
+  values.forEach((value, index) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`Per-environment reset option ${index + 1} must be one JSON object.`);
+    }
+  });
+  return values;
+}
+
 function openEnvNumber(id, label, integer = true) {
   const value = Number(document.getElementById(id)?.value);
   if (!Number.isFinite(value) || (integer && !Number.isSafeInteger(value))) {
@@ -1434,11 +1454,16 @@ document.getElementById('openenv-form')?.addEventListener('submit', async event 
     const environment_urls = openEnvUrls();
     if (!environment_urls.length) throw new Error('Add at least one OpenEnv environment URL.');
     const credential_ids = openEnvCredentialIds(environment_urls.length);
+    const environment_reset_options = openEnvEnvironmentResetOptions(environment_urls.length);
     const training_config = openEnvObject('openenv-training-config', 'Native GRPO overrides');
     const rank = openEnvNumber('openenv-lora-rank', 'LoRA rank');
     const optimizerKind = openEnvOptimizerKind(training_config);
     if (kind === 'train') requireTrainingOptimizerAdmission('grpo', optimizerKind, rank, 'OpenEnv GRPO');
     training_config.lora_rank = rank;
+    const reset_options = openEnvObject('openenv-reset-options', 'Reset options');
+    if (environment_reset_options.length && Object.keys(reset_options).length) {
+      throw new Error('Use either shared reset options or per-environment reset options, not both.');
+    }
     const request = {
       kind,
       environment_urls,
@@ -1446,7 +1471,7 @@ document.getElementById('openenv-form')?.addEventListener('submit', async event 
       groups: openEnvNumber('openenv-groups', 'Seed groups'),
       group_size: openEnvNumber('openenv-group-size', 'Episodes per seed'),
       seed_start: openEnvNumber('openenv-seed-start', 'First seed'),
-      reset_options: openEnvObject('openenv-reset-options', 'Reset options'),
+      reset_options,
       max_steps: openEnvNumber('openenv-max-steps', 'Max actions'),
       concurrency: openEnvNumber('openenv-concurrency', 'Concurrency'),
       max_action_tokens: openEnvNumber('openenv-max-action-tokens', 'Max action tokens'),
@@ -1458,6 +1483,10 @@ document.getElementById('openenv-form')?.addEventListener('submit', async event 
       auto_load: document.getElementById('openenv-auto-load').checked,
     };
     if (credential_ids.length) request.credential_ids = credential_ids;
+    if (environment_reset_options.length) request.environment_reset_options = environment_reset_options;
+    if (request.groups < environment_urls.length) {
+      throw new Error(`Seed groups must be at least the number of environment URLs (${environment_urls.length}) so every endpoint is exercised.`);
+    }
     if (kind === 'train') {
       request.output_adapter = document.getElementById('openenv-output-adapter').value.trim();
       if (!request.output_adapter) throw new Error('Choose an output adapter name.');
@@ -1468,6 +1497,9 @@ document.getElementById('openenv-form')?.addEventListener('submit', async event 
           groups: openEnvNumber('openenv-environment-eval-groups', 'Held-out seed groups'),
           group_size: openEnvNumber('openenv-environment-eval-group-size', 'Held-out episodes per seed'),
         };
+        if (request.environment_eval.groups < environment_urls.length) {
+          throw new Error(`Held-out seed groups must be at least the number of environment URLs (${environment_urls.length}) so every endpoint is evaluated.`);
+        }
         if (environmentEvalMode === 'gate') {
           const minMeanReturn = openEnvOptionalNumber('openenv-environment-gate-floor', 'Minimum mean return');
           request.environment_eval.gate = {

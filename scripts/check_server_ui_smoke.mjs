@@ -4742,6 +4742,9 @@ async function runSmoke(baseUrl, {
       fail(`OpenEnv task catalog lost its bounded selection or credential handle: ${JSON.stringify(openEnvTaskBody)}`);
     }
     await waitForPanelText(page, '#openenv-task-catalog', /smoke-bandit[\s\S]*train[\s\S]*tasks 1\.\.2 of 3[\s\S]*2 \+ 2/, 'OpenEnv task catalog should render the bounded arbitrary task page');
+    await page.$eval('#openenv-environments', input => { input.value = 'http://127.0.0.1:8990\nhttp://127.0.0.1:8991'; });
+    await page.$eval('#openenv-credential-ids', input => { input.value = 'smoke-arcade\n-'; });
+    await page.$eval('#openenv-environment-reset-options', input => { input.value = '[{"difficulty":"hard"},{"split":"train"}]'; });
     await page.select('#openenv-environment-eval-mode', 'gate');
     await page.$eval('#openenv-environment-gate-floor', input => { input.value = '0.5'; });
     await page.$eval('#openenv-environment-gate-improvement', input => { input.value = '0.1'; });
@@ -4754,7 +4757,11 @@ async function runSmoke(baseUrl, {
     const openEnvBody = JSON.parse(openEnvRequest.postData() || '{}');
     if (openEnvBody.kind !== 'train'
       || openEnvBody.environment_urls?.[0] !== 'http://127.0.0.1:8990'
+      || openEnvBody.environment_urls?.[1] !== 'http://127.0.0.1:8991'
       || openEnvBody.credential_ids?.[0] !== 'smoke-arcade'
+      || openEnvBody.credential_ids?.[1] !== null
+      || openEnvBody.environment_reset_options?.[0]?.difficulty !== 'hard'
+      || openEnvBody.environment_reset_options?.[1]?.split !== 'train'
       || openEnvBody.adapter !== 'base'
       || openEnvBody.output_adapter !== 'openenv-agent'
       || openEnvBody.training_config?.lora_rank !== 8

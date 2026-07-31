@@ -628,6 +628,11 @@
               <div class="form-help">One JSON object merged into every reset. Kiln always owns and inserts the deterministic group seed.</div>
             </div>
             <div class="form-group">
+              <label for="openenv-environment-reset-options">Per-environment reset options <span class="hint">— optional heterogeneous portfolio</span></label>
+              <textarea id="openenv-environment-reset-options" rows="4" spellcheck="false" placeholder='[{"difficulty":"hard"},{"split":"train"}]'></textarea>
+              <div class="form-help">A JSON array with exactly one object per environment URL, in the same order. Leave blank to use the shared object above; the two modes are mutually exclusive.</div>
+            </div>
+            <div class="form-group">
               <label for="openenv-training-config">Native GRPO overrides</label>
               <textarea id="openenv-training-config" rows="3" spellcheck="false" placeholder='{"learning_rate":0.00001,"kl_coeff":0.1}'>{}</textarea>
               <div class="form-help">Any native GRPO config fields. Kiln fixes the behavior policy contract, source adapter, output name, and auto-load fields to match this live rollout.</div>

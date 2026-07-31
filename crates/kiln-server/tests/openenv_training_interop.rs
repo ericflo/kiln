@@ -38,14 +38,19 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
     let summary = run_openenv_train(OpenEnvTrainOptions {
         rollout: OpenEnvRolloutOptions {
             kiln_url: format!("http://{address}"),
-            environment_urls: vec![environment_url],
+            environment_urls: vec![environment_url.clone(), environment_url],
             credential_envs: Vec::new(),
             adapter: "base".to_string(),
-            groups: 1,
+            groups: 2,
             group_size: 2,
             seed_start: 71,
             reset_options: None,
             reset_options_value: None,
+            environment_reset_options: Vec::new(),
+            environment_reset_options_values: vec![
+                serde_json::json!({"difficulty": "hard"}),
+                serde_json::json!({"split": "train"}),
+            ],
             max_steps: 2,
             concurrency: 2,
             max_action_tokens: 32,
@@ -65,9 +70,9 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
     .await
     .unwrap();
 
-    assert_eq!(summary.schema, "kiln.openenv-rollout-summary.v2");
-    assert_eq!(summary.rollout_count, 2);
-    assert_eq!(summary.stats.recoverable_protocol_error_count, 2);
+    assert_eq!(summary.schema, "kiln.openenv-rollout-summary.v3");
+    assert_eq!(summary.rollout_count, 4);
+    assert_eq!(summary.stats.recoverable_protocol_error_count, 4);
     assert_eq!(summary.stats.protocol_error_count, 0);
     assert!(
         summary.stats.capacity_retry_count >= 1,
@@ -97,7 +102,7 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
         "no_importance_correction"
     );
     assert_eq!(submitted["config"]["output_name"], "bandit-e2e");
-    assert_eq!(submitted["groups"].as_array().unwrap().len(), 1);
+    assert_eq!(submitted["groups"].as_array().unwrap().len(), 2);
     assert!(
         submitted["groups"][0]["completions"]
             .as_array()
@@ -107,8 +112,36 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
     );
 
     let verified = verify_openenv_artifacts(&summary_path, None, None).unwrap();
-    assert_eq!(verified.report.rollouts, 2);
-    assert_eq!(verified.report.environment_exchanges, 4);
+    assert_eq!(
+        verified.replay.groups[0].reset_payload,
+        serde_json::json!({"difficulty": "hard", "seed": 71})
+    );
+    assert_eq!(
+        verified.replay.groups[1].reset_payload,
+        serde_json::json!({"seed": 72, "split": "train"})
+    );
+    assert_eq!(verified.report.rollouts, 4);
+    assert_eq!(verified.report.environment_exchanges, 8);
+
+    let legacy_summary_path = directory.path().join("legacy-summary.json");
+    let mut legacy_summary = summary.clone();
+    legacy_summary.schema = "kiln.openenv-rollout-summary.v2".to_string();
+    legacy_summary.reset_options_sha256 = Some(format!("sha256:{}", "0".repeat(64)));
+    legacy_summary.reset_plan_sha256 = None;
+    std::fs::write(
+        &legacy_summary_path,
+        serde_json::to_vec_pretty(&legacy_summary).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        verify_openenv_artifacts(&legacy_summary_path, None, None)
+            .unwrap()
+            .report
+            .rollouts,
+        4,
+        "summary v2 bundles remain offline-verifiable after the v3 migration"
+    );
+
     let replay_report = replay_openenv(
         &verified.replay,
         verified.report.replay_sha256,
@@ -118,8 +151,8 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
     )
     .await
     .unwrap();
-    assert_eq!(replay_report.rollouts, 2);
-    assert_eq!(replay_report.environment_exchanges, 4);
+    assert_eq!(replay_report.rollouts, 4);
+    assert_eq!(replay_report.environment_exchanges, 8);
     assert!(replay_report.capacity_retries >= 1);
     assert_eq!(replay_report.environment_prefix_only_rollouts, 0);
 

@@ -486,6 +486,13 @@ lock-step socket and become policy feedback under a bounded budget. A
 `CAPACITY_REACHED` socket is terminal, but episode acquisition is not: Kiln
 backs off and opens a fresh socket under an explicit wait deadline.
 
+Reset configuration is either one shared object or an ordered object per
+environment. The collector removes any caller-supplied `seed`, inserts its
+deterministic group seed, and assigns whole groups round-robin. It requires at
+least one group per configured endpoint. Summary v3 hashes the ordered,
+seed-free plan; offline verification reconstructs that plan from replay groups
+and rejects missing environments, per-environment drift, or a digest mismatch.
+
 The canonical JSONL stays the only training representation. A separate
 content-addressed replay manifest retains exact reset payloads, reset
 observations, ordered action/result exchanges, and final states. The summary

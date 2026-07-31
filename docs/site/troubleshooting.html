@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Kiln Troubleshooting &mdash; Diagnose by symptom</title>
-  <meta name="description" content="Diagnose Kiln startup, accelerator selection, memory pressure, inference latency, health, training, remote access, and adapters.">
+  <meta name="description" content="Diagnose Kiln startup, accelerators, memory pressure, inference, native OpenEnv RL, training, remote access, and adapters.">
   <meta name="theme-color" content="#0a0908">
   <meta name="color-scheme" content="dark">
   <link rel="canonical" href="https://ericflo.github.io/kiln/troubleshooting.html">
@@ -302,6 +302,7 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#remote-server-not-reachable">Remote access</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#long-prefill-timeouts">Long-prefill timeouts</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#mock-mode">Mock mode</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#openenv-runs">OpenEnv runs</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#adapter-directory">Adapter directory</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#adapter-mutation-conflicts">Adapter conflicts</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#where-to-go-next">Where to go next</a>
@@ -1002,6 +1003,32 @@ kiln adapters list --url http://gpu-box:8420</code></pre>
       </article>
 
       <article class="card p-6">
+        <h2 id="openenv-runs" class="text-xl font-semibold mb-4">An OpenEnv run cannot start, stalls, or fails verification</h2>
+        <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
+          <div>
+            <div class="label mb-2">Symptom</div>
+            <p>Discovery fails; admission rejects reset options; collection remains capacity-waiting; or <code>kiln openenv verify</code> reports identity, digest, reward, or reset-plan drift.</p>
+          </div>
+          <div>
+            <div class="label mb-2">Check</div>
+            <ul class="list-disc pl-5">
+              <li>Run <code>kiln openenv inspect --environment URL</code>, then inspect <code>kiln openenv status RUN_ID</code> and server metrics.</li>
+              <li>Use one shared reset object, or exactly one <code>environment_reset_options</code> object per URL; groups must cover every endpoint.</li>
+              <li>Protected origins need an exact-origin credential; remote server runs require explicit operator policy and HTTPS.</li>
+            </ul>
+          </div>
+          <div>
+            <div class="label mb-2">Fix</div>
+            <p>Correct the URL, credential, aligned reset plan, or group count. Reduce concurrency or raise the bounded capacity wait when the environment reports saturation. Keep dataset, replay, and summary together; a verification mismatch means restore the original bundle or recollect—do not edit the receipt. Then use live <code>replay</code> only after offline verification passes.</p>
+          </div>
+        </div>
+        <p class="mt-5 text-sm" style="color: var(--fg-mute);">
+          See the <a href="docs/openenv/">OpenEnv training guide</a> for protocol and workflow details, and
+          <a href="docs/openenv-replay/">OpenEnv replay and recovery</a> for exact mismatch semantics.
+        </p>
+      </article>
+
+      <article class="card p-6">
         <h2 id="adapter-directory" class="text-xl font-semibold mb-4">Adapters are in a different directory than expected</h2>
         <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
           <div>
@@ -1060,6 +1087,10 @@ kiln adapters list --url http://gpu-box:8420</code></pre>
         <a class="card p-5 block" href="grpo.html">
           <h3 class="font-semibold mb-2">GRPO guide</h3>
           <p style="color: var(--fg-dim);">Reward-scored completions, payload shape, and the generate &rarr; score &rarr; train loop.</p>
+        </a>
+        <a class="card p-5 block" href="docs/openenv/">
+          <h3 class="font-semibold mb-2">OpenEnv training</h3>
+          <p style="color: var(--fg-dim);">Diagnose protocol discovery, stateful episodes, capacity, reset plans, artifacts, and held-out return gates.</p>
         </a>
         <a class="card p-5 block" href="architecture.html">
           <h3 class="font-semibold mb-2">Architecture</h3>

@@ -79,7 +79,7 @@ def fixtures() -> dict[str, dict]:
         "mean_model_latency_ms": 1.5,
     }
     summary = {
-        "schema": "kiln.openenv-rollout-summary.v2",
+        "schema": "kiln.openenv-rollout-summary.v3",
         "kiln_url": "http://127.0.0.1:8420",
         "adapter": None,
         "adapter_label": "base",
@@ -96,7 +96,7 @@ def fixtures() -> dict[str, dict]:
         "protocol_error_reward": -1.0,
         "max_recoverable_errors": 3,
         "capacity_wait_seconds": 300,
-        "reset_options_sha256": hash_value("b"),
+        "reset_plan_sha256": hash_value("b"),
         "output_path": "openenv.rollouts.jsonl",
         "replay_output_path": "openenv.replay.json",
         "summary_output_path": "openenv.rollout-summary.json",
@@ -243,6 +243,13 @@ def main() -> int:
         failures.extend(f"{definition}: {error}" for error in errors)
 
     if args.self_test:
+        missing_reset_plan = copy.deepcopy(values["OpenEnvRolloutSummary"])
+        del missing_reset_plan["reset_plan_sha256"]
+        if not validate_instance(
+            missing_reset_plan, schema["$defs"]["OpenEnvRolloutSummary"], schema
+        ):
+            failures.append("self-test: v3 summary without reset_plan_sha256 was accepted")
+
         missing_digest = copy.deepcopy(values["OpenEnvRolloutSummary"])
         del missing_digest["replay_sha256"]
         if not validate_instance(
@@ -304,8 +311,8 @@ def main() -> int:
     for term in required_source_terms:
         if term not in source:
             failures.append(f"openenv_replay.rs is missing contract identifier {term}")
-    if "kiln.openenv-rollout-summary.v2" not in cli:
-        failures.append("openenv_cli.rs is missing summary v2")
+    if "kiln.openenv-rollout-summary.v3" not in cli:
+        failures.append("openenv_cli.rs is missing summary v3")
     for term in [
         "kiln.openenv-environment-evaluation.v1",
         "paired_return_sign_test_v1",

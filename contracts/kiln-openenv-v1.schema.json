@@ -223,7 +223,7 @@
         "protocol_error_reward",
         "max_recoverable_errors",
         "capacity_wait_seconds",
-        "reset_options_sha256",
+        "reset_plan_sha256",
         "output_path",
         "replay_output_path",
         "summary_output_path",
@@ -235,7 +235,7 @@
         "rollouts"
       ],
       "properties": {
-        "schema": { "const": "kiln.openenv-rollout-summary.v2" },
+        "schema": { "const": "kiln.openenv-rollout-summary.v3" },
         "kiln_url": { "type": "string", "minLength": 1 },
         "adapter": { "type": ["string", "null"] },
         "adapter_label": { "type": "string", "minLength": 1 },
@@ -257,7 +257,10 @@
         "protocol_error_reward": { "type": "number" },
         "max_recoverable_errors": { "type": "integer", "minimum": 0, "maximum": 64 },
         "capacity_wait_seconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
-        "reset_options_sha256": { "$ref": "#/$defs/Sha256" },
+        "reset_plan_sha256": {
+          "$ref": "#/$defs/Sha256",
+          "description": "SHA-256 of the ordered seed-free reset template array aligned with environments."
+        },
         "output_path": { "type": "string", "minLength": 1 },
         "replay_output_path": { "type": "string", "minLength": 1 },
         "summary_output_path": { "type": "string", "minLength": 1 },

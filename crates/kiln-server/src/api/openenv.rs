@@ -218,6 +218,11 @@ pub struct OpenEnvRunRequest {
     pub seed_start: u64,
     #[serde(default = "default_reset_options")]
     pub reset_options: Value,
+    /// Optional reset objects aligned one-for-one with `environment_urls`.
+    /// Use this for heterogeneous portfolios; it is mutually exclusive with
+    /// non-empty shared `reset_options`. Kiln owns and inserts `seed`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environment_reset_options: Vec<Value>,
     #[serde(default = "default_max_steps")]
     pub max_steps: usize,
     #[serde(default = "default_concurrency")]
@@ -878,6 +883,44 @@ fn validate_run_request(
             "Send reset_options as an object; Kiln adds the deterministic seed.",
         ));
     }
+    if !request.environment_reset_options.is_empty() {
+        if request.environment_reset_options.len() != request.environment_urls.len() {
+            return Err(openenv_error(
+                StatusCode::BAD_REQUEST,
+                "openenv_invalid_request",
+                format!(
+                    "environment_reset_options must contain exactly one object per environment (expected {}, got {})",
+                    request.environment_urls.len(),
+                    request.environment_reset_options.len()
+                ),
+                "Align one reset object with each environment_urls entry.",
+            ));
+        }
+        if request
+            .environment_reset_options
+            .iter()
+            .any(|value| !value.is_object())
+        {
+            return Err(openenv_error(
+                StatusCode::BAD_REQUEST,
+                "openenv_invalid_request",
+                "environment_reset_options entries must all be JSON objects",
+                "Send one reset object per environment; Kiln adds each deterministic seed.",
+            ));
+        }
+        if request
+            .reset_options
+            .as_object()
+            .is_some_and(|object| !object.is_empty())
+        {
+            return Err(openenv_error(
+                StatusCode::BAD_REQUEST,
+                "openenv_invalid_request",
+                "reset_options and environment_reset_options are mutually exclusive",
+                "Use either one shared reset object or one aligned object per environment.",
+            ));
+        }
+    }
     match request.kind {
         OpenEnvRunKind::Rollout
             if request.output_adapter.is_some() || request.environment_eval.is_some() =>
@@ -993,6 +1036,7 @@ fn rollout_options_for(
     run_dir: &Path,
     credential_envs: Vec<Option<String>>,
 ) -> OpenEnvRolloutOptions {
+    let has_environment_reset_options = !request.environment_reset_options.is_empty();
     OpenEnvRolloutOptions {
         kiln_url: "in-process".to_string(),
         environment_urls: request.environment_urls.clone(),
@@ -1002,7 +1046,10 @@ fn rollout_options_for(
         group_size: request.group_size,
         seed_start: request.seed_start,
         reset_options: None,
-        reset_options_value: Some(request.reset_options.clone()),
+        reset_options_value: (!has_environment_reset_options)
+            .then(|| request.reset_options.clone()),
+        environment_reset_options: Vec::new(),
+        environment_reset_options_values: request.environment_reset_options.clone(),
         max_steps: request.max_steps,
         concurrency: request.concurrency,
         max_action_tokens: request.max_action_tokens,
@@ -1031,6 +1078,7 @@ fn environment_eval_rollout_options(
     let seed_start = resolved_environment_eval_seed_start(request)
         .ok_or_else(|| "OpenEnv environment evaluation seed is unavailable".to_string())?;
     let paths = evaluation_paths(run_dir, side);
+    let has_environment_reset_options = !request.environment_reset_options.is_empty();
     Ok(OpenEnvRolloutOptions {
         kiln_url: "in-process".to_string(),
         environment_urls: request.environment_urls.clone(),
@@ -1040,7 +1088,10 @@ fn environment_eval_rollout_options(
         group_size: config.group_size,
         seed_start,
         reset_options: None,
-        reset_options_value: Some(request.reset_options.clone()),
+        reset_options_value: (!has_environment_reset_options)
+            .then(|| request.reset_options.clone()),
+        environment_reset_options: Vec::new(),
+        environment_reset_options_values: request.environment_reset_options.clone(),
         max_steps: request.max_steps,
         concurrency: request.concurrency.min(config.group_size),
         max_action_tokens: request.max_action_tokens,
@@ -2277,6 +2328,7 @@ mod tests {
             group_size: 3,
             seed_start: 0,
             reset_options: default_reset_options(),
+            environment_reset_options: Vec::new(),
             max_steps: 8,
             concurrency: 2,
             max_action_tokens: 128,
@@ -2456,6 +2508,38 @@ mod tests {
         assert!(validate_run_request(&rollout, &policy).is_err());
         rollout.temperature = 1.0;
         rollout.adapter = "../escape".into();
+        assert!(validate_run_request(&rollout, &policy).is_err());
+    }
+
+    #[test]
+    fn heterogeneous_reset_plan_is_aligned_exclusive_and_preserved() {
+        let policy = OpenEnvConfig::default();
+        let mut rollout = request(OpenEnvRunKind::Rollout);
+        rollout
+            .environment_urls
+            .push("http://127.0.0.1:8001".into());
+        rollout.environment_reset_options =
+            vec![json!({"difficulty": "hard"}), json!({"split": "train"})];
+        assert!(validate_run_request(&rollout, &policy).is_ok());
+
+        let options = rollout_options_for(&rollout, Path::new("."), vec![None, None]);
+        assert_eq!(
+            options.environment_reset_options_values,
+            rollout.environment_reset_options
+        );
+        assert!(options.reset_options_value.is_none());
+
+        rollout.groups = 1;
+        assert!(validate_run_request(&rollout, &policy).is_err());
+        rollout.groups = 2;
+        rollout.environment_reset_options.pop();
+        assert!(validate_run_request(&rollout, &policy).is_err());
+        rollout
+            .environment_reset_options
+            .push(json!(["not", "an", "object"]));
+        assert!(validate_run_request(&rollout, &policy).is_err());
+        rollout.environment_reset_options[1] = json!({});
+        rollout.reset_options = json!({"shared": true});
         assert!(validate_run_request(&rollout, &policy).is_err());
     }
 

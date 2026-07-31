@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Kiln Architecture &mdash; Single-process inference and training</title>
-  <meta name="description" content="How Kiln's single-process server, capability-derived accelerator policy, batching, adapter training, hot-swaps, and eval pipeline fit together.">
+  <meta name="description" content="How Kiln's single-process server, batching, native OpenEnv reinforcement learning, adapter training, hot-swaps, and eval pipeline fit together.">
   <meta name="theme-color" content="#0a0908">
   <meta name="color-scheme" content="dark">
   <link rel="canonical" href="https://ericflo.github.io/kiln/architecture.html">
@@ -272,9 +272,9 @@
         Kiln is one Rust process that serves, trains, and hot-swaps adapters.
       </h1>
       <p class="text-lg leading-relaxed max-w-3xl" style="color: var(--fg-dim);">
-        See how the HTTP server, scheduler, model engine, accelerator policy, LoRA training queue,
-        and eval worker share one runtime. Follow the reference links when you need exact backend,
-        memory, or observability contracts.
+        See how the HTTP server, scheduler, model engine, native OpenEnv episode runner, LoRA training
+        queue, and eval worker share one runtime. Follow the references for exact protocol, backend,
+        memory, and observability contracts.
       </p>
       <div class="flex flex-wrap gap-3 mt-8">
         <a href="docs/architecture-deep-dive/" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
@@ -296,6 +296,7 @@
         <div class="label mb-3">On this page</div>
         <div class="flex flex-wrap gap-2 text-sm">
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#single-process-server">Single-process server</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#openenv-rl-workflow">OpenEnv RL</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#request-path-and-batching">Request path</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#streaming-prefill-authority">Streaming prefill</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#rocm-execution-policy">Accelerator policy</a>
@@ -330,11 +331,49 @@
 training
   -> HTTP/API
   -> LoRA training queue
-  -> saved or hot-swapped adapter</code></pre>
+  -> saved or hot-swapped adapter
+
+OpenEnv RL
+  -> discovery + stateful WebSocket episodes
+  -> canonical scored GRPO groups + exact replay
+  -> native training + held-out environment returns</code></pre>
         <p class="mt-4 text-sm leading-relaxed" style="color: var(--fg-mute);">
           “One process” does not mean that every task runs at the same time. Inference takes shared
           accelerator ownership; training and weight-changing adapter operations require exclusive
           ownership and are admitted only by a serving profile that permits them.
+        </p>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Environment reinforcement learning</div>
+        <h2 id="openenv-rl-workflow" class="text-2xl font-semibold mb-4">OpenEnv episodes are a native training input</h2>
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          <code>kiln-openenv</code> owns implementation-neutral HTTP discovery, typed schemas, optional
+          Task API catalogs, authentication, and the lock-step stateful <code>WS /ws</code> protocol.
+          <code>kiln-server</code> composes those sessions with the ordinary in-process chat handler,
+          persists run lifecycle, and submits canonical scored groups through the same native GRPO
+          admission path as every other job.
+        </p>
+        <pre class="mt-5"><code>environment URLs + aligned credentials/reset plan
+  -> inspect identity and action schema
+  -> round-robin seed-matched candidate episodes
+  -> environment-owned returns
+  -> dataset + exact replay + summary v3 receipt
+  -> native GRPO
+  -> paired held-out environment evaluation
+  -> promote, retain, or reject adapter</code></pre>
+        <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
+          One reset object may be shared, or a heterogeneous portfolio may align one object with each
+          endpoint. Kiln removes caller-supplied seeds, inserts deterministic group seeds, and requires
+          every endpoint to run. The receipt hashes the ordered seed-free plan; offline verification
+          reconstructs it from replay and rejects missing endpoints or drift.
+        </p>
+        <p class="mt-4 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Exact action/observation transcripts, reward arithmetic, recovery, capacity backoff, cancellation,
+          origin-scoped credentials, metrics, and paired promotion evidence remain server-owned. The production
+          path depends only on OpenEnv compatibility. See the
+          <a href="docs/openenv/">OpenEnv training guide</a> and
+          <a href="docs/openenv-replay/">replay contract</a>.
         </p>
       </article>
 
@@ -556,6 +595,7 @@ training
           <li><code>kiln-model</code> loads Qwen3.5-4B, applies adapters, and drives forward execution.</li>
           <li><code>kiln-flash-attn</code>, CUDA support crates, <code>kiln-vulkan-kernel</code>, and Metal shaders provide backend-specific kernels.</li>
           <li><code>kiln-train</code> owns SFT, GRPO, OPD, checkpoints, receipts, and training-job state.</li>
+          <li><code>kiln-openenv</code> owns protocol discovery, typed wire messages, stateful sessions, and bounded interoperability semantics.</li>
           <li><code>kiln-eval</code> owns suites, scorers, outcomes, and dataset-to-suite synthesis.</li>
         </ul>
       </article>
@@ -598,6 +638,10 @@ training
         <a class="card p-5 block" href="grpo.html">
           <h3 class="font-semibold mb-2">GRPO guide</h3>
           <p style="color: var(--fg-dim);">See the reward-scored training payloads and generate &rarr; score &rarr; train loop.</p>
+        </a>
+        <a class="card p-5 block" href="docs/openenv/">
+          <h3 class="font-semibold mb-2">OpenEnv training</h3>
+          <p style="color: var(--fg-dim);">Discover environments, collect stateful episodes, train natively, verify replay, and gate promotion on held-out returns.</p>
         </a>
         <a class="card p-5 block" href="evals.html">
           <h3 class="font-semibold mb-2">Evals guide</h3>

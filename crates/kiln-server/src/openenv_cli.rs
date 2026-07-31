@@ -243,9 +243,18 @@ pub struct OpenEnvRolloutArgs {
     #[arg(long = "seed-start", default_value_t = 0)]
     seed_start: u64,
 
-    /// JSON object merged into every reset request; Kiln always sets `seed`
-    #[arg(long = "reset-options", value_name = "JSON")]
+    /// File containing one JSON object merged into every reset; Kiln sets `seed`
+    #[arg(long = "reset-options", value_name = "FILE")]
     reset_options: Option<PathBuf>,
+
+    /// JSON-object file aligned with each --environment. Repeat once per URL;
+    /// pass '-' for an empty object. Mutually exclusive with --reset-options.
+    #[arg(
+        long = "environment-reset-options",
+        value_name = "FILE_OR_DASH",
+        allow_hyphen_values = true
+    )]
+    environment_reset_options: Vec<PathBuf>,
 
     /// Maximum model actions in one episode
     #[arg(long = "max-steps", default_value_t = 8)]
@@ -492,6 +501,12 @@ pub struct OpenEnvRolloutOptions {
     /// Server/API callers provide reset options directly; CLI callers use
     /// `reset_options` as a file. The two sources are mutually exclusive.
     pub reset_options_value: Option<Value>,
+    /// Optional files aligned one-for-one with `environment_urls`. `None`
+    /// represents an empty object for a CLI `-` slot.
+    pub environment_reset_options: Vec<Option<PathBuf>>,
+    /// Server/API equivalent of `environment_reset_options`. File-backed and
+    /// inline aligned plans are mutually exclusive.
+    pub environment_reset_options_values: Vec<Value>,
     pub max_steps: usize,
     pub concurrency: usize,
     pub max_action_tokens: usize,
@@ -559,7 +574,13 @@ pub struct OpenEnvRolloutSummary {
     pub protocol_error_reward: f64,
     pub max_recoverable_errors: usize,
     pub capacity_wait_seconds: u64,
-    pub reset_options_sha256: String,
+    /// Legacy v2 digest of the single shared reset-options object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_options_sha256: Option<String>,
+    /// Digest of the ordered, seed-free reset template for every environment.
+    /// Kiln inserts each deterministic group seed after computing this digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_plan_sha256: Option<String>,
     pub output_path: String,
     pub replay_output_path: String,
     pub summary_output_path: String,
@@ -1125,6 +1146,12 @@ fn openenv_rollout_options(args: &OpenEnvRolloutArgs) -> OpenEnvRolloutOptions {
         seed_start: args.seed_start,
         reset_options: args.reset_options.clone(),
         reset_options_value: None,
+        environment_reset_options: args
+            .environment_reset_options
+            .iter()
+            .map(|path| (path.as_os_str() != "-").then(|| path.clone()))
+            .collect(),
+        environment_reset_options_values: Vec::new(),
         max_steps: args.max_steps,
         concurrency: args.concurrency,
         max_action_tokens: args.max_action_tokens,
@@ -1292,11 +1319,8 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
 ) -> Result<OpenEnvCollection> {
     validate_options(options)?;
     control.ensure_active()?;
-    let reset_options = read_reset_options(
-        options.reset_options.as_deref(),
-        options.reset_options_value.as_ref(),
-    )?;
-    let reset_options_sha256 = sha256_json(&reset_options)?;
+    let reset_plan = read_reset_plan(options)?;
+    let reset_plan_sha256 = sha256_json(&Value::Array(reset_plan.clone()))?;
     let adapter = parse_adapter_selection(&options.adapter);
     control.publish(OpenEnvCollectionProgress {
         stage: OpenEnvCollectionStage::Discovering,
@@ -1352,7 +1376,7 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
                 "OpenEnv reset seed {seed} exceeds the protocol's portable signed-integer range"
             );
         }
-        let reset = reset_payload(&reset_options, seed)?;
+        let reset = reset_payload(&reset_plan[environment_index], seed)?;
 
         let mut candidates = stream::iter(0..options.group_size)
             .map(|candidate_index| {
@@ -1449,7 +1473,7 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
         groups,
         replay,
         summary: OpenEnvRolloutSummary {
-            schema: "kiln.openenv-rollout-summary.v2".to_string(),
+            schema: "kiln.openenv-rollout-summary.v3".to_string(),
             kiln_url: options.kiln_url.trim_end_matches('/').to_string(),
             adapter: adapter.request_value.as_str().map(ToOwned::to_owned),
             adapter_label: adapter.label,
@@ -1469,7 +1493,8 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
             protocol_error_reward: options.protocol_error_reward,
             max_recoverable_errors: options.max_recoverable_errors,
             capacity_wait_seconds: options.capacity_wait_seconds,
-            reset_options_sha256,
+            reset_options_sha256: None,
+            reset_plan_sha256: Some(reset_plan_sha256),
             output_path: options.output.display().to_string(),
             replay_output_path: options.replay_output.display().to_string(),
             summary_output_path: options.summary_output.display().to_string(),
@@ -1928,6 +1953,38 @@ fn read_reset_options(path: Option<&Path>, direct: Option<&Value>) -> Result<Val
     Ok(value)
 }
 
+fn normalize_reset_options(mut value: Value) -> Result<Value> {
+    let object = value
+        .as_object_mut()
+        .context("OpenEnv reset options must be a JSON object")?;
+    object.remove("seed");
+    Ok(value)
+}
+
+fn read_reset_plan(options: &OpenEnvRolloutOptions) -> Result<Vec<Value>> {
+    let environment_count = options.environment_urls.len();
+    if !options.environment_reset_options.is_empty() {
+        return options
+            .environment_reset_options
+            .iter()
+            .map(|path| read_reset_options(path.as_deref(), None).and_then(normalize_reset_options))
+            .collect();
+    }
+    if !options.environment_reset_options_values.is_empty() {
+        return options
+            .environment_reset_options_values
+            .iter()
+            .cloned()
+            .map(normalize_reset_options)
+            .collect();
+    }
+    let shared = normalize_reset_options(read_reset_options(
+        options.reset_options.as_deref(),
+        options.reset_options_value.as_ref(),
+    )?)?;
+    Ok(vec![shared; environment_count])
+}
+
 fn parse_cli_credential_envs_unchecked(values: &[String]) -> Vec<Option<String>> {
     values
         .iter()
@@ -2016,6 +2073,12 @@ pub(crate) fn validate_options(options: &OpenEnvRolloutOptions) -> Result<()> {
         options.groups > 0 && options.groups <= MAX_OPENENV_GROUPS,
         "OpenEnv groups must be in 1..={MAX_OPENENV_GROUPS}"
     );
+    anyhow::ensure!(
+        options.groups >= options.environment_urls.len(),
+        "OpenEnv groups must be at least the number of environments so every configured endpoint is exercised and receipt-verifiable (expected at least {}, got {})",
+        options.environment_urls.len(),
+        options.groups
+    );
     let final_seed = options
         .seed_start
         .checked_add((options.groups - 1) as u64)
@@ -2069,6 +2132,38 @@ pub(crate) fn validate_options(options: &OpenEnvRolloutOptions) -> Result<()> {
         options.reset_options.is_none() || options.reset_options_value.is_none(),
         "OpenEnv reset options file and inline reset options are mutually exclusive"
     );
+    anyhow::ensure!(
+        options.environment_reset_options.is_empty()
+            || options.environment_reset_options.len() == options.environment_urls.len(),
+        "OpenEnv environment reset option files must be empty or contain exactly one entry per environment (expected {}, got {})",
+        options.environment_urls.len(),
+        options.environment_reset_options.len()
+    );
+    anyhow::ensure!(
+        options.environment_reset_options_values.is_empty()
+            || options.environment_reset_options_values.len() == options.environment_urls.len(),
+        "OpenEnv inline environment reset options must be empty or contain exactly one object per environment (expected {}, got {})",
+        options.environment_urls.len(),
+        options.environment_reset_options_values.len()
+    );
+    anyhow::ensure!(
+        options.environment_reset_options.is_empty()
+            || options.environment_reset_options_values.is_empty(),
+        "OpenEnv aligned reset options must come from either files or inline values, not both"
+    );
+    let has_shared_reset = options.reset_options.is_some() || options.reset_options_value.is_some();
+    let has_aligned_reset = !options.environment_reset_options.is_empty()
+        || !options.environment_reset_options_values.is_empty();
+    anyhow::ensure!(
+        !has_shared_reset || !has_aligned_reset,
+        "OpenEnv shared reset options and aligned environment reset options are mutually exclusive"
+    );
+    for (index, value) in options.environment_reset_options_values.iter().enumerate() {
+        anyhow::ensure!(
+            value.is_object(),
+            "OpenEnv inline environment reset options at position {index} must be one JSON object"
+        );
+    }
     anyhow::ensure!(
         options.output != options.replay_output
             && options.output != options.summary_output
@@ -2438,6 +2533,10 @@ mod tests {
             "-",
             "--credential-env",
             "ARCADE_TOKEN",
+            "--environment-reset-options",
+            "arcade.json",
+            "--environment-reset-options",
+            "-",
             "--groups",
             "12",
             "--group-size",
@@ -2455,6 +2554,10 @@ mod tests {
         assert_eq!(
             options.credential_envs,
             [None, Some("ARCADE_TOKEN".to_string())]
+        );
+        assert_eq!(
+            options.environment_reset_options,
+            [Some(PathBuf::from("arcade.json")), None]
         );
         assert!(!format!("{options:?}").contains("ARCADE_TOKEN"));
         assert_eq!(rollout.groups, 12);
@@ -2615,11 +2718,60 @@ mod tests {
     }
 
     #[test]
-    fn reset_seed_overrides_file_value_and_is_hashed_canonically() {
+    fn reset_seed_overrides_caller_value_and_plan_normalization_removes_it() {
         let base = json!({"difficulty": 3, "seed": 999});
         let reset = reset_payload(&base, 7).unwrap();
         assert_eq!(reset, json!({"difficulty": 3, "seed": 7}));
         assert_eq!(sha256_json(&reset).unwrap().len(), "sha256:".len() + 64);
+        assert_eq!(
+            normalize_reset_options(base).unwrap(),
+            json!({"difficulty": 3})
+        );
+    }
+
+    #[test]
+    fn aligned_reset_plan_is_ordered_bounded_and_exclusive() {
+        let parsed = Cli::try_parse_from([
+            "kiln",
+            "openenv",
+            "rollout",
+            "--environment",
+            "http://127.0.0.1:8000",
+            "--environment",
+            "http://127.0.0.1:8001",
+            "--groups",
+            "2",
+        ])
+        .unwrap();
+        let Some(Commands::Openenv(OpenEnvCommands::Rollout { rollout })) = parsed.command else {
+            panic!("expected openenv rollout command");
+        };
+        let mut options = openenv_rollout_options(&rollout);
+        options.environment_reset_options_values = vec![
+            json!({"difficulty": "hard", "seed": 999}),
+            json!({"split": "train"}),
+        ];
+        validate_options(&options).unwrap();
+        assert_eq!(
+            read_reset_plan(&options).unwrap(),
+            [json!({"difficulty": "hard"}), json!({"split": "train"})]
+        );
+
+        options.reset_options_value = Some(json!({}));
+        assert!(
+            validate_options(&options)
+                .unwrap_err()
+                .to_string()
+                .contains("mutually exclusive")
+        );
+        options.reset_options_value = None;
+        options.environment_reset_options_values.pop();
+        assert!(
+            validate_options(&options)
+                .unwrap_err()
+                .to_string()
+                .contains("exactly one object per environment")
+        );
     }
 
     #[test]

@@ -239,7 +239,12 @@ pub(crate) async fn collect_environment_evaluation(
             && baseline_options.groups == candidate_options.groups
             && baseline_options.group_size == candidate_options.group_size
             && baseline_options.seed_start == candidate_options.seed_start
+            && baseline_options.reset_options == candidate_options.reset_options
             && baseline_options.reset_options_value == candidate_options.reset_options_value
+            && baseline_options.environment_reset_options
+                == candidate_options.environment_reset_options
+            && baseline_options.environment_reset_options_values
+                == candidate_options.environment_reset_options_values
             && baseline_options.max_steps == candidate_options.max_steps
             && baseline_options.max_action_tokens == candidate_options.max_action_tokens
             && baseline_options.temperature == candidate_options.temperature
@@ -801,6 +806,8 @@ mod tests {
                 seed_start: 1000,
                 reset_options: None,
                 reset_options_value: None,
+                environment_reset_options: Vec::new(),
+                environment_reset_options_values: Vec::new(),
                 max_steps: 1,
                 concurrency: 1,
                 max_action_tokens: 16,

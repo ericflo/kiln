@@ -20,19 +20,19 @@ Every successful collection publishes three files:
    group's exact reset payload and reset observation, then every candidate's
    ordered action/result exchanges and final state. It links to the canonical
    JSONL digest instead of creating a second training representation.
-3. `openenv.rollout-summary.json` is the collection receipt. It binds the other
-   two files by path, byte count, and SHA-256 digest and records discovered
-   schemas, collection controls, statistics, and any training submission.
+3. `openenv.rollout-summary.json` is the collection receipt. Summary v3 binds
+   the other files plus the ordered, seed-free per-environment reset plan by
+   SHA-256 and records schemas, controls, statistics, and any submission.
+   Offline verification still accepts legacy v2 receipts.
 
 Move, retain, or archive the three files together. If the receipt's paths no
 longer resolve, provide `--dataset` and `--replay` overrides to verification or
 live replay.
 
-The summary records every discovered environment identity and complete typed
-schema; behavior adapter; seed, sampling, concurrency, recovery, capacity, and
-reset controls; group, rollout, step, model-token, and latency counts; return
-distribution and outcome counts; artifact identities; and the response from
-`openenv train`.
+The summary records every discovered identity and typed schema; behavior
+adapter; seed, sampling, concurrency, recovery, capacity, and reset-plan
+controls; group, rollout, step, model-token, and latency counts; returns,
+outcomes, artifact identities, and the response from `openenv train`.
 
 Server-owned runs publish the same three representations below
 `<adapter_dir>/.openenv/runs/<run-id>/` and expose them as `dataset`, `replay`,

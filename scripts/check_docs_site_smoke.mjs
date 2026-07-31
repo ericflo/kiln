@@ -1670,6 +1670,9 @@ function validateSftLossRouteDocumentationSourceContract() {
     'requests cannot select it',
     'no TOML field',
     'does not claim that the complete training path is available',
+    'OpenEnv episodes are a native training input',
+    'ordered seed-free plan',
+    'production path depends only on OpenEnv compatibility',
   ]);
   if (missingArchitectureTerms.length > 0) {
     fail(`docs/site/architecture.html: reader architecture contract missing terms: ${missingArchitectureTerms.join(', ')}`);
@@ -1677,10 +1680,28 @@ function validateSftLossRouteDocumentationSourceContract() {
   if (!staticArchitectureHtml.includes('id="backend-owned-sft-loss-routing"')) {
     fail('docs/site/architecture.html: missing stable #backend-owned-sft-loss-routing anchor');
   }
+  if (!staticArchitectureHtml.includes('id="openenv-rl-workflow"')) {
+    fail('docs/site/architecture.html: missing stable #openenv-rl-workflow anchor');
+  }
   const nativeSftLink = expectedArchitectureLinks
     .find((link) => link.label === 'generated Native SFT profile')?.href;
   if (!nativeSftLink || !staticArchitectureHtml.includes(`href="${nativeSftLink}"`)) {
     fail('docs/site/architecture.html: missing generated Native SFT profile route-contract link');
+  }
+
+  const troubleshootingHtml = readFileSync(resolve(repoRoot, 'docs/site/troubleshooting.html'), 'utf8');
+  const troubleshootingText = normalizedHtmlText(troubleshootingHtml);
+  const missingTroubleshootingTerms = missingNormalizedTerms(troubleshootingText, [
+    'An OpenEnv run cannot start, stalls, or fails verification',
+    'exactly one environment_reset_options object per URL',
+    'groups must cover every endpoint',
+    'do not edit the receipt',
+  ]);
+  if (missingTroubleshootingTerms.length > 0) {
+    fail(`docs/site/troubleshooting.html: OpenEnv diagnostics missing terms: ${missingTroubleshootingTerms.join(', ')}`);
+  }
+  if (!troubleshootingHtml.includes('id="openenv-runs"')) {
+    fail('docs/site/troubleshooting.html: missing stable #openenv-runs anchor');
   }
 
   const apiHtml = readFileSync(resolve(repoRoot, 'docs/site/api.html'), 'utf8');

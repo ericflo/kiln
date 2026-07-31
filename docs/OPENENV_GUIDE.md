@@ -164,18 +164,20 @@ The `kiln.openenv-environment-evaluation.v1` receipt binds policy identities, ex
 
 ## Reset tasks and multiple environments
 
-Pass environment-specific reset options in a JSON object such as
-`{"difficulty":"hard","split":"train"}`, then add
-`--reset-options wordle-reset.json` to `rollout` or `train`.
+Use `--reset-options task.json` when every environment shares a reset object. For a portfolio, repeat an aligned object with each URL:
 
-Kiln always overwrites the object's `seed` with the group seed. The exact
-effective reset object is hashed into each rollout; arbitrary task payloads
-are not duplicated into every provenance record. It is retained once per
-replay group because exact replay is impossible without it. Treat replay files
-as potentially sensitive when reset tasks contain private data.
+```bash
+kiln openenv rollout \
+  --environment http://127.0.0.1:8000 --environment-reset-options arcade.json \
+  --environment http://127.0.0.1:8001 --environment-reset-options math.json
+```
 
-Multiple environments are first-class: repeat
-`--environment http://127.0.0.1:PORT` on the same command.
+Use `-` for an empty slot. API and dashboard runs send `environment_reset_options` as one object per `environment_urls` entry. Kiln
+removes a caller-supplied `seed`, inserts the group seed, hashes each effective
+reset into rollout provenance, and retains it in replay. Summary v3 binds the
+ordered seed-free plan; verification reconstructs it. Every configured
+endpoint must run, so groups cannot be fewer than environments. Treat private
+reset tasks and replay files as sensitive.
 
 Whole groups—not individual candidates—are distributed round-robin. Relative
 advantages therefore never compare rewards from different environments.
@@ -198,10 +200,8 @@ default. Harness-generated error observations carry a full warning prefix so
 the default warning filter does not teach the model to imitate Kiln's
 diagnostic prose.
 
-The prompt for turn N contains the reset prompt plus every prior action and observation. One WebSocket connection remains open for the whole episode.
-Do not substitute OpenEnv's stateless HTTP `/reset` and `/step` routes: they cannot represent an episode.
-One-step exact-verifier text environments, including all eight math families in the live matrix, need no adapter.
-Discovered string actions, `input_text`, integer rewards, and terminal observations flow unchanged through collection, GRPO, verification, replay, and held-out evaluation.
+The prompt contains the reset plus prior actions and observations. One WebSocket remains open for the episode; stateless HTTP routes cannot represent it.
+One-step exact-verifier environments, including eight math families, need no adapter. Their string actions, `input_text`, integer rewards, and terminal observations flow unchanged through collection, GRPO, verification, replay, and held-out evaluation.
 
 ## Identity and artifacts
 

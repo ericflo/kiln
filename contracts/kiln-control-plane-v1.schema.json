@@ -4127,6 +4127,13 @@
         "reset_options": {
           "type": "object"
         },
+        "environment_reset_options": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "minItems": 1
+        },
         "max_steps": {
           "$ref": "#/$defs/PositiveInteger"
         },
@@ -4174,6 +4181,8 @@
         "kind=train requires output_adapter",
         "kind=rollout rejects output_adapter and environment_eval",
         "credential_ids is empty for unauthenticated endpoints or has exactly one origin-scoped handle/null entry per environment_urls item",
+        "environment_reset_options is empty or has exactly one object per environment_urls item and is mutually exclusive with non-empty reset_options",
+        "groups is at least environment_urls length so every endpoint is exercised and receipt-verifiable",
         "environment_eval requires a distinct behavior and output adapter, and its seed interval must not overlap training",
         "environment_eval.gate requires at least 20 distinct paired seed groups and cannot be combined with post_eval.min_accuracy",
         "an environment gate defers auto_load until a significant exact paired sign-test win also satisfies configured return thresholds",
@@ -7393,6 +7402,11 @@
               "group_size": 4,
               "seed_start": 0,
               "reset_options": {},
+              "environment_reset_options": [
+                {
+                  "difficulty": "hard"
+                }
+              ],
               "max_steps": 8,
               "concurrency": 4,
               "max_action_tokens": 256,
@@ -7490,6 +7504,11 @@
         "group_size": 4,
         "seed_start": 0,
         "reset_options": {},
+        "environment_reset_options": [
+          {
+            "difficulty": "hard"
+          }
+        ],
         "max_steps": 8,
         "concurrency": 4,
         "max_action_tokens": 256,
@@ -7532,6 +7551,11 @@
           "group_size": 4,
           "seed_start": 0,
           "reset_options": {},
+          "environment_reset_options": [
+            {
+              "difficulty": "hard"
+            }
+          ],
           "max_steps": 8,
           "concurrency": 4,
           "max_action_tokens": 256,
