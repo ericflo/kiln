@@ -374,6 +374,12 @@ OpenEnv RL
           A timeout, malformed or unsolicited frame, transport failure, or wrong response type poisons
           the session permanently&mdash;lock-step has no request ID with which to resynchronize.
         </p>
+        <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
+          Every retained reset, action, observation, error, and final state is charged on arrival
+          against one 512 MiB aggregate collection budget. Candidate data moves into group, replay,
+          and receipt ownership without full-object clones; reset files are bounded before read,
+          hashes stream, and replay encoding stops at its cap. Exhaustion publishes no partial bundle.
+        </p>
         <p class="mt-4 text-sm leading-relaxed" style="color: var(--fg-mute);">
           Exact action/observation transcripts, reward arithmetic, recovery, capacity backoff, cancellation,
           origin-scoped credentials, metrics, and paired promotion evidence remain server-owned. The production

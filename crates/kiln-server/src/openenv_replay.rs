@@ -5,7 +5,7 @@
 //! owns the complementary exact transcript used to verify an artifact bundle
 //! offline and to replay every environment exchange against a live server.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -311,15 +311,58 @@ fn validate_candidate(
 }
 
 pub fn encode_replay(manifest: &OpenEnvReplayManifest) -> Result<Vec<u8>> {
+    encode_replay_with_limit(manifest, MAX_ARTIFACT_BYTES)
+}
+
+fn encode_replay_with_limit(manifest: &OpenEnvReplayManifest, limit: usize) -> Result<Vec<u8>> {
     manifest.validate()?;
-    let mut bytes =
-        serde_json::to_vec_pretty(manifest).context("serialize OpenEnv replay manifest")?;
-    bytes.push(b'\n');
-    anyhow::ensure!(
-        bytes.len() <= MAX_ARTIFACT_BYTES,
-        "OpenEnv replay exceeded the {MAX_ARTIFACT_BYTES} byte artifact limit"
-    );
-    Ok(bytes)
+    let mut writer = BoundedVecWriter::new(limit);
+    serde_json::to_writer_pretty(&mut writer, manifest)
+        .context("serialize bounded OpenEnv replay manifest")?;
+    writer
+        .write_all(b"\n")
+        .context("finish bounded OpenEnv replay manifest")?;
+    Ok(writer.into_inner())
+}
+
+struct BoundedVecWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl BoundedVecWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+        }
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl Write for BoundedVecWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let next = self
+            .bytes
+            .len()
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("OpenEnv replay byte count overflow"))?;
+        if next > self.limit {
+            return Err(std::io::Error::other(format!(
+                "OpenEnv replay exceeded the {} byte artifact limit",
+                self.limit
+            )));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 pub fn sha256_bytes(bytes: &[u8]) -> String {
@@ -1169,6 +1212,9 @@ mod tests {
         assert!(encoded.ends_with(b"\n"));
         let decoded: OpenEnvReplayManifest = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(decoded, manifest);
+        let error = encode_replay_with_limit(&manifest, 32).unwrap_err();
+        assert!(error.to_string().contains("bounded OpenEnv replay"));
+        assert!(format!("{error:#}").contains("32 byte artifact limit"));
     }
 
     #[test]

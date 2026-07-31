@@ -314,8 +314,23 @@ def main() -> int:
     for term in required_source_terms:
         if term not in source:
             failures.append(f"openenv_replay.rs is missing contract identifier {term}")
+    for term in ["BoundedVecWriter", "encode_replay_with_limit"]:
+        if term not in source:
+            failures.append(f"openenv_replay.rs is missing bounded encoder term {term}")
     if "kiln.openenv-rollout-summary.v3" not in cli:
         failures.append("openenv_cli.rs is missing summary v3")
+    for term in [
+        "MAX_OPENENV_RETAINED_BYTES",
+        "MAX_OPENENV_RESET_OPTIONS_BYTES",
+        "MAX_OPENENV_SUMMARY_BYTES",
+        "OpenEnvRetainedByteBudget",
+        "BoundedWriter",
+        "charge_serialized",
+        'serialized_len(&collection, "completed collection")',
+        "try_collect::<Vec<_>>()",
+    ]:
+        if term not in cli:
+            failures.append(f"openenv_cli.rs is missing bounded-collection term {term}")
     for term in [
         "keep_alive_while",
         "UnsolicitedApplicationMessage",
@@ -340,6 +355,8 @@ def main() -> int:
         "pumps Ping/Pong control frames",
         "poison the socket",
         "lock-step cannot resynchronize",
+        "512 MiB aggregate retained-representation budget",
+        "Exhaustion publishes no partial bundle",
     ]:
         if command not in guide:
             failures.append(f"OpenEnv guide is missing {command!r}")
@@ -347,7 +364,7 @@ def main() -> int:
     if failures:
         raise SystemExit("\n".join(failures))
     print(
-        "OpenEnv session lifecycle, summary, replay, paired evaluation, verification, and live-replay contracts match"
+        "OpenEnv bounded collection, session lifecycle, summary, replay, paired evaluation, verification, and live-replay contracts match"
     )
     return 0
 

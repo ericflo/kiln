@@ -509,7 +509,14 @@ The boundary is intentionally bounded: redirects are disabled, discovery
 bodies and WebSocket frames have independent byte limits, client messages,
 environment count, sessions, groups, candidates, steps, recoveries, capacity
 wait, action tokens, replay/data artifact bytes, and the inline corpus are
-capped, and terminal OpenEnv errors latch the session closed. Pinned
+capped, and terminal OpenEnv errors latch the session closed. The collector
+also charges every retained reset, action, observation, error, and final state
+against one 512 MiB aggregate budget before appending it. Candidate structures
+are compacted into group/replay/receipt ownership by move, reset files are
+bounded before read, group hashing streams, and replay encoding refuses the
+next write at its 256 MiB cap. A hostile but protocol-legal group therefore
+fails without publishing partial artifacts instead of accumulating the full
+candidate-count × step-count × frame-size product in memory. Pinned
 miniopenenv counter and representative arcade servers are the live
 interoperability oracles in CI only. No production setting, type, or runtime
 branch identifies that implementation; every server follows the same OpenEnv

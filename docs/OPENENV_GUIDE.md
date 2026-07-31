@@ -207,12 +207,12 @@ name and URL, schema and reset hashes, seed, steps, return, termination, and an
 optional protocol-error code. This identity participates in the scored-rollout
 payload hash and fails closed when malformed.
 
-The JSONL is the canonical trainer input. The replay manifest retains exact
-environment exchanges, and the summary records configuration, statistics,
-content hashes, and any training submission. The receipt cannot prove that
-code behind a URL stayed fixed; pin serious environment deployments. The
-[replay and recovery reference](OPENENV_REPLAY_REFERENCE.md) defines the
-artifact and drift boundary in detail.
+JSONL trains; replay retains exact exchanges; summary binds configuration,
+statistics, hashes, and submission. Collection charges each turn against a
+512 MiB aggregate retained-representation budget. Reset files are prebounded;
+dataset, replay, and summary each stay under 256 MiB.
+Exhaustion publishes no partial bundle. Pin URL deployments. See the
+[replay and recovery reference](OPENENV_REPLAY_REFERENCE.md) for artifact and drift boundaries.
 
 ## Failure and capacity semantics
 

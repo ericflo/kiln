@@ -271,7 +271,17 @@ This permits a rollout group to request more concurrent candidates than a
 small server admits without silently dropping candidates. Kiln continues to
 bound environment count, group count, candidate count, steps, action tokens,
 active sessions, discovery response bodies, WebSocket messages, data and replay
-artifacts, and the inline training corpus.
+artifacts, the summary, and the inline training corpus.
+
+Those independent limits are not deferred until serialization. One 512 MiB
+aggregate retained-representation budget is charged when reset data and each
+action, observation, error, and final state arrive. Completed candidates are
+moved—not cloned—into their group, replay, and receipt projections, and the
+budget is reconciled after each compaction. Reset-option files are rejected
+from metadata before a large read, JSONL hashing streams into SHA-256, and the
+replay encoder refuses the write that would cross its 256 MiB artifact cap.
+Budget exhaustion aborts collection before dataset, replay, or summary is
+published; reduce group size, concurrency, steps, or environment payload size.
 
 Live replay uses the same capacity acquisition rule. Capacity retries are
 reported separately from environment transitions and never become fabricated

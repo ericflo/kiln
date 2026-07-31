@@ -663,12 +663,9 @@ impl OpenEnvRunRegistry {
         }
     }
 
-    fn update_environments(&self, run_id: &str, environments: Vec<OpenEnvInspection>) {
+    fn update_environments(&self, run_id: &str, environments: Vec<OpenEnvIdentity>) {
         if let Err(error) = self.update(run_id, |status| {
-            status.environments = environments
-                .into_iter()
-                .map(|inspection| inspection.identity)
-                .collect();
+            status.environments = environments;
         }) {
             tracing::warn!(
                 run_id,

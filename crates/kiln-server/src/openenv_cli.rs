@@ -6,21 +6,22 @@
 //!   inspect -> reset(seed) -> model action -> step -> reward -> trajectory
 //!           -> grouped JSONL -> optional `/v1/train/grpo`
 
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use clap::Subcommand;
 use console::style;
-use futures::{StreamExt, stream};
+use futures::{StreamExt, TryStreamExt, stream};
 use kiln_openenv::{
-    OpenEnvClient, OpenEnvClientError, OpenEnvInspection, OpenEnvObservation, OpenEnvProtocolError,
-    OpenEnvTaskApiSupport, OpenEnvTaskCatalog,
+    OPENENV_MAX_CLIENT_MESSAGE_BYTES, OpenEnvClient, OpenEnvClientError, OpenEnvIdentity,
+    OpenEnvInspection, OpenEnvObservation, OpenEnvProtocolError, OpenEnvTaskApiSupport,
+    OpenEnvTaskCatalog,
 };
 use kiln_train::{
     AgenticGroup, ChatMessage, OpenEnvEpisodeTerminationV1, OpenEnvRolloutProvenanceV1,
@@ -49,6 +50,13 @@ const MAX_OPENENV_RECOVERABLE_ERRORS: usize = 64;
 const MAX_OPENENV_CAPACITY_WAIT_SECONDS: u64 = 3_600;
 pub(crate) const MAX_OPENENV_TASK_PAGE_SIZE: usize = 200;
 const MAX_OPENENV_DATASET_BYTES: usize = 256 * 1024 * 1024;
+const MAX_OPENENV_SUMMARY_BYTES: usize = 256 * 1024 * 1024;
+/// Combined serialized size of the simultaneously retained training, replay,
+/// and receipt projections. Unlike the per-artifact limit, this is charged as
+/// protocol turns arrive so one legal but adversarial group cannot accumulate
+/// an enormous working set before artifact serialization.
+const MAX_OPENENV_RETAINED_BYTES: usize = 512 * 1024 * 1024;
+const MAX_OPENENV_RESET_OPTIONS_BYTES: usize = OPENENV_MAX_CLIENT_MESSAGE_BYTES - 1024;
 const MAX_KILN_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const CHAT_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -117,14 +125,14 @@ pub struct OpenEnvCollectionProgress {
 pub(crate) struct OpenEnvCollectionControl {
     cancel: Arc<AtomicBool>,
     progress: Option<Arc<dyn Fn(OpenEnvCollectionProgress) + Send + Sync>>,
-    discovered: Option<Arc<dyn Fn(Vec<OpenEnvInspection>) + Send + Sync>>,
+    discovered: Option<Arc<dyn Fn(Vec<OpenEnvIdentity>) + Send + Sync>>,
 }
 
 impl OpenEnvCollectionControl {
     pub(crate) fn new(
         cancel: Arc<AtomicBool>,
         progress: Option<Arc<dyn Fn(OpenEnvCollectionProgress) + Send + Sync>>,
-        discovered: Option<Arc<dyn Fn(Vec<OpenEnvInspection>) + Send + Sync>>,
+        discovered: Option<Arc<dyn Fn(Vec<OpenEnvIdentity>) + Send + Sync>>,
     ) -> Self {
         Self {
             cancel,
@@ -139,7 +147,7 @@ impl OpenEnvCollectionControl {
         }
     }
 
-    fn publish_discovered(&self, environments: Vec<OpenEnvInspection>) {
+    fn publish_discovered(&self, environments: Vec<OpenEnvIdentity>) {
         if let Some(callback) = &self.discovered {
             callback(environments);
         }
@@ -631,21 +639,180 @@ pub struct OpenEnvRolloutRecord {
     pub model_latency_ms: f64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct OpenEnvCollection {
     pub groups: Vec<AgenticGroup>,
     pub replay: OpenEnvReplayManifest,
     pub summary: OpenEnvRolloutSummary,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 struct CandidateRollout {
     candidate_index: usize,
-    messages: Vec<ChatMessage>,
-    reset_observation: OpenEnvObservation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    messages: Option<Vec<ChatMessage>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reset_observation: Option<OpenEnvObservation>,
+    #[serde(skip)]
+    messages_sha256: String,
+    #[serde(skip)]
+    reset_observation_sha256: String,
     rollout: ScoredRollout,
     replay: OpenEnvReplayCandidate,
     record: OpenEnvRolloutRecord,
+    #[serde(skip)]
+    retained_bytes: usize,
+}
+
+#[derive(Debug)]
+struct OpenEnvRetainedByteBudget {
+    used: AtomicUsize,
+    limit: usize,
+}
+
+impl OpenEnvRetainedByteBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            used: AtomicUsize::new(0),
+            limit,
+        }
+    }
+
+    fn used(&self) -> usize {
+        self.used.load(Ordering::Relaxed)
+    }
+
+    fn charge(&self, bytes: usize, retained: &str) -> Result<()> {
+        if bytes == 0 {
+            return Ok(());
+        }
+        self.used
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current
+                    .checked_add(bytes)
+                    .filter(|next| *next <= self.limit)
+            })
+            .map(|_| ())
+            .map_err(|current| {
+                anyhow!(
+                    "OpenEnv retained rollout representations would exceed the {} byte collection budget while retaining {retained} (currently {current}, additional {bytes}); reduce groups, group size, concurrency, max steps, action size, or environment observation size",
+                    self.limit
+                )
+            })
+    }
+
+    fn replace(&self, old_bytes: usize, new_bytes: usize, retained: &str) -> Result<()> {
+        if new_bytes > old_bytes {
+            self.charge(new_bytes - old_bytes, retained)
+        } else {
+            let released = old_bytes - new_bytes;
+            let previous = self.used.fetch_sub(released, Ordering::Relaxed);
+            debug_assert!(previous >= released);
+            Ok(())
+        }
+    }
+}
+
+#[derive(Default)]
+struct CountingWriter {
+    bytes: usize,
+}
+
+impl Write for CountingWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self
+            .bytes
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("serialized byte count overflow"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct BoundedWriter<W> {
+    inner: W,
+    bytes: usize,
+    limit: usize,
+    label: &'static str,
+}
+
+impl<W> BoundedWriter<W> {
+    fn new(inner: W, limit: usize, label: &'static str) -> Self {
+        Self {
+            inner,
+            bytes: 0,
+            limit,
+            label,
+        }
+    }
+}
+
+impl<W: Write> Write for BoundedWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let next = self
+            .bytes
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("bounded writer byte count overflow"))?;
+        if next > self.limit {
+            return Err(std::io::Error::other(format!(
+                "{} exceeded the {} byte artifact limit",
+                self.label, self.limit
+            )));
+        }
+        self.inner.write_all(bytes)?;
+        self.bytes = next;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+struct Sha256Writer<'a> {
+    hasher: &'a mut Sha256,
+}
+
+impl Write for Sha256Writer<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.hasher.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_len(value: &impl Serialize, label: &str) -> Result<usize> {
+    let mut writer = CountingWriter::default();
+    serde_json::to_writer(&mut writer, value)
+        .with_context(|| format!("count serialized OpenEnv {label} bytes"))?;
+    Ok(writer.bytes)
+}
+
+fn pretty_serialized_len(value: &impl Serialize, label: &str) -> Result<usize> {
+    let mut writer = CountingWriter::default();
+    serde_json::to_writer_pretty(&mut writer, value)
+        .with_context(|| format!("count pretty-serialized OpenEnv {label} bytes"))?;
+    Ok(writer.bytes)
+}
+
+fn charge_serialized(
+    budget: &OpenEnvRetainedByteBudget,
+    candidate_bytes: &mut usize,
+    value: &impl Serialize,
+    label: &str,
+) -> Result<()> {
+    let bytes = serialized_len(value, label)?;
+    budget.charge(bytes, label)?;
+    *candidate_bytes = candidate_bytes
+        .checked_add(bytes)
+        .context("OpenEnv candidate retained-byte count overflow")?;
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1320,7 +1487,10 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
     validate_options(options)?;
     control.ensure_active()?;
     let reset_plan = read_reset_plan(options)?;
-    let reset_plan_sha256 = sha256_json(&Value::Array(reset_plan.clone()))?;
+    let reset_plan_sha256 = sha256_json(&reset_plan)?;
+    let retained_budget = OpenEnvRetainedByteBudget::new(MAX_OPENENV_RETAINED_BYTES);
+    let reset_plan_bytes = serialized_len(&reset_plan, "reset plan")?;
+    retained_budget.charge(reset_plan_bytes, "the ordered reset plan")?;
     let adapter = parse_adapter_selection(&options.adapter);
     control.publish(OpenEnvCollectionProgress {
         stage: OpenEnvCollectionStage::Discovering,
@@ -1340,15 +1510,19 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
             Ok::<_, anyhow::Error>((client, inspection))
         })
         .buffered(options.environment_urls.len())
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>>>()?;
+        .try_collect::<Vec<_>>()
+        .await?;
+    for (_, inspection) in &inspections {
+        retained_budget.charge(
+            serialized_len(inspection, "environment inspection")?,
+            "discovered environment inspection",
+        )?;
+    }
     control.ensure_active()?;
     control.publish_discovered(
         inspections
             .iter()
-            .map(|(_, inspection)| inspection.clone())
+            .map(|(_, inspection)| inspection.identity.clone())
             .collect(),
     );
     control.publish(OpenEnvCollectionProgress {
@@ -1382,67 +1556,106 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
             .map(|candidate_index| {
                 run_candidate_episode(
                     policy,
-                    environment.clone(),
-                    inspection.clone(),
-                    adapter.request_value.clone(),
-                    adapter.label.clone(),
-                    reset.clone(),
+                    environment,
+                    inspection,
+                    &adapter.request_value,
+                    &adapter.label,
+                    &reset,
                     seed,
                     group_index,
                     candidate_index,
                     options,
                     control,
+                    &retained_budget,
                 )
             })
             .buffer_unordered(options.concurrency.min(options.group_size))
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>>>()?;
+            .try_collect::<Vec<_>>()
+            .await?;
         candidates.sort_by_key(|candidate| candidate.candidate_index);
 
-        let shared_messages = candidates
+        let first_candidate = candidates
             .first()
-            .map(|candidate| candidate.messages.clone())
             .context("OpenEnv group unexpectedly produced no candidate rollouts")?;
+        debug_assert_eq!(first_candidate.candidate_index, 0);
         for candidate in &candidates {
             anyhow::ensure!(
-                candidate.messages == shared_messages,
+                candidate.messages_sha256 == first_candidate.messages_sha256,
                 "OpenEnv reset produced different initial observations within group {group_index}; reset(seed) must be deterministic for group-relative training"
             );
             anyhow::ensure!(
-                candidate.reset_observation == candidates[0].reset_observation,
+                candidate.reset_observation_sha256 == first_candidate.reset_observation_sha256,
                 "OpenEnv reset produced different wire observations within group {group_index}; reset(seed) must be deterministic for exact replay"
             );
         }
-        replay_groups.push(OpenEnvReplayGroup {
+        let candidate_retained_bytes = candidates.iter().try_fold(0usize, |total, candidate| {
+            total
+                .checked_add(candidate.retained_bytes)
+                .context("OpenEnv group retained-byte count overflow")
+        })?;
+        let mut shared_messages = None;
+        let mut reset_observation = None;
+        let mut completions = Vec::with_capacity(candidates.len());
+        let mut replay_candidates = Vec::with_capacity(candidates.len());
+        let mut group_records = Vec::with_capacity(candidates.len());
+        for (position, candidate) in candidates.into_iter().enumerate() {
+            let CandidateRollout {
+                candidate_index: _,
+                messages,
+                reset_observation: candidate_reset,
+                messages_sha256: _,
+                reset_observation_sha256: _,
+                rollout,
+                replay,
+                record,
+                retained_bytes: _,
+            } = candidate;
+            if position == 0 {
+                shared_messages = messages;
+                reset_observation = candidate_reset;
+            } else {
+                debug_assert!(messages.is_none());
+                debug_assert!(candidate_reset.is_none());
+            }
+            completions.push(rollout);
+            replay_candidates.push(replay);
+            group_records.push(record);
+        }
+        let replay_group = OpenEnvReplayGroup {
             group_index,
             environment_index,
             seed,
             reset_payload: reset,
-            reset_observation: candidates[0].reset_observation.clone(),
-            candidates: candidates
-                .iter()
-                .map(|candidate| candidate.replay.clone())
-                .collect(),
-        });
-        let group = AgenticGroup {
-            messages: shared_messages,
-            completions: candidates
-                .iter()
-                .map(|candidate| candidate.rollout.clone())
-                .collect(),
+            reset_observation: reset_observation
+                .context("OpenEnv group lost its reset observation")?,
+            candidates: replay_candidates,
         };
-        let encoded = serde_json::to_vec(&group).context("serialize OpenEnv GRPO group")?;
+        let group = AgenticGroup {
+            messages: shared_messages.context("OpenEnv group lost its shared prompt")?,
+            completions,
+        };
+        let group_bytes = serialized_len(&group, "GRPO group")?;
+        let replay_group_bytes = serialized_len(&replay_group, "replay group")?;
+        let record_bytes = serialized_len(&group_records, "rollout records")?;
+        let compacted_bytes = group_bytes
+            .checked_add(replay_group_bytes)
+            .and_then(|bytes| bytes.checked_add(record_bytes))
+            .context("OpenEnv compacted group byte count overflow")?;
+        retained_budget.replace(
+            candidate_retained_bytes,
+            compacted_bytes,
+            "the compacted seed group",
+        )?;
         dataset_bytes = dataset_bytes
-            .checked_add(encoded.len().saturating_add(1))
+            .checked_add(group_bytes.saturating_add(1))
             .context("OpenEnv dataset byte count overflow")?;
         anyhow::ensure!(
             dataset_bytes <= MAX_OPENENV_DATASET_BYTES,
             "OpenEnv rollout dataset exceeded the {} byte in-memory/inline limit; reduce groups, group size, max steps, or environment observation size",
             MAX_OPENENV_DATASET_BYTES
         );
-        records.extend(candidates.into_iter().map(|candidate| candidate.record));
+        records.extend(group_records);
+        replay_groups.push(replay_group);
         groups.push(group);
         control.publish(OpenEnvCollectionProgress {
             stage: OpenEnvCollectionStage::Collecting,
@@ -1452,81 +1665,103 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
         });
     }
 
+    drop(reset_plan);
+    retained_budget.replace(reset_plan_bytes, 0, "the consumed reset plan")?;
+
     let dataset_sha256 = sha256_jsonl(&groups)?;
+    let replay_environments = inspections
+        .into_iter()
+        .map(|(_, inspection)| inspection)
+        .collect::<Vec<_>>();
+    retained_budget.charge(
+        serialized_len(&replay_environments, "summary environment inspections")?,
+        "the summary copy of environment inspections",
+    )?;
+    let summary_environments = replay_environments.clone();
     let replay = OpenEnvReplayManifest {
         schema: OPENENV_REPLAY_SCHEMA_V1.to_string(),
         client_profile: kiln_openenv::OPENENV_CLIENT_PROFILE.to_string(),
         dataset_sha256: dataset_sha256.clone(),
         protocol_error_reward: options.protocol_error_reward,
         max_steps: options.max_steps,
-        environments: inspections
-            .iter()
-            .map(|(_, inspection)| inspection.clone())
-            .collect(),
+        environments: replay_environments,
         groups: replay_groups,
     };
     let replay_encoded = encode_replay(&replay)?;
     let replay_sha256 = replay_sha256(&replay_encoded);
     let replay_bytes = replay_encoded.len();
+    drop(replay_encoded);
     let stats = summarize_rollouts(&records);
-    Ok(OpenEnvCollection {
+    let summary = OpenEnvRolloutSummary {
+        schema: "kiln.openenv-rollout-summary.v3".to_string(),
+        kiln_url: options.kiln_url.trim_end_matches('/').to_string(),
+        adapter: adapter.request_value.as_str().map(ToOwned::to_owned),
+        adapter_label: adapter.label,
+        environments: summary_environments,
+        groups: options.groups,
+        group_size: options.group_size,
+        rollout_count: records.len(),
+        seed_start: options.seed_start,
+        max_steps: options.max_steps,
+        concurrency: options.concurrency,
+        max_action_tokens: options.max_action_tokens,
+        temperature: options.temperature,
+        thinking: options.thinking,
+        protocol_error_reward: options.protocol_error_reward,
+        max_recoverable_errors: options.max_recoverable_errors,
+        capacity_wait_seconds: options.capacity_wait_seconds,
+        reset_options_sha256: None,
+        reset_plan_sha256: Some(reset_plan_sha256),
+        output_path: options.output.display().to_string(),
+        replay_output_path: options.replay_output.display().to_string(),
+        summary_output_path: options.summary_output.display().to_string(),
+        dataset_sha256,
+        dataset_bytes,
+        replay_sha256,
+        replay_bytes,
+        stats,
+        rollouts: records,
+        training_submission: None,
+    };
+    let summary_bytes = pretty_serialized_len(&summary, "summary")?
+        .checked_add(1)
+        .context("OpenEnv summary byte count overflow")?;
+    anyhow::ensure!(
+        summary_bytes <= MAX_OPENENV_SUMMARY_BYTES,
+        "OpenEnv summary exceeded the {MAX_OPENENV_SUMMARY_BYTES} byte artifact limit"
+    );
+    let collection = OpenEnvCollection {
         groups,
         replay,
-        summary: OpenEnvRolloutSummary {
-            schema: "kiln.openenv-rollout-summary.v3".to_string(),
-            kiln_url: options.kiln_url.trim_end_matches('/').to_string(),
-            adapter: adapter.request_value.as_str().map(ToOwned::to_owned),
-            adapter_label: adapter.label,
-            environments: inspections
-                .iter()
-                .map(|(_, inspection)| inspection.clone())
-                .collect(),
-            groups: options.groups,
-            group_size: options.group_size,
-            rollout_count: records.len(),
-            seed_start: options.seed_start,
-            max_steps: options.max_steps,
-            concurrency: options.concurrency,
-            max_action_tokens: options.max_action_tokens,
-            temperature: options.temperature,
-            thinking: options.thinking,
-            protocol_error_reward: options.protocol_error_reward,
-            max_recoverable_errors: options.max_recoverable_errors,
-            capacity_wait_seconds: options.capacity_wait_seconds,
-            reset_options_sha256: None,
-            reset_plan_sha256: Some(reset_plan_sha256),
-            output_path: options.output.display().to_string(),
-            replay_output_path: options.replay_output.display().to_string(),
-            summary_output_path: options.summary_output.display().to_string(),
-            dataset_sha256,
-            dataset_bytes,
-            replay_sha256,
-            replay_bytes,
-            stats,
-            rollouts: records,
-            training_submission: None,
-        },
-    })
+        summary,
+    };
+    retained_budget.replace(
+        retained_budget.used(),
+        serialized_len(&collection, "completed collection")?,
+        "the completed collection",
+    )?;
+    Ok(collection)
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn run_candidate_episode(
     policy: &OpenEnvPolicyTransport,
-    environment: OpenEnvClient,
-    inspection: OpenEnvInspection,
-    adapter: Value,
-    adapter_label: String,
-    reset_payload: Value,
+    environment: &OpenEnvClient,
+    inspection: &OpenEnvInspection,
+    adapter: &Value,
+    adapter_label: &str,
+    reset_payload: &Value,
     seed: u64,
     group_index: usize,
     candidate_index: usize,
     options: &OpenEnvRolloutOptions,
     control: &OpenEnvCollectionControl,
+    retained_budget: &OpenEnvRetainedByteBudget,
 ) -> Result<CandidateRollout> {
     control.ensure_active()?;
     let (mut session, reset, capacity_retries) = connect_and_reset_with_capacity_checked(
-        &environment,
-        &reset_payload,
+        environment,
+        reset_payload,
         Duration::from_secs(options.capacity_wait_seconds),
         || control.ensure_active(),
     )
@@ -1536,7 +1771,20 @@ async fn run_candidate_episode(
         "OpenEnv environment {} returned done=true from reset; a trainable rollout needs at least one model action",
         inspection.identity.metadata.name
     );
-    let messages = initial_messages(&inspection, &reset)?;
+    let messages = initial_messages(inspection, &reset)?;
+    let mut retained_bytes = 0usize;
+    charge_serialized(
+        retained_budget,
+        &mut retained_bytes,
+        &messages,
+        "candidate initial messages",
+    )?;
+    charge_serialized(
+        retained_budget,
+        &mut retained_bytes,
+        &reset,
+        "candidate reset observation",
+    )?;
     let mut trajectory = Vec::new();
     // Reset is not a transition. Preserve its tagged reward in the initial
     // observation, but only environment step rewards contribute to return.
@@ -1558,8 +1806,8 @@ async fn run_candidate_episode(
                 policy,
                 &messages,
                 &trajectory,
-                &adapter,
-                &adapter_label,
+                adapter,
+                adapter_label,
                 generation_seed,
                 options.max_action_tokens,
                 options.temperature,
@@ -1583,41 +1831,87 @@ async fn run_candidate_episode(
                 total_model_tokens = total_model_tokens.saturating_add(total_tokens);
                 total_model_latency_ms += latency_ms;
                 let raw = raw.unwrap_or_else(|| invalid_action_raw(&message));
-                trajectory.push(action_segment(raw));
-                trajectory.push(harness_error_segment(&json!({
+                let action_turn = action_segment(raw);
+                let error_turn = harness_error_segment(&json!({
                     "openenv_harness_error": {
                         "code": "INVALID_MODEL_ACTION",
                         "message": message
                     },
                     "done": true
-                }))?);
+                }))?;
+                charge_serialized(
+                    retained_budget,
+                    &mut retained_bytes,
+                    &action_turn,
+                    "invalid model action turn",
+                )?;
+                charge_serialized(
+                    retained_budget,
+                    &mut retained_bytes,
+                    &error_turn,
+                    "invalid model action error turn",
+                )?;
+                trajectory.push(action_turn);
+                trajectory.push(error_turn);
                 episode_return += options.protocol_error_reward;
                 termination = OpenEnvEpisodeTerminationV1::InvalidModelAction;
                 break;
             }
             Err(ModelActionFailure::Request(error)) => return Err(error),
         };
-        total_model_tokens = total_model_tokens.saturating_add(model_action.total_tokens);
-        total_model_latency_ms += model_action.latency_ms;
-        trajectory.push(action_segment(model_action.raw));
+        let ModelAction {
+            raw,
+            action,
+            total_tokens,
+            latency_ms,
+        } = model_action;
+        total_model_tokens = total_model_tokens.saturating_add(total_tokens);
+        total_model_latency_ms += latency_ms;
+        let action_turn = action_segment(raw);
+        charge_serialized(
+            retained_budget,
+            &mut retained_bytes,
+            &action_turn,
+            "model action turn",
+        )?;
+        charge_serialized(
+            retained_budget,
+            &mut retained_bytes,
+            &action,
+            "replay action",
+        )?;
+        trajectory.push(action_turn);
         steps = steps.saturating_add(1);
 
-        match session.step(&model_action.action).await {
+        match session.step(&action).await {
             Ok(observation) => {
                 episode_return += observation.reward.training_value();
                 anyhow::ensure!(
                     episode_return.is_finite(),
                     "OpenEnv episode return became non-finite"
                 );
-                trajectory.push(observation_segment(&observation)?);
+                let done = observation.done;
+                let observation_turn = observation_segment(&observation)?;
+                let result = OpenEnvReplayExchangeResult::Observation { observation };
+                charge_serialized(
+                    retained_budget,
+                    &mut retained_bytes,
+                    &observation_turn,
+                    "environment observation turn",
+                )?;
+                charge_serialized(
+                    retained_budget,
+                    &mut retained_bytes,
+                    &result,
+                    "replay observation",
+                )?;
+                trajectory.push(observation_turn);
                 replay_exchanges.push(OpenEnvReplayExchange {
                     step_index,
-                    action: model_action.action,
-                    result: OpenEnvReplayExchangeResult::Observation {
-                        observation: observation.clone(),
-                    },
+                    action,
+                    result,
                 });
-                if observation.done {
+                if done {
                     termination = OpenEnvEpisodeTerminationV1::Done;
                     break;
                 }
@@ -1633,11 +1927,25 @@ async fn run_candidate_episode(
                     terminal_protocol_error = error.code.is_terminal();
                     termination = OpenEnvEpisodeTerminationV1::ProtocolError;
                 }
-                trajectory.push(protocol_error_segment(&error, continued)?);
+                let error_turn = protocol_error_segment(&error, continued)?;
+                let result = OpenEnvReplayExchangeResult::ProtocolError { error, continued };
+                charge_serialized(
+                    retained_budget,
+                    &mut retained_bytes,
+                    &error_turn,
+                    "protocol error turn",
+                )?;
+                charge_serialized(
+                    retained_budget,
+                    &mut retained_bytes,
+                    &result,
+                    "replay protocol error",
+                )?;
+                trajectory.push(error_turn);
                 replay_exchanges.push(OpenEnvReplayExchange {
                     step_index,
-                    action: model_action.action,
-                    result: OpenEnvReplayExchangeResult::ProtocolError { error, continued },
+                    action,
+                    result,
                 });
                 episode_return += options.protocol_error_reward;
                 anyhow::ensure!(
@@ -1667,10 +1975,18 @@ async fn run_candidate_episode(
             )
         })?)
     };
+    if let Some(state) = &final_state {
+        charge_serialized(
+            retained_budget,
+            &mut retained_bytes,
+            state,
+            "final environment state",
+        )?;
+    }
     let _ = session.close().await;
 
     let action_schema_sha256 = sha256_json(&inspection.schema.action)?;
-    let reset_sha256 = sha256_json(&reset_payload)?;
+    let reset_sha256 = sha256_json(reset_payload)?;
     let terminal_done = matches!(termination, OpenEnvEpisodeTerminationV1::Done);
     let openenv = OpenEnvRolloutProvenanceV1::new(
         inspection.identity.metadata.name.clone(),
@@ -1702,17 +2018,22 @@ async fn run_candidate_episode(
         model_latency_ms: total_model_latency_ms,
     };
 
-    Ok(CandidateRollout {
+    let messages_sha256 = sha256_json(&messages)?;
+    let reset_observation_sha256 = sha256_json(&reset)?;
+    let retain_shared_reset = candidate_index == 0;
+    let mut candidate = CandidateRollout {
         candidate_index,
-        messages,
-        reset_observation: reset,
+        messages: retain_shared_reset.then_some(messages),
+        reset_observation: retain_shared_reset.then_some(reset),
+        messages_sha256,
+        reset_observation_sha256,
         rollout,
         replay,
         record: OpenEnvRolloutRecord {
             group_index,
             candidate_index,
-            environment_name: inspection.identity.metadata.name,
-            environment_url: inspection.identity.base_url,
+            environment_name: inspection.identity.metadata.name.clone(),
+            environment_url: inspection.identity.base_url.clone(),
             seed,
             steps,
             episode_return,
@@ -1724,7 +2045,16 @@ async fn run_candidate_episode(
             model_tokens: total_model_tokens,
             model_latency_ms: total_model_latency_ms,
         },
-    })
+        retained_bytes: 0,
+    };
+    let exact_retained_bytes = serialized_len(&candidate, "completed candidate")?;
+    retained_budget.replace(
+        retained_bytes,
+        exact_retained_bytes,
+        "the completed candidate",
+    )?;
+    candidate.retained_bytes = exact_retained_bytes;
+    Ok(candidate)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1943,13 +2273,37 @@ fn read_reset_options(path: Option<&Path>, direct: Option<&Value>) -> Result<Val
             value.is_object(),
             "OpenEnv inline reset options must be one JSON object"
         );
+        ensure_reset_options_size(value, "inline reset options")?;
         return Ok(value.clone());
     }
     let Some(path) = path else {
         return Ok(Value::Object(Map::new()));
     };
-    let bytes = std::fs::read(path)
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("open OpenEnv reset options {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("stat OpenEnv reset options {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.len() <= MAX_OPENENV_RESET_OPTIONS_BYTES as u64,
+        "OpenEnv reset options {} exceed the {} byte input limit",
+        path.display(),
+        MAX_OPENENV_RESET_OPTIONS_BYTES
+    );
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len())
+            .unwrap_or(MAX_OPENENV_RESET_OPTIONS_BYTES)
+            .min(MAX_OPENENV_RESET_OPTIONS_BYTES),
+    );
+    file.take((MAX_OPENENV_RESET_OPTIONS_BYTES as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
         .with_context(|| format!("read OpenEnv reset options {}", path.display()))?;
+    anyhow::ensure!(
+        bytes.len() <= MAX_OPENENV_RESET_OPTIONS_BYTES,
+        "OpenEnv reset options {} grew beyond the {} byte input limit while being read",
+        path.display(),
+        MAX_OPENENV_RESET_OPTIONS_BYTES
+    );
     let value: Value = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse OpenEnv reset options {}", path.display()))?;
     anyhow::ensure!(
@@ -1957,7 +2311,17 @@ fn read_reset_options(path: Option<&Path>, direct: Option<&Value>) -> Result<Val
         "OpenEnv reset options {} must contain one JSON object",
         path.display()
     );
+    ensure_reset_options_size(&value, &format!("reset options {}", path.display()))?;
     Ok(value)
+}
+
+fn ensure_reset_options_size(value: &Value, label: &str) -> Result<()> {
+    let bytes = serialized_len(value, label)?;
+    anyhow::ensure!(
+        bytes <= MAX_OPENENV_RESET_OPTIONS_BYTES,
+        "OpenEnv {label} serialize to {bytes} bytes; limit is {MAX_OPENENV_RESET_OPTIONS_BYTES} bytes so the seeded reset request remains within the protocol frame bound"
+    );
+    Ok(())
 }
 
 fn normalize_reset_options(mut value: Value) -> Result<Value> {
@@ -2346,9 +2710,17 @@ pub(crate) fn write_summary_atomic(path: &Path, summary: &OpenEnvRolloutSummary)
     let parent = output_parent(path)?;
     let mut staged = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("create staged OpenEnv summary beside {}", path.display()))?;
-    serde_json::to_writer_pretty(staged.as_file_mut(), summary)
-        .context("serialize OpenEnv rollout summary")?;
-    staged.as_file_mut().write_all(b"\n")?;
+    {
+        let mut writer = BoundedWriter::new(
+            staged.as_file_mut(),
+            MAX_OPENENV_SUMMARY_BYTES,
+            "OpenEnv summary",
+        );
+        serde_json::to_writer_pretty(&mut writer, summary)
+            .context("serialize bounded OpenEnv rollout summary")?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+    }
     staged
         .as_file()
         .sync_all()
@@ -2428,22 +2800,30 @@ fn generation_seed(seed: u64, candidate_index: usize, step_index: usize) -> u64 
 }
 
 fn sha256_json(value: &impl Serialize) -> Result<String> {
-    let bytes = serde_json::to_vec(value).context("serialize value for SHA-256")?;
-    Ok(sha256_bytes(&bytes))
+    let mut hasher = Sha256::new();
+    serde_json::to_writer(
+        Sha256Writer {
+            hasher: &mut hasher,
+        },
+        value,
+    )
+    .context("serialize value for SHA-256")?;
+    Ok(format_digest(hasher.finalize().as_slice()))
 }
 
 fn sha256_jsonl(groups: &[AgenticGroup]) -> Result<String> {
     let mut hasher = Sha256::new();
-    for group in groups {
-        let bytes = serde_json::to_vec(group).context("serialize OpenEnv group for SHA-256")?;
-        hasher.update(bytes);
-        hasher.update(b"\n");
+    {
+        let mut writer = Sha256Writer {
+            hasher: &mut hasher,
+        };
+        for group in groups {
+            serde_json::to_writer(&mut writer, group)
+                .context("serialize OpenEnv group for SHA-256")?;
+            writer.write_all(b"\n")?;
+        }
     }
     Ok(format_digest(hasher.finalize().as_slice()))
-}
-
-fn sha256_bytes(bytes: &[u8]) -> String {
-    format_digest(Sha256::digest(bytes).as_slice())
 }
 
 fn format_digest(bytes: &[u8]) -> String {
@@ -2826,5 +3206,53 @@ mod tests {
         assert_eq!(generation_seed(42, 0, 0), 42);
         assert_eq!(generation_seed(42, 2, 3), generation_seed(42, 2, 3));
         assert_ne!(generation_seed(42, 1, 0), generation_seed(42, 0, 1));
+    }
+
+    #[test]
+    fn serialized_counter_matches_json_without_allocating_an_output_buffer() {
+        let value = json!({
+            "escaped": "line one\nline two\t\"quoted\"",
+            "nested": [1, 2, 3, {"ok": true}]
+        });
+        assert_eq!(
+            serialized_len(&value, "test value").unwrap(),
+            serde_json::to_vec(&value).unwrap().len()
+        );
+        assert_eq!(
+            pretty_serialized_len(&value, "test value").unwrap(),
+            serde_json::to_vec_pretty(&value).unwrap().len()
+        );
+
+        let mut output = Vec::new();
+        let mut writer = BoundedWriter::new(&mut output, 4, "test output");
+        writer.write_all(b"1234").unwrap();
+        assert!(writer.write_all(b"5").is_err());
+        drop(writer);
+        assert_eq!(output, b"1234");
+    }
+
+    #[test]
+    fn retained_byte_budget_rejects_incrementally_and_releases_on_compaction() {
+        let budget = OpenEnvRetainedByteBudget::new(32);
+        budget.charge(20, "first candidate").unwrap();
+        let error = budget.charge(13, "second candidate").unwrap_err();
+        assert!(error.to_string().contains("32 byte collection budget"));
+        assert_eq!(budget.used(), 20);
+
+        budget.replace(20, 8, "compacted group").unwrap();
+        assert_eq!(budget.used(), 8);
+        budget.charge(24, "remaining groups").unwrap();
+        assert!(budget.charge(1, "one byte too many").is_err());
+    }
+
+    #[test]
+    fn reset_option_files_are_rejected_from_metadata_before_large_reads() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        file.as_file()
+            .set_len((MAX_OPENENV_RESET_OPTIONS_BYTES as u64) + 1)
+            .unwrap();
+        let error = read_reset_options(Some(file.path()), None).unwrap_err();
+        assert!(error.to_string().contains("exceed"), "{error:#}");
+        assert!(error.to_string().contains("input limit"), "{error:#}");
     }
 }

@@ -16,7 +16,11 @@
   saturation uses bounded fresh-session acquisition. Policy inference pumps
   Ping/Pong control frames so slow generation retains non-resumable episode
   state; ambiguous, malformed, unsolicited, timed-out, or wrong-kind responses
-  permanently poison the lock-step session. New `openenv verify` and
+  permanently poison the lock-step session. Collection now incrementally
+  charges all retained training/replay/receipt projections against a 512 MiB
+  aggregate budget, compacts candidates without full-object clones, bounds
+  reset files before reading, streams dataset hashing, and stops replay
+  encoding at its cap before excess allocation. New `openenv verify` and
   `openenv replay` commands validate the artifact bundle offline and replay
   exact live environment behavior. CI drives pinned miniopenenv counter,
   bandit, Connect Four, maze, and Wordle servers plus a native

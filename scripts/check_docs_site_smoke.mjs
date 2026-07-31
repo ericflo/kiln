@@ -1675,6 +1675,8 @@ function validateSftLossRouteDocumentationSourceContract() {
     'production path depends only on OpenEnv compatibility',
     'pumps Ping/Pong control frames while the model thinks',
     'poisons the session permanently',
+    '512 MiB aggregate collection budget',
+    'Exhaustion publishes no partial bundle',
   ]);
   if (missingArchitectureTerms.length > 0) {
     fail(`docs/site/architecture.html: reader architecture contract missing terms: ${missingArchitectureTerms.join(', ')}`);
@@ -1699,6 +1701,8 @@ function validateSftLossRouteDocumentationSourceContract() {
     'groups must cover every endpoint',
     'pumps Ping/Pong while inference is pending',
     'poisons ambiguous lock-step sessions',
+    'retained-representation budget error reports current and additional bytes',
+    'publishes no partial artifact bundle',
     'do not edit the receipt',
   ]);
   if (missingTroubleshootingTerms.length > 0) {

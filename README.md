@@ -194,6 +194,13 @@ an action, so slow policies do not lose their non-resumable episode. A timeout,
 malformed or unsolicited application frame, wrong response type, or transport
 failure permanently poisons that socket; Kiln never risks assigning a late
 lock-step response to the wrong action.
+Collection charges reset data and every action, observation, error, and final
+state against a 512 MiB aggregate retained-representation budget as they
+arrive. Candidate data is moved into the canonical group rather than cloned;
+dataset, replay, and summary artifacts remain capped at 256 MiB each, reset
+files are bounded before reading, and hashes stream without group-sized
+buffers. Exhaustion aborts the run before any partial artifact bundle is
+published.
 When an observation offers a non-empty `input_text`, Kiln foregrounds that
 generic environment-provided decision text while retaining the complete wire
 observation and discovered JSON action schema; it remains optional, never a
