@@ -1934,6 +1934,24 @@ def build_schema() -> dict[str, Any]:
         "live_graph_capture": True,
         "exclusive_gpu_behavior": "writer_priority",
     })
+    # Generic examples are emitted for the default stable profile. Keep every
+    # nested graph-policy view consistent with the complete stable product
+    # contract instead of inheriting the Boolean example generator's `false`.
+    def apply_stable_graph_policy(value: Any) -> None:
+        if isinstance(value, dict):
+            if "capture_allowed_by_serving_profile" in value:
+                value["capture_allowed_by_serving_profile"] = True
+            graph_mode = value.get("rocm_graph_mode")
+            if isinstance(graph_mode, dict) and graph_mode.get("configured") == "profile":
+                graph_mode["effective"] = "lazy_capture_replay"
+            for child in value.values():
+                apply_stable_graph_policy(child)
+        elif isinstance(value, list):
+            for child in value:
+                apply_stable_graph_policy(child)
+
+    for entrypoint_examples in examples.values():
+        apply_stable_graph_policy(entrypoint_examples)
     health["model_defaults_profile"].update({
         "name": "Qwen3.5-4B",
         "canonical_model_id": "Qwen/Qwen3.5-4B",

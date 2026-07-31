@@ -125,7 +125,7 @@
           },
           "rocm_graph_mode": {
             "configured": "profile",
-            "effective": "profile",
+            "effective": "lazy_capture_replay",
             "source": "default"
           },
           "rocm_graph_cache_entries": {
@@ -292,7 +292,7 @@
         "rocm_graph_telemetry_unavailable_reason": "backend_without_graph_runner",
         "cuda_graphs": {
           "requested": false,
-          "capture_allowed_by_serving_profile": false,
+          "capture_allowed_by_serving_profile": true,
           "effective_policy_enabled": false,
           "max_cached_graphs": 1,
           "stable_paged_metadata": true,
@@ -976,7 +976,7 @@
             },
             "rocm_graph_mode": {
               "configured": "profile",
-              "effective": "profile",
+              "effective": "lazy_capture_replay",
               "source": "default"
             },
             "rocm_graph_cache_entries": {
@@ -1036,7 +1036,7 @@
           },
           "cuda_graphs": {
             "requested": false,
-            "capture_allowed_by_serving_profile": false,
+            "capture_allowed_by_serving_profile": true,
             "enabled": false,
             "state": "enabled",
             "max_cached_graphs": 1,
@@ -1584,7 +1584,7 @@
           },
           "rocm_graph_mode": {
             "configured": "profile",
-            "effective": "profile",
+            "effective": "lazy_capture_replay",
             "source": "default"
           },
           "rocm_graph_cache_entries": {
@@ -1600,7 +1600,7 @@
         },
         "cuda_graphs": {
           "requested": false,
-          "capture_allowed_by_serving_profile": false,
+          "capture_allowed_by_serving_profile": true,
           "effective_policy_enabled": false,
           "max_cached_graphs": 1,
           "stable_paged_metadata": true,
