@@ -33,6 +33,7 @@ on:
       - 'contracts/kiln-artifacts-v1.schema.json'
       - 'contracts/kiln-evals-v1.schema.json'
       - 'contracts/kiln-control-plane-v1.schema.json'
+      - 'contracts/kiln-openenv-v1.schema.json'
       - 'contracts/runtime-defaults-v1.json'
       - 'crates/kiln-server/src/ui/index.html'
       - 'desktop/ui/dashboard.html'

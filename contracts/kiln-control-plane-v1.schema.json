@@ -3398,6 +3398,83 @@
       "x-kiln-rust-type": "kiln_train::OpdTrainingMode",
       "x-kiln-field-schema-status": "complete"
     },
+    "OpenEnvEpisodeTerminationV1": {
+      "type": "string",
+      "enum": [
+        "done",
+        "max_steps",
+        "invalid_model_action",
+        "protocol_error"
+      ],
+      "description": "Why an OpenEnv episode ended from Kiln's point of view.",
+      "x-kiln-rust-type": "kiln_train::OpenEnvEpisodeTerminationV1",
+      "x-kiln-field-schema-status": "complete"
+    },
+    "OpenEnvRolloutProvenanceV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "environment_name",
+        "environment_base_url",
+        "environment_schema_sha256",
+        "action_schema_sha256",
+        "reset_sha256",
+        "seed",
+        "steps",
+        "episode_return",
+        "terminal_done",
+        "termination"
+      ],
+      "properties": {
+        "schema": {
+          "const": "kiln.openenv-rollout.v1"
+        },
+        "environment_name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "environment_base_url": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "openapi_version": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "environment_schema_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "action_schema_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "reset_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "seed": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "steps": {
+          "$ref": "#/$defs/NonNegativeInteger"
+        },
+        "episode_return": {
+          "$ref": "#/$defs/FiniteNumber"
+        },
+        "terminal_done": {
+          "$ref": "#/$defs/Boolean"
+        },
+        "termination": {
+          "$ref": "#/$defs/OpenEnvEpisodeTerminationV1"
+        },
+        "protocol_error_code": {
+          "$ref": "#/$defs/NonEmptyString"
+        }
+      },
+      "x-kiln-semantic-constraints": [
+        "terminal_done is true exactly when termination is done",
+        "protocol_error_code is present exactly when termination is protocol_error"
+      ],
+      "description": "Fail-closed environment, task, and outcome identity attached to a native OpenEnv rollout.",
+      "x-kiln-rust-type": "kiln_train::OpenEnvRolloutProvenanceV1",
+      "x-kiln-field-schema-status": "complete"
+    },
     "Optimizer": {
       "oneOf": [
         {
@@ -4304,10 +4381,13 @@
         },
         "provenance": {
           "$ref": "kiln-inference-v1.schema.json#/$defs/RolloutProvenanceV1"
+        },
+        "openenv": {
+          "$ref": "#/$defs/OpenEnvRolloutProvenanceV1"
         }
       },
       "x-kiln-unknown-field-policy": "accepted_and_ignored",
-      "description": "One rewarded completion with optional trajectory and exact generation provenance.",
+      "description": "One rewarded completion with optional trajectory, exact generation provenance, and OpenEnv episode identity.",
       "x-kiln-rust-type": "kiln_train::ScoredRollout",
       "x-kiln-field-schema-status": "complete"
     },

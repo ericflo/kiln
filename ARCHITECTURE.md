@@ -18,6 +18,10 @@ clients and dashboard
         ▼
 HTTP validation, policy, and identity
         │
+        ├──────────────► OpenEnv HTTP discovery + stateful WS episodes
+        │                         │
+        │                         └──► canonical grouped trajectories
+        │
         ├──────────────► durable datasets, suites, jobs, and receipts
         │
         ▼
@@ -36,6 +40,7 @@ The same process owns four related workflows:
 |---|---|---|
 | Serving | Validate, schedule, and generate responses | Request logs and lineage, when enabled |
 | Training | Run admitted SFT, GRPO, or OPD jobs | Checkpoints and LoRA adapters |
+| OpenEnv RL | Discover environments, execute grouped episodes, and aggregate environment rewards | Canonical trajectory JSONL and rollout receipts |
 | Evaluation | Run suites, comparisons, judgments, and strict replay | Eval outcomes and replay records |
 | Artifact management | Validate, load, merge, export, and remove adapters | Manifests, receipts, and archives |
 
@@ -51,6 +56,7 @@ so the useful boundary is responsibility rather than a fixed crate count:
 | Layer | Representative crates | Owns |
 |---|---|---|
 | Product runtime | `kiln-server`, `kiln-model`, `kiln-scheduler` | HTTP, admission, batching, generation, and process state |
+| Environment runtime | `kiln-openenv` | Bounded OpenEnv discovery, typed wire values, stateful WebSocket sessions, and environment identity |
 | Learning loop | `kiln-train`, `kiln-eval` | Training, scoring, replay, and promotion evidence |
 | Tensor substrate | `kiln-tensor`, `kiln-autograd`, `kiln-param`, `kiln-optim` | Storage, operations, gradients, parameters, and optimizer steps |
 | Resource control | `kiln-memory`, `kiln-resource`, `kiln-graph` | Capacity, lifetimes, and replay plans |
@@ -414,6 +420,62 @@ health.
 See the [adapter manifest](docs/ADAPTER_MANIFEST.md) and
 [execution provenance](docs/EXECUTION_PROVENANCE.md) references for the exact
 identity contracts.
+
+## OpenEnv rollout path
+
+OpenEnv is the environment-facing half of native reinforcement learning:
+
+```text
+kiln openenv inspect / rollout / train
+        │
+        ├── bounded GET health · metadata · schema · environments · OpenAPI
+        │
+        ▼
+content-addressed environment identity
+        │
+        ▼
+one WS /ws connection per candidate episode
+        │
+        ├── reset(same seed for every candidate in the group)
+        ├── Kiln chat generation → one schema-shaped JSON action
+        ├── environment step → observation + tagged reward + done
+        └── repeat under explicit step/session/data bounds
+        │
+        ▼
+AgenticGroup JSONL
+        ├── Action segments → GRPO policy loss
+        ├── Observation segments → ECHO environment loss
+        └── OpenEnv identity → scored-payload hash and rollout receipt
+        │
+        ▼
+ordinary /v1/train/grpo admission and training queue
+```
+
+`kiln-openenv` owns the protocol boundary and has no model or optimizer
+responsibility. `kiln-server::openenv_cli` composes sessions with the existing
+chat and training APIs. `kiln-train` owns the optional OpenEnv provenance
+inside canonical `ScoredRollout`; this lets the same JSONL travel through
+native GRPO without a parallel training representation.
+
+The WebSocket path is load-bearing. OpenEnv's HTTP `/reset` and `/step` routes
+construct a fresh environment for each request and cannot carry episode state.
+The client is strictly lock-step because OpenEnv has no correlation IDs and
+permits no server-initiated application messages.
+
+Every group is assigned exactly one environment and reset seed. Candidates may
+run concurrently, but their initial messages must be identical or collection
+fails. Step rewards—not reset rewards—sum into episode return. Environment
+`done`, Kiln's max-step cutoff, invalid policy JSON, and protocol errors remain
+distinct termination states.
+
+The boundary is intentionally bounded: redirects are disabled, discovery
+bodies and WebSocket frames have independent byte limits, client messages,
+environment count, sessions, groups, candidates, steps, action tokens, and
+the inline corpus are capped, and terminal OpenEnv errors latch the session
+closed. A pinned miniopenenv server is the live interoperability oracle in CI.
+
+See the [OpenEnv training guide](docs/OPENENV_GUIDE.md) for the operator
+workflow and artifact contract.
 
 ## Training path
 

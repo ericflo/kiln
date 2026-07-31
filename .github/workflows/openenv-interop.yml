@@ -1,0 +1,46 @@
+name: OpenEnv interoperability
+
+on:
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/kiln-openenv/**'
+      - 'crates/kiln-server/src/openenv_cli.rs'
+      - 'crates/kiln-server/src/cli.rs'
+      - 'crates/kiln-train/src/trajectory.rs'
+      - 'scripts/check_miniopenenv_interop.sh'
+      - '.github/workflows/openenv-interop.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/kiln-openenv/**'
+      - 'crates/kiln-server/src/openenv_cli.rs'
+      - 'crates/kiln-server/src/cli.rs'
+      - 'crates/kiln-train/src/trajectory.rs'
+      - 'scripts/check_miniopenenv_interop.sh'
+      - '.github/workflows/openenv-interop.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  miniopenenv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check out the pinned OpenEnv wire oracle
+        run: |
+          git clone https://github.com/ericflo/miniopenenv.git ../miniopenenv
+          git -C ../miniopenenv checkout 3ea585b2f853e7281e0f5fba845b3bd9bff45f03
+      - name: Test the typed client
+        run: cargo test -p kiln-openenv
+      - name: Drive a real stateful miniopenenv episode
+        env:
+          MINIOPENENV_ROOT: ${{ github.workspace }}/../miniopenenv
+        run: scripts/check_miniopenenv_interop.sh

@@ -15,6 +15,7 @@
   <a href="https://ericflo.github.io/kiln/demo/">Demo</a> &middot;
   <a href="QUICKSTART.md">Quickstart</a> &middot;
   <a href="https://ericflo.github.io/kiln/cli.html">CLI Guide</a> &middot;
+  <a href="docs/OPENENV_GUIDE.md">OpenEnv Guide</a> &middot;
   <a href="https://ericflo.github.io/kiln/grpo.html">GRPO Guide</a> &middot;
   <a href="docs/EVAL_GUIDE.md">Eval Guide</a> &middot;
   <a href="https://ericflo.github.io/kiln/api.html">API Reference</a> &middot;
@@ -85,6 +86,7 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 - **Embedded agent runs** — the server drives pi itself (`POST /v1/agent/runs`): spawns `pi --mode rpc` against its own model, streams the trajectory live with steer/abort, and auto-indexes finished sessions into the trace layer the self-improvement flywheel trains on.
 - **Bounded online-LoRA SFT** over HTTP — one conversation per optimizer update under the fixed `native_online_lora_v1` profile; submit in `experimental` or drained `maintenance`, with atomic publication.
 - **GRPO training** over HTTP — submit scored completions for reinforcement learning. You control the reward function; GPU ownership follows the selected serving profile.
+- **Native OpenEnv training** — discover any OpenEnv server, run seed-matched stateful WebSocket episodes, preserve typed rewards and multi-turn action/observation trajectories, then collect or directly train a LoRA with `kiln openenv`.
 - **On-policy distillation (OPD)** over HTTP — train against an identity-bound local or vLLM teacher, with exact candidate-boundary checkpoints and resume.
 - **First-class evals** over HTTP — register suites, run them against any adapter, drill into per-example outcomes, and strictly replay a completed seeded run against exact model/adapter, tokenizer/template, backend/binary, generation/scorer, and raw decoder-byte identities. Auto-detect picks the right scorer per example (`numeric_tolerance`, `multiple_choice`, `json_validity`, `regex`, `contains`, `tool_call`, `code`, `llm_judge`, `all`/`any` composites).
 - **Dataset → eval synthesis** — upload an SFT JSONL and Kiln decomposes it into an eval suite (final-assistant / first-turn / every-turn / tool-call-prediction strategies). No separate eval harness to write.
@@ -108,6 +110,42 @@ A 4B model continuously tuned to your specific workload — and continuously *me
 - **Durable request log** — every inference request/response (SSE streams reassembled) lands as one JSONL row under `<adapter_dir>/.requests`, size-rotated, gzipped, retention-capped, attributed to the serving adapter. Production traffic becomes a corpus you can mine into SFT data or a `kiln-eval trace-suite` eval with one `jq` line — see [docs/EVAL_GUIDE.md § Mine your own request log](docs/EVAL_GUIDE.md#mine-your-own-request-log).
 - **Training webhooks** — POST a JSON event to a configured URL on training job completion or failure.
 - **Pure Rust** — single binary, single process. No Python. No sidecar. No second model in memory.
+
+## The OpenEnv Loop
+
+Interactive reinforcement-learning environments are a native Kiln data source,
+not an external preprocessing step. Point `kiln openenv` at one or more OpenEnv
+servers and Kiln owns discovery, deterministic task grouping, policy action
+generation, stateful episode sessions, reward aggregation, canonical agentic
+trajectories, ECHO masks, GRPO submission, and audit artifacts.
+
+```bash
+# Inspect the environment's health, metadata, schemas, and content identity.
+kiln openenv inspect --environment http://127.0.0.1:8990
+
+# Run seed-matched candidate episodes and immediately train a LoRA.
+kiln openenv train \
+  --environment http://127.0.0.1:8990 \
+  --groups 16 \
+  --group-size 4 \
+  --max-steps 8 \
+  --output-adapter counter-agent
+```
+
+Every run first publishes canonical GRPO JSONL and a content-addressed summary
+receipt. Candidates in a group share the same environment reset and seed;
+environment step rewards determine episode return; `done`, max-step cutoffs,
+invalid model actions, and OpenEnv protocol errors remain distinct. The
+rollouts carry environment name, URL, action-schema hash, reset hash, seed,
+steps, return, and termination identity directly into Kiln's scored-payload
+hash.
+
+The reusable `kiln-openenv` crate implements bounded HTTP discovery and the
+lock-step stateful `WS /ws` protocol, including tagged rewards and the complete
+OpenEnv error vocabulary. CI drives a real pinned miniopenenv counter episode
+across that boundary. See the [OpenEnv Training Guide](docs/OPENENV_GUIDE.md)
+for multi-environment training, reset tasks, security, ECHO behavior, artifacts,
+and troubleshooting.
 
 ## The GRPO Loop
 

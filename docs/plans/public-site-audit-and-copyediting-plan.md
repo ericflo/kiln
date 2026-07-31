@@ -2,7 +2,7 @@
 
 Status: living execution plan
 Inventory snapshot: 2026-07-30
-Scope: 66 public HTML routes, plus shared navigation, search, metadata, and
+Scope: 68 public HTML routes, plus shared navigation, search, metadata, and
 machine-readable discovery surfaces
 
 This plan exists to prevent a page from being treated as complete merely
@@ -49,10 +49,10 @@ The inventory has three sources:
 
 - nine hand-authored product routes in `docs/site/`;
 - the generated documentation home at `/docs/`;
-- 56 generated document routes declared in
+- 58 generated document routes declared in
   `docs/site/docs-manifest.json`.
 
-That produces **66 public HTML routes** in this snapshot. The generated
+That produces **68 public HTML routes** in this snapshot. The generated
 `sitemap.xml` is the final authority for what the assembled site publishes.
 Supporting surfaces such as `llms.txt`, `search-index.json`, `robots.txt`, and
 the sitemap are audited separately because they affect discovery but are not
@@ -505,6 +505,8 @@ work required. Every row still receives the full seven-pass protocol.
 | `/docs/sft-tokenization/` — `docs/sft-tokenization.md` | Make chat rendering, assistant-only labels, masking, truncation, and parity fixtures concrete. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/training-checkpoints/` — `docs/training-checkpoints.md` | Explain checkpoint contents, identity, compatibility, resume behavior, promotion, and failure recovery. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/grpo/` — `docs/GRPO_GUIDE.md` | Make group construction, scoring, updates, observability, artifacts, and promotion a coherent workflow. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/openenv/` — `docs/OPENENV_GUIDE.md` | Make discovery, seed-matched episode collection, environment rewards, direct training, identity, limits, and failure recovery one coherent workflow. | [x] | [x] | [x] | [x] | [ ] |
+| `/docs/openenv-schema/` — `contracts/kiln-openenv-v1.schema.json` | Define discovery identity, episode outcomes, rollout statistics, dataset hashes, and the content-addressed summary receipt. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/echo/` — `docs/ECHO_GUIDE.md` | Explain ECHO's purpose, data requirements, objective, workflow, evidence, and limitations without research shorthand. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/dataset-splits/` — `docs/DATASET_SPLITS.md` | Define split ownership, leakage prevention, train/eval separation, and promotion consequences. | [x] | [x] | [x] | [x] | [ ] |
 | `/docs/evals/` — `docs/EVAL_GUIDE.md` | Guide readers through suites, judgments, comparisons, replay, artifacts, and feedback to training. | [x] | [x] | [x] | [x] | [ ] |

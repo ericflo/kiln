@@ -42,6 +42,7 @@ const uiVendorFiles = {
 };
 const expectedHeaderHelpLinks = [
   ['Quickstart', 'https://ericflo.github.io/kiln/quickstart.html'],
+  ['OpenEnv Guide', 'https://ericflo.github.io/kiln/docs/openenv/'],
   ['GRPO Guide', 'https://ericflo.github.io/kiln/grpo.html'],
   ['API Reference', 'https://ericflo.github.io/kiln/api.html'],
   ['CLI Reference', 'https://ericflo.github.io/kiln/cli.html'],

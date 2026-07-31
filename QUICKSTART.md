@@ -11,7 +11,7 @@ This guide gets you from a fresh machine to your first Kiln inference. Stop afte
 | **Container** | You prefer the prebuilt GHCR image and already run NVIDIA GPU workloads with Docker. | Pull `ghcr.io/ericflo/kiln-server:latest`, mount your local `Qwen/Qwen3.5-4B` directory, then follow [Running with Docker](#running-with-docker). |
 | **Source / CLI** | You are contributing, scripting, or want to build the binary yourself. | Optionally build `kiln` from source, then download `Qwen/Qwen3.5-4B`, start `kiln serve`, and continue through steps 2-5. |
 
-After first inference, continue to [SFT training](#6-submit-sft-training), the [GRPO guide](docs/GRPO_GUIDE.md), [evaluating an adapter](#10-evaluate-your-adapter), [advanced API examples](#9-advanced-api-examples), the [complete documentation](https://ericflo.github.io/kiln/docs/), or [Troubleshooting](https://ericflo.github.io/kiln/troubleshooting.html).
+After first inference, continue to [SFT training](#6-submit-sft-training), [native OpenEnv training](docs/OPENENV_GUIDE.md), the [GRPO guide](docs/GRPO_GUIDE.md), [evaluating an adapter](#10-evaluate-your-adapter), [advanced API examples](#9-advanced-api-examples), the [complete documentation](https://ericflo.github.io/kiln/docs/), or [Troubleshooting](https://ericflo.github.io/kiln/troubleshooting.html).
 
 ## Prerequisites
 
@@ -317,6 +317,8 @@ Next steps are optional:
 
 - Train a small adapter with [SFT](#6-submit-sft-training).
 - Run generate→score→train loops with [GRPO](docs/GRPO_GUIDE.md).
+- Train directly against stateful RL environments with
+  [`kiln openenv`](docs/OPENENV_GUIDE.md).
 - Distill a registered local or vLLM teacher with [OPD](docs/training-checkpoints.md#opd).
 - Use [advanced API examples](#9-advanced-api-examples) for tools, batch generation, adapter import/export, TIES merge, composition, webhooks, and troubleshooting notes.
 - Open the website [Troubleshooting](https://ericflo.github.io/kiln/troubleshooting.html) page if setup is not clean yet.

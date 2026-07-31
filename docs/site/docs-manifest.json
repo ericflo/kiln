@@ -16,6 +16,11 @@
         "description": "Start Kiln in the experimental profile, submit a scored group, and inspect the adapter and receipt."
       },
       {
+        "title": "OpenEnv Training",
+        "href": "openenv/",
+        "description": "Train directly against stateful OpenEnv environments with seed-matched episodes, native GRPO, ECHO, and replayable receipts."
+      },
+      {
         "title": "Evals Guide",
         "href": "../evals.html",
         "description": "Grade outputs, compare base and adapters on shared seeds, and feed reviewed judgments back to training."
@@ -272,6 +277,21 @@
       "section": "training",
       "navigation": "reference",
       "description": "Build scored groups, submit and observe GRPO, inspect artifacts, resume safely, and audit the result."
+    },
+    {
+      "source": "docs/OPENENV_GUIDE.md",
+      "slug": "openenv",
+      "title": "OpenEnv training",
+      "section": "training",
+      "description": "Discover OpenEnv servers, collect seed-matched stateful episodes, train with native GRPO and ECHO, and audit environment identity, reward, and failure semantics."
+    },
+    {
+      "source": "contracts/kiln-openenv-v1.schema.json",
+      "kind": "json_schema",
+      "slug": "openenv-schema",
+      "title": "OpenEnv rollout schema",
+      "section": "training",
+      "description": "Look up environment discovery identity, episode outcomes, rollout statistics, dataset hashes, and the summary receipt published by kiln openenv."
     },
     {
       "source": "docs/ECHO_GUIDE.md",

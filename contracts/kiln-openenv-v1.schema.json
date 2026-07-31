@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ericflo.github.io/kiln/contracts/kiln-openenv-v1.schema.json",
+  "title": "Kiln OpenEnv rollout contract",
+  "description": "Environment discovery identity, canonical episode provenance, and the content-addressed summary published by `kiln openenv`.",
+  "$ref": "#/$defs/OpenEnvRolloutSummary",
+  "$defs": {
+    "Sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "Metadata": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "description"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "readme_content": { "type": ["string", "null"] },
+        "version": { "type": ["string", "null"] },
+        "author": { "type": ["string", "null"] },
+        "documentation_url": { "type": ["string", "null"] }
+      }
+    },
+    "EnvironmentIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "client_profile",
+        "base_url",
+        "websocket_url",
+        "openapi_version",
+        "environments",
+        "metadata",
+        "schema_sha256"
+      ],
+      "properties": {
+        "schema": { "const": "kiln.openenv-identity.v1" },
+        "client_profile": { "const": "openenv-http/1.x" },
+        "base_url": { "type": "string", "minLength": 1 },
+        "websocket_url": { "type": "string", "pattern": "^wss?://" },
+        "openapi_version": { "type": ["string", "null"] },
+        "environments": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "metadata": { "$ref": "#/$defs/Metadata" },
+        "schema_sha256": { "$ref": "#/$defs/Sha256" }
+      }
+    },
+    "EnvironmentSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "observation", "state"],
+      "properties": {
+        "action": {},
+        "observation": {},
+        "state": {}
+      }
+    },
+    "EnvironmentInspection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "schema"],
+      "properties": {
+        "identity": { "$ref": "#/$defs/EnvironmentIdentity" },
+        "schema": { "$ref": "#/$defs/EnvironmentSchema" }
+      }
+    },
+    "EpisodeTermination": {
+      "type": "string",
+      "enum": ["done", "max_steps", "invalid_model_action", "protocol_error"]
+    },
+    "RolloutRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "group_index",
+        "candidate_index",
+        "environment_name",
+        "environment_url",
+        "seed",
+        "steps",
+        "episode_return",
+        "terminal_done",
+        "termination",
+        "model_tokens",
+        "model_latency_ms"
+      ],
+      "properties": {
+        "group_index": { "type": "integer", "minimum": 0 },
+        "candidate_index": { "type": "integer", "minimum": 0 },
+        "environment_name": { "type": "string", "minLength": 1 },
+        "environment_url": { "type": "string", "minLength": 1 },
+        "seed": { "type": "integer", "minimum": 0 },
+        "steps": { "type": "integer", "minimum": 0 },
+        "episode_return": { "type": "number" },
+        "terminal_done": { "type": "boolean" },
+        "termination": { "$ref": "#/$defs/EpisodeTermination" },
+        "protocol_error_code": { "type": "string", "minLength": 1 },
+        "model_tokens": { "type": "integer", "minimum": 0 },
+        "model_latency_ms": { "type": "number", "minimum": 0 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "termination": { "const": "done" } },
+            "required": ["termination"]
+          },
+          "then": {
+            "properties": { "terminal_done": { "const": true } }
+          },
+          "else": {
+            "properties": { "terminal_done": { "const": false } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "termination": { "const": "protocol_error" } },
+            "required": ["termination"]
+          },
+          "then": { "required": ["protocol_error_code"] },
+          "else": { "not": { "required": ["protocol_error_code"] } }
+        }
+      ]
+    },
+    "RolloutStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mean_episode_return",
+        "min_episode_return",
+        "max_episode_return",
+        "done_count",
+        "max_steps_count",
+        "invalid_model_action_count",
+        "protocol_error_count",
+        "total_environment_steps",
+        "total_model_tokens",
+        "mean_model_latency_ms"
+      ],
+      "properties": {
+        "mean_episode_return": { "type": "number" },
+        "min_episode_return": { "type": ["number", "null"] },
+        "max_episode_return": { "type": ["number", "null"] },
+        "done_count": { "type": "integer", "minimum": 0 },
+        "max_steps_count": { "type": "integer", "minimum": 0 },
+        "invalid_model_action_count": { "type": "integer", "minimum": 0 },
+        "protocol_error_count": { "type": "integer", "minimum": 0 },
+        "total_environment_steps": { "type": "integer", "minimum": 0 },
+        "total_model_tokens": { "type": "integer", "minimum": 0 },
+        "mean_model_latency_ms": { "type": "number", "minimum": 0 }
+      }
+    },
+    "OpenEnvRolloutSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "kiln_url",
+        "adapter",
+        "adapter_label",
+        "environments",
+        "groups",
+        "group_size",
+        "rollout_count",
+        "seed_start",
+        "max_steps",
+        "concurrency",
+        "max_action_tokens",
+        "temperature",
+        "thinking",
+        "protocol_error_reward",
+        "reset_options_sha256",
+        "output_path",
+        "summary_output_path",
+        "dataset_sha256",
+        "dataset_bytes",
+        "stats",
+        "rollouts"
+      ],
+      "properties": {
+        "schema": { "const": "kiln.openenv-rollout-summary.v1" },
+        "kiln_url": { "type": "string", "minLength": 1 },
+        "adapter": { "type": ["string", "null"] },
+        "adapter_label": { "type": "string", "minLength": 1 },
+        "environments": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/EnvironmentInspection" }
+        },
+        "groups": { "type": "integer", "minimum": 1 },
+        "group_size": { "type": "integer", "minimum": 1 },
+        "rollout_count": { "type": "integer", "minimum": 1 },
+        "seed_start": { "type": "integer", "minimum": 0 },
+        "max_steps": { "type": "integer", "minimum": 1 },
+        "concurrency": { "type": "integer", "minimum": 1 },
+        "max_action_tokens": { "type": "integer", "minimum": 1 },
+        "temperature": { "type": "number", "minimum": 0 },
+        "thinking": { "type": "boolean" },
+        "protocol_error_reward": { "type": "number" },
+        "reset_options_sha256": { "$ref": "#/$defs/Sha256" },
+        "output_path": { "type": "string", "minLength": 1 },
+        "summary_output_path": { "type": "string", "minLength": 1 },
+        "dataset_sha256": { "$ref": "#/$defs/Sha256" },
+        "dataset_bytes": { "type": "integer", "minimum": 1 },
+        "stats": { "$ref": "#/$defs/RolloutStats" },
+        "rollouts": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/RolloutRecord" }
+        },
+        "training_submission": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    }
+  }
+}

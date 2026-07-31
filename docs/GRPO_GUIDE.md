@@ -11,6 +11,13 @@ response fields. The generated [HTTP API
 contract](../contracts/kiln-http-api-v1.openapi.json) owns routes, status codes,
 and error shapes. This guide owns the workflow and the decisions around it.
 
+If the reward and state transition come from an OpenEnv server, use
+`kiln openenv` instead of building the rollout loop yourself. It discovers the
+action schema, runs seed-matched stateful episodes, records canonical
+action/observation trajectories, aggregates environment-owned step rewards,
+and can submit native GRPO directly. See the
+[OpenEnv Training Guide](OPENENV_GUIDE.md).
+
 ## Before you start
 
 Use the `experimental` serving profile for a controlled loop that generates,

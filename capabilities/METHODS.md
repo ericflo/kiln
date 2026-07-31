@@ -39,6 +39,7 @@ result. The rest are properties of the capability and your harness.
 | **Dominant headroom type** | inspect H — outcome / format / process | Format → SFT often cheapest. Process → OPD/GRPO. Outcome → may not be liftable without new knowledge. |
 | **Teacher availability** | does a ≥30%-stronger model in the same family exist? | OPD is only available if yes. |
 | **Verifier presence** | can you write a programmatic `score_one()` over a complete response in `[0,1]`? | GRPO is only available if yes. |
+| **OpenEnv availability** | does the capability already exist as a stateful OpenEnv server with action schema, observations, `done`, and reward? Run `kiln openenv inspect`. | Prefer the native environment loop over duplicating state transitions or reward logic in `rollout.py`. |
 | **Reward variance** | sample 20 baseline rollouts on `datasets/train.tasks.jsonl`, compute group variance | < 0.03 → GRPO has no signal. ≥ 0.05 → strong signal filter applies. |
 | **Task is multi-turn tool-calling?** | is `rollout.py` driving pi or another agent loop? | If yes, agentic-GRPO with ECHO is mandatory; everything else is a sub-step. |
 | **Baseline distribution shape** | inspect 5 base responses on `datasets/eval.tasks.jsonl` | Sanity-check that C₀ matches reality — saturated *or* over-strict rubrics distort it. |
@@ -55,8 +56,13 @@ Apply rules in order. The first rule that fires wins. Document the rule
 that fired in `pipeline.md` stage rationale.
 
 ```
-RULE A — Multi-turn tool-calling tasks
-  IF task is multi-turn tool-calling:
+RULE A — Interactive environments and multi-turn tool-calling tasks
+  IF a stateful OpenEnv environment exists:
+    → use `kiln openenv rollout` for the baseline variance probe
+    → use `kiln openenv train` for agentic-GRPO with ECHO on
+    → preserve the OpenEnv rollout summary and exact environment deployment
+      identity with the stage evidence
+  ELSE IF task is multi-turn tool-calling:
     → agentic-GRPO with ECHO on (always)
     → Sub-method choice still applies — you may still SFT-bootstrap or
       OPD-polish before the agentic-GRPO stage. But every agentic stage
@@ -189,11 +195,14 @@ See resources/grpo-mode.md §6.
 
 ### §3.4 Agentic-GRPO
 
-**Trainer:** `cuda_grpo_ablation` with ECHO env-mask layer.
-**Use when:** Rule A. Multi-turn tool-calling tasks (pi rollouts).
-**Data:** pi session JSONLs normalized into ScoredRollout JSONL.
-Use `kiln trajectory inspect` for normalization; `rollout.py` for the
-gathering loop.
+**Trainer:** native `kiln openenv train` for OpenEnv tasks, otherwise
+`cuda_grpo_ablation` with the ECHO env-mask layer.
+**Use when:** Rule A. Stateful OpenEnv tasks or multi-turn tool-calling tasks.
+**Data:** For OpenEnv, seed-matched stateful WebSocket episodes collected as
+canonical `AgenticGroup` JSONL. For pi, session JSONLs normalized into
+ScoredRollout JSONL. Use `kiln openenv inspect` before collection and retain
+`openenv.rollout-summary.json`; use `kiln trajectory inspect` for pi
+normalization and `rollout.py` only when no OpenEnv server owns the task.
 **Defaults:** GRPO defaults + ECHO λ=0.05, env_mask_mode=env_only,
 warning_filter=true.
 **ECHO is mandatory** — without it, env-token loss is silently masked and
@@ -202,7 +211,9 @@ the model never learns to predict its environment. See
 **Verifier-free mode:** `--no-policy-loss` for paper §5.5 adaptation. ECHO
 gradient flows without policy gradient. Reference cap: `pi-script-fixup`.
 **Common failure modes:** stale pi sessions, schema drift (Pi 0.75.3 `toolResult`
-vs `tool` role), warning-prefix bleed into env mask. See
+vs `tool` role), changed OpenEnv action schemas, non-deterministic seeded
+resets, capacity exhaustion, reward-scale mismatch across environments, and
+warning-prefix bleed into env mask. See
 resources/agentic-grpo-mode.md.
 
 ---

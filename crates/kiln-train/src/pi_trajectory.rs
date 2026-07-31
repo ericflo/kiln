@@ -140,6 +140,7 @@ pub fn scored_rollout_from_pi_session(
         reward,
         trajectory: parsed.trajectory,
         provenance: None,
+        openenv: None,
     }
 }
 

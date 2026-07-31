@@ -85,6 +85,7 @@
   <nav class="header-help" aria-label="Help links">
     <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a>
     <a href="https://ericflo.github.io/kiln/docs/" target="_blank" rel="noopener noreferrer">Documentation</a>
+    <a href="https://ericflo.github.io/kiln/docs/openenv/" target="_blank" rel="noopener noreferrer">OpenEnv Guide</a>
     <a href="https://ericflo.github.io/kiln/grpo.html" target="_blank" rel="noopener noreferrer">GRPO Guide</a>
     <a href="https://ericflo.github.io/kiln/api.html" target="_blank" rel="noopener noreferrer">API Reference</a>
     <a href="https://ericflo.github.io/kiln/cli.html" target="_blank" rel="noopener noreferrer">CLI Reference</a>
@@ -665,7 +666,8 @@
       </div>
 
       <div class="tab-content" id="tab-grpo" role="tabpanel" aria-labelledby="training-tab-grpo" hidden inert>
-        <p class="method-lead">Reward-scored tuning — give each prompt several candidate answers with numeric scores; the model learns to prefer the high-scoring ones. <span class="method-alt">Just have correct answers? Use <button type="button" class="btn-link" onclick="document.getElementById('training-tab-sft').click()">SFT</button> — it's simpler.</span></p>
+        <p class="method-lead">Reward-scored tuning — give each prompt several candidate answers with numeric scores; the model learns to prefer the high-scoring ones. Running a stateful RL environment? <a href="https://ericflo.github.io/kiln/docs/openenv/" target="_blank" rel="noopener noreferrer">Use native OpenEnv collection</a> to create and submit these groups directly. <span class="method-alt">Just have correct answers? Use <button type="button" class="btn-link" onclick="document.getElementById('training-tab-sft').click()">SFT</button> — it's simpler.</span></p>
+        <div class="form-help" style="margin-bottom: var(--space-4);"><strong>Live environment loop:</strong> <code>kiln openenv train --environment http://127.0.0.1:8000 --output-adapter my-agent</code> discovers the action schema, runs seed-matched WebSocket episodes, preserves rewards and ECHO trajectories, and queues this same native GRPO trainer.</div>
         <form id="grpo-form">
           <div class="form-group train-data">
             <label>Training data <span class="hint">— prompts with scored completions</span></label>

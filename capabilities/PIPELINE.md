@@ -43,6 +43,8 @@ A **stage** is one trained adapter produced by one method, with:
 - a falsifiable hypothesis stated up front
 - ≥ 3-seed eval evidence
 - a kept iter row in `capability.jsonl` with `status: "kept"`
+- for OpenEnv stages, the rollout-summary SHA-256 plus pinned environment
+  implementation/deployment identity
 
 A stage corresponds to a `stages/stage-<N>-<slug>.json` file.
 
@@ -79,12 +81,28 @@ A stage corresponds to a `stages/stage-<N>-<slug>.json` file.
   "cross_cap_check": {"max_sibling_delta": -0.008, "sigma": 0.011, "passed": true},
   "adapter_manifest": "/workspace/adapters/<cap>-stage-2-opd-polish/adapter_manifest.json",
   "train_receipt":    "/workspace/adapters/<cap>-stage-2-opd-polish/train_receipt.json",
+  "openenv": null,
   "kiln_commit": "<sha>",
   "ts_promoted": "2026-06-08T..."
 }
 ```
 
 The promoted iter's `capability.jsonl` row has `stage: 2` matching this file.
+
+For a stage collected from OpenEnv, replace `openenv: null` with:
+
+```json
+{
+  "rollout_summary": "evidence/openenv.rollout-summary.json",
+  "dataset_sha256": "sha256:…",
+  "environment_schema_sha256": ["sha256:…"],
+  "environment_deployment_identity": ["image-or-binary-sha256:…"]
+}
+```
+
+The URL and schema hash in a rollout identify what Kiln observed; they do not
+prove that an implementation behind the URL stayed unchanged. The deployment
+identity closes that evidence gap.
 
 ### §2.4 stages/ directory invariant
 
@@ -210,6 +228,9 @@ Before any GPU work in a stage N ≥ 2:
    - run lib/method_router.py --eval-summary <prev-stage-eval> --print
    - confirm the recommended method == this stage's method
      OR the pipeline.md stage_transition_rationale documents an override
+
+   - if Rule A selected OpenEnv, `kiln openenv inspect --json` succeeds for
+     every environment and its schema identity matches the planned stage
 
 3. Verify hypothesis is falsifiable:
    - stage_transition_rationale names the sub-score(s) expected to move

@@ -1297,10 +1297,11 @@ impl Default for SftConfig {
 // See `docs/plans/echo-integration-plan.md` §2 and §B.1 for the design.
 
 pub use crate::trajectory::{
-    AgenticGroup, ROLLOUT_PROVENANCE_SCHEMA_V1, RolloutActionTokenSourceV1, RolloutActionTokenV1,
-    RolloutAdapterIdentityV1, RolloutBehaviorPolicyIdentityV1, RolloutChatTemplateInvocationV1,
-    RolloutProvenanceV1, RolloutSamplingConfigV1, RolloutThinkingBudgetV1,
-    RolloutTokenizerIdentityV1, ScoredRollout, TurnKind, TurnSegment,
+    AgenticGroup, OPENENV_ROLLOUT_PROVENANCE_SCHEMA_V1, OpenEnvEpisodeTerminationV1,
+    OpenEnvRolloutProvenanceV1, ROLLOUT_PROVENANCE_SCHEMA_V1, RolloutActionTokenSourceV1,
+    RolloutActionTokenV1, RolloutAdapterIdentityV1, RolloutBehaviorPolicyIdentityV1,
+    RolloutChatTemplateInvocationV1, RolloutProvenanceV1, RolloutSamplingConfigV1,
+    RolloutThinkingBudgetV1, RolloutTokenizerIdentityV1, ScoredRollout, TurnKind, TurnSegment,
     rollout_prompt_messages_sha256, scored_rollout_payload_sha256,
 };
 

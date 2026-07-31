@@ -350,6 +350,39 @@ def build_grpo_types() -> None:
         "One normalized trajectory segment returned by Kiln.",
         optional=("tool_call_id", "warning_prefix_len"),
     )
+    add_enum(
+        "OpenEnvEpisodeTerminationV1",
+        "kiln_train::OpenEnvEpisodeTerminationV1",
+        ["done", "max_steps", "invalid_model_action", "protocol_error"],
+        "Why an OpenEnv episode ended from Kiln's point of view.",
+    )
+    add_object(
+        "OpenEnvRolloutProvenanceV1",
+        "kiln_train::OpenEnvRolloutProvenanceV1",
+        {
+            "schema": {"const": "kiln.openenv-rollout.v1"},
+            "environment_name": ref("NonEmptyString"),
+            "environment_base_url": ref("NonEmptyString"),
+            "openapi_version": ref("NonEmptyString"),
+            "environment_schema_sha256": ref("Sha256"),
+            "action_schema_sha256": ref("Sha256"),
+            "reset_sha256": ref("Sha256"),
+            "seed": ref("NonNegativeInteger"),
+            "steps": ref("NonNegativeInteger"),
+            "episode_return": ref("FiniteNumber"),
+            "terminal_done": ref("Boolean"),
+            "termination": ref("OpenEnvEpisodeTerminationV1"),
+            "protocol_error_code": ref("NonEmptyString"),
+        },
+        "Fail-closed environment, task, and outcome identity attached to a native OpenEnv rollout.",
+        optional=("openapi_version", "protocol_error_code"),
+        extra={
+            "x-kiln-semantic-constraints": [
+                "terminal_done is true exactly when termination is done",
+                "protocol_error_code is present exactly when termination is protocol_error",
+            ]
+        },
+    )
     add_object(
         "ScoredRollout",
         "kiln_train::ScoredRollout",
@@ -358,9 +391,10 @@ def build_grpo_types() -> None:
             "reward": ref("FiniteNumber"),
             "trajectory": array(ref("TurnSegmentInput")),
             "provenance": external_ref(INFERENCE_SCHEMA, "RolloutProvenanceV1"),
+            "openenv": ref("OpenEnvRolloutProvenanceV1"),
         },
-        "One rewarded completion with optional trajectory and exact generation provenance.",
-        optional=("trajectory", "provenance"),
+        "One rewarded completion with optional trajectory, exact generation provenance, and OpenEnv episode identity.",
+        optional=("trajectory", "provenance", "openenv"),
         open_input=True,
     )
     add_object(

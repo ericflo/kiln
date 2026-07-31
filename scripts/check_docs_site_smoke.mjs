@@ -92,6 +92,7 @@ const expectedProductFooterOrder = [
 const expectedEmbeddedUiHelpLinks = [
   { label: 'Quickstart', href: 'https://ericflo.github.io/kiln/quickstart.html' },
   { label: 'Documentation', href: 'https://ericflo.github.io/kiln/docs/' },
+  { label: 'OpenEnv Guide', href: 'https://ericflo.github.io/kiln/docs/openenv/' },
   { label: 'GRPO Guide', href: 'https://ericflo.github.io/kiln/grpo.html' },
   { label: 'API Reference', href: 'https://ericflo.github.io/kiln/api.html' },
   { label: 'CLI Reference', href: 'https://ericflo.github.io/kiln/cli.html' },
@@ -3605,6 +3606,7 @@ function validateGeneratedDocsArtifacts() {
   const expectedProductGuideOrder = [
     'Quickstart',
     'GRPO Guide',
+    'OpenEnv Training',
     'Evals Guide',
     'API Reference',
     'CLI Reference',

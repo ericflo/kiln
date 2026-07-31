@@ -31,6 +31,7 @@ use crate::ChatMessage;
 
 /// Version tag for exact, behavior-policy-bound rollout provenance.
 pub const ROLLOUT_PROVENANCE_SCHEMA_V1: &str = "kiln.rollout-provenance.v1";
+pub const OPENENV_ROLLOUT_PROVENANCE_SCHEMA_V1: &str = "kiln.openenv-rollout.v1";
 
 const MAX_ROLLOUT_IDENTITY_TEXT_BYTES: usize = 256;
 const MAX_ROLLOUT_BACKEND_BYTES: usize = 64;
@@ -251,6 +252,8 @@ struct ScoredRolloutPayloadIdentityV1<'a> {
     schema: &'static str,
     text: &'a str,
     trajectory: &'a [TurnSegment],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    openenv: Option<&'a OpenEnvRolloutProvenanceV1>,
 }
 
 /// Canonical prompt identity used by rollout provenance v1.
@@ -268,6 +271,7 @@ pub fn scored_rollout_payload_sha256(rollout: &ScoredRollout) -> Result<String, 
         schema: "kiln.scored-rollout-payload.v1",
         text: &rollout.text,
         trajectory: &rollout.trajectory,
+        openenv: rollout.openenv.as_ref(),
     };
     let bytes = serde_json::to_vec(&identity)
         .map_err(|error| format!("serialize scored rollout payload: {error}"))?;
@@ -621,6 +625,199 @@ pub enum TurnKind {
     Observation,
 }
 
+/// Why an OpenEnv episode stopped from Kiln's point of view.
+///
+/// OpenEnv itself has only `done`; the other states are harness outcomes that
+/// must remain explicit so a max-step cutoff or malformed model action never
+/// masquerades as an environment terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenEnvEpisodeTerminationV1 {
+    Done,
+    MaxSteps,
+    InvalidModelAction,
+    ProtocolError,
+}
+
+/// Content-addressed OpenEnv identity and episode outcome attached to a scored
+/// rollout.
+///
+/// This record travels with canonical GRPO JSONL, so training data remains
+/// attributable to the environment schema and reset task that produced its
+/// reward. It deliberately hashes the reset payload instead of retaining
+/// arbitrary environment-specific values in every completion.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenEnvRolloutProvenanceV1 {
+    schema: String,
+    pub environment_name: String,
+    pub environment_base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openapi_version: Option<String>,
+    pub environment_schema_sha256: String,
+    pub action_schema_sha256: String,
+    pub reset_sha256: String,
+    pub seed: u64,
+    pub steps: usize,
+    pub episode_return: f64,
+    pub terminal_done: bool,
+    pub termination: OpenEnvEpisodeTerminationV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_error_code: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for OpenEnvRolloutProvenanceV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            schema: String,
+            environment_name: String,
+            environment_base_url: String,
+            #[serde(default)]
+            openapi_version: Option<String>,
+            environment_schema_sha256: String,
+            action_schema_sha256: String,
+            reset_sha256: String,
+            seed: u64,
+            steps: usize,
+            episode_return: f64,
+            terminal_done: bool,
+            termination: OpenEnvEpisodeTerminationV1,
+            #[serde(default)]
+            protocol_error_code: Option<String>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let provenance = Self {
+            schema: wire.schema,
+            environment_name: wire.environment_name,
+            environment_base_url: wire.environment_base_url,
+            openapi_version: wire.openapi_version,
+            environment_schema_sha256: wire.environment_schema_sha256,
+            action_schema_sha256: wire.action_schema_sha256,
+            reset_sha256: wire.reset_sha256,
+            seed: wire.seed,
+            steps: wire.steps,
+            episode_return: wire.episode_return,
+            terminal_done: wire.terminal_done,
+            termination: wire.termination,
+            protocol_error_code: wire.protocol_error_code,
+        };
+        provenance.validate().map_err(serde::de::Error::custom)?;
+        Ok(provenance)
+    }
+}
+
+impl OpenEnvRolloutProvenanceV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        environment_name: impl Into<String>,
+        environment_base_url: impl Into<String>,
+        openapi_version: Option<String>,
+        environment_schema_sha256: String,
+        action_schema_sha256: String,
+        reset_sha256: String,
+        seed: u64,
+        steps: usize,
+        episode_return: f64,
+        terminal_done: bool,
+        termination: OpenEnvEpisodeTerminationV1,
+        protocol_error_code: Option<String>,
+    ) -> Result<Self, String> {
+        let provenance = Self {
+            schema: OPENENV_ROLLOUT_PROVENANCE_SCHEMA_V1.to_string(),
+            environment_name: environment_name.into(),
+            environment_base_url: environment_base_url.into(),
+            openapi_version,
+            environment_schema_sha256,
+            action_schema_sha256,
+            reset_sha256,
+            seed,
+            steps,
+            episode_return,
+            terminal_done,
+            termination,
+            protocol_error_code,
+        };
+        provenance.validate()?;
+        Ok(provenance)
+    }
+
+    pub fn schema(&self) -> &str {
+        &self.schema
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != OPENENV_ROLLOUT_PROVENANCE_SCHEMA_V1 {
+            return Err(format!(
+                "unsupported OpenEnv rollout provenance schema {:?}; expected {:?}",
+                self.schema, OPENENV_ROLLOUT_PROVENANCE_SCHEMA_V1
+            ));
+        }
+        validate_identity_text(
+            "openenv.environment_name",
+            &self.environment_name,
+            MAX_ROLLOUT_IDENTITY_TEXT_BYTES,
+        )?;
+        validate_identity_text(
+            "openenv.environment_base_url",
+            &self.environment_base_url,
+            2048,
+        )?;
+        if let Some(version) = &self.openapi_version {
+            validate_identity_text(
+                "openenv.openapi_version",
+                version,
+                MAX_ROLLOUT_IDENTITY_TEXT_BYTES,
+            )?;
+        }
+        validate_sha256(
+            "openenv.environment_schema_sha256",
+            &self.environment_schema_sha256,
+        )?;
+        validate_sha256("openenv.action_schema_sha256", &self.action_schema_sha256)?;
+        validate_sha256("openenv.reset_sha256", &self.reset_sha256)?;
+        if !self.episode_return.is_finite() {
+            return Err(format!(
+                "openenv.episode_return must be finite, got {}",
+                self.episode_return
+            ));
+        }
+        if self.terminal_done != matches!(self.termination, OpenEnvEpisodeTerminationV1::Done) {
+            return Err(
+                "openenv.terminal_done must be true exactly when termination is done".to_string(),
+            );
+        }
+        match (self.termination, self.protocol_error_code.as_deref()) {
+            (OpenEnvEpisodeTerminationV1::ProtocolError, Some(code)) => {
+                validate_identity_text(
+                    "openenv.protocol_error_code",
+                    code,
+                    MAX_ROLLOUT_IDENTITY_TEXT_BYTES,
+                )?;
+            }
+            (OpenEnvEpisodeTerminationV1::ProtocolError, None) => {
+                return Err(
+                    "openenv.protocol_error_code is required for protocol_error termination"
+                        .to_string(),
+                );
+            }
+            (_, Some(_)) => {
+                return Err(
+                    "openenv.protocol_error_code is only valid for protocol_error termination"
+                        .to_string(),
+                );
+            }
+            (_, None) => {}
+        }
+        Ok(())
+    }
+}
+
 /// One semantic turn in a trajectory.
 ///
 /// `content` is the raw text the model emitted or saw, *before* chat-template
@@ -703,6 +900,10 @@ pub struct ScoredRollout {
     /// under an explicitly provenance-free training mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<RolloutProvenanceV1>,
+    /// OpenEnv environment/task identity and episode outcome. Present for
+    /// native `kiln openenv` rollouts and absent for ordinary scored data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openenv: Option<OpenEnvRolloutProvenanceV1>,
 }
 
 impl ScoredRollout {
@@ -713,6 +914,7 @@ impl ScoredRollout {
             reward,
             trajectory: Vec::new(),
             provenance: None,
+            openenv: None,
         }
     }
 
@@ -726,12 +928,19 @@ impl ScoredRollout {
             reward,
             trajectory,
             provenance: None,
+            openenv: None,
         }
     }
 
     /// Attach validated exact generation provenance.
     pub fn with_provenance(mut self, provenance: RolloutProvenanceV1) -> Self {
         self.provenance = Some(provenance);
+        self
+    }
+
+    /// Attach validated OpenEnv environment and episode provenance.
+    pub fn with_openenv(mut self, provenance: OpenEnvRolloutProvenanceV1) -> Self {
+        self.openenv = Some(provenance);
         self
     }
 
@@ -853,6 +1062,57 @@ mod tests {
             "rocm",
         )
         .unwrap()
+    }
+
+    fn valid_openenv_provenance() -> OpenEnvRolloutProvenanceV1 {
+        OpenEnvRolloutProvenanceV1::new(
+            "CounterEnvironment",
+            "http://127.0.0.1:8990",
+            Some("0.1.0".to_string()),
+            hash('9'),
+            hash('a'),
+            hash('b'),
+            17,
+            2,
+            6.0,
+            true,
+            OpenEnvEpisodeTerminationV1::Done,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn openenv_provenance_round_trips_and_fails_closed() {
+        let provenance = valid_openenv_provenance();
+        let value = serde_json::to_value(&provenance).unwrap();
+        let parsed: OpenEnvRolloutProvenanceV1 = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(parsed, provenance);
+        assert_eq!(parsed.schema(), OPENENV_ROLLOUT_PROVENANCE_SCHEMA_V1);
+
+        let mut inconsistent_done = value.clone();
+        inconsistent_done["terminal_done"] = serde_json::json!(false);
+        let error = serde_json::from_value::<OpenEnvRolloutProvenanceV1>(inconsistent_done)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("terminal_done"), "{error}");
+
+        let mut unexpected_error = value;
+        unexpected_error["protocol_error_code"] = serde_json::json!("EXECUTION_ERROR");
+        let error = serde_json::from_value::<OpenEnvRolloutProvenanceV1>(unexpected_error)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("only valid"), "{error}");
+    }
+
+    #[test]
+    fn scored_rollout_payload_identity_binds_openenv_episode() {
+        let plain = ScoredRollout::legacy(r#"{"amount":2}"#.to_string(), 6.0);
+        let bound = plain.clone().with_openenv(valid_openenv_provenance());
+        assert_ne!(
+            scored_rollout_payload_sha256(&plain).unwrap(),
+            scored_rollout_payload_sha256(&bound).unwrap()
+        );
     }
 
     #[test]

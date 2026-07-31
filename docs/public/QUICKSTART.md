@@ -72,6 +72,8 @@ print(response.choices[0].message.content)
 
 ## 5. Choose the next guide
 
+- [OpenEnv training](https://ericflo.github.io/kiln/docs/openenv/): run seed-matched
+  stateful RL episodes and train directly from environment rewards.
 - [GRPO](https://ericflo.github.io/kiln/grpo.html): score completions, train, evaluate, and
   hot-swap an adapter.
 - [Evals](https://ericflo.github.io/kiln/evals.html): build a suite and compare base versus

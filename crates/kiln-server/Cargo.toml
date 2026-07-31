@@ -37,6 +37,7 @@ kiln-core = { workspace = true }
 kiln-memory = { workspace = true }
 kiln-eval = { workspace = true }
 kiln-model = { workspace = true }
+kiln-openenv = { workspace = true }
 kiln-resource = { workspace = true }
 kiln-scheduler = { workspace = true }
 kiln-tensor = { workspace = true }

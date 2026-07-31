@@ -257,7 +257,7 @@
 
   <section>
     <div class="max-w-4xl mx-auto px-6 pt-16 pb-10">
-      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">CLI guide &middot; serve &middot; pi-setup &middot; train &middot; eval &middot; adapters</span>
+      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">CLI guide &middot; serve &middot; openenv &middot; train &middot; eval &middot; adapters</span>
       <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">Run Kiln from the terminal</h1>
       <p class="text-lg leading-relaxed max-w-3xl" style="color: var(--fg-dim);">
         Use the CLI to start a headless server, automate a workflow, or
@@ -272,6 +272,7 @@
         <a href="#health" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Check health</a>
         <a href="#binary-availability" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Find each binary</a>
         <a href="#pi-setup" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Configure pi</a>
+        <a href="#openenv" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Train with OpenEnv</a>
         <a href="#training" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Submit training</a>
         <a href="#evals" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Run evals</a>
         <a href="#benchmarks" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Run offline tools</a>
@@ -297,6 +298,12 @@ kiln serve</code></pre>
             <p class="mb-3" style="color: var(--fg-dim);">Use the readable tree for humans or JSON for scripts and CI probes.</p>
 <pre class="text-xs"><code>kiln health
 kiln health --json</code></pre>
+          </div>
+          <div>
+            <h3 class="font-semibold mb-2">Train in an OpenEnv</h3>
+            <p class="mb-3" style="color: var(--fg-dim);">Discover a stateful RL environment, collect seed-matched episodes, and train from its rewards.</p>
+<pre class="text-xs"><code>kiln openenv inspect --environment http://127.0.0.1:8990
+kiln openenv train --environment http://127.0.0.1:8990 --output-adapter counter-agent</code></pre>
           </div>
           <div>
             <h3 class="font-semibold mb-2">Submit training</h3>
@@ -583,6 +590,40 @@ pi -p "Use the bash tool to run: pwd"</code></pre>
         Kiln does not add API authentication. Use a remote URL only on a trusted network or behind
         an authenticated reverse proxy, especially when training and adapter-management routes are enabled.
       </p>
+    </div>
+  </section>
+
+  <section id="openenv" class="divider">
+    <div class="max-w-5xl mx-auto px-6 py-12">
+      <p class="label mb-2">OpenEnv reinforcement learning</p>
+      <h2 class="text-2xl font-semibold tracking-tight mb-4">Act, observe, reward, and train in one command</h2>
+      <p class="max-w-3xl mb-6" style="color: var(--fg-dim);"><code>kiln openenv</code> is the native environment-facing GRPO workflow. It checks OpenEnv discovery surfaces, opens one stateful WebSocket session per candidate, gives every candidate in a comparison group the same reset seed, asks the running Kiln model for action-schema JSON, preserves every action and observation for ECHO, and sums environment step rewards into episode return.</p>
+      <div class="grid lg:grid-cols-2 gap-4">
+        <div class="card p-5">
+          <h3 class="font-semibold mb-2">Inspect and collect</h3>
+<pre class="text-sm"><code>kiln openenv inspect \
+  --environment http://127.0.0.1:8990
+
+kiln openenv rollout \
+  --environment http://127.0.0.1:8990 \
+  --groups 16 \
+  --group-size 4 \
+  --output counter.rollouts.jsonl</code></pre>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);">Inspection reports metadata, action/observation/state schemas, the derived <code>WS /ws</code> URL, protocol profile, and schema SHA-256. Rollout collection writes canonical GRPO JSONL and a content-addressed summary receipt without starting training.</p>
+        </div>
+        <div class="card p-5">
+          <h3 class="font-semibold mb-2">Collect and train</h3>
+<pre class="text-sm"><code>kiln openenv train \
+  --environment http://127.0.0.1:8990 \
+  --adapter base \
+  --groups 32 \
+  --group-size 8 \
+  --max-steps 8 \
+  --output-adapter counter-agent</code></pre>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);">The artifacts are published before native on-policy GRPO submission. Repeat <code>--environment</code> for round-robin multi-environment groups; use <code>--reset-options FILE</code> for task parameters. Environment <code>done</code>, max-step cutoffs, invalid model JSON, and protocol errors remain distinct.</p>
+        </div>
+      </div>
+      <p class="text-sm mt-5" style="color: var(--fg-dim);">OpenEnv servers are untrusted inputs and Kiln adds no protocol authentication. Prefer loopback/private networks or HTTPS/WSS behind a trusted gateway. See the complete <a href="docs/openenv/" class="link">OpenEnv Training Guide</a> for wire semantics, limits, reward typing, identity, miniopenenv interoperability, and troubleshooting.</p>
     </div>
   </section>
 

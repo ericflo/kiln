@@ -1554,6 +1554,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-openenv"
+version = "0.5.1"
+dependencies = [
+ "anyhow",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
 name = "kiln-optim"
 version = "0.5.1"
 dependencies = [
@@ -1634,6 +1649,7 @@ dependencies = [
  "kiln-kt-bridge",
  "kiln-memory",
  "kiln-model",
+ "kiln-openenv",
  "kiln-resource",
  "kiln-scheduler",
  "kiln-tensor",
@@ -3065,8 +3081,12 @@ checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
 dependencies = [
  "futures-util",
  "log",
+ "rustls",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls",
  "tungstenite",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -3261,6 +3281,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.4",
+ "rustls",
+ "rustls-pki-types",
  "sha1",
  "thiserror 2.0.18",
 ]

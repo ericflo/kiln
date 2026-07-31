@@ -2,6 +2,16 @@
 
 ## Unreleased — capability-derived Vulkan execution
 
+- OpenEnv reinforcement learning is now a native Kiln workflow. The new
+  `kiln-openenv` crate implements bounded HTTP discovery, typed tagged rewards
+  and errors, content-addressed schema identity, and stateful lock-step
+  WebSocket episodes. `kiln openenv inspect`, `rollout`, and `train` create
+  deterministic seed-matched groups across one or more environments, preserve
+  multi-turn action/observation trajectories and environment-owned returns,
+  publish replayable JSONL plus a rollout receipt, and optionally submit
+  on-policy native GRPO directly. Canonical scored-rollout identity now binds
+  fail-closed OpenEnv episode provenance. CI drives a real pinned miniopenenv
+  counter episode end to end.
 - Corrected the v0.5.1 Vulkan recovery architecture. The recovered route set
   is no longer installed as a renamed global machine-tuned default. Policy v6
   is derived from the selected physical device's reported workgroup geometry,

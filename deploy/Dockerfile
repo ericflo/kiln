@@ -38,12 +38,13 @@ COPY crates/kiln-core/Cargo.toml          crates/kiln-core/Cargo.toml
 COPY crates/kiln-flash-attn/Cargo.toml    crates/kiln-flash-attn/Cargo.toml
 COPY crates/kiln-flash-attn/build.rs      crates/kiln-flash-attn/build.rs
 COPY crates/kiln-model/Cargo.toml         crates/kiln-model/Cargo.toml
+COPY crates/kiln-openenv/Cargo.toml       crates/kiln-openenv/Cargo.toml
 COPY crates/kiln-scheduler/Cargo.toml     crates/kiln-scheduler/Cargo.toml
 COPY crates/kiln-server/Cargo.toml        crates/kiln-server/Cargo.toml
 COPY crates/kiln-train/Cargo.toml         crates/kiln-train/Cargo.toml
 
 # Create dummy source files so cargo can resolve the workspace
-RUN for crate in kiln-core kiln-flash-attn kiln-model kiln-scheduler kiln-server kiln-train; do \
+RUN for crate in kiln-core kiln-flash-attn kiln-model kiln-openenv kiln-scheduler kiln-server kiln-train; do \
         mkdir -p crates/$crate/src && echo "" > crates/$crate/src/lib.rs; \
     done
 
