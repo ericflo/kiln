@@ -1558,6 +1558,7 @@ name = "kiln-openenv"
 version = "0.5.1"
 dependencies = [
  "anyhow",
+ "axum",
  "futures",
  "reqwest",
  "serde",

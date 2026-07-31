@@ -44,8 +44,8 @@
     },
     {
       "path": "crates/kiln-server/src/config.rs",
-      "max_lines": 11442,
-      "rationale": "Five implementation-neutral OpenEnv control-plane fields require canonical types, defaults, environment registration, validation, and completeness tests here; this exact reviewed cap prevents unrelated growth."
+      "max_lines": 11440,
+      "rationale": "OpenEnv credential policy lives in its own module; this residual increase covers the typed re-export, startup validation hook, redacted effective-config insertion, and a complete dynamic-field audit. The cap remains below its prior 11442-line ceiling."
     },
     {
       "path": "crates/kiln-server/src/state.rs",

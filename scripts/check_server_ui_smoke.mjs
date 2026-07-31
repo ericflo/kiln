@@ -388,6 +388,7 @@ function checkTrainingOptimizerSupportContract(appSource, indexSource, demoSourc
     if (!indexSource.includes(`id="${id}"`)) fail(`Training optimizer status node #${id} is missing`);
   }
   for (const id of [
+    'openenv-credential-ids',
     'openenv-environment-eval-mode',
     'openenv-environment-eval-groups',
     'openenv-environment-eval-group-size',
@@ -4687,12 +4688,17 @@ async function runSmoke(baseUrl, {
     await waitForPanelText(page, '#openenv-optimizer-support', /Muon · bf16 LoRA · round-to-nearest · rank 8 \(supported 2–32\)/, 'OpenEnv train should render the native GRPO optimizer tuple');
     await expectDisabled(page, '#openenv-form button[type="submit"]', false, 'OpenEnv train should enable after native GRPO capability admission');
     await page.$eval('#openenv-environments', input => { input.value = 'http://127.0.0.1:8990'; });
+    await page.$eval('#openenv-credential-ids', input => { input.value = 'smoke-arcade'; });
     const inspectRequest = page.waitForRequest(
       request => request.method() === 'POST' && request.url().endsWith('/v1/openenv/inspect'),
       { timeout: 5000 },
     );
     await clickAndWait(page, '#openenv-inspect', 'Could not inspect the OpenEnv server');
-    await inspectRequest.catch(() => fail('OpenEnv Inspect did not POST /v1/openenv/inspect'));
+    const openEnvInspectRequest = await inspectRequest.catch(() => fail('OpenEnv Inspect did not POST /v1/openenv/inspect'));
+    const openEnvInspectBody = JSON.parse(openEnvInspectRequest.postData() || '{}');
+    if (openEnvInspectBody.credential_ids?.[0] !== 'smoke-arcade') {
+      fail(`OpenEnv Inspect lost its origin-scoped credential handle: ${JSON.stringify(openEnvInspectBody)}`);
+    }
     await waitForPanelText(page, '#openenv-inspection', /smoke-bandit[\s\S]*schema sha256:aaaa/, 'OpenEnv inspection should render discovered identity and action schema');
     await page.select('#openenv-environment-eval-mode', 'gate');
     await page.$eval('#openenv-environment-gate-floor', input => { input.value = '0.5'; });
@@ -4706,6 +4712,7 @@ async function runSmoke(baseUrl, {
     const openEnvBody = JSON.parse(openEnvRequest.postData() || '{}');
     if (openEnvBody.kind !== 'train'
       || openEnvBody.environment_urls?.[0] !== 'http://127.0.0.1:8990'
+      || openEnvBody.credential_ids?.[0] !== 'smoke-arcade'
       || openEnvBody.adapter !== 'base'
       || openEnvBody.output_adapter !== 'openenv-agent'
       || openEnvBody.training_config?.lora_rank !== 8

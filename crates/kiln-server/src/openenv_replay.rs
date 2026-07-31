@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::openenv_cli::OpenEnvRolloutSummary;
+use crate::openenv_cli::{OpenEnvRolloutSummary, openenv_client};
 
 pub const OPENENV_REPLAY_SCHEMA_V1: &str = "kiln.openenv-replay.v1";
 pub const OPENENV_VERIFICATION_SCHEMA_V1: &str = "kiln.openenv-verification.v1";
@@ -757,22 +757,31 @@ pub async fn replay_openenv(
     replay_sha256: String,
     concurrency: usize,
     capacity_wait: Duration,
+    credential_envs: &[Option<String>],
 ) -> Result<OpenEnvReplayRunReport> {
     manifest.validate()?;
     anyhow::ensure!(
         concurrency > 0,
         "OpenEnv replay concurrency must be positive"
     );
+    anyhow::ensure!(
+        credential_envs.is_empty() || credential_envs.len() == manifest.environments.len(),
+        "OpenEnv replay credentials must be empty or contain one entry per captured environment"
+    );
 
     let mut clients = Vec::with_capacity(manifest.environments.len());
-    for expected in &manifest.environments {
-        let client = OpenEnvClient::new(&expected.identity.base_url)?;
+    for (index, expected) in manifest.environments.iter().enumerate() {
+        let credential_env = credential_envs
+            .get(index)
+            .and_then(|credential| credential.as_deref());
+        let client = openenv_client(&expected.identity.base_url, credential_env)?;
         let actual = client
             .inspect()
             .await
             .with_context(|| format!("inspect replay target {}", client.base_url()))?;
         anyhow::ensure!(
             actual.identity.metadata.name == expected.identity.metadata.name
+                && actual.identity.authentication == expected.identity.authentication
                 && actual.identity.schema_sha256 == expected.identity.schema_sha256
                 && actual.schema == expected.schema,
             "OpenEnv replay target {} identity/schema drifted from the captured environment",
@@ -1007,6 +1016,7 @@ mod tests {
                 client_profile: OPENENV_CLIENT_PROFILE.to_string(),
                 base_url: "http://127.0.0.1:8000".to_string(),
                 websocket_url: "ws://127.0.0.1:8000/ws".to_string(),
+                authentication: kiln_openenv::OpenEnvAuthentication::None,
                 openapi_version: Some("1".to_string()),
                 environments: vec!["counter".to_string()],
                 metadata: OpenEnvMetadata {

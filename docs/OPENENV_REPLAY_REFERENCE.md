@@ -47,6 +47,67 @@ The summary is an audit receipt, not proof that an implementation behind the
 same URL has remained unchanged. Pin an environment image or binary and retain
 its deployment identity for serious experiments.
 
+### Authentication boundary
+
+Environment identity records whether collection used `none` or `bearer`
+authentication. It never records the bearer value, API/dashboard credential
+handle, or environment-variable name. Server-owned workflows resolve handles
+from exact-origin configuration:
+
+```toml
+[openenv]
+allow_remote_environments = true
+
+[openenv.credentials.production-arcade]
+origin = "https://arcade.example.com"
+bearer_token_env = "ARCADE_OPENENV_TOKEN"
+```
+
+Set `ARCADE_OPENENV_TOKEN` before starting Kiln. API and dashboard requests
+align an opaque handle with each environment; use `null` for a public slot:
+
+```json
+{
+  "environment_urls": ["https://arcade.example.com/openenv"],
+  "credential_ids": ["production-arcade"]
+}
+```
+
+Direct commands resolve an environment-variable name immediately before
+client construction:
+
+```bash
+ARCADE_OPENENV_TOKEN=... kiln openenv inspect \
+  --environment https://arcade.example.com/openenv \
+  --credential-env ARCADE_OPENENV_TOKEN
+
+kiln openenv train \
+  --environment https://arcade.example.com/openenv \
+  --credential-env ARCADE_OPENENV_TOKEN \
+  --output-adapter arcade-agent
+```
+
+Repeat `--credential-env` in environment order and use `-` for a public slot.
+The sensitive header is applied uniformly to `/health`, discovery, and the
+WebSocket upgrade. Remote credentials require HTTPS/WSS; loopback HTTP remains
+available for local development. The
+`kiln_openenv_authenticated_operations_total{operation="inspect"|"run"}` metric
+counts protected operations without credential, origin, or token labels.
+Authenticated response bodies and episode frames are checked for direct token
+reflection before parsing so a peer cannot place the configured credential in
+training data or artifacts.
+
+Live replay of an authenticated bundle must provide a credential source in the
+same environment position. Replay checks that the resulting authentication
+method matches captured identity, but intentionally permits token rotation.
+Offline verification needs no credential because secrets are outside the
+content-addressed artifact boundary.
+
+```bash
+kiln openenv replay --summary protected.rollout-summary.json \
+  --credential-env ARCADE_OPENENV_TOKEN
+```
+
 ### Paired held-out evaluation bundle
 
 A server train run with `environment_eval` adds:
@@ -220,6 +281,12 @@ receipt counters before changing the budget.
 **Replay reports drift.** Confirm that the same environment build, task data,
 and reset semantics are deployed at the captured URL. Stable schema identity
 does not imply stable behavior.
+
+**A protected environment returns 401 or rejects the WebSocket upgrade.**
+Confirm that the configured credential origin exactly matches the URL's
+scheme/host/port, the named environment variable is present and non-empty in
+the Kiln process, and replay received one aligned `--credential-env`. Remote
+bearer credentials require HTTPS/WSS; redirects are never followed.
 
 **Candidates in one group get different initial prompts.** The environment is
 not deterministic for the supplied reset seed. Kiln rejects the group instead

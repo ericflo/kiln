@@ -40,6 +40,12 @@
         "client_profile": { "const": "openenv-http/1.x" },
         "base_url": { "type": "string", "minLength": 1 },
         "websocket_url": { "type": "string", "pattern": "^wss?://" },
+        "authentication": {
+          "type": "string",
+          "enum": ["none", "bearer"],
+          "default": "none",
+          "description": "Request authentication applied to both discovery and the WebSocket upgrade. Credential handles and secrets are excluded."
+        },
         "openapi_version": { "type": ["string", "null"] },
         "environments": {
           "type": "array",

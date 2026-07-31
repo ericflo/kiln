@@ -4,14 +4,17 @@ use std::time::Duration;
 
 use anyhow::Context;
 use futures::{SinkExt, StreamExt};
-use reqwest::StatusCode;
+use reqwest::{
+    StatusCode,
+    header::{AUTHORIZATION, HeaderValue},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async_with_config,
-    tungstenite::{self, Message, protocol::WebSocketConfig},
+    tungstenite::{self, Message, client::IntoClientRequest, protocol::WebSocketConfig},
 };
 
 use crate::types::{
@@ -26,6 +29,10 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 pub enum OpenEnvClientError {
     #[error("invalid OpenEnv base URL: {0}")]
     InvalidBaseUrl(String),
+    #[error("invalid OpenEnv bearer credential")]
+    InvalidCredential,
+    #[error("OpenEnv bearer credentials require HTTPS/WSS unless the environment host is loopback")]
+    InsecureCredentialTransport,
     #[error("OpenEnv HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
     #[error("OpenEnv endpoint {endpoint} returned HTTP {status}: {body}")]
@@ -38,6 +45,10 @@ pub enum OpenEnvClientError {
     HttpBodyTooLarge { endpoint: String, limit: usize },
     #[error("OpenEnv WebSocket failed: {0}")]
     WebSocket(#[from] tungstenite::Error),
+    #[error("authenticated OpenEnv WebSocket upgrade returned HTTP {0}; response redacted")]
+    AuthenticatedWebSocketStatus(StatusCode),
+    #[error("OpenEnv peer reflected the configured bearer credential; response rejected")]
+    CredentialReflected,
     #[error("OpenEnv request timed out after {0:?}")]
     Timeout(Duration),
     #[error("OpenEnv peer closed the episode socket")]
@@ -57,12 +68,24 @@ pub enum OpenEnvClientError {
     },
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenEnvAuthentication {
+    #[default]
+    None,
+    Bearer,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OpenEnvIdentity {
     pub schema: String,
     pub client_profile: String,
     pub base_url: String,
     pub websocket_url: String,
+    /// Authentication method applied to both discovery and WebSocket upgrade.
+    /// Credential handles and secret values are intentionally excluded.
+    #[serde(default)]
+    pub authentication: OpenEnvAuthentication,
     pub openapi_version: Option<String>,
     pub environments: Vec<String>,
     pub metadata: OpenEnvMetadata,
@@ -81,6 +104,9 @@ pub struct OpenEnvClient {
     websocket_url: String,
     http: reqwest::Client,
     request_timeout: Duration,
+    /// A sensitive header value intentionally omitted from Debug, identities,
+    /// receipts, replay manifests, and every serialized OpenEnv artifact.
+    authorization: Option<HeaderValue>,
 }
 
 impl std::fmt::Debug for OpenEnvClient {
@@ -90,6 +116,7 @@ impl std::fmt::Debug for OpenEnvClient {
             .field("base_url", &self.base_url)
             .field("websocket_url", &self.websocket_url)
             .field("request_timeout", &self.request_timeout)
+            .field("authenticated", &self.authorization.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -108,7 +135,33 @@ impl OpenEnvClient {
             websocket_url,
             http,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            authorization: None,
         })
+    }
+
+    /// Authenticate both HTTP discovery and the stateful WebSocket upgrade
+    /// with one standard bearer credential.
+    ///
+    /// The credential is held only as a sensitive request header and is never
+    /// included in Debug output or any protocol identity.
+    pub fn with_bearer_token(mut self, token: impl AsRef<str>) -> Result<Self, OpenEnvClientError> {
+        let token = token.as_ref();
+        if token.trim().is_empty()
+            || token.trim() != token
+            || token
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        {
+            return Err(OpenEnvClientError::InvalidCredential);
+        }
+        if !credential_transport_is_secure(&self.base_url) {
+            return Err(OpenEnvClientError::InsecureCredentialTransport);
+        }
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_| OpenEnvClientError::InvalidCredential)?;
+        authorization.set_sensitive(true);
+        self.authorization = Some(authorization);
+        Ok(self)
     }
 
     pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
@@ -127,9 +180,9 @@ impl OpenEnvClient {
     /// OpenEnv client requirement 8.B.2: health is status-only.
     pub async fn health(&self) -> Result<(), OpenEnvClientError> {
         let endpoint = self.endpoint("health");
-        let response = self.http.get(&endpoint).send().await?;
+        let response = self.authenticate(self.http.get(&endpoint)).send().await?;
         if response.status() != StatusCode::OK {
-            return Err(http_status_error(endpoint, response).await);
+            return Err(http_status_error(endpoint, response, self.authorization.is_some()).await);
         }
         Ok(())
     }
@@ -180,6 +233,11 @@ impl OpenEnvClient {
                 client_profile: OPENENV_CLIENT_PROFILE.to_string(),
                 base_url: self.base_url.clone(),
                 websocket_url: self.websocket_url.clone(),
+                authentication: if self.authorization.is_some() {
+                    OpenEnvAuthentication::Bearer
+                } else {
+                    OpenEnvAuthentication::None
+                },
                 openapi_version,
                 environments,
                 metadata,
@@ -196,11 +254,25 @@ impl OpenEnvClient {
             .max_write_buffer_size(OPENENV_MAX_CLIENT_MESSAGE_BYTES + 16 * 1024)
             .max_message_size(Some(OPENENV_MAX_SERVER_MESSAGE_BYTES))
             .max_frame_size(Some(OPENENV_MAX_SERVER_MESSAGE_BYTES));
-        let connect =
-            connect_async_with_config(self.websocket_url.as_str(), Some(socket_config), false);
-        let (socket, response) = tokio::time::timeout(self.request_timeout, connect)
+        let mut request = self.websocket_url.as_str().into_client_request()?;
+        if let Some(authorization) = &self.authorization {
+            request
+                .headers_mut()
+                .insert(AUTHORIZATION, authorization.clone());
+        }
+        let connect = connect_async_with_config(request, Some(socket_config), false);
+        let connected = tokio::time::timeout(self.request_timeout, connect)
             .await
-            .map_err(|_| OpenEnvClientError::Timeout(self.request_timeout))??;
+            .map_err(|_| OpenEnvClientError::Timeout(self.request_timeout))?;
+        let (socket, response) = match connected {
+            Ok(connected) => connected,
+            Err(tungstenite::Error::Http(response)) if self.authorization.is_some() => {
+                return Err(OpenEnvClientError::AuthenticatedWebSocketStatus(
+                    response.status(),
+                ));
+            }
+            Err(error) => return Err(OpenEnvClientError::WebSocket(error)),
+        };
         if response.status() != StatusCode::SWITCHING_PROTOCOLS {
             return Err(OpenEnvClientError::InvalidMessage(format!(
                 "OpenEnv WebSocket upgrade returned {}",
@@ -211,6 +283,8 @@ impl OpenEnvClient {
             socket,
             request_timeout: self.request_timeout,
             closed: false,
+            credential_marker: bearer_token_bytes(self.authorization.as_ref())
+                .map(ToOwned::to_owned),
         })
     }
 
@@ -218,16 +292,26 @@ impl OpenEnvClient {
         format!("{}/{}", self.base_url, path.trim_start_matches('/'))
     }
 
+    fn authenticate(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.authorization {
+            Some(authorization) => request.header(AUTHORIZATION, authorization.clone()),
+            None => request,
+        }
+    }
+
     async fn get_json<T>(&self, path: &str) -> Result<T, OpenEnvClientError>
     where
         T: serde::de::DeserializeOwned,
     {
         let endpoint = self.endpoint(path);
-        let response = self.http.get(&endpoint).send().await?;
+        let response = self.authenticate(self.http.get(&endpoint)).send().await?;
         if !response.status().is_success() {
-            return Err(http_status_error(endpoint, response).await);
+            return Err(http_status_error(endpoint, response, self.authorization.is_some()).await);
         }
         let bytes = read_http_body_bounded(&endpoint, response).await?;
+        if credential_reflected(&bytes, self.authorization.as_ref()) {
+            return Err(OpenEnvClientError::CredentialReflected);
+        }
         serde_json::from_slice(&bytes)
             .map_err(|error| OpenEnvClientError::InvalidMessage(error.to_string()))
     }
@@ -237,6 +321,9 @@ pub struct OpenEnvSession {
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     request_timeout: Duration,
     closed: bool,
+    /// Raw credential bytes used only to reject reflected secrets before
+    /// parsing. Intentionally omitted from Debug and every serialized value.
+    credential_marker: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for OpenEnvSession {
@@ -245,6 +332,7 @@ impl std::fmt::Debug for OpenEnvSession {
             .debug_struct("OpenEnvSession")
             .field("request_timeout", &self.request_timeout)
             .field("closed", &self.closed)
+            .field("authenticated", &self.credential_marker.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -330,6 +418,11 @@ impl OpenEnvSession {
                     if text.len() > OPENENV_MAX_SERVER_MESSAGE_BYTES {
                         return Err(OpenEnvClientError::MessageTooLarge(text.len()));
                     }
+                    if self.credential_marker.as_ref().is_some_and(|marker| {
+                        contains_credential(text.as_bytes(), marker.as_slice())
+                    }) {
+                        return Err(OpenEnvClientError::CredentialReflected);
+                    }
                     return serde_json::from_str(&text)
                         .map_err(|error| OpenEnvClientError::InvalidMessage(error.to_string()));
                 }
@@ -355,6 +448,43 @@ impl OpenEnvSession {
     }
 }
 
+fn bearer_token_bytes(authorization: Option<&HeaderValue>) -> Option<&[u8]> {
+    authorization?
+        .as_bytes()
+        .strip_prefix(b"Bearer ")
+        .filter(|token| !token.is_empty())
+}
+
+fn credential_transport_is_secure(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        return false;
+    };
+    if url.scheme() == "https" {
+        return true;
+    }
+    url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    })
+}
+
+fn credential_reflected(payload: &[u8], authorization: Option<&HeaderValue>) -> bool {
+    bearer_token_bytes(authorization)
+        .is_some_and(|credential| contains_credential(payload, credential))
+}
+
+fn contains_credential(payload: &[u8], credential: &[u8]) -> bool {
+    !credential.is_empty()
+        && payload.len() >= credential.len()
+        && payload
+            .windows(credential.len())
+            .any(|candidate| candidate == credential)
+}
+
 fn expect_observation(
     response: OpenEnvServerMessage,
 ) -> Result<OpenEnvObservation, OpenEnvClientError> {
@@ -374,14 +504,22 @@ fn unexpected(expected: &'static str, message: &OpenEnvServerMessage) -> OpenEnv
     OpenEnvClientError::UnexpectedResponse { expected, actual }
 }
 
-async fn http_status_error(endpoint: String, response: reqwest::Response) -> OpenEnvClientError {
+async fn http_status_error(
+    endpoint: String,
+    response: reqwest::Response,
+    authenticated: bool,
+) -> OpenEnvClientError {
     let status = response.status();
-    let body = match read_http_body_bounded(&endpoint, response).await {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        Err(OpenEnvClientError::HttpBodyTooLarge { limit, .. }) => {
-            format!("<body exceeded {limit} bytes>")
+    let body = if authenticated {
+        "<authenticated response body redacted>".to_string()
+    } else {
+        match read_http_body_bounded(&endpoint, response).await {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(OpenEnvClientError::HttpBodyTooLarge { limit, .. }) => {
+                format!("<body exceeded {limit} bytes>")
+            }
+            Err(error) => format!("<failed to read body: {error}>"),
         }
-        Err(error) => format!("<failed to read body: {error}>"),
     };
     OpenEnvClientError::HttpStatus {
         endpoint,
@@ -490,5 +628,53 @@ mod tests {
         assert!(OpenEnvClient::new("ftp://example.test").is_err());
         assert!(OpenEnvClient::new("http://token@example.test").is_err());
         assert!(OpenEnvClient::new("http://example.test?token=secret").is_err());
+    }
+
+    #[test]
+    fn bearer_credentials_are_validated_and_redacted_from_debug() {
+        let secret = "super-secret-openenv-token";
+        let client = OpenEnvClient::new("https://example.test/prefix")
+            .unwrap()
+            .with_bearer_token(secret)
+            .unwrap();
+        let debug = format!("{client:?}");
+        assert!(debug.contains("authenticated: true"));
+        assert!(!debug.contains(secret));
+        assert!(
+            OpenEnvClient::new("https://example.test")
+                .unwrap()
+                .with_bearer_token(" \t")
+                .is_err()
+        );
+        assert!(
+            OpenEnvClient::new("https://example.test")
+                .unwrap()
+                .with_bearer_token("line-one\nline-two")
+                .is_err()
+        );
+        assert!(
+            OpenEnvClient::new("https://example.test")
+                .unwrap()
+                .with_bearer_token(" token-with-leading-space")
+                .is_err()
+        );
+        assert!(
+            OpenEnvClient::new("https://example.test")
+                .unwrap()
+                .with_bearer_token("token with internal space")
+                .is_err()
+        );
+        assert!(matches!(
+            OpenEnvClient::new("http://environment.example")
+                .unwrap()
+                .with_bearer_token(secret),
+            Err(OpenEnvClientError::InsecureCredentialTransport)
+        ));
+        assert!(
+            OpenEnvClient::new("http://[::1]:8990")
+                .unwrap()
+                .with_bearer_token(secret)
+                .is_ok()
+        );
     }
 }

@@ -706,7 +706,9 @@ pub fn ensure_memory_governor_for_runtime(
     Ok(())
 }
 
-pub use credential_provider::{CredentialLookupError, validate_bearer_secret_environment};
+pub use credential_provider::{
+    CredentialLookupError, bearer_secret_from_environment, validate_bearer_secret_environment,
+};
 pub use hf_grpo_interop::{
     HF_TRL_GRPO_CORPUS_IDENTITY_V1, HF_TRL_GRPO_MAX_COMPLETIONS_PER_GROUP,
     HF_TRL_GRPO_MAX_DATASET_BYTES, HF_TRL_GRPO_MAX_GROUPS, HF_TRL_GRPO_MAX_ROW_BYTES,

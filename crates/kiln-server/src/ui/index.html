@@ -554,6 +554,11 @@
               <span id="openenv-inspection" class="form-help" role="status" aria-live="polite">Add an environment URL to inspect its identity and action schema.</span>
             </div>
           </div>
+          <div class="form-group">
+            <label for="openenv-credential-ids">Credential handles <span class="hint">— optional; one server-configured ID per URL</span></label>
+            <textarea id="openenv-credential-ids" rows="2" spellcheck="false" autocomplete="off" placeholder="production-arcade"></textarea>
+            <div class="form-help">Leave the whole field empty for public environments. When mixing protected and public URLs, provide one line per URL and use <code>-</code> for a public slot. Bearer values remain in server-owned environment variables.</div>
+          </div>
           <div class="form-row">
             <div class="form-group">
               <label for="openenv-kind">Outcome</label>

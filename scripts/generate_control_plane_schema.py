@@ -487,13 +487,14 @@ def build_openenv_types() -> None:
             "client_profile": ref("String"),
             "base_url": ref("String"),
             "websocket_url": ref("String"),
+            "authentication": {"enum": ["none", "bearer"]},
             "openapi_version": nullable(ref("String")),
             "environments": array(ref("String")),
             "metadata": ref("OpenEnvMetadata"),
             "schema_sha256": ref("Sha256"),
         },
         "Content-addressed identity established by OpenEnv discovery.",
-        optional=("openapi_version",),
+        optional=("authentication", "openapi_version"),
     )
     add_object(
         "OpenEnvInspection",
@@ -729,6 +730,15 @@ def build_openenv_types() -> None:
         {
             "kind": ref("OpenEnvRunKind"),
             "environment_urls": array(ref("NonEmptyString"), min_items=1),
+            "credential_ids": array(
+                {
+                    "type": ["string", "null"],
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9_-]+$",
+                    "not": {"const": "-"},
+                }
+            ),
             "adapter": ref("NonEmptyString"),
             "groups": ref("PositiveInteger"),
             "group_size": ref("PositiveInteger"),
@@ -751,6 +761,7 @@ def build_openenv_types() -> None:
         "A persisted OpenEnv rollout or rollout-and-train request with optional paired held-out environment evaluation. `environments` is accepted as an input alias for `environment_urls`.",
         optional=(
             "kind",
+            "credential_ids",
             "adapter",
             "groups",
             "group_size",
@@ -775,6 +786,7 @@ def build_openenv_types() -> None:
             "x-kiln-semantic-constraints": [
                 "kind=train requires output_adapter",
                 "kind=rollout rejects output_adapter and environment_eval",
+                "credential_ids is empty for unauthenticated endpoints or has exactly one origin-scoped handle/null entry per environment_urls item",
                 "environment_eval requires a distinct behavior and output adapter, and its seed interval must not overlap training",
                 "environment_eval.gate requires at least 20 distinct paired seed groups and cannot be combined with post_eval.min_accuracy",
                 "an environment gate defers auto_load until a significant exact paired sign-test win also satisfies configured return thresholds",
@@ -834,9 +846,26 @@ def build_openenv_types() -> None:
     add_object(
         "OpenEnvInspectRequest",
         "OpenEnvInspectRequest",
-        {"environment_urls": array(ref("NonEmptyString"), min_items=1)},
-        "One or more OpenEnv HTTP base URLs to discover. `environments` is accepted as an input alias.",
-        extra={"x-kiln-input-aliases": {"environments": "environment_urls"}},
+        {
+            "environment_urls": array(ref("NonEmptyString"), min_items=1),
+            "credential_ids": array(
+                {
+                    "type": ["string", "null"],
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9_-]+$",
+                    "not": {"const": "-"},
+                }
+            ),
+        },
+        "One or more OpenEnv HTTP base URLs to discover, with optional origin-scoped server credential handles. `environments` is accepted as an input alias.",
+        optional=("credential_ids",),
+        extra={
+            "x-kiln-input-aliases": {"environments": "environment_urls"},
+            "x-kiln-semantic-constraints": [
+                "credential_ids is empty or has exactly one handle/null entry per environment_urls item"
+            ],
+        },
     )
     add_object(
         "OpenEnvInspectResponse",
@@ -1319,6 +1348,7 @@ def build_examples() -> dict[str, list[Any]]:
             "client_profile": "openenv-python-sdk-v1",
             "base_url": "http://127.0.0.1:8000",
             "websocket_url": "ws://127.0.0.1:8000/ws",
+            "authentication": "bearer",
             "openapi_version": "3.1.0",
             "environments": ["bandit"],
             "metadata": {
@@ -1340,6 +1370,7 @@ def build_examples() -> dict[str, list[Any]]:
     openenv_request = {
         "kind": "train",
         "environment_urls": ["http://127.0.0.1:8000"],
+        "credential_ids": ["local-arcade"],
         "adapter": "base",
         "groups": 8,
         "group_size": 4,
@@ -1445,7 +1476,7 @@ def build_examples() -> dict[str, list[Any]]:
         "MarkTrainedResponse": [{"status": "marked", "marked": 1}],
         "MessageRequest": [{"message": "Also run the focused test."}],
         "OpdRequest": [opd],
-        "OpenEnvInspectRequest": [{"environment_urls": ["http://127.0.0.1:8000"]}],
+        "OpenEnvInspectRequest": [{"environment_urls": ["http://127.0.0.1:8000"], "credential_ids": ["local-arcade"]}],
         "OpenEnvInspectResponse": [{"schema": "kiln.openenv-inspection.v1", "environments": [openenv_inspection]}],
         "OpenEnvRunList": [{"schema": "kiln.openenv-run-list.v3", "runs": [openenv_status]}],
         "OpenEnvRunRequest": [openenv_request],

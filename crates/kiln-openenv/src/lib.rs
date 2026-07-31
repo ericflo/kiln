@@ -10,7 +10,8 @@ mod client;
 mod types;
 
 pub use client::{
-    OpenEnvClient, OpenEnvClientError, OpenEnvIdentity, OpenEnvInspection, OpenEnvSession,
+    OpenEnvAuthentication, OpenEnvClient, OpenEnvClientError, OpenEnvIdentity, OpenEnvInspection,
+    OpenEnvSession,
 };
 pub use types::{
     OPENENV_CLIENT_PROFILE, OPENENV_MAX_CLIENT_MESSAGE_BYTES, OPENENV_MAX_DISCOVERY_BYTES,

@@ -1144,6 +1144,45 @@
           "x-kiln-canonical-env": "KILN_OPENENV_ALLOW_REMOTE_ENVIRONMENTS (implemented)",
           "x-kiln-environment": "none",
           "x-kiln-validation": "When false, server-launched discovery and runs reject non-loopback origins before network access. Enable only for trusted operators and origins; Kiln's HTTP API is unauthenticated unless protected by your deployment."
+        },
+        "credentials": {
+          "type": "object",
+          "description": "Config-file-only OpenEnv bearer credential handles. API and dashboard requests name an opaque handle; the secret remains in the referenced process environment variable.",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            "not": {
+              "const": "-"
+            }
+          },
+          "patternProperties": {
+            "^[A-Za-z0-9_-]{1,64}$": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "origin",
+                "bearer_token_env"
+              ],
+              "properties": {
+                "origin": {
+                  "type": "string",
+                  "pattern": "^https?://[^/?#]+$",
+                  "description": "Exact canonical scheme/host/port origin authorized to receive this credential. HTTPS is required unless the host is loopback."
+                },
+                "bearer_token_env": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$",
+                  "description": "Environment-variable name containing the bearer token. The effective configuration reports this field as redacted null."
+                }
+              }
+            }
+          },
+          "additionalProperties": false,
+          "default": {},
+          "x-kiln-path": "openenv.credentials.<id>",
+          "x-kiln-type-and-default": "map of origin-scoped credential objects; empty",
+          "x-kiln-canonical-env": "none",
+          "x-kiln-environment": "none",
+          "x-kiln-validation": "Config-file-only handles. IDs use 1..=64 ASCII letters, digits, _ or -, except that - alone is reserved for a public CLI/dashboard slot; each object requires an exact canonical origin and bearer_token_env. Remote origins require HTTPS. The named secret must be set and non-empty at startup; its value and variable name are redacted from effective configuration."
         }
       },
       "default": {},
@@ -2011,7 +2050,7 @@
     }
   ],
   "x-kiln-field-count": 117,
-  "x-kiln-dynamic-field-template-count": 2,
+  "x-kiln-dynamic-field-template-count": 3,
   "x-kiln-canonical-environment-count": 112,
   "x-kiln-config-file-only-count": 5,
   "x-kiln-compatibility-field-count": 0,

@@ -39,6 +39,7 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
         rollout: OpenEnvRolloutOptions {
             kiln_url: format!("http://{address}"),
             environment_urls: vec![environment_url],
+            credential_envs: Vec::new(),
             adapter: "base".to_string(),
             groups: 1,
             group_size: 2,
@@ -113,6 +114,7 @@ async fn collects_submits_verifies_and_replays_a_real_arcade_batch() {
         verified.report.replay_sha256,
         2,
         Duration::from_secs(10),
+        &[],
     )
     .await
     .unwrap();

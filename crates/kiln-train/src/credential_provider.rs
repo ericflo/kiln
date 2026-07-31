@@ -16,7 +16,11 @@ pub fn validate_bearer_secret_environment(name: &str) -> Result<(), CredentialLo
     bearer_secret_from_environment(name).map(drop)
 }
 
-pub(crate) fn bearer_secret_from_environment(name: &str) -> Result<String, CredentialLookupError> {
+/// Resolve one explicitly configured bearer-secret environment variable.
+///
+/// Callers must keep the returned value out of Debug output, persistence,
+/// error bodies, metrics, and receipts.
+pub fn bearer_secret_from_environment(name: &str) -> Result<String, CredentialLookupError> {
     let secret = std::env::var(name).map_err(|_| CredentialLookupError::Unavailable)?;
     if secret.trim().is_empty() {
         return Err(CredentialLookupError::Empty);

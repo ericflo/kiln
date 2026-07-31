@@ -78,6 +78,8 @@ done
         api::openenv::tests --lib
     "$cargo_bin" test -p kiln-server --no-default-features \
         openenv_cli::tests --lib
+    "$cargo_bin" test -p kiln-server --no-default-features \
+        openenv_credentials::tests --lib
     KILN_OPENENV_INTEROP_ARCADE_URLS="$(IFS=,; echo "${arcade_urls[*]}")" \
     KILN_OPENENV_INTEROP_COUNTER_URL="${server_urls[counter]}" \
     KILN_OPENENV_INTEROP_BANDIT_URL="${server_urls[bandit]}" \

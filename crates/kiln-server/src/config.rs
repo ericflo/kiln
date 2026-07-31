@@ -20,6 +20,8 @@ use anyhow::{Context, Result};
 pub use kiln_scheduler::DEFAULT_MAX_BATCH_TOKENS;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+pub use crate::openenv_credentials::{OpenEnvConfig, OpenEnvCredentialConfig};
+
 /// Default loopback interface used by a fresh server or desktop install.
 pub const DEFAULT_SERVER_HOST: &str = "127.0.0.1";
 /// Hostname used by local CLI clients when no server URL is supplied.
@@ -3061,7 +3063,7 @@ impl TeachersConfig {
 
 impl TeacherCredentialConfig {
     fn validate_definition(&self, credential_id: &str) -> std::result::Result<(), String> {
-        validate_teacher_api_key_env_name(&self.api_key_env).map_err(|message| {
+        validate_secret_environment_name(&self.api_key_env).map_err(|message| {
             format!("teachers.credentials.{credential_id}.api_key_env {message}")
         })?;
         let canonical = canonical_teacher_origin(&self.origin)?;
@@ -3115,7 +3117,7 @@ pub fn validate_teacher_credential_id(id: &str) -> std::result::Result<(), Strin
     Ok(())
 }
 
-fn validate_teacher_api_key_env_name(name: &str) -> std::result::Result<(), String> {
+pub(crate) fn validate_secret_environment_name(name: &str) -> std::result::Result<(), String> {
     let mut bytes = name.bytes();
     let valid_start = bytes
         .next()
@@ -3932,28 +3934,6 @@ pub struct TrainingConfig {
     /// week's runs, while `max_tracked_jobs` (default 1024) still bounds
     /// memory.
     pub tracked_job_ttl_secs: u64,
-}
-
-/// `[openenv]` server-owned rollout orchestration policy.
-///
-/// CLI-driven OpenEnv workflows remain available independently. These limits
-/// govern only the asynchronous HTTP/dashboard control plane.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct OpenEnvConfig {
-    /// Enable OpenEnv discovery and run lifecycle API routes.
-    pub enabled: bool,
-    /// Maximum concurrent rollout collectors. Training jobs submitted by a
-    /// run subsequently use the normal bounded training queue.
-    pub max_active_runs: usize,
-    /// Maximum in-memory tracked run records, including terminal runs.
-    pub max_tracked_runs: usize,
-    /// Retention window for terminal run records.
-    pub tracked_run_ttl_secs: u64,
-    /// Permit the server control plane to connect to non-loopback OpenEnv
-    /// origins. Disabled by default to make the HTTP API safe against SSRF;
-    /// the local CLI remains unrestricted.
-    pub allow_remote_environments: bool,
 }
 
 /// Logging settings. Startup overrides use `KILN_LOGGING_<FIELD>`.
@@ -5516,18 +5496,6 @@ impl Default for TrainingConfig {
     }
 }
 
-impl Default for OpenEnvConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_active_runs: 4,
-            max_tracked_runs: 128,
-            tracked_run_ttl_secs: 604_800,
-            allow_remote_environments: false,
-        }
-    }
-}
-
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
@@ -5862,6 +5830,8 @@ impl KilnConfig {
                 );
             }
         }
+        self.openenv
+            .insert_effective_configuration_fields(&self.value_sources, &mut fields);
 
         Ok(EffectiveConfiguration {
             schema_id: EFFECTIVE_CONFIGURATION_SCHEMA_ID,
@@ -6189,6 +6159,7 @@ impl KilnConfig {
                 self.openenv.tracked_run_ttl_secs
             );
         }
+        self.openenv.validate_credentials()?;
         validate_optional_webhook_url(
             "training.webhook_url",
             self.training.webhook_url.as_deref(),
@@ -6554,7 +6525,7 @@ fn parse_optional_u64_env(name: &str, value: &str) -> Result<Option<u64>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::TEST_ENV_LOCK as ENV_LOCK;
     use std::ffi::{OsStr, OsString};
@@ -6765,10 +6736,13 @@ mod tests {
         "KILN_EVAL_MAX_TRACKED_JOBS",
         "KILN_EVAL_WEBHOOK_URL",
         "KILN_AGENT_SELF_IMPROVE",
+        "KILN_OPENENV_CREDENTIALS",
         "KILN_TEACHERS_CREDENTIALS",
     ];
 
     const DYNAMIC_CONFIG_FIELDS: &[&str] = &[
+        "openenv.credentials.<id>.bearer_token_env",
+        "openenv.credentials.<id>.origin",
         "teachers.credentials.<id>.api_key_env",
         "teachers.credentials.<id>.origin",
     ];
@@ -6789,7 +6763,7 @@ mod tests {
         }
     }
 
-    struct ScopedConfigEnvironment {
+    pub(crate) struct ScopedConfigEnvironment {
         saved: Vec<(String, Option<OsString>)>,
     }
 
@@ -6798,7 +6772,7 @@ mod tests {
             Self::isolated_with(&[])
         }
 
-        fn isolated_with(additional_names: &[&str]) -> Self {
+        pub(crate) fn isolated_with(additional_names: &[&str]) -> Self {
             let mut names = vec!["KILN_CONFIG".to_owned()];
             for field in PUBLIC_ENV_FIELDS {
                 names.push(field.canonical_name());
@@ -6825,7 +6799,7 @@ mod tests {
             Self { saved }
         }
 
-        fn set(&self, name: &str, value: &str) {
+        pub(crate) fn set(&self, name: &str, value: &str) {
             unsafe {
                 std::env::set_var(name, value);
             }
@@ -8019,18 +7993,26 @@ rocm_graph_cache_max_bytes = 17179869184
                 api_key_env: "PROBE_API_KEY".to_owned(),
             },
         );
-        let mut teacher_leaves = Vec::new();
-        collect_json_leaf_paths(
-            "teachers",
-            &serde_json::to_value(&config.teachers).unwrap(),
-            &mut teacher_leaves,
+        config.openenv.credentials.insert(
+            "probe".to_owned(),
+            OpenEnvCredentialConfig {
+                origin: "https://environment.example".to_owned(),
+                bearer_token_env: "PROBE_OPENENV_TOKEN".to_owned(),
+            },
         );
-        for path in &mut teacher_leaves {
+        let mut dynamic_leaves = Vec::new();
+        collect_json_leaf_paths(
+            "",
+            &serde_json::to_value(&config).unwrap(),
+            &mut dynamic_leaves,
+        );
+        dynamic_leaves.retain(|path| path.contains(".credentials.probe."));
+        for path in &mut dynamic_leaves {
             *path = path.replace(".probe.", ".<id>.");
         }
-        teacher_leaves.sort();
+        dynamic_leaves.sort();
         assert_eq!(
-            teacher_leaves,
+            dynamic_leaves,
             DYNAMIC_CONFIG_FIELDS
                 .iter()
                 .map(|path| (*path).to_owned())
@@ -8066,6 +8048,10 @@ webhook_url = "https://training.example.invalid/private"
 [agent]
 self_improve = {{ task = "private-task" }}
 
+[openenv.credentials.arcade]
+origin = "http://127.0.0.1:8990"
+bearer_token_env = "{SECRET_ENV}"
+
 [teachers.credentials.primary]
 origin = "http://127.0.0.1:8000"
 api_key_env = "{SECRET_ENV}"
@@ -8083,8 +8069,8 @@ api_key_env = "{SECRET_ENV}"
         assert_eq!(effective.schema_id, EFFECTIVE_CONFIGURATION_SCHEMA_ID);
         assert_eq!(effective.schema_version, 1);
         assert_eq!(effective.fixed_field_count, 117);
-        assert_eq!(effective.dynamic_field_count, 2);
-        assert_eq!(effective.fields.len(), 119);
+        assert_eq!(effective.dynamic_field_count, 4);
+        assert_eq!(effective.fields.len(), 121);
         assert!(effective.all_fields_restart_required_to_change);
         assert!(
             effective
@@ -8143,6 +8129,17 @@ api_key_env = "{SECRET_ENV}"
         assert_eq!(credential_secret.source, ConfigValueSource::ConfigFile);
         assert!(credential_secret.redacted);
         assert!(credential_secret.effective_value.is_null());
+
+        let openenv_origin = &effective.fields["openenv.credentials.arcade.origin"];
+        assert_eq!(openenv_origin.source, ConfigValueSource::ConfigFile);
+        assert_eq!(
+            openenv_origin.effective_value,
+            serde_json::json!("http://127.0.0.1:8990")
+        );
+        let openenv_secret = &effective.fields["openenv.credentials.arcade.bearer_token_env"];
+        assert_eq!(openenv_secret.source, ConfigValueSource::ConfigFile);
+        assert!(openenv_secret.redacted);
+        assert!(openenv_secret.effective_value.is_null());
 
         for path in [
             "agent.self_improve",
@@ -8892,6 +8889,7 @@ prefill_admission_quantum = 100
         config.apply_env_overrides().unwrap();
         assert!(config.eval.is_none());
         assert!(config.agent.is_none());
+        assert!(config.openenv.credentials.is_empty());
         assert!(config.teachers.credentials.is_empty());
         assert!(PUBLIC_ENV_FIELDS.iter().all(|field| {
             !INTENTIONALLY_UNMAPPED_ENV_TARGETS.contains(&field.canonical_name().as_str())

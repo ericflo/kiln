@@ -55,12 +55,10 @@ curl -sS localhost:8420/v1/openenv/runs \
          "gate":{"min_mean_improvement":0.05}}}'
 ```
 
-Use `POST /v1/openenv/inspect` for discovery, `GET /v1/openenv/runs` for status,
-and `DELETE /v1/openenv/runs/{run_id}` to cancel any active phase. Version 3
-continues through `training_running`, optional `post_evaluating`,
-`environment_evaluating`, and `completed`. Cancellation reaches the active
-collector, trainer, or evaluator. Status and artifacts persist under
-`<adapter_dir>/.openenv/runs/<run_id>/`.
+Use `POST /v1/openenv/inspect` for discovery, `GET /v1/openenv/runs` for status, and
+`DELETE /v1/openenv/runs/{run_id}` to cancel. Version 3 continues through `training_running`,
+optional `post_evaluating`, `environment_evaluating`, and `completed`. Cancellation reaches
+the active collector, trainer, or evaluator. Artifacts persist under `<adapter_dir>/.openenv/runs/<run_id>/`.
 
 The CLI exposes the same lifecycle:
 
@@ -72,10 +70,17 @@ kiln openenv cancel 80a26e21-8451-4a64-8666-890c06fd80bd
 
 `status --follow --json` emits one terminal snapshot; human output follows trainer loss, eval accuracy, held-out returns, exact p-values, and gates.
 
-Server runs accept loopback origins by default. `[openenv]` controls remote
-origins, capacity, retention, and TTL; each field has a canonical
-`KILN_OPENENV_*` override. See the [recovery reference](OPENENV_REPLAY_REFERENCE.md)
-and [configuration reference](CONFIGURATION.md).
+Server runs accept loopback origins by default. `[openenv]` controls remote origins, capacity,
+retention, and TTL; each field has a canonical `KILN_OPENENV_*` override. See the
+[recovery reference](OPENENV_REPLAY_REFERENCE.md) and [configuration reference](CONFIGURATION.md).
+
+### Protected environments
+
+Protected deployments use exact-origin bearer credentials without putting a secret in a URL,
+request body, run record, metric, or artifact. Server and dashboard requests align opaque
+`credential_ids` with URLs; CLI commands align `--credential-env`, using `-` for a public slot.
+Kiln authenticates discovery and WebSocket upgrade, requires HTTPS/WSS outside loopback, and
+records only `none` or `bearer`. See the [authentication and replay reference](OPENENV_REPLAY_REFERENCE.md#authentication-boundary).
 
 ### Inspect
 
@@ -84,14 +89,12 @@ kiln openenv inspect --environment http://127.0.0.1:8990
 kiln openenv inspect --environment http://127.0.0.1:8990 --json
 ```
 
-Inspection checks `/health`, then reads `/metadata`, `/schema`,
-`/list_environments`, and `/openapi.json`. It reports the derived WebSocket
-URL, OpenEnv client profile, OpenAPI version when present, and a SHA-256 over
-the typed action/observation/state schema.
+Inspection checks `/health`, then reads `/metadata`, `/schema`, `/list_environments`, and
+`/openapi.json`. It reports the WebSocket URL, client profile, OpenAPI version, and a SHA-256
+over the typed action/observation/state schema.
 
-Run inspection before a long collection. It catches an unavailable server,
-unexpected discovery document, or changed environment schema without spending
-model tokens.
+Run inspection before a long collection. It catches an unavailable server, unexpected
+discovery document, or changed environment schema without spending model tokens.
 
 ### Collect without training
 
@@ -106,9 +109,8 @@ kiln openenv rollout \
   --summary-output counter.rollout-summary.json
 ```
 
-Use `rollout` to inspect reward variance, compare policy versions, retain a
-batch for audit, or submit the JSONL later with `kiln train grpo`. The output
-is the same canonical `AgenticGroup` JSONL accepted by the native GRPO route.
+Use `rollout` to inspect reward variance, compare policies, retain a batch for audit, or submit
+the JSONL later with `kiln train grpo`. It is canonical `AgenticGroup` JSONL.
 
 ### Verify and replay
 
@@ -120,16 +122,15 @@ kiln openenv verify --summary counter.rollout-summary.json
 kiln openenv replay --summary counter.rollout-summary.json
 ```
 
-`verify` is network-free. It checks both byte digests and byte counts, parses
-the canonical GRPO groups, fail-closed provenance, replay transcript, returns,
-and receipt totals.
+`verify` is network-free. It checks byte digests and counts, canonical GRPO groups,
+fail-closed provenance, replay transcript, returns, and receipt totals.
 
-`replay` performs that offline verification first. It then inspects each live
-target and compares the captured reset, action, result, and final-state
-transcript exactly. Move or archive the three files together; use `--dataset`
-and `--replay` when their recorded paths have changed. See the
-[replay and recovery reference](OPENENV_REPLAY_REFERENCE.md) for the complete
-verification, drift, and prefix-only semantics.
+`replay` verifies offline first, then inspects each live target and compares the captured reset,
+action, result, and final state. Move or archive all three files together; use `--dataset` and
+`--replay` when paths change. See the [replay and recovery reference](OPENENV_REPLAY_REFERENCE.md)
+for verification, drift, and prefix-only semantics.
+
+Protected replay repeats aligned `--credential-env`; it matches auth method but permits rotation.
 
 ### Collect and train
 
@@ -143,12 +144,10 @@ kiln openenv train \
   --lora-rank 16
 ```
 
-`--adapter` selects the behavior policy used to act. `base`, `none`, and
-`null` explicitly select the base model. `--output-adapter` names the new LoRA.
-The trainer receives `behavior_policy: "no_importance_correction"` because the
-current multi-turn chat path does not expose exact per-action token
-log-probability provenance. Kiln never labels these rollouts as the separate
-`recorded` policy contract.
+`--adapter` selects the behavior policy; `base`, `none`, and `null` select the base model.
+`--output-adapter` names the new LoRA. The trainer receives
+`behavior_policy: "no_importance_correction"` because multi-turn chat does not expose exact
+per-action token log-probability provenance. Kiln never labels it `recorded`.
 
 Training admission, memory checks, checkpointing, cancellation, atomic adapter
 publication, and serving-profile rules are the same as any other native GRPO
@@ -236,10 +235,12 @@ recoverable and terminal code, retry rule, and resource bound.
 
 OpenEnv actions and observations are untrusted external data that enter the
 model context and corpus. Prefer loopback or a private network; use HTTPS/WSS
-and a trusted authentication gateway remotely. Inspect the schema and
-implementation, reject prompts and observations as potentially injected, and
+with an origin-scoped server credential remotely. Inspect the schema and
+implementation, treat prompts and observations as potentially injected, and
 retain the summary plus deployment identity before promoting an adapter.
-Environment URL credentials, queries, and fragments are rejected.
+Environment URL credentials, queries, and fragments are rejected. Bearer
+response bodies are still untrusted and bounded; authentication establishes
+access, not environment integrity.
 
 ## Troubleshooting
 

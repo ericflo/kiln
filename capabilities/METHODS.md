@@ -40,6 +40,7 @@ result. The rest are properties of the capability and your harness.
 | **Teacher availability** | does a ≥30%-stronger model in the same family exist? | OPD is only available if yes. |
 | **Verifier presence** | can you write a programmatic `score_one()` over a complete response in `[0,1]`? | GRPO is only available if yes. |
 | **OpenEnv availability** | does the capability already exist as a stateful OpenEnv server with action schema, observations, `done`, and reward? Inspect it with `kiln openenv inspect` or Training → OpenEnv in the dashboard. | Prefer the native environment loop over duplicating state transitions or reward logic in `rollout.py`. |
+| **OpenEnv trust boundary** | is the environment public, loopback, or protected by a bearer credential, and is that credential exact-origin scoped? | Use `--credential-env` for direct CLI work or a server-owned `[openenv.credentials.<id>]` handle. Never place tokens in task payloads, manifests, recipes, or receipts. |
 | **OpenEnv held-out plan** | reserve disjoint reset seeds and pin the environment deployment identity before training | OpenEnv promotion evidence must measure paired behavior-vs-candidate returns on unseen tasks, never the training episodes. |
 | **Reward variance** | sample 20 baseline rollouts on `datasets/train.tasks.jsonl`, compute group variance | < 0.03 → GRPO has no signal. ≥ 0.05 → strong signal filter applies. |
 | **Task is multi-turn tool-calling?** | is `rollout.py` driving pi or another agent loop? | If yes, agentic-GRPO with ECHO is mandatory; everything else is a sub-step. |

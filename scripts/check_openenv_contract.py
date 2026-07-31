@@ -26,6 +26,7 @@ def fixtures() -> dict[str, dict]:
             "client_profile": "openenv-http/1.x",
             "base_url": "http://127.0.0.1:8990",
             "websocket_url": "ws://127.0.0.1:8990/ws",
+            "authentication": "none",
             "openapi_version": "1.0",
             "environments": ["counter"],
             "metadata": {

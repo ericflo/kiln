@@ -156,7 +156,7 @@ pub(crate) const OPENENV_OVERVIEW: &str = r#"Inspect OpenEnv servers, collect gr
 
 Kiln discovers each environment over HTTP, opens one WebSocket session per episode, resets every candidate in a GRPO group with the same deterministic seed, asks the selected Kiln policy for schema-shaped JSON actions, and records every action, observation, reward, termination, environment identity, and content hash in canonical agentic trajectory JSONL.
 
-`rollout` writes the exact reusable GRPO corpus, an exact replay transcript, and a detailed summary receipt. `verify` validates the three-artifact bundle without contacting a server; `replay` re-executes the captured reset/action protocol against the content-addressed environments. `train` writes those artifacts and submits the in-memory groups to `/v1/train/grpo` with the explicit native on-policy behavior-policy contract. Start `kiln serve` first.
+`rollout` writes the exact reusable GRPO corpus, an exact replay transcript, and a detailed summary receipt. `verify` validates the three-artifact bundle without contacting a server; `replay` re-executes the captured reset/action protocol against the content-addressed environments. `train` writes those artifacts and submits the in-memory groups to `/v1/train/grpo` with the explicit native on-policy behavior-policy contract. Protected environments use `--credential-env`; only the non-secret authentication method enters environment identity. Start `kiln serve` first.
 "#;
 
 pub(crate) const OPENENV_EXAMPLES: &str = r#"Examples:
@@ -171,6 +171,10 @@ pub(crate) const OPENENV_EXAMPLES: &str = r#"Examples:
   kiln openenv train --environment http://127.0.0.1:8000 --output-adapter wordle-agent
       Collect a native on-policy batch, submit GRPO training, and auto-load the
       completed adapter.
+
+  kiln openenv inspect --environment https://arcade.example.com/openenv --credential-env ARCADE_OPENENV_TOKEN
+      Authenticate HTTP discovery and the WebSocket upgrade with a bearer
+      token read from the named environment variable without persisting it.
 
   kiln openenv runs
       List server-owned OpenEnv workflows, including live trainer and linked
@@ -203,6 +207,15 @@ pub struct OpenEnvRolloutArgs {
     /// OpenEnv HTTP base URL. Repeat to assign groups round-robin across environments.
     #[arg(long = "environment", value_name = "URL", required = true)]
     environment_urls: Vec<String>,
+
+    /// Bearer-token environment variable aligned with each --environment.
+    /// Repeat once per URL when used; pass '-' for an unauthenticated slot.
+    #[arg(
+        long = "credential-env",
+        value_name = "ENV_OR_DASH",
+        allow_hyphen_values = true
+    )]
+    credential_envs: Vec<String>,
 
     /// Running Kiln server URL used for policy generation and training
     #[arg(long = "url", default_value_t = default_server_url())]
@@ -288,6 +301,10 @@ pub enum OpenEnvCommands {
         /// OpenEnv HTTP base URL
         #[arg(long, value_name = "URL")]
         environment: String,
+
+        /// Environment variable containing this origin's bearer token
+        #[arg(long = "credential-env", value_name = "ENV")]
+        credential_env: Option<String>,
 
         /// Emit the complete inspection as JSON
         #[arg(long)]
@@ -399,6 +416,15 @@ pub enum OpenEnvCommands {
         #[arg(long)]
         replay: Option<PathBuf>,
 
+        /// Bearer-token environment variable aligned with each captured
+        /// environment. Repeat once per environment; pass '-' for no token.
+        #[arg(
+            long = "credential-env",
+            value_name = "ENV_OR_DASH",
+            allow_hyphen_values = true
+        )]
+        credential_envs: Vec<String>,
+
         /// Maximum simultaneous replay sessions within a group
         #[arg(long, default_value_t = 4)]
         concurrency: usize,
@@ -413,10 +439,14 @@ pub enum OpenEnvCommands {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenEnvRolloutOptions {
     pub kiln_url: String,
     pub environment_urls: Vec<String>,
+    /// One secret environment-variable name per environment. An empty vector
+    /// means all endpoints are unauthenticated. Values are runtime-only and
+    /// never enter summaries, replay manifests, or training receipts.
+    pub credential_envs: Vec<Option<String>>,
     pub adapter: String,
     pub groups: usize,
     pub group_size: usize,
@@ -436,6 +466,32 @@ pub struct OpenEnvRolloutOptions {
     pub output: PathBuf,
     pub replay_output: PathBuf,
     pub summary_output: PathBuf,
+}
+
+impl std::fmt::Debug for OpenEnvRolloutOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenEnvRolloutOptions")
+            .field("kiln_url", &self.kiln_url)
+            .field("environment_urls", &self.environment_urls)
+            .field(
+                "authenticated_environments",
+                &self
+                    .credential_envs
+                    .iter()
+                    .filter(|item| item.is_some())
+                    .count(),
+            )
+            .field("adapter", &self.adapter)
+            .field("groups", &self.groups)
+            .field("group_size", &self.group_size)
+            .field("seed_start", &self.seed_start)
+            .field("max_steps", &self.max_steps)
+            .field("concurrency", &self.concurrency)
+            .field("max_action_tokens", &self.max_action_tokens)
+            .field("thinking", &self.thinking)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -556,8 +612,12 @@ enum ModelActionFailure {
 /// Run native OpenEnv discovery, rollout collection, or rollout-and-train.
 pub async fn run_openenv(command: &OpenEnvCommands) -> Result<()> {
     match command {
-        OpenEnvCommands::Inspect { environment, json } => {
-            let inspection = inspect_openenv(environment).await?;
+        OpenEnvCommands::Inspect {
+            environment,
+            credential_env,
+            json,
+        } => {
+            let inspection = inspect_openenv(environment, credential_env.as_deref()).await?;
             if *json {
                 println!("{}", serde_json::to_string_pretty(&inspection)?);
             } else {
@@ -692,6 +752,7 @@ pub async fn run_openenv(command: &OpenEnvCommands) -> Result<()> {
             summary,
             dataset,
             replay,
+            credential_envs,
             concurrency,
             capacity_wait_seconds,
             json,
@@ -707,11 +768,14 @@ pub async fn run_openenv(command: &OpenEnvCommands) -> Result<()> {
             );
             let verified =
                 verify_openenv_artifacts(summary, dataset.as_deref(), replay.as_deref())?;
+            let credential_envs =
+                parse_cli_credential_envs(credential_envs, verified.replay.environments.len())?;
             let report = replay_openenv(
                 &verified.replay,
                 verified.report.replay_sha256,
                 *concurrency,
                 Duration::from_secs(*capacity_wait_seconds),
+                &credential_envs,
             )
             .await?;
             if *json {
@@ -954,6 +1018,7 @@ fn openenv_rollout_options(args: &OpenEnvRolloutArgs) -> OpenEnvRolloutOptions {
     OpenEnvRolloutOptions {
         kiln_url: args.kiln_url.clone(),
         environment_urls: args.environment_urls.clone(),
+        credential_envs: parse_cli_credential_envs_unchecked(&args.credential_envs),
         adapter: args.adapter.clone(),
         groups: args.groups,
         group_size: args.group_size,
@@ -1032,8 +1097,14 @@ fn print_openenv_summary(summary: &OpenEnvRolloutSummary, submitted_training: bo
     Ok(())
 }
 
-pub async fn inspect_openenv(environment_url: &str) -> Result<OpenEnvInspection> {
-    let client = OpenEnvClient::new(environment_url)?;
+pub async fn inspect_openenv(
+    environment_url: &str,
+    credential_env: Option<&str>,
+) -> Result<OpenEnvInspection> {
+    if let Some(name) = credential_env {
+        validate_credential_envs(&[Some(name.to_owned())], 1)?;
+    }
+    let client = openenv_client(environment_url, credential_env)?;
     client
         .inspect()
         .await
@@ -1112,8 +1183,9 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
     });
 
     let inspections = stream::iter(options.environment_urls.iter().cloned())
-        .map(|url| async move {
-            let client = OpenEnvClient::new(&url)?;
+        .zip(stream::iter(resolved_credential_envs(options)))
+        .map(|(url, credential_env)| async move {
+            let client = openenv_client(&url, credential_env.as_deref())?;
             let inspection = client
                 .inspect()
                 .await
@@ -1733,12 +1805,90 @@ fn read_reset_options(path: Option<&Path>, direct: Option<&Value>) -> Result<Val
     Ok(value)
 }
 
+fn parse_cli_credential_envs_unchecked(values: &[String]) -> Vec<Option<String>> {
+    values
+        .iter()
+        .map(|value| (value != "-").then(|| value.clone()))
+        .collect()
+}
+
+fn parse_cli_credential_envs(
+    values: &[String],
+    environment_count: usize,
+) -> Result<Vec<Option<String>>> {
+    let parsed = parse_cli_credential_envs_unchecked(values);
+    validate_credential_envs(&parsed, environment_count)?;
+    Ok(parsed)
+}
+
+fn resolved_credential_envs(options: &OpenEnvRolloutOptions) -> Vec<Option<String>> {
+    if options.credential_envs.is_empty() {
+        vec![None; options.environment_urls.len()]
+    } else {
+        options.credential_envs.clone()
+    }
+}
+
+fn validate_credential_envs(
+    credential_envs: &[Option<String>],
+    environment_count: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        credential_envs.is_empty() || credential_envs.len() == environment_count,
+        "OpenEnv credential envs must be empty or contain exactly one entry per environment (expected {environment_count}, got {})",
+        credential_envs.len()
+    );
+    for (index, credential_env) in credential_envs.iter().enumerate() {
+        let Some(name) = credential_env.as_deref() else {
+            continue;
+        };
+        let mut bytes = name.bytes();
+        let valid_start = bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
+        let valid_rest = bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        anyhow::ensure!(
+            valid_start && valid_rest && name.len() <= 128,
+            "OpenEnv credential env at position {index} must name a 1..=128 character environment variable matching [A-Za-z_][A-Za-z0-9_]*"
+        );
+        kiln_train::validate_bearer_secret_environment(name).map_err(|error| {
+            let detail = match error {
+                kiln_train::CredentialLookupError::Unavailable => "is unavailable",
+                kiln_train::CredentialLookupError::Empty => "is empty",
+            };
+            anyhow::anyhow!("OpenEnv credential at position {index} {detail}")
+        })?;
+    }
+    Ok(())
+}
+
+pub(crate) fn openenv_client(
+    environment_url: &str,
+    credential_env: Option<&str>,
+) -> Result<OpenEnvClient> {
+    let client = OpenEnvClient::new(environment_url)?;
+    let Some(name) = credential_env else {
+        return Ok(client);
+    };
+    let token = kiln_train::bearer_secret_from_environment(name).map_err(|error| {
+        let detail = match error {
+            kiln_train::CredentialLookupError::Unavailable => "is unavailable",
+            kiln_train::CredentialLookupError::Empty => "is empty",
+        };
+        anyhow::anyhow!("configured OpenEnv credential {detail}")
+    })?;
+    client
+        .with_bearer_token(token)
+        .context("configure OpenEnv bearer credential")
+}
+
 pub(crate) fn validate_options(options: &OpenEnvRolloutOptions) -> Result<()> {
     anyhow::ensure!(
         !options.environment_urls.is_empty()
             && options.environment_urls.len() <= MAX_OPENENV_ENVIRONMENTS,
         "OpenEnv requires 1..={MAX_OPENENV_ENVIRONMENTS} --environment URL values"
     );
+    validate_credential_envs(&options.credential_envs, options.environment_urls.len())?;
     anyhow::ensure!(
         options.groups > 0 && options.groups <= MAX_OPENENV_GROUPS,
         "OpenEnv groups must be in 1..={MAX_OPENENV_GROUPS}"
@@ -2105,6 +2255,8 @@ mod tests {
             "inspect",
             "--environment",
             "127.0.0.1:8990",
+            "--credential-env",
+            "OPENENV_TEST_TOKEN",
             "--json",
         ])
         .unwrap();
@@ -2112,8 +2264,11 @@ mod tests {
             inspect.command,
             Some(Commands::Openenv(OpenEnvCommands::Inspect {
                 environment,
+                credential_env,
                 json: true,
+                ..
             })) if environment == "127.0.0.1:8990"
+                && credential_env.as_deref() == Some("OPENENV_TEST_TOKEN")
         ));
 
         let rollout = Cli::try_parse_from([
@@ -2124,6 +2279,10 @@ mod tests {
             "http://127.0.0.1:8000",
             "--environment",
             "http://127.0.0.1:8001",
+            "--credential-env",
+            "-",
+            "--credential-env",
+            "ARCADE_TOKEN",
             "--groups",
             "12",
             "--group-size",
@@ -2136,6 +2295,13 @@ mod tests {
             panic!("expected openenv rollout command");
         };
         assert_eq!(rollout.environment_urls.len(), 2);
+        assert_eq!(rollout.credential_envs, ["-", "ARCADE_TOKEN"]);
+        let options = openenv_rollout_options(&rollout);
+        assert_eq!(
+            options.credential_envs,
+            [None, Some("ARCADE_TOKEN".to_string())]
+        );
+        assert!(!format!("{options:?}").contains("ARCADE_TOKEN"));
         assert_eq!(rollout.groups, 12);
         assert_eq!(rollout.group_size, 6);
         assert!(rollout.thinking);
@@ -2222,6 +2388,8 @@ mod tests {
             "batch.summary.json",
             "--concurrency",
             "2",
+            "--credential-env",
+            "REPLAY_TOKEN",
         ])
         .unwrap();
         assert!(matches!(
@@ -2229,8 +2397,9 @@ mod tests {
             Some(Commands::Openenv(OpenEnvCommands::Replay {
                 concurrency: 2,
                 capacity_wait_seconds: 300,
+                credential_envs,
                 ..
-            }))
+            })) if credential_envs == ["REPLAY_TOKEN"]
         ));
 
         assert!(

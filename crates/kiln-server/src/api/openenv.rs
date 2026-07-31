@@ -23,7 +23,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::{StreamExt, stream};
 use kiln_eval::EvalJobState;
-use kiln_openenv::{OpenEnvClient, OpenEnvIdentity, OpenEnvInspection};
+use kiln_openenv::{OpenEnvIdentity, OpenEnvInspection};
 use kiln_train::{BehaviorPolicy, GrpoConfig, GrpoRequest, TrainingResponse, TrainingState};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -197,6 +197,11 @@ pub struct OpenEnvRunRequest {
     pub kind: OpenEnvRunKind,
     #[serde(alias = "environments")]
     pub environment_urls: Vec<String>,
+    /// Optional server-configured credential handle aligned with each
+    /// environment URL. An empty list means every endpoint is unauthenticated.
+    /// Handles persist for audit; bearer values never enter the request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_ids: Vec<Option<String>>,
     #[serde(default = "default_adapter")]
     pub adapter: String,
     #[serde(default = "default_groups")]
@@ -349,6 +354,8 @@ struct OpenEnvRunList {
 struct OpenEnvInspectRequest {
     #[serde(alias = "environments")]
     environment_urls: Vec<String>,
+    #[serde(default)]
+    credential_ids: Vec<Option<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -798,11 +805,30 @@ fn validate_environment_urls(urls: &[String], allow_remote: bool) -> Result<(), 
     Ok(())
 }
 
+fn resolve_credential_envs(
+    policy: &OpenEnvConfig,
+    credential_ids: &[Option<String>],
+    environment_urls: &[String],
+) -> Result<Vec<Option<String>>, ApiError> {
+    policy
+        .resolve_credential_envs(credential_ids, environment_urls)
+        .map_err(|error| {
+            openenv_error(
+                StatusCode::BAD_REQUEST,
+                "openenv_invalid_credential",
+                error,
+                "Configure an origin-scoped [openenv.credentials.<id>] bearer_token_env and align credential_ids with environment_urls.",
+            )
+        })
+}
+
 fn validate_run_request(
     request: &OpenEnvRunRequest,
     policy: &OpenEnvConfig,
 ) -> Result<(), ApiError> {
     validate_environment_urls(&request.environment_urls, policy.allow_remote_environments)?;
+    let credential_envs =
+        resolve_credential_envs(policy, &request.credential_ids, &request.environment_urls)?;
     if !matches!(
         request.adapter.trim().to_ascii_lowercase().as_str(),
         "base" | "none" | "null"
@@ -832,12 +858,17 @@ fn validate_run_request(
             let output = request.output_adapter.as_deref().unwrap_or_default();
             crate::api::adapters::validate_adapter_name(output)?;
             if let Some(config) = &request.environment_eval {
-                validate_environment_eval(request, output, config)?;
+                validate_environment_eval(request, output, config, &credential_envs)?;
             }
         }
         OpenEnvRunKind::Rollout => {}
     }
-    validate_options(&rollout_options_for(request, Path::new("."))).map_err(|error| {
+    validate_options(&rollout_options_for(
+        request,
+        Path::new("."),
+        credential_envs,
+    ))
+    .map_err(|error| {
         openenv_error(
             StatusCode::BAD_REQUEST,
             "openenv_invalid_request",
@@ -852,6 +883,7 @@ fn validate_environment_eval(
     request: &OpenEnvRunRequest,
     output_adapter: &str,
     config: &OpenEnvEnvironmentEvalConfig,
+    credential_envs: &[Option<String>],
 ) -> Result<(), ApiError> {
     let fail = |message: String| {
         openenv_error(
@@ -910,16 +942,26 @@ fn validate_environment_eval(
             )));
         }
     }
-    let options =
-        environment_eval_rollout_options(request, Path::new("."), output_adapter, "candidate")
-            .map_err(&fail)?;
+    let options = environment_eval_rollout_options(
+        request,
+        Path::new("."),
+        output_adapter,
+        "candidate",
+        credential_envs.to_vec(),
+    )
+    .map_err(&fail)?;
     validate_options(&options).map_err(|error| fail(error.to_string()))
 }
 
-fn rollout_options_for(request: &OpenEnvRunRequest, run_dir: &Path) -> OpenEnvRolloutOptions {
+fn rollout_options_for(
+    request: &OpenEnvRunRequest,
+    run_dir: &Path,
+    credential_envs: Vec<Option<String>>,
+) -> OpenEnvRolloutOptions {
     OpenEnvRolloutOptions {
         kiln_url: "in-process".to_string(),
         environment_urls: request.environment_urls.clone(),
+        credential_envs,
         adapter: request.adapter.clone(),
         groups: request.groups,
         group_size: request.group_size,
@@ -945,6 +987,7 @@ fn environment_eval_rollout_options(
     run_dir: &Path,
     adapter: &str,
     side: &str,
+    credential_envs: Vec<Option<String>>,
 ) -> Result<OpenEnvRolloutOptions, String> {
     let config = request
         .environment_eval
@@ -956,6 +999,7 @@ fn environment_eval_rollout_options(
     Ok(OpenEnvRolloutOptions {
         kiln_url: "in-process".to_string(),
         environment_urls: request.environment_urls.clone(),
+        credential_envs,
         adapter: adapter.to_string(),
         groups: config.groups,
         group_size: config.group_size,
@@ -992,9 +1036,21 @@ async fn inspect(
         &request.environment_urls,
         state.openenv_runs.policy().allow_remote_environments,
     )?;
+    let credential_envs = resolve_credential_envs(
+        state.openenv_runs.policy(),
+        &request.credential_ids,
+        &request.environment_urls,
+    )?;
+    if credential_envs.iter().any(Option::is_some) {
+        state
+            .metrics
+            .openenv_authenticated_inspections
+            .fetch_add(1, Ordering::Relaxed);
+    }
     let environments = stream::iter(request.environment_urls)
-        .map(|url| async move {
-            let client = OpenEnvClient::new(&url)?;
+        .zip(stream::iter(credential_envs))
+        .map(|(url, credential_env)| async move {
+            let client = crate::openenv_cli::openenv_client(&url, credential_env.as_deref())?;
             client
                 .inspect()
                 .await
@@ -1032,6 +1088,7 @@ async fn create_run(
         ));
     }
     validate_run_request(&request, state.openenv_runs.policy())?;
+    let authenticated = request.credential_ids.iter().any(Option::is_some);
     let (status, cancel) = state.openenv_runs.insert(request).map_err(|error| {
         let capacity = error.to_string().contains("capacity is full");
         openenv_error(
@@ -1057,6 +1114,12 @@ async fn create_run(
         .metrics
         .openenv_runs_started
         .fetch_add(1, Ordering::Relaxed);
+    if authenticated {
+        state
+            .metrics
+            .openenv_authenticated_runs_started
+            .fetch_add(1, Ordering::Relaxed);
+    }
     let run_id = status.run_id.clone();
     tokio::spawn(async move {
         execute_run(state, run_id, cancel).await;
@@ -1110,7 +1173,12 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
         .context("OpenEnv run disappeared before execution")?
         .request;
     let run_dir = state.openenv_runs.run_dir(run_id);
-    let options = rollout_options_for(&request, &run_dir);
+    let credential_envs = state
+        .openenv_runs
+        .policy()
+        .resolve_credential_envs(&request.credential_ids, &request.environment_urls)
+        .map_err(anyhow::Error::msg)?;
+    let options = rollout_options_for(&request, &run_dir, credential_envs);
     let summary_output = options.summary_output.clone();
     let registry = state.openenv_runs.clone();
     let progress_run_id = run_id.to_string();
@@ -1304,12 +1372,27 @@ async fn run_openenv_environment_evaluation(
     let baseline = policy_identity(state, &request.adapter)?;
     let candidate = policy_identity(state, output_adapter)?;
     let run_dir = state.openenv_runs.run_dir(run_id);
-    let baseline_options =
-        environment_eval_rollout_options(request, &run_dir, &request.adapter, "baseline")
-            .map_err(anyhow::Error::msg)?;
-    let candidate_options =
-        environment_eval_rollout_options(request, &run_dir, output_adapter, "candidate")
-            .map_err(anyhow::Error::msg)?;
+    let credential_envs = state
+        .openenv_runs
+        .policy()
+        .resolve_credential_envs(&request.credential_ids, &request.environment_urls)
+        .map_err(anyhow::Error::msg)?;
+    let baseline_options = environment_eval_rollout_options(
+        request,
+        &run_dir,
+        &request.adapter,
+        "baseline",
+        credential_envs.clone(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let candidate_options = environment_eval_rollout_options(
+        request,
+        &run_dir,
+        output_adapter,
+        "candidate",
+        credential_envs,
+    )
+    .map_err(anyhow::Error::msg)?;
     let rollouts_total = config
         .groups
         .checked_mul(config.group_size)
@@ -2023,6 +2106,7 @@ mod tests {
         OpenEnvRunRequest {
             kind,
             environment_urls: vec!["http://127.0.0.1:8000".into()],
+            credential_ids: Vec::new(),
             adapter: "base".into(),
             groups: 2,
             group_size: 3,
@@ -2122,6 +2206,24 @@ mod tests {
         assert!(
             validate_environment_urls(&["http://user:secret@127.0.0.1:1".into()], true).is_err()
         );
+    }
+
+    #[test]
+    fn credential_handles_are_aligned_and_resolved_before_admission() {
+        let policy = OpenEnvConfig::default();
+        let mut rollout = request(OpenEnvRunKind::Rollout);
+        rollout.credential_ids = vec![Some("missing".into())];
+        let error = validate_run_request(&rollout, &policy).unwrap_err();
+        assert_eq!(error.code, "openenv_invalid_credential");
+        assert!(!error.message.contains("bearer"));
+
+        rollout.credential_ids = vec![None, None];
+        let error = validate_run_request(&rollout, &policy).unwrap_err();
+        assert_eq!(error.code, "openenv_invalid_credential");
+        assert!(error.message.contains("exactly one"));
+
+        rollout.credential_ids = vec![None];
+        assert!(validate_run_request(&rollout, &policy).is_ok());
     }
 
     #[test]

@@ -148,6 +148,13 @@ kiln openenv train \
 kiln openenv status 80a26e21-8451-4a64-8666-890c06fd80bd --follow
 ```
 
+Protected deployments are native too. Direct CLI commands accept
+`--credential-env TOKEN_VARIABLE`; dashboard/API runs name an origin-scoped
+`[openenv.credentials.<id>]` handle through `credential_ids`. Kiln applies the
+bearer token to both HTTP discovery and the WebSocket upgrade while keeping the
+token, its environment-variable name, and server handle out of rollout and
+replay artifacts. Environment identity records only `authentication: bearer`.
+
 The dashboard and API expose this held-out evaluation as `environment_eval`.
 Adding `gate` requires significant paired improvement plus optional mean-return
 thresholds. Kiln retains baseline and candidate dataset/replay/summary bundles

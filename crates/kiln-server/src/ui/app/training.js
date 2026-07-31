@@ -1055,6 +1055,22 @@ function openEnvUrls() {
     .filter(Boolean);
 }
 
+function openEnvCredentialIds(environmentCount) {
+  const raw = document.getElementById('openenv-credential-ids')?.value || '';
+  if (!raw.trim()) return [];
+  const values = raw.trim().split(/\r?\n/).map(value => value.trim());
+  if (values.length !== environmentCount) {
+    throw new Error(`Credential handles must be empty or contain exactly one line per environment URL (expected ${environmentCount}, got ${values.length}).`);
+  }
+  return values.map((value, index) => {
+    if (value === '-') return null;
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(value)) {
+      throw new Error(`Credential handle ${index + 1} must use 1–64 letters, digits, "_" or "-", or be exactly "-" for a public slot.`);
+    }
+    return value;
+  });
+}
+
 function openEnvNumber(id, label, integer = true) {
   const value = Number(document.getElementById(id)?.value);
   if (!Number.isFinite(value) || (integer && !Number.isSafeInteger(value))) {
@@ -1165,13 +1181,21 @@ async function inspectOpenEnv() {
     if (result) result.textContent = 'Add at least one environment URL first.';
     return;
   }
+  let credential_ids;
+  try {
+    credential_ids = openEnvCredentialIds(environment_urls.length);
+  } catch (error) {
+    if (result) result.textContent = error.message;
+    toast(error.message, 'err');
+    return;
+  }
   if (button) button.disabled = true;
   if (result) result.textContent = 'Discovering health, metadata, schemas, and protocol identity…';
   try {
     const response = await api('/v1/openenv/inspect', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ environment_urls }),
+      body: JSON.stringify({ environment_urls, ...(credential_ids.length ? {credential_ids} : {}) }),
     });
     const environments = response.environments || [];
     if (result) {
@@ -1338,6 +1362,7 @@ document.getElementById('openenv-form')?.addEventListener('submit', async event 
     const kind = document.getElementById('openenv-kind').value;
     const environment_urls = openEnvUrls();
     if (!environment_urls.length) throw new Error('Add at least one OpenEnv environment URL.');
+    const credential_ids = openEnvCredentialIds(environment_urls.length);
     const training_config = openEnvObject('openenv-training-config', 'Native GRPO overrides');
     const rank = openEnvNumber('openenv-lora-rank', 'LoRA rank');
     const optimizerKind = openEnvOptimizerKind(training_config);
@@ -1361,6 +1386,7 @@ document.getElementById('openenv-form')?.addEventListener('submit', async event 
       capacity_wait_seconds: openEnvNumber('openenv-capacity-wait', 'Capacity wait'),
       auto_load: document.getElementById('openenv-auto-load').checked,
     };
+    if (credential_ids.length) request.credential_ids = credential_ids;
     if (kind === 'train') {
       request.output_adapter = document.getElementById('openenv-output-adapter').value.trim();
       if (!request.output_adapter) throw new Error('Choose an output adapter name.');

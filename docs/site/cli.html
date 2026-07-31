@@ -626,6 +626,14 @@ kiln openenv rollout \
         </div>
       </div>
       <div class="card p-5 mt-4">
+        <h3 class="font-semibold mb-2">Authenticate a protected environment</h3>
+<pre class="text-sm"><code>ARCADE_OPENENV_TOKEN=... kiln openenv train \
+  --environment https://arcade.example.com/openenv \
+  --credential-env ARCADE_OPENENV_TOKEN \
+  --output-adapter arcade-agent</code></pre>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">Direct CLI commands name a secret environment variable. Dashboard/API workflows instead submit an opaque <code>credential_ids</code> entry backed by exact-origin <code>[openenv.credentials.&lt;id&gt;]</code> server configuration. Kiln sends the bearer header on discovery and the WebSocket upgrade, records only <code>authentication: bearer</code> in environment identity, and excludes handles, variable names, and tokens from artifacts.</p>
+      </div>
+      <div class="card p-5 mt-4">
         <h3 class="font-semibold mb-2">Gate promotion on held-out environment returns</h3>
 <pre class="text-sm"><code>"environment_eval": {
   "groups": 20,
@@ -650,7 +658,7 @@ kiln openenv status 80a26e21-8451-4a64-8666-890c06fd80bd --follow
 kiln openenv cancel 80a26e21-8451-4a64-8666-890c06fd80bd</code></pre>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">Dashboard and API runs remain authoritative through collection, native GRPO, static and environment evaluation, and promotion. <code>status --follow</code> reports trainer progress/loss, paired returns, and gate outcomes; <code>cancel</code> cooperatively stops whichever executor owns the active phase.</p>
       </div>
-      <p class="text-sm mt-5" style="color: var(--fg-dim);">OpenEnv servers are untrusted inputs and Kiln adds no protocol authentication. Prefer loopback/private networks or HTTPS/WSS behind a trusted gateway. The production runtime depends only on OpenEnv-compatible discovery and WebSocket behavior; miniopenenv is used solely as a pinned byte-real CI oracle. See the complete <a href="docs/openenv/" class="link">OpenEnv Training Guide</a> for wire semantics, limits, reward typing, identity, interoperability, and troubleshooting.</p>
+      <p class="text-sm mt-5" style="color: var(--fg-dim);">OpenEnv servers remain untrusted inputs even when authenticated. Prefer loopback/private networks or HTTPS/WSS with exact-origin credentials. The production runtime depends only on OpenEnv-compatible discovery and WebSocket behavior; miniopenenv is used solely as a pinned byte-real CI oracle. See the complete <a href="docs/openenv/" class="link">OpenEnv Training Guide</a> for wire semantics, limits, reward typing, identity, interoperability, and troubleshooting.</p>
     </div>
   </section>
 

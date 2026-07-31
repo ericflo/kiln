@@ -225,6 +225,8 @@ pub struct Metrics {
     pub openenv_runs_failed: AtomicU64,
     pub openenv_runs_cancelled: AtomicU64,
     pub openenv_episodes_collected: AtomicU64,
+    pub openenv_authenticated_inspections: AtomicU64,
+    pub openenv_authenticated_runs_started: AtomicU64,
     pub openenv_environment_evaluations_started: AtomicU64,
     pub openenv_environment_evaluations_completed: AtomicU64,
     pub openenv_environment_evaluations_failed: AtomicU64,
@@ -284,6 +286,8 @@ impl Metrics {
             openenv_runs_failed: AtomicU64::new(0),
             openenv_runs_cancelled: AtomicU64::new(0),
             openenv_episodes_collected: AtomicU64::new(0),
+            openenv_authenticated_inspections: AtomicU64::new(0),
+            openenv_authenticated_runs_started: AtomicU64::new(0),
             openenv_environment_evaluations_started: AtomicU64::new(0),
             openenv_environment_evaluations_completed: AtomicU64::new(0),
             openenv_environment_evaluations_failed: AtomicU64::new(0),
@@ -3105,6 +3109,28 @@ impl Metrics {
                 self.openenv_episodes_collected.load(Ordering::Relaxed)
             ),
         );
+        out.push_str("# HELP kiln_openenv_authenticated_operations_total Accepted OpenEnv control-plane operations using at least one origin-scoped bearer credential.\n");
+        out.push_str("# TYPE kiln_openenv_authenticated_operations_total counter\n");
+        for (operation, value) in [
+            (
+                "inspect",
+                self.openenv_authenticated_inspections
+                    .load(Ordering::Relaxed),
+            ),
+            (
+                "run",
+                self.openenv_authenticated_runs_started
+                    .load(Ordering::Relaxed),
+            ),
+        ] {
+            prom_counter(
+                &mut out,
+                "kiln_openenv_authenticated_operations_total",
+                "operation",
+                operation,
+                value,
+            );
+        }
         out.push_str("# HELP kiln_openenv_environment_evaluations_total Paired held-out OpenEnv evaluations by lifecycle outcome.\n");
         out.push_str("# TYPE kiln_openenv_environment_evaluations_total counter\n");
         for (status, value) in [

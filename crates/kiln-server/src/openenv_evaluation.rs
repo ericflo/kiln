@@ -794,6 +794,7 @@ mod tests {
             OpenEnvRolloutOptions {
                 kiln_url: format!("http://{address}"),
                 environment_urls: vec![environment_url.clone()],
+                credential_envs: Vec::new(),
                 adapter: adapter.to_string(),
                 groups: 20,
                 group_size: 1,

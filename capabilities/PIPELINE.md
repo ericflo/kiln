@@ -45,6 +45,9 @@ A **stage** is one trained adapter produced by one method, with:
 - a kept iter row in `capability.jsonl` with `status: "kept"`
 - for OpenEnv stages, training rollout-summary SHA-256, native paired held-out
   evaluation receipt and both summary digests, plus pinned deployment identity
+- for protected OpenEnv stages, the non-secret `authentication: bearer`
+  identity and operator-owned credential-handle policy; secret values and
+  variable names never enter the stage manifest
 
 A stage corresponds to a `stages/stage-<N>-<slug>.json` file.
 
