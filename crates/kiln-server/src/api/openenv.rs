@@ -47,7 +47,7 @@ use crate::openenv_evaluation::{
     write_environment_evaluation_receipt,
 };
 use crate::recent_requests::now_unix_ms;
-use crate::state::AppState;
+use crate::state::{AppState, TrainingWorkload};
 
 const OPENENV_RUN_SCHEMA_V1: &str = "kiln.openenv-run.v1";
 const OPENENV_RUN_SCHEMA_V4: &str = "kiln.openenv-run.v4";
@@ -1340,12 +1340,15 @@ fn validate_run_request(
     }
     match request.kind {
         OpenEnvRunKind::Rollout
-            if request.output_adapter.is_some() || request.environment_eval.is_some() =>
+            if request.output_adapter.is_some()
+                || request.training_config.is_some()
+                || request.post_eval.is_some()
+                || request.environment_eval.is_some() =>
         {
             return Err(openenv_error(
                 StatusCode::BAD_REQUEST,
                 "openenv_invalid_request",
-                "output_adapter and environment_eval are valid only for kind=train",
+                "output_adapter, training_config, post_eval, and environment_eval are valid only for kind=train",
                 "Remove training-only fields or set kind to train.",
             ));
         }
@@ -1371,6 +1374,66 @@ fn validate_run_request(
             "Correct the OpenEnv collection bounds and retry.",
         )
     })?;
+    Ok(())
+}
+
+/// Materialize the exact native-GRPO configuration owned by an OpenEnv train
+/// workflow. The request may customize ordinary trainer controls, while Kiln
+/// fixes all fields whose meaning is determined by the live rollout.
+fn effective_openenv_grpo_config(request: &OpenEnvRunRequest, output_adapter: &str) -> GrpoConfig {
+    let mut config = request.training_config.clone().unwrap_or_default();
+    config.output_name = Some(output_adapter.to_string());
+    // A native environment gate owns promotion. Keep the prior policy active
+    // until paired held-out returns pass; diagnostic environment evaluation
+    // preserves the ordinary training auto-load behavior.
+    config.auto_load = request.auto_load
+        && !request
+            .environment_eval
+            .as_ref()
+            .is_some_and(|config| config.gate.is_some());
+    config.behavior_policy = BehaviorPolicy::NoImportanceCorrection;
+    config.base_adapter = normalized_adapter(&request.adapter);
+    config
+}
+
+/// Reject a doomed OpenEnv train workflow before it is persisted or opens an
+/// environment session. Final GRPO queue admission remains authoritative for
+/// transient capacity and live memory, which may change while collection is
+/// running; immutable request/backend/suite contracts are safe to prove now.
+fn validate_openenv_training_preflight(
+    state: &AppState,
+    request: &OpenEnvRunRequest,
+) -> Result<(), ApiError> {
+    if request.kind != OpenEnvRunKind::Train {
+        return Ok(());
+    }
+    let output_adapter = request.output_adapter.as_deref().ok_or_else(|| {
+        openenv_error(
+            StatusCode::BAD_REQUEST,
+            "openenv_invalid_request",
+            "kind=train requires output_adapter",
+            "Choose a path-safe output adapter name.",
+        )
+    })?;
+    let config = effective_openenv_grpo_config(request, output_adapter);
+
+    // OpenEnv trajectories always carry explicit observation segments, so
+    // validate the environment-token branch of the native kt-tape contract.
+    super::training::validate_grpo_config_at_submit(&config, true)?;
+    super::training::validate_post_eval_suite(state, request.post_eval.as_ref())?;
+    if let Some(adapter) = normalized_adapter(&request.adapter) {
+        super::adapters::validate_loadable_adapter_dir(&state.adapter_dir.join(adapter))?;
+    }
+    super::training::ensure_training_backend_admission(state)?;
+    if state.shutdown.load(Ordering::Relaxed) {
+        return Err(ApiError::shutting_down());
+    }
+    super::training::enforce_training_workload_admission(state, TrainingWorkload::Grpo)?;
+    super::training::enforce_training_optimizer_admission(
+        state,
+        config.optimizer,
+        config.lora_rank,
+    )?;
     Ok(())
 }
 
@@ -1778,6 +1841,13 @@ async fn create_run(
         return Ok((StatusCode::OK, Json(status)));
     }
     validate_run_request(&request, state.openenv_runs.policy())?;
+    if let Err(error) = validate_openenv_training_preflight(&state, &request) {
+        state
+            .metrics
+            .openenv_training_preflight_rejected
+            .fetch_add(1, Ordering::Relaxed);
+        return Err(error);
+    }
     let authenticated = request.credential_ids.iter().any(Option::is_some);
     let outcome = state
         .openenv_runs
@@ -1979,25 +2049,7 @@ async fn execute_run_inner(state: &AppState, run_id: &str, cancel: Arc<AtomicBoo
         .output_adapter
         .as_ref()
         .context("OpenEnv train run has no output adapter")?;
-    let mut config = request.training_config.clone().unwrap_or_default();
-    config.output_name = Some(output_adapter.clone());
-    // A native environment gate owns promotion. Keep the prior policy active
-    // until paired held-out returns pass; diagnostic environment evaluation
-    // preserves the ordinary training auto-load behavior.
-    config.auto_load = request.auto_load
-        && !request
-            .environment_eval
-            .as_ref()
-            .is_some_and(|config| config.gate.is_some());
-    config.behavior_policy = BehaviorPolicy::NoImportanceCorrection;
-    config.base_adapter = if matches!(
-        request.adapter.trim().to_ascii_lowercase().as_str(),
-        "base" | "none" | "null"
-    ) {
-        None
-    } else {
-        Some(request.adapter.clone())
-    };
+    let config = effective_openenv_grpo_config(&request, output_adapter);
     let environment_gate_pending = request
         .environment_eval
         .as_ref()
@@ -3356,6 +3408,107 @@ mod tests {
     }
 
     #[test]
+    fn rollout_rejects_every_training_only_field() {
+        let policy = OpenEnvConfig::default();
+
+        let mut rollout = request(OpenEnvRunKind::Rollout);
+        rollout.output_adapter = Some("agent".into());
+        assert!(validate_run_request(&rollout, &policy).is_err());
+
+        let mut rollout = request(OpenEnvRunKind::Rollout);
+        rollout.training_config = Some(GrpoConfig::default());
+        assert!(validate_run_request(&rollout, &policy).is_err());
+
+        let mut rollout = request(OpenEnvRunKind::Rollout);
+        rollout.post_eval = Some(kiln_eval::PostEvalConfig {
+            suite: "held-out".into(),
+            data_scope: Default::default(),
+            generation: None,
+            min_accuracy: None,
+            include_baseline: true,
+        });
+        assert!(validate_run_request(&rollout, &policy).is_err());
+
+        let mut rollout = request(OpenEnvRunKind::Rollout);
+        rollout.environment_eval = Some(OpenEnvEnvironmentEvalConfig {
+            groups: 1,
+            group_size: 1,
+            seed_start: None,
+            gate: None,
+        });
+        assert!(validate_run_request(&rollout, &policy).is_err());
+    }
+
+    #[test]
+    fn effective_grpo_config_is_owned_by_the_live_rollout_contract() {
+        let mut train = request(OpenEnvRunKind::Train);
+        train.adapter = "behavior-agent".into();
+        train.auto_load = true;
+        train.environment_eval = Some(OpenEnvEnvironmentEvalConfig {
+            groups: 1,
+            group_size: 1,
+            seed_start: None,
+            gate: Some(crate::openenv_evaluation::OpenEnvEnvironmentEvalGate {
+                min_mean_return: None,
+                min_mean_improvement: 0.0,
+            }),
+        });
+        let mut supplied = GrpoConfig::default();
+        supplied.output_name = Some("ignored".into());
+        supplied.auto_load = true;
+        supplied.base_adapter = Some("ignored".into());
+        supplied.behavior_policy = BehaviorPolicy::Recorded;
+        train.training_config = Some(supplied);
+
+        let effective = effective_openenv_grpo_config(&train, "trained-agent");
+        assert_eq!(effective.output_name.as_deref(), Some("trained-agent"));
+        assert_eq!(effective.base_adapter.as_deref(), Some("behavior-agent"));
+        assert_eq!(
+            effective.behavior_policy,
+            BehaviorPolicy::NoImportanceCorrection
+        );
+        assert!(!effective.auto_load, "environment gate owns promotion");
+    }
+
+    #[test]
+    fn train_preflight_rejects_static_failures_before_mock_backend_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = test_state(&temp, OpenEnvConfig::default());
+
+        let mut invalid_config = request(OpenEnvRunKind::Train);
+        let mut config = GrpoConfig::default();
+        config.checkpoint_interval = Some(0);
+        invalid_config.training_config = Some(config);
+        let error = validate_openenv_training_preflight(&state, &invalid_config).unwrap_err();
+        assert_eq!(error.code, "training_invalid_request");
+        assert!(error.message.contains("checkpoint_interval"));
+
+        state.suite_registry = Some(Arc::new(crate::eval::SuiteRegistry::new(
+            temp.path().join("suites"),
+        )));
+        let mut missing_suite = request(OpenEnvRunKind::Train);
+        missing_suite.post_eval = Some(kiln_eval::PostEvalConfig {
+            suite: "not-installed".into(),
+            data_scope: Default::default(),
+            generation: None,
+            min_accuracy: None,
+            include_baseline: true,
+        });
+        let error = validate_openenv_training_preflight(&state, &missing_suite).unwrap_err();
+        assert_eq!(error.code, "training_invalid_request");
+        assert!(error.message.contains("not an installed eval suite"));
+
+        let mut missing_policy = request(OpenEnvRunKind::Train);
+        missing_policy.adapter = "missing-policy".into();
+        let error = validate_openenv_training_preflight(&state, &missing_policy).unwrap_err();
+        assert_eq!(error.code, "adapter_not_found");
+
+        let error = validate_openenv_training_preflight(&state, &request(OpenEnvRunKind::Train))
+            .unwrap_err();
+        assert_eq!(error.code, "mock_mode");
+    }
+
+    #[test]
     fn collection_bounds_are_rejected_before_run_admission() {
         let policy = OpenEnvConfig::default();
         let mut rollout = request(OpenEnvRunKind::Rollout);
@@ -3804,6 +3957,50 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            temp.path()
+                .join(".openenv")
+                .join("runs")
+                .read_dir()
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn http_train_preflight_rejection_is_observable_and_persists_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(&temp, OpenEnvConfig::default());
+        let metrics = state.metrics.clone();
+        let app = routes().with_state(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/openenv/runs")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&request(OpenEnvRunKind::Train)).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"],
+            "mock_mode"
+        );
+        assert_eq!(
+            metrics
+                .openenv_training_preflight_rejected
+                .load(Ordering::Relaxed),
+            1
+        );
         assert!(
             temp.path()
                 .join(".openenv")

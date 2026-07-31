@@ -3245,7 +3245,7 @@
             "x-kiln-rust-type": "OpenEnvRunStatus"
           },
           "202": {
-            "description": "The bounded run was newly persisted and accepted for asynchronous execution.",
+            "description": "The bounded run passed immutable train preflight when applicable, was newly persisted, and was accepted for asynchronous execution.",
             "content": {
               "application/json": {
                 "schema": {

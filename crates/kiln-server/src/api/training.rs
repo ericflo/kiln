@@ -1012,13 +1012,7 @@ fn validate_grpo_submission_source(
                 .any(|seg| seg.kind == kiln_train::trajectory::TurnKind::Observation)
         })
     });
-    req.config
-        .loss
-        .validate_for_kt_tape(has_env_tokens)
-        .map_err(ApiError::training_invalid_request)?;
-    req.config
-        .validate_policy_config()
-        .map_err(ApiError::training_invalid_request)?;
+    validate_grpo_config_at_submit(&req.config, has_env_tokens)?;
     if req.config.behavior_policy == kiln_train::BehaviorPolicy::Recorded {
         for (group_idx, group) in req.groups.iter().enumerate() {
             for (completion_idx, completion) in group.completions.iter().enumerate() {
@@ -1080,6 +1074,37 @@ pub(crate) fn validate_lora_scale_at_submit(
     kiln_train::lora_scaling::validate_lora_scaling(lora_rank, lora_alpha, allow_high_lora_scale)
         .map(|_| ())
         .map_err(|e| ApiError::training_invalid_request(format!("{e:#}")))
+}
+
+/// Validate the static native-GRPO contract before a request can consume
+/// queue, accelerator, or environment capacity.
+///
+/// OpenEnv train workflows call this with `has_env_tokens=true` before they
+/// launch a single episode. Keeping this guard shared with `/v1/train/grpo`
+/// prevents the live-environment path from drifting into a weaker dialect of
+/// Kiln's native trainer contract.
+pub(crate) fn validate_grpo_config_at_submit(
+    config: &kiln_train::GrpoConfig,
+    has_env_tokens: bool,
+) -> Result<(), ApiError> {
+    config
+        .loss
+        .validate_for_kt_tape(has_env_tokens)
+        .map_err(ApiError::training_invalid_request)?;
+    config
+        .validate_policy_config()
+        .map_err(ApiError::training_invalid_request)?;
+    validate_lora_scale_at_submit(
+        config.lora_rank,
+        config.lora_alpha,
+        config.allow_high_lora_scale,
+    )?;
+    if config.checkpoint_interval == Some(0) {
+        return Err(ApiError::training_invalid_request(
+            "GRPO checkpoint_interval must be greater than zero",
+        ));
+    }
+    Ok(())
 }
 
 fn normalize_sft_config_at_submit(config: &mut kiln_train::SftConfig) -> Result<(), ApiError> {
@@ -1801,16 +1826,6 @@ pub(crate) fn submit_grpo_request(
     let job_id = uuid::Uuid::new_v4().to_string();
     if let Some(name) = req.config.output_name.as_deref() {
         super::adapters::validate_adapter_name(name)?;
-    }
-    validate_lora_scale_at_submit(
-        req.config.lora_rank,
-        req.config.lora_alpha,
-        req.config.allow_high_lora_scale,
-    )?;
-    if req.config.checkpoint_interval == Some(0) {
-        return Err(ApiError::training_invalid_request(
-            "GRPO checkpoint_interval must be greater than zero",
-        ));
     }
     let adapter_name = req
         .config
@@ -6298,6 +6313,21 @@ mod tests {
         invalid_cispo.config.cispo_max_weight = 0.0;
         let error = validate_grpo_submission_source(&invalid_cispo, None).unwrap_err();
         assert!(error.message.contains("cispo_max_weight"));
+    }
+
+    #[test]
+    fn grpo_static_config_validation_covers_lora_and_checkpoint_contracts() {
+        let mut config = kiln_train::GrpoConfig::default();
+        config.checkpoint_interval = Some(0);
+        let error = validate_grpo_config_at_submit(&config, true).unwrap_err();
+        assert_eq!(error.code, "training_invalid_request");
+        assert!(error.message.contains("checkpoint_interval"));
+
+        config.checkpoint_interval = None;
+        config.lora_alpha = 1_000.0;
+        let error = validate_grpo_config_at_submit(&config, true).unwrap_err();
+        assert_eq!(error.code, "training_invalid_request");
+        assert!(error.message.contains("unsafe LoRA scaling"));
     }
 
     /// ECHO env-CE trains again (resurrection PR2), so echo-enabled

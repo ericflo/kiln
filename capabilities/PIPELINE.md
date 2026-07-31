@@ -242,7 +242,11 @@ Before any GPU work in a stage N ≥ 2:
      server `run_id` and linked `training_job_id`; submit the complete request
      with `kiln openenv start --request <run.json> --idempotency-key <attempt-key> --follow`; reserve disjoint
      held-out seeds and configure the native paired-return gate before
-     collection; bind one stable non-secret `idempotency_key` to the stage so a
+     collection; attach the installed static `post_eval` suite when the blind
+     capability eval should run automatically; a synchronous train-preflight
+     rejection creates no run and consumes no environment episode, so correct
+     its effective-GRPO/adapter/suite/backend/optimizer contract before retry;
+     bind one stable non-secret `idempotency_key` to the stage so a
      lost response recovers the same retained run; if v4 status is `queued`,
      record its FIFO position and follow that run ID; Task API catalogs may document coverage but never imply a
      reset binding

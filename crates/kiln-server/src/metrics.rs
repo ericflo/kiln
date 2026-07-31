@@ -219,6 +219,7 @@ pub struct Metrics {
 
     // OpenEnv orchestration counters
     pub openenv_runs_started: AtomicU64,
+    pub openenv_training_preflight_rejected: AtomicU64,
     pub openenv_run_idempotent_replays: AtomicU64,
     pub openenv_runs_resumed: AtomicU64,
     pub openenv_runs_admitted: AtomicU64,
@@ -288,6 +289,7 @@ impl Metrics {
             training_opd_failed: AtomicU64::new(0),
             training_opd_cancelled: AtomicU64::new(0),
             openenv_runs_started: AtomicU64::new(0),
+            openenv_training_preflight_rejected: AtomicU64::new(0),
             openenv_run_idempotent_replays: AtomicU64::new(0),
             openenv_runs_resumed: AtomicU64::new(0),
             openenv_runs_admitted: AtomicU64::new(0),
@@ -3095,6 +3097,11 @@ impl Metrics {
         for (status, value) in [
             ("started", self.openenv_runs_started.load(Ordering::Relaxed)),
             (
+                "training_preflight_rejected",
+                self.openenv_training_preflight_rejected
+                    .load(Ordering::Relaxed),
+            ),
+            (
                 "idempotent_replay",
                 self.openenv_run_idempotent_replays.load(Ordering::Relaxed),
             ),
@@ -3906,6 +3913,8 @@ mod tests {
             .store(8192, std::sync::atomic::Ordering::Relaxed);
         m.openenv_runs_resumed.store(2, Ordering::Relaxed);
         m.openenv_runs_admitted.store(3, Ordering::Relaxed);
+        m.openenv_training_preflight_rejected
+            .store(5, Ordering::Relaxed);
         m.openenv_run_idempotent_replays.store(4, Ordering::Relaxed);
         m.openenv_run_queue_wait_ms_total
             .store(1_250, Ordering::Relaxed);
@@ -4358,6 +4367,9 @@ mod tests {
         assert!(output.contains("kiln_request_prefill_tokens_completed 8192"));
         assert!(output.contains("kiln_scheduler_waiting 3"));
         assert!(output.contains("kiln_openenv_runs_total{status=\"admitted\"} 3"));
+        assert!(
+            output.contains("kiln_openenv_runs_total{status=\"training_preflight_rejected\"} 5")
+        );
         assert!(output.contains("kiln_openenv_runs_total{status=\"resumed\"} 2"));
         assert!(output.contains("kiln_openenv_runs_total{status=\"idempotent_replay\"} 4"));
         assert!(output.contains("kiln_openenv_run_queue_wait_seconds_total 1.250"));

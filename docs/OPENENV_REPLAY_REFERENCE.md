@@ -366,6 +366,30 @@ Live replay uses the same capacity acquisition rule. Capacity retries are
 reported separately from environment transitions and never become fabricated
 training observations.
 
+## Training admission
+
+For a persisted `kind=train` request, Kiln materializes the exact native-GRPO
+configuration before it creates a run directory or contacts an environment.
+It overrides rollout-owned `behavior_policy`, `base_adapter`, `output_name`,
+and `auto_load`, then validates the environment-token loss and policy contract,
+LoRA scale, checkpoint interval, behavior-adapter layout, installed
+`post_eval` suite, serving profile, backend GRPO workload, optimizer, and model
+rank ceiling. Failure is synchronous, consumes no episode, and increments
+`kiln_openenv_runs_total{status="training_preflight_rejected"}`. Rollout-only
+requests reject `output_adapter`, `training_config`, `post_eval`, and
+`environment_eval` instead of ignoring them.
+
+The final native GRPO admission repeats immutable checks after collection and
+adds time-varying queue and live-memory capacity. This second gate remains
+authoritative because capacity can change while episodes run.
+
+The dashboard's **Prove it after training** control emits ordinary
+`post_eval`. The named suite must already be installed; Kiln follows adapter
+and optional baseline jobs to terminal outcomes. `train-set-eval` is diagnostic
+and cannot set `min_accuracy`. Static evaluation can accompany paired
+`environment_eval`, but a workflow has one automatic promotion owner:
+`post_eval.min_accuracy` and `environment_eval.gate` are mutually exclusive.
+
 ## Protocol conformance oracle
 
 Run the byte-real interoperability gate with:
@@ -436,9 +460,11 @@ SFT bootstrap for the JSON action format.
 **Rewards have no variance.** GRPO has no within-group signal. Use harder tasks,
 more policy sampling, a more informative reward, or an SFT/OPD bootstrap.
 
-**Training is rejected after collection.** The rollout artifacts remain valid.
-Check the serving profile, training preflight, queue, adapter name, and memory
-diagnostics, then submit the JSONL with `kiln train grpo`.
+**Training is rejected.** Persisted workflows preflight immutable failures
+before collection; correct the returned config, adapter, suite, backend, or
+optimizer error. A direct CLI collection can still encounter time-varying
+queue or memory rejection at final native admission; its rollout artifacts
+remain valid and can be resubmitted with `kiln train grpo`.
 
 **A remote environment redirects.** Redirects are rejected at the trust
 boundary. Pass the canonical base URL directly.

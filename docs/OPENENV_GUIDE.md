@@ -21,9 +21,6 @@ KILN_SERVER_SERVING_PROFILE=experimental KILN_MODEL_PATH=./Qwen3.5-4B ./kiln ser
   --output-adapter counter-agent
 ```
 
-Keep the pre-training JSONL, replay, and summary with `train_receipt.json`;
-held-out evaluation retains paired bundles and a decision receipt.
-
 **Training → OpenEnv** persists artifacts, GRPO progress, evaluations,
 gates, failures, and cancellation. Restarts resume queued work; interrupted executors fail explicitly.
 
@@ -68,6 +65,10 @@ Version 4 adds a position-visible, cancellable FIFO. `[openenv]` bounds run capa
 origins, credentials, and TTL. See the [recovery reference](OPENENV_REPLAY_REFERENCE.md) and
 [configuration reference](CONFIGURATION.md).
 
+Before persistence or discovery, train creation preflights its effective GRPO
+config, adapter, suite, and backend; failures spend no episodes. Rollouts reject
+train-only fields. See the [admission reference](OPENENV_REPLAY_REFERENCE.md#training-admission).
+
 ### Protected environments
 
 Protected deployments use exact-origin bearer credentials without putting a secret in a URL,
@@ -88,9 +89,8 @@ Inspection checks `/health`, then reads `/metadata`, `/schema`, `/list_environme
 `/openapi.json`. It reports the WebSocket URL, client profile, OpenAPI version, and a SHA-256
 over the typed action/observation/state schema.
 
-Run inspection before a long collection. It catches unavailable or changed servers without
-spending model tokens. `tasks` reports conforming 501 as unsupported and otherwise pages
-arbitrary provider rows; OpenEnv defines no row-to-reset mapping, so Kiln never invents one.
+Inspect before collection. Task API 501 means unsupported; catalog rows remain
+untrusted because OpenEnv defines no portable row-to-reset mapping.
 
 ### Collect without training
 
@@ -149,6 +149,10 @@ Training admission, memory checks, checkpointing, cancellation, atomic adapter
 publication, and serving-profile rules are the same as any other native GRPO
 job. Use `kiln train status --job-id …`, the dashboard, and the adapter's
 `train_receipt.json` normally.
+
+**Prove it after training** attaches an installed static `post_eval` suite. It
+may accompany paired evaluation, but only one gate can own promotion. See the
+[admission reference](OPENENV_REPLAY_REFERENCE.md#training-admission).
 
 ### Held-out environment returns
 

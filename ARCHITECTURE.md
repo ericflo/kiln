@@ -428,6 +428,9 @@ OpenEnv is the environment-facing half of native reinforcement learning:
 ```text
 CLI start/status/artifact · dashboard · /v1/openenv/inspect and /v1/openenv/runs
         │
+        ├── train preflight → effective GRPO config · adapter · suite · backend/optimizer
+        │                     (before persistence, discovery, episodes, or GPU work)
+        │
         ├── bounded GET health · metadata · schema · environments · OpenAPI
         │
         ▼
@@ -462,6 +465,18 @@ GRPO admission function used by `POST /v1/train/grpo`. `kiln-train` owns the
 optional OpenEnv provenance inside canonical `ScoredRollout`; this lets the
 same JSONL travel through native GRPO without a parallel training
 representation.
+
+For `kind=train`, control-plane admission first materializes the exact config
+that will later reach native GRPO. It fixes rollout-owned fields, validates the
+environment-token loss and policy contract, LoRA scale, checkpoint interval,
+behavior-adapter layout, installed `post_eval` suite, serving profile, backend
+workload, optimizer tuple, and model rank ceiling. Failure is synchronous and
+persists no run, so a typo cannot spend episodes before failing at trainer
+handoff. The final native queue admission still rechecks these invariants plus
+transient queue and live-memory capacity after collection. Rollout-only
+requests reject every training-only field. Both the dashboard's static
+**Prove it after training** suite and paired `environment_eval` remain ordinary
+parts of the same owned lifecycle.
 
 Server-owned runs are bounded by `[openenv]` policy and persisted below
 `<adapter_dir>/.openenv/runs/<run-id>/`. `run.json` records request, discovery

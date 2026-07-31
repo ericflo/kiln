@@ -37,6 +37,12 @@
   interrupted stateful work still fails explicitly. Optional bounded,
   non-secret idempotency keys atomically recover identical retained submissions
   across concurrency and restart, while conflicting reuse returns HTTP 409.
+  Train runs now materialize and validate their exact effective GRPO config,
+  behavior adapter, installed static eval suite, backend/workload, optimizer,
+  and rank before persistence or environment collection; rejected preflights
+  consume no episodes and are separately metered. Rollout requests fail closed
+  on every training-only field. Training → OpenEnv now exposes the same
+  **Prove it after training** static-suite workflow as native SFT and GRPO.
   CI drives all twenty-two pinned
   text-profiled arcade and math servers plus a native
   collect/submit/verify/replay batch end to end.

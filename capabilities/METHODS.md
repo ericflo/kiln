@@ -209,6 +209,13 @@ Assign one non-secret `idempotency_key` to each persisted hypothesis. Exact
 retained retries recover the same v4 run across concurrency and restart; never
 change request semantics under that key. Treat `queued` plus an admission
 position as accepted work, retain the run ID, and cancel obsolete hypotheses.
+Attach an installed static `post_eval` suite when the stage also has a
+capability-level blind eval. Kiln preflights the exact effective GRPO config,
+behavior adapter, suite, backend/workload, optimizer, and rank before it
+persists a train run or opens an environment session. A synchronous rejection
+therefore spent no episodes: correct the request and use a new idempotency key
+only when its semantics change. The dashboard's **Prove it after training**
+control emits this same contract.
 **Use when:** Rule A. Stateful OpenEnv tasks or multi-turn tool-calling tasks.
 **Data:** For OpenEnv, seed-matched stateful WebSocket episodes collected as
 canonical `AgenticGroup` JSONL. For pi, session JSONLs normalized into

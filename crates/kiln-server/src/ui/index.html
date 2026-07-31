@@ -602,6 +602,17 @@
               <input id="openenv-output-adapter" value="openenv-agent" required autocomplete="off" spellcheck="false">
             </div>
           </div>
+          <div class="prove-row" id="openenv-prove-row" hidden>
+            <label class="prove-check" for="openenv-prove">
+              <input type="checkbox" id="openenv-prove"> Prove it after training
+            </label>
+            <select id="openenv-prove-suite" aria-label="Eval suite to grade the OpenEnv-trained adapter against" disabled></select>
+            <select id="openenv-prove-scope" aria-label="OpenEnv post-training evaluation data scope" disabled>
+              <option value="held-out" selected>Held-out evaluation</option>
+              <option value="train-set-eval">Train-set diagnostic</option>
+            </select>
+            <span class="prove-hint" id="openenv-prove-hint">Kiln preflights the installed suite before opening an environment session, then grades the trained adapter and base after native GRPO.</span>
+          </div>
           <div class="form-row">
             <div class="form-group"><label for="openenv-groups">Seed groups</label><input id="openenv-groups" type="number" value="8" min="1" max="16384"></div>
             <div class="form-group"><label for="openenv-group-size">Episodes per seed</label><input id="openenv-group-size" type="number" value="4" min="1" max="256"></div>

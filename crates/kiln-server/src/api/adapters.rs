@@ -374,7 +374,7 @@ fn record_adapter_loaded(
     }
 }
 
-fn validate_loadable_adapter_dir(adapter_path: &Path) -> Result<PathBuf, ApiError> {
+pub(crate) fn validate_loadable_adapter_dir(adapter_path: &Path) -> Result<PathBuf, ApiError> {
     if !adapter_path.exists() || !adapter_path.is_dir() {
         return Err(ApiError::adapter_not_found(adapter_path.display()));
     }

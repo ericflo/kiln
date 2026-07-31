@@ -1085,12 +1085,16 @@ curl -fsS http://localhost:8420/v1/train/opd \
           v4 status reports one-based queue position, admission timestamp, and wait duration. A restart
           resumes only never-admitted FIFO entries; interrupted executors fail explicitly. Optional
           bounded <code>idempotency_key</code> values make concurrent and post-restart submission retries
-          atomic while the original run is retained.
+          atomic while the original run is retained. Train creation materializes the exact effective
+          GRPO config and preflights its behavior adapter, static <code>post_eval</code> suite,
+          backend/workload, optimizer, and rank before persistence or environment discovery. Rejections
+          therefore spend no episodes. Training &rarr; OpenEnv exposes that suite as <strong>Prove it after
+          training</strong>; collect-only requests reject every training-only field.
         </p>
         <div class="endpoint-list" style="color: var(--fg-dim);">
           <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/inspect</code> &mdash; discover and normalize the protocol metadata, action schema, and observation schema for one compatible environment.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/tasks</code> &mdash; list the environment&rsquo;s reset-task catalog through the same origin and credential policy.</div>
-          <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/runs</code> &mdash; accept a collect-only or collect-and-train run into bounded FIFO execution. A new run returns 202; the same retained idempotency key and normalized request return the original status with 200; changed reuse returns 409.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/runs</code> &mdash; preflight and accept a collect-only or collect-and-train run into bounded FIFO execution. A new run returns 202; the same retained idempotency key and normalized request return the original status with 200; changed reuse returns 409.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/openenv/runs</code> &mdash; list retained runs with progress, terminal evidence, gates, and published artifact manifests.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/openenv/runs/{run_id}</code> &mdash; retrieve one durable run snapshot across collection, training, paired evaluation, completion, failure, or cancellation.</div>
           <div class="endpoint"><span class="method">DELETE</span> <code>/v1/openenv/runs/{run_id}</code> &mdash; immediately cancel queued work or request cooperative cancellation from the active collector, trainer, or evaluator while retaining completed evidence.</div>
@@ -1102,6 +1106,8 @@ curl -fsS http://localhost:8420/v1/train/opd \
        "environment_urls":["http://127.0.0.1:8990"],
        "adapter":"base","output_adapter":"math-agent",
        "groups":8,"group_size":4,"max_steps":8,
+       "post_eval":{"suite":"qwen3.5-agentic-core",
+                    "data_scope":"held-out","include_baseline":true},
        "environment_eval":{"groups":20,"group_size":1}}'
 
 curl -fsS http://localhost:8420/v1/openenv/runs | python3 -m json.tool</code></pre></div>

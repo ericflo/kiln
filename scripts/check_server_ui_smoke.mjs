@@ -389,6 +389,9 @@ function checkTrainingOptimizerSupportContract(appSource, indexSource, demoSourc
   }
   for (const id of [
     'openenv-credential-ids',
+    'openenv-prove',
+    'openenv-prove-suite',
+    'openenv-prove-scope',
     'openenv-environment-eval-mode',
     'openenv-environment-eval-groups',
     'openenv-environment-eval-group-size',
@@ -398,6 +401,8 @@ function checkTrainingOptimizerSupportContract(appSource, indexSource, demoSourc
     if (!indexSource.includes(`id="${id}"`)) fail(`OpenEnv held-out evaluation control #${id} is missing`);
   }
   for (const term of [
+    "provePostEval('openenv')",
+    'request.post_eval = postEval',
     'request.environment_eval = {',
     'environmentEvaluation?.evidence',
     "state === 'environment_evaluating'",
@@ -4749,11 +4754,29 @@ async function runSmoke(baseUrl, {
     await clickAndWait(page, '#training-tab-queue', 'Could not activate Queue tab before keyboard checks');
     await expectTrainingTabKeyboardNavigation(page);
 
+    if (setEvalSuites) setEvalSuites([{ name: 'smoke-suite', num_examples: 3 }]);
     await clickAndWait(page, '#training-tab-openenv', 'Could not open OpenEnv training tab');
     await waitForVisiblePanel(page, '#tab-openenv', 'OpenEnv training tab did not activate');
     await waitForPanelText(page, '#openenv-runs', /queue-op[\s\S]*queued[\s\S]*FIFO execution queue · position 2 · 1 active slot/, 'OpenEnv history should render live FIFO admission position and capacity');
     await waitForPanelText(page, '#openenv-optimizer-support', /Muon · bf16 LoRA · round-to-nearest · rank 8 \(supported 2–32\)/, 'OpenEnv train should render the native GRPO optimizer tuple');
     await expectDisabled(page, '#openenv-form button[type="submit"]', false, 'OpenEnv train should enable after native GRPO capability admission');
+    if (setEvalSuites) {
+      await page.waitForFunction(
+        () => document.getElementById('openenv-prove-row')?.hidden === false,
+        { timeout: 5000 },
+      ).catch(() => fail('OpenEnv post-training eval suite row did not appear'));
+      await page.select('#openenv-kind', 'rollout');
+      const rolloutProveState = await page.evaluate(() => ({
+        hidden: document.getElementById('openenv-prove-row')?.hidden,
+        disabled: document.getElementById('openenv-prove')?.disabled,
+      }));
+      if (!rolloutProveState.hidden || !rolloutProveState.disabled) {
+        fail(`OpenEnv rollout-only mode retained training-only eval controls: ${JSON.stringify(rolloutProveState)}`);
+      }
+      await page.select('#openenv-kind', 'train');
+      await clickAndWait(page, '#openenv-prove', 'Could not enable OpenEnv post-training evaluation');
+      await waitForPanelText(page, '#openenv-prove-hint', /preflights the installed suite before opening an environment session/, 'OpenEnv eval control should explain admission-time suite validation');
+    }
     await page.$eval('#openenv-environments', input => { input.value = 'http://127.0.0.1:8990'; });
     await page.$eval('#openenv-credential-ids', input => { input.value = 'smoke-arcade'; });
     const inspectRequest = page.waitForRequest(
@@ -4808,6 +4831,9 @@ async function runSmoke(baseUrl, {
       || openEnvBody.adapter !== 'base'
       || openEnvBody.output_adapter !== 'openenv-agent'
       || openEnvBody.training_config?.lora_rank !== 8
+      || (setEvalSuites && (openEnvBody.post_eval?.suite !== 'smoke-suite'
+        || openEnvBody.post_eval?.data_scope !== 'held-out'
+        || openEnvBody.post_eval?.include_baseline !== true))
       || openEnvBody.environment_eval?.groups !== 20
       || openEnvBody.environment_eval?.group_size !== 1
       || openEnvBody.environment_eval?.gate?.min_mean_return !== 0.5
@@ -4832,6 +4858,7 @@ async function runSmoke(baseUrl, {
     await waitForPanelText(page, '#openenv-runs', /smoke-op[\s\S]*Retry key · [0-9a-f-]{36}/, 'OpenEnv run history should expose the persisted retry key');
     await waitForPanelText(page, '#openenv-runs', /smoke-op[\s\S]*Execution admitted after 250 ms/, 'OpenEnv run history should retain admission wait evidence');
     await waitForPanelText(page, '#openenv-runs', /dataset[\s\S]*aaaaaaaaaaaa/, 'OpenEnv artifact controls should expose the manifest digest identity');
+    if (setEvalSuites) setEvalSuites([]);
 
     await clickAndWait(page, '#training-tab-sft', 'Could not open SFT tab');
     await waitForVisiblePanel(page, '#tab-sft', 'SFT tab did not activate');

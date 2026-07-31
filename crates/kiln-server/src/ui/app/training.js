@@ -916,26 +916,34 @@ function updateProveControls(kind) {
   if (hint) {
     hint.textContent = scope?.value === 'train-set-eval'
       ? 'Diagnostic only: this mode may reuse training rows and cannot satisfy a minimum-accuracy promotion gate.'
-      : 'Kiln rejects the submission if this suite overlaps the admitted training partition, then grades the adapter and base when training finishes.';
+      : kind === 'openenv'
+        ? 'Kiln preflights the installed suite before opening an environment session, then grades the trained adapter and base after native GRPO.'
+        : 'Kiln rejects the submission if this suite overlaps the admitted training partition, then grades the adapter and base when training finishes.';
   }
 }
 async function refreshProveRows() {
   let suites = [];
   try { const d = await api('/v1/eval/suites'); suites = d.suites || []; } catch (_) { /* leave hidden */ }
-  for (const kind of ['sft', 'grpo']) {
+  for (const kind of ['sft', 'grpo', 'openenv']) {
     const row = document.getElementById(kind + '-prove-row');
     const sel = document.getElementById(kind + '-prove-suite');
     const check = document.getElementById(kind + '-prove');
     if (!row || !sel || !check) continue;
-    if (!suites.length) { row.hidden = true; continue; }
-    row.hidden = false;
+    row.dataset.hasSuites = suites.length ? 'true' : 'false';
+    if (!suites.length) {
+      check.checked = false;
+      row.hidden = true;
+      updateProveControls(kind);
+      continue;
+    }
+    row.hidden = kind === 'openenv' && document.getElementById('openenv-kind')?.value !== 'train';
     const cur = sel.value;
     sel.innerHTML = suites.map(s => `<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)}${s.num_examples ? ' · ' + s.num_examples + ' examples' : ''}</option>`).join('');
     if (cur && suites.some(s => s.name === cur)) sel.value = cur;
     updateProveControls(kind);
   }
 }
-for (const kind of ['sft', 'grpo']) {
+for (const kind of ['sft', 'grpo', 'openenv']) {
   document.getElementById(kind + '-prove')?.addEventListener('change', () => updateProveControls(kind));
   document.getElementById(kind + '-prove-scope')?.addEventListener('change', () => updateProveControls(kind));
 }
@@ -1149,12 +1157,23 @@ function syncOpenEnvKind() {
   const output = document.getElementById('openenv-output-adapter');
   const rank = document.getElementById('openenv-lora-rank');
   const optimizerStatus = document.getElementById('openenv-optimizer-support');
+  const proveRow = document.getElementById('openenv-prove-row');
+  const proveCheck = document.getElementById('openenv-prove');
   if (outputGroup) outputGroup.hidden = !train;
   if (output) {
     output.disabled = !train;
     output.required = train;
   }
   if (environmentEvalMode) environmentEvalMode.disabled = !train;
+  if (proveRow) proveRow.hidden = !train || proveRow.dataset.hasSuites !== 'true';
+  if (proveCheck) proveCheck.disabled = !train;
+  if (train) updateProveControls('openenv');
+  else {
+    const proveSuite = document.getElementById('openenv-prove-suite');
+    const proveScope = document.getElementById('openenv-prove-scope');
+    if (proveSuite) proveSuite.disabled = true;
+    if (proveScope) proveScope.disabled = true;
+  }
   ['openenv-environment-eval-groups', 'openenv-environment-eval-group-size'].forEach(id => {
     const input = document.getElementById(id);
     if (input) input.disabled = !environmentEvalEnabled;
@@ -1448,7 +1467,10 @@ document.getElementById('openenv-environment-eval-mode')?.addEventListener('chan
 document.getElementById('openenv-inspect')?.addEventListener('click', inspectOpenEnv);
 document.getElementById('openenv-task-inspect')?.addEventListener('click', inspectOpenEnvTasks);
 document.getElementById('openenv-refresh')?.addEventListener('click', () => pollOpenEnvRuns(true));
-document.getElementById('training-tab-openenv')?.addEventListener('click', () => pollOpenEnvRuns(true));
+document.getElementById('training-tab-openenv')?.addEventListener('click', () => {
+  pollOpenEnvRuns(true);
+  refreshProveRows();
+});
 document.getElementById('openenv-adv-toggle')?.addEventListener('click', event => {
   const body = document.getElementById('openenv-advanced');
   const open = body?.hidden;
@@ -1520,6 +1542,8 @@ document.getElementById('openenv-form')?.addEventListener('submit', async event 
       request.output_adapter = document.getElementById('openenv-output-adapter').value.trim();
       if (!request.output_adapter) throw new Error('Choose an output adapter name.');
       request.training_config = training_config;
+      const postEval = provePostEval('openenv');
+      if (postEval) request.post_eval = postEval;
       const environmentEvalMode = document.getElementById('openenv-environment-eval-mode').value;
       if (environmentEvalMode !== 'off') {
         request.environment_eval = {

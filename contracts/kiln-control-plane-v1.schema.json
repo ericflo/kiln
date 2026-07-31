@@ -4213,7 +4213,7 @@
       },
       "x-kiln-semantic-constraints": [
         "kind=train requires output_adapter",
-        "kind=rollout rejects output_adapter and environment_eval",
+        "kind=rollout rejects output_adapter, training_config, post_eval, and environment_eval",
         "while retained, an idempotency_key plus the same normalized request returns the original run; changed semantics with that key fail",
         "idempotency_key is a non-secret opaque client token and is persisted in status",
         "credential_ids is empty for unauthenticated endpoints or has exactly one origin-scoped handle/null entry per environment_urls item",
@@ -4222,9 +4222,10 @@
         "environment_eval requires a distinct behavior and output adapter, and its seed interval must not overlap training",
         "environment_eval.gate requires at least 20 distinct paired seed groups and cannot be combined with post_eval.min_accuracy",
         "an environment gate defers auto_load until a significant exact paired sign-test win also satisfies configured return thresholds",
-        "Kiln overrides behavior_policy, base_adapter, output_name, and auto_load in training_config"
+        "Kiln overrides behavior_policy, base_adapter, output_name, and auto_load in training_config",
+        "kind=train preflights the effective native GRPO config, behavior adapter, installed post_eval suite, backend, GRPO workload, optimizer, and rank before persistence or environment collection"
       ],
-      "description": "A persisted OpenEnv rollout or rollout-and-train request with optional paired held-out environment evaluation. `environments` is accepted as an input alias for `environment_urls`.",
+      "description": "A persisted OpenEnv rollout or rollout-and-train request with optional static and paired held-out environment evaluation. Immutable train contracts are preflighted before persistence or environment collection. `environments` is accepted as an input alias for `environment_urls`.",
       "x-kiln-rust-type": "OpenEnvRunRequest",
       "x-kiln-field-schema-status": "complete"
     },
@@ -7511,6 +7512,11 @@
                 "lora_rank": 8
               },
               "auto_load": true,
+              "post_eval": {
+                "suite": "qwen3.5-agentic-core",
+                "data_scope": "held-out",
+                "include_baseline": true
+              },
               "environment_eval": {
                 "groups": 20,
                 "group_size": 1,
@@ -7620,6 +7626,11 @@
           "lora_rank": 8
         },
         "auto_load": true,
+        "post_eval": {
+          "suite": "qwen3.5-agentic-core",
+          "data_scope": "held-out",
+          "include_baseline": true
+        },
         "environment_eval": {
           "groups": 20,
           "group_size": 1,
@@ -7668,6 +7679,11 @@
             "lora_rank": 8
           },
           "auto_load": true,
+          "post_eval": {
+            "suite": "qwen3.5-agentic-core",
+            "data_scope": "held-out",
+            "include_baseline": true
+          },
           "environment_eval": {
             "groups": 20,
             "group_size": 1,
