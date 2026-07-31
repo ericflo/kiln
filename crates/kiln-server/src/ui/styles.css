@@ -3286,6 +3286,15 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
     background: var(--danger-bg); border: 1px solid var(--danger-bd);
     font-size: var(--text-xs); color: var(--danger-fg); line-height: 1.45; }
   .training-card-error .icn { width: 13px; height: 13px; flex-shrink: 0; margin-top: 1px; }
+  .openenv-run-error { display: block; }
+  .openenv-run-error-head { margin-bottom: 3px; }
+  .openenv-run-error-summary { color: var(--text-2); font-size: var(--text-sm); }
+  .openenv-run-error .hint { display: block; margin-top: 4px; color: var(--text-muted); }
+  .openenv-failure-details { margin-top: 6px; color: var(--text-muted); }
+  .openenv-failure-details > summary { width: fit-content; cursor: pointer; color: var(--text-2); }
+  .openenv-failure-details > pre { max-height: 15rem; overflow: auto; margin: 6px 0 0;
+    padding: var(--space-2); border-radius: var(--radius-sm); background: var(--surface-1);
+    color: var(--text-muted); font: 11px/1.45 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
   .train-data-paste { margin-top: var(--space-2); }
   .train-next-hint { font-size: var(--text-xs); color: var(--text-muted); }
   /* "Prove it after training" — the post_eval auto-hook in one row */

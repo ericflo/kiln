@@ -1354,6 +1354,35 @@ function openEnvRolloutStatsLine(label, stats) {
   return `<div class="training-card-meta">${escapeHtml(label)} · mean return ${Number(stats.mean_episode_return || 0).toFixed(3)}${range} · ${Number(stats.done_count || 0).toLocaleString()} done · ${Number(stats.max_steps_count || 0).toLocaleString()} max steps · ${Number(stats.invalid_model_action_count || 0).toLocaleString()} invalid JSON/schema actions · ${Number(stats.protocol_error_count || 0).toLocaleString()} protocol errors · ${Number(stats.total_environment_steps || 0).toLocaleString()} steps · ${Number(stats.total_model_tokens || 0).toLocaleString()} policy tokens · ${Number(stats.mean_model_latency_ms || 0).toFixed(1)} ms mean model latency · ${Number(stats.recoverable_protocol_error_count || 0).toLocaleString()} recoveries · ${Number(stats.capacity_retry_count || 0).toLocaleString()} capacity retries</div>`;
 }
 
+function openEnvFailureSummary(message) {
+  const raw = String(message || 'OpenEnv run failed.');
+  if (raw.includes('no gradient reached registered differentiable deposits')) {
+    return 'Training stopped safely because the recorded computation graph was disconnected. No adapter update was published.';
+  }
+  if (raw.includes('non-finite')) {
+    return 'Training stopped safely after detecting non-finite model math. No adapter update was published.';
+  }
+  const compact = raw
+    .replace(/^OpenEnv training job [0-9a-f-]+ failed:\s*/i, '')
+    .replace(/^failure_reason=/i, '')
+    .replaceAll(/\s+/g, ' ')
+    .trim();
+  return compact.length > 280 ? `${compact.slice(0, 277)}…` : compact;
+}
+
+function openEnvFailureCard(failure, fallback) {
+  const message = String(failure?.message || fallback || 'OpenEnv run failed.');
+  const technicalDetail = message.length > 280
+    ? `<details class="openenv-failure-details"><summary>Technical details</summary><pre>${escapeHtml(message)}</pre></details>`
+    : '';
+  return `<div class="training-card-error openenv-run-error" role="alert">
+    <div class="openenv-run-error-head"><strong>${escapeHtml(String(failure?.code || 'internal_error'))}</strong> · ${escapeHtml(openEnvStateLabel(failure?.stage || 'orchestration'))} · ${failure?.retryable ? 'retryable' : 'not retryable'}${failure?.protocol_code ? ` · OpenEnv ${escapeHtml(failure.protocol_code)}` : ''}${failure?.http_status ? ` · HTTP ${Number(failure.http_status)}` : ''}</div>
+    <div class="openenv-run-error-summary">${escapeHtml(openEnvFailureSummary(message))}</div>
+    ${failure?.hint ? `<div class="hint">Next: ${escapeHtml(failure.hint)}</div>` : ''}
+    ${technicalDetail}
+  </div>`;
+}
+
 function openEnvRunCard(run) {
   const state = String(run.state || 'unknown');
   const progress = run.progress || {};
@@ -1412,9 +1441,9 @@ function openEnvRunCard(run) {
   const cancel = terminal ? '' : `<button class="btn btn-sm btn-danger" type="button" data-openenv-cancel="${escapeHtml(run.run_id)}">Cancel</button>`;
   const failure = run.failure || null;
   const error = failure
-    ? `<div class="training-card-error"><strong>${escapeHtml(String(failure.code || 'internal_error'))}</strong> · ${escapeHtml(openEnvStateLabel(failure.stage || 'orchestration'))} · ${failure.retryable ? 'retryable' : 'not retryable'}${failure.protocol_code ? ` · OpenEnv ${escapeHtml(failure.protocol_code)}` : ''}${failure.http_status ? ` · HTTP ${Number(failure.http_status)}` : ''}<br>${escapeHtml(failure.message || run.error || 'OpenEnv run failed.')}${failure.hint ? `<br><span class="hint">Next: ${escapeHtml(failure.hint)}</span>` : ''}</div>`
+    ? openEnvFailureCard(failure, run.error)
     : run.error
-      ? `<div class="training-card-error">${escapeHtml(run.error)}</div>`
+      ? openEnvFailureCard(null, run.error)
       : '';
   const warnings = Array.isArray(run.warnings) && run.warnings.length
     ? `<div class="training-card-meta" role="status"><strong>Warning</strong><br>${run.warnings.map(warning => escapeHtml(String(warning))).join('<br>')}</div>`
