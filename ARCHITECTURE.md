@@ -426,7 +426,7 @@ identity contracts.
 OpenEnv is the environment-facing half of native reinforcement learning:
 
 ```text
-CLI · dashboard · /v1/openenv/inspect and /v1/openenv/runs
+CLI start/status/artifact · dashboard · /v1/openenv/inspect and /v1/openenv/runs
         │
         ├── bounded GET health · metadata · schema · environments · OpenAPI
         │
@@ -471,6 +471,10 @@ failure; it never guesses whether a stateful external episode can resume.
 Dataset, replay, and summary downloads stream from those owned paths. Collection
 is cooperatively cancellable through capacity backoff and episode boundaries,
 but cancellation closes once the run enters the native training handoff.
+`kiln openenv start` submits the same bounded run request and follows that state
+machine. `kiln openenv artifact` consumes only an exact manifest entry, disables
+redirects, verifies response headers, length, and SHA-256 while staging beside
+the destination, and publishes atomically only after the independent check.
 
 The WebSocket path is load-bearing. OpenEnv's HTTP `/reset` and `/step` routes
 construct a fresh environment for each request and cannot carry episode state.
@@ -512,6 +516,8 @@ non-symlink files and cross-checks the dataset and replay against the summary;
 download repeats both checks on one file descriptor and streams that same
 descriptor with exact length and digest headers. Disk drift therefore becomes
 a structured integrity failure, never an unverified training-data response.
+The CLI repeats the manifest, header, length, and digest checks rather than
+trusting either a guessed pathname or transport success.
 
 The boundary is intentionally bounded: redirects are disabled, discovery
 bodies and WebSocket frames have independent byte limits, client messages,
@@ -524,11 +530,11 @@ are compacted into group/replay/receipt ownership by move, reset files are
 bounded before read, group hashing streams, and replay encoding refuses the
 next write at its 256 MiB cap. A hostile but protocol-legal group therefore
 fails without publishing partial artifacts instead of accumulating the full
-candidate-count × step-count × frame-size product in memory. Pinned
-miniopenenv counter and representative arcade servers are the live
-interoperability oracles in CI only. No production setting, type, or runtime
-branch identifies that implementation; every server follows the same OpenEnv
-contract.
+candidate-count × step-count × frame-size product in memory. The pinned
+miniopenenv counter plus all twenty-two text-profiled arcade and math servers
+are live interoperability oracles in CI only. No production setting, type, or
+runtime branch identifies that implementation; every server follows the same
+OpenEnv contract.
 
 See the [OpenEnv training guide](docs/OPENENV_GUIDE.md) for the operator
 workflow and artifact contract.

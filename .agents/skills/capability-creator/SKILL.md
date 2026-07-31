@@ -25,7 +25,7 @@ The single rule:
 | `resources/opd-mode.md` | OPD-specific high-baseline failure (cap #5), skip-rate watch, teacher hosting. |
 | `resources/grpo-mode.md` | GRPO-specific reward function failure modes, group statistics, all-zeros mode. |
 | `resources/agentic-grpo-mode.md` | Agentic-specific ECHO defaults, pi-smoke, multi-turn budget. |
-| `resources/kiln-cli-reference.md` | The 11 kiln CLIs the layout depends on. |
+| `resources/kiln-cli-reference.md` | Kiln serving, training, OpenEnv, eval, and adapter CLI contracts. |
 | `templates/scaffold.sh` | Create `capabilities/caps/<slug>/` with the full LAYOUT.md skeleton. |
 | `templates/run_stage_sft.sh` | Reference stage runner for SFT. |
 | `templates/run_stage_opd.sh` | Reference stage runner for OPD. |
@@ -396,7 +396,8 @@ to ask whether the rubric is rewarding the right thing.
 
 ## §7. The kiln CLI surface (reference)
 
-The 11 CLIs the layout depends on, all part of the round-2 backlog (#1-40 complete).
+Use Kiln's native CLI contracts; the round-2 backlog (#1-40) is complete and
+OpenEnv persisted workflows are first-class pipeline inputs.
 Full reference in `resources/kiln-cli-reference.md`.
 
 | Command | Purpose | Issue |
@@ -407,6 +408,8 @@ Full reference in `resources/kiln-cli-reference.md`.
 | `kiln trajectory inspect <jsonl>` | Mask + token-count diagnostic | 10 |
 | `kiln eval-adapter --adapter ... --seeds N` | Multi-seed paired eval | 33 |
 | `kiln rollout --adapter ... --tasks ...` | Direct HTTP rollout | 34 |
+| `kiln openenv start --request ... --follow` | Persisted environment collect/train/eval lifecycle | native |
+| `kiln openenv artifact <run-id> <kind> --output ...` | Manifest-bound verified evidence materialization | native |
 | `cuda_grpo_ablation --dry-run` | Pre-GPU validation | 9 |
 | `cuda_grpo_ablation --filter-var-min` | Strong-signal filter | 22 |
 | `cuda_*_ablation --install-adapter-dir/name` | Atomic install | 5 |

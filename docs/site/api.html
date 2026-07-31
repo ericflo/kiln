@@ -1099,15 +1099,19 @@ curl -fsS http://localhost:8420/v1/train/opd \
        "environment_eval":{"groups":20,"group_size":1}}'
 
 curl -fsS http://localhost:8420/v1/openenv/runs | python3 -m json.tool</code></pre></div>
+        <div class="code-block mt-4"><pre><code>kiln openenv start --request openenv-run.json --follow
+kiln openenv artifact &lt;run-id&gt; environment_eval_receipt --output receipt.json</code></pre></div>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
-          Follow artifact links from the returned manifest; do not construct filenames. Training publishes
+          The CLI submits that same JSON object and independently materializes returned artifacts. Follow
+          artifact links from the returned manifest; do not construct filenames. Training publishes
           dataset, replay, and summary evidence, while paired evaluation can additionally publish baseline
           and candidate datasets, replays, summaries, and its receipt. Only manifest-declared artifacts are
           downloadable. Every download rechecks the exact byte count and SHA-256 on the same opened file
           descriptor before streaming, and returns exact <code>Content-Length</code>, a strong digest
           <code>ETag</code>, <code>Cache-Control: private, no-store</code>, and
           <code>X-Content-Type-Options: nosniff</code>. Drift returns HTTP 409 with
-          <code>openenv_artifact_integrity_failed</code> and no artifact bytes.
+          <code>openenv_artifact_integrity_failed</code> and no artifact bytes. The CLI additionally stages
+          beside the destination, rehashes the response, and publishes atomically only after all checks pass.
         </p>
         <p class="mt-3 text-sm" style="color: var(--fg-dim);">
           For request schemas, reset-task alignment, math and arcade action examples, lifecycle semantics,

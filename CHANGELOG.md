@@ -25,8 +25,12 @@
   files, verify exact bytes and SHA-256, and fail closed on disk drift instead
   of serving replaced or partially published data. New `openenv verify` and
   `openenv replay` commands validate the artifact bundle offline and replay
-  exact live environment behavior. CI drives pinned miniopenenv counter,
-  bandit, Connect Four, maze, and Wordle servers plus a native
+  exact live environment behavior. `openenv start` now submits and follows the
+  complete persisted run contract, including paired held-out evaluation;
+  `openenv artifact` consumes only returned same-origin manifest entries,
+  independently verifies headers, length, and SHA-256, and atomically publishes
+  no partial or accidental replacement. CI drives all twenty-two pinned
+  text-profiled arcade and math servers plus a native
   collect/submit/verify/replay batch end to end.
 - Corrected the v0.5.1 Vulkan recovery architecture. The recovered route set
   is no longer installed as a renamed global machine-tuned default. Policy v6

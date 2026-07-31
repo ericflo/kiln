@@ -5,7 +5,9 @@
 //!
 //!   inspect -> reset(seed) -> model action -> step -> reward -> trajectory
 //!           -> grouped JSONL -> optional `/v1/train/grpo`
+//!   request -> persisted `/v1/openenv/runs` lifecycle -> verified manifest artifact
 
+use std::fs::OpenOptions;
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -33,8 +35,8 @@ use sha2::{Digest, Sha256};
 
 use crate::config::default_server_url;
 use crate::openenv_replay::{
-    OPENENV_REPLAY_SCHEMA_V1, OpenEnvReplayCandidate, OpenEnvReplayExchange,
-    OpenEnvReplayExchangeResult, OpenEnvReplayGroup, OpenEnvReplayManifest,
+    MAX_OPENENV_ARTIFACT_BYTES, OPENENV_REPLAY_SCHEMA_V1, OpenEnvReplayCandidate,
+    OpenEnvReplayExchange, OpenEnvReplayExchangeResult, OpenEnvReplayGroup, OpenEnvReplayManifest,
     connect_and_reset_with_capacity_checked, encode_replay, replay_openenv,
     sha256_bytes as replay_sha256, verify_openenv_artifacts,
 };
@@ -57,6 +59,7 @@ const MAX_OPENENV_SUMMARY_BYTES: usize = 256 * 1024 * 1024;
 /// an enormous working set before artifact serialization.
 const MAX_OPENENV_RETAINED_BYTES: usize = 512 * 1024 * 1024;
 const MAX_OPENENV_RESET_OPTIONS_BYTES: usize = OPENENV_MAX_CLIENT_MESSAGE_BYTES - 1024;
+const MAX_OPENENV_RUN_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_KILN_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const CHAT_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -166,7 +169,7 @@ pub(crate) const OPENENV_OVERVIEW: &str = r#"Inspect OpenEnv servers, collect gr
 
 Kiln discovers each environment over HTTP, including its optional bounded Task API catalog, opens one WebSocket session per episode, resets every candidate in a GRPO group with the same deterministic seed, asks the selected Kiln policy for schema-shaped JSON actions, and records every action, observation, reward, termination, environment identity, and content hash in canonical agentic trajectory JSONL. Task rows are discovery data: OpenEnv defines no automatic task-to-reset mapping, so portable training continues to use explicit reset options and seeds.
 
-`rollout` writes the exact reusable GRPO corpus, an exact replay transcript, and a detailed summary receipt. `verify` validates the three-artifact bundle without contacting a server; `replay` re-executes the captured reset/action protocol against the content-addressed environments. `train` writes those artifacts and submits the in-memory groups to `/v1/train/grpo` with the explicit native on-policy behavior-policy contract. Protected environments use `--credential-env`; only the non-secret authentication method enters environment identity. Start `kiln serve` first.
+`rollout` writes the exact reusable GRPO corpus, an exact replay transcript, and a detailed summary receipt. `verify` validates the three-artifact bundle without contacting a server; `replay` re-executes the captured reset/action protocol against the content-addressed environments. `train` writes those artifacts and submits the in-memory groups to `/v1/train/grpo` with the explicit native on-policy behavior-policy contract. `start` submits the full persisted server-run contract, including paired held-out evaluation, while `artifact` atomically materializes one manifest-declared object after independent byte and SHA-256 verification. Protected environments use `--credential-env`; only the non-secret authentication method enters environment identity. Start `kiln serve` first.
 "#;
 
 pub(crate) const OPENENV_EXAMPLES: &str = r#"Examples:
@@ -194,6 +197,11 @@ pub(crate) const OPENENV_EXAMPLES: &str = r#"Examples:
       List server-owned OpenEnv workflows, including live trainer and linked
       post-evaluation state.
 
+  kiln openenv start --request openenv-run.json --follow
+      Submit a bounded persisted server-run request and follow collection,
+      native GRPO, static evaluation, and paired held-out evaluation through
+      their shared terminal outcome.
+
   kiln openenv status 80a26e21-8451-4a64-8666-890c06fd80bd --follow
       Follow one persisted server workflow through collection, native GRPO,
       requested evaluation, and its terminal outcome.
@@ -201,6 +209,10 @@ pub(crate) const OPENENV_EXAMPLES: &str = r#"Examples:
   kiln openenv cancel 80a26e21-8451-4a64-8666-890c06fd80bd
       Cooperatively cancel whichever collection, training, or evaluation
       phase currently owns the work.
+
+  kiln openenv artifact 80a26e21-8451-4a64-8666-890c06fd80bd environment_eval_receipt --output receipt.json
+      Follow the run's returned artifact manifest, require the exact server
+      length and ETag, rehash the streamed bytes, and publish atomically.
 
   kiln openenv verify --summary openenv.rollout-summary.json
       Verify the dataset, replay transcript, receipt hashes, rollout
@@ -405,6 +417,25 @@ pub enum OpenEnvCommands {
         json: bool,
     },
 
+    /// Start a fully persisted server-owned OpenEnv workflow from JSON
+    Start {
+        /// Regular non-symlink JSON object (max 1 MiB) matching OpenEnvRunRequest
+        #[arg(long, value_name = "FILE")]
+        request: PathBuf,
+
+        /// Running Kiln server URL
+        #[arg(long = "url", default_value_t = default_server_url())]
+        kiln_url: String,
+
+        /// Follow collection, training, and requested evaluations to terminal
+        #[arg(long)]
+        follow: bool,
+
+        /// Emit JSON (only the terminal snapshot when following)
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Inspect or follow one server-owned OpenEnv workflow
     Status {
         /// Persisted OpenEnv run UUID
@@ -433,6 +464,31 @@ pub enum OpenEnvCommands {
         kiln_url: String,
 
         /// Emit the updated workflow status as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Download and independently verify one manifest-declared run artifact
+    Artifact {
+        /// Persisted OpenEnv run UUID
+        run_id: String,
+
+        /// Exact kind currently returned in the run's artifacts array
+        kind: String,
+
+        /// Destination file; it must not exist unless --force is explicit
+        #[arg(long, value_name = "FILE")]
+        output: PathBuf,
+
+        /// Running Kiln server URL
+        #[arg(long = "url", default_value_t = default_server_url())]
+        kiln_url: String,
+
+        /// Atomically replace an existing destination
+        #[arg(long)]
+        force: bool,
+
+        /// Emit the verified local artifact receipt as JSON
         #[arg(long)]
         json: bool,
     },
@@ -965,6 +1021,17 @@ pub async fn run_openenv(command: &OpenEnvCommands) -> Result<()> {
                 anyhow::bail!("Kiln returned an invalid OpenEnv run-list response");
             }
         }
+        OpenEnvCommands::Start {
+            request,
+            kiln_url,
+            follow,
+            json,
+        } => {
+            let request = read_openenv_run_request(request)?;
+            let started = start_openenv_control_plane_run(kiln_url, &request).await?;
+            let run_id = validated_openenv_server_run_id(&started, None)?.to_string();
+            watch_openenv_server_run(kiln_url, &run_id, *follow, *json, Some(started)).await?;
+        }
         OpenEnvCommands::Status {
             run_id,
             kiln_url,
@@ -972,30 +1039,7 @@ pub async fn run_openenv(command: &OpenEnvCommands) -> Result<()> {
             json,
         } => {
             validate_openenv_run_id(run_id)?;
-            let mut previous_fingerprint = None;
-            loop {
-                let value =
-                    openenv_control_plane_request(kiln_url, Some(run_id), reqwest::Method::GET)
-                        .await?;
-                value
-                    .get("state")
-                    .and_then(Value::as_str)
-                    .context("Kiln OpenEnv status omitted state")?;
-                let fingerprint = openenv_server_run_fingerprint(&value);
-                if !json && previous_fingerprint.as_deref() != Some(fingerprint.as_str()) {
-                    print_openenv_server_run(&value);
-                }
-                if !follow || openenv_server_run_terminal(&value) {
-                    if *json {
-                        println!("{}", serde_json::to_string_pretty(&value)?);
-                    } else if previous_fingerprint.as_deref() == Some(fingerprint.as_str()) {
-                        print_openenv_server_run(&value);
-                    }
-                    break;
-                }
-                previous_fingerprint = Some(fingerprint);
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
+            watch_openenv_server_run(kiln_url, run_id, *follow, *json, None).await?;
         }
         OpenEnvCommands::Cancel {
             run_id,
@@ -1006,10 +1050,34 @@ pub async fn run_openenv(command: &OpenEnvCommands) -> Result<()> {
             let value =
                 openenv_control_plane_request(kiln_url, Some(run_id), reqwest::Method::DELETE)
                     .await?;
+            validated_openenv_server_run_id(&value, Some(run_id))?;
             if *json {
                 println!("{}", serde_json::to_string_pretty(&value)?);
             } else {
                 print_openenv_server_run(&value);
+            }
+        }
+        OpenEnvCommands::Artifact {
+            run_id,
+            kind,
+            output,
+            kiln_url,
+            force,
+            json,
+        } => {
+            let receipt =
+                download_openenv_server_artifact(kiln_url, run_id, kind, output, *force).await?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&receipt)?);
+            } else {
+                println!(
+                    "{} Downloaded and verified OpenEnv artifact {}",
+                    style("✓").green().bold(),
+                    style(&receipt.kind).cyan().bold()
+                );
+                println!("  Output:  {}", receipt.output_path);
+                println!("  Bytes:   {}", receipt.bytes);
+                println!("  SHA-256: {}", receipt.sha256);
             }
         }
         OpenEnvCommands::Verify {
@@ -1090,6 +1158,350 @@ pub async fn run_openenv(command: &OpenEnvCommands) -> Result<()> {
     Ok(())
 }
 
+const OPENENV_ARTIFACT_DOWNLOAD_SCHEMA_V1: &str = "kiln.openenv-artifact-download.v1";
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct OpenEnvArtifactDownloadReceipt {
+    schema: &'static str,
+    run_id: String,
+    kind: String,
+    source_url: String,
+    output_path: String,
+    sha256: String,
+    bytes: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct OpenEnvManifestArtifact {
+    url: String,
+    sha256: String,
+    bytes: usize,
+}
+
+fn read_openenv_run_request(path: &Path) -> Result<Value> {
+    let path_metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("stat OpenEnv run request {}", path.display()))?;
+    anyhow::ensure!(
+        path_metadata.file_type().is_file() && !path_metadata.file_type().is_symlink(),
+        "OpenEnv run request {} must be a regular non-symlink file",
+        path.display()
+    );
+    anyhow::ensure!(
+        path_metadata.len() <= MAX_OPENENV_RUN_REQUEST_BYTES as u64,
+        "OpenEnv run request {} contains {} bytes; limit is {MAX_OPENENV_RUN_REQUEST_BYTES}",
+        path.display(),
+        path_metadata.len()
+    );
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .with_context(|| format!("open OpenEnv run request {}", path.display()))?;
+    let opened_metadata = file
+        .metadata()
+        .with_context(|| format!("stat opened OpenEnv run request {}", path.display()))?;
+    anyhow::ensure!(
+        opened_metadata.file_type().is_file(),
+        "OpenEnv run request {} must remain a regular file after open",
+        path.display()
+    );
+    anyhow::ensure!(
+        opened_metadata.len() <= MAX_OPENENV_RUN_REQUEST_BYTES as u64,
+        "OpenEnv run request {} contains {} bytes; limit is {MAX_OPENENV_RUN_REQUEST_BYTES}",
+        path.display(),
+        opened_metadata.len()
+    );
+    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+    file.take((MAX_OPENENV_RUN_REQUEST_BYTES as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read OpenEnv run request {}", path.display()))?;
+    anyhow::ensure!(
+        bytes.len() <= MAX_OPENENV_RUN_REQUEST_BYTES,
+        "OpenEnv run request {} grew beyond the {MAX_OPENENV_RUN_REQUEST_BYTES} byte limit while reading",
+        path.display()
+    );
+    let request: Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("decode OpenEnv run request {} as JSON", path.display()))?;
+    anyhow::ensure!(
+        request.is_object(),
+        "OpenEnv run request {} must contain one JSON object",
+        path.display()
+    );
+    Ok(request)
+}
+
+fn openenv_control_plane_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(CHAT_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("build OpenEnv control-plane client")
+}
+
+async fn start_openenv_control_plane_run(kiln_url: &str, request: &Value) -> Result<Value> {
+    let response = openenv_control_plane_client()?
+        .post(format!(
+            "{}/v1/openenv/runs",
+            kiln_url.trim_end_matches('/')
+        ))
+        .header("x-kiln-client", "openenv-cli")
+        .json(request)
+        .send()
+        .await
+        .context("start persisted OpenEnv workflow")?;
+    let status = response.status();
+    let body = read_kiln_json_bounded(response, "workflow creation").await?;
+    anyhow::ensure!(
+        status.is_success(),
+        "Kiln OpenEnv control plane returned HTTP {status}: {}",
+        serde_json::to_string(&body).unwrap_or_default()
+    );
+    validated_openenv_server_run_id(&body, None)?;
+    Ok(body)
+}
+
+async fn watch_openenv_server_run(
+    kiln_url: &str,
+    run_id: &str,
+    follow: bool,
+    json: bool,
+    initial: Option<Value>,
+) -> Result<Value> {
+    let mut previous_fingerprint = None;
+    let mut next = initial;
+    loop {
+        let value = match next.take() {
+            Some(value) => value,
+            None => {
+                openenv_control_plane_request(kiln_url, Some(run_id), reqwest::Method::GET).await?
+            }
+        };
+        validated_openenv_server_run_id(&value, Some(run_id))?;
+        value
+            .get("state")
+            .and_then(Value::as_str)
+            .context("Kiln OpenEnv status omitted state")?;
+        let fingerprint = openenv_server_run_fingerprint(&value);
+        if !json && previous_fingerprint.as_deref() != Some(fingerprint.as_str()) {
+            print_openenv_server_run(&value);
+        }
+        if !follow || openenv_server_run_terminal(&value) {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else if previous_fingerprint.as_deref() == Some(fingerprint.as_str()) {
+                print_openenv_server_run(&value);
+            }
+            return Ok(value);
+        }
+        previous_fingerprint = Some(fingerprint);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+fn validated_openenv_server_run_id<'a>(run: &'a Value, expected: Option<&str>) -> Result<&'a str> {
+    let run_id = run
+        .get("run_id")
+        .and_then(Value::as_str)
+        .context("Kiln OpenEnv status omitted run_id")?;
+    validate_openenv_run_id(run_id)?;
+    if let Some(expected) = expected {
+        anyhow::ensure!(
+            run_id == expected,
+            "Kiln OpenEnv status returned run ID {run_id:?}; expected {expected:?}"
+        );
+    }
+    Ok(run_id)
+}
+
+fn manifest_artifact(run: &Value, run_id: &str, kind: &str) -> Result<OpenEnvManifestArtifact> {
+    let artifact = run
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .context("Kiln OpenEnv status omitted the artifacts array")?
+        .iter()
+        .find(|artifact| artifact.get("kind").and_then(Value::as_str) == Some(kind))
+        .with_context(|| {
+            format!("OpenEnv run {run_id} has no manifest-declared artifact kind {kind:?}")
+        })?;
+    let url = artifact
+        .get("url")
+        .and_then(Value::as_str)
+        .context("OpenEnv artifact manifest omitted url")?;
+    let expected_url = format!("/v1/openenv/runs/{run_id}/artifacts/{kind}");
+    anyhow::ensure!(
+        url == expected_url,
+        "OpenEnv artifact manifest URL {url:?} does not match its run and kind"
+    );
+    let sha256 = artifact
+        .get("sha256")
+        .and_then(Value::as_str)
+        .context("OpenEnv artifact manifest omitted sha256")?;
+    validate_openenv_sha256("artifact manifest", sha256)?;
+    let bytes_u64 = artifact
+        .get("bytes")
+        .and_then(Value::as_u64)
+        .context("OpenEnv artifact manifest omitted non-negative integer bytes")?;
+    let bytes = usize::try_from(bytes_u64).context("OpenEnv artifact byte count exceeds usize")?;
+    anyhow::ensure!(
+        bytes <= MAX_OPENENV_ARTIFACT_BYTES,
+        "OpenEnv artifact manifest declares {bytes} bytes; limit is {MAX_OPENENV_ARTIFACT_BYTES}"
+    );
+    Ok(OpenEnvManifestArtifact {
+        url: url.to_string(),
+        sha256: sha256.to_string(),
+        bytes,
+    })
+}
+
+fn validate_openenv_sha256(label: &str, value: &str) -> Result<()> {
+    anyhow::ensure!(
+        value.len() == "sha256:".len() + 64
+            && value.starts_with("sha256:")
+            && value["sha256:".len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "OpenEnv {label} SHA-256 is malformed"
+    );
+    Ok(())
+}
+
+async fn download_openenv_server_artifact(
+    kiln_url: &str,
+    run_id: &str,
+    kind: &str,
+    output: &Path,
+    force: bool,
+) -> Result<OpenEnvArtifactDownloadReceipt> {
+    validate_openenv_run_id(run_id)?;
+    anyhow::ensure!(!kind.is_empty(), "OpenEnv artifact kind cannot be empty");
+    let run = openenv_control_plane_request(kiln_url, Some(run_id), reqwest::Method::GET).await?;
+    validated_openenv_server_run_id(&run, Some(run_id))?;
+    let artifact = manifest_artifact(&run, run_id, kind)?;
+    let download_url = format!("{}{}", kiln_url.trim_end_matches('/'), artifact.url);
+    let mut response = openenv_control_plane_client()?
+        .get(&download_url)
+        .header("x-kiln-client", "openenv-cli")
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .send()
+        .await
+        .context("download manifest-declared OpenEnv artifact")?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = read_kiln_json_bounded(response, "artifact download error").await?;
+        anyhow::bail!(
+            "Kiln OpenEnv artifact download returned HTTP {status}: {}",
+            serde_json::to_string(&body).unwrap_or_default()
+        );
+    }
+    let headers = response.headers();
+    let content_length = headers
+        .get(reqwest::header::CONTENT_LENGTH)
+        .context("Kiln OpenEnv artifact response omitted Content-Length")?
+        .to_str()
+        .context("Kiln OpenEnv artifact Content-Length was not ASCII")?
+        .parse::<usize>()
+        .context("Kiln OpenEnv artifact Content-Length was not an integer")?;
+    anyhow::ensure!(
+        content_length == artifact.bytes,
+        "Kiln OpenEnv artifact Content-Length {content_length} does not match manifest {}",
+        artifact.bytes
+    );
+    let etag = headers
+        .get(reqwest::header::ETAG)
+        .context("Kiln OpenEnv artifact response omitted ETag")?
+        .to_str()
+        .context("Kiln OpenEnv artifact ETag was not ASCII")?;
+    anyhow::ensure!(
+        etag == format!("\"{}\"", artifact.sha256),
+        "Kiln OpenEnv artifact ETag {etag:?} does not match manifest digest"
+    );
+    anyhow::ensure!(
+        headers
+            .get(reqwest::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok())
+            == Some("private, no-store"),
+        "Kiln OpenEnv artifact response omitted the private, no-store cache policy"
+    );
+    anyhow::ensure!(
+        headers
+            .get(reqwest::header::X_CONTENT_TYPE_OPTIONS)
+            .and_then(|value| value.to_str().ok())
+            == Some("nosniff"),
+        "Kiln OpenEnv artifact response omitted X-Content-Type-Options: nosniff"
+    );
+
+    let parent = output_parent(output)?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("create staged OpenEnv artifact beside {}", output.display()))?;
+    let mut hasher = Sha256::new();
+    let mut bytes = 0usize;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("read manifest-declared OpenEnv artifact")?
+    {
+        bytes = bytes
+            .checked_add(chunk.len())
+            .context("OpenEnv artifact byte count overflow")?;
+        anyhow::ensure!(
+            bytes <= artifact.bytes,
+            "Kiln OpenEnv artifact response exceeded its manifest byte count {}",
+            artifact.bytes
+        );
+        hasher.update(&chunk);
+        staged
+            .as_file_mut()
+            .write_all(&chunk)
+            .with_context(|| format!("write staged OpenEnv artifact for {}", output.display()))?;
+    }
+    anyhow::ensure!(
+        bytes == artifact.bytes,
+        "Kiln OpenEnv artifact response ended at {bytes} bytes; manifest declares {}",
+        artifact.bytes
+    );
+    let sha256 = format_digest(hasher.finalize().as_slice());
+    anyhow::ensure!(
+        sha256 == artifact.sha256,
+        "Kiln OpenEnv artifact response digest {sha256} does not match manifest {}",
+        artifact.sha256
+    );
+    staged
+        .as_file()
+        .sync_all()
+        .with_context(|| format!("sync staged OpenEnv artifact for {}", output.display()))?;
+    if force {
+        staged
+            .persist(output)
+            .map_err(|error| error.error)
+            .with_context(|| format!("publish OpenEnv artifact {}", output.display()))?;
+    } else {
+        staged
+            .persist_noclobber(output)
+            .map_err(|error| error.error)
+            .with_context(|| {
+                format!(
+                    "publish OpenEnv artifact {} without replacement; use --force to replace it deliberately",
+                    output.display()
+                )
+            })?;
+    }
+    Ok(OpenEnvArtifactDownloadReceipt {
+        schema: OPENENV_ARTIFACT_DOWNLOAD_SCHEMA_V1,
+        run_id: run_id.to_string(),
+        kind: kind.to_string(),
+        source_url: artifact.url,
+        output_path: output.display().to_string(),
+        sha256,
+        bytes,
+    })
+}
+
 fn validate_openenv_run_id(run_id: &str) -> Result<()> {
     uuid::Uuid::parse_str(run_id)
         .with_context(|| format!("OpenEnv run ID {run_id:?} is not a UUID"))?;
@@ -1101,12 +1513,7 @@ async fn openenv_control_plane_request(
     run_id: Option<&str>,
     method: reqwest::Method,
 ) -> Result<Value> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(CHAT_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .context("build OpenEnv control-plane client")?;
+    let client = openenv_control_plane_client()?;
     let suffix = run_id.map_or_else(
         || "/v1/openenv/runs".to_string(),
         |run_id| format!("/v1/openenv/runs/{run_id}"),
@@ -1116,6 +1523,7 @@ async fn openenv_control_plane_request(
             method,
             format!("{}{suffix}", kiln_url.trim_end_matches('/')),
         )
+        .header("x-kiln-client", "openenv-cli")
         .send()
         .await
         .context("send OpenEnv control-plane request")?;
@@ -2848,6 +3256,11 @@ fn json_type_name(value: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Json;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{HeaderMap, HeaderValue, Response, StatusCode, header};
+    use axum::routing::{get, post};
     use clap::Parser;
 
     use crate::cli::{Cli, Commands};
@@ -2978,6 +3391,26 @@ mod tests {
             })) if output_adapter == "agent-v2"
         ));
 
+        let start = Cli::try_parse_from([
+            "kiln",
+            "openenv",
+            "start",
+            "--request",
+            "run.json",
+            "--follow",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            start.command,
+            Some(Commands::Openenv(OpenEnvCommands::Start {
+                request,
+                follow: true,
+                json: true,
+                ..
+            })) if request == PathBuf::from("run.json")
+        ));
+
         let status = Cli::try_parse_from([
             "kiln",
             "openenv",
@@ -3005,6 +3438,30 @@ mod tests {
         assert!(matches!(
             cancel.command,
             Some(Commands::Openenv(OpenEnvCommands::Cancel { .. }))
+        ));
+
+        let artifact = Cli::try_parse_from([
+            "kiln",
+            "openenv",
+            "artifact",
+            "80a26e21-8451-4a64-8666-890c06fd80bd",
+            "environment_eval_receipt",
+            "--output",
+            "receipt.json",
+            "--force",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            artifact.command,
+            Some(Commands::Openenv(OpenEnvCommands::Artifact {
+                kind,
+                output,
+                force: true,
+                json: true,
+                ..
+            })) if kind == "environment_eval_receipt"
+                && output == PathBuf::from("receipt.json")
         ));
 
         let verify = Cli::try_parse_from([
@@ -3064,6 +3521,237 @@ mod tests {
         assert!(openenv_server_run_terminal(
             &json!({"schema":"kiln.openenv-run.v1","state":"training_queued"})
         ));
+    }
+
+    #[test]
+    fn persisted_run_requests_are_bounded_regular_json_objects() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            br#"{"kind":"train","environment_urls":["http://127.0.0.1:8990"]}"#,
+        )
+        .unwrap();
+        let request = read_openenv_run_request(file.path()).unwrap();
+        assert_eq!(request["kind"], "train");
+
+        std::fs::write(file.path(), b"[]").unwrap();
+        assert!(
+            read_openenv_run_request(file.path())
+                .unwrap_err()
+                .to_string()
+                .contains("one JSON object")
+        );
+
+        file.as_file()
+            .set_len((MAX_OPENENV_RUN_REQUEST_BYTES as u64) + 1)
+            .unwrap();
+        assert!(
+            read_openenv_run_request(file.path())
+                .unwrap_err()
+                .to_string()
+                .contains("limit")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persisted_run_request_rejects_symlinks() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("request.json");
+        let link = directory.path().join("request-link.json");
+        std::fs::write(&target, b"{}").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(
+            read_openenv_run_request(&link)
+                .unwrap_err()
+                .to_string()
+                .contains("regular non-symlink file")
+        );
+    }
+
+    #[test]
+    fn artifact_selection_is_manifest_bound_and_same_origin() {
+        let run_id = "80a26e21-8451-4a64-8666-890c06fd80bd";
+        let sha256 = format!("sha256:{}", "a".repeat(64));
+        let run = json!({
+            "run_id": run_id,
+            "artifacts": [{
+                "kind": "dataset",
+                "url": format!("/v1/openenv/runs/{run_id}/artifacts/dataset"),
+                "sha256": sha256,
+                "bytes": 12
+            }]
+        });
+        assert_eq!(
+            manifest_artifact(&run, run_id, "dataset").unwrap(),
+            OpenEnvManifestArtifact {
+                url: format!("/v1/openenv/runs/{run_id}/artifacts/dataset"),
+                sha256: format!("sha256:{}", "a".repeat(64)),
+                bytes: 12,
+            }
+        );
+        assert!(manifest_artifact(&run, run_id, "summary").is_err());
+
+        let mut external = run.clone();
+        external["artifacts"][0]["url"] = json!("https://example.com/secret");
+        assert!(
+            manifest_artifact(&external, run_id, "dataset")
+                .unwrap_err()
+                .to_string()
+                .contains("does not match")
+        );
+
+        let mut malformed_digest = run.clone();
+        malformed_digest["artifacts"][0]["sha256"] = json!(format!("sha256:{}", "A".repeat(64)));
+        assert!(manifest_artifact(&malformed_digest, run_id, "dataset").is_err());
+
+        let mut oversized = run;
+        oversized["artifacts"][0]["bytes"] = json!((MAX_OPENENV_ARTIFACT_BYTES as u64) + 1);
+        assert!(manifest_artifact(&oversized, run_id, "dataset").is_err());
+    }
+
+    #[tokio::test]
+    async fn persisted_start_and_artifact_download_follow_and_reverify_the_manifest() {
+        let run_id = "80a26e21-8451-4a64-8666-890c06fd80bd";
+        let original = b"{\"group\":1}\n".to_vec();
+        let drifted = b"{\"group\":2}\n".to_vec();
+        assert_eq!(original.len(), drifted.len());
+        let sha256 = replay_sha256(&original);
+        let artifact_url = format!("/v1/openenv/runs/{run_id}/artifacts/dataset");
+        let status = json!({
+            "schema": "kiln.openenv-run.v3",
+            "run_id": run_id,
+            "kind": "train",
+            "state": "completed",
+            "progress": {
+                "groups_completed": 1,
+                "groups_total": 1,
+                "rollouts_completed": 1,
+                "rollouts_total": 1
+            },
+            "artifacts": [{
+                "kind": "dataset",
+                "url": artifact_url,
+                "sha256": sha256,
+                "bytes": original.len()
+            }]
+        });
+        let post_status = status.clone();
+        let get_status = status.clone();
+        let serve_drift = Arc::new(AtomicBool::new(false));
+        let artifact_drift = serve_drift.clone();
+        let response_sha256 = replay_sha256(&original);
+        let response_len = original.len();
+        let app = Router::new()
+            .route(
+                "/v1/openenv/runs",
+                post(move |Json(request): Json<Value>| {
+                    let status = post_status.clone();
+                    async move {
+                        if request.pointer("/environment_eval/groups") == Some(&json!(20)) {
+                            (StatusCode::CREATED, Json(status))
+                        } else {
+                            (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({"error": "missing eval"})),
+                            )
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/openenv/runs/{run_id}",
+                get(move || {
+                    let status = get_status.clone();
+                    async move { Json(status) }
+                }),
+            )
+            .route(
+                "/v1/openenv/runs/{run_id}/artifacts/dataset",
+                get(move |headers: HeaderMap| {
+                    assert_eq!(
+                        headers.get(header::ACCEPT_ENCODING),
+                        Some(&HeaderValue::from_static("identity"))
+                    );
+                    let body = if artifact_drift.load(Ordering::Relaxed) {
+                        drifted.clone()
+                    } else {
+                        original.clone()
+                    };
+                    let etag = format!("\"{response_sha256}\"");
+                    async move {
+                        let mut response = Response::new(Body::from(body));
+                        response.headers_mut().insert(
+                            header::CONTENT_LENGTH,
+                            HeaderValue::from_str(&response_len.to_string()).unwrap(),
+                        );
+                        response
+                            .headers_mut()
+                            .insert(header::ETAG, HeaderValue::from_str(&etag).unwrap());
+                        response.headers_mut().insert(
+                            header::CACHE_CONTROL,
+                            HeaderValue::from_static("private, no-store"),
+                        );
+                        response.headers_mut().insert(
+                            header::X_CONTENT_TYPE_OPTIONS,
+                            HeaderValue::from_static("nosniff"),
+                        );
+                        response
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let kiln_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let request = json!({
+            "kind": "train",
+            "environment_urls": ["http://127.0.0.1:8990"],
+            "environment_eval": {"groups": 20, "group_size": 1}
+        });
+        let started = start_openenv_control_plane_run(&kiln_url, &request)
+            .await
+            .unwrap();
+        assert_eq!(
+            validated_openenv_server_run_id(&started, None).unwrap(),
+            run_id
+        );
+        let terminal = watch_openenv_server_run(&kiln_url, run_id, true, false, Some(started))
+            .await
+            .unwrap();
+        assert_eq!(terminal["state"], "completed");
+
+        let output_dir = tempfile::tempdir().unwrap();
+        let output = output_dir.path().join("rollouts.jsonl");
+        let receipt =
+            download_openenv_server_artifact(&kiln_url, run_id, "dataset", &output, false)
+                .await
+                .unwrap();
+        assert_eq!(receipt.schema, OPENENV_ARTIFACT_DOWNLOAD_SCHEMA_V1);
+        assert_eq!(
+            receipt.sha256,
+            replay_sha256(&std::fs::read(&output).unwrap())
+        );
+        assert_eq!(receipt.bytes, response_len);
+        assert_eq!(receipt.source_url, artifact_url);
+
+        let no_clobber =
+            download_openenv_server_artifact(&kiln_url, run_id, "dataset", &output, false)
+                .await
+                .unwrap_err();
+        assert!(no_clobber.to_string().contains("without replacement"));
+        assert_eq!(std::fs::read(&output).unwrap(), b"{\"group\":1}\n");
+
+        serve_drift.store(true, Ordering::Relaxed);
+        let rejected = output_dir.path().join("drifted.jsonl");
+        let error =
+            download_openenv_server_artifact(&kiln_url, run_id, "dataset", &rejected, false)
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("digest"), "{error:#}");
+        assert!(!rejected.exists(), "drifted bytes must never publish");
+
+        server.abort();
     }
 
     #[test]

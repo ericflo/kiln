@@ -217,12 +217,22 @@ def fixtures() -> dict[str, dict]:
         "outcome": "promoted",
         "verdict": "Environment promotion gate passed and the candidate was promoted.",
     }
+    artifact_download = {
+        "schema": "kiln.openenv-artifact-download.v1",
+        "run_id": "80a26e21-8451-4a64-8666-890c06fd80bd",
+        "kind": "environment_eval_receipt",
+        "source_url": "/v1/openenv/runs/80a26e21-8451-4a64-8666-890c06fd80bd/artifacts/environment_eval_receipt",
+        "output_path": "evidence/environment-evaluation/receipt.json",
+        "sha256": hash_value("3"),
+        "bytes": 2048,
+    }
     return {
         "OpenEnvRolloutSummary": summary,
         "OpenEnvReplayManifest": replay,
         "VerificationReport": verification,
         "ReplayRunReport": replay_run,
         "EnvironmentEvaluationReceipt": environment_evaluation,
+        "OpenEnvArtifactDownloadReceipt": artifact_download,
     }
 
 
@@ -293,6 +303,15 @@ def main() -> int:
                 "self-test: passed environment evidence with a rejected outcome was accepted"
             )
 
+        external_artifact = copy.deepcopy(values["OpenEnvArtifactDownloadReceipt"])
+        external_artifact["source_url"] = "https://example.com/receipt.json"
+        if not validate_instance(
+            external_artifact,
+            schema["$defs"]["OpenEnvArtifactDownloadReceipt"],
+            schema,
+        ):
+            failures.append("self-test: external artifact receipt URL was accepted")
+
     source = (ROOT / "crates" / "kiln-server" / "src" / "openenv_replay.rs").read_text(
         encoding="utf-8"
     )
@@ -340,6 +359,22 @@ def main() -> int:
     ]:
         if term not in api_source:
             failures.append(f"api/openenv.rs is missing manifest-bound artifact term {term}")
+    for term in [
+        "OpenEnvCommands::Start",
+        "OpenEnvCommands::Artifact",
+        "MAX_OPENENV_RUN_REQUEST_BYTES",
+        "kiln.openenv-artifact-download.v1",
+        "persist_noclobber",
+        "manifest_artifact",
+        "ACCEPT_ENCODING",
+        '"identity"',
+        "Content-Length",
+        "ETag",
+        "private, no-store",
+        "nosniff",
+    ]:
+        if term not in cli:
+            failures.append(f"openenv_cli.rs is missing persisted lifecycle term {term}")
     expected_artifact_kinds = {
         "dataset",
         "replay",
@@ -404,6 +439,8 @@ def main() -> int:
             )
     for command in [
         "kiln openenv tasks",
+        "kiln openenv start",
+        "kiln openenv artifact",
         "kiln openenv verify",
         "kiln openenv replay",
         "pumps Ping/Pong control frames",

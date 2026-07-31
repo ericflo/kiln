@@ -1288,6 +1288,7 @@ const expectedCliCodeExamples = [
   { label: 'serve command', terms: ['kiln_model_path=./Qwen3.5-4B', 'kiln serve'] },
   { label: 'health commands', terms: ['kiln health', 'kiln health --json'] },
   { label: 'OpenEnv commands', terms: ['kiln openenv inspect', 'kiln openenv tasks', 'kiln openenv train', '--environment http://127.0.0.1:8990'] },
+  { label: 'OpenEnv persisted run commands', terms: ['kiln openenv start --request openenv-run.json --follow', 'kiln openenv artifact', 'environment_eval_receipt --output receipt.json'] },
   { label: 'pi setup command', terms: ['kiln pi-setup', '--kiln-url http://office-kiln:8420'] },
   { label: 'SFT training command', terms: ['kiln train sft', '--file corrections.jsonl', '--adapter support-bot', '--checkpoint-interval 25'] },
   { label: 'GRPO training command', terms: ['kiln train grpo', '--file scored-groups.jsonl', '--adapter support-bot', '--checkpoint-interval 25', '--resume-checkpoint'] },
@@ -1326,6 +1327,7 @@ const expectedCliReaderCodeExamples = [
   { label: 'serve command', terms: ['kiln_model_path=./qwen3.5-4b', 'kiln serve'] },
   { label: 'health commands', terms: ['kiln health', 'kiln health --json'] },
   { label: 'OpenEnv commands', terms: ['kiln openenv inspect', 'kiln openenv tasks', 'kiln openenv train', '--environment http://127.0.0.1:8990'] },
+  { label: 'OpenEnv persisted run commands', terms: ['kiln openenv start --request openenv-run.json --follow', 'kiln openenv artifact', 'environment_eval_receipt --output receipt.json'] },
   { label: 'pi setup command', terms: ['kiln pi-setup', '--kiln-url http://office-kiln:8420'] },
   { label: 'SFT training command', terms: ['kiln train sft', '--file corrections.jsonl', '--adapter support-bot'] },
   { label: 'GRPO training command', terms: ['kiln train grpo', '--file scored-groups.jsonl', '--adapter support-bot'] },
@@ -1679,6 +1681,9 @@ function validateSftLossRouteDocumentationSourceContract() {
     'Exhaustion publishes no partial bundle',
     'Only manifest-declared artifacts are downloadable',
     'every request rechecks exact byte count and SHA-256 on the same descriptor before streaming',
+    'kiln openenv start',
+    'kiln openenv artifact',
+    'all twenty-two text-profiled arcade and math servers strictly as byte-real interoperability oracles',
   ]);
   if (missingArchitectureTerms.length > 0) {
     fail(`docs/site/architecture.html: reader architecture contract missing terms: ${missingArchitectureTerms.join(', ')}`);
@@ -1745,9 +1750,12 @@ function validateSftLossRouteDocumentationSourceContract() {
     'compact_device',
     'bounded_host_fallback',
     'OpenEnv is a native persisted training lifecycle, not an environment-specific adapter',
+    'kiln openenv start --request openenv-run.json --follow',
+    'kiln openenv artifact <run-id> environment_eval_receipt --output receipt.json',
     'Only manifest-declared artifacts are downloadable',
     'Every download rechecks the exact byte count and SHA-256 on the same opened file descriptor before streaming',
     'openenv_artifact_integrity_failed',
+    'stages beside the destination, rehashes the response, and publishes atomically only after all checks pass',
   ]);
   if (missingApiTerms.length > 0) {
     fail(`docs/site/api.html: retained deep-reference wording missing terms: ${missingApiTerms.join(', ')}`);

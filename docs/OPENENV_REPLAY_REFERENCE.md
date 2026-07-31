@@ -43,6 +43,30 @@ the linked native training job. An interrupted active run is marked failed
 after restart because a stateful environment session cannot be assumed
 resumable.
 
+The CLI can own this complete persisted lifecycle without reconstructing HTTP
+requests or artifact paths:
+
+```bash
+kiln openenv start --request openenv-run.json --follow
+kiln openenv artifact <run-id> summary --output openenv.rollout-summary.json
+kiln openenv artifact <run-id> environment_eval_receipt \
+  --output evidence/environment-evaluation/receipt.json
+```
+
+`start` reads exactly one regular, non-symlink JSON object up to 1 MiB and lets
+the server validate the authoritative `OpenEnvRunRequest`. `artifact` first
+reads current run status and accepts only an exact kind and relative URL from
+its manifest. Redirects are disabled, so the Kiln origin cannot be exchanged
+for another host. The client requires manifest-matching `Content-Length` and
+strong `ETag`, requests identity encoding, requires `private, no-store` and
+`nosniff`, then independently caps, counts, and SHA-256 hashes the streamed
+body. A same-length mutation still
+fails. Bytes are staged beside the destination, synced, and atomically
+published only after all checks pass. Existing files are preserved unless
+`--force` explicitly requests replacement; failures leave no partial output.
+`--json` emits a `kiln.openenv-artifact-download.v1` local receipt without
+embedding the configured Kiln base URL or its possible credentials.
+
 A pathname is not publication. The download route accepts only artifact kinds
 present in that run's persisted `artifacts` manifest, so staged or partially
 written bundles remain unreachable. Publication hashes each regular,

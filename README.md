@@ -122,8 +122,9 @@ The runtime is implementation-neutral: miniopenenv is a pinned CI oracle, not
 a dependency, configuration namespace, or special execution path.
 
 OpenEnv is also native to the embedded dashboard and control plane. Use
-**Training → OpenEnv** in `/ui/`, or submit a durable run to
-`POST /v1/openenv/runs`; Kiln persists discovery and collection progress,
+**Training → OpenEnv** in `/ui/`, submit `POST /v1/openenv/runs`, or use
+`kiln openenv start --request openenv-run.json --follow`; Kiln persists
+discovery and collection progress,
 canonical artifact links, native GRPO progress and loss, linked evaluation
 results, promotion-gate outcomes, failures, and cancellation across browser
 refreshes. After training, it can pair behavior and candidate policies on
@@ -149,6 +150,10 @@ kiln openenv train \
 
 # Follow a dashboard/API-owned workflow through training and evaluation.
 kiln openenv status 80a26e21-8451-4a64-8666-890c06fd80bd --follow
+
+# Materialize only a manifest-declared artifact and verify it independently.
+kiln openenv artifact 80a26e21-8451-4a64-8666-890c06fd80bd \
+  environment_eval_receipt --output receipt.json
 ```
 
 Task catalogs are native in the CLI, dashboard, and `POST /v1/openenv/tasks`.
@@ -206,6 +211,8 @@ bounded regular files before publishing their links, then rechecks the exact
 byte count and SHA-256 on the same opened descriptor before every stream.
 Drift, replacement, symlinks, truncation, or growth fail closed; successful
 responses expose the digest as a strong `ETag` and forbid intermediary caches.
+The persisted CLI lifecycle follows those returned links, rechecks response
+length, headers, and SHA-256, and atomically publishes no partial destination.
 When an observation offers a non-empty `input_text`, Kiln foregrounds that
 generic environment-provided decision text while retaining the complete wire
 observation and discovered JSON action schema; it remains optional, never a

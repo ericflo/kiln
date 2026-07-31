@@ -239,9 +239,11 @@ Before any GPU work in a stage N ≥ 2:
 
    - if Rule A selected OpenEnv, CLI or server inspection succeeds for every
      environment and its schema identity matches the planned stage; retain the
-     server `run_id` and linked `training_job_id`; reserve disjoint held-out
-     seeds and configure the native paired-return gate before collection; Task
-     API catalogs may document coverage but never imply a reset binding
+     server `run_id` and linked `training_job_id`; submit the complete request
+     with `kiln openenv start --request <run.json> --follow`; reserve disjoint
+     held-out seeds and configure the native paired-return gate before
+     collection; Task API catalogs may document coverage but never imply a
+     reset binding
 
 3. Verify hypothesis is falsifiable:
    - stage_transition_rationale names the sub-score(s) expected to move
@@ -285,7 +287,10 @@ An iter is promoted to a stage if ALL hold:
 6. **OpenEnv return gate (OpenEnv stages only)** — at least 20 disjoint paired
    seed groups produce `decision: passed`; configured point thresholds pass; the
    environment-evaluation receipt, both replay bundles, and pinned deployment
-   identity are retained. Training returns cannot substitute for this gate.
+   identity are retained. Materialize each server artifact with
+   `kiln openenv artifact <run-id> <kind> --output <path>` so manifest identity,
+   length, and SHA-256 are independently checked. Training returns cannot
+   substitute for this gate.
 
 Promotion is mechanical once these pass. Skipping any of them is a process
 violation and the stage is invalid.
@@ -339,7 +344,8 @@ Behavior:
 7. Real training, with `--install-adapter-dir` and `--adapter-smoke-test`.
 8. `kiln adapter verify`.
 9. 3-seed eval via `kiln eval-adapter`; OpenEnv stages additionally complete
-   the server-owned paired environment gate on disjoint held-out seeds.
+   the server-owned paired environment gate on disjoint held-out seeds and
+   download its declared evidence with `kiln openenv artifact`.
 10. `integration/cross-cap-coherence/capability.oracle.sh <new-adapter>`.
 11. Append iter row to `capability.jsonl` with `stage` + `method` +
     `base_adapter` + `output_adapter`.

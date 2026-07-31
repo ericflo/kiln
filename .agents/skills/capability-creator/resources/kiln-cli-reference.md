@@ -1,7 +1,8 @@
 # Kiln CLI reference
 
-The 11 kiln CLIs the round-3 layout depends on. All shipped as part of the
-40-issue round-2 backlog (see
+The Kiln CLI contracts the capability layout depends on. The core surfaces
+shipped with the 40-issue round-2 backlog; OpenEnv adds a native persisted
+environment lifecycle (see
 [`capabilities/KILN_IMPROVEMENT_ISSUES.md`](../../../../capabilities/KILN_IMPROVEMENT_ISSUES.md)).
 Do not re-implement any of these in cap scripts.
 
@@ -67,6 +68,41 @@ kiln trajectory inspect /tmp/<cap>-iter-<N>/grpo-train.jsonl --json
 
 JSON output is the round-3 canonical schema; pi-trajectory.py outputs the
 same shape.
+
+## OpenEnv persisted training and evidence
+
+### `kiln openenv start --request <file> --follow`
+
+Submit the complete server-owned `OpenEnvRunRequest`: rollout-only or native
+GRPO, optional static post-eval, and paired held-out environment evaluation.
+Use this route when an OpenEnv stage must survive the invoking terminal and
+produce one durable `run_id`. The file must be one regular, non-symlink JSON
+object up to 1 MiB; the server remains authoritative for request validation.
+
+```bash
+kiln openenv start --request openenv-run.json --follow
+kiln openenv status <run-id> --follow --json
+```
+
+Keep training and held-out seeds disjoint. A kept stage requires the native
+paired-return gate; training returns never substitute for it.
+
+### `kiln openenv artifact <run-id> <kind> --output <file>`
+
+Materialize evidence only through the exact artifact kind and relative URL in
+the run status manifest. The command disables redirects, checks response
+headers and declared length, independently hashes the bounded stream, stages
+beside the destination, and publishes atomically. It preserves an existing
+destination unless `--force` is deliberate; any failure leaves no partial
+file. Use `--json` when the pipeline needs the local
+`kiln.openenv-artifact-download.v1` receipt.
+
+```bash
+kiln openenv artifact <run-id> summary \
+  --output evidence/openenv.rollout-summary.json
+kiln openenv artifact <run-id> environment_eval_receipt \
+  --output evidence/environment-evaluation/receipt.json --json
+```
 
 ## Eval
 

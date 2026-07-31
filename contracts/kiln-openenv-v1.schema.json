@@ -1,13 +1,45 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ericflo.github.io/kiln/contracts/kiln-openenv-v1.schema.json",
-  "title": "Kiln OpenEnv rollout and evaluation contract",
-  "description": "Environment discovery identity, canonical episode provenance, exact replay transcripts, paired held-out return evaluation receipts, offline verification reports, and content-addressed summaries published by `kiln openenv`.",
+  "title": "Kiln OpenEnv rollout, evaluation, and artifact contract",
+  "description": "Environment discovery identity, canonical episode provenance, exact replay transcripts, paired held-out return evaluation receipts, offline verification reports, verified artifact-download receipts, and content-addressed summaries published by `kiln openenv`.",
   "$ref": "#/$defs/OpenEnvRolloutSummary",
   "$defs": {
     "Sha256": {
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "OpenEnvArtifactDownloadReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "run_id",
+        "kind",
+        "source_url",
+        "output_path",
+        "sha256",
+        "bytes"
+      ],
+      "properties": {
+        "schema": { "const": "kiln.openenv-artifact-download.v1" },
+        "run_id": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        },
+        "kind": { "type": "string", "minLength": 1 },
+        "source_url": {
+          "type": "string",
+          "pattern": "^/v1/openenv/runs/[0-9a-fA-F-]{36}/artifacts/[^/?#]+$"
+        },
+        "output_path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/Sha256" },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 268435456
+        }
+      }
     },
     "Metadata": {
       "type": "object",

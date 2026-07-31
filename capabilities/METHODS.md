@@ -61,11 +61,13 @@ that fired in `pipeline.md` stage rationale.
 ```
 RULE A — Interactive environments and multi-turn tool-calling tasks
   IF a stateful OpenEnv environment exists:
-    → use `kiln openenv rollout` or a rollout-only server run for the baseline variance probe
-    → use `kiln openenv train` or a train server run for agentic-GRPO with ECHO on
-    → request paired held-out environment evaluation on disjoint seeds
+    → use `kiln openenv rollout` or `kiln openenv start --request baseline.json --follow`
+      for the baseline variance probe
+    → use `kiln openenv train` or `kiln openenv start --request train.json --follow`
+      for agentic-GRPO with ECHO on
+    → put paired held-out evaluation on disjoint seeds in the persisted train request
     → promotion requires its exact sign-test gate; preserve both rollout
-      summaries, the environment-evaluation receipt, and deployment identity
+      summaries and receipt with `kiln openenv artifact`, plus deployment identity
   ELSE IF task is multi-turn tool-calling:
     → agentic-GRPO with ECHO on (always)
     → Sub-method choice still applies — you may still SFT-bootstrap or
@@ -199,8 +201,9 @@ See resources/grpo-mode.md §6.
 
 ### §3.4 Agentic-GRPO
 
-**Trainer:** native `kiln openenv train`, Training → OpenEnv, or
-`POST /v1/openenv/runs` for OpenEnv tasks, otherwise
+**Trainer:** native `kiln openenv train`, persisted
+`kiln openenv start --request <run.json> --follow`, Training → OpenEnv, or
+`POST /v1/openenv/runs` for OpenEnv tasks; otherwise
 `cuda_grpo_ablation` with the ECHO env-mask layer.
 **Use when:** Rule A. Stateful OpenEnv tasks or multi-turn tool-calling tasks.
 **Data:** For OpenEnv, seed-matched stateful WebSocket episodes collected as
@@ -209,7 +212,9 @@ ScoredRollout JSONL. Inspect before collection and retain the summary artifact
 from the CLI or server run plus its environment deployment identity. For a
 kept OpenEnv adapter, also retain a native paired evaluation over disjoint
 seeds: baseline/candidate replay bundles, both summary digests, exact sign-test
-evidence, and the promotion receipt. Use `kiln trajectory inspect` for pi
+evidence, and the promotion receipt. Materialize server-run evidence only with
+`kiln openenv artifact <run-id> <kind> --output <path>` so the manifest, length,
+and SHA-256 are reverified. Use `kiln trajectory inspect` for pi
 normalization and `rollout.py` only when no OpenEnv server owns the task.
 **Defaults:** GRPO defaults + ECHO λ=0.05, env_mask_mode=env_only,
 warning_filter=true.

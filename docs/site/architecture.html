@@ -352,9 +352,10 @@ OpenEnv RL
           Task API catalogs, authentication, and the lock-step stateful <code>WS /ws</code> protocol.
           <code>kiln-server</code> composes those sessions with the ordinary in-process chat handler,
           persists run lifecycle, and submits canonical scored groups through the same native GRPO
-          admission path as every other job.
+          admission path as every other job. <code>kiln openenv start</code> enters that persisted
+          state machine from a bounded request file.
         </p>
-        <pre class="mt-5"><code>environment URLs + aligned credentials/reset plan
+        <pre class="mt-5"><code>persisted run request + environment URLs + aligned credentials/reset plan
   -> inspect identity and action schema
   -> round-robin seed-matched candidate episodes
   -> environment-owned returns
@@ -383,12 +384,15 @@ OpenEnv RL
         <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
           Only manifest-declared artifacts are downloadable. Publication hashes bounded regular files,
           and every request rechecks exact byte count and SHA-256 on the same descriptor before streaming.
-          Replacement, symlinks, growth, truncation, or mutation fail closed instead of serving drifted bytes.
+          <code>kiln openenv artifact</code> repeats the manifest, header, length, and digest checks while
+          staging locally, then publishes atomically. Replacement, symlinks, growth, truncation, or mutation
+          fail closed instead of serving drifted bytes.
         </p>
         <p class="mt-4 text-sm leading-relaxed" style="color: var(--fg-mute);">
           Exact action/observation transcripts, reward arithmetic, recovery, capacity backoff, cancellation,
           origin-scoped credentials, metrics, and paired promotion evidence remain server-owned. The production
-          path depends only on OpenEnv compatibility. See the
+          path depends only on OpenEnv compatibility. CI uses the pinned counter and all twenty-two text-profiled
+          arcade and math servers strictly as byte-real interoperability oracles. See the
           <a href="docs/openenv/">OpenEnv training guide</a> and
           <a href="docs/openenv-replay/">replay contract</a>.
         </p>

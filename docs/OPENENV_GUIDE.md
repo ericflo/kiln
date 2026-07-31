@@ -40,37 +40,33 @@ wire type and map finitely (`null = 0`, `false = 0`, `true = 1`).
 
 ## Commands
 
-### Dashboard and server API
+### Persisted dashboard, CLI, and API runs
 
-Dashboard, API, and CLI share the collector, chat handler, artifacts, and GRPO
-admission path. In `/ui/`, choose **Training → OpenEnv**. The equivalent API is:
+All three surfaces share one collector, trainer, evaluator, and artifact store. In `/ui/`, choose
+**Training → OpenEnv**. Save the `POST /v1/openenv/runs` body as `openenv-run.json`:
 
-```bash
-curl -sS localhost:8420/v1/openenv/runs \
-  -H 'content-type: application/json' \
-  -d '{"kind":"train","environment_urls":["http://127.0.0.1:8990"],
-       "adapter":"base","output_adapter":"counter-agent",
-       "groups":8,"group_size":4,"max_steps":8,
-       "environment_eval":{"groups":20,"group_size":1,
-         "gate":{"min_mean_improvement":0.05}}}'
+```json
+{"kind":"train","environment_urls":["http://127.0.0.1:8990"],
+ "adapter":"base","output_adapter":"counter-agent","groups":8,"group_size":4,
+ "environment_eval":{"groups":20,"group_size":1,
+   "gate":{"min_mean_improvement":0.05}}}
 ```
 
-Use `POST /v1/openenv/inspect` for discovery, `POST /v1/openenv/tasks` for task catalogs, `GET /v1/openenv/runs` for status, and `DELETE /v1/openenv/runs/{run_id}` to cancel.
-Version 3 continues through `training_running`, `post_evaluating`, `environment_evaluating`, and `completed`. Cancellation reaches collector, trainer, or evaluator; artifacts persist under `<adapter_dir>/.openenv/runs/<run_id>/`.
-
-The CLI exposes the same lifecycle:
-
 ```bash
+kiln openenv start --request openenv-run.json --follow
 kiln openenv runs
 kiln openenv status 80a26e21-8451-4a64-8666-890c06fd80bd --follow
+kiln openenv artifact 80a26e21-8451-4a64-8666-890c06fd80bd environment_eval_receipt --output receipt.json
 kiln openenv cancel 80a26e21-8451-4a64-8666-890c06fd80bd
 ```
 
-`status --follow --json` emits one terminal snapshot; human output follows trainer loss, eval accuracy, held-out returns, exact p-values, and gates.
-
-Server runs accept loopback origins by default. `[openenv]` controls remote origins, capacity,
-retention, and TTL; each field has a canonical `KILN_OPENENV_*` override. See the
-[recovery reference](OPENENV_REPLAY_REFERENCE.md) and [configuration reference](CONFIGURATION.md).
+`start` accepts one regular, non-symlink JSON object up to 1 MiB. `artifact` follows only the
+returned same-server manifest URL, requires its length and ETag, rehashes the bounded stream,
+and publishes atomically without replacement; use `--force` deliberately. `status --follow
+--json` emits one terminal snapshot. Version 3 follows training and both evaluations to outcome.
+Server runs default to loopback; `[openenv]` controls remote origins, credentials, capacity,
+retention, and TTL. See the [recovery reference](OPENENV_REPLAY_REFERENCE.md) and
+[configuration reference](CONFIGURATION.md).
 
 ### Protected environments
 
