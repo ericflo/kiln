@@ -490,9 +490,10 @@ impl InferenceMemoryRuntime {
 
 /// Backend graph eligibility resolved before a [`ModelRunner`] is built.
 ///
-/// The server's stable profile disables every graph backend. Other embedding
-/// callers can continue using [`ModelRunner::new_with_options`] for the
-/// historical CUDA-only option plus backend defaults.
+/// The server resolves graph eligibility from its serving and accelerator
+/// policies. Other embedding callers can continue using
+/// [`ModelRunner::new_with_options`] for the historical CUDA-only option plus
+/// backend defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelRunnerRuntimeOptions {
     pub cuda_graph: CudaGraphExecutionPolicy,

@@ -551,10 +551,9 @@ async fn maintenance_profile_rejects_inference_before_gpu_read_acquisition() {
 }
 
 #[tokio::test]
-async fn stable_profile_rejects_adapter_load_before_gpu_writer_acquisition() {
+async fn stable_profile_admits_adapter_load_before_disk_validation() {
     let state = tiny_real_state_with_timeout(tiny_config(), Duration::from_secs(1));
     let state_for_assert = state.clone();
-    let retained_inference = state.gpu_lock.clone().read_owned().await;
     let app = api::router(state);
 
     let response = tokio::time::timeout(
@@ -569,18 +568,16 @@ async fn stable_profile_rejects_adapter_load_before_gpu_writer_acquisition() {
         ),
     )
     .await
-    .expect("stable adapter admission must not wait for the GPU writer")
+    .expect("stable adapter admission must complete")
     .unwrap();
     let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(status, StatusCode::CONFLICT, "{json}");
-    assert_eq!(json["error"]["code"], "serving_profile_conflict");
+    assert_ne!(status, StatusCode::CONFLICT, "{json}");
+    assert_ne!(json["error"]["code"], "serving_profile_conflict");
     assert!(state_for_assert.loaded_adapter_identity().is_none());
-    assert!(state_for_assert.gpu_lock.try_write().is_err());
-    drop(retained_inference);
     assert!(state_for_assert.gpu_lock.try_write().is_ok());
 }
 
@@ -618,10 +615,9 @@ async fn quarantined_backend_rejects_training_admission_without_publication() {
 }
 
 #[tokio::test]
-async fn stable_profile_rejects_training_admission_without_publication_or_gpu_wait() {
+async fn stable_profile_admits_training_before_request_validation() {
     let state = tiny_real_state_with_timeout(tiny_config(), Duration::from_secs(1));
     let state_for_assert = state.clone();
-    let retained_inference = state.gpu_lock.clone().read_owned().await;
     let app = api::router(state);
 
     let response = tokio::time::timeout(
@@ -636,19 +632,17 @@ async fn stable_profile_rejects_training_admission_without_publication_or_gpu_wa
         ),
     )
     .await
-    .expect("stable training admission must not wait for the GPU writer")
+    .expect("stable training request validation must complete")
     .unwrap();
     let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(status, StatusCode::CONFLICT, "{json}");
-    assert_eq!(json["error"]["code"], "serving_profile_conflict");
+    assert_ne!(status, StatusCode::CONFLICT, "{json}");
+    assert_ne!(json["error"]["code"], "serving_profile_conflict");
     assert!(state_for_assert.training_jobs.read().unwrap().is_empty());
     assert_eq!(state_for_assert.training_queue.lock().unwrap().len(), 0);
-    assert!(state_for_assert.gpu_lock.try_write().is_err());
-    drop(retained_inference);
     assert!(state_for_assert.gpu_lock.try_write().is_ok());
 }
 
@@ -762,7 +756,7 @@ async fn queued_training_transition_fails_while_quarantined_reader_is_retained()
 }
 
 #[tokio::test]
-async fn stable_queued_training_fails_without_gpu_writer_acquisition() {
+async fn stable_queued_training_reaches_the_worker() {
     use kiln_server::training_queue::spawn_training_worker;
     use kiln_train::TrainingState;
 
@@ -772,7 +766,6 @@ async fn stable_queued_training_fails_without_gpu_writer_acquisition() {
     let job_id = "stable-profile-transition".to_string();
     enqueue_empty_sft_job(&state, &job_id);
 
-    let retained_inference = state.gpu_lock.clone().read_owned().await;
     spawn_training_worker(state.clone(), state.shutdown.clone());
 
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -790,25 +783,27 @@ async fn stable_queued_training_fails_without_gpu_writer_acquisition() {
         }
     })
     .await
-    .expect("stable queued job must reject without waiting for GPU ownership");
+    .expect("stable queued job must reach a terminal worker result");
 
     let jobs = state.training_jobs.read().unwrap();
     let failed = jobs.get(&job_id).unwrap();
     assert_eq!(failed.state, TrainingState::Failed);
     assert!(
-        failed
+        failed.error.is_some(),
+        "empty SFT fixture should fail validation"
+    );
+    assert!(
+        !failed
             .error
             .as_deref()
             .is_some_and(|error| error.contains("prohibits training GPU ownership")),
         "{:?}",
         failed.error
     );
-    assert!(state.gpu_lock.try_write().is_err());
     drop(jobs);
     state
         .shutdown
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    drop(retained_inference);
     assert!(state.gpu_lock.try_write().is_ok());
 }
 
@@ -4637,7 +4632,7 @@ fn batching_forward_rejects_queued_request_after_same_name_revision_swap() {
 }
 
 #[test]
-fn stable_real_forward_rejects_physical_kv_resize_without_mutation() {
+fn real_forward_rejects_physical_kv_resize_when_policy_disallows_it() {
     let config = tiny_config();
     let runner = ModelRunner::new(
         tiny_weights(&config, &Device::Cpu),
@@ -4663,7 +4658,7 @@ fn stable_real_forward_rejects_physical_kv_resize_without_mutation() {
 
     let error = forward
         .resize_kv(start_blocks.saturating_sub(1))
-        .expect_err("stable profile must reject physical KV resize");
+        .expect_err("disabled resize policy must reject physical KV resize");
     assert!(
         error
             .to_string()
