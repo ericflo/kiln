@@ -1095,12 +1095,12 @@
         "enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Enable the native OpenEnv discovery and asynchronous run lifecycle routes.",
+          "description": "Enable native OpenEnv protocol discovery, bounded Task API catalogs, and asynchronous run lifecycle routes.",
           "x-kiln-path": "openenv.enabled",
           "x-kiln-type-and-default": "boolean; true",
           "x-kiln-canonical-env": "KILN_OPENENV_ENABLED (implemented)",
           "x-kiln-environment": "none",
-          "x-kiln-validation": "Enables discovery and asynchronous run lifecycle routes. Disabling it does not remove the local CLI."
+          "x-kiln-validation": "Enables protocol discovery, bounded Task API catalogs, and asynchronous run lifecycle routes. Disabling it does not remove the local CLI."
         },
         "max_active_runs": {
           "type": "integer",
