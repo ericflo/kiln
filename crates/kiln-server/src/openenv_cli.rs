@@ -26,6 +26,12 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::config::default_server_url;
+use crate::openenv_replay::{
+    OPENENV_REPLAY_SCHEMA_V1, OpenEnvReplayCandidate, OpenEnvReplayExchange,
+    OpenEnvReplayExchangeResult, OpenEnvReplayGroup, OpenEnvReplayManifest,
+    connect_and_reset_with_capacity, encode_replay, replay_openenv, sha256_bytes as replay_sha256,
+    verify_openenv_artifacts,
+};
 
 const MAX_OPENENV_ENVIRONMENTS: usize = 64;
 const MAX_OPENENV_GROUPS: usize = 16_384;
@@ -34,6 +40,8 @@ const MAX_OPENENV_ROLLOUTS: usize = 16_384;
 const MAX_OPENENV_STEPS: usize = 256;
 const MAX_OPENENV_CONCURRENCY: usize = 256;
 const MAX_OPENENV_ACTION_TOKENS: usize = 16_384;
+const MAX_OPENENV_RECOVERABLE_ERRORS: usize = 64;
+const MAX_OPENENV_CAPACITY_WAIT_SECONDS: u64 = 3_600;
 const MAX_OPENENV_DATASET_BYTES: usize = 256 * 1024 * 1024;
 const MAX_KILN_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const CHAT_TIMEOUT: Duration = Duration::from_secs(180);
@@ -42,7 +50,7 @@ pub(crate) const OPENENV_OVERVIEW: &str = r#"Inspect OpenEnv servers, collect gr
 
 Kiln discovers each environment over HTTP, opens one WebSocket session per episode, resets every candidate in a GRPO group with the same deterministic seed, asks the selected Kiln policy for schema-shaped JSON actions, and records every action, observation, reward, termination, environment identity, and content hash in canonical agentic trajectory JSONL.
 
-`rollout` writes the exact reusable GRPO corpus and a detailed summary receipt. `train` writes those same artifacts and submits the in-memory groups to `/v1/train/grpo` with the explicit native on-policy behavior-policy contract. Start `kiln serve` first.
+`rollout` writes the exact reusable GRPO corpus, an exact replay transcript, and a detailed summary receipt. `verify` validates the three-artifact bundle without contacting a server; `replay` re-executes the captured reset/action protocol against the content-addressed environments. `train` writes those artifacts and submits the in-memory groups to `/v1/train/grpo` with the explicit native on-policy behavior-policy contract. Start `kiln serve` first.
 "#;
 
 pub(crate) const OPENENV_EXAMPLES: &str = r#"Examples:
@@ -57,6 +65,14 @@ pub(crate) const OPENENV_EXAMPLES: &str = r#"Examples:
   kiln openenv train --environment http://127.0.0.1:8000 --output-adapter wordle-agent
       Collect a native on-policy batch, submit GRPO training, and auto-load the
       completed adapter.
+
+  kiln openenv verify --summary openenv.rollout-summary.json
+      Verify the dataset, replay transcript, receipt hashes, rollout
+      provenance, rewards, and counts entirely offline.
+
+  kiln openenv replay --summary openenv.rollout-summary.json
+      Reconnect to the captured environment identities and assert every reset,
+      observation, reward, error, done flag, and final state exactly.
 
   kiln openenv train --environment http://127.0.0.1:8000 --environment http://127.0.0.1:8001 --adapter wordle-agent --output-adapter arcade-agent --groups 16
       Continue training an existing policy across multiple environments,
@@ -123,9 +139,21 @@ pub struct OpenEnvRolloutArgs {
     #[arg(long = "protocol-error-reward", default_value_t = -1.0)]
     protocol_error_reward: f64,
 
+    /// Recoverable OpenEnv errors allowed before ending an episode
+    #[arg(long = "max-recoverable-errors", default_value_t = 3)]
+    max_recoverable_errors: usize,
+
+    /// Maximum time to wait for a saturated OpenEnv server
+    #[arg(long = "capacity-wait-seconds", default_value_t = 300)]
+    capacity_wait_seconds: u64,
+
     /// Canonical GRPO JSONL output
     #[arg(long, default_value = "openenv.rollouts.jsonl")]
     output: PathBuf,
+
+    /// Exact content-addressed environment replay transcript
+    #[arg(long = "replay-output", default_value = "openenv.replay.json")]
+    replay_output: PathBuf,
 
     /// Content-addressed rollout summary and provenance receipt
     #[arg(
@@ -176,6 +204,52 @@ pub enum OpenEnvCommands {
         )]
         auto_load: bool,
     },
+
+    /// Verify a rollout dataset, replay transcript, and summary receipt offline
+    Verify {
+        /// Content-addressed rollout summary receipt
+        #[arg(long, default_value = "openenv.rollout-summary.json")]
+        summary: PathBuf,
+
+        /// Override the dataset path recorded in the summary
+        #[arg(long)]
+        dataset: Option<PathBuf>,
+
+        /// Override the replay path recorded in the summary
+        #[arg(long)]
+        replay: Option<PathBuf>,
+
+        /// Emit the verification report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Replay a captured transcript against its live OpenEnv environments
+    Replay {
+        /// Content-addressed rollout summary receipt
+        #[arg(long, default_value = "openenv.rollout-summary.json")]
+        summary: PathBuf,
+
+        /// Override the dataset path recorded in the summary
+        #[arg(long)]
+        dataset: Option<PathBuf>,
+
+        /// Override the replay path recorded in the summary
+        #[arg(long)]
+        replay: Option<PathBuf>,
+
+        /// Maximum simultaneous replay sessions within a group
+        #[arg(long, default_value_t = 4)]
+        concurrency: usize,
+
+        /// Maximum time to wait for a saturated OpenEnv server
+        #[arg(long = "capacity-wait-seconds", default_value_t = 300)]
+        capacity_wait_seconds: u64,
+
+        /// Emit the replay report as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -193,7 +267,10 @@ pub struct OpenEnvRolloutOptions {
     pub temperature: f32,
     pub thinking: bool,
     pub protocol_error_reward: f64,
+    pub max_recoverable_errors: usize,
+    pub capacity_wait_seconds: u64,
     pub output: PathBuf,
+    pub replay_output: PathBuf,
     pub summary_output: PathBuf,
 }
 
@@ -206,6 +283,7 @@ pub struct OpenEnvTrainOptions {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenEnvRolloutSummary {
     pub schema: String,
     pub kiln_url: String,
@@ -222,18 +300,24 @@ pub struct OpenEnvRolloutSummary {
     pub temperature: f32,
     pub thinking: bool,
     pub protocol_error_reward: f64,
+    pub max_recoverable_errors: usize,
+    pub capacity_wait_seconds: u64,
     pub reset_options_sha256: String,
     pub output_path: String,
+    pub replay_output_path: String,
     pub summary_output_path: String,
     pub dataset_sha256: String,
     pub dataset_bytes: usize,
+    pub replay_sha256: String,
+    pub replay_bytes: usize,
     pub stats: OpenEnvRolloutStats,
     pub rollouts: Vec<OpenEnvRolloutRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub training_submission: Option<Value>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct OpenEnvRolloutStats {
     pub mean_episode_return: f64,
     pub min_episode_return: Option<f64>,
@@ -242,12 +326,15 @@ pub struct OpenEnvRolloutStats {
     pub max_steps_count: usize,
     pub invalid_model_action_count: usize,
     pub protocol_error_count: usize,
+    pub recoverable_protocol_error_count: usize,
+    pub capacity_retry_count: usize,
     pub total_environment_steps: usize,
     pub total_model_tokens: usize,
     pub mean_model_latency_ms: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenEnvRolloutRecord {
     pub group_index: usize,
     pub candidate_index: usize,
@@ -260,6 +347,8 @@ pub struct OpenEnvRolloutRecord {
     pub termination: OpenEnvEpisodeTerminationV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_error_code: Option<String>,
+    pub recoverable_protocol_errors: usize,
+    pub capacity_retries: usize,
     pub model_tokens: usize,
     pub model_latency_ms: f64,
 }
@@ -267,6 +356,7 @@ pub struct OpenEnvRolloutRecord {
 #[derive(Debug)]
 pub struct OpenEnvCollection {
     pub groups: Vec<AgenticGroup>,
+    pub replay: OpenEnvReplayManifest,
     pub summary: OpenEnvRolloutSummary,
 }
 
@@ -274,7 +364,9 @@ pub struct OpenEnvCollection {
 struct CandidateRollout {
     candidate_index: usize,
     messages: Vec<ChatMessage>,
+    reset_observation: OpenEnvObservation,
     rollout: ScoredRollout,
+    replay: OpenEnvReplayCandidate,
     record: OpenEnvRolloutRecord,
 }
 
@@ -346,6 +438,76 @@ pub async fn run_openenv(command: &OpenEnvCommands) -> Result<()> {
             .await?;
             print_openenv_summary(&summary, true)?;
         }
+        OpenEnvCommands::Verify {
+            summary,
+            dataset,
+            replay,
+            json,
+        } => {
+            let verified =
+                verify_openenv_artifacts(summary, dataset.as_deref(), replay.as_deref())?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&verified.report)?);
+            } else {
+                println!(
+                    "{} Verified {} OpenEnv episodes and {} exact environment exchanges",
+                    style("✓").green().bold(),
+                    verified.report.rollouts,
+                    verified.report.environment_exchanges
+                );
+                println!("  Dataset: {}", verified.report.dataset_path);
+                println!("  Replay:  {}", verified.report.replay_path);
+                println!("  Receipt: {}", verified.report.summary_path);
+                println!("  Dataset SHA-256: {}", verified.report.dataset_sha256);
+                println!("  Replay SHA-256:  {}", verified.report.replay_sha256);
+            }
+        }
+        OpenEnvCommands::Replay {
+            summary,
+            dataset,
+            replay,
+            concurrency,
+            capacity_wait_seconds,
+            json,
+        } => {
+            anyhow::ensure!(
+                *concurrency > 0 && *concurrency <= MAX_OPENENV_CONCURRENCY,
+                "OpenEnv replay concurrency must be in 1..={MAX_OPENENV_CONCURRENCY}"
+            );
+            anyhow::ensure!(
+                *capacity_wait_seconds > 0
+                    && *capacity_wait_seconds <= MAX_OPENENV_CAPACITY_WAIT_SECONDS,
+                "OpenEnv capacity wait must be in 1..={MAX_OPENENV_CAPACITY_WAIT_SECONDS} seconds"
+            );
+            let verified =
+                verify_openenv_artifacts(summary, dataset.as_deref(), replay.as_deref())?;
+            let report = replay_openenv(
+                &verified.replay,
+                verified.report.replay_sha256,
+                *concurrency,
+                Duration::from_secs(*capacity_wait_seconds),
+            )
+            .await?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "{} Replayed {} OpenEnv episodes and {} exact environment exchanges",
+                    style("✓").green().bold(),
+                    report.rollouts,
+                    report.environment_exchanges
+                );
+                println!("  Environments:     {}", report.environments);
+                println!("  Replay SHA-256:   {}", report.replay_sha256);
+                println!("  Capacity retries: {}", report.capacity_retries);
+                if report.environment_prefix_only_rollouts > 0 {
+                    println!(
+                        "  Prefix-only:       {} rollouts ended at a model-side invalid action",
+                        report.environment_prefix_only_rollouts
+                    );
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -365,7 +527,10 @@ fn openenv_rollout_options(args: &OpenEnvRolloutArgs) -> OpenEnvRolloutOptions {
         temperature: args.temperature,
         thinking: args.thinking,
         protocol_error_reward: args.protocol_error_reward,
+        max_recoverable_errors: args.max_recoverable_errors,
+        capacity_wait_seconds: args.capacity_wait_seconds,
         output: args.output.clone(),
+        replay_output: args.replay_output.clone(),
         summary_output: args.summary_output.clone(),
     }
 }
@@ -378,8 +543,10 @@ fn print_openenv_summary(summary: &OpenEnvRolloutSummary, submitted_training: bo
         summary.groups
     );
     println!("  Dataset:    {}", summary.output_path);
+    println!("  Replay:     {}", summary.replay_output_path);
     println!("  Receipt:    {}", summary.summary_output_path);
-    println!("  SHA-256:    {}", summary.dataset_sha256);
+    println!("  Dataset SHA-256: {}", summary.dataset_sha256);
+    println!("  Replay SHA-256:  {}", summary.replay_sha256);
     println!(
         "  Return:     mean {:.6}, min {}, max {}",
         summary.stats.mean_episode_return,
@@ -401,6 +568,13 @@ fn print_openenv_summary(summary: &OpenEnvRolloutSummary, submitted_training: bo
         summary.stats.invalid_model_action_count,
         summary.stats.protocol_error_count
     );
+    if summary.stats.recoverable_protocol_error_count > 0 || summary.stats.capacity_retry_count > 0
+    {
+        println!(
+            "  Recovery:   {} recoverable protocol errors, {} capacity retries",
+            summary.stats.recoverable_protocol_error_count, summary.stats.capacity_retry_count
+        );
+    }
     if submitted_training {
         let submission = summary
             .training_submission
@@ -429,14 +603,24 @@ pub async fn inspect_openenv(environment_url: &str) -> Result<OpenEnvInspection>
 
 pub async fn run_openenv_rollout(options: OpenEnvRolloutOptions) -> Result<OpenEnvRolloutSummary> {
     let collection = collect_openenv_rollouts(&options).await?;
-    write_openenv_outputs(&options, &collection.groups, &collection.summary)?;
+    write_openenv_outputs(
+        &options,
+        &collection.groups,
+        &collection.replay,
+        &collection.summary,
+    )?;
     Ok(collection.summary)
 }
 
 pub async fn run_openenv_train(options: OpenEnvTrainOptions) -> Result<OpenEnvRolloutSummary> {
     validate_output_adapter(&options.output_adapter)?;
     let mut collection = collect_openenv_rollouts(&options.rollout).await?;
-    write_openenv_outputs(&options.rollout, &collection.groups, &collection.summary)?;
+    write_openenv_outputs(
+        &options.rollout,
+        &collection.groups,
+        &collection.replay,
+        &collection.summary,
+    )?;
     let submission = submit_openenv_training(
         &options.rollout.kiln_url,
         &collection.groups,
@@ -480,13 +664,17 @@ pub async fn collect_openenv_rollouts(
         .collect::<Result<Vec<_>>>()?;
 
     let mut groups = Vec::with_capacity(options.groups);
+    let mut replay_groups = Vec::with_capacity(options.groups);
     let mut records = Vec::with_capacity(options.groups.saturating_mul(options.group_size));
     let mut dataset_bytes = 0usize;
 
     for group_index in 0..options.groups {
         let environment_index = group_index % inspections.len();
         let (environment, inspection) = &inspections[environment_index];
-        let seed = options.seed_start.wrapping_add(group_index as u64);
+        let seed = options
+            .seed_start
+            .checked_add(group_index as u64)
+            .context("OpenEnv reset seed range overflow")?;
         if seed > i64::MAX as u64 {
             anyhow::bail!(
                 "OpenEnv reset seed {seed} exceeds the protocol's portable signed-integer range"
@@ -525,7 +713,22 @@ pub async fn collect_openenv_rollouts(
                 candidate.messages == shared_messages,
                 "OpenEnv reset produced different initial observations within group {group_index}; reset(seed) must be deterministic for group-relative training"
             );
+            anyhow::ensure!(
+                candidate.reset_observation == candidates[0].reset_observation,
+                "OpenEnv reset produced different wire observations within group {group_index}; reset(seed) must be deterministic for exact replay"
+            );
         }
+        replay_groups.push(OpenEnvReplayGroup {
+            group_index,
+            environment_index,
+            seed,
+            reset_payload: reset,
+            reset_observation: candidates[0].reset_observation.clone(),
+            candidates: candidates
+                .iter()
+                .map(|candidate| candidate.replay.clone())
+                .collect(),
+        });
         let group = AgenticGroup {
             messages: shared_messages,
             completions: candidates
@@ -547,11 +750,27 @@ pub async fn collect_openenv_rollouts(
     }
 
     let dataset_sha256 = sha256_jsonl(&groups)?;
+    let replay = OpenEnvReplayManifest {
+        schema: OPENENV_REPLAY_SCHEMA_V1.to_string(),
+        client_profile: kiln_openenv::OPENENV_CLIENT_PROFILE.to_string(),
+        dataset_sha256: dataset_sha256.clone(),
+        protocol_error_reward: options.protocol_error_reward,
+        max_steps: options.max_steps,
+        environments: inspections
+            .iter()
+            .map(|(_, inspection)| inspection.clone())
+            .collect(),
+        groups: replay_groups,
+    };
+    let replay_encoded = encode_replay(&replay)?;
+    let replay_sha256 = replay_sha256(&replay_encoded);
+    let replay_bytes = replay_encoded.len();
     let stats = summarize_rollouts(&records);
     Ok(OpenEnvCollection {
         groups,
+        replay,
         summary: OpenEnvRolloutSummary {
-            schema: "kiln.openenv-rollout-summary.v1".to_string(),
+            schema: "kiln.openenv-rollout-summary.v2".to_string(),
             kiln_url: options.kiln_url.trim_end_matches('/').to_string(),
             adapter: adapter.request_value.as_str().map(ToOwned::to_owned),
             adapter_label: adapter.label,
@@ -569,11 +788,16 @@ pub async fn collect_openenv_rollouts(
             temperature: options.temperature,
             thinking: options.thinking,
             protocol_error_reward: options.protocol_error_reward,
+            max_recoverable_errors: options.max_recoverable_errors,
+            capacity_wait_seconds: options.capacity_wait_seconds,
             reset_options_sha256,
             output_path: options.output.display().to_string(),
+            replay_output_path: options.replay_output.display().to_string(),
             summary_output_path: options.summary_output.display().to_string(),
             dataset_sha256,
             dataset_bytes,
+            replay_sha256,
+            replay_bytes,
             stats,
             rollouts: records,
             training_submission: None,
@@ -594,14 +818,12 @@ async fn run_candidate_episode(
     candidate_index: usize,
     options: &OpenEnvRolloutOptions,
 ) -> Result<CandidateRollout> {
-    let mut session = environment
-        .connect()
-        .await
-        .with_context(|| format!("connect OpenEnv episode at {}", environment.base_url()))?;
-    let reset = session
-        .reset(&reset_payload)
-        .await
-        .with_context(|| format!("reset OpenEnv episode at {}", environment.base_url()))?;
+    let (mut session, reset, capacity_retries) = connect_and_reset_with_capacity(
+        &environment,
+        &reset_payload,
+        Duration::from_secs(options.capacity_wait_seconds),
+    )
+    .await?;
     anyhow::ensure!(
         !reset.done,
         "OpenEnv environment {} returned done=true from reset; a trainable rollout needs at least one model action",
@@ -617,6 +839,9 @@ async fn run_candidate_episode(
     let mut total_model_latency_ms = 0.0f64;
     let mut termination = OpenEnvEpisodeTerminationV1::MaxSteps;
     let mut protocol_error_code = None;
+    let mut recoverable_protocol_errors = 0usize;
+    let mut replay_exchanges = Vec::new();
+    let mut terminal_protocol_error = false;
 
     for step_index in 0..options.max_steps {
         let generation_seed = generation_seed(seed, candidate_index, step_index);
@@ -671,17 +896,43 @@ async fn run_candidate_episode(
                     "OpenEnv episode return became non-finite"
                 );
                 trajectory.push(observation_segment(&observation)?);
+                replay_exchanges.push(OpenEnvReplayExchange {
+                    step_index,
+                    action: model_action.action,
+                    result: OpenEnvReplayExchangeResult::Observation {
+                        observation: observation.clone(),
+                    },
+                });
                 if observation.done {
                     termination = OpenEnvEpisodeTerminationV1::Done;
                     break;
                 }
             }
             Err(OpenEnvClientError::Protocol(error)) => {
-                protocol_error_code = Some(error.code.to_string());
-                trajectory.push(protocol_error_segment(&error)?);
+                let continued = !error.code.is_terminal()
+                    && recoverable_protocol_errors < options.max_recoverable_errors;
+                if !error.code.is_terminal() {
+                    recoverable_protocol_errors = recoverable_protocol_errors.saturating_add(1);
+                }
+                if !continued {
+                    protocol_error_code = Some(error.code.to_string());
+                    terminal_protocol_error = error.code.is_terminal();
+                    termination = OpenEnvEpisodeTerminationV1::ProtocolError;
+                }
+                trajectory.push(protocol_error_segment(&error, continued)?);
+                replay_exchanges.push(OpenEnvReplayExchange {
+                    step_index,
+                    action: model_action.action,
+                    result: OpenEnvReplayExchangeResult::ProtocolError { error, continued },
+                });
                 episode_return += options.protocol_error_reward;
-                termination = OpenEnvEpisodeTerminationV1::ProtocolError;
-                break;
+                anyhow::ensure!(
+                    episode_return.is_finite(),
+                    "OpenEnv episode return became non-finite"
+                );
+                if !continued {
+                    break;
+                }
             }
             Err(error) => {
                 return Err(anyhow!(error)).with_context(|| {
@@ -693,6 +944,15 @@ async fn run_candidate_episode(
             }
         }
     }
+    let final_state = if terminal_protocol_error {
+        None
+    } else {
+        Some(session.state().await.with_context(|| {
+            format!(
+                "capture final OpenEnv state for group {group_index} candidate {candidate_index}"
+            )
+        })?)
+    };
     let _ = session.close().await;
 
     let action_schema_sha256 = sha256_json(&inspection.schema.action)?;
@@ -715,11 +975,25 @@ async fn run_candidate_episode(
     .map_err(anyhow::Error::msg)
     .context("build OpenEnv rollout provenance")?;
     let rollout = ScoredRollout::from_trajectory(trajectory, episode_return).with_openenv(openenv);
+    let replay = OpenEnvReplayCandidate {
+        candidate_index,
+        exchanges: replay_exchanges,
+        final_state,
+        episode_return,
+        terminal_done,
+        termination,
+        recoverable_protocol_errors,
+        capacity_retries,
+        model_tokens: total_model_tokens,
+        model_latency_ms: total_model_latency_ms,
+    };
 
     Ok(CandidateRollout {
         candidate_index,
         messages,
+        reset_observation: reset,
         rollout,
+        replay,
         record: OpenEnvRolloutRecord {
             group_index,
             candidate_index,
@@ -731,6 +1005,8 @@ async fn run_candidate_episode(
             terminal_done,
             termination,
             protocol_error_code,
+            recoverable_protocol_errors,
+            capacity_retries,
             model_tokens: total_model_tokens,
             model_latency_ms: total_model_latency_ms,
         },
@@ -824,7 +1100,7 @@ async fn generate_model_action(
     })
 }
 
-fn initial_messages(
+pub(crate) fn initial_messages(
     inspection: &OpenEnvInspection,
     reset: &OpenEnvObservation,
 ) -> Result<Vec<ChatMessage>> {
@@ -888,10 +1164,11 @@ fn harness_error_segment(error: &impl Serialize) -> Result<TurnSegment> {
     })
 }
 
-fn protocol_error_segment(error: &OpenEnvProtocolError) -> Result<TurnSegment> {
+fn protocol_error_segment(error: &OpenEnvProtocolError, continued: bool) -> Result<TurnSegment> {
     harness_error_segment(&json!({
         "openenv_error": error,
-        "done": true
+        "recoverable": continued,
+        "done": !continued
     }))
 }
 
@@ -902,7 +1179,7 @@ fn invalid_action_raw(message: &str) -> String {
     .to_string()
 }
 
-fn parse_model_action(raw: &str) -> std::result::Result<Value, String> {
+pub(crate) fn parse_model_action(raw: &str) -> std::result::Result<Value, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("model returned an empty action".to_string());
@@ -966,6 +1243,14 @@ fn validate_options(options: &OpenEnvRolloutOptions) -> Result<()> {
         options.groups > 0 && options.groups <= MAX_OPENENV_GROUPS,
         "OpenEnv groups must be in 1..={MAX_OPENENV_GROUPS}"
     );
+    let final_seed = options
+        .seed_start
+        .checked_add((options.groups - 1) as u64)
+        .context("OpenEnv reset seed range overflow")?;
+    anyhow::ensure!(
+        final_seed <= i64::MAX as u64,
+        "OpenEnv reset seed range must fit the protocol's portable signed-integer range"
+    );
     anyhow::ensure!(
         options.group_size > 0 && options.group_size <= MAX_OPENENV_GROUP_SIZE,
         "OpenEnv group size must be in 1..={MAX_OPENENV_GROUP_SIZE}"
@@ -999,8 +1284,19 @@ fn validate_options(options: &OpenEnvRolloutOptions) -> Result<()> {
         "OpenEnv protocol error reward must be finite"
     );
     anyhow::ensure!(
-        options.output != options.summary_output,
-        "OpenEnv --output and --summary-output must name different files"
+        options.max_recoverable_errors <= MAX_OPENENV_RECOVERABLE_ERRORS,
+        "OpenEnv max recoverable errors must be in 0..={MAX_OPENENV_RECOVERABLE_ERRORS}"
+    );
+    anyhow::ensure!(
+        options.capacity_wait_seconds > 0
+            && options.capacity_wait_seconds <= MAX_OPENENV_CAPACITY_WAIT_SECONDS,
+        "OpenEnv capacity wait must be in 1..={MAX_OPENENV_CAPACITY_WAIT_SECONDS} seconds"
+    );
+    anyhow::ensure!(
+        options.output != options.replay_output
+            && options.output != options.summary_output
+            && options.replay_output != options.summary_output,
+        "OpenEnv --output, --replay-output, and --summary-output must name different files"
     );
     Ok(())
 }
@@ -1108,10 +1404,32 @@ async fn read_kiln_json_bounded(mut response: reqwest::Response, label: &str) ->
 fn write_openenv_outputs(
     options: &OpenEnvRolloutOptions,
     groups: &[AgenticGroup],
+    replay: &OpenEnvReplayManifest,
     summary: &OpenEnvRolloutSummary,
 ) -> Result<()> {
     write_groups_atomic(&options.output, groups)?;
+    write_replay_atomic(&options.replay_output, replay)?;
     write_summary_atomic(&options.summary_output, summary)
+}
+
+fn write_replay_atomic(path: &Path, replay: &OpenEnvReplayManifest) -> Result<()> {
+    let bytes = encode_replay(replay)?;
+    let parent = output_parent(path)?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("create staged OpenEnv replay beside {}", path.display()))?;
+    staged
+        .as_file_mut()
+        .write_all(&bytes)
+        .with_context(|| format!("write staged OpenEnv replay for {}", path.display()))?;
+    staged
+        .as_file()
+        .sync_all()
+        .with_context(|| format!("sync staged OpenEnv replay for {}", path.display()))?;
+    staged
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("publish OpenEnv replay {}", path.display()))?;
+    Ok(())
 }
 
 fn write_groups_atomic(path: &Path, groups: &[AgenticGroup]) -> Result<()> {
@@ -1169,7 +1487,7 @@ fn output_parent(path: &Path) -> Result<&Path> {
     Ok(parent)
 }
 
-fn summarize_rollouts(records: &[OpenEnvRolloutRecord]) -> OpenEnvRolloutStats {
+pub(crate) fn summarize_rollouts(records: &[OpenEnvRolloutRecord]) -> OpenEnvRolloutStats {
     if records.is_empty() {
         return OpenEnvRolloutStats::default();
     }
@@ -1207,6 +1525,11 @@ fn summarize_rollouts(records: &[OpenEnvRolloutRecord]) -> OpenEnvRolloutStats {
             .iter()
             .filter(|record| record.termination == OpenEnvEpisodeTerminationV1::ProtocolError)
             .count(),
+        recoverable_protocol_error_count: records
+            .iter()
+            .map(|record| record.recoverable_protocol_errors)
+            .sum(),
+        capacity_retry_count: records.iter().map(|record| record.capacity_retries).sum(),
         total_environment_steps: records.iter().map(|record| record.steps).sum(),
         total_model_tokens: records.iter().map(|record| record.model_tokens).sum(),
         mean_model_latency_ms: latency_sum / records.len() as f64,
@@ -1306,6 +1629,9 @@ mod tests {
         assert_eq!(rollout.group_size, 6);
         assert!(rollout.thinking);
         assert_eq!(rollout.protocol_error_reward, -1.0);
+        assert_eq!(rollout.max_recoverable_errors, 3);
+        assert_eq!(rollout.capacity_wait_seconds, 300);
+        assert_eq!(rollout.replay_output, PathBuf::from("openenv.replay.json"));
 
         let train = Cli::try_parse_from([
             "kiln",
@@ -1328,6 +1654,43 @@ mod tests {
                 auto_load: false,
                 ..
             })) if output_adapter == "agent-v2"
+        ));
+
+        let verify = Cli::try_parse_from([
+            "kiln",
+            "openenv",
+            "verify",
+            "--summary",
+            "batch.summary.json",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            verify.command,
+            Some(Commands::Openenv(OpenEnvCommands::Verify {
+                summary,
+                json: true,
+                ..
+            })) if summary == PathBuf::from("batch.summary.json")
+        ));
+
+        let replay = Cli::try_parse_from([
+            "kiln",
+            "openenv",
+            "replay",
+            "--summary",
+            "batch.summary.json",
+            "--concurrency",
+            "2",
+        ])
+        .unwrap();
+        assert!(matches!(
+            replay.command,
+            Some(Commands::Openenv(OpenEnvCommands::Replay {
+                concurrency: 2,
+                capacity_wait_seconds: 300,
+                ..
+            }))
         ));
 
         assert!(

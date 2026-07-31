@@ -283,7 +283,15 @@
       "slug": "openenv",
       "title": "OpenEnv training",
       "section": "training",
-      "description": "Discover OpenEnv servers, collect seed-matched stateful episodes, train with native GRPO and ECHO, and audit environment identity, reward, and failure semantics."
+      "description": "Discover OpenEnv servers, collect seed-matched stateful episodes, train with native GRPO and ECHO, then verify or exactly replay the content-addressed environment transcript."
+    },
+    {
+      "source": "docs/OPENENV_REPLAY_REFERENCE.md",
+      "slug": "openenv-replay",
+      "title": "OpenEnv replay and recovery",
+      "section": "training",
+      "navigation": "reference",
+      "description": "Verify content-bound rollout artifacts, exactly replay environment exchanges, and understand protocol recovery, capacity, drift, and implementation-neutral conformance."
     },
     {
       "source": "contracts/kiln-openenv-v1.schema.json",
@@ -291,7 +299,7 @@
       "slug": "openenv-schema",
       "title": "OpenEnv rollout schema",
       "section": "training",
-      "description": "Look up environment discovery identity, episode outcomes, rollout statistics, dataset hashes, and the summary receipt published by kiln openenv."
+      "description": "Look up environment discovery identity, episode outcomes, recovery statistics, dataset/replay hashes, exact transcript, verification report, and summary receipt published by kiln openenv."
     },
     {
       "source": "docs/ECHO_GUIDE.md",

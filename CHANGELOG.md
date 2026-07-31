@@ -8,10 +8,16 @@
   WebSocket episodes. `kiln openenv inspect`, `rollout`, and `train` create
   deterministic seed-matched groups across one or more environments, preserve
   multi-turn action/observation trajectories and environment-owned returns,
-  publish replayable JSONL plus a rollout receipt, and optionally submit
+  publish canonical JSONL plus an exact content-addressed environment replay
+  transcript and rollout receipt, and optionally submit
   on-policy native GRPO directly. Canonical scored-rollout identity now binds
-  fail-closed OpenEnv episode provenance. CI drives a real pinned miniopenenv
-  counter episode end to end.
+  fail-closed OpenEnv episode provenance. Recoverable protocol errors now
+  become bounded corrective policy turns on the same socket; capacity
+  saturation uses bounded fresh-session acquisition. New `openenv verify` and
+  `openenv replay` commands validate the artifact bundle offline and replay
+  exact live environment behavior. CI drives pinned miniopenenv counter,
+  bandit, Connect Four, maze, and Wordle servers plus a native
+  collect/submit/verify/replay batch end to end.
 - Corrected the v0.5.1 Vulkan recovery architecture. The recovered route set
   is no longer installed as a renamed global machine-tuned default. Policy v6
   is derived from the selected physical device's reported workgroup geometry,

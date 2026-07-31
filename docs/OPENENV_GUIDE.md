@@ -25,10 +25,11 @@ KILN_MODEL_PATH=./Qwen3.5-4B \
   --output-adapter counter-agent
 ```
 
-`openenv.rollouts.jsonl` and `openenv.rollout-summary.json` are published
-before the training request. Keep them with the adapter's normal
-`train_receipt.json`: together they bind the environment-facing rollout and
-the optimizer-facing training attempt.
+`openenv.rollouts.jsonl`, `openenv.replay.json`, and
+`openenv.rollout-summary.json` are published before the training request. Keep
+all three with the adapter's normal `train_receipt.json`: together they bind
+the environment-facing rollout, its exact executable transcript, and the
+optimizer-facing training attempt.
 
 ## How the loop works
 
@@ -41,8 +42,9 @@ For each group, Kiln:
 5. asks the selected Kiln policy for exactly one JSON action;
 6. sends that action to the environment and records the observation, tagged
    reward, and `done`;
-7. repeats until `done`, `--max-steps`, an invalid model action, or a protocol
-   error;
+7. feeds recoverable protocol errors back to the policy on the same socket and
+   repeats until `done`, `--max-steps`, an invalid model action, a terminal
+   protocol error, or the configured recovery budget is exhausted;
 8. sums step rewards into the episode return; and
 9. writes all candidates as one `AgenticGroup`, then submits the groups to the
    ordinary native GRPO trainer when `train` was selected.
@@ -84,12 +86,35 @@ kiln openenv rollout \
   --group-size 4 \
   --seed-start 1000 \
   --output counter.rollouts.jsonl \
+  --replay-output counter.replay.json \
   --summary-output counter.rollout-summary.json
 ```
 
 Use `rollout` to inspect reward variance, compare policy versions, retain a
 batch for audit, or submit the JSONL later with `kiln train grpo`. The output
 is the same canonical `AgenticGroup` JSONL accepted by the native GRPO route.
+
+### Verify and replay
+
+```bash
+# Offline: rehash and cross-check the JSONL, replay transcript, and receipt.
+kiln openenv verify --summary counter.rollout-summary.json
+
+# Live: verify first, then execute the exact reset/action transcript again.
+kiln openenv replay --summary counter.rollout-summary.json
+```
+
+`verify` is network-free. It checks both byte digests and byte counts, parses
+the canonical GRPO groups, fail-closed provenance, replay transcript, returns,
+and receipt totals.
+
+`replay` performs that offline verification first. It then inspects each live
+target and compares the captured reset, action, result, and final-state
+transcript exactly. Move or archive the three files together; use `--dataset`
+and `--replay` when their recorded paths have changed. See the
+[replay and recovery reference](OPENENV_REPLAY_REFERENCE.md) for the complete
+verification, drift, and prefix-only semantics.
+
 
 ### Collect and train
 
@@ -123,7 +148,9 @@ Pass environment-specific reset options in a JSON object such as
 
 Kiln always overwrites the object's `seed` with the group seed. The exact
 effective reset object is hashed into each rollout; arbitrary task payloads
-are not duplicated into every provenance record.
+are not duplicated into every provenance record. It is retained once per
+replay group because exact replay is impossible without it. Treat replay files
+as potentially sensitive when reset tasks contain private data.
 
 Multiple environments are first-class: repeat
 `--environment http://127.0.0.1:PORT` on the same command.
@@ -139,7 +166,8 @@ The system prompt contains the discovered action JSON Schema. At each turn,
 the policy must emit one JSON object and no prose. Kiln currently accepts a
 bare object or an otherwise exact JSON object inside one Markdown JSON fence.
 The environment remains authoritative: its validation and execution errors
-become explicit protocol outcomes.
+become explicit protocol outcomes. Recoverable errors are full feedback turns,
+so a policy can correct its next action without losing episode state.
 
 Every sampled action is a `TurnKind::Action`. Every environment observation is
 a `TurnKind::Observation`. Native GRPO therefore applies policy-gradient loss
@@ -156,43 +184,30 @@ represent an episode.
 ## Identity and artifacts
 
 Each scored rollout may carry `kiln.openenv-rollout.v1` provenance: environment
-name and URL, OpenAPI version, full-environment/action-schema and reset hashes,
-seed, steps, episode return, `done`, termination, and an optional protocol-error
-code.
+name and URL, schema and reset hashes, seed, steps, return, termination, and an
+optional protocol-error code. This identity participates in the scored-rollout
+payload hash and fails closed when malformed.
 
-This identity participates in Kiln's scored-rollout payload hash. Deserialization
-fails closed on an unsupported schema, malformed hash, non-finite return,
-inconsistent `done`, or invalid protocol-error state.
-
-The rollout summary records:
-
-- every discovered environment identity and complete typed schema;
-- behavior adapter, seeds, sampling controls, concurrency, and reset hash;
-- group, rollout, step, model-token, and latency counts;
-- return distribution and termination counts;
-- compact JSONL byte count and SHA-256; and
-- the training submission response for `openenv train`.
-
-The summary is an audit receipt, not proof that an environment implementation
-behind the same URL has not changed. Pin the environment image or binary and
-retain its content identity alongside serious training runs.
+The JSONL is the canonical trainer input. The replay manifest retains exact
+environment exchanges, and the summary records configuration, statistics,
+content hashes, and any training submission. The receipt cannot prove that
+code behind a URL stayed fixed; pin serious environment deployments. The
+[replay and recovery reference](OPENENV_REPLAY_REFERENCE.md) defines the
+artifact and drift boundary in detail.
 
 ## Failure and capacity semantics
 
-OpenEnv's recoverable errors are `INVALID_JSON`, `UNKNOWN_TYPE`,
-`VALIDATION_ERROR`, and `EXECUTION_ERROR`. Its terminal errors are
-`CAPACITY_REACHED`, `FACTORY_ERROR`, and `SESSION_ERROR`.
+Kiln assigns every protocol error `--protocol-error-reward` (default `-1`).
+Recoverable errors become observation feedback and the policy may try again on
+the same socket up to `--max-recoverable-errors` (default `3`). A terminal
+error, or the next recoverable error after that budget is spent, ends the
+candidate as `protocol_error`.
 
-Kiln records protocol error codes and ends the affected candidate with
-`--protocol-error-reward` (default `-1`). Invalid model JSON is recorded
-separately as `invalid_model_action`; `max_steps` is not mislabeled as
-environment `done`.
-
-OpenEnv servers commonly cap active sessions. Keep `--concurrency` at or below
-the environment's capacity. Kiln bounds environments, groups, candidates,
-steps, action tokens, active sessions, discovery bodies, WebSocket messages,
-and the in-memory/inline training corpus; limit failures ask you to reduce the
-corresponding dimension.
+On `CAPACITY_REACHED`, Kiln closes that socket and retries a fresh session with
+bounded backoff until `--capacity-wait-seconds` expires. Invalid model JSON and
+`max_steps` remain distinct outcomes. The
+[replay and recovery reference](OPENENV_REPLAY_REFERENCE.md) lists every
+recoverable and terminal code, retry rule, and resource bound.
 
 ## Security boundary
 
@@ -211,39 +226,18 @@ model context and training corpus.
 - Retain the rollout summary and environment deployment identity before
   accepting a trained adapter into a higher-trust setting.
 
-## miniopenenv interoperability
+## Protocol interoperability oracle
 
-Kiln's reusable `kiln-openenv` crate is tested against the observed OpenEnv
-HTTP/1.x protocol and a pinned miniopenenv counter:
-
-```bash
-CARGO_BIN="$(command -v cargo)" scripts/check_miniopenenv_interop.sh
-```
-
-The check launches the real C99 server and verifies discovery, schema, reset,
-two stateful steps (`2`, then `4`), tagged float rewards, terminal `done`, full
-WebSocket state, and close. CI runs the same test against the pinned
-miniopenenv revision.
-
-Representative miniopenenv environments include `wordle`, `connect4`, `maze`,
-`logic`, `bandit`, `blackjack`, `cartpole`, `g2048`, `snake`, and `pong`.
-Start with a short horizon and a small batch, inspect return variance and
-termination counts, then scale groups.
+Kiln's reusable `kiln-openenv` crate and native training loop are tested
+against the OpenEnv HTTP/1.x protocol. Its byte-real oracle happens to use
+miniopenenv for speed, but production Kiln has no implementation-specific type,
+setting, command, or branch: every compatible `--environment` follows the same
+runtime path. The
+[replay and recovery reference](OPENENV_REPLAY_REFERENCE.md) documents the
+five-environment gate.
 
 ## Troubleshooting
 
-**Inspection succeeds but reset fails.** The server may have exhausted session capacity or failed to construct an environment. Reduce concurrency and inspect the exact terminal error code.
-
-**Every candidate in a group gets a different initial prompt.** The environment is not deterministic for the supplied reset seed. Kiln rejects the group rather than compute misleading relative advantages.
-
-**Most outcomes are `invalid_model_action`.** Inspect the action schema, reduce thinking, increase `--max-action-tokens` only if output is truncated, and bootstrap the JSON action format with SFT before GRPO.
-
-**Rewards have no variance.** GRPO has no within-group signal. Use harder tasks,
-more stochastic policy sampling, a more informative environment reward, or an
-SFT/OPD bootstrap. Do not compensate merely by running more identical groups.
-
-**Training is rejected after collection.** The rollout artifacts remain valid.
-Check the Kiln serving profile, training preflight, queue state, adapter name,
-and memory diagnostics, then submit the JSONL with `kiln train grpo`.
-
-**A remote environment redirects.** Redirects are rejected at the trust boundary. Pass the canonical base URL directly.
+See [OpenEnv troubleshooting](OPENENV_REPLAY_REFERENCE.md#troubleshooting) for
+capacity, recovery, replay drift, reset determinism, action, reward, training,
+and redirect failures.

@@ -7,9 +7,12 @@ on:
       - 'Cargo.lock'
       - 'crates/kiln-openenv/**'
       - 'crates/kiln-server/src/openenv_cli.rs'
+      - 'crates/kiln-server/src/openenv_replay.rs'
+      - 'crates/kiln-server/tests/openenv_training_interop.rs'
       - 'crates/kiln-server/src/cli.rs'
       - 'crates/kiln-train/src/trajectory.rs'
       - 'scripts/check_miniopenenv_interop.sh'
+      - 'scripts/check_openenv_contract.py'
       - '.github/workflows/openenv-interop.yml'
   push:
     branches: [main]
@@ -18,9 +21,12 @@ on:
       - 'Cargo.lock'
       - 'crates/kiln-openenv/**'
       - 'crates/kiln-server/src/openenv_cli.rs'
+      - 'crates/kiln-server/src/openenv_replay.rs'
+      - 'crates/kiln-server/tests/openenv_training_interop.rs'
       - 'crates/kiln-server/src/cli.rs'
       - 'crates/kiln-train/src/trajectory.rs'
       - 'scripts/check_miniopenenv_interop.sh'
+      - 'scripts/check_openenv_contract.py'
       - '.github/workflows/openenv-interop.yml'
   workflow_dispatch:
 
@@ -39,8 +45,10 @@ jobs:
           git clone https://github.com/ericflo/miniopenenv.git ../miniopenenv
           git -C ../miniopenenv checkout 3ea585b2f853e7281e0f5fba845b3bd9bff45f03
       - name: Test the typed client
-        run: cargo test -p kiln-openenv
-      - name: Drive a real stateful miniopenenv episode
+        run: |
+          python3 scripts/check_openenv_contract.py --self-test
+          cargo test -p kiln-openenv
+      - name: Drive real stateful counter and arcade episodes
         env:
-          MINIOPENENV_ROOT: ${{ github.workspace }}/../miniopenenv
+          OPENENV_INTEROP_ROOT: ${{ github.workspace }}/../miniopenenv
         run: scripts/check_miniopenenv_interop.sh

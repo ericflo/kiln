@@ -445,7 +445,8 @@ one WS /ws connection per candidate episode
 AgenticGroup JSONL
         ├── Action segments → GRPO policy loss
         ├── Observation segments → ECHO environment loss
-        └── OpenEnv identity → scored-payload hash and rollout receipt
+        ├── OpenEnv identity → scored-payload hash and rollout receipt
+        └── exact typed protocol transcript → offline verification and live replay
         │
         ▼
 ordinary /v1/train/grpo admission and training queue
@@ -466,13 +467,25 @@ Every group is assigned exactly one environment and reset seed. Candidates may
 run concurrently, but their initial messages must be identical or collection
 fails. Step rewards—not reset rewards—sum into episode return. Environment
 `done`, Kiln's max-step cutoff, invalid policy JSON, and protocol errors remain
-distinct termination states.
+distinct termination states. Recoverable OpenEnv errors remain on the same
+lock-step socket and become policy feedback under a bounded budget. A
+`CAPACITY_REACHED` socket is terminal, but episode acquisition is not: Kiln
+backs off and opens a fresh socket under an explicit wait deadline.
+
+The canonical JSONL stays the only training representation. A separate
+content-addressed replay manifest retains exact reset payloads, reset
+observations, ordered action/result exchanges, and final states. The summary
+links both artifacts by digest. Offline verification cross-checks hashes,
+counts, provenance, and reward arithmetic; live replay also pins the discovered
+schema identity and compares every wire result exactly.
 
 The boundary is intentionally bounded: redirects are disabled, discovery
 bodies and WebSocket frames have independent byte limits, client messages,
-environment count, sessions, groups, candidates, steps, action tokens, and
-the inline corpus are capped, and terminal OpenEnv errors latch the session
-closed. A pinned miniopenenv server is the live interoperability oracle in CI.
+environment count, sessions, groups, candidates, steps, recoveries, capacity
+wait, action tokens, replay/data artifact bytes, and the inline corpus are
+capped, and terminal OpenEnv errors latch the session closed. Pinned
+miniopenenv counter and representative arcade servers are the live
+interoperability oracles in CI.
 
 See the [OpenEnv training guide](docs/OPENENV_GUIDE.md) for the operator
 workflow and artifact contract.

@@ -1,15 +1,17 @@
-use kiln_openenv::{OPENENV_CLIENT_PROFILE, OpenEnvClient, OpenEnvReward};
+use kiln_openenv::{
+    OPENENV_CLIENT_PROFILE, OpenEnvClient, OpenEnvClientError, OpenEnvErrorCode, OpenEnvReward,
+};
 use serde_json::json;
 
 /// Byte-real interoperability check for the sibling miniopenenv counter.
 ///
 /// `scripts/check_miniopenenv_interop.sh` owns the server lifecycle and opts
-/// this ignored test in with `KILN_MINIOPENENV_URL`.
+/// this ignored test in with a generic OpenEnv interoperability URL.
 #[tokio::test]
 #[ignore = "requires a live miniopenenv counter server"]
 async fn drives_a_stateful_miniopenenv_counter_episode() {
-    let url = std::env::var("KILN_MINIOPENENV_URL")
-        .expect("KILN_MINIOPENENV_URL must identify the live counter server");
+    let url = std::env::var("KILN_OPENENV_INTEROP_COUNTER_URL")
+        .expect("KILN_OPENENV_INTEROP_COUNTER_URL must identify the live counter server");
     let client = OpenEnvClient::new(url).unwrap();
     let inspection = client.inspect().await.unwrap();
 
@@ -51,4 +53,129 @@ async fn drives_a_stateful_miniopenenv_counter_episode() {
     assert_eq!(state["step_count"], 2);
     assert_eq!(state["total"], 4);
     episode.close().await.unwrap();
+}
+
+/// Representative downstream environments cover changing action spaces,
+/// semantic execution errors, procedural state, string actions, and all the
+/// stateful reset/step/state behavior used by training.
+#[tokio::test]
+#[ignore = "requires live miniopenenv arcade servers"]
+async fn drives_representative_arcade_environments_and_recovers_in_session() {
+    let bandit = OpenEnvClient::new(
+        std::env::var("KILN_OPENENV_INTEROP_BANDIT_URL")
+            .expect("KILN_OPENENV_INTEROP_BANDIT_URL must identify a live OpenEnv server"),
+    )
+    .unwrap();
+    let bandit_inspection = bandit.inspect().await.unwrap();
+    assert_eq!(
+        bandit_inspection
+            .schema
+            .action
+            .pointer("/properties/arm/type"),
+        Some(&json!("integer"))
+    );
+    let mut episode = bandit.connect().await.unwrap();
+    let reset = episode.reset(&json!({"seed": 41})).await.unwrap();
+    assert_eq!(reset.observation["pulls"], 0);
+    let error = episode.step(&json!({"arm": 99})).await.unwrap_err();
+    let OpenEnvClientError::Protocol(error) = error else {
+        panic!("expected an OpenEnv execution error");
+    };
+    assert_eq!(error.code, OpenEnvErrorCode::ExecutionError);
+    assert!(!error.code.is_terminal());
+    let recovered = episode.step(&json!({"arm": 0})).await.unwrap();
+    assert_eq!(recovered.observation["pulls"], 1);
+    assert_eq!(recovered.observation["last_arm"], 0);
+    assert!(matches!(recovered.reward, OpenEnvReward::Integer(0 | 1)));
+    episode.close().await.unwrap();
+
+    let connect4 = OpenEnvClient::new(
+        std::env::var("KILN_OPENENV_INTEROP_CONNECT4_URL")
+            .expect("KILN_OPENENV_INTEROP_CONNECT4_URL must identify a live OpenEnv server"),
+    )
+    .unwrap();
+    let inspection = connect4.inspect().await.unwrap();
+    assert_eq!(
+        inspection.schema.action.pointer("/properties/col/type"),
+        Some(&json!("integer"))
+    );
+    let mut episode = connect4.connect().await.unwrap();
+    let reset = episode.reset(&json!({"seed": 42})).await.unwrap();
+    assert_eq!(
+        reset.observation["legal_actions"],
+        json!([0, 1, 2, 3, 4, 5, 6])
+    );
+    let turn = episode.step(&json!({"col": 3})).await.unwrap();
+    assert!(turn.observation["board"].as_str().unwrap().contains('X'));
+    assert!(turn.observation["legal_actions"].is_array());
+    assert_eq!(episode.state().await.unwrap()["step_count"], 1);
+    episode.close().await.unwrap();
+
+    let maze = OpenEnvClient::new(
+        std::env::var("KILN_OPENENV_INTEROP_MAZE_URL")
+            .expect("KILN_OPENENV_INTEROP_MAZE_URL must identify a live OpenEnv server"),
+    )
+    .unwrap();
+    let inspection = maze.inspect().await.unwrap();
+    assert_eq!(
+        inspection.schema.action.pointer("/properties/move/type"),
+        Some(&json!("integer"))
+    );
+    let mut episode = maze.connect().await.unwrap();
+    let reset = episode.reset(&json!({"seed": 43})).await.unwrap();
+    let grid = reset.observation["grid"].as_str().unwrap();
+    assert!(grid.contains('A') && grid.contains('G'));
+    let turn = episode.step(&json!({"move": 0})).await.unwrap();
+    assert_eq!(turn.observation["goal_x"], 13);
+    assert_eq!(episode.state().await.unwrap()["step_count"], 1);
+    episode.close().await.unwrap();
+
+    let wordle = OpenEnvClient::new(
+        std::env::var("KILN_OPENENV_INTEROP_WORDLE_URL")
+            .expect("KILN_OPENENV_INTEROP_WORDLE_URL must identify a live OpenEnv server"),
+    )
+    .unwrap();
+    let inspection = wordle.inspect().await.unwrap();
+    assert_eq!(
+        inspection.schema.action.pointer("/properties/guess/type"),
+        Some(&json!("string"))
+    );
+    let mut episode = wordle.connect().await.unwrap();
+    let reset = episode.reset(&json!({"seed": 44})).await.unwrap();
+    assert_eq!(reset.observation["guesses"], 0);
+    let turn = episode.step(&json!({"guess": "crane"})).await.unwrap();
+    assert_eq!(turn.observation["valid"], true);
+    assert_eq!(turn.observation["guesses"], 1);
+    assert_eq!(episode.state().await.unwrap()["step_count"], 1);
+    episode.close().await.unwrap();
+}
+
+/// Capacity is an application frame after a successful WebSocket upgrade, not
+/// an HTTP handshake failure. Kiln must classify it as terminal and allow a
+/// fresh session after capacity is released.
+#[tokio::test]
+#[ignore = "requires a live max-sessions=1 miniopenenv bandit server"]
+async fn observes_capacity_as_a_terminal_first_frame_and_reacquires() {
+    let client = OpenEnvClient::new(
+        std::env::var("KILN_OPENENV_INTEROP_BANDIT_URL")
+            .expect("KILN_OPENENV_INTEROP_BANDIT_URL must identify a live OpenEnv server"),
+    )
+    .unwrap();
+    let mut occupied = client.connect().await.unwrap();
+    occupied.reset(&json!({"seed": 1})).await.unwrap();
+
+    let mut refused = client.connect().await.unwrap();
+    let error = refused.reset(&json!({"seed": 2})).await.unwrap_err();
+    let OpenEnvClientError::Protocol(error) = error else {
+        panic!("expected CAPACITY_REACHED");
+    };
+    assert_eq!(error.code, OpenEnvErrorCode::CapacityReached);
+    assert!(error.code.is_terminal());
+    assert_eq!(error.active_sessions, Some(1));
+    assert_eq!(error.max_sessions, Some(1));
+
+    occupied.close().await.unwrap();
+    let mut reacquired = client.connect().await.unwrap();
+    reacquired.reset(&json!({"seed": 3})).await.unwrap();
+    reacquired.close().await.unwrap();
 }

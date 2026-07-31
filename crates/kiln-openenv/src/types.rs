@@ -1,7 +1,7 @@
 //! Typed OpenEnv wire values.
 //!
 //! OpenEnv has no negotiated wire version. These types follow the observed
-//! HTTP/1.x profile described by miniopenenv's protocol corpus. In particular,
+//! observed OpenEnv HTTP/1.x protocol profile. In particular,
 //! rewards remain tagged because `null`, booleans, integers, and floats are
 //! observably distinct on `WS /ws`.
 

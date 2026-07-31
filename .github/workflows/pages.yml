@@ -21,6 +21,7 @@ on:
       - 'crates/kiln-server/src/cli.rs'
       - 'crates/kiln-server/src/config.rs'
       - 'crates/kiln-server/src/openenv_cli.rs'
+      - 'crates/kiln-server/src/openenv_replay.rs'
       - 'crates/kiln-server/src/ui/**'
       - 'crates/kiln-vulkan-kernel/**'
       - 'desktop/ui/**'
@@ -45,6 +46,7 @@ on:
       - 'scripts/check_release_versions.py'
       - 'scripts/check_config_schema.py'
       - 'scripts/check_http_api_contract.py'
+      - 'scripts/check_openenv_contract.py'
       - 'scripts/generate_observability_schema.py'
       - 'scripts/generate_artifact_schema.py'
       - 'scripts/generate_eval_schema.py'
@@ -84,6 +86,8 @@ jobs:
         run: node scripts/check_thinking_budget_contract.mjs
       - name: Check configuration schema and documentation
         run: python3 scripts/check_config_schema.py --self-test
+      - name: Check OpenEnv artifact and replay contract
+        run: python3 scripts/check_openenv_contract.py --self-test
       - name: Check HTTP API operation contract
         run: |
           python3 scripts/generate_observability_schema.py --check

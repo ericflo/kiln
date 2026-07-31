@@ -118,6 +118,8 @@ not an external preprocessing step. Point `kiln openenv` at one or more OpenEnv
 servers and Kiln owns discovery, deterministic task grouping, policy action
 generation, stateful episode sessions, reward aggregation, canonical agentic
 trajectories, ECHO masks, GRPO submission, and audit artifacts.
+The runtime is implementation-neutral: miniopenenv is a pinned CI oracle, not
+a dependency, configuration namespace, or special execution path.
 
 ```bash
 # Inspect the environment's health, metadata, schemas, and content identity.
@@ -132,8 +134,11 @@ kiln openenv train \
   --output-adapter counter-agent
 ```
 
-Every run first publishes canonical GRPO JSONL and a content-addressed summary
-receipt. Candidates in a group share the same environment reset and seed;
+Every run first publishes canonical GRPO JSONL, an exact content-addressed
+environment replay transcript, and a summary receipt. `kiln openenv verify`
+cross-checks the bundle offline; `kiln openenv replay` re-executes every
+captured environment exchange. Candidates in a group share the same
+environment reset and seed;
 environment step rewards determine episode return; `done`, max-step cutoffs,
 invalid model actions, and OpenEnv protocol errors remain distinct. The
 rollouts carry environment name, URL, action-schema hash, reset hash, seed,
@@ -142,8 +147,11 @@ hash.
 
 The reusable `kiln-openenv` crate implements bounded HTTP discovery and the
 lock-step stateful `WS /ws` protocol, including tagged rewards and the complete
-OpenEnv error vocabulary. CI drives a real pinned miniopenenv counter episode
-across that boundary. See the [OpenEnv Training Guide](docs/OPENENV_GUIDE.md)
+OpenEnv error vocabulary. Recoverable protocol errors become corrective policy
+turns, while capacity saturation triggers bounded fresh-session acquisition.
+CI drives real pinned miniopenenv counter, bandit, Connect Four, maze, and
+Wordle episodes plus collect/train/verify/replay end to end. See the
+[OpenEnv Training Guide](docs/OPENENV_GUIDE.md)
 for multi-environment training, reset tasks, security, ECHO behavior, artifacts,
 and troubleshooting.
 

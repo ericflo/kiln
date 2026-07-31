@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ericflo.github.io/kiln/contracts/kiln-openenv-v1.schema.json",
   "title": "Kiln OpenEnv rollout contract",
-  "description": "Environment discovery identity, canonical episode provenance, and the content-addressed summary published by `kiln openenv`.",
+  "description": "Environment discovery identity, canonical episode provenance, exact replay transcripts, offline verification reports, and the content-addressed summary published by `kiln openenv`.",
   "$ref": "#/$defs/OpenEnvRolloutSummary",
   "$defs": {
     "Sha256": {
@@ -68,6 +68,41 @@
         "schema": { "$ref": "#/$defs/EnvironmentSchema" }
       }
     },
+    "ProtocolError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "INVALID_JSON",
+            "UNKNOWN_TYPE",
+            "VALIDATION_ERROR",
+            "EXECUTION_ERROR",
+            "CAPACITY_REACHED",
+            "FACTORY_ERROR",
+            "SESSION_ERROR"
+          ]
+        },
+        "message": { "type": "string" },
+        "errors": { "type": "array" },
+        "active_sessions": { "type": "integer", "minimum": 0 },
+        "max_sessions": { "type": "integer", "minimum": 0 },
+        "factory_name": { "type": "string" }
+      }
+    },
+    "Observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observation", "reward", "done"],
+      "properties": {
+        "observation": {},
+        "reward": { "type": ["null", "boolean", "integer", "number"] },
+        "done": { "type": "boolean" },
+        "metadata": {}
+      }
+    },
     "EpisodeTermination": {
       "type": "string",
       "enum": ["done", "max_steps", "invalid_model_action", "protocol_error"]
@@ -85,6 +120,8 @@
         "episode_return",
         "terminal_done",
         "termination",
+        "recoverable_protocol_errors",
+        "capacity_retries",
         "model_tokens",
         "model_latency_ms"
       ],
@@ -93,12 +130,14 @@
         "candidate_index": { "type": "integer", "minimum": 0 },
         "environment_name": { "type": "string", "minLength": 1 },
         "environment_url": { "type": "string", "minLength": 1 },
-        "seed": { "type": "integer", "minimum": 0 },
-        "steps": { "type": "integer", "minimum": 0 },
+        "seed": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 },
+        "steps": { "type": "integer", "minimum": 0, "maximum": 256 },
         "episode_return": { "type": "number" },
         "terminal_done": { "type": "boolean" },
         "termination": { "$ref": "#/$defs/EpisodeTermination" },
         "protocol_error_code": { "type": "string", "minLength": 1 },
+        "recoverable_protocol_errors": { "type": "integer", "minimum": 0 },
+        "capacity_retries": { "type": "integer", "minimum": 0 },
         "model_tokens": { "type": "integer", "minimum": 0 },
         "model_latency_ms": { "type": "number", "minimum": 0 }
       },
@@ -136,6 +175,8 @@
         "max_steps_count",
         "invalid_model_action_count",
         "protocol_error_count",
+        "recoverable_protocol_error_count",
+        "capacity_retry_count",
         "total_environment_steps",
         "total_model_tokens",
         "mean_model_latency_ms"
@@ -148,6 +189,8 @@
         "max_steps_count": { "type": "integer", "minimum": 0 },
         "invalid_model_action_count": { "type": "integer", "minimum": 0 },
         "protocol_error_count": { "type": "integer", "minimum": 0 },
+        "recoverable_protocol_error_count": { "type": "integer", "minimum": 0 },
+        "capacity_retry_count": { "type": "integer", "minimum": 0 },
         "total_environment_steps": { "type": "integer", "minimum": 0 },
         "total_model_tokens": { "type": "integer", "minimum": 0 },
         "mean_model_latency_ms": { "type": "number", "minimum": 0 }
@@ -172,39 +215,50 @@
         "temperature",
         "thinking",
         "protocol_error_reward",
+        "max_recoverable_errors",
+        "capacity_wait_seconds",
         "reset_options_sha256",
         "output_path",
+        "replay_output_path",
         "summary_output_path",
         "dataset_sha256",
         "dataset_bytes",
+        "replay_sha256",
+        "replay_bytes",
         "stats",
         "rollouts"
       ],
       "properties": {
-        "schema": { "const": "kiln.openenv-rollout-summary.v1" },
+        "schema": { "const": "kiln.openenv-rollout-summary.v2" },
         "kiln_url": { "type": "string", "minLength": 1 },
         "adapter": { "type": ["string", "null"] },
         "adapter_label": { "type": "string", "minLength": 1 },
         "environments": {
           "type": "array",
           "minItems": 1,
+          "maxItems": 64,
           "items": { "$ref": "#/$defs/EnvironmentInspection" }
         },
-        "groups": { "type": "integer", "minimum": 1 },
-        "group_size": { "type": "integer", "minimum": 1 },
-        "rollout_count": { "type": "integer", "minimum": 1 },
-        "seed_start": { "type": "integer", "minimum": 0 },
-        "max_steps": { "type": "integer", "minimum": 1 },
-        "concurrency": { "type": "integer", "minimum": 1 },
-        "max_action_tokens": { "type": "integer", "minimum": 1 },
+        "groups": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "group_size": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "rollout_count": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "seed_start": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 },
+        "max_steps": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "concurrency": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "max_action_tokens": { "type": "integer", "minimum": 1, "maximum": 16384 },
         "temperature": { "type": "number", "minimum": 0 },
         "thinking": { "type": "boolean" },
         "protocol_error_reward": { "type": "number" },
+        "max_recoverable_errors": { "type": "integer", "minimum": 0, "maximum": 64 },
+        "capacity_wait_seconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
         "reset_options_sha256": { "$ref": "#/$defs/Sha256" },
         "output_path": { "type": "string", "minLength": 1 },
+        "replay_output_path": { "type": "string", "minLength": 1 },
         "summary_output_path": { "type": "string", "minLength": 1 },
         "dataset_sha256": { "$ref": "#/$defs/Sha256" },
-        "dataset_bytes": { "type": "integer", "minimum": 1 },
+        "dataset_bytes": { "type": "integer", "minimum": 1, "maximum": 268435456 },
+        "replay_sha256": { "$ref": "#/$defs/Sha256" },
+        "replay_bytes": { "type": "integer", "minimum": 1, "maximum": 268435456 },
         "stats": { "$ref": "#/$defs/RolloutStats" },
         "rollouts": {
           "type": "array",
@@ -215,6 +269,177 @@
           "type": "object",
           "additionalProperties": true
         }
+      }
+    },
+    "ReplayExchangeResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "observation"],
+          "properties": {
+            "kind": { "const": "observation" },
+            "observation": { "$ref": "#/$defs/Observation" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "error", "continued"],
+          "properties": {
+            "kind": { "const": "protocol_error" },
+            "error": { "$ref": "#/$defs/ProtocolError" },
+            "continued": { "type": "boolean" }
+          }
+        }
+      ]
+    },
+    "ReplayExchange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step_index", "action", "result"],
+      "properties": {
+        "step_index": { "type": "integer", "minimum": 0 },
+        "action": { "type": "object" },
+        "result": { "$ref": "#/$defs/ReplayExchangeResult" }
+      }
+    },
+    "ReplayCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_index",
+        "exchanges",
+        "episode_return",
+        "terminal_done",
+        "termination",
+        "recoverable_protocol_errors",
+        "capacity_retries",
+        "model_tokens",
+        "model_latency_ms"
+      ],
+      "properties": {
+        "candidate_index": { "type": "integer", "minimum": 0 },
+        "exchanges": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/ReplayExchange" }
+        },
+        "final_state": {},
+        "episode_return": { "type": "number" },
+        "terminal_done": { "type": "boolean" },
+        "termination": { "$ref": "#/$defs/EpisodeTermination" },
+        "recoverable_protocol_errors": { "type": "integer", "minimum": 0 },
+        "capacity_retries": { "type": "integer", "minimum": 0 },
+        "model_tokens": { "type": "integer", "minimum": 0 },
+        "model_latency_ms": { "type": "number", "minimum": 0 }
+      }
+    },
+    "ReplayGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "group_index",
+        "environment_index",
+        "seed",
+        "reset_payload",
+        "reset_observation",
+        "candidates"
+      ],
+      "properties": {
+        "group_index": { "type": "integer", "minimum": 0 },
+        "environment_index": { "type": "integer", "minimum": 0 },
+        "seed": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 },
+        "reset_payload": { "type": "object" },
+        "reset_observation": { "$ref": "#/$defs/Observation" },
+        "candidates": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/ReplayCandidate" }
+        }
+      }
+    },
+    "OpenEnvReplayManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "client_profile",
+        "dataset_sha256",
+        "protocol_error_reward",
+        "max_steps",
+        "environments",
+        "groups"
+      ],
+      "properties": {
+        "schema": { "const": "kiln.openenv-replay.v1" },
+        "client_profile": { "const": "openenv-http/1.x" },
+        "dataset_sha256": { "$ref": "#/$defs/Sha256" },
+        "protocol_error_reward": { "type": "number" },
+        "max_steps": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "environments": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/EnvironmentInspection" }
+        },
+        "groups": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16384,
+          "items": { "$ref": "#/$defs/ReplayGroup" }
+        }
+      }
+    },
+    "VerificationReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "summary_path",
+        "dataset_path",
+        "replay_path",
+        "dataset_sha256",
+        "replay_sha256",
+        "groups",
+        "rollouts",
+        "environment_exchanges"
+      ],
+      "properties": {
+        "schema": { "const": "kiln.openenv-verification.v1" },
+        "summary_path": { "type": "string", "minLength": 1 },
+        "dataset_path": { "type": "string", "minLength": 1 },
+        "replay_path": { "type": "string", "minLength": 1 },
+        "dataset_sha256": { "$ref": "#/$defs/Sha256" },
+        "replay_sha256": { "$ref": "#/$defs/Sha256" },
+        "groups": { "type": "integer", "minimum": 1 },
+        "rollouts": { "type": "integer", "minimum": 1 },
+        "environment_exchanges": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ReplayRunReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "replay_sha256",
+        "environments",
+        "groups",
+        "rollouts",
+        "environment_exchanges",
+        "capacity_retries",
+        "environment_prefix_only_rollouts"
+      ],
+      "properties": {
+        "schema": { "const": "kiln.openenv-replay-run.v1" },
+        "replay_sha256": { "$ref": "#/$defs/Sha256" },
+        "environments": { "type": "integer", "minimum": 1 },
+        "groups": { "type": "integer", "minimum": 1 },
+        "rollouts": { "type": "integer", "minimum": 1 },
+        "environment_exchanges": { "type": "integer", "minimum": 0 },
+        "capacity_retries": { "type": "integer", "minimum": 0 },
+        "environment_prefix_only_rollouts": { "type": "integer", "minimum": 0 }
       }
     }
   }
