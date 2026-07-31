@@ -134,7 +134,7 @@ jobs:
 
       # Dependency policy can only change with manifests, the lockfile, or
       # deny.toml. Source-only pushes skip the downloader entirely.
-      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.17
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.0.17
         if: steps.scope.outputs.dependency_policy == 'true'
         with:
           command: check
