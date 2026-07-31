@@ -427,6 +427,9 @@ def main() -> int:
     interop_workflow = (
         ROOT / ".github" / "workflows" / "openenv-interop.yml"
     ).read_text(encoding="utf-8")
+    ci_workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
     http_api = json.loads(
         (ROOT / "contracts" / "kiln-http-api-v1.openapi.json").read_text(
             encoding="utf-8"
@@ -870,14 +873,21 @@ def main() -> int:
     for term in [
         "schedule:",
         "workflow_dispatch:",
-        "OPENENV_INTEROP_PIN:",
-        "revision=origin/main",
-        "revision=\"$OPENENV_INTEROP_PIN\"",
-        "checkout --detach \"$revision\"",
+        "checkout --detach origin/main",
     ]:
         if term not in interop_workflow:
             failures.append(
-                f"OpenEnv interoperability workflow is missing pinned/edge term {term!r}"
+                f"OpenEnv edge workflow is missing upstream term {term!r}"
+            )
+    for term in [
+        "OPENENV_INTEROP_PIN:",
+        "checkout --detach \"$OPENENV_INTEROP_PIN\"",
+        "steps.scope.outputs.openenv == 'true'",
+        "scripts/check_miniopenenv_interop.sh",
+    ]:
+        if term not in ci_workflow:
+            failures.append(
+                f"change-driven CI is missing pinned OpenEnv term {term!r}"
             )
 
     if failures:

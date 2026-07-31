@@ -1,120 +1,40 @@
-name: OpenEnv interoperability
+name: OpenEnv upstream edge
 
+# Change-driven pinned interoperability runs inside CI's already-warm Rust job.
+# This standalone lane is only the weekly upstream-head canary and a manual
+# diagnostic, so normal pushes never pay for a second workspace compilation.
 on:
   schedule:
-    # Keep the reproducible push gate pinned, but exercise the current oracle
-    # every week so upstream protocol and environment drift becomes visible
-    # without waiting for a Kiln change or a manual reminder.
     - cron: '17 13 * * 1'
-  pull_request:
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'crates/kiln-openenv/**'
-      - 'crates/kiln-server/src/adapter_swap.rs'
-      - 'crates/kiln-server/src/config.rs'
-      - 'crates/kiln-server/src/openenv_cli.rs'
-      - 'crates/kiln-server/src/openenv_credentials.rs'
-      - 'crates/kiln-server/src/openenv_evaluation.rs'
-      - 'crates/kiln-server/src/openenv_replay.rs'
-      - 'crates/kiln-server/src/api/openenv.rs'
-      - 'crates/kiln-server/src/api/openenv/**'
-      - 'crates/kiln-server/src/api/training.rs'
-      - 'crates/kiln-server/src/job_cancellation.rs'
-      - 'crates/kiln-server/src/metrics.rs'
-      - 'crates/kiln-server/src/training_queue.rs'
-      - 'crates/kiln-server/src/ui/app/training.js'
-      - 'crates/kiln-server/src/ui/index.html'
-      - 'crates/kiln-server/tests/openenv_training_interop.rs'
-      - 'crates/kiln-server/src/cli.rs'
-      - 'crates/kiln-train/src/trajectory.rs'
-      - 'crates/kiln-train/src/credential_provider.rs'
-      - 'crates/kiln-train/src/lib.rs'
-      - 'scripts/check_miniopenenv_interop.sh'
-      - 'scripts/check_openenv_contract.py'
-      - 'scripts/check_http_api_contract.py'
-      - 'scripts/generate_control_plane_schema.py'
-      - 'contracts/kiln-control-plane-v1.schema.json'
-      - 'contracts/kiln-config-v1.schema.json'
-      - 'contracts/kiln-http-api-v1.openapi.json'
-      - 'contracts/kiln-openenv-v1.schema.json'
-      - '.github/workflows/openenv-interop.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'crates/kiln-openenv/**'
-      - 'crates/kiln-server/src/adapter_swap.rs'
-      - 'crates/kiln-server/src/config.rs'
-      - 'crates/kiln-server/src/openenv_cli.rs'
-      - 'crates/kiln-server/src/openenv_credentials.rs'
-      - 'crates/kiln-server/src/openenv_evaluation.rs'
-      - 'crates/kiln-server/src/openenv_replay.rs'
-      - 'crates/kiln-server/src/api/openenv.rs'
-      - 'crates/kiln-server/src/api/openenv/**'
-      - 'crates/kiln-server/src/api/training.rs'
-      - 'crates/kiln-server/src/job_cancellation.rs'
-      - 'crates/kiln-server/src/metrics.rs'
-      - 'crates/kiln-server/src/training_queue.rs'
-      - 'crates/kiln-server/src/ui/app/training.js'
-      - 'crates/kiln-server/src/ui/index.html'
-      - 'crates/kiln-server/tests/openenv_training_interop.rs'
-      - 'crates/kiln-server/src/cli.rs'
-      - 'crates/kiln-train/src/trajectory.rs'
-      - 'crates/kiln-train/src/credential_provider.rs'
-      - 'crates/kiln-train/src/lib.rs'
-      - 'scripts/check_miniopenenv_interop.sh'
-      - 'scripts/check_openenv_contract.py'
-      - 'scripts/check_http_api_contract.py'
-      - 'scripts/generate_control_plane_schema.py'
-      - 'contracts/kiln-control-plane-v1.schema.json'
-      - 'contracts/kiln-config-v1.schema.json'
-      - 'contracts/kiln-http-api-v1.openapi.json'
-      - 'contracts/kiln-openenv-v1.schema.json'
-      - '.github/workflows/openenv-interop.yml'
   workflow_dispatch:
-
-env:
-  OPENENV_INTEROP_PIN: 74bc7def050d520399cc2410d5a6f34598589558
 
 permissions:
   contents: read
 
+concurrency:
+  group: openenv-upstream-edge
+  cancel-in-progress: true
+
 jobs:
-  miniopenenv:
+  upstream-edge:
+    name: Current upstream OpenEnv matrix
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - name: Check out the reproducible or upstream OpenEnv wire oracle
-        env:
-          EDGE_ORACLE: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+      - uses: swatinem/rust-cache@v2
+
+      - name: Check out the current OpenEnv wire oracle
         run: |
-          git clone https://github.com/ericflo/miniopenenv.git ../miniopenenv
-          if [ "$EDGE_ORACLE" = "true" ]; then
-            revision=origin/main
-            mode=upstream-head
-          else
-            revision="$OPENENV_INTEROP_PIN"
-            mode=pinned
-          fi
-          git -C ../miniopenenv checkout --detach "$revision"
-          oracle_sha=$(git -C ../miniopenenv rev-parse HEAD)
-          echo "OPENENV_INTEROP_ORACLE_SHA=$oracle_sha" >> "$GITHUB_ENV"
-          {
-            echo "### OpenEnv interoperability oracle"
-            echo
-            echo "- Mode: \`$mode\`"
-            echo "- Revision: \`$oracle_sha\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Test the typed client
+          git clone --filter=blob:none https://github.com/ericflo/miniopenenv.git ../miniopenenv
+          git -C ../miniopenenv checkout --detach origin/main
+          echo "OPENENV_INTEROP_ORACLE_SHA=$(git -C ../miniopenenv rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Validate contracts and current upstream environments
+        env:
+          OPENENV_INTEROP_ROOT: ${{ github.workspace }}/../miniopenenv
         run: |
           python3 scripts/check_openenv_contract.py --self-test
           python3 scripts/check_http_api_contract.py
-          cargo test -p kiln-openenv
-      - name: Drive real stateful counter, arcade, and math episodes
-        env:
-          OPENENV_INTEROP_ROOT: ${{ github.workspace }}/../miniopenenv
-        run: scripts/check_miniopenenv_interop.sh
+          scripts/check_miniopenenv_interop.sh

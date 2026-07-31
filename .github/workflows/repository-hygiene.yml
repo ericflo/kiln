@@ -1,4 +1,4 @@
-name: Repository hygiene
+name: Repository checks
 
 on:
   push:
@@ -14,10 +14,53 @@ concurrency:
 
 jobs:
   artifacts:
-    name: Tracked artifact policy
+    name: Fast repository contracts
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
-      - run: python3 scripts/check_repository_artifacts.py
-      - run: python3 scripts/check_production_file_budget.py
+        with:
+          fetch-depth: 2
+
+      - name: Select portable qualification scope
+        id: scope
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+        run: |
+          set -euo pipefail
+          qualification=true
+          if [ -n "$CI_BASE_SHA" ] && [[ ! "$CI_BASE_SHA" =~ ^0+$ ]] && git cat-file -e "$CI_BASE_SHA^{commit}" 2>/dev/null; then
+            changed=$(git diff --name-only "$CI_BASE_SHA" "$GITHUB_SHA")
+            if ! grep -Eq '^(crates/|qualification/|benchmarks/receipts/|bench-results/backend-latency/|contracts/(production-file-budget|repository-artifact-policy|runtime-env-direct-reads|source-parsing-test-inventory)-v1\.json|scripts/(qualification/|check_repository_artifacts\.py|check_runtime_env_contract\.py|check_source_parsing_tests\.py|.*backend_latency.*\.py|bench-concurrent-batch\.py|run-serving-benchmark-campaign\.py)|docs/backend-latency-|\.github/workflows/(qualification-contract|repository-hygiene)\.yml)' <<<"$changed"; then
+              qualification=false
+            fi
+          fi
+          echo "qualification=$qualification" >> "$GITHUB_OUTPUT"
+      - name: Check generated, documentation, and repository contracts
+        run: |
+          python3 scripts/check_repository_artifacts.py
+          python3 scripts/check_production_file_budget.py
+          python3 scripts/check_runtime_env_contract.py --check
+          python3 scripts/check_source_parsing_tests.py
+          python3 scripts/check_config_schema.py --self-test
+          python3 scripts/check_openenv_contract.py --self-test
+          python3 scripts/check_http_api_contract.py --self-test
+          python3 scripts/generate_observability_schema.py --check
+          python3 scripts/generate_artifact_schema.py --check
+          python3 scripts/generate_eval_schema.py --check
+          python3 scripts/generate_control_plane_schema.py --check
+          node scripts/check_thinking_budget_contract.mjs
+          node scripts/check_runtime_defaults.mjs
+          python3 scripts/check_release_versions.py
+
+      - name: Check portable qualification evidence
+        if: steps.scope.outputs.qualification == 'true'
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts/qualification/tests
+          mapfile -d '' receipts < <(find qualification/receipts -type f -name '*.json' -print0 | sort -z)
+          if [ "${#receipts[@]}" -gt 0 ]; then
+            python3 scripts/qualification/receipt.py "${receipts[@]}"
+          fi
+          git fetch --no-tags --depth=1 origin 9371035bfeb3908ebf47bd107eb53f98c529be3e
+          scripts/qualification/validate_retained_evidence.sh

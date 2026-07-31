@@ -1,71 +1,8 @@
-name: Release Version Drift
+name: Release version diagnostic
 
+# Normal pushes run these sub-second checks in the shared repository contract
+# runner. This manual lane remains available when investigating drift alone.
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'Cargo.toml'
-      - 'desktop/Cargo.toml'
-      - 'README.md'
-      - 'QUICKSTART.md'
-      - 'desktop/README.md'
-      - 'desktop/src/main.rs'
-      - 'desktop/src/runtime_defaults.rs'
-      - 'desktop/src/settings.rs'
-      - 'desktop/src/supervisor.rs'
-      - 'desktop/ui/_kiln-runtime-defaults.js'
-      - 'desktop/ui/dashboard.html'
-      - 'desktop/ui/settings.html'
-      - 'docs/site/**'
-      - 'docs/EVAL_GUIDE.md'
-      - 'docs/THINKING_BUDGET_CONTRACT.md'
-      - 'contracts/thinking-budget-v1.schema.json'
-      - 'contracts/thinking-budget-v1.conformance.json'
-      - 'contracts/runtime-defaults-v1.json'
-      - 'crates/kiln-server/src/cli.rs'
-      - 'crates/kiln-server/src/config.rs'
-      - 'crates/kiln-server/src/openenv_cli.rs'
-      - 'crates/kiln-server/src/agent_runs.rs'
-      - 'crates/kiln-server/src/api/terminal.rs'
-      - 'crates/kiln-server/src/bin/kiln_eval_cli.rs'
-      - 'kiln.example.toml'
-      - 'scripts/check_runtime_defaults.mjs'
-      - 'scripts/phase2_validation_steps_1_2_3.sh'
-      - 'scripts/check_thinking_budget_contract.mjs'
-      - 'scripts/check_release_versions.py'
-      - '.github/workflows/release-version-drift.yml'
-  pull_request:
-    paths:
-      - 'Cargo.toml'
-      - 'desktop/Cargo.toml'
-      - 'README.md'
-      - 'QUICKSTART.md'
-      - 'desktop/README.md'
-      - 'desktop/src/main.rs'
-      - 'desktop/src/runtime_defaults.rs'
-      - 'desktop/src/settings.rs'
-      - 'desktop/src/supervisor.rs'
-      - 'desktop/ui/_kiln-runtime-defaults.js'
-      - 'desktop/ui/dashboard.html'
-      - 'desktop/ui/settings.html'
-      - 'docs/site/**'
-      - 'docs/EVAL_GUIDE.md'
-      - 'docs/THINKING_BUDGET_CONTRACT.md'
-      - 'contracts/thinking-budget-v1.schema.json'
-      - 'contracts/thinking-budget-v1.conformance.json'
-      - 'contracts/runtime-defaults-v1.json'
-      - 'crates/kiln-server/src/cli.rs'
-      - 'crates/kiln-server/src/config.rs'
-      - 'crates/kiln-server/src/openenv_cli.rs'
-      - 'crates/kiln-server/src/agent_runs.rs'
-      - 'crates/kiln-server/src/api/terminal.rs'
-      - 'crates/kiln-server/src/bin/kiln_eval_cli.rs'
-      - 'kiln.example.toml'
-      - 'scripts/check_runtime_defaults.mjs'
-      - 'scripts/phase2_validation_steps_1_2_3.sh'
-      - 'scripts/check_thinking_budget_contract.mjs'
-      - 'scripts/check_release_versions.py'
-      - '.github/workflows/release-version-drift.yml'
   workflow_dispatch:
 
 jobs:

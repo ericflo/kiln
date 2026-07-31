@@ -2,6 +2,30 @@ name: Pages
 
 on:
   pull_request:
+    paths:
+      - '*.md'
+      - 'docs/**'
+      - 'assets/**'
+      - 'Cargo.toml'
+      - 'kiln.example.toml'
+      - 'crates/kiln-model/src/backend/**'
+      - 'crates/kiln-model/src/generate.rs'
+      - 'crates/kiln-server/src/api/**'
+      - 'crates/kiln-server/src/bench.rs'
+      - 'crates/kiln-server/src/cli.rs'
+      - 'crates/kiln-server/src/config.rs'
+      - 'crates/kiln-server/src/openenv*.rs'
+      - 'crates/kiln-server/src/ui/**'
+      - 'crates/kiln-vulkan-kernel/**'
+      - 'desktop/ui/**'
+      - 'qualification/receipts/**'
+      - 'contracts/**'
+      - 'scripts/check_*.py'
+      - 'scripts/check_*.mjs'
+      - 'scripts/generate_*.py'
+      - 'scripts/json_schema_subset.py'
+      - 'scripts/docs-site/**'
+      - '.github/workflows/pages.yml'
   schedule:
     # Rebuild the complete public surface monthly so stale generated content,
     # broken links, and route-inventory drift fail visibly even without a push.

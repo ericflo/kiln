@@ -1,6 +1,10 @@
 name: CI
 
 on:
+  schedule:
+    # A weekly full-workspace safety net replaces paying for every unchanged
+    # crate on every push. Missing event diff state selects the full workspace.
+    - cron: '41 12 * * 0'
   push:
     branches: [main]
     paths:
@@ -9,7 +13,8 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'deny.toml'
-      - 'contracts/production-file-budget-v1.json'
+      - 'scripts/ci_rust_scope.py'
+      - 'scripts/check_miniopenenv_interop.sh'
       - '.github/workflows/ci.yml'
   pull_request:
     paths:
@@ -18,7 +23,8 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'deny.toml'
-      - 'contracts/production-file-budget-v1.json'
+      - 'scripts/ci_rust_scope.py'
+      - 'scripts/check_miniopenenv_interop.sh'
       - '.github/workflows/ci.yml'
   workflow_dispatch:
     inputs:
@@ -42,24 +48,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  OPENENV_INTEROP_PIN: 74bc7def050d520399cc2410d5a6f34598589558
 
 jobs:
-  rustfmt:
-    name: Rust formatting
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install repository Rust toolchain
-        run: |
-          rustup set profile minimal
-          rustc --version
-          rustup show active-toolchain
-          cargo fmt --version
-
-      - name: Check formatting
-        run: cargo fmt --all --check
-
   macos-metal:
     name: macOS / Metal (M-series)
     if: ${{ github.event_name == 'workflow_dispatch' && (inputs.backend_build == 'all' || inputs.backend_build == 'metal') }}
@@ -106,21 +97,15 @@ jobs:
           cargo test --locked --features metal -- --test-threads=1
 
   linux-default:
-    name: Linux / default features
+    name: Linux / affected Rust packages
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
-
-      - name: Free disk space for the workspace test suite
-        # The full workspace build plus test binaries can exhaust the hosted
-        # runner's small root volume. Remove preinstalled SDKs this CPU-only
-        # job never uses before Cargo populates target/.
-        run: |
-          df -h /
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
-            /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL \
-            /usr/local/lib/node_modules || true
-          df -h /
+        with:
+          # Two commits cover the normal one-push iteration. The scope router
+          # safely falls back to the full workspace if the event base is not
+          # present (for example, a multi-commit push).
+          fetch-depth: 2
 
       - name: Install Rust stable
         # Use the rustup that's pre-installed on every GitHub-hosted runner
@@ -133,35 +118,47 @@ jobs:
           rustup default stable
           rustc --version
 
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Select affected workspace packages
+        id: scope
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+        run: |
+          python3 scripts/ci_rust_scope.py --self-test
+          python3 scripts/ci_rust_scope.py \
+            --base "$CI_BASE_SHA" \
+            --head "$GITHUB_SHA" \
+            --github-output "$GITHUB_OUTPUT"
+
+      # Dependency policy can only change with manifests, the lockfile, or
+      # deny.toml. Source-only pushes skip the downloader entirely.
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.17
+        if: steps.scope.outputs.dependency_policy == 'true'
+        with:
+          command: check
+          arguments: --all-features
+
+      - name: Free disk space for a full-workspace fallback
+        if: steps.scope.outputs.full_workspace == 'true'
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL \
+            /usr/local/lib/node_modules || true
+          df -h /
+
       - name: Rust cache
+        if: steps.scope.outputs.run_tests == 'true'
         uses: swatinem/rust-cache@v2
 
-      - name: Fetch dependencies
-        run: cargo fetch
-
-      - name: Build (default features — no CUDA)
-        run: cargo build --locked
-
-      - name: Test (default features)
-        run: cargo test --locked
-
-      - name: Test substrate leaf crates directly
-        # Historical note: added while the #1082 candle removal broke the
-        # whole-workspace build. That migration is DONE (the default job
-        # tests the workspace) — the per-crate runs stay because they
-        # exercise the substrate leaves (kiln-optim AdamW stochastic
-        # rounding, kiln-param's atomic `Parameter::version`, the
-        # kiln-autograd tape) in isolation, fast, on a GPU-less runner.
-        run: cargo test --locked -p kiln-optim -p kiln-param -p kiln-autograd
-
-      - name: Validate anomaly trap + deterministic envelope (#1082)
-        # Anomaly policy is explicit tape state. Tensor-library determinism
-        # tests configure isolated typed caches directly.
-        run: |
-          cargo test --locked -p kiln-autograd backward_detects_non_finite_grad_when_anomaly_enabled
-          cargo test --locked -p kiln-tensor determinism -- --test-threads=1
+      - name: Test affected packages and reverse dependents
+        if: steps.scope.outputs.run_tests == 'true'
+        run: cargo test --locked ${{ steps.scope.outputs.package_args }}
 
       - name: Assert no candle in the --features cuda runtime dep tree
+        if: steps.scope.outputs.dependency_policy == 'true'
         # #1082 DoD line 100: `cargo build --release --features cuda` must have
         # no candle in its dep tree. `cargo tree` resolves manifest metadata
         # only — it never compiles and never runs build scripts — so this is a
@@ -181,16 +178,19 @@ jobs:
           fi
           echo "OK — no candle in the CUDA runtime dep tree."
 
-      - name: Validate local qualification tooling and portable receipts
+      - name: Check out the pinned OpenEnv wire oracle
+        if: steps.scope.outputs.openenv == 'true'
         run: |
-          set -euo pipefail
-          python3 -m unittest discover -s scripts/qualification/tests -v
-          mapfile -d '' receipts < <(find qualification/receipts -type f -name '*.json' -print0 | sort -z)
-          if [ "${#receipts[@]}" -gt 0 ]; then
-            python3 scripts/qualification/receipt.py "${receipts[@]}"
-          fi
-          git fetch --no-tags --depth=1 origin 9371035bfeb3908ebf47bd107eb53f98c529be3e
-          scripts/qualification/validate_retained_evidence.sh
+          git clone --filter=blob:none https://github.com/ericflo/miniopenenv.git ../miniopenenv
+          git -C ../miniopenenv checkout --detach "$OPENENV_INTEROP_PIN"
+
+      - name: Drive real OpenEnv counter, arcade, and math episodes
+        if: steps.scope.outputs.openenv == 'true'
+        env:
+          OPENENV_INTEROP_ROOT: ${{ github.workspace }}/../miniopenenv
+        run: |
+          python3 scripts/check_openenv_contract.py --self-test
+          scripts/check_miniopenenv_interop.sh
 
   linux-vulkan:
     name: Linux / Vulkan
@@ -353,20 +353,3 @@ jobs:
           ROCM_PATH: /opt/rocm
           KILN_ROCM_ARCHS: gfx1100
         run: cargo build --locked --bin kiln -p kiln-server --no-default-features --features rocm
-
-  cargo-deny:
-    name: cargo-deny (license / source / bans policy)
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v6
-      # Pin to an exact commit SHA so the bundled cargo-deny CLI version cannot
-      # drift on us. v2.0.17 bundles cargo-deny 0.19.2, which is the version the
-      # `unmaintained = "workspace"` Scope syntax in deny.toml is validated
-      # against (cargo-deny ≤ 0.17 still parses that field as a deprecated
-      # LintLevel and will reject "workspace"). Bump this pin deliberately when
-      # we want a newer cargo-deny — see the README for the action.
-      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.17 (cargo-deny 0.19.2)
-        with:
-          command: check
-          # Run all checks: licenses, sources, bans, advisories
-          arguments: --all-features

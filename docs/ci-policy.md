@@ -43,21 +43,22 @@ The repository currently uses these automatic workflows:
 
 | Workflow | Trigger | Primary claim |
 | --- | --- | --- |
-| `ci.yml` | Matching Rust, manifest, toolchain, or policy changes | Formatting, the Linux default-feature build and tests, focused substrate checks, qualification-tool tests, portable receipts, and dependency policy |
-| `repository-hygiene.yml` | Every push and pull request | Tracked artifacts and production-file budgets satisfy repository policy |
-| `qualification-contract.yml` | Matching contract, qualification, benchmark-receipt, or related source changes | Environment and source-parsing ratchets, qualification tooling, retained evidence, and portable receipts validate |
+| `ci.yml` | Matching Rust, manifest, toolchain, or OpenEnv harness changes | One Linux job formats and tests changed packages plus reverse dependents; dependency policy runs only for dependency inputs, and change-driven OpenEnv episodes reuse the warm build |
+| `repository-hygiene.yml` | Every push and pull request | One shared runner validates generated/static contracts, release drift, and repository policy; qualification tooling and evidence run only for relevant diffs |
 | `ui-smoke.yml` | Matching server-dashboard, desktop-UI, or thinking-budget changes | Browser and static UI contracts pass |
-| `release-version-drift.yml` | Matching version-owning or version-consuming changes | User-facing release examples and runtime defaults agree with their canonical owners |
 | `opd-bench-gate.yml` | Matching pull-request paths | The inexpensive OPD gate parser detects known pass and regression fixtures |
 | `pages.yml` | Matching changes merged to `main`, or manual dispatch | The documentation contracts, build, browser smoke, and Pages artifact pass before deployment |
+| `openenv-interop.yml` | Weekly schedule or manual dispatch | Current upstream OpenEnv environments remain compatible; ordinary changes use the pinned oracle inside `ci.yml` |
 
 Path filters intentionally avoid unrelated work. When a change crosses a
 contract boundary that the filters do not express, run the affected checker
 locally and update the workflow filter in the same change.
 
-The ordinary `ci.yml` path launches three automatic jobs: Rust formatting, one
-Linux default-feature job, and dependency policy. Its accelerator jobs require
-manual dispatch.
+The ordinary `ci.yml` path launches one automatic Linux job. It does not run a
+redundant `cargo build` before `cargo test`, retest unchanged leaf crates, or
+start a second cold Rust runner for OpenEnv. Missing diff history safely falls
+back to the full workspace, and a weekly scheduled run exercises the complete
+workspace as a safety net. Accelerator jobs require manual dispatch.
 
 ## Manual backend checks
 
@@ -213,6 +214,13 @@ of aggregate hosted time.
 Those figures explain the policy; they are not a current performance promise.
 Re-measure representative runs before using them for capacity or cost
 planning.
+
+On 2026-07-31, a representative OpenEnv push fanned out to seven workflows;
+the Rust workflow alone used about 7.2 aggregate runner-minutes and the
+standalone OpenEnv lane compiled an overlapping workspace again. The current
+router consolidates the three static-policy workflows into one runner and the
+three Rust jobs into one affected-package job, with the pinned live matrix in
+that same warm job. Weekly upstream-edge coverage remains independent.
 
 The legacy performance-fixture workflow remains manual while structured local
 qualification replaces it. Its machine-bound thresholds are compatibility

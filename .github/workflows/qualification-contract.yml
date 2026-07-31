@@ -1,50 +1,8 @@
-name: Qualification contract
+name: Qualification contract diagnostic
 
-# Keep hardware qualification local, but validate its portable contracts and
-# checked-in evidence on the inexpensive GitHub-hosted CPU runner. This is a
-# separate workflow so a receipt-only commit does not rebuild the Rust workspace.
+# Normal pushes run these checks in repository-hygiene.yml's single shared
+# runner. Keep an explicit manual entry point for focused diagnosis.
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'crates/**'
-      - 'contracts/production-file-budget-v1.json'
-      - 'contracts/repository-artifact-policy-v1.json'
-      - 'contracts/runtime-env-direct-reads-v1.json'
-      - 'contracts/source-parsing-test-inventory-v1.json'
-      - 'scripts/check_repository_artifacts.py'
-      - 'scripts/check_runtime_env_contract.py'
-      - 'scripts/check_source_parsing_tests.py'
-      - 'scripts/*backend_latency*.py'
-      - 'scripts/qualification/**'
-      - 'scripts/bench-concurrent-batch.py'
-      - 'scripts/run-serving-benchmark-campaign.py'
-      - 'docs/backend-latency-fixtures.json'
-      - 'docs/backend-latency-result-schema.md'
-      - 'qualification/**'
-      - 'bench-results/backend-latency/*.json'
-      - 'benchmarks/receipts/**'
-      - '.github/workflows/qualification-contract.yml'
-  pull_request:
-    paths:
-      - 'crates/**'
-      - 'contracts/production-file-budget-v1.json'
-      - 'contracts/repository-artifact-policy-v1.json'
-      - 'contracts/runtime-env-direct-reads-v1.json'
-      - 'contracts/source-parsing-test-inventory-v1.json'
-      - 'scripts/check_repository_artifacts.py'
-      - 'scripts/check_runtime_env_contract.py'
-      - 'scripts/check_source_parsing_tests.py'
-      - 'scripts/*backend_latency*.py'
-      - 'scripts/qualification/**'
-      - 'scripts/bench-concurrent-batch.py'
-      - 'scripts/run-serving-benchmark-campaign.py'
-      - 'docs/backend-latency-fixtures.json'
-      - 'docs/backend-latency-result-schema.md'
-      - 'qualification/**'
-      - 'bench-results/backend-latency/*.json'
-      - 'benchmarks/receipts/**'
-      - '.github/workflows/qualification-contract.yml'
   workflow_dispatch:
 
 jobs:
@@ -53,15 +11,9 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
-
-      - name: Ratchet direct environment access
-        run: python3 scripts/check_runtime_env_contract.py --check
-
-      - name: Ratchet implementation-source parsing tests
-        run: python3 scripts/check_source_parsing_tests.py
-
+      - run: python3 scripts/check_runtime_env_contract.py --check
+      - run: python3 scripts/check_source_parsing_tests.py
       - name: Validate tooling and receipts
-        shell: bash
         run: |
           set -euo pipefail
           python3 -m unittest discover -s scripts/qualification/tests -v
