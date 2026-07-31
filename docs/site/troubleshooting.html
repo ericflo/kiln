@@ -745,11 +745,11 @@ serving_profile = "stable"
 
 [accelerator]
 rocm_synchronization_mode = "legacy_host_barriers"
-rocm_graph_mode = "profile"</code></pre>
+rocm_graph_mode = "disabled"</code></pre>
             <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-              Validate, restart, and require effective graph mode <code>disabled</code>. Stable startup rejects
-              stream-ordered synchronization and explicit non-disabled graph modes instead of silently
-              weakening the request.
+              Validate, restart, and require effective graph mode <code>disabled</code>. Stable accepts explicit
+              diagnostic backend settings, so the rollback file states both the portable synchronization mode
+              and eager graph mode directly; the resolved policy reports those exact choices.
             </p>
           </div>
         </details>

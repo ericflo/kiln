@@ -1283,7 +1283,9 @@ UUID identity and cannot be enabled by adding another environment spelling.
 | `training.tracked_job_ttl_secs` | unsigned integer; `604800` | `KILN_TRAINING_TRACKED_JOB_TTL_SECS` (implemented) | none | Must be greater than zero. Terminal entries older than the TTL are removed; active jobs are never age-evicted. |
 
 Training GPU work is also governed by `server.serving_profile`; the default
-`stable` profile does not grant training GPU ownership.
+`stable` profile grants coordinated training GPU ownership through the same
+writer-priority protocol used for adapter transitions and physical memory
+changes. `maintenance` is only required when inference must be fully drained.
 
 ### Optimizer support is a resident capability, not configuration
 

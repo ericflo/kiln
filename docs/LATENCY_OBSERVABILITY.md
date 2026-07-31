@@ -153,9 +153,9 @@ participated in it. Request phase totals therefore explain causal overlap; they
 are not process-wide work totals. Use backend lifetime telemetry when you need
 device-work totals.
 
-Stable serving normally leaves resize, trim, adapter, and training attribution
-null because those operations are prohibited. A permitted operation also
-remains null when it did not overlap the request's relevant boundary.
+Stable serving permits resize, trim, adapter, and training work through
+writer-priority accelerator ownership. Their attribution remains null when no
+such operation overlapped the request's relevant boundary.
 
 ## Understand stall reasons
 
