@@ -1088,23 +1088,8 @@ pub(crate) fn validate_grpo_config_at_submit(
     has_env_tokens: bool,
 ) -> Result<(), ApiError> {
     config
-        .loss
-        .validate_for_kt_tape(has_env_tokens)
-        .map_err(ApiError::training_invalid_request)?;
-    config
-        .validate_policy_config()
-        .map_err(ApiError::training_invalid_request)?;
-    validate_lora_scale_at_submit(
-        config.lora_rank,
-        config.lora_alpha,
-        config.allow_high_lora_scale,
-    )?;
-    if config.checkpoint_interval == Some(0) {
-        return Err(ApiError::training_invalid_request(
-            "GRPO checkpoint_interval must be greater than zero",
-        ));
-    }
-    Ok(())
+        .validate_static_contract(has_env_tokens)
+        .map_err(ApiError::training_invalid_request)
 }
 
 fn normalize_sft_config_at_submit(config: &mut kiln_train::SftConfig) -> Result<(), ApiError> {
@@ -6313,21 +6298,6 @@ mod tests {
         invalid_cispo.config.cispo_max_weight = 0.0;
         let error = validate_grpo_submission_source(&invalid_cispo, None).unwrap_err();
         assert!(error.message.contains("cispo_max_weight"));
-    }
-
-    #[test]
-    fn grpo_static_config_validation_covers_lora_and_checkpoint_contracts() {
-        let mut config = kiln_train::GrpoConfig::default();
-        config.checkpoint_interval = Some(0);
-        let error = validate_grpo_config_at_submit(&config, true).unwrap_err();
-        assert_eq!(error.code, "training_invalid_request");
-        assert!(error.message.contains("checkpoint_interval"));
-
-        config.checkpoint_interval = None;
-        config.lora_alpha = 1_000.0;
-        let error = validate_grpo_config_at_submit(&config, true).unwrap_err();
-        assert_eq!(error.code, "training_invalid_request");
-        assert!(error.message.contains("unsafe LoRA scaling"));
     }
 
     /// ECHO env-CE trains again (resurrection PR2), so echo-enabled

@@ -2024,6 +2024,22 @@ impl GrpoConfig {
         .map_err(|error| error.to_string())?;
         Ok(())
     }
+
+    /// Validate the device-free GRPO contract shared by every submission path.
+    pub fn validate_static_contract(&self, has_env_tokens: bool) -> Result<(), String> {
+        self.loss.validate_for_kt_tape(has_env_tokens)?;
+        self.validate_policy_config()?;
+        lora_scaling::validate_lora_scaling(
+            self.lora_rank,
+            self.lora_alpha,
+            self.allow_high_lora_scale,
+        )
+        .map_err(|error| format!("{error:#}"))?;
+        if self.checkpoint_interval == Some(0) {
+            return Err("GRPO checkpoint_interval must be greater than zero".to_string());
+        }
+        Ok(())
+    }
 }
 
 impl Default for GrpoConfig {
@@ -2741,6 +2757,28 @@ mod tests {
         };
         disabled_kl.validate_policy_config().unwrap();
         assert!(!disabled_kl.kl_penalty_enabled());
+    }
+
+    #[test]
+    fn grpo_static_contract_covers_lora_and_checkpoint_guards() {
+        let mut config = GrpoConfig {
+            checkpoint_interval: Some(0),
+            ..GrpoConfig::default()
+        };
+        assert!(
+            config
+                .validate_static_contract(true)
+                .unwrap_err()
+                .contains("checkpoint_interval")
+        );
+        config.checkpoint_interval = None;
+        config.lora_alpha = 1_000.0;
+        assert!(
+            config
+                .validate_static_contract(true)
+                .unwrap_err()
+                .contains("unsafe LoRA scaling")
+        );
     }
 
     /// Pin the full per-optimizer learning-rate table. AdamW/SGD are the
