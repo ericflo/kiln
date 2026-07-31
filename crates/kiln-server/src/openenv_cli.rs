@@ -1553,18 +1553,25 @@ async fn run_candidate_episode(
     for step_index in 0..options.max_steps {
         control.ensure_active()?;
         let generation_seed = generation_seed(seed, candidate_index, step_index);
-        let model_action = generate_model_action(
-            policy,
-            &messages,
-            &trajectory,
-            &adapter,
-            &adapter_label,
-            generation_seed,
-            options.max_action_tokens,
-            options.temperature,
-            options.thinking,
-        )
-        .await;
+        let model_action = session
+            .keep_alive_while(generate_model_action(
+                policy,
+                &messages,
+                &trajectory,
+                &adapter,
+                &adapter_label,
+                generation_seed,
+                options.max_action_tokens,
+                options.temperature,
+                options.thinking,
+            ))
+            .await
+            .with_context(|| {
+                format!(
+                    "maintain OpenEnv environment {} while generating group {group_index} candidate {candidate_index} step {step_index}",
+                    inspection.identity.metadata.name
+                )
+            })?;
         let model_action = match model_action {
             Ok(action) => action,
             Err(ModelActionFailure::Invalid {

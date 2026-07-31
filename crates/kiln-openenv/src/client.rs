@@ -1,6 +1,6 @@
 //! Async OpenEnv discovery and stateful episode client.
 
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use anyhow::Context;
 use futures::{SinkExt, StreamExt};
@@ -93,6 +93,8 @@ pub enum OpenEnvClientError {
     Closed,
     #[error("OpenEnv peer sent a binary frame; text JSON is required")]
     BinaryFrame,
+    #[error("OpenEnv peer sent an unsolicited application message while the client was idle")]
+    UnsolicitedApplicationMessage,
     #[error("OpenEnv frame exceeded the {0} byte client limit")]
     MessageTooLarge(usize),
     #[error("invalid OpenEnv message: {0}")]
@@ -727,21 +729,21 @@ impl std::fmt::Debug for OpenEnvSession {
 impl OpenEnvSession {
     pub async fn reset(&mut self, data: &Value) -> Result<OpenEnvObservation, OpenEnvClientError> {
         let response = self.exchange(OpenEnvClientMessage::Reset { data }).await?;
-        expect_observation(response)
+        self.expect_observation(response)
     }
 
     pub async fn step(&mut self, action: &Value) -> Result<OpenEnvObservation, OpenEnvClientError> {
         let response = self
             .exchange(OpenEnvClientMessage::Step { data: action })
             .await?;
-        expect_observation(response)
+        self.expect_observation(response)
     }
 
     pub async fn state(&mut self) -> Result<Value, OpenEnvClientError> {
         let response = self.exchange(OpenEnvClientMessage::State).await?;
         match response {
             OpenEnvServerMessage::State(state) => Ok(state),
-            other => Err(unexpected("state", &other)),
+            other => self.fail_closed(unexpected("state", &other)),
         }
     }
 
@@ -751,8 +753,83 @@ impl OpenEnvSession {
             .await?;
         match response {
             OpenEnvServerMessage::Mcp(value) => Ok(value),
-            other => Err(unexpected("mcp", &other)),
+            other => self.fail_closed(unexpected("mcp", &other)),
         }
+    }
+
+    /// Keep the episode socket alive while policy work is in flight.
+    ///
+    /// OpenEnv permits WebSocket control frames while otherwise remaining
+    /// strictly lock-step. Long model inference can exceed a server's ping
+    /// timeout, so callers should wrap that work here between an observation
+    /// and the next action. Ping frames are answered, Pong frames are absorbed,
+    /// and any unsolicited application message poisons the session because it
+    /// cannot be correlated with a request.
+    pub async fn keep_alive_while<F>(&mut self, work: F) -> Result<F::Output, OpenEnvClientError>
+    where
+        F: Future,
+    {
+        if self.closed {
+            return Err(OpenEnvClientError::Closed);
+        }
+        tokio::pin!(work);
+        loop {
+            tokio::select! {
+                // If policy completion and a buffered peer frame become ready
+                // together, validate the frame first. Otherwise an already
+                // unsolicited response could be mistaken for the next step's
+                // answer after this method returns.
+                biased;
+                frame = self.socket.next() => {
+                    let frame = match frame {
+                        Some(Ok(frame)) => frame,
+                        Some(Err(error)) => {
+                            return self.fail_closed(OpenEnvClientError::WebSocket(error));
+                        }
+                        None => return self.fail_closed(OpenEnvClientError::Closed),
+                    };
+                    match frame {
+                        Message::Ping(payload) => {
+                            if let Err(error) = self.socket.send(Message::Pong(payload)).await {
+                                return self.fail_closed(OpenEnvClientError::WebSocket(error));
+                            }
+                        }
+                        Message::Pong(_) => {}
+                        Message::Close(_) => {
+                            return self.fail_closed(OpenEnvClientError::Closed);
+                        }
+                        Message::Text(text) => {
+                            if text.len() > OPENENV_MAX_SERVER_MESSAGE_BYTES {
+                                return self.fail_closed(OpenEnvClientError::MessageTooLarge(text.len()));
+                            }
+                            if self.credential_marker.as_ref().is_some_and(|marker| {
+                                contains_credential(text.as_bytes(), marker.as_slice())
+                            }) {
+                                return self.fail_closed(OpenEnvClientError::CredentialReflected);
+                            }
+                            return self.fail_closed(
+                                OpenEnvClientError::UnsolicitedApplicationMessage,
+                            );
+                        }
+                        Message::Binary(_) => {
+                            return self.fail_closed(OpenEnvClientError::BinaryFrame);
+                        }
+                        Message::Frame(_) => {
+                            return self.fail_closed(OpenEnvClientError::InvalidMessage(
+                                "OpenEnv peer exposed an unexpected raw WebSocket frame".to_string(),
+                            ));
+                        }
+                    }
+                }
+                output = &mut work => return Ok(output),
+            }
+        }
+    }
+
+    /// Whether this handle has observed a terminal or ambiguous transport
+    /// outcome and therefore cannot safely issue another OpenEnv request.
+    pub fn is_closed(&self) -> bool {
+        self.closed
     }
 
     /// Send OpenEnv's close message best-effort and await no application
@@ -779,10 +856,18 @@ impl OpenEnvSession {
         let payload = serde_json::to_string(&request)
             .map_err(|error| OpenEnvClientError::InvalidMessage(error.to_string()))?;
         self.ensure_client_message_limit(payload.len())?;
-        self.socket.send(Message::Text(payload.into())).await?;
-        let response = tokio::time::timeout(self.request_timeout, self.read_application_message())
-            .await
-            .map_err(|_| OpenEnvClientError::Timeout(self.request_timeout))??;
+        if let Err(error) = self.socket.send(Message::Text(payload.into())).await {
+            return self.fail_closed(OpenEnvClientError::WebSocket(error));
+        }
+        let response =
+            match tokio::time::timeout(self.request_timeout, self.read_application_message()).await
+            {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) => return self.fail_closed(error),
+                Err(_) => {
+                    return self.fail_closed(OpenEnvClientError::Timeout(self.request_timeout));
+                }
+            };
         if let OpenEnvServerMessage::Error(error) = response {
             if error.code.is_terminal() {
                 self.closed = true;
@@ -833,6 +918,21 @@ impl OpenEnvSession {
         }
         Ok(())
     }
+
+    fn expect_observation(
+        &mut self,
+        response: OpenEnvServerMessage,
+    ) -> Result<OpenEnvObservation, OpenEnvClientError> {
+        match response {
+            OpenEnvServerMessage::Observation(observation) => Ok(observation),
+            other => self.fail_closed(unexpected("observation", &other)),
+        }
+    }
+
+    fn fail_closed<T>(&mut self, error: OpenEnvClientError) -> Result<T, OpenEnvClientError> {
+        self.closed = true;
+        Err(error)
+    }
 }
 
 fn bearer_token_bytes(authorization: Option<&HeaderValue>) -> Option<&[u8]> {
@@ -870,15 +970,6 @@ fn contains_credential(payload: &[u8], credential: &[u8]) -> bool {
         && payload
             .windows(credential.len())
             .any(|candidate| candidate == credential)
-}
-
-fn expect_observation(
-    response: OpenEnvServerMessage,
-) -> Result<OpenEnvObservation, OpenEnvClientError> {
-    match response {
-        OpenEnvServerMessage::Observation(observation) => Ok(observation),
-        other => Err(unexpected("observation", &other)),
-    }
 }
 
 fn unexpected(expected: &'static str, message: &OpenEnvServerMessage) -> OpenEnvClientError {

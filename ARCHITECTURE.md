@@ -475,7 +475,12 @@ but cancellation closes once the run enters the native training handoff.
 The WebSocket path is load-bearing. OpenEnv's HTTP `/reset` and `/step` routes
 construct a fresh environment for each request and cannot carry episode state.
 The client is strictly lock-step because OpenEnv has no correlation IDs and
-permits no server-initiated application messages.
+permits no server-initiated application messages. While the selected policy is
+generating, the client keeps polling the socket solely to answer Ping control
+frames; application data in that idle window is a protocol violation. Once an
+exchange times out, returns an unreadable frame, or answers with the wrong
+message type, the session is permanently poisoned because no safe
+resynchronization exists.
 
 Every group is assigned exactly one environment and reset seed. Candidates may
 run concurrently, but their initial messages must be identical or collection

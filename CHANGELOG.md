@@ -13,7 +13,10 @@
   on-policy native GRPO directly. Canonical scored-rollout identity now binds
   fail-closed OpenEnv episode provenance. Recoverable protocol errors now
   become bounded corrective policy turns on the same socket; capacity
-  saturation uses bounded fresh-session acquisition. New `openenv verify` and
+  saturation uses bounded fresh-session acquisition. Policy inference pumps
+  Ping/Pong control frames so slow generation retains non-resumable episode
+  state; ambiguous, malformed, unsolicited, timed-out, or wrong-kind responses
+  permanently poison the lock-step session. New `openenv verify` and
   `openenv replay` commands validate the artifact bundle offline and replay
   exact live environment behavior. CI drives pinned miniopenenv counter,
   bandit, Connect Four, maze, and Wordle servers plus a native

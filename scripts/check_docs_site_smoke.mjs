@@ -1673,6 +1673,8 @@ function validateSftLossRouteDocumentationSourceContract() {
     'OpenEnv episodes are a native training input',
     'ordered seed-free plan',
     'production path depends only on OpenEnv compatibility',
+    'pumps Ping/Pong control frames while the model thinks',
+    'poisons the session permanently',
   ]);
   if (missingArchitectureTerms.length > 0) {
     fail(`docs/site/architecture.html: reader architecture contract missing terms: ${missingArchitectureTerms.join(', ')}`);
@@ -1695,6 +1697,8 @@ function validateSftLossRouteDocumentationSourceContract() {
     'An OpenEnv run cannot start, stalls, or fails verification',
     'exactly one environment_reset_options object per URL',
     'groups must cover every endpoint',
+    'pumps Ping/Pong while inference is pending',
+    'poisons ambiguous lock-step sessions',
     'do not edit the receipt',
   ]);
   if (missingTroubleshootingTerms.length > 0) {

@@ -302,6 +302,9 @@ def main() -> int:
     cli = (ROOT / "crates" / "kiln-server" / "src" / "openenv_cli.rs").read_text(
         encoding="utf-8"
     )
+    client = (ROOT / "crates" / "kiln-openenv" / "src" / "client.rs").read_text(
+        encoding="utf-8"
+    )
     guide = (ROOT / "docs" / "OPENENV_GUIDE.md").read_text(encoding="utf-8")
     required_source_terms = [
         "kiln.openenv-replay.v1",
@@ -314,6 +317,15 @@ def main() -> int:
     if "kiln.openenv-rollout-summary.v3" not in cli:
         failures.append("openenv_cli.rs is missing summary v3")
     for term in [
+        "keep_alive_while",
+        "UnsolicitedApplicationMessage",
+        "fail_closed",
+    ]:
+        if term not in client:
+            failures.append(f"kiln-openenv client is missing session-lifecycle term {term}")
+    if "keep_alive_while" not in cli:
+        failures.append("openenv_cli.rs does not pump control frames during policy generation")
+    for term in [
         "kiln.openenv-environment-evaluation.v1",
         "paired_return_sign_test_v1",
     ]:
@@ -325,14 +337,17 @@ def main() -> int:
         "kiln openenv tasks",
         "kiln openenv verify",
         "kiln openenv replay",
+        "pumps Ping/Pong control frames",
+        "poison the socket",
+        "lock-step cannot resynchronize",
     ]:
         if command not in guide:
-            failures.append(f"OpenEnv guide is missing {command}")
+            failures.append(f"OpenEnv guide is missing {command!r}")
 
     if failures:
         raise SystemExit("\n".join(failures))
     print(
-        "OpenEnv summary, replay, paired evaluation, verification, and live-replay contracts match"
+        "OpenEnv session lifecycle, summary, replay, paired evaluation, verification, and live-replay contracts match"
     )
     return 0
 

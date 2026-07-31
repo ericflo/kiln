@@ -193,14 +193,11 @@ while the complete wire observation remains present; it is not a protocol
 field or requirement. The environment remains authoritative: recoverable
 validation/execution errors are feedback turns on the same episode.
 
-Every sampled action is a `TurnKind::Action`. Every environment observation is
-a `TurnKind::Observation`. Native GRPO therefore applies policy-gradient loss
-to model actions and ECHO's environment cross-entropy to observation tokens by
-default. Harness-generated error observations carry a full warning prefix so
-the default warning filter does not teach the model to imitate Kiln's
-diagnostic prose.
-
-The prompt contains the reset plus prior actions and observations. One WebSocket remains open for the episode; stateless HTTP routes cannot represent it.
+Actions and observations become their corresponding `TurnKind` segments.
+Native GRPO applies policy-gradient loss to actions and ECHO cross-entropy to
+observation tokens. Full-warning harness errors stay outside ECHO imitation.
+The prompt retains reset and turn history. Kiln pumps Ping/Pong control frames
+while the policy thinks; stateless HTTP routes cannot preserve the episode.
 One-step exact-verifier environments, including eight math families, need no adapter. Their string actions, `input_text`, integer rewards, and terminal observations flow unchanged through collection, GRPO, verification, replay, and held-out evaluation.
 
 ## Identity and artifacts
@@ -227,7 +224,9 @@ candidate as `protocol_error`.
 
 On `CAPACITY_REACHED`, Kiln closes that socket and retries a fresh session with
 bounded backoff until `--capacity-wait-seconds` expires. Invalid model JSON and
-`max_steps` remain distinct outcomes. The
+`max_steps` remain distinct outcomes. Timeouts, unsolicited or unreadable
+frames, transport failures, and wrong response types poison the socket
+permanently; lock-step cannot resynchronize. The
 [replay and recovery reference](OPENENV_REPLAY_REFERENCE.md) lists every
 recoverable and terminal code, retry rule, and resource bound.
 

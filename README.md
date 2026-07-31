@@ -189,6 +189,11 @@ The reusable `kiln-openenv` crate implements bounded HTTP discovery and the
 lock-step stateful `WS /ws` protocol, including tagged rewards and the complete
 OpenEnv error vocabulary. Recoverable protocol errors become corrective policy
 turns, while capacity saturation triggers bounded fresh-session acquisition.
+Kiln continues pumping Ping/Pong control frames while the model is generating
+an action, so slow policies do not lose their non-resumable episode. A timeout,
+malformed or unsolicited application frame, wrong response type, or transport
+failure permanently poisons that socket; Kiln never risks assigning a late
+lock-step response to the wrong action.
 When an observation offers a non-empty `input_text`, Kiln foregrounds that
 generic environment-provided decision text while retaining the complete wire
 observation and discovered JSON action schema; it remains optional, never a

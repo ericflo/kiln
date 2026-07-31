@@ -368,6 +368,12 @@ OpenEnv RL
           every endpoint to run. The receipt hashes the ordered seed-free plan; offline verification
           reconstructs it from replay and rejects missing endpoints or drift.
         </p>
+        <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
+          Policy generation may be slower than an environment server&rsquo;s WebSocket idle timeout. Kiln
+          pumps Ping/Pong control frames while the model thinks without consuming application data.
+          A timeout, malformed or unsolicited frame, transport failure, or wrong response type poisons
+          the session permanently&mdash;lock-step has no request ID with which to resynchronize.
+        </p>
         <p class="mt-4 text-sm leading-relaxed" style="color: var(--fg-mute);">
           Exact action/observation transcripts, reward arithmetic, recovery, capacity backoff, cancellation,
           origin-scoped credentials, metrics, and paired promotion evidence remain server-owned. The production

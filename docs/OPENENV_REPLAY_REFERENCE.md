@@ -252,6 +252,13 @@ The terminal error codes are:
 recorded separately as `invalid_model_action`, while exhaustion of the horizon
 is `max_steps`; neither is mislabeled as environment `done`.
 
+OpenEnv has no request IDs or episode resume. Kiln therefore pumps only
+Ping/Pong control frames while policy inference is pending and rejects any
+unsolicited application message. A timeout, socket failure, binary, malformed
+or oversized response, credential reflection, or wrong response type
+permanently poisons the session. The action is not resent and a late response
+can never be consumed as the answer to a later action.
+
 ## Capacity acquisition
 
 OpenEnv servers may cap active sessions and can send `CAPACITY_REACHED` as the
