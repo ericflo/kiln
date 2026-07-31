@@ -230,6 +230,14 @@ action-schema hash, reset hash, exact behavior-policy revision, seed,
 steps, return, and termination identity directly into Kiln's scored-payload
 hash.
 
+Inspection also compiles each environment's advertised action JSON Schema
+before Kiln opens a session. Schema dialect selection follows the schema's
+declaration, internal references are supported, and external HTTP or filesystem
+references are rejected rather than resolved. Every model action is validated
+against that compiled contract before `step`; a mismatch never reaches the
+environment and is retained as `invalid_model_action` with bounded
+keyword/JSON-Pointer diagnostics.
+
 The reusable `kiln-openenv` crate implements bounded HTTP discovery and the
 lock-step stateful `WS /ws` protocol, including tagged rewards and the complete
 OpenEnv error vocabulary. Recoverable protocol errors become corrective policy

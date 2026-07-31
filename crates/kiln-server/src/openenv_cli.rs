@@ -21,9 +21,9 @@ use clap::Subcommand;
 use console::style;
 use futures::{StreamExt, TryStreamExt, stream};
 use kiln_openenv::{
-    OPENENV_MAX_CLIENT_MESSAGE_BYTES, OpenEnvClient, OpenEnvClientError, OpenEnvIdentity,
-    OpenEnvInspection, OpenEnvObservation, OpenEnvProtocolError, OpenEnvTaskApiSupport,
-    OpenEnvTaskCatalog,
+    OPENENV_MAX_CLIENT_MESSAGE_BYTES, OpenEnvActionValidator, OpenEnvClient, OpenEnvClientError,
+    OpenEnvIdentity, OpenEnvInspection, OpenEnvObservation, OpenEnvProtocolError,
+    OpenEnvTaskApiSupport, OpenEnvTaskCatalog,
 };
 use kiln_train::{
     AgenticGroup, BehaviorPolicy, ChatMessage, GrpoConfig, OpenEnvEpisodeTerminationV1,
@@ -1007,6 +1007,7 @@ struct ModelAction {
 #[derive(Debug)]
 enum ModelActionFailure {
     Invalid {
+        code: &'static str,
         message: String,
         raw: Option<String>,
         total_tokens: usize,
@@ -2284,12 +2285,18 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
                 .inspect()
                 .await
                 .with_context(|| format!("inspect OpenEnv server {}", client.base_url()))?;
-            Ok::<_, anyhow::Error>((client, inspection))
+            let action_validator = inspection.action_validator().map_err(|source| {
+                OpenEnvClientError::InvalidActionSchema {
+                    endpoint: format!("{}/schema", client.base_url()),
+                    source,
+                }
+            })?;
+            Ok::<_, anyhow::Error>((client, inspection, action_validator))
         })
         .buffered(options.environment_urls.len())
         .try_collect::<Vec<_>>()
         .await?;
-    for (_, inspection) in &inspections {
+    for (_, inspection, _) in &inspections {
         retained_budget.charge(
             serialized_len(inspection, "environment inspection")?,
             "discovered environment inspection",
@@ -2299,7 +2306,7 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
     control.publish_discovered(
         inspections
             .iter()
-            .map(|(_, inspection)| inspection.identity.clone())
+            .map(|(_, inspection, _)| inspection.identity.clone())
             .collect(),
     );
     control.publish(OpenEnvCollectionProgress {
@@ -2317,7 +2324,7 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
     for group_index in 0..options.groups {
         control.ensure_active()?;
         let environment_index = group_index % inspections.len();
-        let (environment, inspection) = &inspections[environment_index];
+        let (environment, inspection, action_validator) = &inspections[environment_index];
         let seed = options
             .seed_start
             .checked_add(group_index as u64)
@@ -2335,6 +2342,7 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
                     policy,
                     environment,
                     inspection,
+                    action_validator,
                     &adapter.request_value,
                     &adapter.label,
                     &reset,
@@ -2466,7 +2474,7 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
     let dataset_sha256 = sha256_jsonl(&groups)?;
     let replay_environments = inspections
         .into_iter()
-        .map(|(_, inspection)| inspection)
+        .map(|(_, inspection, _)| inspection)
         .collect::<Vec<_>>();
     retained_budget.charge(
         serialized_len(&replay_environments, "summary environment inspections")?,
@@ -2546,7 +2554,7 @@ pub(crate) async fn collect_openenv_rollouts_with_policy(
 }
 
 async fn revalidate_openenv_identity(
-    (environment, expected): &(OpenEnvClient, OpenEnvInspection),
+    (environment, expected, _): &(OpenEnvClient, OpenEnvInspection, OpenEnvActionValidator),
 ) -> Result<()> {
     environment.revalidate(expected).await.with_context(|| {
         format!(
@@ -2561,6 +2569,7 @@ async fn run_candidate_episode(
     policy: &OpenEnvPolicyTransport,
     environment: &OpenEnvClient,
     inspection: &OpenEnvInspection,
+    action_validator: &OpenEnvActionValidator,
     adapter: &Value,
     adapter_label: &str,
     reset_payload: &Value,
@@ -2618,6 +2627,7 @@ async fn run_candidate_episode(
         let model_action = session
             .keep_alive_while(generate_model_action(
                 policy,
+                action_validator,
                 &messages,
                 &trajectory,
                 adapter,
@@ -2637,6 +2647,7 @@ async fn run_candidate_episode(
         let model_action = match model_action {
             Ok(action) => action,
             Err(ModelActionFailure::Invalid {
+                code,
                 message,
                 raw,
                 total_tokens,
@@ -2656,7 +2667,7 @@ async fn run_candidate_episode(
                 let action_turn = action_segment(raw);
                 let error_turn = harness_error_segment(&json!({
                     "openenv_harness_error": {
-                        "code": "INVALID_MODEL_ACTION",
+                        "code": code,
                         "message": message
                     },
                     "done": true
@@ -2895,6 +2906,7 @@ async fn run_candidate_episode(
 #[allow(clippy::too_many_arguments)]
 async fn generate_model_action(
     policy: &OpenEnvPolicyTransport,
+    action_validator: &OpenEnvActionValidator,
     messages: &[ChatMessage],
     trajectory: &[TurnSegment],
     adapter: &Value,
@@ -2953,6 +2965,7 @@ async fn generate_model_action(
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
         .ok_or_else(|| ModelActionFailure::Invalid {
+            code: "INVALID_MODEL_ACTION",
             message: "Kiln response choices[0].message.content is missing or not text".to_string(),
             raw: None,
             total_tokens,
@@ -2960,13 +2973,17 @@ async fn generate_model_action(
             behavior_policy: behavior_policy.clone(),
         })?
         .to_string();
-    let action = parse_model_action(&raw).map_err(|message| ModelActionFailure::Invalid {
-        message,
-        raw: Some(raw.clone()),
-        total_tokens,
-        latency_ms,
-        behavior_policy: behavior_policy.clone(),
-    })?;
+    let action =
+        parse_and_validate_model_action(&raw, action_validator).map_err(|(code, message)| {
+            ModelActionFailure::Invalid {
+                code,
+                message,
+                raw: Some(raw.clone()),
+                total_tokens,
+                latency_ms,
+                behavior_policy: behavior_policy.clone(),
+            }
+        })?;
     Ok(ModelAction {
         raw,
         action,
@@ -3122,6 +3139,17 @@ pub(crate) fn parse_model_action(raw: &str) -> std::result::Result<Value, String
         ));
     }
     Ok(value)
+}
+
+fn parse_and_validate_model_action(
+    raw: &str,
+    validator: &OpenEnvActionValidator,
+) -> std::result::Result<Value, (&'static str, String)> {
+    let action = parse_model_action(raw).map_err(|message| ("INVALID_MODEL_ACTION", message))?;
+    validator
+        .validate(&action)
+        .map_err(|error| ("ACTION_SCHEMA_VALIDATION_FAILED", error.to_string()))?;
+    Ok(action)
 }
 
 fn reset_payload(base: &Value, seed: u64) -> Result<Value> {
@@ -4478,6 +4506,30 @@ mod tests {
         assert!(parse_model_action("answer B").is_err());
         assert!(parse_model_action("[1,2]").is_err());
         assert!(parse_model_action("{} trailing").is_err());
+    }
+
+    #[test]
+    fn model_actions_must_satisfy_the_advertised_openenv_schema() {
+        let validator = OpenEnvActionValidator::compile(&json!({
+            "type": "object",
+            "properties": {"answer": {"type": "integer"}},
+            "required": ["answer"],
+            "additionalProperties": false
+        }))
+        .unwrap();
+        assert_eq!(
+            parse_and_validate_model_action(r#"{"answer": 4}"#, &validator).unwrap(),
+            json!({"answer": 4})
+        );
+        let secret = "MODEL_VALUE_MUST_NOT_LEAK";
+        let (code, message) = parse_and_validate_model_action(
+            &json!({"answer": secret, "extra": secret}).to_string(),
+            &validator,
+        )
+        .unwrap_err();
+        assert_eq!(code, "ACTION_SCHEMA_VALIDATION_FAILED");
+        assert!(message.contains("type"));
+        assert!(!message.contains(secret));
     }
 
     #[test]

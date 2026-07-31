@@ -432,6 +432,7 @@ CLI train/start/status/artifact · dashboard · /v1/openenv/*
         │                     (before persistence or direct discovery/episodes/GPU work)
         │
         ├── bounded GET health · metadata · schema · environments · OpenAPI
+        ├── compile self-contained action schema (no HTTP/file resolution)
         │
         ▼
 content-addressed environment identity
@@ -440,7 +441,8 @@ content-addressed environment identity
 one WS /ws connection per candidate episode
         │
         ├── reset(same seed for every candidate in the group)
-        ├── Kiln chat generation → one schema-shaped JSON action
+        ├── Kiln chat generation → one JSON object
+        ├── local advertised-schema validation → reject before step on mismatch
         ├── environment step → observation + tagged reward + done
         └── repeat under explicit step/session/data bounds
         │
@@ -550,11 +552,20 @@ exchange times out, returns an unreadable frame, or answers with the wrong
 message type, the session is permanently poisoned because no safe
 resynchronization exists.
 
+The action schema is an executable protocol boundary, not prompt decoration.
+`kiln-openenv` compiles it during every inspection with draft auto-detection and
+without HTTP or filesystem resolvers; internal references remain available,
+while malformed or external-reference schemas fail discovery as a non-retryable
+environment protocol error. The collector reuses the compiled validator for
+every generated action. A mismatch produces bounded keyword and JSON Pointer
+evidence, receives the configured protocol-error reward, terminates as
+`invalid_model_action`, and never writes the action to the episode socket.
+
 Every group is assigned exactly one environment and reset seed. Candidates may
 run concurrently, but their initial messages must be identical or collection
 fails. Step rewards—not reset rewards—sum into episode return. Environment
-`done`, Kiln's max-step cutoff, invalid policy JSON, and protocol errors remain
-distinct termination states. Recoverable OpenEnv errors remain on the same
+`done`, Kiln's max-step cutoff, invalid policy JSON/schema, and protocol errors
+remain distinct termination states. Recoverable OpenEnv errors remain on the same
 lock-step socket and become policy feedback under a bounded budget. A
 `CAPACITY_REACHED` socket is terminal, but episode acquisition is not: Kiln
 backs off and opens a fresh socket under an explicit wait deadline.

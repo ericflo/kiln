@@ -250,7 +250,10 @@ Before any GPU work in a stage N ≥ 2:
      OR the pipeline.md stage_transition_rationale documents an override
 
    - if Rule A selected OpenEnv, CLI or server inspection succeeds for every
-     environment and its schema identity matches the planned stage; retain the
+     environment, its self-contained action schema compiles without external
+     references, and its schema identity matches the planned stage; require
+     sampled-action schema failures to remain local `invalid_model_action`
+     evidence rather than environment `VALIDATION_ERROR`; retain the
      server `run_id` and linked `training_job_id`; submit the complete request
      with `kiln openenv start --request <run.json> --idempotency-key <attempt-key> --follow`; reserve disjoint
      held-out seeds and configure the native paired-return gate before

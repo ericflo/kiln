@@ -363,8 +363,9 @@ OpenEnv RL
         <pre class="mt-5"><code>persisted run request + environment URLs + aligned credentials/reset plan
   -> idempotent persisted creation
   -> bounded FIFO workflow admission
-  -> inspect identity and action schema
+  -> inspect identity and compile self-contained action schema
   -> round-robin seed-matched candidate episodes
+  -> validate every model action before its environment step
   -> environment-owned returns
   -> revalidate complete discovery identity
   -> immutable admitted training contract
@@ -373,6 +374,13 @@ OpenEnv RL
   -> paired held-out environment evaluation
   -> promote, retain, or reject adapter
   -> completed evidence or typed terminal failure</code></pre>
+        <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
+          The advertised action schema is enforced, not merely shown to the policy. Inspection
+          auto-detects its JSON Schema draft, supports internal references, and rejects external
+          HTTP/filesystem references without resolving them. A schema-invalid action never reaches
+          the environment; it is retained as <code>invalid_model_action</code> with bounded
+          keyword/JSON-Pointer evidence and <code>ACTION_SCHEMA_VALIDATION_FAILED</code>.
+        </p>
         <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
           Train admission atomically persists <code>kiln.openenv-training-contract.v1</code> with the
           effective GRPO config and optional post-eval suite. Restart, trainer submission, CLI, and

@@ -286,6 +286,7 @@ fn client_failure(
             None,
         ),
         OpenEnvClientError::HttpBodyTooLarge { .. }
+        | OpenEnvClientError::InvalidActionSchema { .. }
         | OpenEnvClientError::TaskCollectionTooLarge { .. }
         | OpenEnvClientError::InvalidTaskCount(_)
         | OpenEnvClientError::InvalidTaskPage { .. }
@@ -457,6 +458,28 @@ mod tests {
         assert!(failure.hint.contains("mixed-identity episodes"));
         assert_eq!(failure.protocol_code, None);
         assert_eq!(failure.http_status, None);
+    }
+
+    #[test]
+    fn invalid_advertised_action_schema_is_a_non_retryable_protocol_failure() {
+        let secret = "SCHEMA_PAYLOAD_MUST_NOT_LEAK";
+        let source = kiln_openenv::OpenEnvActionValidator::compile(&serde_json::json!({
+            "type": secret
+        }))
+        .unwrap_err();
+        let error = anyhow::Error::new(OpenEnvClientError::InvalidActionSchema {
+            endpoint: "https://environment.example/openenv/schema".into(),
+            source,
+        });
+        let failure =
+            OpenEnvRunFailure::from_error(OpenEnvRunState::Discovering, false, &error, 23);
+        assert_eq!(
+            failure.code,
+            OpenEnvRunFailureCode::EnvironmentProtocolError
+        );
+        assert_eq!(failure.stage, OpenEnvRunFailureStage::Discovery);
+        assert!(!failure.retryable);
+        assert!(!failure.message.contains(secret));
     }
 
     #[test]

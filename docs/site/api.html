@@ -1106,7 +1106,7 @@ curl -fsS http://localhost:8420/v1/train/opd \
           training</strong>; collect-only requests reject every training-only field.
         </p>
         <div class="endpoint-list" style="color: var(--fg-dim);">
-          <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/inspect</code> &mdash; discover and normalize the protocol metadata, action schema, and observation schema for one compatible environment.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/inspect</code> &mdash; discover and normalize protocol metadata and schemas, and compile the self-contained action schema without resolving external references.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/tasks</code> &mdash; list the environment&rsquo;s reset-task catalog through the same origin and credential policy.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/training/preflight</code> &mdash; validate direct OpenEnv training before collection and return its exact effective GRPO config plus a non-reserving queue/tracked-capacity snapshot. Final submission rechecks live queue and memory.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/runs</code> &mdash; preflight and accept a collect-only or collect-and-train run into bounded FIFO execution. A new run returns 202; the same retained idempotency key and normalized request return the original status with 200; changed reuse returns 409.</div>

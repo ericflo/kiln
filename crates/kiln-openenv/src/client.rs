@@ -24,6 +24,7 @@ use crate::types::{
     OpenEnvProtocolError, OpenEnvSchema, OpenEnvServerMessage, OpenEnvTask, OpenEnvTaskApiSupport,
     OpenEnvTaskCatalog, OpenEnvTaskCount, OpenEnvTaskList, OpenEnvTaskRange, OpenEnvTaskSplit,
 };
+use crate::{OpenEnvActionSchemaError, OpenEnvActionValidator};
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -115,6 +116,12 @@ pub enum OpenEnvClientError {
         actual_schema_sha256: String,
         changed_fields: Vec<&'static str>,
     },
+    #[error("OpenEnv endpoint {endpoint} advertised an invalid action schema: {source}")]
+    InvalidActionSchema {
+        endpoint: String,
+        #[source]
+        source: OpenEnvActionSchemaError,
+    },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -148,6 +155,12 @@ pub struct OpenEnvInspection {
 }
 
 impl OpenEnvInspection {
+    /// Compile the advertised action schema into a reusable, self-contained
+    /// validator. External HTTP and filesystem references are never resolved.
+    pub fn action_validator(&self) -> Result<OpenEnvActionValidator, OpenEnvActionSchemaError> {
+        OpenEnvActionValidator::compile(&self.schema.action)
+    }
+
     /// Require a later discovery snapshot to be exactly the same environment
     /// identity used to generate actions and collect rewards.
     ///
@@ -530,7 +543,7 @@ impl OpenEnvClient {
             .pointer("/info/version")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
-        Ok(OpenEnvInspection {
+        let inspection = OpenEnvInspection {
             identity: OpenEnvIdentity {
                 schema: "kiln.openenv-identity.v1".to_string(),
                 client_profile: OPENENV_CLIENT_PROFILE.to_string(),
@@ -547,7 +560,17 @@ impl OpenEnvClient {
                 schema_sha256,
             },
             schema,
-        })
+        };
+        // Discovery is not successful unless the action contract can actually
+        // be enforced. Compile it before any session is opened or artifact is
+        // attributed to this identity.
+        inspection.action_validator().map_err(|source| {
+            OpenEnvClientError::InvalidActionSchema {
+                endpoint: self.endpoint("schema"),
+                source,
+            }
+        })?;
+        Ok(inspection)
     }
 
     /// Re-read every stable discovery surface and fail if the environment no
@@ -1413,6 +1436,54 @@ mod tests {
                 if changed_fields == &["identity.metadata"]
         ));
         assert!(!error.to_string().contains("deployment two"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn inspection_rejects_an_unenforceable_action_schema_before_sessions() {
+        let secret = "INVALID_SCHEMA_VALUE_MUST_NOT_LEAK";
+        let app = Router::new()
+            .route("/health", get(|| async { AxumStatusCode::OK }))
+            .route(
+                "/metadata",
+                get(|| async {
+                    Json(json!({
+                        "name": "InvalidSchemaEnvironment",
+                        "description": "fixture"
+                    }))
+                }),
+            )
+            .route(
+                "/schema",
+                get(move || async move {
+                    Json(json!({
+                        "action": {"type": secret},
+                        "observation": {"type": "object"},
+                        "state": {"type": "object"}
+                    }))
+                }),
+            )
+            .route(
+                "/list_environments",
+                get(|| async { Json(json!(["invalid_schema"])) }),
+            )
+            .route(
+                "/openapi.json",
+                get(|| async { Json(json!({"info": {"version": "1.0"}})) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let error = OpenEnvClient::new(format!("http://{address}"))
+            .unwrap()
+            .inspect()
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OpenEnvClientError::InvalidActionSchema { .. }
+        ));
+        assert!(!error.to_string().contains(secret));
         server.abort();
     }
 

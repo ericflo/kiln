@@ -337,9 +337,15 @@ The terminal error codes are:
 - `FACTORY_ERROR`
 - `SESSION_ERROR`
 
-`FACTORY_ERROR` and `SESSION_ERROR` end the candidate. Invalid model JSON is
-recorded separately as `invalid_model_action`, while exhaustion of the horizon
-is `max_steps`; neither is mislabeled as environment `done`.
+`FACTORY_ERROR` and `SESSION_ERROR` end the candidate. Invalid model JSON and a
+JSON object that fails the advertised action schema are recorded separately
+from environment errors as `invalid_model_action`, while exhaustion of the
+horizon is `max_steps`; neither is mislabeled as environment `done`. Kiln
+compiles the schema during inspection without HTTP/filesystem reference
+resolution and validates before `step`, so `ACTION_SCHEMA_VALIDATION_FAILED`
+never sends the rejected action to the environment. Its retained diagnostic is
+bounded to closed keywords and JSON Pointer paths rather than model values or
+environment-authored schema content.
 
 OpenEnv has no request IDs or episode resume. Kiln therefore pumps only
 Ping/Pong control frames while policy inference is pending and rejects any
@@ -588,9 +594,11 @@ bearer credentials require HTTPS/WSS; redirects are never followed.
 not deterministic for the supplied reset seed. Kiln rejects the group instead
 of computing misleading relative advantages.
 
-**Most outcomes are `invalid_model_action`.** Inspect the action schema, reduce
-thinking, increase `--max-action-tokens` only for truncation, and consider an
-SFT bootstrap for the JSON action format.
+**Most outcomes are `invalid_model_action`.** Inspect the action schema and the
+retained harness code. `INVALID_MODEL_ACTION` means the reply was absent or was
+not one JSON object; `ACTION_SCHEMA_VALIDATION_FAILED` means its shape or values
+missed the advertised schema. Reduce thinking, increase `--max-action-tokens`
+only for truncation, and consider an SFT bootstrap for the JSON action format.
 
 **Rewards have no variance.** GRPO has no within-group signal. Use harder tasks,
 more policy sampling, a more informative reward, or an SFT/OPD bootstrap.

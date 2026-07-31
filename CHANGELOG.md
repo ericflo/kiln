@@ -80,6 +80,14 @@
   Mid-run redeployment fails as typed `environment_identity_changed` at
   `identity_verification`, publishes no mixed-identity corpus, and uses the same
   strict comparison during live replay.
+  Advertised action schemas are now compiled during discovery with automatic
+  JSON Schema draft selection and no HTTP/filesystem reference resolution.
+  Every model action is validated locally before its WebSocket step;
+  mismatches never reach the environment and terminate as
+  `invalid_model_action` with the distinct
+  `ACTION_SCHEMA_VALIDATION_FAILED` harness code and bounded payload-free
+  diagnostics. Invalid advertised schemas are typed, non-retryable environment
+  protocol failures.
 - Corrected the v0.5.1 Vulkan recovery architecture. The recovered route set
   is no longer installed as a renamed global machine-tuned default. Policy v6
   is derived from the selected physical device's reported workgroup geometry,

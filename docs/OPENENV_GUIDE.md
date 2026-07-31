@@ -180,16 +180,16 @@ inside environments when mixing tasks with radically different ranges.
 
 ## Actions, observations, and ECHO
 
-The system prompt contains the discovered action JSON Schema. At each turn, the
-policy must emit one JSON object and no prose. A non-empty observation
-`input_text` is foregrounded as optional environment-provided decision text,
-while the complete wire observation remains present; it is not a protocol
-field or requirement. The environment remains authoritative: recoverable
-validation/execution errors are feedback turns on the same episode.
+The system prompt contains the discovered action JSON Schema. The policy emits
+one JSON object; Kiln compiles the schema during inspection and validates before
+`step`. Internal references work; external HTTP/filesystem references fail as a
+protocol error. A mismatch never contacts `step`: it becomes
+`invalid_model_action` with `protocol_error_reward` and bounded
+`ACTION_SCHEMA_VALIDATION_FAILED` keyword/JSON-Pointer evidence. Optional
+observation `input_text` is foregrounded while the complete wire observation
+remains present. Recoverable environment errors remain same-episode feedback.
 
-Actions and observations become `TurnKind` segments. GRPO trains actions; ECHO trains observation tokens, excluding full-warning harness errors. Prompts retain reset and turn history, and Kiln pumps Ping/Pong control frames while the policy thinks.
-One-step exact-verifier environments—including eight math families—need no
-adapter; their text actions flow unchanged end to end.
+Actions and observations become `TurnKind` segments. GRPO trains actions; ECHO trains observation tokens, excluding full-warning harness errors. Prompts retain reset and turn history, and Kiln pumps Ping/Pong control frames while the policy thinks. One-step exact-verifier environments—including eight math families—need no adapter; their text actions flow unchanged end to end.
 
 ## Identity and artifacts
 

@@ -391,6 +391,13 @@ def main() -> int:
     client = (ROOT / "crates" / "kiln-openenv" / "src" / "client.rs").read_text(
         encoding="utf-8"
     )
+    action_schema = (
+        ROOT / "crates" / "kiln-openenv" / "src" / "action_schema.rs"
+    ).read_text(encoding="utf-8")
+    workspace_manifest = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+    openenv_manifest = (
+        ROOT / "crates" / "kiln-openenv" / "Cargo.toml"
+    ).read_text(encoding="utf-8")
     corpus_source = (
         ROOT / "crates" / "kiln-train" / "src" / "openenv_provenance.rs"
     ).read_text(encoding="utf-8")
@@ -722,6 +729,43 @@ def main() -> int:
     ]:
         if term not in client:
             failures.append(f"kiln-openenv client is missing session-lifecycle term {term}")
+    if (
+        'jsonschema = { version = "0.49.2", default-features = false }'
+        not in workspace_manifest
+    ):
+        failures.append(
+            "workspace JSON Schema validator must keep HTTP/filesystem default features disabled"
+        )
+    if "jsonschema = { workspace = true }" not in openenv_manifest:
+        failures.append("kiln-openenv is missing the workspace JSON Schema validator")
+    for term in [
+        "OpenEnvActionValidator",
+        "jsonschema::validator_for",
+        "MAX_VALIDATION_ISSUES",
+        "iter_errors",
+        "error.kind().keyword()",
+        "instance_path",
+        "schema_path",
+        "supports_self_contained_internal_references",
+        "rejects_invalid_and_external_schemas_without_echoing_them",
+    ]:
+        if term not in action_schema:
+            failures.append(f"OpenEnv action-schema boundary is missing {term}")
+    for term in [
+        "pub fn action_validator",
+        "InvalidActionSchema",
+        "inspection.action_validator()",
+    ]:
+        if term not in client:
+            failures.append(f"kiln-openenv discovery is missing action validation term {term}")
+    for term in [
+        "parse_and_validate_model_action",
+        "ACTION_SCHEMA_VALIDATION_FAILED",
+        ".validate(&action)",
+        "OpenEnvEpisodeTerminationV1::InvalidModelAction",
+    ]:
+        if term not in cli:
+            failures.append(f"OpenEnv collector is missing action validation term {term}")
     for term in [
         "OpenEnvCollectionStage::Revalidating",
         "environment.revalidate(expected)",
@@ -757,6 +801,8 @@ def main() -> int:
         "revalidating",
         "environment_identity_changed",
         "identity_verification",
+        "ACTION_SCHEMA_VALIDATION_FAILED",
+        "external HTTP/filesystem",
     ]:
         if command not in guide:
             failures.append(f"OpenEnv guide is missing {command!r}")
@@ -773,6 +819,8 @@ def main() -> int:
         "identity_verification",
         "stable discovery surface",
         "requires exact equality",
+        "ACTION_SCHEMA_VALIDATION_FAILED",
+        "without HTTP/filesystem reference",
     ]:
         if term not in replay_reference:
             failures.append(f"OpenEnv replay reference is missing {term!r}")
@@ -782,6 +830,8 @@ def main() -> int:
         "failure.retryable=true",
         "new idempotency key",
         "legacy `error`",
+        "self-contained action schema",
+        "sampled-action schema failures",
     ]:
         if term not in capability_methods and term not in capability_pipeline:
             failures.append(f"capability pipeline is missing failure term {term!r}")
@@ -812,7 +862,7 @@ def main() -> int:
     if failures:
         raise SystemExit("\n".join(failures))
     print(
-        "OpenEnv typed failures, training preflight, bounded collection, self-contained trainer evidence, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, live replay, and continuous pinned/edge interoperability contracts match"
+        "OpenEnv advertised-action validation, typed failures, training preflight, bounded collection, self-contained trainer evidence, manifest-gated artifacts, session lifecycle, summary, replay, paired evaluation, verification, live replay, and continuous pinned/edge interoperability contracts match"
     )
     return 0
 
