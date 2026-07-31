@@ -151,19 +151,19 @@ def tagged_variant(
 
 
 def build_primitives() -> None:
-    add_definition("AnyJson", "serde_json::Value", {}, "Any JSON value carried without field-level interpretation.")
-    add_definition("Boolean", "bool", {"type": "boolean"}, "A serialized Rust boolean.")
-    add_definition("String", "String", {"type": "string"}, "A serialized UTF-8 Rust string.")
-    add_definition("NonEmptyString", "String", {"type": "string", "minLength": 1}, "A non-empty UTF-8 string.")
-    add_definition("NonNegativeInteger", "u64 | u32 | usize", {"type": "integer", "minimum": 0}, "A non-negative integer.")
-    add_definition("PositiveInteger", "u64 | u32 | usize", {"type": "integer", "minimum": 1}, "A positive integer.")
-    add_definition("FiniteNumber", "f32 | f64", {"type": "number"}, "A finite JSON number.")
-    add_definition("UnitInterval", "f32", {"type": "number", "minimum": 0, "maximum": 1}, "A score or rate in the closed interval [0, 1].")
+    add_definition("AnyJson", "serde_json::Value", {}, "Any JSON value; Kiln does not interpret its internal shape at this boundary.")
+    add_definition("Boolean", "bool", {"type": "boolean"}, "Either true or false.")
+    add_definition("String", "String", {"type": "string"}, "Text, including an empty string.")
+    add_definition("NonEmptyString", "String", {"type": "string", "minLength": 1}, "Text containing at least one character.")
+    add_definition("NonNegativeInteger", "u64 | u32 | usize", {"type": "integer", "minimum": 0}, "A whole number greater than or equal to zero.")
+    add_definition("PositiveInteger", "u64 | u32 | usize", {"type": "integer", "minimum": 1}, "A whole number greater than zero.")
+    add_definition("FiniteNumber", "f32 | f64", {"type": "number"}, "A finite JSON number; NaN and infinities are not valid JSON.")
+    add_definition("UnitInterval", "f32", {"type": "number", "minimum": 0, "maximum": 1}, "A score or rate from 0 through 1, inclusive.")
     add_definition(
         "DecimalU64",
         "u64",
         {"type": "string", "pattern": "^(0|[1-9][0-9]*)$"},
-        "An exact unsigned 64-bit value serialized as a base-10 string for JavaScript safety.",
+        "An unsigned 64-bit value encoded as decimal text so JavaScript clients do not round it.",
     )
     add_definition("Rfc3339Timestamp", "String", {"type": "string", "format": "date-time"}, "An RFC 3339 timestamp.")
     add_definition("Sha256Digest", "String", {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "A lowercase SHA-256 identity with an explicit algorithm prefix.")
@@ -171,7 +171,7 @@ def build_primitives() -> None:
         "EvalResourceName",
         "String",
         {"type": "string", "minLength": 1, "pattern": r"^(?![\s\S]*(?:/|\\|\.\.))(?=[\s\S]*\S)[\s\S]+$"},
-        "A non-blank suite, dataset, or judgment name without path separators or '..'.",
+        "A non-blank suite, dataset, or judgment name without path separators or the sequence '..'.",
     )
 
 
@@ -199,7 +199,7 @@ def build_scorers() -> None:
                 tagged_variant("line_coverage", {"min_coverage": ref("FiniteNumber")}, optional=("min_coverage",)),
             ]
         },
-        "Code comparison policy. Variant-specific defaulted fields may be omitted on input.",
+        "How the code scorer compares extracted code. Omitted variant settings use the scorer defaults.",
     )
     add_definition(
         "NameMatch",
@@ -255,7 +255,7 @@ def build_scorers() -> None:
         "Scorer",
         "kiln_eval::scorers::Scorer",
         {"oneOf": scorer_variants},
-        "Complete built-in scorer union. Unknown fields are accepted and ignored within each input variant.",
+        "Select one built-in scorer. Each variant accepts and ignores unrecognized input fields; use only documented fields so mistakes remain visible in review.",
     )
 
 
@@ -285,7 +285,7 @@ def build_suite_types() -> None:
             "name": nullable(ref("String")),
             "tool_call_id": nullable(ref("String")),
         },
-        "Canonical chat message. Non-string input content is normalized by the runtime's compatibility deserializer.",
+        "Chat message shared by inference, training, and evals. Kiln normalizes supported structured content into its internal message form.",
         optional=("content", "tool_calls", "name", "tool_call_id"),
         open_input=True,
     )
@@ -342,7 +342,7 @@ def build_suite_types() -> None:
             "schema_version": {"type": "integer", "enum": [1, 2]},
             "tools": array(ref("AnyJson")),
         },
-        "A validated evaluation suite. Defaulted fields may be omitted on input and are materialized when serialized.",
+        "A named set of examples with shared scoring, generation, aggregation, prompt, and tool settings. Omitted settings use documented defaults.",
         optional=("description", "generation", "aggregation", "system_prompt", "schema_version", "tools"),
         open_input=True,
         extra={"x-kiln-semantic-constraints": ["resolved example IDs are unique", "weights are finite and non-negative", "tool entries have a non-empty function.name or name", "every effective generation.n equals aggregation.k", "schema version 1 permits only single aggregation and n=1"]},
@@ -515,13 +515,13 @@ def build_result_types() -> None:
     )
     add_object(
         "PostEvalGate", "PostEvalGate",
-        {"min_accuracy": ref("FiniteNumber"), "relative_recovery": ref("FiniteNumber"), "absolute_gain": ref("FiniteNumber"), "adapter_name": ref("String"), "training_job_id": ref("NonEmptyString"), "auto_load_on_pass": ref("Boolean")},
-        "Post-training promotion thresholds retained on an eval job.", optional=("relative_recovery", "absolute_gain"),
+        {"min_accuracy": ref("UnitInterval"), "relative_recovery": ref("FiniteNumber"), "absolute_gain": ref("FiniteNumber"), "adapter_name": ref("String"), "training_job_id": ref("NonEmptyString"), "auto_load_on_pass": ref("Boolean")},
+        "Fail-closed post-training promotion settings retained with the paired eval job.", optional=("relative_recovery", "absolute_gain"),
     )
     add_object(
         "EvalJobInfo", "EvalJobInfo",
         {"schema_version": {"const": 2}, "job_id": ref("NonEmptyString"), "suite_name": ref("EvalResourceName"), "adapters": array(nullable(ref("String"))), "submission_kind": ref("EvalSubmissionKind"), "base_weight_shard_manifest": external_ref(OBSERVABILITY_SCHEMA, "BaseWeightShardManifest"), "execution_provenance": external_ref(OBSERVABILITY_SCHEMA, "ExecutionProvenanceV1"), "effective_seed": ref("DecimalU64"), "state": ref("EvalJobState"), "progress": ref("EvalProgress"), "finished_runs": array(ref("SuiteResult")), "headline_accuracy": nullable(ref("FiniteNumber")), "error": nullable(ref("String")), "source_training_job_id": nullable(ref("String")), "submitted_at_iso": ref("Rfc3339Timestamp"), "started_at_iso": nullable(ref("Rfc3339Timestamp")), "finished_at_iso": nullable(ref("Rfc3339Timestamp")), "post_eval_gate": ref("PostEvalGate"), "replay_expectation": ref("EvalReplayExpectationV1"), "replay_verdict": ref("EvalReplayVerdict")},
-        "Tracked eval-job list record; runtime-only Instants and cancellation handles are never serialized.",
+        "List-view record for a queued, running, or retained eval job. Process-local timers and cancellation handles are not part of the wire response.",
         optional=("base_weight_shard_manifest", "execution_provenance", "effective_seed", "post_eval_gate", "replay_expectation", "replay_verdict"),
     )
     add_object("EvalJobListResponse", "EvalJobListResponse", {"jobs": array(ref("EvalJobInfo"))}, "All retained eval jobs in descending submission order.")
@@ -550,7 +550,7 @@ def build_dataset_and_synthesis_types() -> None:
     add_object("DatasetStats", "DatasetStats", {"num_assistant_turns": ref("NonNegativeInteger"), "num_tool_messages": ref("NonNegativeInteger"), "num_with_tool_calls": ref("NonNegativeInteger"), "max_messages_per_conv": ref("NonNegativeInteger"), "max_content_chars": ref("NonNegativeInteger"), "avg_messages_per_conv": ref("FiniteNumber"), "sample_role_patterns": array(ref("String"))}, "Bounded structural statistics computed from an uploaded dataset.")
     add_object("DatasetManifest", "DatasetManifest", {"schema_version": {"const": 2}, "name": ref("EvalResourceName"), "format": ref("DatasetFormat"), "description": nullable(ref("String")), "num_rows": ref("NonNegativeInteger"), "size_bytes": ref("NonNegativeInteger"), "created_at": ref("Rfc3339Timestamp"), "updated_at": ref("Rfc3339Timestamp"), "corpus_sha256": ref("Sha256Digest"), "normalized_corpus_sha256": ref("Sha256Digest"), "split_manifest_sha256": ref("Sha256Digest"), "split_config": ref("DatasetSplitConfig"), "split_counts": ref("DatasetSplitCounts"), "num_groups": ref("NonNegativeInteger"), "num_sessions": ref("NonNegativeInteger"), "stats": ref("DatasetStats")}, "Persisted content-addressed dataset identity and partition summary.")
     add_object("DatasetListResponse", "DatasetListResponse", {"datasets": array(ref("DatasetManifest"))}, "All uploaded eval/training datasets.")
-    add_object("DatasetUploadMultipart", "DatasetUploadMultipart", {"name": ref("EvalResourceName"), "format": ref("DatasetUploadFormat"), "description": ref("String"), "file": {"type": "string", "format": "binary", "contentMediaType": "application/jsonl"}}, "Multipart dataset upload. Unknown parts are drained and ignored.", optional=("format", "description"), open_input=True, extra={"x-kiln-default-format": "sft_chat"})
+    add_object("DatasetUploadMultipart", "DatasetUploadMultipart", {"name": ref("EvalResourceName"), "format": ref("DatasetUploadFormat"), "description": ref("String"), "file": {"type": "string", "format": "binary", "contentMediaType": "application/jsonl"}}, "Multipart dataset upload. Unrecognized multipart fields are read and ignored.", optional=("format", "description"), open_input=True, extra={"x-kiln-default-format": "sft_chat"})
     add_object("DeleteDatasetResponse", "DeleteDatasetResponse", {"status": {"const": "deleted"}, "name": ref("EvalResourceName")}, "Confirmation that a dataset was deleted.")
     add_object("Sampling", "kiln_eval::synthesis::Sampling", {"max_examples": nullable(ref("NonNegativeInteger")), "max_prompt_chars": ref("NonNegativeInteger"), "max_target_chars": ref("NonNegativeInteger"), "seed": nullable(ref("NonNegativeInteger")), "dedupe": ref("Boolean")}, "Synthesis sampling and filtering controls.", optional=("max_examples", "max_prompt_chars", "max_target_chars", "seed", "dedupe"), open_input=True)
     add_definition(
@@ -562,7 +562,7 @@ def build_dataset_and_synthesis_types() -> None:
     add_object("SynthesisPreviewBody", "SynthesisPreviewBody", {**synthesis_fields(), "head_n": ref("NonNegativeInteger"), "source_split": ref("DatasetSplit")}, "Preview a suite synthesized from one persisted partition without saving it. Source defaults to holdout.", optional=preview_optional, open_input=True)
     synth_optional = tuple(field for field in synthesis_fields() if field != "suite_name") + ("force", "run_against", "source_split")
     add_object("SynthesizeBody", "SynthesizeBody", {**synthesis_fields(), "force": ref("Boolean"), "run_against": nullable(array(ref("String"))), "source_split": ref("DatasetSplit")}, "Persist a suite synthesized from one partition and optionally queue it against adapters. Source defaults to holdout.", optional=synth_optional, open_input=True)
-    add_object("SynthesisStats", "kiln_eval::synthesis::SynthesisStats", {"trajectories_seen": ref("NonNegativeInteger"), "trajectories_used": ref("NonNegativeInteger"), "examples_generated": ref("NonNegativeInteger"), "skipped_no_target": ref("NonNegativeInteger"), "skipped_prompt_too_long": ref("NonNegativeInteger"), "skipped_target_too_long": ref("NonNegativeInteger"), "skipped_duplicate": ref("NonNegativeInteger"), "skipped_strategy_match": ref("NonNegativeInteger"), "sample_kept": ref("NonNegativeInteger"), "effective_seed": ref("DecimalU64"), "auto_scorer_histogram": mapping(ref("NonNegativeInteger"))}, "Complete synthesis filtering and deterministic seed statistics. The u64 seed is emitted as an exact decimal string.")
+    add_object("SynthesisStats", "kiln_eval::synthesis::SynthesisStats", {"trajectories_seen": ref("NonNegativeInteger"), "trajectories_used": ref("NonNegativeInteger"), "examples_generated": ref("NonNegativeInteger"), "skipped_no_target": ref("NonNegativeInteger"), "skipped_prompt_too_long": ref("NonNegativeInteger"), "skipped_target_too_long": ref("NonNegativeInteger"), "skipped_duplicate": ref("NonNegativeInteger"), "skipped_strategy_match": ref("NonNegativeInteger"), "sample_kept": ref("NonNegativeInteger"), "effective_seed": ref("DecimalU64"), "auto_scorer_histogram": mapping(ref("NonNegativeInteger"))}, "Synthesis input, filtering, sampling, output, scorer, and effective-seed counts.")
     add_object("SynthesisPreview", "SynthesisPreview", {"examples": array(ref("EvalExample")), "stats": ref("SynthesisStats"), "suite_name": ref("EvalResourceName"), "default_scorer_kind": ref("NonEmptyString"), "aggregation": ref("EvalAggregation"), "completions_per_example": {"type": "integer", "minimum": 1, "maximum": 128}, "source_split": ref("DatasetSplit")}, "Non-persisted synthesis preview including its persisted source partition and completion reduction.")
     add_object("SynthesizeDatasetResponse", "SynthesizeDatasetResponse", {"suite": ref("EvalSuiteSummary"), "stats": ref("SynthesisStats"), "queued_eval_job_ids": array(ref("String"))}, "Persisted suite summary plus any auto-queued eval job IDs.")
 
@@ -574,11 +574,11 @@ def build_judgment_types() -> None:
     add_object("JudgmentListResponse", "JudgmentListResponse", {"judgments": array(ref("JudgmentManifest"))}, "All retained pairwise-judgment datasets.")
     add_object("CreateJudgmentBody", "CreateJudgmentBody", {"name": ref("EvalResourceName"), "description": nullable(ref("String"))}, "Create an append-only judgment dataset.", optional=("description",), open_input=True)
     append_fields = {"id": nullable(ref("String")), "prompt": array(ref("EvalChatMessage")), "adapter_a": nullable(ref("String")), "adapter_b": nullable(ref("String")), "response_a": ref("String"), "response_b": ref("String"), "winner": ref("JudgmentWinner"), "note": nullable(ref("String")), "tags": array(ref("String"))}
-    add_object("AppendJudgmentBody", "AppendJudgmentBody", append_fields, "Append one exact A/B preference row.", optional=("id", "adapter_a", "adapter_b", "note", "tags"), open_input=True)
+    add_object("AppendJudgmentBody", "AppendJudgmentBody", append_fields, "Store one human preference over two exact responses to the same prompt.", optional=("id", "adapter_a", "adapter_b", "note", "tags"), open_input=True)
     add_object("AppendJudgmentResponse", "AppendJudgmentResponse", {"judgment_id": ref("NonEmptyString"), **manifest_fields}, "Assigned row ID flattened with the updated judgment manifest.", optional=manifest_optional)
     add_object("DeleteJudgmentResponse", "DeleteJudgmentResponse", {"status": {"const": "deleted"}, "name": ref("EvalResourceName")}, "Confirmation that a judgment dataset was deleted.")
     add_object("CompileJudgmentBody", "CompileJudgmentBody", {"output_dataset": ref("EvalResourceName"), "include_skips": ref("Boolean"), "holdout_n": nullable(ref("NonNegativeInteger"))}, "Compile judgment rows to a swap-augmented SFT dataset with a holdout.", optional=("include_skips", "holdout_n"), open_input=True)
-    add_object("CompileJudgmentResponse", "CompileJudgmentResponse", {"status": {"const": "compiled"}, "rows": ref("PositiveInteger"), "holdout_n": ref("NonNegativeInteger"), "train_validation_split": ref("PositiveInteger"), "dataset": ref("DatasetManifest"), "warnings": array(ref("String"))}, "Compiled SFT dataset and exact train/validation boundary.")
+    add_object("CompileJudgmentResponse", "CompileJudgmentResponse", {"status": {"const": "compiled"}, "rows": ref("PositiveInteger"), "holdout_n": ref("NonNegativeInteger"), "train_validation_split": ref("PositiveInteger"), "dataset": ref("DatasetManifest"), "warnings": array(ref("String"))}, "The swap-augmented SFT output, reserved holdout count, source-row boundary, dataset manifest, and warnings.")
     add_object("PromoteJudgmentBody", "PromoteJudgmentBody", {"adapter": ref("String"), "holdout_n": ref("NonNegativeInteger")}, "Queue held-out validation for a trained judge adapter.", optional=("holdout_n",), open_input=True)
     add_object("ValidateJudgmentResponse", "ValidateJudgmentResponse", {"status": {"const": "queued"}, "eval_job_id": ref("NonEmptyString"), "effective_seed": ref("DecimalU64"), "validation_suite": ref("EvalResourceName"), "warnings": array(ref("String"))}, "Held-out judge-validation admission receipt.")
     add_object("RenderJudgmentPromptResponse", "RenderJudgmentPromptResponse", {"prompt": ref("String")}, "Exact pairwise prompt used by both judge training and inference.")
@@ -664,7 +664,7 @@ def build_examples() -> dict[str, list[Any]]:
         "ReplayBody": [{"run_index": 0}],
         "RerunBody": [{"adapter": "math-v2", "outcome_kinds": ["fail", "invalid", "error"], "include_pass": False, "seed": 42}],
         "SuiteListResponse": [{"suites": [summary]}],
-        "SuiteSaveResponse": [{"name": "math-smoke", "path": "/srv/kiln/.eval/suites/math-smoke.json", "status": "created"}],
+        "SuiteSaveResponse": [{"name": "math-smoke", "path": "/srv/kiln/.eval/suites/math-smoke/suite.json", "status": "created"}],
         "SynthesisPreview": [{"examples": suite["examples"], "stats": stats_example(), "suite_name": "math-smoke", "default_scorer_kind": "exact_match", "aggregation": {"kind": "single"}, "completions_per_example": 1, "source_split": "holdout"}],
         "SynthesisPreviewBody": [{key: value for key, value in synth_body.items() if key not in {"force", "run_against"}} | {"head_n": 5}],
         "SynthesizeBody": [synth_body],
@@ -689,7 +689,7 @@ def build_schema() -> dict[str, Any]:
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "https://ericflo.github.io/kiln/contracts/kiln-evals-v1.schema.json",
         "title": "Kiln Eval, Dataset Synthesis, and Judgment API",
-        "description": "Complete field-level wire contract for eval suites and jobs, uploaded datasets, deterministic suite synthesis, and the pairwise-judgment flywheel. Open input objects explicitly preserve serde's accepted-and-ignored unknown-field behavior; emitted objects are closed.",
+        "description": "JSON Schema for eval suites, jobs and results; uploaded datasets and deterministic synthesis; and pairwise judgments. Each request shape states whether unrecognized fields are ignored. Server-emitted objects are closed unless a definition explicitly says otherwise.",
         "x-kiln-field-schema-status": "complete",
         "x-kiln-entrypoints": list(ENTRYPOINTS),
         "x-kiln-external-contracts": [OBSERVABILITY_SCHEMA, THINKING_SCHEMA],

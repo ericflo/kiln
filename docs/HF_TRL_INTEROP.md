@@ -1,25 +1,65 @@
-# HF/TRL Interoperability Contract
+# HF/TRL export and PEFT import
 
-Kiln's native trainer is the bounded `native_online_lora_v1` single-GPU LoRA
-profile described in [NATIVE_SFT_PROFILE.md](NATIVE_SFT_PROFILE.md). General,
-distributed, and broadly configurable training belongs in Hugging Face
-Transformers, TRL, and PEFT. The interoperability route moves data and
-adapters between those systems without discarding the identities needed to
-audit the handoff.
+Use this workflow when Kiln's fixed
+[`native_online_lora_v1`](NATIVE_SFT_PROFILE.md) profile does not fit your
+training run. Kiln exports an immutable SFT or recorded-GRPO bundle, an
+external Hugging Face Transformers/TRL/PEFT process trains the adapter, and
+Kiln verifies the completed result against the running server before importing
+it.
 
-The version-1 manifests, validation library, atomic SFT and GRPO bundle
-writers, atomic import-envelope writer, task-aware pinned SFT/recorded-GRPO
-reference runner, public export/download API and CLI for both tasks,
-resident-validated PEFT import API and CLI, and local production-model
-round-trip qualification workload are implemented. A PEFT directory installed
-through the generic adapter upload route has not passed this contract.
+This contract preserves the identity of the data, model, tokenizer, templates,
+script, settings, and adapter files across that handoff. It does **not** prove
+that external training was correct or that a custom script executed as
+reported. A bare PEFT directory installed through the generic adapter upload
+route has not passed these checks.
 
-The generated [Artifact Lifecycle API Schema](../contracts/kiln-artifacts-v1.schema.json)
-is authoritative for the HTTP request, response, export-summary, and complete
-export-manifest field shapes. This guide owns workflow and verification
-semantics; it does not duplicate the wire schema.
+The generated [Artifact lifecycle API
+schema](../contracts/kiln-artifacts-v1.schema.json) is the source of truth for
+HTTP fields and validation constraints. This guide explains the workflow and
+its trust boundary.
 
-## Bundle Model
+## End-to-end workflow
+
+1. Export and download a verified bundle with `kiln train hf export-sft` or
+   `kiln train hf export-grpo`.
+2. Extract the archive and run the `train.py` copy inside it. The pinned
+   reference runner supports SFT and recorded GRPO; a modified script must use
+   `--allow-custom-script`.
+3. Import the completed directory with `kiln train hf import-peft`. Kiln
+   verifies the result and resident model identity before publishing the new
+   adapter.
+
+```bash
+mkdir -p ./handoffs
+kiln train hf export-sft \
+  --file /data/support-sft.jsonl \
+  --name support_run_01 \
+  --output ./handoffs/support_run_01.kiln-hf.tar.gz
+
+tar -xzf ./handoffs/support_run_01.kiln-hf.tar.gz -C ./handoffs
+python ./handoffs/support_run_01.kiln-hf/train.py \
+  ./handoffs/support_run_01.kiln-hf \
+  --base-model /absolute/path/to/the/hf-model
+
+kiln train hf import-peft \
+  --bundle ./handoffs/support_run_01.kiln-hf \
+  --name support-v2
+```
+
+The `--file` value is read by the running Kiln server. It is not uploaded from
+the CLI machine.
+
+## What crosses the boundary
+
+| Direction | Included | Deliberately excluded |
+| --- | --- | --- |
+| Kiln to external trainer | Dataset, model and weight-shard identity, tokenizer, three templates, optional split and input adapter, reference runner, environment lock, and export manifest | Server configuration and unrelated adapter-registry contents |
+| External trainer to Kiln | Export and result manifests, executed script, PEFT configuration and weights, model configuration, tokenizer, and three templates | Training corpus, ingestion receipt, split data, input-adapter bytes, environment lock, and reference-runner bytes |
+
+The import envelope excludes the corpus to avoid uploading training data back
+to the server. Its export manifest still binds the excluded files by digest.
+
+## Bundle model
 
 One handoff directory contains two independently self-verifying documents:
 
@@ -58,7 +98,7 @@ export manifest are cross-checked against the complete `sft_ingestion.json`
 receipt, including its source, row counts, invalid-row policy, ordered corpus
 digest, and internally validated per-row identities.
 
-### Strict GRPO corpus and atomic writer
+### Recorded-GRPO corpus requirements
 
 A GRPO manifest is not accepted merely because it names
 `kiln.rollout-provenance.v1`. Its `train.jsonl` must contain one canonical
@@ -98,17 +138,17 @@ no-replace rename. It syncs the parent and verifies the published directory
 again. Failure cleans staging, existing targets are never replaced, and later
 source mutation cannot change the published bundle.
 
-The same writer now backs `POST /v1/train/hf/grpo/exports`. The API accepts
+The same writer backs `POST /v1/train/hf/grpo/exports`. The API accepts
 exactly one provenance-complete inline `groups` array or server-local canonical
 `dataset_path`, plus the same optional split manifest and revision-stable input
 adapter as SFT. Both forms enter the existing immutable registry and therefore
 share its verification, download, conditional deletion, capacity, locking, and
 crash-recovery behavior. The task-aware pinned runner and first-party
 `export-grpo` CLI support recorded GRPO. The production-model round-trip
-workload described below is the required local hardware gate for proving that
-this complete route composes.
+workload described below is the local hardware gate for proving that the
+complete route works in one captured environment.
 
-## Template Identities
+## Template identities
 
 The three template artifacts are intentionally distinct:
 
@@ -123,7 +163,7 @@ renderer cannot parse that extension, so its effective identity uses the same
 template with those blocks converted through Kiln's internal span path. The
 two hashes must not be substituted for one another.
 
-## Stable Digests
+## Stable digests
 
 Manifest self-digests exclude only their own digest field. Kiln recursively
 sorts JSON object keys, emits compact UTF-8 JSON, hashes the resulting bytes
@@ -139,7 +179,7 @@ The result's executed script is preserved as `executed_train.py`. Import can
 therefore report whether it is byte-identical to the exported `train.py`
 without preventing deliberate custom training code.
 
-## Atomic SFT Bundles
+## Atomic SFT bundle creation
 
 Library-created export directories end in `.kiln-hf` and are immutable. The
 writer revalidates every prepared example against the server-owned ingestion
@@ -155,7 +195,7 @@ removes staging, and an existing final target is never replaced. Optional
 input-adapter files reject symlinks and are copied while the caller holds its
 adapter revision stable.
 
-## Public Export API
+## HTTP export API
 
 Create one server-owned immutable export with `POST
 /v1/train/hf/sft/exports`:
@@ -176,7 +216,7 @@ curl -s http://localhost:8420/v1/train/hf/exports/support_run_01/download \
 ```
 
 The request accepts exactly one of inline `examples`, a server-local
-`dataset_path`, or an uploaded eval-dataset `dataset` name. The special
+`dataset_path`, or a registered eval-dataset `dataset` name. The special
 `corrections:active` name snapshots currently trainable corrections without
 marking them trained. `invalid_row_policy` has the same `fail`/`skip` behavior
 and canonical row identities as native SFT. `input_adapter` and the
@@ -240,17 +280,18 @@ but unexpected symlinks or special entries fail closed. Download responses use
 `Cache-Control: private, no-store` because a deliberately deleted name may be
 reused for different bytes.
 
-## Verified CLI Handoff
+## CLI export and download
 
-The SFT and GRPO CLIs perform creation, download, local verification, atomic
-publication, and server cleanup through one fail-closed workflow:
+The SFT and recorded-GRPO commands create the server export, download it,
+verify it locally, publish it without replacing an existing file, and clean up
+the server copy:
 
 ```bash
 mkdir -p ./handoffs
 kiln train hf export-sft \
   --file /data/support-sft.jsonl \
   --name support_run_01 \
-  --output ./handoffs/support_run_01.tar.gz \
+  --output ./handoffs/support_run_01.kiln-hf.tar.gz \
   --invalid-row-policy fail \
   --input-adapter support-base \
   --split-manifest ./support-split.json
@@ -258,16 +299,16 @@ kiln train hf export-sft \
 kiln train hf export-grpo \
   --file /data/support-recorded-rollouts.jsonl \
   --name support_grpo_01 \
-  --output ./handoffs/support_grpo_01.tar.gz \
+  --output ./handoffs/support_grpo_01.kiln-hf.tar.gz \
   --split-manifest ./support-grpo-split.json
 ```
 
-`--file` is a path in the running server's filesystem. It intentionally has
-the same server-local meaning as native JSONL training and is not uploaded from
-the CLI host. Use `--dataset corrections:active` to snapshot active
-corrections without marking them trained, or pass another named server
-dataset. Exactly one of `--file` and `--dataset` is required. The optional
-split file is read by the CLI and must contain a JSON object.
+For `export-sft`, choose exactly one of `--file` and `--dataset`. `--file` is a
+path in the running server's filesystem, with the same server-local meaning as
+native JSONL training; it is not uploaded from the CLI host. Use `--dataset
+corrections:active` to snapshot active corrections without marking them
+trained, or pass another named server dataset. The optional split file is read
+by the CLI and must contain a JSON object.
 
 `export-grpo --file` has the same server-local path semantics and requires the
 canonical, final-LF, provenance-complete JSONL contract described above. It
@@ -314,22 +355,22 @@ Omitting `--export-sha256` is an intentional unconditioned operator deletion.
 Use it only after inspecting the current name, or when a damaged manifest
 prevents identity-conditional cleanup.
 
-After extraction, run the copy embedded in the bundle:
+After extraction, run the script embedded in the bundle:
 
 ```bash
-tar -xzf support_run_01.kiln-hf.tar.gz
-python ./support_run_01.kiln-hf/train.py ./support_run_01.kiln-hf \
+tar -xzf ./handoffs/support_run_01.kiln-hf.tar.gz -C ./handoffs
+python ./handoffs/support_run_01.kiln-hf/train.py \
+  ./handoffs/support_run_01.kiln-hf \
   --base-model /absolute/path/to/the/hf-model
 ```
 
-## Pinned Reference Runner
+## Pinned reference runner
 
-`scripts/hf_trl/train_sft.py` is the exact standalone runner embedded in every
-public SFT export and exposed by the GRPO library writer under a task-specific
-reference constant. Despite the historical filename, it dispatches from the
-self-verifying manifest task and supports both SFT and provenance-complete
-recorded GRPO. `scripts/hf_trl/requirements-sft.lock` pins the package versions
-it accepts:
+`scripts/hf_trl/train_sft.py` is the standalone runner embedded in every SFT
+export and exposed by the GRPO bundle writer. Despite its historical filename,
+it reads the task from the self-verifying manifest and supports both SFT and
+provenance-complete recorded GRPO.
+`scripts/hf_trl/requirements-sft.lock` pins the versions it accepts:
 
 | Package | Version |
 | --- | --- |
@@ -363,16 +404,17 @@ only Tokenizers' equivalent legacy string-pair and current two-token-array BPE
 merge framing; any vocabulary, merge, normalizer, pre-tokenizer,
 post-processor, decoder, or added-token drift still fails. SFT additionally
 verifies its complete selection receipt and generation-span template. GRPO
-streams and reconstructs
-the typed canonical corpus, then checks every prompt, scored payload,
+streams and reconstructs the typed canonical corpus, then checks every prompt,
+scored payload,
 tokenizer, template, behavior policy, adapter revision, sampling control,
 thinking budget, token boundary, sampled/forced action, behavior log-probability,
 row count, and ordered corpus digest. It enforces the same 64 GiB dataset,
-256 MiB row, ten-million-group, and 2..=1024-completion bounds as the Rust
+256 MiB row, ten-million-group, and 2-to-1,024-completion bounds as the Rust
 verifier. `--verify-only` performs this dependency-free preflight.
 
 The default route uses TRL `SFTTrainer`, assistant-only generation masks,
-PEFT LoRA, no packing or dataset shuffle, AdamW, and a materialized seed. It
+PEFT LoRA, no packing or dataset shuffle, AdamW, and an explicit effective
+seed. It
 derives `max_length` from the admitted rows and refuses an explicit value that
 would truncate any row. Input adapters are resumed as trainable PEFT adapters;
 new-adapter LoRA shape flags are rejected in that mode rather than silently
@@ -425,7 +467,7 @@ publication for a complete result. In-process failures clean partial result
 files; a later invocation can recover a result carrying the explicit
 incomplete sentinel, while unattributed output files fail closed.
 
-## Completed Bundle And Import Envelope
+## Completed bundle and import envelope
 
 A completed training directory is an exact closed superset of the pristine
 export. It contains every original export artifact plus exactly these four
@@ -456,7 +498,7 @@ envelope, fsyncs it, and publishes with a kernel-enforced no-clobber atomic
 rename on Linux and Apple platforms. Unsupported platforms fail closed rather
 than falling back to an existence-check race.
 
-## Verified PEFT Import CLI
+## CLI adapter import
 
 Use the completed extracted directory produced by the embedded runner, not the
 downloaded tarball and not a bare PEFT directory:
@@ -497,7 +539,7 @@ arrives, it similarly warns that the named adapter may already be installed.
 An existing name returns the server's `adapter_already_exists` error and is
 never replaced.
 
-## Validated PEFT Import API
+## HTTP adapter import
 
 `POST /v1/train/hf/peft/imports/{name}` is the lower-level transport used by
 the verified CLI and installs one completed external result.
@@ -550,11 +592,12 @@ and the adapter content revision. The first-party command that derives,
 archives, streams, predicts, and verifies this API transaction is
 `kiln train hf import-peft`.
 
-## Production-Model Qualification
+## Hardware qualification
 
-The committed `hf-trl-production-roundtrip-v1` workload is the end-to-end
-correctness gate. It runs with external network access disabled and loopback
-enabled. For both SFT and recorded GRPO it:
+The committed `hf-trl-production-roundtrip-v1` workload is an end-to-end
+correctness gate for one explicit backend, model, binary, and host. It runs
+with external network access disabled and loopback enabled. For both SFT and
+recorded GRPO, it:
 
 1. starts the selected production Kiln backend against the real model;
 2. generates two exact scored GRPO completions and exports both task bundles;
@@ -570,28 +613,32 @@ enabled. For both SFT and recorded GRPO it:
 
 The external environment must already contain the exact versions from
 `scripts/hf_trl/requirements-sft.lock`, with PyTorch installed from the index
-for the machine. Build `target/release/kiln` for the selected backend, commit
-the workload and source first, then run it from a clean tree:
+for the accelerator platform. Build `target/release/kiln` for the selected
+backend, commit the workload and source first, then run it from a clean tree.
+Use a stable identifier for the machine that produced the receipt:
 
 ```bash
 python3 scripts/qualification/run.py \
   qualification/workloads/hf-trl-production-roundtrip-v1.json \
   --variant rocm \
-  --host-id strix-halo \
+  --host-id local-accelerator-host \
   --model /absolute/path/to/Qwen3.5-4B \
   --model-id Qwen/Qwen3.5-4B \
   --var trainer_python=/absolute/path/to/pinned-venv/bin/python
 ```
 
-Use `--variant vulkan` with a Vulkan-built server binary for the paired Strix
-Halo receipt. The workload's cross-backend comparison policy requires exact
-agreement on import/eval counts, nonzero tensor counts, adapter byte sizes,
-HTTP error count, and task count while allowing only declared backend
-environment differences. CUDA and Metal need explicit workload variants before
-they can claim this gate; a compile check or manually assembled transcript is
-not a substitute for a strict receipt.
+Use `--variant vulkan` with a Vulkan-built server binary. The workload
+currently defines ROCm and Vulkan variants but no cross-backend comparison
+policy. The repository's committed receipts for this workload were captured on
+one Strix Halo host; they qualify only the source, binary, backend, model, and
+host recorded in each receipt. They do not establish performance or
+correctness for every ROCm or Vulkan device.
 
-## Validation Boundary
+CUDA and Metal need explicit workload variants and their own passed receipts
+before they can claim this gate. A compile check, a receipt from another
+device, or a manually assembled transcript is not a substitute.
+
+## What the contract does not prove
 
 The bundle contract proves byte and identity continuity across an explicitly
 provided handoff. By itself it does not prove that an external process executed

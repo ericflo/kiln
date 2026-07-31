@@ -1,8 +1,8 @@
 # Quickstart reference
 
-This is the compact reference path. For platform-specific installers,
+This is the command-focused reference path. For platform-specific installers,
 screenshots, troubleshooting cues, and copy buttons, use the
-[five-minute Quickstart](https://ericflo.github.io/kiln/quickstart.html).
+[guided Quickstart](https://ericflo.github.io/kiln/quickstart.html).
 
 ## 1. Install
 
@@ -54,7 +54,9 @@ Open `http://127.0.0.1:8420/ui/` for the dashboard and playground.
 ## 4. Connect an OpenAI client
 
 Point the client at `http://127.0.0.1:8420/v1`. A placeholder API key is
-accepted for clients that require one syntactically.
+accepted for clients that require one syntactically. Kiln does not authenticate
+requests itself, so keep the default loopback bind or put remote access behind
+an authenticated, trusted network boundary.
 
 ```python
 from openai import OpenAI

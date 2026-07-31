@@ -3,8 +3,9 @@
 Kiln reduces every SFT input source to one versioned admission contract before
 queue publication or GPU ownership. Inline `examples`, server-local
 `dataset_path` JSONL, uploaded named datasets, `corrections:active`, recipe
-steps, and direct Rust training select rows with the same parser, structural
-checks, chat template, tokenizer, and assistant-only label validation.
+steps, and direct Rust training all pass through the same structural checks,
+chat template, tokenizer, and assistant-only label validation. JSONL sources
+also share one row parser.
 
 The admitted rows are consumed by the fixed
 [`native_online_lora_v1` update contract](NATIVE_SFT_PROFILE.md).
@@ -88,8 +89,8 @@ kept corpus is unchanged.
 
 ## Receipt fields
 
-Successful and trainer-reached failed SFT runs place the following object at
-`train_receipt.json -> data.sft_ingestion`:
+Completed runs and failed runs that reached receipt creation place the
+following object at `train_receipt.json -> data.sft_ingestion`:
 
 ```json
 {

@@ -1,7 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://kiln.local/schemas/qualification-receipt-v1.json",
-  "title": "Kiln local hardware qualification receipt",
+  "title": "Kiln local qualification receipt",
+  "description": "Closed record of one local qualification run: source identity, execution envelope, selected backend and device, optional model identity, workload inputs, effective configuration, case outcomes, measurements, and hashed evidence. The Python validator enforces cross-field verdict, timestamp, platform, model, source, and artifact rules beyond this JSON Schema. A receipt is unsigned and has no self-digest; validate it and independently establish custody before treating it as trusted evidence.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -21,28 +22,47 @@
     "notes"
   ],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": {
+      "const": 1,
+      "description": "Qualification receipt contract version. The validator accepts only version 1."
+    },
     "receipt_id": {
       "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$",
+      "description": "Stable receipt label generated from time, backend, host, workload, and variant identity. It names the record but is not a content hash, signature, or uniqueness proof."
     },
-    "created_at_utc": { "$ref": "#/$defs/timestamp" },
+    "created_at_utc": {
+      "$ref": "#/$defs/timestamp",
+      "description": "UTC time when the receipt was created. The semantic validator requires it not to precede qualification.finished_at_utc."
+    },
     "source": {
       "type": "object",
+      "description": "Identity of the source inputs and Git state observed for the run. The source-tree digest covers a defined repository subset; it does not hash this receipt, model files, result artifacts, or historical receipts.",
       "additionalProperties": false,
       "required": ["tree_hash_format", "tree_hash", "git_commit", "git_worktree_clean"],
       "properties": {
-        "tree_hash_format": { "const": "kiln-source-tree-v1" },
-        "tree_hash": { "$ref": "#/$defs/sha256" },
+        "tree_hash_format": {
+          "const": "kiln-source-tree-v1",
+          "description": "Algorithm and inclusion-policy identifier used by scripts/qualification/source_tree_hash.py."
+        },
+        "tree_hash": {
+          "$ref": "#/$defs/sha256",
+          "description": "SHA-256 identity of tracked source inputs selected by kiln-source-tree-v1, including file mode, path, byte length, and content digest."
+        },
         "git_commit": {
           "type": "string",
-          "pattern": "^[0-9a-f]{40}$"
+          "pattern": "^[0-9a-f]{40}$",
+          "description": "Lowercase 40-hex Git commit recorded at run start. Existence is checked only when validation uses --require-known-commit."
         },
-        "git_worktree_clean": { "type": "boolean" }
+        "git_worktree_clean": {
+          "type": "boolean",
+          "description": "Whether the Git worktree was clean at run start. A passed receipt requires true; the runner also fails a run if a clean worktree becomes dirty."
+        }
       }
     },
     "qualification": {
       "type": "object",
+      "description": "Runner-owned summary of the qualification category, backend family, profile, final verdict, wall-clock interval, and argv invocation.",
       "additionalProperties": false,
       "required": [
         "kind",
@@ -56,97 +76,169 @@
       ],
       "properties": {
         "kind": {
-          "enum": ["environment", "correctness", "serving", "performance", "training", "eval", "soak"]
+          "enum": ["environment", "correctness", "serving", "performance", "training", "eval", "soak"],
+          "description": "Purpose of the run. Non-environment runs require workload identity; passed serving, performance, training, eval, and soak runs also require model identity."
         },
-        "backend": { "enum": ["cpu", "cuda", "rocm", "vulkan", "metal"] },
-        "profile": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "verdict": { "enum": ["passed", "failed"] },
-        "started_at_utc": { "$ref": "#/$defs/timestamp" },
-        "finished_at_utc": { "$ref": "#/$defs/timestamp" },
-        "duration_seconds": { "type": "number", "minimum": 0 },
+        "backend": {
+          "enum": ["cpu", "cuda", "rocm", "vulkan", "metal"],
+          "description": "Portable backend family selected by the workload variant. Device name and architecture are recorded separately and do not constrain this enum to a specific machine."
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Human-readable workload profile label. The local runner derives it from the workload ID and truncates it to 128 characters."
+        },
+        "verdict": {
+          "enum": ["passed", "failed"],
+          "description": "Final runner verdict. Passed requires every required result to pass and a clean source tree; failed requires at least one required result to fail or be skipped."
+        },
+        "started_at_utc": {
+          "$ref": "#/$defs/timestamp",
+          "description": "UTC run-start time."
+        },
+        "finished_at_utc": {
+          "$ref": "#/$defs/timestamp",
+          "description": "UTC run-finish time. It may not precede started_at_utc."
+        },
+        "duration_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Finite non-negative runner-observed wall time. It must agree with the start and finish timestamps within one second."
+        },
         "command": {
           "type": "array",
           "minItems": 1,
-          "items": { "type": "string", "minLength": 1 }
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Non-empty argv array for the qualification runner invocation. It is recorded as evidence, not replayed or shell-interpreted during receipt validation."
         }
       }
     },
     "environment": {
       "type": "object",
+      "description": "Host, operating-system, selected-device, runtime, compiler, and optional platform-specific observations captured around the run. These observations identify the measured environment; they are not a portable device allowlist.",
       "additionalProperties": false,
       "required": ["host_id", "os", "device", "runtime", "compiler"],
       "properties": {
         "host_id": {
           "type": "string",
-          "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+          "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$",
+          "description": "Operator-supplied stable host label used in receipt identity. It is not a hardware fingerprint or authenticated machine identity."
         },
         "os": {
           "type": "object",
+          "description": "Operating-system identity reported by the environment probes.",
           "additionalProperties": false,
           "required": ["name", "version", "kernel", "architecture"],
           "properties": {
-            "name": { "type": "string", "minLength": 1 },
-            "version": { "type": "string", "minLength": 1 },
-            "kernel": { "type": "string", "minLength": 1 },
-            "architecture": { "type": "string", "minLength": 1 }
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Operating-system family reported by the host."
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Operating-system version reported by the host."
+            },
+            "kernel": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Kernel release or build reported by the host."
+            },
+            "architecture": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Host processor architecture reported by the operating system."
+            }
           }
         },
         "device": {
           "type": "object",
+          "description": "Selected accelerator or CPU identity and capacity reported by backend probes. Optional fields remain null when a backend cannot report them.",
           "additionalProperties": false,
           "required": ["name", "architecture", "memory_bytes", "unified_memory", "driver"],
           "properties": {
-            "name": { "type": "string", "minLength": 1 },
-            "architecture": { "type": "string", "minLength": 1 },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Backend-reported device name for the selected logical device."
+            },
+            "architecture": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Backend-reported device architecture or target family."
+            },
             "memory_bytes": {
               "oneOf": [
                 { "type": "integer", "minimum": 1 },
                 { "type": "null" }
-              ]
+              ],
+              "description": "Total selected-device memory in bytes, or null when the probe cannot determine it."
             },
-            "unified_memory": { "type": "boolean" },
-            "driver": { "type": "string", "minLength": 1 },
+            "unified_memory": {
+              "type": "boolean",
+              "description": "Whether the selected device shares its memory pool with the host."
+            },
+            "driver": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Backend or operating-system driver identity reported for the selected device."
+            },
             "logical_index": {
               "oneOf": [
                 { "type": "integer", "minimum": 0 },
                 { "type": "null" }
-              ]
+              ],
+              "description": "Zero-based backend-visible device index, or null when no stable index is reported."
             },
             "device_uuid": {
               "oneOf": [
                 { "type": "string", "minLength": 1 },
                 { "type": "null" }
-              ]
+              ],
+              "description": "Backend-reported device UUID, or null when unavailable. WSL2 NVML temperature evidence must match this value."
             },
             "pci_bus_id": {
               "oneOf": [
                 { "type": "string", "minLength": 1 },
                 { "type": "null" }
-              ]
+              ],
+              "description": "PCI bus identifier for the selected device, or null when unavailable or inapplicable."
             },
             "compute_capability": {
               "oneOf": [
                 { "type": "string", "minLength": 1 },
                 { "type": "null" }
-              ]
+              ],
+              "description": "Backend-specific compute capability or feature-level text, or null when the backend does not expose one."
             },
             "compute_units": {
               "oneOf": [
                 { "type": "integer", "minimum": 1 },
                 { "type": "null" }
-              ]
+              ],
+              "description": "Positive count of backend-reported compute units, cores, or equivalent parallel units, or null when unavailable."
             },
             "memory_available_bytes": {
               "oneOf": [
                 { "type": "integer", "minimum": 0 },
                 { "type": "null" }
-              ]
+              ],
+              "description": "Available selected-device memory at capture time, or null when unavailable. It may not exceed memory_bytes."
             }
           }
         },
-        "runtime": { "$ref": "#/$defs/nonemptyStringMap" },
-        "compiler": { "$ref": "#/$defs/nonemptyStringMap" },
+        "runtime": {
+          "$ref": "#/$defs/nonemptyStringMap",
+          "description": "Non-empty map of runtime identities captured by probes, such as Kiln, backend API, or execution-environment versions."
+        },
+        "compiler": {
+          "$ref": "#/$defs/nonemptyStringMap",
+          "description": "Non-empty map of compiler and toolchain identities captured by probes."
+        },
         "platform": {
+          "description": "Optional WSL2- or macOS-specific capability declarations and observations. Capability status must agree with the corresponding evidence.",
           "oneOf": [
             {
               "type": "object",
@@ -485,35 +577,45 @@
       "oneOf": [
         { "type": "null" },
         { "$ref": "#/$defs/model" }
-      ]
+      ],
+      "description": "Model and tokenizer content identity for the measured run, or null when no model applies or a failed run could not establish it. Passed serving, performance, training, eval, and soak receipts require this object."
     },
     "workload": {
       "oneOf": [
         { "type": "null" },
         { "$ref": "#/$defs/workload" }
-      ]
+      ],
+      "description": "Committed workload identity, seed, and resolved parameters, or null only for environment qualification. The digest identifies the exact workload file bytes."
     },
-    "effective_config": { "$ref": "#/$defs/configObject" },
+    "effective_config": {
+      "$ref": "#/$defs/configObject",
+      "description": "Configuration the command-produced cases proved they actually used. The local runner copies the selected variant only when every command-owned case reports an exact match; otherwise this object is empty and affected results fail."
+    },
     "results": {
       "type": "array",
       "minItems": 1,
-      "items": { "$ref": "#/$defs/result" }
+      "items": { "$ref": "#/$defs/result" },
+      "description": "Runner-normalized, repetition-aggregated case outcomes in workload order. Required result status determines the receipt verdict; a passed receipt cannot contain a failed or skipped required result."
     },
     "metrics": {
       "type": "array",
-      "items": { "$ref": "#/$defs/metric" }
+      "items": { "$ref": "#/$defs/metric" },
+      "description": "Optional run-level measurements. The local workload runner currently emits case measurements under results and leaves this array empty; consumers must not silently combine the two scopes."
     },
     "artifacts": {
       "type": "array",
-      "items": { "$ref": "#/$defs/artifact" }
+      "items": { "$ref": "#/$defs/artifact" },
+      "description": "Content-addressed evidence files for probes, model fingerprints, command output, normalized case results, and effective run configuration. Hash verification is opt-in for local_ignored files and is not performed for external locations."
     },
     "unsupported": {
       "type": "array",
-      "items": { "type": "string", "minLength": 1 }
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Non-empty capability or probe limitations reported by environment capture. Entries explain missing evidence; they do not automatically change the verdict."
     },
     "notes": {
       "type": "array",
-      "items": { "type": "string", "minLength": 1 }
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Non-empty runner annotations about this record, including receipt downgrades. Notes are explanatory text, not signed assertions or machine-enforced policy."
     }
   },
   "allOf": [
@@ -559,9 +661,11 @@
   ],
   "$defs": {
     "capabilityStatus": {
-      "enum": ["available", "unavailable"]
+      "enum": ["available", "unavailable"],
+      "description": "Whether a platform-specific probe established the named capability. For observed WSL2 and macOS capabilities, this declaration must agree with the corresponding evidence."
     },
     "configValue": {
+      "description": "One finite JSON scalar, null, or recursively nested configuration object. List values are excluded so comparison code can address leaves with unambiguous dot paths.",
       "oneOf": [
         { "type": ["string", "number", "boolean", "null"] },
         { "$ref": "#/$defs/configObject" }
@@ -569,6 +673,7 @@
     },
     "configObject": {
       "type": "object",
+      "description": "Configuration namespace with lowercase, dot-path-compatible keys and finite scalar, null, or nested-object values.",
       "propertyNames": {
         "pattern": "^[a-z][a-z0-9_-]*$"
       },
@@ -576,18 +681,22 @@
     },
     "timestamp": {
       "type": "string",
-      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$",
+      "description": "UTC RFC 3339 timestamp ending in Z, with optional fractional seconds. The Python validator parses the value and enforces relevant ordering relationships."
     },
     "sha256": {
       "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$"
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "SHA-256 digest written as sha256: followed by 64 lowercase hexadecimal characters. Syntax alone does not verify the referenced content."
     },
     "nonemptyStringMap": {
       "type": "object",
       "minProperties": 1,
-      "additionalProperties": { "type": "string", "minLength": 1 }
+      "additionalProperties": { "type": "string", "minLength": 1 },
+      "description": "Non-empty object of non-empty string values used for probe-reported runtime, compiler, or platform detail identities."
     },
     "nullableSha256": {
+      "description": "A SHA-256 content digest or null when the corresponding optional input does not exist.",
       "oneOf": [
         { "$ref": "#/$defs/sha256" },
         { "type": "null" }
@@ -595,16 +704,29 @@
     },
     "weightFile": {
       "type": "object",
+      "description": "One model weight shard identified by path, byte length, and SHA-256 content digest.",
       "additionalProperties": false,
       "required": ["path", "sha256", "bytes"],
       "properties": {
-        "path": { "type": "string", "minLength": 1 },
-        "sha256": { "$ref": "#/$defs/sha256" },
-        "bytes": { "type": "integer", "minimum": 1 }
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Weight-file path recorded by model fingerprinting. Paths must be unique within the model record."
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "SHA-256 digest of this weight file's bytes."
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Positive weight-file size in bytes."
+        }
       }
     },
     "model": {
       "type": "object",
+      "description": "Content identity for the exact model directory observed before and after qualification. The runner fails if the final fingerprint differs from the initial one.",
       "additionalProperties": false,
       "required": [
         "id",
@@ -615,83 +737,162 @@
         "chat_template_hash"
       ],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "path": { "type": "string", "minLength": 1 },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Operator- or workload-selected model label."
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Model directory path used by fingerprinting. This is location evidence, not a portable download identifier."
+        },
         "weight_files": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/weightFile" }
+          "items": { "$ref": "#/$defs/weightFile" },
+          "description": "Non-empty set of uniquely named weight shards and their content identities."
         },
-        "config_hash": { "$ref": "#/$defs/sha256" },
-        "tokenizer_hash": { "$ref": "#/$defs/sha256" },
-        "chat_template_hash": { "$ref": "#/$defs/nullableSha256" }
+        "config_hash": {
+          "$ref": "#/$defs/sha256",
+          "description": "SHA-256 identity of the model configuration content selected by fingerprinting."
+        },
+        "tokenizer_hash": {
+          "$ref": "#/$defs/sha256",
+          "description": "Aggregate SHA-256 identity of tokenizer inputs selected by fingerprinting."
+        },
+        "chat_template_hash": {
+          "$ref": "#/$defs/nullableSha256",
+          "description": "SHA-256 identity of the chat template when present, otherwise null."
+        }
       }
     },
     "workload": {
       "type": "object",
+      "description": "Identity and resolved inputs for the workload contract that produced the receipt.",
       "additionalProperties": false,
       "required": ["id", "sha256", "seed", "parameters"],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "sha256": { "$ref": "#/$defs/sha256" },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Workload ID copied from the validated workload contract."
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "SHA-256 digest of the exact committed workload JSON file bytes."
+        },
         "seed": {
           "oneOf": [
             { "type": "integer", "minimum": 0 },
             { "type": "null" }
-          ]
+          ],
+          "description": "Deterministic non-negative seed delivered to each case, or null for a workload that explicitly declares no seed."
         },
-        "parameters": { "type": "object" }
+        "parameters": {
+          "type": "object",
+          "description": "Resolved run parameters. The local runner records variant_id plus every operator-supplied workload variable."
+        }
       }
     },
     "metric": {
       "type": "object",
+      "description": "One finite measurement and the unit, aggregation, and direction required to interpret it. Metric names must be unique within their containing array.",
       "additionalProperties": false,
       "required": ["name", "value", "unit", "aggregation", "lower_is_better"],
       "properties": {
         "name": {
           "type": "string",
-          "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+          "pattern": "^[a-z][a-z0-9_.-]{0,127}$",
+          "description": "Stable metric identifier declared by the workload result protocol and, when compared, by its metric rule."
         },
-        "value": { "type": "number" },
-        "unit": { "type": "string", "minLength": 1 },
-        "aggregation": { "type": "string", "minLength": 1 },
-        "lower_is_better": { "type": "boolean" }
+        "value": {
+          "type": "number",
+          "description": "Finite observed or repetition-aggregated value. The Python validator rejects NaN and infinity."
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Non-empty measurement unit. Compared metrics must match the committed workload rule exactly."
+        },
+        "aggregation": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Non-empty aggregation label. Repeated command metrics are emitted as mean_of_<count>_<original aggregation>."
+        },
+        "lower_is_better": {
+          "type": "boolean",
+          "description": "Recorded metric direction. It must match the committed workload rule when the metric participates in comparison."
+        }
       }
     },
     "result": {
       "type": "object",
+      "description": "Runner-normalized outcome for one workload case after all repetitions, output assertions, structured-result checks, and infrastructure checks.",
       "additionalProperties": false,
       "required": ["id", "required", "status", "duration_seconds", "metrics", "details"],
       "properties": {
         "id": {
           "type": "string",
-          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+          "description": "Unique case ID copied from the selected workload variant."
         },
-        "required": { "type": "boolean" },
-        "status": { "enum": ["passed", "failed", "skipped"] },
-        "duration_seconds": { "type": "number", "minimum": 0 },
+        "required": {
+          "type": "boolean",
+          "description": "Whether this case gates the receipt verdict. Every required result must pass for the receipt to pass."
+        },
+        "status": {
+          "enum": ["passed", "failed", "skipped"],
+          "description": "Final runner-owned case status after command status and runner, contract, source, model, and infrastructure failures are applied."
+        },
+        "duration_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Finite sum of runner-observed monotonic durations across this case's repetitions."
+        },
         "metrics": {
           "type": "array",
-          "items": { "$ref": "#/$defs/metric" }
+          "items": { "$ref": "#/$defs/metric" },
+          "description": "Command- or runner-owned measurements aggregated across repetitions. Per-execution advisory tolerances are not copied into this result."
         },
         "details": {
           "oneOf": [
             { "type": "string", "maxLength": 2048 },
             { "type": "null" }
-          ]
+          ],
+          "description": "Optional bounded diagnostic text combined from case executions and runner or infrastructure failures."
         }
       }
     },
     "artifact": {
       "type": "object",
+      "description": "Content identity for one evidence file referenced by the receipt. The receipt records hashes but does not embed, sign, or automatically retrieve the content.",
       "additionalProperties": false,
       "required": ["kind", "location", "path", "sha256", "bytes"],
       "properties": {
-        "kind": { "type": "string", "minLength": 1 },
-        "location": { "enum": ["local_ignored", "external"] },
-        "path": { "type": "string", "minLength": 1 },
-        "sha256": { "$ref": "#/$defs/sha256" },
-        "bytes": { "type": "integer", "minimum": 0 }
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Evidence-role label, such as environment_probes, case_stdout, case_result, model_fingerprint, or effective_run_config."
+        },
+        "location": {
+          "enum": ["local_ignored", "external"],
+          "description": "Custody class. local_ignored evidence can be verified under .qualification with --require-local-artifacts; external evidence is not fetched or hash-checked by the validator."
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Artifact path or external locator. The validator constrains local_ignored paths to .qualification only when local verification is requested."
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "Claimed SHA-256 digest of the artifact bytes. It is recomputed only for locally verified local_ignored evidence."
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Claimed artifact size in bytes. It is checked against file length only for locally verified local_ignored evidence."
+        }
       }
     }
   }

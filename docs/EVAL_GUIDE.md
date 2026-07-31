@@ -1,516 +1,343 @@
-# Eval Guide
+# Eval guide
 
-Kiln ships a first-class eval system for measuring how well LoRA adapters
-perform on tasks that matter to you. Evals run in the same process as
-inference, share the same model weights, and slot into the same job-queue
-machinery as training — so you can `train → eval → compare` in one HTTP
-loop without touching Python.
+Kiln evaluates the base model and LoRA adapters through the same in-process
+inference path used for serving. A suite defines prompts, targets, generation
+settings, and scoring. A run records raw completions, one reduced outcome per
+example, aggregate metrics, and the provenance needed to compare or replay it.
 
-The generated [Eval and Judgment API Schema](../contracts/kiln-evals-v1.schema.json)
-is the normative field-level reference for every suite, scorer, job, dataset,
-synthesis, and judgment payload in this guide. It records defaults, bounds,
-decimal seed encoding, thinking-budget provenance, response closure, conditional
-source rules, and the input objects where unknown fields are intentionally
-accepted and ignored. The generated [HTTP API Contract](../contracts/kiln-http-api-v1.openapi.json)
-owns route methods, media types, response statuses, handler bindings, and errors.
+Use the generated [eval and judgment schema](../contracts/kiln-evals-v1.schema.json)
+for field types, defaults, bounds, and response shapes. Use the generated
+[HTTP API contract](../contracts/kiln-http-api-v1.openapi.json) for methods,
+paths, status codes, media types, and errors.
 
-That one-process loop requires `KILN_SERVER_SERVING_PROFILE=experimental`. The
-default `stable` profile admits eval inference but rejects training and real
-adapter weight transitions. A `maintenance` process admits training and
-adapter transitions but rejects every eval because inference is disabled; run
-the eval after restarting into `stable`. See
-[Serving Profiles](SERVING_PROFILES.md).
+All examples assume a server at `http://localhost:8420`. The browser UI exposes
+the same workflow under **Evals → Datasets / Suites / Jobs / Judgments**.
 
-Three things are unusual about kiln's eval stack:
+## Serving profile
 
-1. **You don't write a scorer.** Auto-detect picks one per example based on
-   the *shape of the target* — numbers go to `numeric_tolerance`, JSON-shaped
-   targets to `json_validity`, tool calls to `tool_call`, code blocks to
-   `code`, and free-form text to a contains-with-key-phrases scorer.
-2. **You don't have to start from scratch.** Upload an SFT JSONL and Kiln
-   content-addresses it, persists group-aware train/validation/holdout
-   partitions, and *synthesizes* an eval suite from the holdout partition by
-   default. It never relabels the training partition as held out.
-3. **You don't need a frontier LLM as the judge.** The flywheel turns
-   user A/B picks into a local SFT dataset; that dataset trains a *local*
-   judge LoRA; the judge LoRA scores future evals via `LlmJudge`. Nothing
-   leaves your machine.
+Choose the profile before starting the server:
 
-Everything in this guide assumes a Kiln server running on
-`http://localhost:8420`. The `/ui/` dashboard has a dedicated Evals tab with
-Datasets / Suites / Jobs / Judgments sub-tabs that drive every endpoint
-documented here.
+| Task | Profile |
+| --- | --- |
+| Evaluate the base model or an adapter already active at startup | `stable` or `experimental` |
+| Train, load the resulting unmerged adapter, and evaluate it in one process | `experimental` |
+| Drain inference and train without eval traffic | `maintenance` |
+
+`maintenance` disables inference, so it cannot run evals. After
+maintenance-mode training, restart in `experimental` to load and evaluate the
+saved unmerged adapter. Do not restart in `stable` for that transition:
+`stable` deliberately rejects runtime adapter changes. See
+[Serving profiles](SERVING_PROFILES.md).
+
+## Choose a workflow
+
+| Starting point | Recommended path |
+| --- | --- |
+| A small, hand-authored test set | Write a suite JSON file, register it, then run or compare it. |
+| An SFT conversation dataset | Upload it, inspect its split, and synthesize a suite from `holdout`. |
+| Recorded tool-using traffic | Convert request logs or external traces with `kiln-eval trace-suite`. |
+| Human A/B preferences | Record judgments, reserve a holdout, compile SFT data, train a judge adapter, then validate it. |
+| A completed run that must reproduce exactly | Use strict replay, not a failure rerun. |
 
 ## Five-minute tour
 
-1. **Author a suite.** A suite is a JSON document with a name, a default
-   scorer, generation params, and a list of examples. Example
-   (`smoke.json`):
-
-   ```json
-   {
-     "name": "math-smoke",
-     "description": "Three arithmetic problems",
-     "schema_version": 2,
-     "default_scorer": { "kind": "numeric_tolerance", "integer_only": true },
-     "generation": { "temperature": 0.0, "max_tokens": 32, "n": 1 },
-     "aggregation": { "kind": "single" },
-     "examples": [
-       { "messages": [{"role": "user", "content": "47 + 138?"}], "target": "185" },
-       { "messages": [{"role": "user", "content": "23 * 17?"}],  "target": "391" },
-       { "messages": [{"role": "user", "content": "1024 - 376?"}], "target": "648" }
-     ]
-   }
-   ```
-
-2. **Register it.**
-
-   ```bash
-   curl -X POST http://localhost:8420/v1/eval/suites \
-        -H 'content-type: application/json' \
-        -d @smoke.json
-   ```
-
-   or via the CLI:
-
-   ```bash
-   kiln-eval register --file smoke.json
-   ```
-
-3. **Run it.**
-
-   ```bash
-   kiln-eval run --suite math-smoke --adapter my-trained-adapter --seed 42 --watch
-   ```
-
-   The CLI prints a per-suite summary when the job lands:
-
-   ```
-   Effective seed: 42 (kiln.eval-seed.v1)
-   Suite: math-smoke | Adapter: my-trained-adapter
-     job: ...  hash: ...  aggregate: single
-     accuracy:  66.7%  |  mean: 0.667  |  weighted: 0.667
-     pass:2  fail:1  invalid:0  error:0  (examples=3, completions=3)
-     latency ms: p50=412  p90=601  p99=601  mean=478
-   ```
-
-## The 60-second onramp: Dataset → Suite → Eval
-
-Most users never hand-author a suite. The canonical flow is:
-
-1. **Upload an SFT JSONL.** Drag a `messages: [...]` corpus into the
-   **Evals → Datasets → Upload** panel, or POST it via:
-
-   ```bash
-   curl -F name=my-sft -F format=sft_chat -F file=@my-sft.jsonl \
-        http://localhost:8420/v1/eval/datasets/upload
-   ```
-
-   Kiln content-addresses every row and persists deterministic,
-   group/session-aware train, validation, and holdout views. Inspect the
-   actual counts before use; connected rows always stay together.
-
-2. **Synthesize a held-out suite.** Synthesis reads the persisted `holdout`
-   partition by default. Pick a *strategy* (`final_assistant`,
-   `first_assistant_turn`, `every_assistant_turn`, `tool_call_predict`) and
-   click **Preview 5 examples** to sanity-check before committing. Then
-   **Save & Run vs active** synthesizes the full suite and queues an eval
-   against your currently-loaded adapter in one click.
-
-   Strategies in plain English:
-   - **`final_assistant`** — Prompt = everything up to the last user turn;
-     target = the very last assistant turn. Tests end-to-end correctness on
-     Q&A and on the *final answer* of an agent run.
-   - **`first_assistant_turn`** — Prompt = system + first user; target =
-     first assistant. Cheap, fast, tests immediate response only.
-   - **`every_assistant_turn`** — One example per assistant turn. Useful for
-     "next-action prediction" evals across long agent trajectories.
-   - **`tool_call_predict`** — Only keeps assistant turns that emit tool
-     calls. Targets are canonicalized `{"tool_calls":[…]}` JSON; the
-     synthesized scorer is `tool_call` with auto args scoring.
-
-3. **Stash + re-run.** Suites live in `<adapter_dir>/.eval/suites/<name>/`
-   on disk. Re-run the same suite against any adapter in 1 click.
-
-The complete row-identity, split API, named-training, contamination, migration,
-and provenance contract is in
-[Dataset Splits and Train/Eval Separation](DATASET_SPLITS.md).
-
-## Multi-completion evaluation
-
-### The unit of evidence
-
-An eval example is one independent observation. Asking the model for `k`
-completions does not turn that example into `k` independent observations: the
-completions share the same prompt, target, tags, weight, and usually much of
-the same failure mode. Kiln therefore stores two result layers:
-
-- `outcomes` contains every raw `ExampleOutcome`, keyed by `example_id` and
-  `completion_index`. Latency, token counts, exact generation seed, raw text,
-  reasoning, and thinking-budget evidence live here.
-- `aggregated_outcomes` contains exactly one `AggregatedExampleOutcome` per
-  example. Headline accuracy, mean score, Wilson confidence intervals,
-  weights, scorer/tag/tool slices, paired comparisons, regression detection,
-  failure reruns, and promotion gates consume this layer.
-
-`metrics.num_examples` is the number of reduced examples and
-`metrics.num_completions` is the number of raw generations. Token, latency,
-reasoning-length, thinking-closure, and schema-diagnostic totals use raw
-completions because they measure runtime work rather than statistical sample
-size.
-
-### Reducers
-
-Every schema-v2 suite declares one `aggregation`. Its cardinality `k` must be
-between 1 and 128, and every effective `generation.n` (suite default, run
-override, or per-example override) must equal that `k`.
-
-| Wire value | Reduced score and verdict | Representative raw completion |
-| --- | --- | --- |
-| `{"kind":"single"}` | Requires `n=1`; preserves completion 0's score and kind. | Completion 0. |
-| `{"kind":"mean_at_k","k":K}` | Arithmetic mean of all K scorer values. Passes at a mean of at least `0.5`; an all-Invalid/Error group preserves that non-verdict instead. | Score closest to the mean, then lowest index. |
-| `{"kind":"pass_at_k","k":K}` | Score 1 and Pass when any completion is Pass; otherwise score 0. This is observed any-success, not an estimator over a larger sample. | First passing completion, otherwise completion 0. |
-| `{"kind":"majority_at_k","k":K}` | Score 1 and Pass only when more than half of the completions are Pass; otherwise score 0. K must be odd. | First completion on the winning side. |
-
-When no completion passes, the reduced non-pass kind is selected in the order
-Fail, Invalid, Error according to which raw kinds are present. This keeps
-ordinary wrong answers distinct from format rejection and generation failure.
-The aggregate also records `completion_indices`,
-`representative_completion_index`, and exact `num_pass`, `num_fail`,
-`num_invalid`, and `num_error` counts.
-
-`mean_at_k` preserves continuous scorer information and is normally the right
-choice for judge, similarity, and partial-credit scorers. `pass_at_k` answers
-"did any of these K attempts solve it?" and should not be compared as if it
-were single-attempt accuracy. `majority_at_k` measures consistency under
-sampling. Use an odd K so a tie cannot be hidden behind policy. For stochastic
-multi-completion suites, choose a nonzero temperature; the dashboard defaults
-new multi-completion synthesis to `0.7` but keeps it editable.
-
-### Authoring and running
-
-This suite samples five attempts and treats any successful attempt as the
-example verdict:
+Create `smoke.json`:
 
 ```json
 {
-  "name": "code-pass-at-5",
+  "name": "math-smoke",
+  "description": "Three arithmetic checks",
   "schema_version": 2,
   "default_scorer": {
-    "kind": "code",
-    "language": "python",
-    "style": {"kind": "token_similarity", "min_jaccard": 0.8}
+    "kind": "numeric_tolerance",
+    "atol": 0,
+    "rtol": 0,
+    "integer_only": true
   },
   "generation": {
-    "temperature": 0.7,
-    "top_p": 0.95,
-    "max_tokens": 512,
-    "n": 5
+    "temperature": 0,
+    "top_p": 1,
+    "top_k": 0,
+    "max_tokens": 32,
+    "n": 1
   },
-  "aggregation": {"kind": "pass_at_k", "k": 5},
+  "aggregation": {"kind": "single"},
   "examples": [
     {
-      "id": "sum-even",
-      "messages": [{"role": "user", "content": "Write sum_even(values)."}],
-      "target": "def sum_even(values):\n    return sum(x for x in values if x % 2 == 0)"
+      "id": "add",
+      "messages": [{"role": "user", "content": "47 + 138?"}],
+      "target": "185"
+    },
+    {
+      "id": "multiply",
+      "messages": [{"role": "user", "content": "23 × 17?"}],
+      "target": "391"
+    },
+    {
+      "id": "subtract",
+      "messages": [{"role": "user", "content": "1024 - 376?"}],
+      "target": "648"
     }
   ]
 }
 ```
 
-The suite registry validates this contract on save and load. The executor
-validates it again before prompt preparation, including an API-level
-`generation` override. A mismatched `n`, zero or excessive K, even
-`majority_at_k`, incomplete completion group, duplicate/missing completion
-index, non-finite score, or inconsistent tags/metadata fails closed instead of
-silently changing the denominator.
-
-The Evals dashboard exposes reducer, K, and temperature when synthesizing a
-suite. Suite rows show the saved reducer. Result drill-down filters and counts
-one row per reduced example, opens the reducer-selected representative output,
-and shows the raw kind counts. The JSONL download retains every raw completion
-and embeds its matching `aggregated_example_outcome` and `aggregation` so an
-offline audit can reconstruct both views.
-
-Failure reruns select reduced non-passing example IDs, then rerun the complete
-example with the original reducer. Compare and promotion paths require both
-runs to use the same reducer and example set; pairing is by stable
-`example_id`, never result order or completion zero.
-
-A failure rerun is a new diagnostic run over a subset. It may accept a new
-seed and does not claim that any completion is reproduced. Strict replay is a
-separate whole-run operation that retains the original suite, generation,
-seed, identity envelope, and expected raw decoder bytes; see
-[Strict byte replay](#strict-byte-replay).
-
-### Result schema v2 and migration
-
-New result documents require top-level `schema_version: 2`. Every
-`SuiteResult` requires `aggregation`, `aggregated_outcomes`, raw `outcomes`,
-and both example/completion counts in its metrics. Result v1 and unversioned
-results are rejected because their `n > 1` headline metrics cannot be
-unambiguously reconstructed: older producers sometimes counted completions as
-examples while slices and promotion used completion zero. Terminal job
-archives carry the same version and are skipped at startup with an explicit
-rerun-required diagnostic when the version is missing or older.
-
-Suite schema v1 remains readable only for the unambiguous `single`, `n=1`
-case. To migrate a suite, set `schema_version` to `2`, add an explicit
-`aggregation`, and make every suite/per-example `generation.n` equal its K.
-Do not relabel an old multi-completion result as v2; rerun the suite so Kiln
-can persist the raw group and canonical reduction. The generated contract file
-keeps its `kiln-evals-v1.schema.json` name because that is the stable HTTP
-contract family; payload-level `schema_version` records this result-format
-break.
-
-## Production trace tool-call evals
-
-### Mine your own request log
-
-Every inference request kiln serves is already a recorded production trace:
-the server appends one JSON row per request/response to
-`<adapter_dir>/.requests/` (`requests-current.jsonl` plus rotated
-`requests-<ts>.jsonl.gz`, size-rotated and retention-capped; SSE streams are
-reassembled into the final-message shape). Each row carries the wire-format
-`request` and `response`, the HTTP `status`, the `user_agent`, and the
-`adapter` that served it (key omitted for base-model rows), so the corpus
-splits cleanly per adapter.
-
-For completed chat streams, reassembly retains the finish chunk's
-`metadata.thinking_budget` object and restores its final outcome at
-`response.choices[0].thinking_budget`, matching the non-streaming log shape.
-An interrupted stream is marked `stream_interrupted=true`; if it ended before
-the finish chunk, the log does not invent a budget outcome.
-
-Each generated eval `ExampleOutcome` uses the same flat `thinking_budget`
-record as chat metadata: effective limits and sources, `applied`, and terminal
-`triggered`, `trigger`, `closed`, `thinking_tokens`, and `thinking_time_ms`
-fields when an outcome exists. Readers still accept the earlier eval-only
-shape that nested those terminal fields under `outcome`; new results always
-write the shared flat shape.
+Register and run it:
 
 ```bash
-# SFT dataset from successful chats (request messages + assistant reply):
-zcat -f ~/models/Qwen3.5-4B/adapters/.requests/requests-*.jsonl* \
-  | jq -c 'select(.status == 200 and .route == "/v1/chat/completions")
-      | {messages: (.request.messages + [.response.choices[0].message])}' > mined-sft.jsonl
-
-# Or feed the importer below directly for a tool-call eval suite:
-zcat -f ~/models/Qwen3.5-4B/adapters/.requests/requests-*.jsonl* \
-  | jq -c 'select(.status == 200)
-      | {messages: (.request.messages + [.response.choices[0].message]), tools: .request.tools}' \
-  > mined-traces.jsonl
-kiln-eval trace-suite --input mined-traces.jsonl --format openai_jsonl \
-  --output mined-tool-calls.json --suite-name mined-tool-calls
+kiln-eval register --file smoke.json
+kiln-eval run \
+  --suite math-smoke \
+  --adapter my-trained-adapter \
+  --seed 42 \
+  --watch
 ```
 
-(`zcat -f` reads the gzipped rotations and the plain active file in one
-stream. Rows whose final assistant message has no tool call are counted as
-`skipped_no_tool_call` by the importer — expected for plain chat traffic.)
+Pass `--adapter ""` to evaluate the base model. Omit `--adapter` to use the
+currently active adapter. Add `--json` when automation needs the complete job
+rather than the human summary.
 
-### Importing external traces
+## Build a suite from a dataset
 
-For traces exported from other systems, `kiln-eval trace-suite` turns a JSONL
-export of recorded tool-calling turns into an eval suite:
+Upload an SFT JSONL corpus:
 
 ```bash
-kiln-eval trace-suite \
-  --input production-turns.jsonl \
-  --input more-production-turns.jsonl \
-  --output production-tool-calls.json \
-  --stats-output production-tool-calls.report.json \
-  --suite-name production-tool-calls \
-  --max-examples 1000 \
-  --seed 42
-
-kiln-eval run --file production-tool-calls.json --adapter my-agent-lora --watch
+curl --fail-with-body -sS \
+  -F name=my-sft \
+  -F format=sft_chat \
+  -F file=@my-sft.jsonl \
+  http://localhost:8420/v1/eval/datasets/upload
 ```
 
-The importer is source-agnostic. Your production pipeline only needs to emit
-one JSON object per row in one of these shapes:
+Kiln persists deterministic `train`, `validation`, and `holdout` views. Check
+their actual counts: normalized duplicates and rows linked by declared
+`group_id` or `session_id` stay together, so row percentages need not exactly
+match the configured percentages.
 
-- **`prompt_chosen_jsonl`**: `{ "prompt_messages": [...], "chosen": {...}, "tools": [...] }`
-- **`openai_jsonl`**: `{ "messages": [...prompt..., assistant_with_tool_calls], "tools": [...] }`
-- **`openai_trajectory_jsonl`**: `{ "messages": [full OpenAI-style trajectory], "tools": [...] }`;
-  every assistant message with a tool call becomes one sampled candidate, and
-  its prompt is the exact message prefix before that assistant turn.
-- **`anthropic_jsonl`**: `{ "system_prompt": "...", "messages": [...], "assistant_response": [...], "tools": [...] }`
-- **`anthropic_trajectory_jsonl`**: `{ "system_prompt": "...", "messages": [full Anthropic-style trajectory], "tools": [...] }`;
-  every assistant message containing a `tool_use` block becomes one sampled
-  candidate after converting the exact Anthropic prefix to Kiln's chat format.
+Dataset preview and synthesis select `holdout` by default. The available
+strategies answer different questions:
 
-Pass `--format openai_trajectory_jsonl` when every row is a full trajectory,
-pass `--format anthropic_trajectory_jsonl` for Anthropic full trajectories, or
-include `"format": "openai_trajectory_jsonl"` / `"trace_format": ...` on
-individual rows when mixing row shapes under `--format auto`. Auto-detection
-recognizes both vendors' trajectories: Anthropic `messages` arrays that
-contain `tool_use` or `tool_result` content blocks, and OpenAI `messages`
-arrays that contain `tool`-role messages or more than one assistant
-`tool_calls` turn. Both get per-turn materialization; remaining `messages`
-rows fall back to single-turn `openai_jsonl` scoring of the final assistant
-message.
+| Strategy | Prompt and target |
+| --- | --- |
+| `final_assistant` | Prompt through the final user turn; target the last assistant turn. |
+| `first_assistant_turn` | Initial system/user context; target the first assistant turn. |
+| `every_assistant_turn` | Create one example for every assistant turn. |
+| `tool_call_predict` | Keep assistant tool-call turns and target canonical tool-call JSON. |
+| `tool_response_followup` | End the prompt after tool results; target the next assistant turn. |
+| `end_of_trajectory_answer` | Include the agentic trajectory through the last tool result; target the closing answer. |
 
-Rows without a current-turn tool call are skipped. Eligible rows are
-reservoir-sampled, so large exports can stream through without loading the
-whole file. Dedupe is off by default because repeated production turns are
-workload-frequency signal.
-
-Repeat `--input` to sample one suite across multiple exports. Sampling stays
-global across all files, and the audit report records the physical source path
-and per-file source line for every sampled example.
-
-Use `--stats-output` for the audit sidecar you keep with eval results. It
-records the exact sampling config, effective seed, parse/skip counts, source
-format counts, retained-vs-sampled tool histograms, and one provenance record
-per sampled example (`example_id`, source line, source format, optional
-source path, turn/session/model fields, source message index for trajectory
-rows, target tools, prompt chars, target chars). This is the artifact that lets
-you later explain what production workload slice an adapter score actually
-measured.
-
-Each generated example also embeds the same provenance in `metadata`, and
-raw eval results echo that metadata on every outcome. When a production
-workload eval fails, the result JSON can be inspected directly to recover the
-source export path, source line, session/turn/model fields, and target tool
-set for that failed turn.
-
-Production trace examples are tagged for aggregate slicing. In addition to
-`production_trace`, `kind:tool_call`, and `tool:<name>`, Kiln adds
-`source_format:<format>` plus sanitized `production_model:<model>` and
-`split:<split>` tags when those fields exist in the export. The human CLI and
-raw `SuiteResult.metrics.pass_rate_by_tag` then show which source format,
-teacher model, split, or target tool is breaking for an adapter.
-
-The target is canonical semantic tool-call JSON, not the source model's wire
-format. At eval time, Kiln renders the saved `messages` and `tools` through
-the model backend's chat template, so Qwen3.5 sees its native `<tools>` prompt
-and is free to emit Qwen XML. The scorer accepts Qwen XML, OpenAI tool calls,
-inline JSON, and fenced tool-call blocks by default. Use
-`--require-qwen-xml` only when you intentionally want to grade native Qwen
-output formatting in addition to tool-call semantics.
-
-The scorer itself is not tied to a running Kiln server. For quick cross-model
-checks against hosted or local OpenAI-compatible APIs, build/run the standalone
-example from the `kiln-eval` crate:
+Preview before saving:
 
 ```bash
-cargo run -p kiln-eval --example trace_api_eval -- \
-  --suite production_tool_calls.json \
-  --api-base https://api.openai.com/v1 \
-  --model gpt-4.1-mini \
-  --model qwen/qwen3.5-4b \
-  --output production_tool_calls.api-result.json
+curl --fail-with-body -sS -X POST \
+  http://localhost:8420/v1/eval/datasets/my-sft/preview \
+  -H 'content-type: application/json' \
+  -d '{
+    "suite_name": "my-sft-holdout",
+    "source_split": "holdout",
+    "strategy": "final_assistant",
+    "head_n": 5
+  }'
 ```
 
-The example sends the saved `messages` and effective `tools` catalogue through
-the target API's normal chat-completions surface, converts structured
-`message.tool_calls` responses back into canonical `tool_calls` JSON for
-scoring, and still accepts raw Qwen XML / fenced / inline JSON completions.
-This keeps the eval focused on tool-call semantics while letting each provider
-apply its own ideal chat/tool format. Requests carry a total per-request
-timeout (`--timeout-secs`, default 120) plus a 10s connect timeout, so a hung
-endpoint fails that example instead of stalling the run.
+Then synthesize:
 
-One transport caveat: suites built with `--require-qwen-xml` cannot measure
-output *format* through this runner when tools are sent. An OpenAI-compatible
-server that parses tool calls returns them as structured `message.tool_calls`,
-erasing whatever wire format the model actually emitted — possibly genuine
-Qwen XML. For those responses the runner disables the XML-format requirement
-(with a one-time warning) and scores semantics only. Pass `--no-tools` to
-receive raw completions if format enforcement matters.
+```bash
+curl --fail-with-body -sS -X POST \
+  http://localhost:8420/v1/eval/datasets/my-sft/synthesize \
+  -H 'content-type: application/json' \
+  -d '{
+    "suite_name": "my-sft-holdout",
+    "source_split": "holdout",
+    "strategy": "final_assistant",
+    "scorer": {"kind": "auto_detect"},
+    "force": true
+  }'
+```
 
-For shell-heavy traces, the tool-call scorer compares beneath common wrappers:
-`bash -lc`, `python -c`, and Python here-doc/stdin forms are normalized before
-the command argument is scored. That means a production target like
-`bash -lc "python3 - <<'PY' ... PY"` can score against a model prediction that
-uses an equivalent direct `python3 -c ...` call, while a different inner Python
-program still fails.
+Synthesis from `train` is available for diagnostics, but it does not make the
+result held out. The [dataset split guide](DATASET_SPLITS.md) defines identity,
+contamination, migration, and training-provenance behavior.
 
-Inline Python payloads are inspected recursively too. The scorer extracts
-`os.system`, `os.popen`, `subprocess.*`, and `Popen(...)` shell commands and
-scores those nested commands with the same shell scorer. It also compares
-executed file paths from `exec(open(...).read())`, `runpy.run_path(...)`, and
-`Path(...).read_text()` so equivalent wrappers around the same local script are
-not treated as source-format differences.
+## Author a suite
 
-## The judgment flywheel (training a local judge LoRA, no frontier LLM)
+A schema-v2 suite contains:
 
-The eval system also captures *user preferences* into a separate kind of
-dataset, then compiles them into SFT data for training a local judge LoRA.
-The judge LoRA grades future evals via `Scorer::LlmJudge { judge_adapter }`.
+| Field | Purpose |
+| --- | --- |
+| `name` | Stable registry name. |
+| `description` | Human explanation of the suite's purpose and provenance. |
+| `default_scorer` | Scorer for examples without an override. |
+| `generation` | Suite-wide decode settings. |
+| `aggregation` | Reduction from completions to one outcome per example. |
+| `system_prompt` | Optional system message added when an example does not already start with one. |
+| `tools` | Optional shared tool catalogue. |
+| `examples` | Prompts, targets, tags, weights, metadata, and overrides. |
 
-End-to-end loop:
+An example may override `scorer`, `generation`, or `tools`. Its `tags` drive
+metric slices, `metadata` is copied into results, and `weight` affects only
+`weighted_mean_score`. A zero weight keeps the example visible without
+contributing to that weighted metric.
 
-1. **Create a judgment dataset.** Evals → Judgments → Create.
-2. **Generate pairs.** Enter a prompt, pick two adapters (or two
-   temperatures of the same adapter), click **Generate pair**.
-3. **Pick a winner.** A / Tie / B / Skip. Optionally add a note + tags.
-   Each click POSTs one row to `/v1/judgments/<name>/rows`.
-4. **Compile to SFT.** Once you have ~20 judgments, click **Compile to SFT**
-   — kiln writes a new SFT dataset whose target is the winner label plus
-   your note. Every judgment is emitted in BOTH orientations (A/B swapped,
-   winner flipped) so the judge can't learn a position prior, and the
-   most-recent rows are automatically held out of the training data
-   (default `min(20, rows/5)`; override with `holdout_n`) so validation in
-   step 6 measures generalization, not memorization.
-5. **Train a judge LoRA.** Submit the compiled dataset via `/v1/train/sft`
-   like any other SFT job.
-6. **Validate.** Click **Validate adapter** — kiln runs an inline eval
-   suite asking the trained LoRA to predict the winner on the held-out
-   rows, presenting roughly half of them in swapped orientation (a judge
-   that always answers one side scores ~50%, not its bias rate). The
-   response carries a warning if the validation rows overlap what the last
-   compile trained on.
-7. **Use it.** Reference the trained adapter as the `judge_adapter` in any
-   future `LlmJudge` scorer. The flywheel closes — your evals get smarter
-   the more you use kiln.
-8. **Prune and retrain.** When the judge LoRA makes a mistake you disagree
-   with, delete that judgment row (`/v1/judgments/<name>/rows/<id>`) and
-   retrain. Because the dataset is the asset and training is deterministic,
-   removing a row + retraining = removing the LoRA's exposure to that
-   data point. The whole system embraces this "data as asset" model.
+Give every case a stable, unique `id`. If omitted, Kiln derives one from the
+messages, target, and aliases. Empty or duplicate resolved IDs are rejected
+because comparisons, seeds, reruns, and aggregate rows all depend on identity.
 
-This loop runs entirely on your kiln server — no Claude/GPT calls
-anywhere in the path. The model that grades your evals is one *you* trained
-on *your* judgments.
+Two file layouts are supported:
+
+1. A single JSON document containing the suite and `examples`.
+2. A suite header without inline examples plus `examples.jsonl`, with one
+   example per non-empty line.
+
+The registry stores suites under `<eval_root>/suites/<name>/`. The default
+eval root is `<adapter_dir>/.eval`; `eval.eval_dir` relocates that shared root
+for suites, datasets, and judgments.
+
+## Multi-completion evaluation
+
+### The unit of evidence
+
+One example is one independent observation. Asking for five completions from
+the same prompt does not create five independent examples. Kiln therefore
+keeps:
+
+- `outcomes`: every raw completion, with its completion index, derived seed,
+  text, score, timing, tokens, reasoning, and budget evidence;
+- `aggregated_outcomes`: exactly one reduced record per example.
+
+Headline accuracy, confidence intervals, tag/tool/scorer slices, comparisons,
+failure reruns, regression tests, and promotion gates use
+`aggregated_outcomes`. Latency, token totals, reasoning length, and format
+diagnostics use raw `outcomes`.
+
+### Reducers
+
+For schema v2, every effective `generation.n` must equal the aggregation's
+cardinality. `k` must be from 1 through 128.
+
+| Aggregation | Meaning |
+| --- | --- |
+| `{"kind":"single"}` | Require `n=1`; use completion 0. |
+| `{"kind":"mean_at_k","k":K}` | Average all K scores; pass when the mean is at least `0.5`. |
+| `{"kind":"pass_at_k","k":K}` | Pass when any observed completion passes. This is observed any-success, not a population estimator. |
+| `{"kind":"majority_at_k","k":K}` | Pass when more than half pass. K must be odd. |
+
+Use `mean_at_k` for continuous or partial-credit scoring, `pass_at_k` for
+bounded search success, and `majority_at_k` for sampled consistency. Use a
+nonzero temperature when genuinely different samples are intended.
+
+The registry and executor reject mismatched `n`/K, even `majority_at_k`, an
+incomplete completion group, duplicate or missing indices, non-finite scores,
+and inconsistent group metadata. Schema-v1 suites remain readable only for
+the unambiguous `single`/`n=1` case. Do not relabel an old multi-completion
+result as v2; rerun it.
+
+## Run, compare, and rerun
+
+Run one target:
+
+```bash
+kiln-eval run --suite math-smoke --adapter v1 --seed 42 --watch
+```
+
+Compare several targets under the same suite and job seed:
+
+```bash
+kiln-eval compare \
+  --suite math-smoke \
+  --adapter "" \
+  --adapter v1 \
+  --adapter v2 \
+  --seed 42 \
+  --watch
+```
+
+The compare API accepts at most eight adapters. Pairing uses stable example
+IDs, not result order.
+
+`POST /v1/eval/jobs/{job_id}/rerun` creates a diagnostic run from selected
+reduced outcomes. By default it includes `fail`, `invalid`, and `error`,
+retains the original effective seed, and uses the original target. The body
+may set `adapter`, `outcome_kinds`, `include_pass`, or a replacement `seed`.
+A rerun does not claim byte reproduction; it reruns the complete selected
+examples with their original reducer.
+
+## Interpret a result
+
+Read these fields first:
+
+| Field | Interpretation |
+| --- | --- |
+| `metrics.num_examples` | Reduced independent examples. |
+| `metrics.num_completions` | Raw generations across those examples. |
+| `metrics.accuracy` | Passing reduced examples divided by reduced examples. |
+| `metrics.accuracy_confidence_interval` | 95% Wilson interval for that pass rate. |
+| `metrics.mean_score` | Unweighted mean reduced score. |
+| `metrics.weighted_mean_score` | Mean reduced score after example weights. |
+| `metrics.tag_breakdown` | Per-tag counts, pass rate, and interval. |
+| `metrics.by_scorer` | Per-scorer counts, mean score, and pass rate. |
+| `metrics.pass_rate_by_tool` | Per-tool counts, pass rate, and interval for tool-call suites. |
+| `metrics.latency` and token totals | Runtime work measured from raw completions. |
+
+The confidence interval describes sampling uncertainty under the suite's
+sampling assumptions. It does not correct selection bias, leakage, mislabeled
+targets, correlated examples, or an unrepresentative suite.
+
+Each raw `outcomes[]` row includes `example_id`, `completion_index`,
+decimal-string `generation_seed`, raw and scoring-form completion text,
+`kind`, `score`, `detail`, tags, metadata, tokens, latency, reasoning, and
+thinking-budget evidence. Each reduced `aggregated_outcomes[]` row records its
+representative completion and the raw pass/fail/invalid/error counts.
 
 ## Scorer reference
 
-Every scorer is a JSON object with a `kind` field. They all live under
-`kiln_eval::scorers`. The full set:
+Every scorer is a JSON object with `kind`.
 
-### `exact_match`
-Strict textual equality after optional normalization.
+| Kind | Use |
+| --- | --- |
+| `exact_match` | Text equality with explicit case and whitespace settings. |
+| `contains` | Require any, all, or none of a phrase list. |
+| `regex` | Match a pattern or compare one capture group with the target. |
+| `json_validity` | Require parseable JSON, optional object shape and JSON Pointer paths, and optional structural target equality. |
+| `multiple_choice` | Reduce common answer forms to a declared label. |
+| `numeric_tolerance` | Compare the last number in the completion with one target number. |
+| `llm_judge` | Ask the base model or a named local judge adapter for a score. |
+| `tool_call` | Compare normalized tool names and arguments. |
+| `code` | Compare extracted code by presence, exact text, token similarity, or line coverage. |
+| `python_doctest` | Execute generated Python against doctests in the user prompt. |
+| `all` | Require every nested scorer; use their mean score. |
+| `any` | Accept any nested scorer; use their maximum score. |
 
-```json
-{ "kind": "exact_match", "case_sensitive": false, "strip_whitespace": true }
-```
+### Text, JSON, and numbers
 
-Defaults: case-insensitive, strip whitespace, NFC-normalize unicode.
-
-### `contains`
-Substring check with three modes.
-
-```json
-{ "kind": "contains", "phrases": ["thanks", "anytime"], "mode": "any" }
-```
-
-`mode` values: `any` (default), `all`, `none`. `none` is useful for safety
-evals — "the response must not contain any of these phrases."
-
-### `regex`
-Pattern match with an optional capture group.
+`exact_match` defaults to case-sensitive comparison with surrounding
+whitespace stripped. State both options when the policy matters:
 
 ```json
-{ "kind": "regex", "pattern": "answer:\\s*(-?\\d+)", "capture_group": 1 }
+{"kind":"exact_match","case_sensitive":false,"strip_whitespace":true}
 ```
 
-Without `capture_group`, the example passes when the pattern matches
-anywhere. With `capture_group`, the captured slice is compared to the
-example's `target`.
+`contains` defaults to case-sensitive matching and `mode: "any"`:
 
-### `json_validity`
-Did the model emit parseable JSON?
+```json
+{
+  "kind": "contains",
+  "phrases": ["Paris", "France"],
+  "mode": "all",
+  "case_sensitive": false
+}
+```
+
+`numeric_tolerance` requires exactly one number in the target and uses the
+last number found in the completion:
+
+```json
+{"kind":"numeric_tolerance","atol":0.001,"rtol":0.01,"integer_only":false}
+```
+
+It passes when `|prediction - target| <= atol + rtol × |target|`.
+
+`json_validity` can require object output and paths:
 
 ```json
 {
@@ -520,56 +347,14 @@ Did the model emit parseable JSON?
 }
 ```
 
-When the example has a `target`, the parsed output is compared
-structurally (key order doesn't matter). When `required_paths` is set,
-every JSON Pointer must resolve.
+If the example also has a target, both sides must parse and compare
+structurally; object-key order does not matter.
 
-### `multiple_choice`
-Reduce the completion to a single answer label and compare.
+### Tool calls
 
-```json
-{ "kind": "multiple_choice", "choices": ["A", "B", "C", "D"] }
-```
-
-Recognizes `"Answer: X"`, `"The answer is X"`, leading `X)`/`(X)`/`X.`,
-and bare standalone letters. `target` is the correct letter.
-
-### `numeric_tolerance`
-Extract the last number in the completion and check tolerance.
-
-```json
-{ "kind": "numeric_tolerance", "atol": 0.001, "rtol": 0.01, "integer_only": false }
-```
-
-Passes iff `|got - target| <= atol + rtol * |target|`. Strips `$`, `%`,
-and thousands-separator commas.
-
-### `llm_judge`
-Ask another model to grade the completion.
-
-```json
-{
-  "kind": "llm_judge",
-  "judge_adapter": "judge-v1",
-  "template": "Score the following answer 0-1...",
-  "score_regex": "(?i)score[:\\s]*([01](?:\\.\\d+)?)"
-}
-```
-
-The judge prompt receives `{question}`, `{target}`, `{answer}`
-placeholders. The default template asks for a 0/1 score and the default
-regex matches `Score: <0..1>`.
-
-### `tool_call`
-
-The right scorer for agentic trajectories. Compares a predicted tool call
-(extracted from the model's completion — supports OpenAI `tool_calls`,
-inline JSON, and fenced ```tool_call``` blocks) against a target tool call.
-Three things contribute to the final score:
-
-1. **Name match** (`exact` / `case_insensitive` / `one_of`).
-2. **Structure** — same argument keys?
-3. **Content** — per-argument quality.
+`tool_call` normalizes Qwen3.5 XML, canonical `{"tool_calls":[...]}` JSON,
+OpenAI `function.arguments`, inline JSON, and fenced tool-call blocks before
+scoring:
 
 ```json
 {
@@ -579,98 +364,234 @@ Three things contribute to the final score:
 }
 ```
 
-`args.kind` values:
+Argument modes are:
 
-- **`auto`** (default) — pick per-arg scoring based on the value's shape.
-  Strings of free-form prose get contains-with-key-phrases; numbers go
-  through tolerance; JSON args go through structural equality. When the
-  arg key is `command` / `cmd` / `script` / `shell`, kiln runs a small
-  POSIX-ish lexer + introspector that handles the common case where a
-  `bash` tool wraps `python3 -c '…'` / `node -e '…'`: same classification
-  (e.g. `python_inline`) gets sub-scored by code token similarity on the
-  inner program.
-- **`structural`** — full canonicalized equality of the arguments JSON.
-  Keys order-independent, but values must match.
-- **`keys_only`** — only check the *set* of keys. Forgiving when values
-  are non-deterministic (timestamps, IDs).
-- **`per_key`** — per-argument scorer map. Lets you score a `query` arg
-  with `Contains`, a `code` arg with `Code`, and an `id` arg with
-  `ExactMatch` — *in the same tool call*.
+- `auto`: choose structural, numeric, prose, or command-aware comparison from
+  each value and key;
+- `structural`: require canonical JSON equality;
+- `keys_only`: compare only argument keys;
+- `per_key`: assign a nested scorer to individual arguments.
+
+Command-like arguments receive additional shell-wrapper and inline-code
+analysis. That makes equivalent wrapping less important while retaining
+action differences such as `git push` versus `git pull`.
+
+Set `require_xml_format: true` only when native Qwen XML is part of the
+contract. Leave it false when semantic tool selection and arguments are what
+matter.
+
+### Code and executable scoring
+
+The `code` scorer does not run the completion. It supports:
+
+- `any_block`;
+- `exact_block` with optional comment stripping;
+- `token_similarity` (default Jaccard threshold `0.6`);
+- `line_coverage` (default threshold `0.7`).
+
+Example:
 
 ```json
 {
-  "kind": "tool_call",
-  "args": {
-    "kind": "per_key",
-    "scorers": {
-      "query": {"kind": "contains", "phrases": ["paris", "france"], "mode": "all", "case_sensitive": false},
-      "code":  {"kind": "code", "language": "python", "style": {"kind": "token_similarity", "min_jaccard": 0.6}}
-    },
-    "extra_key_penalty": 0.1
+  "kind": "code",
+  "language": "python",
+  "style": {"kind": "token_similarity", "min_jaccard": 0.8}
+}
+```
+
+`python_doctest` does execute model-produced Python in a
+`python3 -I -S` subprocess with a wall-clock timeout:
+
+```json
+{"kind":"python_doctest","timeout_seconds":5}
+```
+
+Python's isolated flags and a timeout are not a security sandbox. Run
+untrusted code only inside an operating-system or container sandbox with
+appropriate filesystem, process, and network isolation.
+
+### Local judge
+
+`llm_judge` renders `{question}`, `{target}`, and `{answer}` into a prompt,
+then parses a score from the judge response:
+
+```json
+{
+  "kind": "llm_judge",
+  "judge_adapter": "judge-v1",
+  "template": "Question: {question}\nReference: {target}\nAnswer: {answer}\nScore from 0 to 1.",
+  "score_regex": "(?i)score[:\\s]*([01](?:\\.\\d+)?)"
+}
+```
+
+Omit `judge_adapter` to use the base model. A judge is another model-based
+measurement, not ground truth: validate it on held-out human labels and audit
+its disagreement slices.
+
+## Post-training auto-eval
+
+SFT and GRPO requests may attach:
+
+```json
+{
+  "post_eval": {
+    "suite": "math-smoke",
+    "data_scope": "held-out",
+    "include_baseline": true
   }
 }
 ```
 
-### `code`
+`data_scope` defaults to `held-out`. Before queue publication, Kiln rejects
+detected exact, normalized, source-row, group, or session overlap with the
+admitted training data. Use `"data_scope":"train-set-eval"` only for an
+intentional training-data diagnostic. That diagnostic may overlap but cannot
+set `min_accuracy`.
 
-For code-writing evals. Extracts the first fenced code block (or
-fence-less but code-shaped content) from both target and prediction, then
-applies one of four styles:
+After training, Kiln queues the adapter eval and optionally a standalone
+baseline result, then records IDs in `linked_eval_job_ids`.
 
-- **`any_block`** — pass if the completion contains any code block of the
-  declared language.
-- **`exact_block`** — strict equality after normalization (whitespace, and
-  optional `strip_comments: true` for `#` / `//` comment removal).
-- **`token_similarity`** (default, `min_jaccard: 0.6`) — Jaccard on
-  identifier-like tokens. Lets the model rename variables while still
-  catching missing logic.
-- **`line_coverage`** — fraction of non-trivial target lines present in
-  the completion. Useful for "did you import all the right modules" style
-  checks where exact-order isn't important.
+### Automatic promotion policy
 
-```json
-{"kind": "code", "language": "python",
- "style": {"kind": "token_similarity", "min_jaccard": 0.6}}
+Adding `post_eval.min_accuracy` creates a fail-closed promotion gate. The
+versioned `paired_wilson_v1` policy compares the candidate with the adapter
+active before training, or with the base model if none was active.
+
+For an ordinary accuracy gate:
+
+1. Both arms must have matching suite and generation hashes, aggregation,
+   example count, and unique example IDs.
+2. At least 20 reduced, paired examples are required.
+3. Kiln runs a two-sided exact binomial sign test on per-example score changes
+   at `alpha = 0.05`.
+4. The candidate must show significant paired improvement and its 95% Wilson
+   lower bound must reach `min_accuracy`.
+
+Twenty examples is only a minimum. Even 20 passes from 20 examples has a
+Wilson lower bound of about `0.84`, so it cannot prove a `0.90` floor.
+
+| Outcome | Meaning and action |
+| --- | --- |
+| `promoted` | Evidence passed and deferred auto-load succeeded. |
+| `kept` | Evidence passed, but auto-load was not requested. |
+| `regression` | The candidate was significantly worse; it remains for investigation and is not promoted. |
+| `demoted` | The Wilson upper bound was below the floor; Kiln removes it from serving/default state and renames it with a `.failed` suffix. |
+| `inconclusive` | Evidence could not pass or conclusively fail; the adapter remains on disk and is not promoted. |
+| `error` | Evaluation, evidence validation, archival, or adapter transition failed; the adapter is not promoted. |
+
+The gate uses one versioned held-out suite. It does not average several suites
+or let one passing suite erase another result. Put required domains in one
+suite, version that composition, and use tags for slices. Training status and
+history expose `gate_outcome`, `post_eval_verdict`, and
+`post_eval_gate_evidence`.
+
+## The judgment flywheel
+
+Kiln can turn human A/B preferences into an SFT dataset for a local judge
+adapter:
+
+1. Create a judgment dataset under **Evals → Judgments**.
+2. Generate two responses and record A, B, tie, or skip, plus optional notes
+   and tags.
+3. Compile the dataset. Kiln excludes the most recent holdout rows and emits
+   each training judgment in both A/B orientations.
+4. Train the compiled `sft_chat` dataset through `/v1/train/sft`.
+5. Validate the resulting adapter against the reserved judgment rows.
+6. Use the adapter as `judge_adapter` only after reviewing held-out accuracy
+   and orientation-bias failures.
+
+If `holdout_n` is omitted during compilation, Kiln reserves
+`min(20, floor(rows / 5))`. Small datasets may therefore reserve zero rows and
+return a warning. Compilation fails when the chosen holdout leaves no training
+rows. Validation also warns when its requested rows overlap the last compiled
+training range.
+
+Deleting a bad judgment and retraining removes that row from the new training
+corpus. It does not “unlearn” the row from an already trained adapter, and it
+does not by itself prove that a replacement adapter is unaffected by related
+examples.
+
+This path does not call an external frontier judge. It uses the local base
+model or a local adapter through Kiln's evaluator.
+
+## Production trace tool-call evals
+
+### Mine your own request log
+
+Request logging is enabled by default. Kiln records chat, completion, and batch
+inference requests under `<adapter_dir>/.requests/`, unless
+`request_log.enabled` is false or the logger could not initialize. The active
+file is `requests-current.jsonl`; rotated files are
+`requests-<timestamp>.jsonl.gz` when compression is enabled.
+
+The log is bounded and intentionally does not block inference:
+
+- bodies beyond `request_log.max_capture_bytes` are truncated in the log;
+- a full logging channel drops rows and increments its drop count;
+- retention deletes the oldest rotated files after `max_total_bytes`;
+- interrupted streams are marked and may lack a final thinking-budget outcome.
+
+Treat the log as sensitive. Prompts, responses, tool arguments, and user-agent
+data may contain secrets or personal data. Apply access controls, retention,
+redaction, and consent rules appropriate to the deployment.
+
+On systems with GNU `zcat -f`, a simple tool-call extraction is:
+
+```bash
+zcat -f /path/to/adapters/.requests/requests-*.jsonl* \
+  | jq -c '
+      select(.status == 200 and .route == "/v1/chat/completions")
+      | {
+          messages: (.request.messages + [.response.choices[0].message]),
+          tools: .request.tools
+        }
+    ' > mined-traces.jsonl
+
+kiln-eval trace-suite \
+  --input mined-traces.jsonl \
+  --format openai_jsonl \
+  --output mined-tool-calls.json \
+  --stats-output mined-tool-calls.report.json \
+  --suite-name mined-tool-calls \
+  --max-examples 1000 \
+  --seed 42
 ```
 
-### `all` / `any`
-Compose multiple scorers.
+Verify local `zcat` behavior before relying on `-f`; otherwise decompress
+rotated files and concatenate the active JSONL explicitly.
 
-```json
-{
-  "kind": "all",
-  "scorers": [
-    { "kind": "json_validity", "require_object": true },
-    { "kind": "regex", "pattern": "tool_call" }
-  ]
-}
-```
+### Import external traces
 
-`all` requires every sub-scorer to pass; `any` accepts the first pass.
-Score is the mean (`all`) or max (`any`).
+`kiln-eval trace-suite` accepts:
 
-## Per-example overrides
+- `prompt_chosen_jsonl`;
+- `openai_jsonl`;
+- `openai_trajectory_jsonl`;
+- `anthropic_jsonl`;
+- `anthropic_trajectory_jsonl`;
+- `auto`, which honors explicit per-row format labels and otherwise inspects
+  each row.
 
-Suite-level defaults can be overridden per example. Common pattern: most
-examples use one scorer, but a handful need a custom regex:
+Trajectory formats create one candidate per eligible assistant tool-call
+turn. Rows without a current-turn tool call are skipped. Reservoir sampling
+is global across repeated `--input` flags. Exact deduplication is off by
+default because repeat frequency can be part of the workload distribution;
+enable it explicitly with `--dedupe`.
 
-```json
-{
-  "messages": [{"role": "user", "content": "Return JSON: {\"x\": 1}"}],
-  "target": "{\"x\": 1}",
-  "scorer": { "kind": "json_validity", "require_object": true },
-  "generation": { "temperature": 0.0, "max_tokens": 64 },
-  "tags": ["json", "easy"],
-  "weight": 2.0
-}
-```
+Keep `--stats-output` with the suite. It records sampling settings, the
+effective seed, parse and skip counts, format/tool histograms, and source
+provenance for retained examples. Review this sidecar before interpreting a
+score as representative production evidence.
 
-`tags` slice the aggregate report (see `pass_rate_by_tag` in the result).
-`weight` contributes to the weighted mean — set it to 0 for "test but
-don't count" rows.
+## Qwen3.5 chat and tool behavior
 
-Eval generation accepts the same thinking budgets as chat and batch requests.
-For a reasoning eval that still guarantees time for a final answer:
+### Thinking
+
+Kiln separates Qwen reasoning from final content before ordinary scoring.
+Raw decoder text and `reasoning_text` remain in outcomes. Aggregate metrics
+report reasoning length and unclosed thinking blocks.
+
+Control thinking per suite or example:
 
 ```json
 {
@@ -682,576 +603,28 @@ For a reasoning eval that still guarantees time for a final answer:
 }
 ```
 
-An omitted budget inherits the server default. Explicit `null` makes that
-dimension unlimited for the example, and `0` closes thinking immediately.
+An omitted budget inherits the server setting, `null` means unlimited for that
+dimension, and `0` requests immediate closure. If both token and time limits
+are active, the first reached wins. See the
+[thinking-budget contract](THINKING_BUDGET_CONTRACT.md).
 
-## Seed contract
+### Tools
 
-Every eval job materializes one immutable `effective_seed` before it enters
-the queue. Supply the top-level `seed` on `/v1/eval/run` or
-`/v1/eval/compare` when you need a chosen value without replacing the suite's
-other generation settings. Otherwise Kiln uses the selected run-level
-`generation.seed`, then the suite-level `generation.seed`, and finally a
-random value. The submission response, job list/detail, on-disk job archive,
-CLI, and dashboard all expose the resolved value.
-
-Eval admission/results and dataset-synthesis `stats.effective_seed` emit the
-`u64` as a decimal string, so JavaScript clients do not lose precision. The
-synthesis decoder still accepts legacy numeric archives.
-
-Execution uses the versioned `kiln.eval-seed.v1` derivation over the selected
-base seed, stable `example_id`, and `completion_index`. Each outcome persists
-the resulting `generation_seed`; compare-mode adapters therefore receive the
-same per-example/per-completion seeds. A filtered failure re-run reuses the
-original job seed unless its request body supplies a replacement `seed`.
-Suite registration and inline submission reject empty or duplicate resolved
-example IDs, including identical id-less examples, because identity aliasing
-would also alias seeds and aggregate rows. Assign explicit unique IDs when two
-otherwise-identical cases are intentionally distinct.
-Seed provenance is encoded as decimal JSON strings in results so browsers do
-not round values above JavaScript's safe-integer limit. Request fields accept
-ordinary JSON integers.
-
-This contract makes sampling inputs inspectable and paired. It is not, by
-itself, a claim that outputs are byte-identical across different binaries,
-drivers, devices, kernels, precision policies, or model revisions.
-
-## Base-weight provenance
-
-Eval admission also snapshots the resident `kiln.base-weight-shards.v1`
-manifest before queue publication. `base_weight_shard_manifest` therefore
-identifies every exact safetensors shard behind the job even if the server later
-restarts or another model directory is selected. The job list/detail API,
-terminal archive, raw result JSON, and `kiln-eval --json` preserve the full
-manifest. Human CLI output and the dashboard show its aggregate, shard count,
-and total bytes; the dashboard offers an exact-copy control. Downloaded outcome
-JSONL repeats the full manifest on every standalone outcome row.
-
-Archive load validates the aggregate, each shard digest and size, total bytes,
-ordering, and schema. Corrupt new archives are skipped rather than reported as
-valid provenance. A missing field is accepted only for legacy archives or
-synthetic/mock generation; a newly admitted production job always receives the
-loader-owned manifest. This binds base weights only; the execution envelope is
-recorded separately. Adapter revision and generation settings remain additional
-replay inputs. See
-[Base-Weight Provenance](BASE_WEIGHT_PROVENANCE.md) for the canonical schema and
-content-identity rules.
-
-## Execution provenance
-
-Production eval admission snapshots the startup-owned
-`kiln.execution-provenance.v1` record before queue publication. The record binds
-the backend and device, bounded driver/runtime evidence, exact executable and
-optional source revision, model/tokenizer/template identities, inference and
-training precision policy, compiled kernel contract, and effective server
-configuration/environment digests. It is exposed as `execution_provenance` in
-job list/detail and raw result JSON, retained by terminal archives, printed as a
-backend/device/digest summary by `kiln-eval`, and shown with an exact-copy action
-in the dashboard. Downloaded outcome JSONL repeats the complete record on every
-standalone row.
-
-Archive save and restart load validate the self-verifying canonical digest;
-tampered records are rejected instead of being reported as evidence. Legacy
-archives and synthetic/mock generators may omit the field, but a newly admitted
-production job receives the same immutable record retained by `AppState`. The
-record proves the declared execution envelope's integrity, not driver
-correctness or reproducibility by itself. Strict replay binds this record to
-the remaining input and output identities described below. See
-[Execution Provenance](EXECUTION_PROVENANCE.md).
-
-## Strict byte replay
-
-Every newly completed production eval run carries a self-validating
-`kiln.eval-replay.v1` record. It is the immutable identity of one complete
-suite/adapter run, not a best-effort recipe. The record contains:
-
-- the exact `EvalSuite`, optional run generation override, effective seed,
-  seed-derivation version, and every example's resolved thinking-budget limits
-  and source;
-- the candidate target and every LLM-judge target. A named adapter includes the
-  loader-attested SHA-256 identity of its config and weight bytes; the base
-  target is bound through the complete base-weight shard manifest;
-- one stable scorer kind and complete serialized scorer-configuration SHA-256
-  per example;
-- one reference per expected `(example_id, completion_index)`, pointing to its
-  adjacent `SuiteResult.outcomes` entry, with exact derived generation seed,
-  raw decoder continuation SHA-256 and byte count, and normalized scoring-text
-  SHA-256 and byte count;
-- full-domain hashes for the suite, effective generation state, raw-completion
-  set, base-weight manifest, execution provenance, and replay record itself.
-
-The execution-provenance digest binds the backend/device and bounded runtime
-evidence, executable and optional source revision, model configuration,
-tokenizer vocabulary and configuration, chat templates, precision policy,
-compiled kernels/features, and effective configuration/environment. A strict
-record is rejected if any of these identities, any raw decoder continuation,
-any completion index, any per-completion seed, or any thinking-budget record is
-missing or inconsistent. Terminal archive save validates every new finished
-run; restart loading validates any record present and rejects changed retained
-outcome bytes. Older archives remain readable, but cannot be strict-replayed.
-
-### Run a replay
-
-Use the source job ID and, for compare jobs, the source run index:
-
-```bash
-kiln-eval replay --job eval_123
-kiln-eval replay --job eval_compare_123 --run-index 1 --json
-```
-
-The dashboard exposes the same operation as **Strict replay** for the selected
-run. The HTTP form is:
-
-```bash
-curl -s -X POST http://localhost:8420/v1/eval/jobs/eval_123/replay \
-  -H 'content-type: application/json' \
-  -d '{}'
-```
-
-Replay admission fails before queue visibility unless the selected source run
-is complete, its strict record validates against retained outcomes, and the
-current execution-provenance and base-weight-manifest digests exactly match the
-source. It re-attests named candidate and judge adapter bytes on disk before
-enqueue. The queued job atomically receives both the public expectation and the
-complete internal source record. Immediately before generation the executor
-checks suite, generation, seed, environment, base weights, and the exact loaded
-candidate target; immediately before judge scoring it checks the exact loaded
-judge target. Identity drift is rejected before the affected model work rather
-than discovered only after completion.
-
-The terminal `replay_verdict.status` is:
-
-- `matched`: the complete replay-record identity and every raw decoder
-  continuation matched byte-for-byte;
-- `mismatch`: execution completed, but at least one identity or raw decoder
-  continuation differed;
-- `error`: the replay could not produce a complete, internally valid record.
-
-`kiln-eval replay` waits for a terminal state and exits nonzero for `mismatch`,
-`error`, a failed job, or a missing/invalid verdict. `--json` emits the complete
-job, including `replay_expectation`, `replay_verdict`, source/actual hashes, and
-the new run's replay record. The dashboard shows the same hashes and offers
-exact-copy controls.
-
-A `matched` verdict proves byte reproduction for this declared run and
-environment. It does not prove driver correctness or promise that another
-backend, binary, source revision, kernel, precision policy, model/tokenizer,
-template, adapter, configuration, or seed will match. A `mismatch` is retained
-evidence; on a backend with nondeterministic operations it is not automatically
-a Kiln defect, but it prevents a reproducibility claim. Use ordinary failure
-rerun for legacy jobs or intentional changes, without an exact-replay claim.
-
-## API reference
-
-### `POST /v1/eval/suites`
-Register or overwrite (`?force=true`) a suite. Body = `EvalSuite` JSON.
-
-### `GET /v1/eval/suites`
-List registered suites with summaries.
-
-### `GET /v1/eval/suites/{name}`
-Fetch a single suite's full content.
-
-### `DELETE /v1/eval/suites/{name}`
-Remove a registered suite.
-
-### `POST /v1/eval/run`
-Submit an eval job. Exactly one of `suite` (registered name) or
-`inline_suite` must be set. Optional fields: `adapter` (empty string = base
-model), `seed` (job-level seed), and `generation` (full override). The queued
-response includes `job_id`, `state`, and the exact decimal-string
-`effective_seed`.
-
-### `POST /v1/eval/compare`
-Run a suite against multiple adapters in one job. Body:
-
-```json
-{ "suite": "math-smoke", "adapters": ["", "v1", "v2"], "seed": 42 }
-```
-
-The job's `runs` array carries one `SuiteResult` per adapter in the order
-you sent them. Cap: 8 adapters per submission.
-
-### `GET /v1/eval/jobs`
-List all tracked eval jobs (queued / running / terminal).
-
-### `GET /v1/eval/jobs/{job_id}`
-Per-job status. While running, the response includes a `progress` object
-with `examples_completed`, `examples_total`, `running_accuracy`, and
-`running_mean_score`. Every new job also reports decimal-string
-`effective_seed` and `seed_derivation`.
-
-### `POST /v1/eval/jobs/{job_id}/rerun`
-
-Re-run selected failing outcomes. Omit `seed` to retain the original job's
-effective seed, or provide a replacement seed deliberately.
-
-### `POST /v1/eval/jobs/{job_id}/replay`
-
-Queue a strict whole-run byte replay of a completed source run. The optional
-body field `run_index` selects an arm of a compare job and defaults to `0`.
-Admission requires a complete strict replay record plus exact current execution,
-base-weight, and adapter identities. The POST returns the new job ID and
-effective seed; immediate job detail contains the immutable
-`replay_expectation`, and terminal detail adds `replay_verdict`.
-
-### `DELETE /v1/eval/jobs/{job_id}`
-Cancel a queued or running job.
-
-## Post-training auto-eval
-
-Attach `post_eval` to any SFT or GRPO request and the trained adapter is
-automatically evaluated when training completes. `data_scope` defaults to
-`held-out`; admission rejects exact, normalized, source-row, group, or session
-overlap with the exact admitted training corpus:
-
-```bash
-curl -X POST http://localhost:8420/v1/train/sft \
-  -H 'content-type: application/json' \
-  -d '{
-        "examples": [...],
-        "config": {"training_profile": "native_online_lora_v1", "epochs": 3, "output_name": "math-v1"},
-        "post_eval": {
-          "suite": "math-smoke",
-          "data_scope": "held-out",
-          "include_baseline": true
-        }
-      }'
-```
-
-When the training job finishes the worker enqueues the adapter evaluation and,
-when requested, its base-model comparison, then back-links eval IDs on the
-training status through `linked_eval_job_ids`. Use `include_baseline: false`
-to skip the base-model run.
-
-### Automatic promotion policy
-
-Setting `post_eval.min_accuracy` changes the post-eval into a fail-closed
-promotion gate. Kiln always runs one paired `Compare` job against the adapter
-that was active before training (or the base model when no adapter was active),
-using the same suite, effective generation settings, seed derivation, and
-reduced per-example aggregation for both arms. This comparison is required
-even when `include_baseline` is false; `include_baseline` only controls the
-additional standalone baseline result linked for browsing.
-
-Automatic promotion uses the fixed `paired_wilson_v1` policy:
-
-1. The baseline and candidate must have identical suite hashes, effective
-   generation hashes, aggregation modes, example counts, and unique example
-   IDs. Missing, duplicate, non-finite, or mismatched evidence is an error.
-2. The suite must contain at least 20 independent examples *after* its
-   declared `single`, `mean@k`, `pass@k`, or `majority@k` reduction. Raw
-   completions are not independent samples for this requirement.
-3. Kiln computes a two-sided exact binomial sign test over per-example score
-   improvements and regressions at `alpha = 0.05`.
-4. Kiln recomputes candidate accuracy from the reduced outcomes and computes
-   its 95% Wilson interval. An ordinary gate passes only when the candidate is
-   significantly better than the paired baseline **and** the Wilson lower
-   bound is at least `min_accuracy`. The point estimate alone is never a pass.
-5. Internal recovery/gain gates use conservative confidence bounds rather than
-   point ratios: candidate-lower / baseline-upper for relative recovery, and
-   candidate-lower - baseline-upper for absolute gain. A significant paired
-   regression still rejects them.
-
-Twenty examples is a hard minimum, not a promise that twenty is sufficient.
-For example, 20/20 has a 95% Wilson lower bound of about 0.84 and therefore
-cannot satisfy `min_accuracy: 0.90`; a larger held-out suite is required.
-
-The gate outcome is explicit:
-
-| `gate_outcome` | Meaning | Adapter action |
-|---|---|---|
-| `promoted` | Statistical policy passed and deferred auto-load succeeded. | Active in serving. |
-| `kept` | Statistical policy passed but auto-load was not requested. | Retained under its original name. |
-| `regression` | Candidate was significantly worse in the paired exact test. | Never promoted; retained for investigation. |
-| `demoted` | With at least 20 pairs, even the Wilson upper bound was below the accuracy floor. | Renamed to `<name>.failed` and removed from serving/default state. |
-| `inconclusive` | Evidence could neither pass nor conclusively reject: too few pairs, no significant improvement, or a lower bound below a required threshold. | Retained under its original name, never promoted. |
-| `error` | The eval, evidence contract, archive update, or adapter swap failed. | Never promoted. |
-
-`GET /v1/train/status`, `GET /v1/train/status/{job_id}`, and
-`GET /v1/train/queue` expose the human-readable `post_eval_verdict`, the stable
-`gate_outcome`, and `post_eval_gate_evidence[]`. Each evidence row persists the
-policy and suite identities, baseline/candidate labels, aggregation, minimum
-and observed paired counts, improved/regressed/tied counts, exact-test p-value
-and alpha, both Wilson intervals, configured thresholds, conservative
-recovery/gain bounds, and final outcome. The dashboard shows the paired count,
-p-value, and candidate lower bound directly on the training job.
-
-Automatic promotion deliberately has a **single-versioned-suite policy**.
-Kiln does not average independent suites, accept an OR across suites, or let a
-passing suite erase a failing one. Put every required domain into one
-registered held-out suite, use tags for domain-level slices, version that
-composition, and set one promotion floor. Independent suite runs remain useful
-diagnostics but do not compose into an automatic promotion decision.
-
-The same rule is enforced for `distill_refresh`. Across a gated `post_eval`,
-`if_eval_suite`, and `new_knowledge_eval_suite`, `config.auto_load: true`
-accepts at most one configured gate. Requests with several are rejected before
-training. Set `auto_load: false` to retain several independent diagnostic
-evidence rows for operator review, or compose the domains into one held-out
-suite for one automatic decision.
-When several diagnostic gates finish, every evidence row remains available and
-the training job's summary `gate_outcome` retains the strongest fail-closed
-classification, so a later passing diagnostic cannot erase an earlier error,
-regression, demotion, or inconclusive result.
-
-An intentional training-data diagnostic must set
-`"data_scope":"train-set-eval"`. That label permits overlap but is rejected
-when combined with `min_accuracy`, so it cannot masquerade as a promotion
-gate. See [Dataset Splits and Train/Eval Separation](DATASET_SPLITS.md) for
-the exact policy and limitations.
-
-## CLI
-
-The CLI is installed as `kiln-eval` next to `kiln`. Set `KILN_SERVER_URL`
-to point at a non-local server.
-
-```bash
-kiln-eval list
-kiln-eval register --file smoke.json [--force]
-kiln-eval run --suite math-smoke --adapter v1 --seed 42 --watch
-kiln-eval run --file smoke.json --adapter v1 --watch --json
-kiln-eval compare --suite math-smoke --adapter v1 --adapter v2 --seed 42 --watch
-kiln-eval probe --prompt "1+1?" --target 2 --scorer numeric --adapter v1 --seed 42
-kiln-eval replay --job eval_123 [--run-index 0] [--json]
-```
-
-`probe` is a one-off helper that wraps a single example as an inline
-suite — useful during model debugging. `replay` always watches through a
-terminal verdict and returns a nonzero process status unless exact raw bytes and
-all bound identities match.
-
-## Suite-file layouts
-
-Two layouts are supported:
-
-1. **Single-file JSON** — everything inline, as in the example above.
-2. **Header + JSONL** — for large suites, write a `suite.json` that
-   contains everything *except* the `examples` array, and pair it with
-   an `examples.jsonl` (one example per line). The registry loads both
-   when you register the directory.
-
-## Result shape
-
-`SuiteResult.metrics` carries:
-
-- `num_examples`, `num_pass`, `num_fail`, `num_invalid`, `num_error`
-- `accuracy` — pass rate
-- `accuracy_confidence_interval` — 95% Wilson interval around `accuracy`;
-  production trace suites are random samples, so treat this as the sampling
-  uncertainty around the point estimate.
-- `mean_score`, `weighted_mean_score`
-- `latency` — `{p50_ms, p90_ms, p99_ms, mean_ms, max_ms}`
-- `total_prompt_tokens`, `total_completion_tokens`
-- `elapsed_secs`
-- `pass_rate_by_tag` — per-tag pass rate (uses the first completion when
-  `n>1`)
-- `tag_breakdown` — per-tag pass counts and confidence intervals
-- `by_scorer` — per-scorer-kind breakdown when the suite mixes scorers
-
-Each run also carries `suite_hash`, `effective_generation_hash`, and a
-`replay_record`. `suite_hash` changes only when the suite content changes.
-`effective_generation_hash` additionally includes the job seed and derivation
-schema, run-level generation override, and every example's resolved
-thinking-budget limits and provenance, so a run that inherits different
-defaults has a different identity even when its suite file is unchanged. The
-replay record binds these inputs to model/judge/scorer identities, execution and
-base-weight provenance, and exact raw and normalized completion hashes. Its
-`record_sha256` and `raw_completion_set_sha256` are the terminal strict-replay
-comparison keys.
-
-A replay job adds top-level `replay_expectation` before queue visibility and
-`replay_verdict` at terminal transition. Their source job/run coordinates and
-expected hashes must agree. A `matched` verdict must carry equal expected and
-actual record/raw-set hashes; `mismatch` must carry unequal actual hashes; an
-`error` may omit actual hashes when no valid run record was produced. Archive
-validation rejects an unbound or internally contradictory verdict.
-
-Every example record (`outcomes[]`) carries:
-
-- `example_id`, `completion_index`, decimal-string `generation_seed`, and
-  `completion_text`
-- `raw_completion_text` — the exact decoder continuation. `completion_text`
-  is the scoring form and may restore a prompt-prefilled `<think>` opener that
-  the decoder itself did not repeat.
-- `kind` — `pass | fail | invalid | error`
-- `score`, `detail`
-- `tags`, `metadata` — copied from the source example for aggregate slicing
-  and per-outcome provenance
-- `prompt_tokens`, `completion_tokens`, `latency_ms`
-- `thinking_budget` — effective `max_tokens` / `max_time_ms`, per-dimension
-  source (`server_default`, `suite`, `run_override`, or `example`, including
-  explicit `_unlimited` variants), whether the controller was applied, and
-  its runtime `outcome`. The outcome records `triggered`, `trigger`, `closed`,
-  `thinking_tokens`, and `thinking_time_ms`.
-
-## Recipes
-
-**A/B test a fresh adapter against the baseline.**
-```bash
-kiln-eval compare --suite math-smoke --adapter "" --adapter math-v1 --watch
-```
-
-**Gate a promotion behind paired evidence.** Use `post_eval.min_accuracy` on
-your training request. A point accuracy above the floor is insufficient: the
-fixed paired exact-test and Wilson-lower-bound policy above must pass. A
-conclusive floor failure is renamed with `.failed`; inconclusive or regressed
-adapters remain on disk for investigation but are never auto-loaded.
-
-**JSON-shape gate for tool-call models.** Use a composite scorer:
-```json
-{
-  "kind": "all",
-  "scorers": [
-    { "kind": "json_validity", "required_paths": ["/tool_call/name"] },
-    { "kind": "regex", "pattern": "tool_call" }
-  ]
-}
-```
-
-**Slice a suite by difficulty.** Tag every example (`"tags": ["easy"]` /
-`["hard"]`) and read `pass_rate_by_tag` to see where the model breaks.
-
-## Qwen3.5-native chat format
-
-Kiln only targets Qwen3.5-4B, so the eval system is *precise* about the
-model's wire format. Three things matter:
-
-### 1. Thinking blocks are stripped before scoring
-
-Qwen3.5's chat template prefills `<think>\n` into every assistant turn,
-so the raw completion looks like:
-
-```
-<think>
-Let me work out the capital of France.
-</think>
-
-Paris
-```
-
-Every scorer except `tool_call` and `llm_judge` strips the
-`<think>…</think>` block before comparing — so an `exact_match` target
-of `Paris` passes even when reasoning is verbose. Scorers see the *answer*,
-not the chain-of-thought.
-
-The reasoning text is preserved on each `ExampleOutcome` as
-`reasoning_text`, so dashboards can render "thought 432 chars before
-answering" without re-parsing. The aggregate metrics include a
-`reasoning_length` histogram (mean / p50 / p90 / max) across the run, and
-`num_unclosed_thinking` flags completions that opened `<think>` but never
-closed it (typically `max_tokens` was reached before either a natural or
-budget-forced close).
-
-To disable thinking on a per-example basis, set
-`"generation": {"chat_template_kwargs": {"enable_thinking": false}}` —
-Qwen3.5's template will then prefill an empty `<think>\n\n</think>\n\n`
-block.
-
-To keep reasoning but bound it, use `thinking_budget_tokens` and/or
-`thinking_budget_ms` in the example's `generation` object. Omitted fields
-inherit `server.default_thinking_budget_tokens` and
-`server.default_thinking_budget_ms`; explicit `null` is unlimited for that
-dimension and `0` closes the block immediately. If both limits are active, the
-first reached wins. Time starts at the first decode candidate, excluding queue
-and prefill, and is checked at token boundaries.
-The [Thinking Budget Contract](THINKING_BUDGET_CONTRACT.md) is the normative
-schema and cross-runtime semantics reference.
-
-A natural `</think>` always wins if it arrives first. Otherwise Kiln feeds the
-forced close-tag tokens into model context and continues decoding the answer;
-those tokens count toward `max_tokens` and completion usage. A successfully
-forced close is therefore not counted by `num_unclosed_thinking`. Budgets do
-nothing when the rendered prompt is not inside a thinking block. Live
-in-process eval generation does not use the chat response cache; it only reuses
-rendered-prompt and prompt-tokenization caches. Time-budgeted evals are
-therefore always decoded, while repeated prompt setup remains inexpensive.
-
-For agentic evals where most requests should run without Qwen thinking, set
-`server.default_thinking_enabled = false` in `kiln.toml` or
-`KILN_SERVER_DEFAULT_THINKING_ENABLED=false` in the environment. Kiln applies that as
-the default `chat_template_kwargs.enable_thinking` value only when a request
-omits it, so individual examples can still opt back into thinking with
-`"generation": {"chat_template_kwargs": {"enable_thinking": true}}`. `/health`
-reports the configured default, and chat responses include metadata showing the
-thinking mode used for that response.
-
-For OpenAI-compatible chat clients, separated reasoning is returned as
-`choices[].message.reasoning_content`; `choices[].message.content` is only the
-final answer. If the model stops while still reasoning, `content` can be empty
-and response metadata reports `final_content_empty=true` with
-`content_empty_reason="reasoning_without_final_content"`. Compatibility
-clients can set `fold_reasoning_into_content=true`, or configure
-`server.fold_reasoning_into_content = true`, to duplicate the reasoning block
-into `content` while preserving the separate reasoning field.
-
-### 2. Tool calls — XML and JSON both score
-
-Qwen3.5's *native* tool-call wire form is XML:
-
-```
-<tool_call>
-<function=get_weather>
-<parameter=city>
-Paris
-</parameter>
-<parameter=units>
-celsius
-</parameter>
-</function>
-</tool_call>
-```
-
-`Scorer::ToolCall` parses every format Kiln has seen (Qwen3.5 XML,
-canonical JSON `{"tool_calls":[…]}`, OpenAI `function.arguments` strings,
-fenced ```` ```tool_call``` ```` blocks) into the same structured
-`ParsedToolCall` and compares structurally. A target stored as JSON
-canonical scores correctly against a model that emitted Qwen3.5 XML, and
-vice versa.
-
-The serving API performs the same normalization for clients: when a
-tools-bearing `/v1/chat/completions` request produces Qwen3.5 XML, Kiln
-returns OpenAI-shaped `tool_calls` with `finish_reason: "tool_calls"` in
-both non-streaming responses and SSE deltas. Raw XML remains accepted in
-datasets and eval artifacts, but OpenAI-compatible agents should not see it
-as assistant prose.
-
-Numeric and boolean XML params auto-coerce to their JSON shape, so a
-target of `{"replace_all": false}` compares correctly against a model
-that wrote `<parameter=replace_all>\nfalse\n</parameter>`. Both `False`
-(Python `str()`) and `false` (JSON) tokens are recognized.
-
-Multi-call targets pair calls positionally; excess predicted calls
-subtract `0.25 / target_count` from the score, and missing calls fail
-the corresponding pair. The scorer detail string surfaces the actual
-on-the-wire formats (`formats=[xml,json]`) so you can spot a model that
-regressed from native XML to JSON.
-
-Command-like arguments (`command`, `cmd`, `script`, `shell`, `bash`, `code`)
-receive recursive bash introspection in `auto` mode. The scorer unwraps common
-shell layers (`bash -c` / `bash -lc`) and compares inline code from
-`python -c` or `python - <<'PY' ... PY` by token similarity instead of raw
-string equality. This catches the production pattern where the real action is
-buried inside a shell call without turning inconsequential wrapping changes
-into eval failures. "Right program, wrong action" predictions stay failures:
-a same-program subcommand mismatch (`git push` vs `git pull`,
-`pip install` vs `pip uninstall`) scores below the pass threshold under
-default weights, even when the command is wrapped in `bash -lc`.
-
-### 3. Tools belong on the suite
-
-Agentic suites declare their tool catalogue once on the suite itself:
+Put a shared OpenAI-shaped tool catalogue on the suite:
 
 ```json
 {
   "name": "weather-agent",
+  "schema_version": 2,
   "default_scorer": {"kind": "tool_call"},
+  "generation": {"temperature": 0, "max_tokens": 128, "n": 1},
+  "aggregation": {"kind": "single"},
   "tools": [
     {
       "type": "function",
       "function": {
         "name": "get_weather",
-        "description": "Return current weather for a city.",
+        "description": "Return weather for a city.",
         "parameters": {
           "type": "object",
           "properties": {"city": {"type": "string"}},
@@ -1260,60 +633,161 @@ Agentic suites declare their tool catalogue once on the suite itself:
       }
     }
   ],
-  "examples": [...]
+  "examples": [
+    {
+      "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
+      "target": "{\"tool_calls\":[{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}]}"
+    }
+  ]
 }
 ```
 
-The executor passes these into the chat template so the Qwen3.5
-`<tools>` system block renders into every prompt automatically. Per-example
-`tools` override the suite default — useful when one example needs a
-broader catalogue than the rest.
+The executor renders these tools through the model's chat template.
+Per-example `tools` replace the suite catalogue. The scorer can compare
+canonical JSON targets with Qwen XML predictions.
 
-For agentic suites, the result includes `pass_rate_by_tool`: a map from
-tool name to `(num_examples, num_pass, pass_rate, confidence_interval)`. So
-you can spot a model that nails `Read` but flubs `Edit` without writing
-per-tool tags yourself, while still seeing how much evidence each tool slice
-has.
+### Built-in suite
 
-## Built-in: `qwen3.5-agentic-core`
-
-Kiln ships a hand-crafted 24-example agentic eval suite under the name
-`qwen3.5-agentic-core`. It auto-registers at server startup, so:
+Kiln installs `qwen3.5-agentic-core` at startup. Its 24 hand-authored examples
+cover no-tool answers, tool selection and arguments, refusals, follow-ups,
+thinking, code, JSON, multiple choice, and numeric output:
 
 ```bash
-kiln-eval run --suite qwen3.5-agentic-core --adapter my-trained-adapter --watch
+kiln-eval run \
+  --suite qwen3.5-agentic-core \
+  --adapter my-trained-adapter \
+  --watch
 ```
 
-…just works without authoring anything. The suite covers:
+It is a smoke/regression suite, not evidence that an application-specific
+adapter is production-ready.
 
-- Pure no-tool answers (the model must NOT invoke a tool for things it
-  already knows).
-- Single tool calls with exact args / paraphrase-tolerant args /
-  ambiguous tool selection.
-- Multi-step trajectory followups (assistant emits a tool call, the
-  tool returns a result, what does the model say next?).
-- Thinking-then-answer probes.
-- Code generation, JSON output validation, MCQ, numeric tolerance.
-- Tool-call refusals (the model must NOT invoke tools that aren't in
-  the catalogue).
+## Seed and provenance
 
-Use it as a regression gate after every training run.
+### Seed contract
 
-## Synthesis strategies (agentic)
+Every job receives one immutable `effective_seed` before queue publication.
+Resolution order is:
 
-Two strategies on top of `final_assistant` / `first_assistant_turn` /
-`every_assistant_turn` / `tool_call_predict` cover the agentic-eval
-shapes that matter:
+1. top-level run/compare `seed`;
+2. run-level `generation.seed`;
+3. suite-level `generation.seed`;
+4. a generated random seed.
 
-- **`tool_response_followup`** — One example per
-  `(assistant tool_call → tool result(s) → next assistant)` triple.
-  Prompt ends on the tool response so the model is asked "given this
-  tool output, what do you do next?".
-- **`end_of_trajectory_answer`** — Prompt = full trajectory up through
-  the last tool result, target = the closing assistant turn. Filters
-  out non-agentic conversations.
+Kiln derives a per-example/per-completion seed through
+`kiln.eval-seed.v1` using the base seed, stable example ID, and completion
+index. Compare arms therefore receive the same derived seeds. Seed values are
+emitted as decimal strings where the response must preserve the full `u64`
+for JavaScript clients.
 
-`final_assistant` and `first_assistant_turn` now canonicalize raw
-Qwen3.5 XML tool calls in `assistant.content` into the JSON envelope
-automatically, so SFT data captured from a base Qwen3.5 model
-(no structured `tool_calls`) still produces clean tool-call targets.
+A shared seed makes sampling inputs paired and auditable. It does not promise
+the same bytes across different binaries, drivers, devices, kernels, precision
+policies, model revisions, or nondeterministic operations.
+
+### Base-weight provenance
+
+Production admission snapshots `kiln.base-weight-shards.v1`, including every
+resident safetensors shard identity. Jobs, terminal archives, results, CLI
+JSON, and the dashboard preserve it. See
+[base-weight provenance](BASE_WEIGHT_PROVENANCE.md).
+
+### Execution provenance
+
+Production admission also snapshots `kiln.execution-provenance.v1`: bounded
+backend/device/runtime evidence, executable and optional source identity,
+model/tokenizer/template identities, precision policy, compiled features, and
+effective configuration/environment digests. It proves the integrity of the
+declared envelope, not driver correctness. See
+[execution provenance](EXECUTION_PROVENANCE.md).
+
+## Strict byte replay
+
+A newly completed production run carries a self-validating
+`kiln.eval-replay.v1` record. It binds the exact suite, effective generation
+state and seed, scorer configurations, base and adapter identities, thinking
+budgets, execution provenance, and every raw decoder continuation.
+
+Run:
+
+```bash
+kiln-eval replay --job eval_123
+kiln-eval replay --job eval_compare_123 --run-index 1 --json
+```
+
+Replay admission fails before queue visibility if the source record is
+incomplete or invalid, or if current execution, base weights, or required
+adapter identities differ. Terminal status is:
+
+| Status | Meaning |
+| --- | --- |
+| `matched` | The replay record and every raw decoder continuation matched byte for byte. |
+| `mismatch` | Execution completed, but at least one bound identity or raw continuation differed. |
+| `error` | Kiln could not produce a complete valid replay record. |
+
+The CLI exits nonzero for mismatch, error, failed execution, or a missing
+verdict. A match proves reproduction only for the identities declared by that
+record. It is not a general claim about other environments.
+
+## CLI
+
+Set `KILN_SERVER_URL` or pass the global `--server` option for another server.
+
+```bash
+kiln-eval list
+kiln-eval register --file smoke.json --force
+kiln-eval run --suite math-smoke --adapter v1 --seed 42 --watch
+kiln-eval run --file smoke.json --adapter v1 --watch --json
+kiln-eval compare --suite math-smoke --adapter "" --adapter v1 --seed 42 --watch
+kiln-eval probe --prompt "1+1?" --target 2 --scorer numeric --adapter v1 --seed 42
+kiln-eval trace-suite --help
+kiln-eval panel-suite --help
+kiln-eval replay --job eval_123 --run-index 0 --json
+```
+
+`probe` wraps one example in an inline suite for debugging. `panel-suite`
+builds a bounded weighted panel from an existing suite. Inspect each command's
+`--help`; the CLI is the normative source for command-line flags.
+
+## HTTP API reference
+
+| Method and path | Purpose |
+| --- | --- |
+| `POST /v1/eval/suites` | Register a suite; use `?force=true` to replace one. |
+| `GET /v1/eval/suites` | List suite summaries. |
+| `GET /v1/eval/suites/{name}` | Fetch a complete suite. |
+| `DELETE /v1/eval/suites/{name}` | Delete a suite. |
+| `POST /v1/eval/run` | Queue a registered or inline suite against one target. |
+| `POST /v1/eval/compare` | Queue one registered suite against up to eight targets. |
+| `GET /v1/eval/jobs` | List tracked and retained jobs. |
+| `GET /v1/eval/jobs/{job_id}` | Read progress, results, provenance, and replay fields. |
+| `POST /v1/eval/jobs/{job_id}/rerun` | Rerun selected reduced outcome kinds. |
+| `POST /v1/eval/jobs/{job_id}/replay` | Queue strict replay for one completed run. |
+| `DELETE /v1/eval/jobs/{job_id}` | Cancel queued/running work; delete a terminal job and its archive. |
+| `POST /v1/eval/datasets/upload` | Register dataset content. |
+| `GET /v1/eval/datasets/{name}/split` | Inspect persisted row assignments. |
+| `PUT /v1/eval/datasets/{name}/split` | Replace split settings and assignments. |
+| `POST /v1/eval/datasets/{name}/preview` | Preview suite synthesis. |
+| `POST /v1/eval/datasets/{name}/synthesize` | Save a synthesized suite. |
+| `POST /v1/judgments/{name}/compile` | Compile judgment rows into an SFT dataset. |
+| `POST /v1/judgments/{name}/validate` | Queue held-out validation for a judge adapter. |
+
+For request and response fields, use the generated contracts linked at the top
+of this guide.
+
+## What an eval does not prove
+
+An eval result is evidence about a declared suite, scorer, generation policy,
+model state, and execution envelope. It is not proof that:
+
+- the suite represents production traffic;
+- its labels or scorer are correct;
+- examples are independent;
+- no semantic or pretraining leakage exists;
+- a model is safe outside the measured domains;
+- a point estimate will hold after deployment;
+- a seed alone makes execution reproducible.
+
+Keep suite source, synthesis/trace sidecars, split identities, job/result
+archives, and provenance records together. Review failures and slice counts,
+not only headline accuracy. Use an external test corpus and independent
+human review for high-stakes release decisions.

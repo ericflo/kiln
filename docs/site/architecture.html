@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Kiln Architecture &mdash; Single-process inference and training</title>
-  <meta name="description" content="Kiln architecture: single-process serving, ROCm stream ordering and graph lifecycle, request flow, LoRA hot-swap training, and GPU backend kernels.">
+  <meta name="description" content="How Kiln's single-process server, capability-derived accelerator policy, batching, adapter training, hot-swaps, and eval pipeline fit together.">
   <meta name="theme-color" content="#0a0908">
   <meta name="color-scheme" content="dark">
   <link rel="canonical" href="https://ericflo.github.io/kiln/architecture.html">
@@ -13,7 +13,7 @@
   <link rel="apple-touch-icon" href="assets/logo.png">
 
   <meta property="og:title" content="Kiln Architecture &mdash; Single-process inference and training">
-  <meta property="og:description" content="Kiln internals: server, scheduler, model engine, ROCm execution policy, live LoRA training, and GPU backend kernels.">
+  <meta property="og:description" content="How Kiln's server, scheduler, model engine, accelerator policy, adapter training, and eval pipeline fit together.">
   <meta property="og:type" content="website">
   <meta property="og:locale" content="en_US">
   <meta property="og:site_name" content="Kiln">
@@ -25,7 +25,7 @@
   <meta property="og:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Kiln Architecture &mdash; Single-process inference and training">
-  <meta name="twitter:description" content="Kiln internals: server, scheduler, model engine, ROCm execution policy, live LoRA training, and GPU backend kernels.">
+  <meta name="twitter:description" content="How Kiln's server, scheduler, model engine, accelerator policy, adapter training, and eval pipeline fit together.">
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image-v3.png">
   <meta name="twitter:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
 
@@ -80,7 +80,7 @@
       position: absolute;
       left: 1rem;
       top: 0;
-      transform: translateY(-120%);
+      transform: translateY(calc(-100% + 1px));
       z-index: 50;
       background: var(--accent);
       color: #1a0c00;
@@ -267,18 +267,18 @@
   <!-- hero -->
   <section class="hero-glow">
     <div class="max-w-4xl mx-auto px-6 pt-16 pb-10">
-      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">Architecture &middot; cold-reader map</span>
+      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">Architecture &middot; system map</span>
       <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">
         Kiln is one Rust process that serves, trains, and hot-swaps adapters.
       </h1>
       <p class="text-lg leading-relaxed max-w-3xl" style="color: var(--fg-dim);">
-        This page is the website-level map of Kiln internals. It explains how the HTTP server,
-        scheduler, model engine, LoRA training queue, and GPU backend crates fit together before
-        you dive into the full GitHub architecture document.
+        See how the HTTP server, scheduler, model engine, accelerator policy, LoRA training queue,
+        and eval worker share one runtime. Follow the reference links when you need exact backend,
+        memory, or observability contracts.
       </p>
       <div class="flex flex-wrap gap-3 mt-8">
-        <a href="https://github.com/ericflo/kiln/blob/main/ARCHITECTURE.md" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
-          Full architecture doc &rarr;
+        <a href="docs/architecture-deep-dive/" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+          Architecture deep dive &rarr;
         </a>
         <a href="quickstart.html" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
           Quickstart &rarr;
@@ -298,11 +298,12 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#single-process-server">Single-process server</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#request-path-and-batching">Request path</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#streaming-prefill-authority">Streaming prefill</a>
-          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#rocm-execution-policy">ROCm execution</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#rocm-execution-policy">Accelerator policy</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#gated-deltanet-hybrid">Gated DeltaNet hybrid</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#lora-hot-swap-training-queue">LoRA hot-swap</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#backend-owned-sft-loss-routing">SFT loss routing</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#gpu-backend-crates">GPU backends</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#eval-pipeline">Evaluation</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#where-to-go-next">Where to go next</a>
         </div>
       </div>
@@ -316,978 +317,146 @@
         <div class="label mb-3">System shape</div>
         <h2 id="single-process-server" class="text-2xl font-semibold mb-4">Single-process server</h2>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
-          Kiln is built as one deployable Rust binary: a single process owns the OpenAI-compatible
-          Axum HTTP API, request scheduler, model engine, adapter registry, and background training
-          workers. There is no Python sidecar and no second model load for the normal SFT or GRPO path.
+          Kiln runs serving, training, adapter management, and evaluation in one deployable Rust binary.
+          The process owns the Axum HTTP API, scheduler, model engine, adapter registry, and background
+          workers. The normal SFT and GRPO paths need neither a Python sidecar nor a second model load.
         </p>
-        <pre class="mt-5"><code>client request
-  -> axum HTTP/API
+        <pre class="mt-5"><code>inference
+  -> HTTP/API
   -> scheduler + block manager
   -> Qwen/Qwen3.5-4B engine
-  -> sampler or streaming SSE response
+  -> sampler or streaming response
 
-training request
-  -> axum HTTP/API
+training
+  -> HTTP/API
   -> LoRA training queue
-  -> hot-swapped adapter path</code></pre>
+  -> saved or hot-swapped adapter</code></pre>
+        <p class="mt-4 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          “One process” does not mean that every task runs at the same time. Inference takes shared
+          accelerator ownership; training and weight-changing adapter operations require exclusive
+          ownership and are admitted only by a serving profile that permits them.
+        </p>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Request lifecycle</div>
+        <h2 id="request-path-and-batching" class="text-2xl font-semibold mb-4">Request path and batching</h2>
+        <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
+          <div>
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">API edge</h3>
+            <p>OpenAI-shaped chat, model-listing, health, and streaming endpoints accept work and return structured errors.</p>
+          </div>
+          <div>
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">Scheduler</h3>
+            <p>The iteration-level scheduler combines continuous batching with chunked prefill so prompt and decode work can share the accelerator loop.</p>
+          </div>
+          <div>
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">Memory</h3>
+            <p>The paged KV block manager allocates cache only for full-attention layers and tracks ownership through cancellation and terminal cleanup.</p>
+          </div>
+        </div>
+        <p class="mt-5 leading-relaxed" style="color: var(--fg-dim);">
+          Startup resolves one immutable <code>BatchingRuntimeConfig</code> after selecting a backend and
+          decode width. Streaming and non-streaming requests, sampling, cancellation, response backpressure,
+          adapter barriers, KV ownership, and shutdown enter the same actor state machine. Live snapshots
+          distinguish queue time, prefill, decode, response delivery, and cleanup.
+        </p>
+        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Prefix-cache admission must change reuse, not numerical prompt partitioning. A cache miss follows
+          the same block-aligned final prefill boundary as a fresh request. A request is not reported complete
+          until its scheduler row and backend-owned resources have drained.
+        </p>
       </article>
 
       <article class="card p-6">
         <div class="label mb-3">Prefill execution</div>
         <h2 id="streaming-prefill-authority" class="text-2xl font-semibold mb-4">One streaming-prefill authority for inference and training</h2>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
-          Typed TOML and canonical startup overrides enter one strict loader. After backend selection,
-          Kiln combines operator intent with <code>StreamingPrefillBackendPolicy</code> to produce an
-          immutable <code>StreamingPrefillRuntimeConfig</code>. Its private execution policy is injected
-          into <code>ModelRunner</code> and the server-owned training runtime. Ordinary generation,
-          prompt-logprob scoring, SFT/GRPO/OPD admission, local teachers, MTP alignment, checkpoint
-          planning, GDN segment forwards, tape-authoritative forwards, detached full-attention routes,
-          and the benchmark consume that value. None of those paths rereads public streaming
-          environment variables; server-owned teacher construction fails closed if the value is absent.
+          Typed configuration and canonical startup overrides resolve into an immutable
+          <code>StreamingPrefillRuntimeConfig</code>. Inference, prompt-logprob scoring, native training,
+          local teachers, checkpoint planning, and benchmarks consume that same value. They do not reread
+          environment variables while work is running.
         </p>
-        <pre class="mt-5"><code>typed [streaming_prefill] + source attribution
-  -> selected-backend dispatch and tile defaults
-  -> immutable StreamingPrefillRuntimeConfig
-  -> ModelRunner + native training runtime + checkpoint identity
-  -> inference base tiles / tape tiles / detached full-attention tiles
-  -> generation / prompt-logprob + local teacher / MTP alignment
-  -> inference-contract-v2 teacher and logit-cache identity</code></pre>
-        <div class="grid md:grid-cols-3 gap-5 check-list mt-5" style="color: var(--fg-dim);">
-          <div>
-            <h3 class="font-semibold mb-2" style="color: var(--fg);">Dispatch</h3>
-            <p><code>auto</code> starts at 256 prompt tokens on ROCm, 2048 on CUDA/Metal, and remains off on CPU/Vulkan. <code>enabled</code> selects every non-empty prompt; <code>disabled</code> is the monolithic A/B control. A threshold override adjusts only an existing automatic crossover; eligible work physically splits only when its sequence exceeds the route tile.</p>
-          </div>
-          <div>
-            <h3 class="font-semibold mb-2" style="color: var(--fg);">Route-specific tiles</h3>
-            <p>The base tile covers inference and non-tape GDN work, the tape tile covers tape-authoritative training, and the detached tile covers materialized full attention. All concrete values are positive multiples of the 64-token recurrent chunk.</p>
-          </div>
-          <div>
-            <h3 class="font-semibold mb-2" style="color: var(--fg);">Inheritance</h3>
-            <p>An explicit base feeds specialized fields left on <code>auto</code>. A detached override feeds ordinary, boundary, and tape-replay full-attention variants. Effective-source diagnostics preserve whether a value came from backend policy, file, environment, or base inheritance.</p>
-          </div>
-        </div>
-        <div class="overflow-x-auto mt-5">
-          <table class="w-full text-sm" style="color: var(--fg-dim);">
-            <thead style="color: var(--fg);"><tr><th class="text-left p-2">Backend</th><th class="text-left p-2">Auto dispatch</th><th class="text-left p-2">Base / tape</th><th class="text-left p-2">Detached / boundary / replay</th></tr></thead>
-            <tbody>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">CPU</td><td class="p-2">never</td><td class="p-2">8192 / 8192</td><td class="p-2">8192 / 8192 / 8192</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">CUDA</td><td class="p-2">&ge; 2048</td><td class="p-2">1024 / 1024</td><td class="p-2">8192 / 65536 / 65536</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">ROCm</td><td class="p-2">&ge; 256</td><td class="p-2">256 / 256</td><td class="p-2">8192 / 8192 / 8192</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Metal</td><td class="p-2">&ge; 2048</td><td class="p-2">2048 / 2048</td><td class="p-2">8192 / 8192 / 8192</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Vulkan</td><td class="p-2">never</td><td class="p-2">2048 / 2048</td><td class="p-2">8192 / 8192 / 8192</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="leading-relaxed mt-4" style="color: var(--fg-dim);">ROCm batching also enforces route-invariant prefill chunks at startup: the actor ceiling must equal the effective 256-token streaming tile, automatic or forced streaming must cover the first split, and the combined actor budget must fit that tile plus the effective decode width. A violation stops startup before traffic instead of allowing scheduler chunking and tiled model prefill to partition a deterministic prompt differently.</p>
-        <p class="mt-5 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          The complete resolved object appears at <code>/v1/config.streaming_prefill</code>,
-          health <code>prefill_runtime.streaming_prefill</code>, and trusted-debug top-level
-          <code>streaming_prefill</code>. It has no single enabled boolean because auto dispatch is
-          prompt-length dependent. It includes configured/backend/effective dispatch, threshold
-          applicability, every effective tile and source, last-token LM-head policy, immutability, and
-          restart requirement. This is process-lifetime policy; a running request or training job never
-          observes a changed shell or file. The canonical Kiln prompt-logprob teacher identity hashes
-          every resolved field under inference-contract v2. Changing the policy therefore changes the
-          teacher revision and invalidates identity-bound logit caches and OPD resume bindings.
+        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
+          Backend policy supplies automatic dispatch thresholds and route-specific tile defaults. Explicit
+          settings may override those defaults, but startup validates their geometry before accepting traffic.
+          The resolved values and their sources appear in config, health, and trusted-debug output.
+        </p>
+        <p class="mt-4 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Changing prefill policy changes execution identity. Identity-bound teacher caches and resumable
+          training state therefore fail closed instead of silently reusing evidence produced by another route.
+          See the <a href="docs/configuration/">configuration reference</a> for exact defaults and validation.
         </p>
       </article>
 
       <article class="card p-6">
         <div class="label mb-3">Accelerator execution</div>
-        <h2 id="rocm-execution-policy" class="text-2xl font-semibold mb-4">Immutable accelerator routes, attention geometry, ROCm stream ordering, and graph lifecycle</h2>
+        <h2 id="rocm-execution-policy" class="text-2xl font-semibold mb-4">Accelerator policy is resolved once before execution</h2>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
-          ROCm execution is process-lifetime policy, resolved once before the primary HIP context or model
-          runner exists. Typed <code>[accelerator]</code> intent combines with the immutable serving profile
-          to produce <code>kiln.accelerator-runtime-policy.v16</code>. The same resolved object is installed in
-          the tensor context, projected into the model graph runner, stored in server state, and returned by
-          product diagnostics. Tensor, model, and kernel code do not re-read the public graph,
-          synchronization, or matmul-route environment names during inference.
+          Kiln combines typed <code>[accelerator]</code> settings with the serving profile before it creates
+          the device or loads the model. The result is immutable
+          <code>kiln.accelerator-runtime-policy.v16</code>, shared by the tensor context, model runner,
+          training runtime, and diagnostics. Requests cannot change it.
         </p>
-        <pre class="mt-5"><code>typed [server] + [accelerator] configuration
-  -> strict parse, source attribution, and serving-profile gate
-  -> immutable accelerator runtime policy v16
-  -> Vulkan physical-device/validation policy installed before logical-device creation
-  -> kiln-tensor adapter route set installed before model execution
-  -> exact full-attention score geometry installed in model and ROCm flash planners
-  -> primary ROCm context synchronization and matmul-route discipline
-  -> ModelRunner graph lifecycle and bounded graph cache
-  -> /v1/config + /health + trusted debug + dashboard + Prometheus</code></pre>
-
-        <div class="grid md:grid-cols-3 gap-5 check-list mt-5" style="color: var(--fg-dim);">
-          <div>
-            <h3 class="font-semibold mb-2" style="color: var(--fg);"><code>legacy_host_barriers</code></h3>
-            <p>The portable default preserves conservative device and active-stream waits, including the device-wide external-yield drain and established large hipBLASLt and cast boundaries.</p>
+        <div class="grid md:grid-cols-3 gap-5 mt-5" style="color: var(--fg-dim);">
+          <div class="card p-4" style="background: var(--bg-soft-2);">
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">Configuration</h3>
+            <p>Operator intent selects a backend, serving profile, memory policy, and the small set of supported backend profiles.</p>
           </div>
-          <div>
-            <h3 class="font-semibold mb-2" style="color: var(--fg);"><code>stream_ordered</code></h3>
-            <p>The experimental mode omits only barriers whose call site asserts a same-stream FIFO dependency. External yield waits on the primary producer stream. Host reads, borrowed-buffer lifetimes, in-place mutation, reclamation, graph transitions, recovery, and global mutation still synchronize.</p>
+          <div class="card p-4" style="background: var(--bg-soft-2);">
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">Capabilities</h3>
+            <p>The selected device reports limits and features. Workload shape and dtype add per-dispatch eligibility checks.</p>
           </div>
-          <div>
-            <h3 class="font-semibold mb-2" style="color: var(--fg);">One context, one policy</h3>
-            <p>The primary context stores the policy. A later owner requesting another policy for the same device receives an error naming the installed and requested values; multiple model/runtime owners cannot silently mix ordering disciplines.</p>
+          <div class="card p-4" style="background: var(--bg-soft-2);">
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">Evidence</h3>
+            <p>Qualification records correctness and performance for a build and workload. It never rewrites product dispatch.</p>
           </div>
         </div>
 
-        <h3 class="font-semibold mt-6 mb-3">Adapter routes are one typed policy</h3>
+        <h3 class="text-lg font-semibold mt-7 mb-3">Vulkan policy is capability-driven</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
-          <code>accelerator.kt_api_mode</code> replaces the former per-operation environment switches.
-          <code>auto</code> enables the qualified kiln-tensor routes while leaving generic matmul and paged-KV
-          experiments inactive; <code>all</code> enables the complete route set and <code>disabled</code> forces
-          legacy fallbacks. The explicit comparison modes require the experimental profile. The model stores
-          the selected value once, accepts an idempotent reinstall, and rejects a conflicting process-lifetime
-          value rather than allowing different requests or model owners to execute different route mixtures.
-        </p>
-
-        <h3 class="font-semibold mt-6 mb-3">Vulkan device creation is typed startup policy</h3>
-        <p class="leading-relaxed" style="color: var(--fg-dim);">
-          <code>accelerator.vulkan_device_index</code> is either automatic or a strict zero-based physical-device
-          index. Automatic selection preserves discrete-GPU preference and otherwise uses the first enumerated
-          device; an unavailable explicit index aborts startup rather than falling back. The canonical environment
-          name is mechanically derived as <code>KILN_ACCELERATOR_VULKAN_DEVICE_INDEX</code>; retired
-          <code>KILN_VULKAN_DEVICE</code> is ignored.
-          <code>accelerator.vulkan_validation</code> defaults false; true requires the experimental serving profile
-          and an installed Khronos validation layer or startup fails. Both values are installed under
-          <code>kiln.vulkan-device-policy.v1</code>, accept only an idempotent reinstall, and are reported in every
-          accelerator-policy diagnostic. The nonstandard <code>GGML_VK_VISIBLE_DEVICES</code> behavior is removed.
-        </p>
-
-        <h3 class="font-semibold mt-6 mb-3">Vulkan routes are derived from device capabilities</h3>
-        <p class="leading-relaxed" style="color: var(--fg-dim);">
-          Product Vulkan dispatch installs typed, immutable
-          <code>kiln.vulkan-kernel-policy.v6</code> from the selected physical device's reported workgroup,
-          shared-memory, descriptor, push-constant, subgroup, API, and memory-topology capabilities. It is not a
-          TOML, CLI, request, environment, device-name, vendor-ID, device-ID, driver-name, or PCI-ID surface. The
-          Vulkan backend, kernel crate, and resident model planner share this one object. Each standards-based model
-          route, packed-weight path, row grouping, fused submission, parallel recurrence path, and resident-decode
-          path is admitted only when its own requirements fit. Unsupported optional routes retain narrow fallbacks;
-          unrelated routes stay enabled. Machine-specific receipts do not alter product dispatch. A source change
-          must version the policy and establish cross-device correctness.
-          Accelerator policy v16 reports this identity as <code>vulkan_kernel_policy_schema_id</code> in config,
-          health, trusted debug state, the CLI config check, and the dashboard.
+          Vulkan adds a device-capability policy derived from standardized limits and features—not a device
+          name, marketing name, vendor ID, device ID, driver string, PCI ID, host name, or qualification
+          receipt. After physical-device selection, Kiln reads the API version, workgroup and storage limits,
+          shared-memory and push-constant limits, subgroup support, and memory properties. It installs
+          <code>kiln.vulkan-kernel-policy.v6</code> once.
         </p>
         <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Instance creation negotiates the loader API up to Vulkan 1.2. The common shader set targets Vulkan 1.0.
-          Three subgroup-tiled attention shaders target Vulkan 1.1 and are selected only when compute-stage subgroup
-          basic and arithmetic operations are both available; otherwise the Vulkan 1.0 untiled shader remains active.
+          Each optional Vulkan route is admitted only when its own shader, buffer, dispatch-grid, tensor-shape,
+          and dtype requirements fit. If one route is unavailable, only that route takes its explicit fallback;
+          unrelated fast paths remain eligible. This lets any sufficiently capable Vulkan device use accelerated
+          routes without appearing in an allowlist. A policy change requires a version change and cross-device
+          correctness evidence.
         </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Former Vulkan route controls, including the applicable
-          <code>KILN_DISABLE_VULKAN_*</code>, <code>KILN_ENABLE_VULKAN_*</code>, threshold, split-K,
-          stage-profile, packed-weight, recurrence, and resident-decode variables, have no aliases or
-          replacement fields. They silently composed unreportable routes and accepted malformed values.
-          Historical optimization logs retain them only as experiment provenance; the research microbenchmark
-          is a separate executable and is not a product configuration path.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Serving and product kernel paths no longer read residual <code>KILN_VK_*</code> tiling or CPU-fallback
-          controls. The separate <code>vulkan_decode_microbench</code> research executable also has no
-          <code>KILN_*</code> input: selection, timing, history, kernel crossovers, and A/B route choices are
-          typed command arguments, validated before device creation, and documented completely in the CLI
-          reference. They are not server configuration and cannot produce a qualified product receipt. Phase
-          8.1 remains open for non-Vulkan runtime controls elsewhere.
-        </p>
-
-        <h3 class="font-semibold mt-6 mb-3">Attention geometry cannot follow free-memory noise</h3>
-        <p class="leading-relaxed" style="color: var(--fg-dim);">
-          <code>accelerator.full_attention_score_budget_mib</code> is a 64&ndash;2048 MiB process-lifetime
-          ceiling, defaulting to 2048 MiB. The model planner uses it for materialized exact-attention score
-          and scratch tiling on every backend. ROCm flash attention derives a fixed
-          <code>min(value, 1024)</code> MiB online-score ceiling and retains fixed 2048-query and
-          4096-key tile maxima. Memory-governor observations still protect allocations: an operation whose
-          exact working set is unavailable is rejected before publication. They no longer choose a different
-          tile size or route between layers or requests.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Policy v16 retains the deletion of eight permissive materialized-score, online-score, and tile environment controls
-          rather than retaining aliases. The former planners could independently parse different values during
-          execution and derive a materialized ceiling as high as 32 GiB from changing free memory. Real-device
-          parity tests now force small multi-tile geometry with a scoped programmatic hook, so test coverage no
-          longer mutates process-global configuration.
-        </p>
-
-        <h3 class="font-semibold mt-6 mb-3">CUDA backend routes are one typed profile</h3>
-        <p class="leading-relaxed" style="color: var(--fg-dim);">
-          <code>accelerator.cuda_kernel_profile</code> replaces twenty-five CUDA model/backend hot-path
-          environment decisions with one process-lifetime policy installed before backend construction.
-          <code>native_default</code> preserves the twenty-five established model/backend routes that were
-          previously enabled by default; the name deliberately does not claim qualification on the
-          current source tree or hardware.
-          <code>portable_fallback</code> declines every owned accelerated route for explicit reference
-          comparison. Reinstalling the same policy is idempotent; attempting to install a different policy
-          after one has been observed fails instead of changing live dispatch.
-        </p>
-        <div class="overflow-x-auto mt-4">
-          <table class="w-full text-sm" style="color: var(--fg-dim);">
-            <thead style="color: var(--fg);"><tr><th class="text-left p-2">CUDA backend route</th><th class="text-left p-2"><code>native_default</code></th><th class="text-left p-2"><code>portable_fallback</code></th></tr></thead>
-            <tbody>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>full_attn_qkv_in_proj</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_ab_in_proj</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_prefill_ab_in_proj</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_prefill_gates</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_gates</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_gated_rms_norm</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_decode_fused</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_decode_unexpanded_qk</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_decode_qk_norm_recurrent</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_decode_qk_norm_recurrent_rmsnorm</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_conv1d</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>lora_decode_add</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_full_chunk_forward_multiblock</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_paged_decode</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_rotary_qk</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>attn_decode_qkv_prep</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_mlp_silu_mul</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_mlp_gate_up_prefill</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_attn_sigmoid_mul</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_rmsnorm</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>rmsnorm_backward</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>fused_l2_qk_norm</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>paged_decode_dyn_seqlen_batch</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>gdn_chunk_pre_permute</code></td><td class="p-2">on</td><td class="p-2">off</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          The canonical environment override is mechanically derived as
-          <code>KILN_ACCELERATOR_CUDA_KERNEL_PROFILE</code>. Former CUDA-specific per-kernel names are not
-          aliases. Generic switches governing the same routes are likewise no longer read by CUDA model code.
-          Route selection, training chunk geometry, and direct paged-decode preference now come from the same
-          installed policy rather than request-time process state. The profile does not claim CUDA hardware
-          qualification, graph support, or Marlin correctness beyond the routes enumerated above.
-        </p>
-
-        <h3 class="font-semibold mt-6 mb-3">CUDA weight layout and training backward are startup policy</h3>
-        <p class="leading-relaxed" style="color: var(--fg-dim);">
-          <code>accelerator.cuda_marlin_profile</code> selects one immutable projection representation before
-          weight upload. <code>disabled</code> preserves BF16 weights; <code>attention_mlp</code> packs
-          full-attention Q and MLP gate/up/down as W4A16; <code>attention_mlp_gdn</code> also packs the
-          quality-sensitive GDN output projection. CPU packing always uses the established parallel path.
-          Both W4A16 profiles require <code>server.serving_profile = "experimental"</code>.
-          Its canonical override is <code>KILN_ACCELERATOR_CUDA_MARLIN_PROFILE</code>.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          <code>accelerator.cuda_flash_backward_mode</code> fixes CUDA FlashAttention training backward as
-          <code>fast</code> or split-accumulation <code>deterministic</code> before model construction. Its
-          canonical override is <code>KILN_ACCELERATOR_CUDA_FLASH_BACKWARD_MODE</code>. Kernel calls receive
-          this mode explicitly; they do not read process state. Former <code>KILN_W4A16</code>,
-          <code>KILN_W4A16_GDN_OUT_PROJ</code>, <code>KILN_DISABLE_PARALLEL_PACK</code>, and
-          <code>KILN_FLASH_ATTN_BWD_DETERMINISTIC</code> names are removed rather than aliases.
-          The unused <code>KILN_DISABLE_OPD_LOSS_KERNEL</code> is deleted, and FLCE uses a fixed bounded
-          4,096-row active tile instead of <code>KILN_FLCE_ACTIVE_ROW_TILE</code>.
-        </p>
-
-        <h3 class="font-semibold mt-6 mb-3">Metal backend routes are one typed profile</h3>
-        <p class="leading-relaxed" style="color: var(--fg-dim);">
-          <code>accelerator.metal_kernel_profile</code> replaces every Metal backend per-kernel environment
-          decision with one process-lifetime policy installed before backend construction.
-          <code>native_default</code> preserves forty-five established native routes and retains custom
-          LM-head argmax as the single default-off route; <code>portable_fallback</code> declines all forty-six.
-          The canonical environment override is <code>KILN_ACCELERATOR_METAL_KERNEL_PROFILE</code>.
-          Reinstalling the same value is idempotent and a conflicting install fails before serving.
-        </p>
-        <div class="overflow-x-auto mt-4">
-          <table class="w-full text-sm" style="color: var(--fg-dim);">
-            <thead style="color: var(--fg);"><tr><th class="text-left p-2">Family</th><th class="text-left p-2">Complete owned route set</th><th class="text-left p-2"><code>native_default</code></th></tr></thead>
-            <tbody>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Attention and convolution</td><td class="p-2"><code>sdpa</code>, <code>sdpa_full</code>, <code>conv1d_prefill</code>, <code>conv1d_update</code></td><td class="p-2">all on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">GDN core</td><td class="p-2"><code>gdn_forward_substitution</code>, <code>gdn_recurrent</code>, <code>gdn_gates</code>, <code>gated_rms_norm</code>, <code>gdn_in_proj</code>, <code>gdn_qk_norm</code>, <code>gdn_qkv_conv_norm</code>, <code>gdn_prefill_qkv_conv_split</code></td><td class="p-2">all on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">GDN projection variants</td><td class="p-2"><code>gdn_in_proj_row_pair</code>, <code>gdn_in_proj_row_quad</code>, <code>gdn_in_proj_row_triple</code>, <code>gdn_in_proj_serial_vector_load</code>, <code>gdn_in_proj_serial_x2_load</code>, <code>gdn_prefill_decay_recurrent</code>, <code>gdn_prefill_ab_in_proj</code></td><td class="p-2">all on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">GDN decode and norm</td><td class="p-2"><code>gdn_decode_gates_recurrent</code>, <code>gdn_decode_gates_recurrent_rmsnorm</code>, <code>rms_norm</code></td><td class="p-2">all on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">MLP</td><td class="p-2"><code>mlp_gate_up_fusion</code>, <code>mlp_gate_up_row_pair</code>, <code>mlp_gate_up_row_quad</code>, <code>mlp_gate_up_row_triple</code>, <code>mlp_gate_up_row_quad_vector_load</code>, <code>mlp_gate_up_serial_vector_load</code>, <code>mlp_gate_up_serial_dedicated</code>, <code>mlp_silu_mul</code></td><td class="p-2">all on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Projection and LoRA</td><td class="p-2"><code>attn_gate_fusion</code>, <code>fused_qkv_proj</code>, <code>lora_delta_decode</code></td><td class="p-2">all on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">LM head</td><td class="p-2"><code>lm_head_argmax</code>, <code>lm_head_argmax_rows</code>, <code>lm_head_argmax_gpu_reduce</code>, <code>lm_head_sample</code></td><td class="p-2">custom argmax off; rows, reduction, and sampling on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Paged decode</td><td class="p-2"><code>paged_attn_decode_contiguous</code>, <code>paged_kv_write_token_major</code></td><td class="p-2">all on</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Transposed cooperative GEMV</td><td class="p-2"><code>transposed_coop_gemv</code>, <code>transposed_coop_gemv_tile8</code>, <code>transposed_coop_gemv_tile16</code>, <code>transposed_coop_gemv_row_pair</code>, <code>transposed_coop_gemv_row_quad</code>, <code>transposed_coop_gemv_row_quad_tile8</code>, <code>transposed_coop_gemv_row_triple_tile8</code></td><td class="p-2">all on</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          The removed names are the <code>KILN_DISABLE_METAL_SDPA*</code>,
-          <code>KILN_DISABLE_METAL_CONV1D_PREFILL</code>, generic and Metal fused-conv/GDN switches,
-          <code>KILN_DISABLE_METAL_GDN_*</code>, generic and Metal RMSNorm switches,
-          <code>KILN_DISABLE_METAL_MLP_*</code>, <code>KILN_DISABLE_METAL_ATTN_GATE_FUSION</code>,
-          <code>KILN_DISABLE_METAL_FUSED_QKV_PROJ</code>, <code>KILN_DISABLE_METAL_LORA_DELTA_DECODE</code>,
-          <code>KILN_ENABLE_METAL_LM_HEAD_ARGMAX</code>, all
-          <code>KILN_DISABLE_METAL_LM_HEAD_*</code>, both Metal paged-attention/KV switches, and every
-          <code>KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV*</code> variant. The configuration reference
-          enumerates every exact spelling. None is an alias for the typed profile.
-        </p>
-
-        <h3 class="font-semibold mt-6 mb-3">Fixed model, loader, and fallback policy</h3>
-        <p class="leading-relaxed" style="color: var(--fg-dim);">
-          Unsectioned debug and rollback variables that could change routes after typed startup validation are
-          removed without aliases. The table records the complete replacement behavior; these independent
-          combinations are deliberately not product configuration.
-        </p>
-        <div class="overflow-x-auto mt-4">
-          <table class="w-full text-sm" style="color: var(--fg-dim);">
-            <thead style="color: var(--fg);"><tr><th class="text-left p-2">Policy family</th><th class="text-left p-2">Retired names</th><th class="text-left p-2">Product behavior</th></tr></thead>
-            <tbody>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Decode fallback</td><td class="p-2"><code>KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE</code>, <code>KILN_ROCM_PAGED_DECODE</code>, <code>KILN_DECODE_HOT_PATH_DEBUG_FALLBACK</code>, <code>KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK</code>, <code>KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK</code>, <code>KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK</code>, and <code>KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY</code></td><td class="p-2">CUDA and Vulkan follow their installed device-neutral profiles; ROCm retains its portable fallback policy. Unsupported routes fail closed.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">CUDA model routes</td><td class="p-2"><code>KILN_DISABLE_FUSED_PAGED_DECODE</code>, <code>KILN_DISABLE_FUSED_CUDA_ROTARY_QK</code>, <code>KILN_DISABLE_CUDA_ATTN_DECODE_QKV_PREP</code>, fused MLP/attention/RMSNorm/L2-QK switches, dynamic-length paged-decode force/disable switches, and <code>KILN_DISABLE_GDN_CHUNK_PRE_PERMUTE</code></td><td class="p-2">All twenty-five decisions come from <code>accelerator.cuda_kernel_profile</code>.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Training geometry</td><td class="p-2"><code>KILN_DISABLE_GPU_TRAINING_MLP_CHUNKING</code>, CUDA variants and token counts, split-Q/gate disable variants, and <code>KILN_SPLIT_Q_GATE_OUTPUT_CHUNK_FEATURES</code></td><td class="p-2">ROCm uses portable fixed geometry; CUDA uses 1,024-token MLP chunks; Vulkan uses at most 1,024 output features per split slice.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Projection loading</td><td class="p-2"><code>KILN_KEEP_PROJECTION_ORIGINALS</code>, <code>KILN_DROP_PROJECTION_ORIGINALS</code>, <code>KILN_KEEP_PROJECTION_TRANSPOSES</code>, parallel-load disable switches, and <code>KILN_VK_NATIVE_TRAINING</code></td><td class="p-2">CUDA/Metal drop redundant originals; CPU/ROCm/Vulkan retain them; every backend retains cached transposes; Metal parallel uploads remain enabled.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">State and precision</td><td class="p-2"><code>KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER</code>, backend BF16-state disable switches, and <code>KILN_ALLOW_FP8_ON_METAL</code></td><td class="p-2">State scatter and native-with-constraints BF16/F16 state follow fixed backend policy. Metal FP8 KV remains declined.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Optimized paths</td><td class="p-2"><code>KILN_DISABLE_WEIGHTED_LM_HEAD_PREP</code>, <code>KILN_DISABLE_MARLIN_BF16_DROP</code>, CUDA GDN row-loop switches, and <code>KILN_ENABLE_METAL_GDN_STREAMING_FASTPATHS</code></td><td class="p-2">Backend policy owns preparation and redundant transpose release; CUDA rows loop only when noncontiguous; the unqualified Metal experiment stays off.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Diagnostics/training</td><td class="p-2"><code>KILN_ARENA_FORCE_ZERO</code> and <code>KILN_CUDA_NATIVE_TRAINING</code></td><td class="p-2">Only contractually zeroed arena buffers are cleared. Server training uses the authoritative shared tensor tape.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Metal graph execution</td><td class="p-2"><code>KILN_METAL_GRAPHS</code>, <code>KILN_FORCE_EAGER_DECODE</code>, and <code>KILN_METAL_GRAPH_STABLE_PAGED_METADATA</code></td><td class="p-2">Runtime options fix graph eligibility before runner construction; eligible runners use stable paged metadata.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Tape residency</td><td class="p-2"><code>KILN_TAPE_GDN_OFFLOAD_SAVED_TENSORS</code>, <code>KILN_TAPE_OFFLOAD_MATMUL_A</code>, and <code>KILN_TAPE_OFFLOAD_MIN_BYTES</code></td><td class="p-2">Saved tensors remain device-resident; the unqualified host-offload experiment is unavailable.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Metal SDPA/commands</td><td class="p-2"><code>KILN_SDPA_SPLIT</code>, <code>KILN_SDPA_PREFILL_MIN</code>, and <code>CANDLE_METAL_COMPUTE_PER_BUFFER</code></td><td class="p-2">Shape policy owns split-K; matrix-core prefill starts at 16 query tokens; command buffers commit after 50 compute encodes.</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          <code>server.deterministic</code> remains typed configuration. Its sole environment target is
-          <code>KILN_SERVER_DETERMINISTIC</code>; retired <code>KILN_DETERMINISTIC</code> is ignored.
-          Standalone tensor-library use defaults to nondeterministic execution
-          unless its owning application installs the process-lifetime policy.
-        </p>
-
-        <h3 class="font-semibold mt-6 mb-3">ROCm product execution is portable-only</h3>
-        <p class="leading-relaxed" style="color: var(--fg-dim);">
-          <code>accelerator.rocm_kernel_profile</code> accepts only <code>portable_fallback</code>.
-          Product builds decline machine-qualified model and tensor routes and retain bounded generic
-          fallbacks. Historical route attribution is isolated behind the
-          <code>hardware-qualification</code> feature on the dedicated example; those values are not server
-          configuration and cannot be installed by an ordinary ROCm build.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Historical qualification route matrices are retained only with their source receipts, not as product architecture.
-          Ordinary backend dispatch, model loading, forward/tape execution, Rust tensor operations, RMSNorm,
-          and C++ paged-attention launchers read the portable policy. Dispatch does not consult device identity
-          or process environment in hot paths. The retired per-kernel ROCm spellings and CUDA-spelled fallbacks
-          are unsupported as aliases. The default-off ROCm streaming-GDN and materialized tape-flash investigation switches were
-          removed rather than promoted. The unused opt-in axis-zero concat kernel was deleted. Generic GPU MLP and split-projection environment controls remain live
-          for CUDA/Vulkan until those hardware-host migrations, but ROCm no longer consumes them.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Portable ROCm execution declines the packed W8/W8A8 token-only LM-head routes and uses the ordinary
-          BF16 LM head. Historical route mechanics and attribution remain in source-bound qualification artifacts,
-          not product configuration.
-        </p>
-        <details class="mt-4" open>
-          <summary class="font-medium">Retired model and tensor-layer ROCm variables</summary>
-          <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-            The profile replaces <code>KILN_DISABLE_ROCM_ATTN_DECODE_QKV_PREP</code>,
-            <code>KILN_ENABLE_ROCM_GDN_STREAMING_FASTPATHS</code>,
-            <code>KILN_DISABLE_ROCM_LONG_FLASH_ATTN</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_RECTANGULAR_CAUSAL</code>,
-            <code>KILN_DISABLE_ROCM_TRAINING_MLP_CHUNKING</code>,
-            <code>KILN_ROCM_TRAINING_MLP_CHUNK_TOKENS</code>,
-            <code>KILN_DISABLE_ROCM_W8_SAMPLED_LM_HEAD</code>,
-            <code>KILN_DISABLE_ROCM_SPLIT_Q_GATE_TRAINING</code>,
-            <code>KILN_ROCM_SPLIT_Q_GATE_ROW_TILE_TOKENS</code>,
-            <code>KILN_DISABLE_ROCM_SPLIT_Q_GATE_F32_OUTPUT</code>,
-            <code>KILN_DISABLE_ROCM_GQA_SDPA_F32</code>,
-            <code>KILN_ROCM_TAPE_FLASH_MATERIALIZED</code>, <code>KILN_ROCM_W8A16</code>,
-            <code>KILN_ROCM_W8A8</code>, <code>KILN_ROCM_W8A8_SAMPLED_LM_HEAD</code>, and
-            <code>KILN_DISABLE_ROCM_W8_SWIGLU</code>, plus
-            <code>KILN_DISABLE_ROCM_SPLIT_PAGED_ATTN</code>,
-            <code>KILN_ROCM_PAGED_ATTN_SPLIT_TOKENS</code>,
-            <code>KILN_ROCM_PAGED_ATTN_MAX_SPLITS</code>,
-            <code>KILN_DISABLE_ROCM_GQA_PAGED_ATTN</code>,
-            <code>KILN_DISABLE_ROCM_GQA_D128_PARALLEL</code>,
-            <code>KILN_DISABLE_ROCM_GQA_D256_PARALLEL</code>,
-            <code>KILN_DISABLE_ROCM_CONCAT_SAFE_ROW_ASSEMBLY</code>,
-            <code>KILN_ROCM_CONCAT_AXIS0_ROW_COPY</code>,
-            <code>KILN_ROCM_IS_FINITE_LARGE_HOST_SCAN</code>,
-            <code>KILN_ROCM_IS_FINITE_HOST_SCAN_ELEMENTS</code>, and
-            <code>KILN_ROCM_RMSNORM_ROW_TILE_ROWS</code>. None is accepted as an alias.
+        <div class="card p-4 mt-5" style="background: var(--bg-soft-2); border-color: var(--amber);">
+          <h3 class="font-semibold mb-2" style="color: var(--fg);">Current Vulkan correctness boundary</h3>
+          <p class="leading-relaxed" style="color: var(--fg-dim);">
+            Vulkan currently uses generic prefill in the stable profile and disables cross-request prefix reuse
+            on every Vulkan device. This source-level quarantine follows production-model semantic failures; it
+            is not device-name routing. The experimental profile may admit resident prefill when its capability
+            and request checks pass, but it cannot bypass the separate prefix-reuse quarantine.
           </p>
-          <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
-            Flash policy additionally retires all 50 former build/runtime spellings:
-            <code>KILN_ROCM_ATTENTION_COOPERATIVE_YIELD</code>,
-            <code>KILN_ROCM_ATTENTION_YIELD_MS</code>, <code>KILN_ROCM_DISABLE_CK_FMHA</code>,
-            <code>KILN_ROCM_ENABLE_CK_FMHA</code>, <code>KILN_ROCM_ENABLE_CK_FMHA_FWD</code>,
-            <code>KILN_ROCM_F32_MATMUL_INNER_TILE</code>,
-            <code>KILN_ROCM_FLASH_BWD_PRECOMPUTE_DELTA</code>,
-            <code>KILN_ROCM_FLASH_BWD_PRECOMPUTE_DELTA_MAX_SEQ</code>,
-            <code>KILN_ROCM_FLASH_CK</code>, <code>KILN_ROCM_FLASH_COLLAPSED_GQA_BWD</code>,
-            <code>KILN_ROCM_FLASH_DISABLE_CK_BWD_COLLAPSED_GQA</code>,
-            <code>KILN_ROCM_FLASH_DISABLE_WMMA_GQA_QBLOCK</code>,
-            <code>KILN_ROCM_FLASH_DISABLE_WMMA_GQA_R64K16</code>,
-            <code>KILN_ROCM_FLASH_DISABLE_WMMA_GQA_R64K32</code>,
-            <code>KILN_ROCM_FLASH_DISABLE_WMMA_GQA_R64K32_LOG2</code>,
-            <code>KILN_ROCM_FLASH_MATMUL_BWD</code>, <code>KILN_ROCM_FLASH_NATIVE_BWD</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_BWD_FORCE</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_BWD_LONG_MIN_SEQ</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_BWD_MAX_SEQ</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_DIRECT_COLLAPSED_GQA_BWD</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_DIRECT_COLLAPSED_GQA_QPAR</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_FFI_SYNC</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_GQA_QBLOCK</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_GQA_QBLOCK_MIN_SEQ</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_KEYSPLIT</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_KEYSPLIT_MIN_SEQ</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_KEY_TILE</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_MAX_SEQ</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_QUERY_TILE</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_RECTANGULAR_CAUSAL</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_SCALAR</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_SCALAR_FORCE</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_SINGLE_MAX_SEQ</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_STREAMING</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_STREAMING_FORCE</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_STREAMING_MIN_SEQ</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_TILED</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_TILED_FORCE</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_WMMA_QBLOCK</code>,
-            <code>KILN_ROCM_FLASH_NATIVE_WMMA_QBLOCK_MIN_SEQ</code>,
-            <code>KILN_ROCM_FLASH_ONLINE</code>, <code>KILN_ROCM_FLASH_ONLINE_BWD</code>,
-            <code>KILN_ROCM_FLASH_ONLINE_MATMUL_BATCH_GROUP</code>,
-            <code>KILN_ROCM_FLASH_USE_WMMA_GQA_R64K16</code>,
-            <code>KILN_ROCM_FLASH_USE_WMMA_GQA_R64K32</code>,
-            <code>KILN_ROCM_FLASH_USE_WMMA_GQA_R64K32_LOG2</code>,
-            <code>KILN_ROCM_FLASH_WMMA_GQA_R64K16_MIN_SEQ</code>,
-            <code>KILN_ROCM_FLASH_WMMA_GQA_R64K32_LOG2_MIN_SEQ</code>, and
-            <code>KILN_ROCM_FLASH_WMMA_GQA_R64K32_MIN_SEQ</code>. None is an alias.
-            Positive/negative/force mixtures collapse into one profile; cooperative sleeps and forced FFI
-            synchronization are deleted; unused key-split/WMMA code and the incorrect CK backward route are removed.
-          </p>
-        </details>
-
-        <h3 class="font-semibold mt-6 mb-3">Matmul route choice is fixed before inference</h3>
-        <p class="leading-relaxed" style="color: var(--fg-dim);">
-          The primary context also owns <code>rocm_strided_batched_matmul_mode</code> and
-          <code>rocm_bf16_matmul_output_mode</code>. Portable defaults select per-row GEMMs and
-          F32 output followed by an on-device BF16 cast. Strided batching and native BF16 output require the
-          experimental serving profile; retired machine-shaped <code>auto</code> values are rejected. A later owner
-          cannot install different synchronization or matmul policy on the same device, and a GEMM cannot
-          observe a shell mutation between layers or requests. Route decisions use only immutable policy,
-          shape, and dtype; they do not read live memory. The obsolete matmul trace variables were deleted.
-        </p>
-
-        <h3 class="font-semibold mt-6 mb-3">Graph lifecycle is a separate axis</h3>
-        <div class="overflow-x-auto">
-          <table class="w-full text-sm" style="color: var(--fg-dim);">
-            <thead style="color: var(--fg);"><tr><th class="text-left p-2">Configured mode</th><th class="text-left p-2">Effective execution</th><th class="text-left p-2">Admission</th></tr></thead>
-            <tbody>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>profile</code></td><td class="p-2">Stable and maintenance resolve to <code>disabled</code>; experimental resolves to <code>lazy_capture_replay</code>.</td><td class="p-2">Recommended default; the serving profile remains authoritative.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>disabled</code></td><td class="p-2">Bypasses graph-shaped warmup, native capture, and replay.</td><td class="p-2">Every profile.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>warmup_then_eager</code></td><td class="p-2">Runs one graph-shaped eager warmup, never captures, then remains eager.</td><td class="p-2">Experimental only.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>lazy_capture_replay</code></td><td class="p-2">Warms eagerly, then lazily captures and replays eligible decode shapes.</td><td class="p-2">Experimental only; independently bounded by <code>rocm_graph_cache_entries</code> (1&ndash;64) and <code>rocm_graph_cache_max_bytes</code> (64 MiB&ndash;16 GiB, default 1 GiB).</td></tr>
-            </tbody>
-          </table>
         </div>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Capture and replay use a dedicated stream without weakening external visibility. A replay records
-          completion on its capture stream, the primary stream waits on that event, and external yield then
-          waits on the primary stream before a token becomes visible. Stable paged metadata is a correctness
-          invariant, not a user switch. A native capture failure may trip only the graph-runner circuit breaker
-          and continue eagerly when recoverable <code>capture_rollback</code> settlement and logical state restore
-          both succeed. A replay failure, failed capture settlement/rollback, or unclassified capture exit uses
-          fail-closed containment instead of continuing with uncertain state.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Every new multi-row graph must pass an automatic first-launch oracle before it is replayable. The eager
-          warm pass supplies exact hidden, recurrent, convolution, and current K/V-row references. After restoring
-          input state, Kiln launches the graph once and compares those values on device with one bounded U8 mask at
-          a time. Snapshot, current-row gather, and mask bytes are reserved before allocation. A mismatch or
-          comparison error settles work, restores state, discards the graph, disables graphs for that runner, and
-          reaches eager only through the contained <code>capture_failure</code> path. Structured event
-          <code>rocm_graph_capture_parity_check</code> reports a passed, failed, or error outcome, comparison
-          completion, compared bytes, duration, and either mismatch attribution or the comparison error. There is
-          no bypass setting. Health and Prometheus additionally retain monotonic batched-capture and parity
-          attempt/outcome/byte/duration counters, so admission evidence survives log rotation and can be differenced
-          over a benchmark window.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          hipBLASLt workspace ownership follows the same lifecycle. Every fresh capture stream receives a
-          workspace lease before its warm pass. A deferred or failed attempt settles the stream and releases
-          its allocation; a successful graph retains the lease as its last-owned resource, so graph handles
-          and graph-stable tensors are destroyed before the workspace is reclaimed. Retained capture
-          workspaces therefore track the bounded live graph cache instead of accumulating across recapture
-          history. Opaque hipBLASLt algorithm blobs are cached per device and are never shared across ROCm
-          ordinals.
+        <p class="mt-4 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          The research-only <code>vulkan_decode_microbench</code> accepts typed command arguments. Its route
+          experiments and machine receipts are not server settings and cannot qualify product behavior.
+          Exact device-selection, validation-layer, kernel-profile, and fallback contracts belong in the
+          <a href="docs/configuration/">configuration reference</a> and
+          <a href="docs/architecture-deep-dive/">architecture deep dive</a>.
         </p>
 
-        <h3 class="font-semibold mt-6 mb-3">Graph admission has independent entry and byte hard limits</h3>
-        <div class="overflow-x-auto">
-          <table class="w-full text-sm" style="color: var(--fg-dim);">
-            <thead style="color: var(--fg);"><tr><th class="text-left p-2">Accounted category</th><th class="text-left p-2">What it includes</th><th class="text-left p-2">Live field</th></tr></thead>
-            <tbody>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Stable I/O</td><td class="p-2">Token, position, paged-KV metadata, rotary, output-hidden, paged-decode, and GDN graph-stable tensors.</td><td class="p-2"><code>retained_stable_io_bytes</code></td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Capture arena</td><td class="p-2">Freeze-pointer Q/K/V and intermediate activation allocations retained for replay.</td><td class="p-2"><code>retained_capture_arena_bytes</code></td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">hipBLASLt workspace</td><td class="p-2">Actual requested bytes held by each retained private capture stream&rsquo;s workspace lease.</td><td class="p-2"><code>retained_blaslt_workspace_bytes</code></td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Owner slot state</td><td class="p-2">Every runner-owned recurrent/conv slot, including active continuity state whose native graphs were evicted.</td><td class="p-2"><code>retained_slot_state_bytes</code></td></tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Accounting uses the allocation&rsquo;s device ordinal and allocation identity, not tensor shape or Rust
-          owner count. One physical allocation is counted once across aliases, categories, and graph entries;
-          recurrent/conv slot state shared by several graphs for one owner is likewise deduplicated. Active
-          graphless slot state remains in both <code>retained_slot_state_bytes</code> and the total because graph
-          eviction cannot discard a live decode owner&rsquo;s continuity. The four categories sum to
-          <code>retained_bytes</code>, and <code>peak_retained_bytes</code> records the highest total after slot
-          creation or cache admission and is never below the current total. An unmappable retained tensor makes
-          <code>retained_bytes_accounting_complete=false</code> and fails byte-budget admission closed.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          The cap is exact for requested physical allocation bytes, but it is not a claim about total driver
-          residency. HIP does not expose allocation sizes for the graph, executable, private stream, or two
-          ordering events retained by each entry. Kiln reports those five objects per graph through
-          <code>opaque_native_object_count</code>; their driver overhead and allocator-pool slack remain outside
-          <code>retained_bytes</code> and are covered by the separate live memory-pressure policy.
-        </p>
-
-        <h3 class="font-semibold mt-6 mb-3">Admission, LRU eviction, and pressure are owner-aware</h3>
+        <h3 class="text-lg font-semibold mt-7 mb-3">Other backends follow the same boundary</h3>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
-          Entry saturation and known byte saturation first reclaim deterministic least-recently-used idle owners,
-          oldest access tick then slot ID, before allocating a new candidate. If those cannot make room, admission
-          orders active entries by projected owner count, then exact LRU and stable owner/geometry tie-breakers.
-          The incoming candidate counts toward its owner's share; only the minimum selected entries are retired,
-          one projected graph remains for every active owner, and all recurrent-state slots, row assignments, and
-          continuity timelines remain intact. After one settled warm Record pass makes every candidate allocation measurable,
-          pre-native admission performs exact deduplicated accounting, matching-device pressure reconciliation,
-          an atomic process-wide governor reservation, and the same ordered reclaim plan. Native capture does not
-          begin unless that plan fits both hard limits. Ordinary budget pressure never discards live recurrent
-          state merely to admit a new shape.
-          A separate overlapping governor reservation covers the automatic parity snapshots, live K/V gather, and
-          equality mask before those temporary allocations occur; <code>last_transient_candidate_bytes</code> and
-          <code>peak_transient_candidate_bytes</code> include that temporary working set plus the exact candidate.
-          Each completed transaction emits <code>rocm_graph_cache_eviction</code> with its boundary, typed reason,
-          removed graph and slot counts, released requested bytes, and
-          <code>active_graph_only_owner_count</code>. A nonzero active count makes this settled transition visible
-          instead of presenting its synchronization time as an unexplained inference pause.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Fairness is enforced only at actual global entry or byte saturation, so lightly occupied owners can keep
-          reusable exact geometries without forced recapture. Idle owners remain the first victims. Narrow active
-          relief runs at <code>pre_capture_active_fair_share</code>, preserves each live slot and timeline, and
-          guarantees one retained graph per active owner after the incoming candidate. The selected owner may
-          differ from the candidate owner when it holds a larger surplus; no unused global headroom is converted
-          into an artificial per-owner ceiling.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Capture and cache admission are deliberately separate outcomes. <code>capture_successes</code> means
-          the native graph instantiated and its first launch succeeded. A defensive exact recheck can still
-          reject and safely destroy that candidate if concurrent state changed before publication.
-          <code>cache_admission_successes</code> is the retained, replayable subset; entry, byte, and accounting
-          post-capture rejection counters explain the difference. Pre-capture entry/byte/accounting/global-governor
-          skips are separate outcomes and do not explain that delta. Candidate-alone byte-budget,
-          incomplete-accounting, and global-reservation denials are memoized by geometry and runner generation.
-          Matching steps use the typed fallback without repeating candidate allocation and a full warm pass until
-          observed headroom actually improves.
-          Required active graphless slot state stays counted and may consume the whole byte allowance; the runner
-          blocks new capture rather than dropping live continuity state merely to satisfy graph admission.
-        </p>
-        <div class="overflow-x-auto mt-3">
-          <table class="w-full text-sm" style="color: var(--fg-dim);">
-            <thead style="color: var(--fg);"><tr><th class="text-left p-2">Governor result</th><th class="text-left p-2">Graph policy</th></tr></thead>
-            <tbody>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Comfortable</td><td class="p-2">Normal cache hit, capture, bounded admission, idle-owner LRU, then settled prior-geometry retirement for the active candidate owner when required.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Moderate</td><td class="p-2">Permit an already-retained replay, but block cache growth and use typed eager fallback on a miss.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Tight</td><td class="p-2">Evict every eligible idle owner. Permit only an already-retained replay for the active owner; a cache miss uses eager execution and no new capture.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Critical or unavailable</td><td class="p-2">Treat unknown pressure as critical, settle and remove every graph, preserve active slot state, and use eager execution only after cleanup proves safe.</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Eviction and rejected-candidate cleanup are three-stage fail-closed transactions: settle the device
-          before ownership removal, drop graph resources and eligible slot state, then settle async frees and
-          check cleanup quarantine again. A cached-eviction pre-drop failure leaves the cache map intact. A
-          rejected candidate whose pre-drop settlement fails enters cleanup quarantine, so its low-level owners
-          retain possibly in-flight handles until process exit rather than destroying them unsafely. A destructor
-          or post-drop settlement failure records <code>quarantined_retained_bytes</code>, trips the same
-          process-lifetime quarantine, reports no successful reclaimed-byte event, and forbids an eager retry.
-          The runtime never equates &ldquo;removed from a Rust map&rdquo; with &ldquo;safe to reuse VRAM.&rdquo;
-        </p>
-
-        <h3 class="font-semibold mt-6 mb-3">Capture pauses have fixed, live phase attribution</h3>
-        <p class="leading-relaxed" style="color: var(--fg-dim);">
-          Exact candidate size is unknowable until the warm Record pass has allocated its stable I/O, capture
-          arena, and private-stream workspace. That is the remaining transient exposure: the hard retained-byte
-          limit governs publication, while the global governor gates native capture after exact measurement.
-          <code>last_transient_candidate_bytes</code> and <code>peak_transient_candidate_bytes</code> report those
-          deduplicated queryable candidate bytes and exclude already-owned recurrent slot state.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          A cloneable telemetry handle is retained outside both the model-runner and graph-runner mutexes. It publishes
-          <code>current_phase</code> and <code>current_phase_elapsed_micros</code> while work is still in progress,
-          plus completed <code>calls</code>, <code>slow</code>, <code>total_duration_micros</code>, and
-          <code>max_duration_micros</code> for exactly six fixed phases. The five non-overlapping capture-lifecycle phases are
-          <code>pre_candidate_headroom</code>, <code>candidate_warm</code>,
-          <code>pre_native_reservation</code>, <code>native_capture</code>, and
-          <code>rejected_candidate_cleanup</code>. The first includes matching-device pressure checks and settled
-          pre-allocation eviction. <code>native_capture</code> remains active through native capture, the settled
-          first launch, defensive cache admission/publication, and the blocking committed governor debit. The last
-          begins only when an unretained candidate enters automatic destruction and settlement. A runner lock held
-          by a long phase therefore does not erase the phase that operators need to diagnose.
-          The sixth phase, <code>native_replay</code>, covers replay input updates, cross-stream dependency setup, and
-          native launch submission; external-yield settlement remains a separate request synchronization phase.
-          A successful full <code>rocm_graphs</code> snapshot also carries point-in-time copies of all six
-          completed summaries and transient-byte gauges; the separate handle is the authoritative active-phase
-          source and continues advancing when that full snapshot is unavailable.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Governor admission validates that its probe selector matches this runner&rsquo;s ROCm ordinal before reading
-          pressure or reserving bytes. A mismatch fails closed with distinct skip/fallback telemetry. Warm-pass
-          host-copy detection is scoped to the calling thread and device, so an unrelated concurrent copy cannot
-          permanently classify the geometry as capture-unsafe.
-        </p>
-
-        <h3 class="font-semibold mt-6 mb-3">Synchronization reasons are fixed telemetry dimensions</h3>
-        <p class="leading-relaxed" style="color: var(--fg-dim);">
-          Every host-visible wait is attributed to one of 23 stable lower-snake-case reasons. The snapshot
-          stores device wait count, stream wait count, accumulated host wait nanoseconds, and stream-ordered
-          skip count for each reason. Reading it loads atomics only; it never inserts a barrier or calls the
-          driver. The complete reason set is:
-        </p>
-        <div class="grid md:grid-cols-2 gap-5 mt-4 text-sm" style="color: var(--fg-dim);">
-          <ul class="list-disc pl-5 check-list">
-            <li><code>explicit_device_drain</code>, <code>explicit_stream_drain</code>, <code>tensor_handoff</code>, <code>external_yield</code></li>
-            <li><code>activation_output</code>, <code>elementwise_output</code>, <code>cast_output</code></li>
-            <li><code>concat_input</code>, <code>concat_output</code>, <code>contiguous_output</code>, <code>repeat_heads_output</code></li>
-            <li><code>matmul_output</code>, <code>matmul_cast_boundary</code></li>
-          </ul>
-          <ul class="list-disc pl-5 check-list">
-            <li><code>in_place_mutation</code>, <code>memory_reclaim</code>, <code>graph_boundary</code></li>
-            <li><code>full_attention_handoff</code>, <code>model_handoff</code>, <code>host_readback</code></li>
-            <li><code>allocation_lifetime</code>, <code>error_recovery</code>, <code>global_state_mutation</code>, <code>capture_rollback</code></li>
-          </ul>
-        </div>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          <code>error_recovery</code> is reserved for a device whose process-lifetime execution quarantine
-          was already published; it waits for pre-quarantine host submissions to settle before the diagnostic
-          drain. <code>capture_rollback</code> is the distinct recoverable path: it drains a failed capture before
-          a proven logical rollback while leaving execution admission open. Calling the fatal recovery path on
-          an open gate is rejected rather than silently changing either contract.
+          CUDA and Metal use typed kernel profiles; ROCm product execution uses its portable profile plus typed
+          synchronization, matmul, and graph policy. Backend-specific optimized routes may have narrower
+          eligibility than baseline inference. Their presence in source does not mean that stable serving
+          activates them, and no hot path is allowed to reinterpret a changed shell variable between requests.
         </p>
         <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          Successful physical settlement plus successful recurrent-state restoration disarms the capture guard;
-          the runner may disable further graph work, record <code>capture_failure</code>, and take the eager path.
-          Failed settlement, failed logical restoration, or an armed/unclassified guard leaving scope publishes
-          sticky STOP before the post-STOP diagnostic drain attributed to <code>error_recovery</code>. That drain is diagnostic only: even
-          if it succeeds, execution stays cleanup-quarantined and the process must restart.
-        </p>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          Wait duration belongs to the boundary where the host discovered outstanding work. It is not a
-          per-kernel profiler and does not prove which earlier operation consumed the time. For example, a
-          large <code>external_yield</code> delta can expose work accumulated earlier on the producer stream.
-          A VRAM-rebalance claim additionally needs allocator reclaim, physical KV resize, memory-tier, or
-          host-pressure evidence. A new graph bucket can instead produce a one-time warmup/capture pause.
-        </p>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          Source-bound ROCm and Vulkan development soaks add an independent qualification-only device sampler;
-          it is not a second product configuration surface. Every 250 ms the harness resolves exactly one AMD
-          <code>0x1002</code> DRM device and one labeled <code>amdgpu</code> hwmon, then records GPU busy,
-          <code>sclk</code>, <code>PPT</code> average power, and edge temperature. Active aggregates include only
-          samples at or above 50 percent busy and publish minimum/p50/maximum SCLK, p50/peak power, p50/peak
-          temperature, and a count below half the advertised <code>pp_dpm_sclk</code> maximum. ROCm receipts fail
-          closed on unavailable, malformed, empty, or idle-only telemetry. Vulkan records the same closed metric
-          schema when AMD sysfs exists but may report it unavailable on a non-AMD Vulkan device. This evidence can
-          distinguish a device-wide clock or thermal state from graph, allocator, and synchronization events;
-          correlation still does not make any one sample a kernel-level causal profile.
-        </p>
-
-        <h3 class="font-semibold mt-6 mb-3">CUDA graph policy is startup-owned</h3>
-        <p class="leading-relaxed" style="color: var(--fg-dim);">
-          <code>memory.cuda_graphs</code> and <code>memory.cuda_graph_cache_entries</code> resolve before device
-          selection into one immutable CUDA graph policy. The cache bound is <code>1..=64</code> and defaults to
-          eight retained single-row geometries. Stable paged metadata is mandatory because transient metadata
-          previously raced block reuse; batched CUDA capture remains unavailable after failing real concurrent
-          serving and has no environment opt-in. <code>/v1/config.cuda_graphs</code>, health
-          <code>decode_runtime.cuda_graphs</code>, the CLI, and the dashboard expose these same facts.
-        </p>
-
-        <h3 class="font-semibold mt-6 mb-3">The product surfaces share one authority</h3>
-        <div class="overflow-x-auto">
-          <table class="w-full text-sm" style="color: var(--fg-dim);">
-            <thead style="color: var(--fg);"><tr><th class="text-left p-2">Surface</th><th class="text-left p-2">Contract</th></tr></thead>
-            <tbody>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>GET /v1/config</code></td><td class="p-2">Top-level <code>accelerator_runtime</code> schema v12 exposes configured/effective/source values for adapter routing, attention geometry, CUDA/ROCm kernel policy, Vulkan device policy, synchronization, both matmul routes, ROCm graph mode, entry capacity, and retained-byte budget, plus compiled Vulkan policy IDs. <code>cuda_graphs</code> exposes its requested/effective/cache/invariant state. ROCm snapshot fields retain independent full-stat and phase/transient authorities.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>GET /health</code></td><td class="p-2"><code>decode_runtime.cuda_graphs</code> combines immutable CUDA intent with live runner state. <code>decode_runtime.accelerator_runtime</code>, <code>decode_runtime.rocm_synchronization</code>, and <code>decode_runtime.rocm_graphs</code> combine immutable ROCm intent with live wait/skip and quarantine state while preserving separate unavailable authorities.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Trusted debug</td><td class="p-2"><code>/v1/debug/model-state</code> repeats top-level <code>accelerator_runtime</code>, <code>rocm_synchronization</code>, and the same four graph value/reason fields as config; it does not reintroduce raw runtime flags.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2"><code>GET /metrics</code></td><td class="p-2">Synchronization policy/availability/quarantine and 23 fixed-reason wait/skip families sit beside two graph availability gauges and two five-reason one-hot missing-data families. Full graph state/capacity/owner/retained/cache/capture/replay/fallback families and phase/current/transient families are independently governed.</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">CLI and dashboard</td><td class="p-2"><code>kiln config</code> shows configured policy and source attribution without constructing an accelerator, including actor-cycle, prefill, decode-width, and streaming inputs. Optional <code>--backend</code> resolves hardware-independent effective scheduling policy and runs the same actor-prefill validator as serve startup without probing hardware or loading weights. The runtime configuration panel shows actual resolved policy after device selection. The config snapshot supplies retained/transient bytes, cache actions, and completed phase envelopes. The dashboard&rsquo;s two-second health poll directly refreshes only Graph live and Graph current phase, including typed full-snapshot reason and active elapsed time.</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          Config and trusted debug publish the full nonblocking snapshot as <code>rocm_graphs</code> with
-          <code>rocm_graphs_unavailable_reason</code>, and publish the independent current/completed phase channel
-          as <code>rocm_graph_telemetry</code> with <code>rocm_graph_telemetry_unavailable_reason</code>. Health
-          flattens both authorities under <code>decode_runtime.rocm_graphs</code>:
-          <code>phase_telemetry_available</code> and <code>phase_telemetry_unavailable_reason</code> govern the
-          phase/current/transient fields independently from the full statistics. Its state is busy only for lock
-          contention and unavailable for no-runner or poisoned-lock state; null never means an empty cache or
-          zero activity.
-        </p>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          Both API reason fields and both Prometheus missing-data families use the same closed set:
-          <code>backend_without_graph_runner</code>, <code>model_runner_busy</code>,
-          <code>model_runner_lock_poisoned</code>, <code>graph_runner_busy</code>, and
-          <code>graph_runner_lock_poisoned</code>. Full statistics can use any reason. The phase handle is stored
-          outside both runner locks, so every real backend keeps it visible through model-runner or graph-runner
-          contention and poison; currently only <code>backend_without_graph_runner</code> makes phase telemetry
-          unavailable. Null never means zero activity.
-        </p>
-        <pre class="mt-5"><code>kiln_rocm_synchronization_active
-kiln_rocm_synchronization_telemetry_available
-kiln_rocm_cleanup_quarantined
-kiln_rocm_synchronization_policy_info{mode}
-kiln_rocm_synchronizations_total{reason,scope}
-kiln_rocm_synchronization_wait_seconds_total{reason}
-kiln_rocm_synchronization_skipped_total{reason}</code></pre>
-        <pre class="mt-5"><code>kiln_rocm_graph_telemetry_available
-kiln_rocm_graph_snapshot_unavailable{reason="backend_without_graph_runner|model_runner_busy|model_runner_lock_poisoned|graph_runner_busy|graph_runner_lock_poisoned"}
-kiln_rocm_graph_phase_telemetry_available
-kiln_rocm_graph_phase_telemetry_unavailable{reason="backend_without_graph_runner|model_runner_busy|model_runner_lock_poisoned|graph_runner_busy|graph_runner_lock_poisoned"}
-kiln_rocm_graph_state{kind="requested|capture_requested|enabled|capture_enabled"}
-kiln_rocm_graph_cache_entries
-kiln_rocm_graph_cache_entry_limit
-kiln_rocm_graph_slots{state="total|active|idle"}
-kiln_rocm_graph_tracked_decode_owners
-kiln_rocm_graph_owner_lifecycle_total{event="decode_release|graph_release|slot_create|slot_reuse"}
-kiln_rocm_graph_retained_bytes{kind="stable_io|capture_arena|blaslt_workspace|slot_state|total|peak|quarantined"}
-kiln_rocm_graph_retained_byte_limit
-kiln_rocm_graph_retained_byte_accounting_complete
-kiln_rocm_graph_opaque_native_objects
-kiln_rocm_graph_current_phase{phase="pre_candidate_headroom|candidate_warm|pre_native_reservation|native_capture|native_replay|rejected_candidate_cleanup"}
-kiln_rocm_graph_current_phase_elapsed_seconds
-kiln_rocm_graph_phase_calls_total{phase}
-kiln_rocm_graph_phase_slow_total{phase}
-kiln_rocm_graph_phase_duration_seconds_total{phase}
-kiln_rocm_graph_phase_duration_seconds_max{phase}
-kiln_rocm_graph_transient_candidate_bytes{kind="last|peak"}
-kiln_rocm_graph_cache_admissions_total
-kiln_rocm_graph_cache_evictions_total
-kiln_rocm_graph_cache_evicted_bytes_total
-kiln_rocm_graph_cache_evictions_by_cause_total{cause="budget|pressure|invalidation|recovery"}
-kiln_rocm_graph_cache_admission_rejections_total{reason="entry_capacity|byte_budget|accounting_incomplete"}
-kiln_rocm_graph_pre_capture_skips_total{reason="entry_capacity|byte_budget|accounting_incomplete|memory_reservation_denied|memory_governor_selector_mismatch"}
-kiln_rocm_graph_capture_attempts_total
-kiln_rocm_graph_capture_outcomes_total{outcome="success|deferred|failure"}
-kiln_rocm_graph_batched_capture_attempts_total
-kiln_rocm_graph_batched_capture_outcomes_total{outcome="success|deferred|failure"}
-kiln_rocm_graph_capture_parity_checks_total
-kiln_rocm_graph_capture_parity_outcomes_total{outcome="passed|failed|error"}
-kiln_rocm_graph_capture_parity_compared_bytes_total
-kiln_rocm_graph_capture_parity_duration_seconds_total
-kiln_rocm_graph_replay_attempts_total
-kiln_rocm_graph_replay_outcomes_total{outcome="success|failure"}
-kiln_rocm_graph_fallbacks_total{reason}
-kiln_rocm_graph_fallback_slow_total
-kiln_rocm_graph_fallback_duration_seconds_total
-kiln_rocm_graph_fallback_duration_seconds_max</code></pre>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          Graph fallback <code>reason</code> is a closed set:
-          <code>multi_row_batch_unsupported</code>, <code>cold_cache_host_round_trip</code>,
-          <code>persistent_host_round_trip</code>,
-          <code>shape_dependent_attention</code>,
-          <code>graph_cache_capacity</code>, <code>graph_cache_byte_budget</code>,
-          <code>graph_accounting_incomplete</code>, <code>moderate_memory_pressure</code>,
-          <code>tight_memory_pressure</code>, <code>critical_memory_pressure</code>,
-          <code>memory_reservation_denied</code>, <code>memory_governor_selector_mismatch</code>,
-          <code>capture_failure</code>, and <code>replay_failure</code>. Both availability gauges and both one-hot
-          unavailable-reason families are always emitted. When full-snapshot availability is zero, only the full
-          cache/counter families are omitted; phase/current/transient families remain authoritative when their own
-          availability is one. When phase availability is zero, only those live families are omitted. Absence must
-          not be interpreted as zero activity, zero retained bytes, or an idle phase.
-        </p>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          Native ROCm graph capture owns single-row decode and contiguous BF16 multi-row decode. Batch graphs are
-          keyed by width plus bucketed attention geometry and retain stable token, position, RoPE, paged-KV metadata,
-          attention scratch, hidden-output, and recurrent-state storage. Final normalization, LM head, and sampling
-          remain eager. The historical <code>multi_row_batch_unsupported</code> reason stays in the closed schema, but
-          a supported current batch route must leave it at zero and publish real capture/replay activity.
-        </p>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          Graph-slot liveness is live row ownership, not retained cache residency. A slot with an assigned logical
-          row is active. A reusable single-row slot or a slot reserved for a batched width is idle between cohorts,
-          even while its native graphs, recurrent state, and width mapping remain resident and byte-accounted. A
-          drained boundary therefore requires zero active slots and zero tracked decode owners; positive idle slots
-          are bounded reusable capacity rather than leaked requests.
-        </p>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          Capture success is published only after <code>rocm_graph_capture_parity_check</code> passes exact hidden,
-          complete GDN state, and current-row K/V comparison with the same candidate&rsquo;s eager warm execution.
-          A failed check is a capture failure, not an admitted graph whose later output happens to be inspected.
-          In the cumulative counters, batched attempts and parity checks each reconcile to their closed outcomes,
-          and successful batch admissions cannot exceed passed checks. A clean qualification row additionally
-          requires zero failures/errors and equal success/pass counts; a pass followed by a later admission failure
-          remains visible as failure evidence.
-        </p>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          Capture-safety host transfers are separately source-attributed as
-          <code>event=rocm_graph_capture_host_transfer</code>. The dynamic observer is local to the capture thread and
-          device, aggregates copy count and bytes by build-source file/line/column, dtype, and per-copy geometry, and
-          bounds each candidate to 32 unique sites plus one overflow aggregate. These fields stay in structured logs;
-          they are deliberately excluded from Prometheus labels and contain no request or tensor contents.
-        </p>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          Materialized ROCm broadcast keeps graph ownership self-contained. Its rank-eight shape and stride
-          descriptor is a 272-byte kernel value captured in the graph node, not a device buffer populated by four
-          host uploads. Replays therefore do not depend on an evictable metadata cache or an allocation whose lifetime
-          is outside the retained graph entry.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          A fatal execution or synchronization failure marks the device cleanup-quarantined for the rest of
-          the process lifetime. The flag is shared across every context for that device ordinal; a later
-          recovery drain may collect evidence but cannot re-enable execution or cleanup. New execution fails closed and Drop
-          retains possibly in-flight streams, events, allocations, graphs, and graph executables until process
-          exit rather than risking use-after-free. Graph code must not fall back to eager execution after a
-          failed recovery. Active ROCm telemetry unavailability is also fail-closed rather than interpreted as
-          a false bit. The central server admission gate observes and permanently latches either condition before
-          adapter, training, import, or other backend mutation work. The live fault makes backend runtime health
-          fail closed and readiness return 503.
-          It appears in health and trusted debug, while
-          <code>kiln_rocm_cleanup_quarantined</code> provides alerting; its value is authoritative only when the
-          telemetry-availability gauge is one. This state is deliberately absent from
-          <code>/v1/config</code>, which describes immutable startup intent.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          The stable product default is <code>legacy_host_barriers</code> with graph mode
-          <code>profile</code>, which resolves to eager <code>disabled</code> execution. Stream-ordered and
-          explicit non-disabled graph modes fail startup outside the experimental profile. Promotion requires
-          local hardware evidence for token/logit parity, concurrency throughput, p50/p95/p99/max inter-token
-          latency, reasoned wait time, graph fallbacks, memory peaks and plateaus, cancellation, and sustained
-          stability. The reversible procedure is in
-          <a href="troubleshooting.html#rocm-token-pauses">ROCm token-pause troubleshooting</a>; the field and
-          environment migration contract is in the
-          <a href="docs/configuration/">complete configuration reference</a>.
-        </p>
-      </article>
-
-      <article class="card p-6">
-        <div class="label mb-3">Inference flow</div>
-        <h2 id="request-path-and-batching" class="text-2xl font-semibold mb-4">Request path and batching</h2>
-        <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
-          <div>
-            <h3 class="font-semibold mb-2" style="color: var(--fg);">API edge</h3>
-            <p><code>/v1/chat/completions</code>, <code>/v1/models</code>, <code>/health</code>, and streaming responses stay compatible with familiar OpenAI-style clients.</p>
-          </div>
-          <div>
-            <h3 class="font-semibold mb-2" style="color: var(--fg);">Scheduler</h3>
-            <p>The iteration-level scheduler combines continuous batching with chunked prefill, so long prompts and decode work share one GPU loop.</p>
-          </div>
-          <div>
-            <h3 class="font-semibold mb-2" style="color: var(--fg);">Memory</h3>
-            <p>The paged KV block manager tracks the full-attention layers and reuses recently released runs before untouched sparse pages. Qwen3.5-4B&rsquo;s Gated DeltaNet layers do not need KV cache.</p>
-          </div>
-        </div>
-        <p class="mt-5 leading-relaxed" style="color: var(--fg-dim);">
-          The locality policy preserves a released request&rsquo;s logical block order while moving that run to
-          the front of the allocator. This avoids walking an entire host-resident Vulkan KV pool and
-          first-touching new anonymous or transparent-huge pages during otherwise steady traffic. Prefix-cache
-          leases still retain their blocks, and logical shrink still retires capacity before any physical pool
-          replacement. Vulkan&rsquo;s bounded scratch recycler separately uses exact buckets for device-local
-          buffers; host-visible staging checks its exact bucket first and then the smallest sufficient idle larger
-          bucket on the same device and memory type. A borrowed, undersized, or cross-device buffer is never reused.
-        </p>
-        <h3 id="prefix-cache-route-invariance" class="text-lg font-semibold mt-6 mb-2">Prefix-cache route invariance</h3>
-        <p class="leading-relaxed" style="color: var(--fg-dim);">
-          On the batching actor, cache admission changes storage and reuse, not numerical prefill geometry. A
-          cache-enabled miss and a cache-disabled fresh prefill keep the same block-aligned final prompt boundary
-          and the same configured token and layer quanta. With caching disabled, Kiln performs no lookup,
-          recurrent-state snapshot, prompt registration, rolling snapshot, retained-block publication, or lease.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          The distinction is correctness-critical for hybrid GDN models. Every resumable prompt-chunk boundary
-          materializes recurrent state at the configured precision; changing the boundary can change greedy output
-          even when the cache has never served a hit. Route-equivalence coverage therefore compares the first token,
-          recurrent state, and following decode token with registration enabled and disabled. Accelerator
-          qualification remains required before a corrected source checkpoint can replace a failed device receipt.
-          On Strix Halo ROCm, the clean-source production replacement arm passed all ten deterministic and eight
-          sampled requests while every cache metric stayed zero; the historical failed receipt remains published
-          so the correction is auditable rather than overwritten.
-        </p>
-        <h3 id="conservative-terminal-drain" class="text-lg font-semibold mt-6 mb-2">Conservative terminal drain</h3>
-        <p class="leading-relaxed" style="color: var(--fg-dim);">
-          Batching health keeps a terminal row publicly active until normal finish or error/cancellation discard
-          has released its graph owner, recurrent-state lease, prefix-cache ownership, and private KV blocks.
-          The row has already left the private scheduling vector and cannot run again, but its removal is not
-          published until model cleanup returns and terminal delivery is queued. A zero-active health snapshot is
-          therefore a resource-ownership boundary, not merely an empty scheduling queue; graph, cache, and block
-          drain assertions cannot race terminal cleanup.
-        </p>
-        <h3 id="vulkan-prefix-cache" class="text-lg font-semibold mt-6 mb-2">Vulkan cross-request prefix reuse</h3>
-        <p class="leading-relaxed" style="color: var(--fg-dim);">
-          Production currently correctness-quarantines the complete Vulkan prefix cache. A guarded fresh-process
-          run with resident token-prefill already disabled produced four correct first-wave responses, then four
-          semantically wrong exact repeats after restoring cached KV and GDN state. The repeated prompts therefore
-          use fresh generic prefill instead of accepting internally plausible but incorrect restored state.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          <code>prefix_cache.enabled</code> remains typed operator intent and defaults to true. Startup combines it
-          with the selected backend. CPU, CUDA, ROCm, and Metal currently honor the request; Vulkan forces the
-          effective capability false, allocates zero cached blocks and recurrent-state bytes, and does not perform
-          lookups or registrations. <code>GET /v1/config</code> reports both the configured object and
-          <code>effective_reason="vulkan_correctness_quarantine"</code>. Health, trusted debug state, and
-          <code>kiln_batching_engine_prefix_cache_enabled 0</code> expose the live result.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          While disabled, every lookup, hit, miss, retained-block, retained-entry, state-byte, lease, and
-          pending-release value must stay zero. Qualification checks that invariant after warmup, every stabilized
-          and measured wave, and final drain. There is no request or environment bypass. Re-enablement requires a
-          source change plus production-model semantic parity across first use, exact repeats, strict descendants,
-          changing cohorts, cancellation, and repeated process history.
-        </p>
-        <pre class="mt-5"><code>configured enabled=true + backend=vulkan
-  -> effective_enabled=false
-  -> effective_reason=vulkan_correctness_quarantine
-  -> zero cache capacity and activity
-  -> fresh generic prefill for every request</code></pre>
-        <h3 id="vulkan-resident-prefill" class="text-lg font-semibold mt-6 mb-2">Vulkan resident token-prefill</h3>
-        <p class="leading-relaxed" style="color: var(--fg-dim);">
-          Production currently disables this optimization and publishes
-          <code>resident_prefill_enabled=false</code>. Guarded Qwen3.5 Vulkan runs produced plausible but
-          semantically incorrect token sequences, including on the first resident-prefill use in a fresh process.
-          Every prompt therefore stays on the generic layer-resumable prefill path. This is a correctness
-          quarantine, not an operator setting, and there is no environment variable or request override that can
-          bypass it.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          The dormant route remains lifecycle-tested so it can be repaired without losing its ownership model.
-          Its intended eligibility is effectively greedy, adapter-free work at a committed token boundary with no
-          behavior-logprob capture or partial layer chunk. It would advance one token per row through a bounded
-          round-robin cohort, retain stable row IDs as cohort shape changes, and keep a final resident row on that
-          route rather than returning to stale generic KV. None of those transitions are admitted while the
-          capability is false.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Health and trusted debug state must report the capability as false, and every resident-prefill activity
-          counter, batch-size gauge, active-row gauge, and request-level <code>resident_prefill_used</code> value
-          must remain zero or false. Prometheus exposes the same capability as
-          <code>kiln_batching_engine_resident_prefill_enabled 0</code>. Qualification treats any resident-prefill
-          activity while disabled as a contract failure. Re-enabling requires a source change plus production-model
-          parity across first use, changing cohorts, single-row tails, repeated waves, cancellation, and prefix
-          history; scheduler lifecycle tests alone are not sufficient.
-        </p>
-        <pre class="mt-5"><code>resident_prefill_enabled=false
-  -> no candidate probing
-  -> no native resident-prefill attempt
-  -> generic layer-resumable prefill remains authoritative
-  -> any nonzero route activity is a qualification failure</code></pre>
-        <p class="mt-5 leading-relaxed" style="color: var(--fg-dim);">
-          Startup resolves one immutable <code>BatchingRuntimeConfig</code> after backend selection and
-          effective decode-width resolution. Every real backend constructs one actor; the decode-forward
-          boundary applies true batched versus rowwise decode, and the actor receives its projected
-          strict-prefix and prompt-admission policy. None of those paths rereads public batching environment
-          variables. CUDA/Vulkan fill effective decode width before decode, while ROCm/Metal/CPU use a latency-oriented
-          quantum of 4, clamped to that width. CUDA alone carries backend-owned burst admission.
-        </p>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Streaming and non-streaming requests, greedy and sampled decode, cancellation, response
-          backpressure, adapter barriers, KV ownership, and shutdown all enter that same state machine.
-          This removes the former actor/direct ownership split and makes actor snapshots sufficient to
-          explain queueing, prefill, decode, delivery, and terminal cleanup.
-        </p>
-        <pre class="mt-5"><code>typed TOML / canonical startup override
-  -> strict parse + source attribution
-  -> backend policy + effective max decode batch
-  -> immutable BatchingRuntimeConfig
-  -> mandatory real-backend batching actor
-  -> live snapshot + request performance metadata</code></pre>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          <code>GET /v1/config</code> returns the configuration and <code>actor_active</code> under
-          <code>batching</code>. Health repeats policy at
-          <code>decode_runtime.batching_configuration</code> beside the live actor snapshot; trusted debug
-          uses <code>batching_engine.configuration</code>. Configured intent, backend default, effective
-          value, clamp authority, and actor construction remain distinct so performance evidence cannot
-          silently inherit an old shell override.
+          <code>GET /v1/config</code> reports resolved startup intent and source attribution.
+          <code>GET /health</code> adds live runtime state. Trusted debug output and Prometheus expose
+          backend-specific activity, fallback, synchronization, memory, and quarantine evidence. Missing
+          telemetry is never presented as zero activity.
         </p>
       </article>
 
@@ -1295,156 +464,123 @@ kiln_rocm_graph_fallback_duration_seconds_max</code></pre>
         <div class="label mb-3">Model architecture</div>
         <h2 id="gated-deltanet-hybrid" class="text-2xl font-semibold mb-4">Why the Gated DeltaNet hybrid matters</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          Qwen3.5-4B is not a plain all-attention transformer. Its 32 layers are split into
-          24 Gated DeltaNet linear-attention layers and 8 full GQA layers, and Kiln is tuned
-          around that exact shape instead of hiding it behind a generic model-family abstraction.
+          Qwen3.5-4B is not an all-attention transformer. Its 32 layers comprise 24 Gated DeltaNet
+          linear-attention layers and 8 full GQA layers. Kiln targets that exact architecture.
         </p>
-        <div class="grid md:grid-cols-3 gap-5 check-list mb-5" style="color: var(--fg-dim);">
+        <div class="grid md:grid-cols-3 gap-5" style="color: var(--fg-dim);">
           <div>
             <h3 class="font-semibold mb-2" style="color: var(--fg);">Fixed GDN state</h3>
-            <p>Gated DeltaNet layers carry fixed-size recurrent state through the sequence instead of storing per-token K/V tensors.</p>
+            <p>Gated DeltaNet carries a fixed-size recurrent state instead of storing per-token K/V tensors.</p>
           </div>
           <div>
-            <h3 class="font-semibold mb-2" style="color: var(--fg);">Small KV footprint</h3>
-            <p>Only the 8 full-attention GQA layers need KV cache, which is why long context can fit on one GPU.</p>
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">Smaller KV growth</h3>
+            <p>Only the eight full-attention layers need KV cache, reducing growth relative to an all-attention model of the same width and depth.</p>
           </div>
           <div>
-            <h3 class="font-semibold mb-2" style="color: var(--fg);">Targeted kernels</h3>
-            <p>GDN handles most layers with recurrent linear attention while GQA handles periodic full-attention checkpoints.</p>
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">Model-specific kernels</h3>
+            <p>Backend kernels target GDN recurrence, periodic full attention, paged decode, projections, normalization, and sampling.</p>
           </div>
         </div>
-        <p class="text-sm" style="color: var(--fg-mute);">
-          For the detailed recurrence, paging, and kernel discussion, read the
-          <a href="https://github.com/ericflo/kiln/blob/main/ARCHITECTURE.md">full ARCHITECTURE.md deep dive</a>.
+        <p class="mt-5 text-sm" style="color: var(--fg-mute);">
+          The <a href="docs/architecture-deep-dive/">architecture deep dive</a> explains recurrence,
+          cache ownership, paging, and kernel boundaries.
         </p>
       </article>
 
       <article class="card p-6">
         <div class="label mb-3">Live learning</div>
         <h2 id="lora-hot-swap-training-queue" class="text-2xl font-semibold mb-4">LoRA hot-swap and training queue</h2>
-        <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          Training requests enter the same server through <code>/v1/train/sft</code> or
-          <code>/v1/train/grpo</code>. A FIFO background queue trains LoRA adapter weights against the
-          loaded base model, checkpoints progress, then publishes the new adapter atomically at an
-          iteration boundary. Subsequent inference requests see the updated adapter without restarting
-          the server.
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          Accepted SFT, GRPO, and OPD jobs enter a FIFO background queue. The worker takes exclusive
+          accelerator ownership, trains a LoRA adapter against the loaded base model, checkpoints progress,
+          and saves the completed adapter. The base model remains fixed.
         </p>
-        <div class="grid sm:grid-cols-2 gap-4" style="color: var(--fg-dim);">
+        <div class="grid sm:grid-cols-2 gap-4 mt-5" style="color: var(--fg-dim);">
           <div class="card p-4" style="background: var(--bg-soft-2);">
-            <h3 class="font-semibold mb-2" style="color: var(--fg);">SFT</h3>
-            <p>Correct input/output examples update adapter weights directly from supervised loss.</p>
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">Saved</h3>
+            <p>Every completed job records its adapter and receipt in the server-owned registry.</p>
           </div>
           <div class="card p-4" style="background: var(--bg-soft-2);">
-            <h3 class="font-semibold mb-2" style="color: var(--fg);">GRPO</h3>
-            <p>Scored completions become a generate &rarr; score &rarr; train loop through the same HTTP API.</p>
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">Activated</h3>
+            <p>A completed adapter changes inference only when auto-load is enabled and any held-out post-eval activation gate passes.</p>
           </div>
         </div>
-        <p class="text-sm mt-5" style="color: var(--fg-dim);">
-          Inspect your live server&rsquo;s queue and registry: <code>kiln train status</code> shows pending and running jobs, and <code>kiln adapters list</code> shows the published adapters available to subsequent requests.
-        </p>
-        <pre class="mt-3 overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>kiln train status
-kiln adapters list</code></pre>
-        <p class="text-xs mt-3" style="color: var(--fg-mute);">
-          See the <a href="cli.html">CLI Reference</a> for the full <code>kiln</code> command surface.
+        <p class="mt-5 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          Stable serving rejects training and live adapter-weight transitions. Experimental and maintenance
+          profiles admit different mutation classes; see the
+          <a href="docs/serving-profiles/">serving-profile matrix</a>.
         </p>
       </article>
 
       <article class="card p-6">
-        <div class="label mb-3">SFT loss authority</div>
+        <div class="label mb-3">Training backend</div>
         <h2 id="backend-owned-sft-loss-routing" class="text-2xl font-semibold mb-4">Backend-owned SFT loss routing</h2>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
-          The selected training backend owns one typed <code>SftFlceLossRoute</code> capability. It is
-          deliberately absent from the SFT request, <code>SftConfig</code>, and typed
-          <code>[training]</code> configuration, so there is no TOML field and no mechanically derived
-          environment name. The former <code>KILN_USE_FLCE</code> switch is removed: it has no
-          compatibility alias and no current routing effect.
+          The selected training backend owns one typed <code>SftFlceLossRoute</code>. Requests cannot select
+          it, and there is no TOML field or mechanically derived environment name for it. Admission estimates
+          the route-specific loss workspace and rejects unsupported checkpoint geometry before queue publication.
         </p>
         <div class="overflow-x-auto mt-5">
           <table class="w-full text-sm" style="color: var(--fg-dim);">
-            <thead style="color: var(--fg);"><tr><th class="text-left p-2">Backend</th><th class="text-left p-2">Loss route</th><th class="text-left p-2">Checkpointed SFT</th></tr></thead>
+            <thead style="color: var(--fg);">
+              <tr><th class="text-left p-2">Backend</th><th class="text-left p-2">Loss route</th><th class="text-left p-2">Checkpointed SFT</th></tr>
+            </thead>
             <tbody>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">CUDA</td><td class="p-2"><code>kt_tape_flce</code></td><td class="p-2">compatible</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">ROCm</td><td class="p-2"><code>kt_tape_flce</code></td><td class="p-2">compatible</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Vulkan</td><td class="p-2"><code>vulkan_active_rows</code></td><td class="p-2">compatible</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">Metal</td><td class="p-2"><code>full_logits</code></td><td class="p-2">uncheckpointed only</td></tr>
-              <tr style="border-top:1px solid var(--line);"><td class="p-2">CPU/reference</td><td class="p-2"><code>full_logits</code></td><td class="p-2">not a production native-SFT route</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">CUDA</td><td class="p-2"><code>kt_tape_flce</code></td><td class="p-2">Compatible</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">ROCm</td><td class="p-2"><code>kt_tape_flce</code></td><td class="p-2">Compatible</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Vulkan</td><td class="p-2"><code>vulkan_active_rows</code></td><td class="p-2">Compatible when native training is admitted</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">Metal</td><td class="p-2"><code>full_logits</code></td><td class="p-2">Uncheckpointed only</td></tr>
+              <tr style="border-top:1px solid var(--line);"><td class="p-2">CPU/reference</td><td class="p-2"><code>full_logits</code></td><td class="p-2">Not a production native-SFT route</td></tr>
             </tbody>
           </table>
         </div>
-        <p class="mt-3 text-sm leading-relaxed" style="color: var(--fg-mute);">
-          This capability matrix defines routing and admission behavior; it is not hardware
-          qualification evidence. Route-specific saturating admission accounts for the loss workspace.
-          A rejected memory estimate reports <code>loss workspace ... (route=&lt;route&gt;)</code> in the
-          HTTP 413 detail. <code>full_logits</code> materializes dense <code>[T,V]</code> logits, so a
-          multi-segment checkpoint plan fails before queue publication with
-          <code>training_invalid_request</code> instead of silently selecting a different loss path.
-        </p>
-        <pre class="mt-5"><code>resident TrainingLossBackend capability
-  -> route-specific saturating preflight + checkpoint compatibility guard
-  -> PreparedSftAdmission pins SftFlceLossRoute
-  -> queue recheck before governor reservation / KV replacement / allocator reclamation
-  -> pinned TrainingRuntimeContext
-  -> fresh execution-backend comparison before resident or trainable allocation
-  -> every standard or checkpointed SFT step uses the admitted route</code></pre>
-        <p class="mt-3 leading-relaxed" style="color: var(--fg-dim);">
-          Completed SFT receipts expose the decision as <code>runtime.sft_loss_route</code>. Exact SFT
-          checkpoints bind it under <code>kiln.training-checkpoint-planning.v4</code>; prior SFT v3
-          identities fail closed as planning drift, while GRPO and OPD remain on
-          <code>kiln.training-checkpoint-planning.v3</code>. The generated
-          <a href="https://ericflo.github.io/kiln/docs/native-sft-profile/#backend-owned-sft-loss-routing">Native SFT Profile</a>
-          is the complete normative contract.
+        <p class="mt-4 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          This matrix identifies the loss implementation after native training is admitted. It does not claim
+          that the complete training path is available on every serving configuration or device. Read the
+          generated <a href="docs/native-sft-profile/#backend-owned-sft-loss-routing">Native SFT Profile</a>
+          for the normative route, memory, checkpoint, and receipt contract.
         </p>
       </article>
 
       <article class="card p-6">
-        <div class="label mb-3">GPU path</div>
+        <div class="label mb-3">Code ownership</div>
         <h2 id="gpu-backend-crates" class="text-2xl font-semibold mb-4">GPU backend crates</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          Kiln keeps the Qwen3.5-4B fast path in Rust crates with focused native kernels where the model
-          needs them. CUDA builds use vendored FlashAttention-style kernels and paged GQA decode paths,
-          Vulkan builds use ash plus embedded SPIR-V shaders for AMD/Intel Linux GDN hot paths, and
-          Metal builds use candle-metal plus Kiln's Apple Silicon shader family. The result is a small
-          codebase tuned for one model instead of abstracting over many model families.
+          Kiln keeps the Qwen3.5-4B execution path in focused Rust crates, with native kernels where the
+          model needs them. Backend boundaries are explicit so policy, correctness fallbacks, and telemetry
+          stay attributable.
         </p>
         <ul class="list-disc pl-5 check-list" style="color: var(--fg-dim);">
-          <li><code>kiln-server</code> owns HTTP routing, configuration, metrics, and API surfaces.</li>
-          <li><code>kiln-scheduler</code> and <code>kiln-core</code> coordinate batching, requests, and KV blocks.</li>
-          <li><code>kiln-model</code> loads Qwen3.5-4B weights, applies adapters, and drives the forward pass.</li>
-          <li><code>kiln-flash-attn</code>, CUDA-backed crates, <code>kiln-vulkan-kernel</code>, and Metal shaders provide backend-specific GPU kernels.</li>
-          <li><code>kiln-train</code> defines the SFT, GRPO, and identity-bound OPD training APIs, exact checkpoint state, and job lifecycle.</li>
-          <li><code>kiln-eval</code> defines eval suites, scorers, results, and dataset → suite synthesis (pure CPU).</li>
+          <li><code>kiln-server</code> owns configuration, HTTP routes, serving-profile admission, metrics, and workers.</li>
+          <li><code>kiln-scheduler</code> and <code>kiln-core</code> coordinate requests, batching, and KV blocks.</li>
+          <li><code>kiln-model</code> loads Qwen3.5-4B, applies adapters, and drives forward execution.</li>
+          <li><code>kiln-flash-attn</code>, CUDA support crates, <code>kiln-vulkan-kernel</code>, and Metal shaders provide backend-specific kernels.</li>
+          <li><code>kiln-train</code> owns SFT, GRPO, OPD, checkpoints, receipts, and training-job state.</li>
+          <li><code>kiln-eval</code> owns suites, scorers, outcomes, and dataset-to-suite synthesis.</li>
         </ul>
       </article>
 
       <article class="card p-6">
-        <div class="label mb-3">Eval pipeline</div>
+        <div class="label mb-3">Evaluation</div>
         <h2 id="eval-pipeline" class="text-2xl font-semibold mb-4">Evals as a peer of training</h2>
-        <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          The eval pipeline mirrors the training queue but rides the inference read-lock so it can run concurrently with both serving and training. A second FIFO worker pulls <code>QueuedEvalJob</code> entries from <code>state.eval_queue</code>, resolves the requested suite from <code>SuiteRegistry</code> (or uses an inline copy), drives the in-process generator across every example, and writes per-example outcomes plus a headline accuracy into <code>EvalJobInfo</code>. A streamed progress callback updates a <code>running_accuracy</code> field after every example so the <code>/ui</code> drill-in modal renders live. Each new production run also writes an exact replay record over suite/generation/seed/budget, model/judge/scorer, execution/base-weight, and raw-completion identities.
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          A separate FIFO worker resolves a registered or inline suite, generates each completion in process,
+          scores it, and records per-example outcomes plus aggregate accuracy. Eval generation can share the
+          inference side of accelerator ownership and waits while training holds exclusive GPU ownership.
         </p>
-        <div class="grid sm:grid-cols-2 gap-4" style="color: var(--fg-dim);">
+        <div class="grid sm:grid-cols-2 gap-4 mt-5" style="color: var(--fg-dim);">
           <div class="card p-4" style="background: var(--bg-soft-2);">
-            <h3 class="font-semibold mb-2" style="color: var(--fg);">Suite registry</h3>
-            <p>Suites are versioned JSON under <code>&lt;eval-root&gt;/suites/</code>. <code>POST /v1/eval/suites</code> registers; <code>POST /v1/eval/run</code> grades any adapter against them.</p>
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">Held-out gates</h3>
+            <p>Post-training eval can control activation only when admission proves the suite is held out from training data.</p>
           </div>
           <div class="card p-4" style="background: var(--bg-soft-2);">
-            <h3 class="font-semibold mb-2" style="color: var(--fg);">Dataset → suite</h3>
-            <p>Upload an SFT or GRPO JSONL to persist content-addressed, group-aware train/validation/holdout views. Training defaults to train; synthesis defaults to holdout before applying <code>final_assistant</code>, <code>every_assistant_turn</code>, or <code>tool_call_predict</code>.</p>
-          </div>
-          <div class="card p-4" style="background: var(--bg-soft-2);">
-            <h3 class="font-semibold mb-2" style="color: var(--fg);">Post-training auto-eval</h3>
-            <p>SFT and GRPO may carry a held-out <code>post_eval</code>. Admission rejects exact, normalized, row, group, or session overlap before training; explicit <code>train-set-eval</code> runs are diagnostic-only.</p>
-          </div>
-          <div class="card p-4" style="background: var(--bg-soft-2);">
-            <h3 class="font-semibold mb-2" style="color: var(--fg);">Judgment flywheel</h3>
-            <p>A/B/Tie/Skip preferences from <code>/ui</code> append to a <code>JudgmentStore</code>, compile to an SFT dataset, train a local judge LoRA, and that judge grades future suites &mdash; no frontier LLM called.</p>
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">Strict replay</h3>
+            <p>Replay binds suite, sampling, model, scorer, adapter, base-weight, and raw-completion identities before it can claim a match.</p>
           </div>
         </div>
-        <p class="text-sm mt-5" style="color: var(--fg-dim);">
-          Strict replay enters through <code>POST /v1/eval/jobs/{id}/replay</code>. Admission validates the selected source record, requires exact current execution and base-weight digests, re-attests adapter bytes, and installs the replay expectation before queue visibility. The executor rechecks the loaded candidate immediately before decode and each judge immediately before scoring. The worker emits a terminal <code>matched</code>, <code>mismatch</code>, or <code>error</code> verdict; archive validation rejects changed raw bytes and contradictory evidence. Legacy runs remain readable but cannot make a strict replay claim. See <a href="evals.html#strict-replay">Strict replay</a> for the operator workflow and proof boundary.
-        </p>
-        <p class="text-sm mt-5" style="color: var(--fg-dim);">
-          Full pipeline diagram and request shapes live in <a href="evals.html">the Evals guide</a> and <a href="https://github.com/ericflo/kiln/blob/main/ARCHITECTURE.md#evaluation-pipeline">ARCHITECTURE.md &rsaquo; Evaluation Pipeline</a>.
+        <p class="mt-5 text-sm leading-relaxed" style="color: var(--fg-mute);">
+          See the <a href="evals.html">Evals guide</a> for suites, scorers, post-training gates,
+          judgments, comparisons, and strict replay.
         </p>
       </article>
     </div>
@@ -1455,9 +591,9 @@ kiln adapters list</code></pre>
     <div class="max-w-4xl mx-auto px-6 py-12">
       <h2 id="where-to-go-next" class="text-2xl font-semibold tracking-tight mb-4">Where to go next</h2>
       <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <a class="card p-5 block" href="https://github.com/ericflo/kiln/blob/main/ARCHITECTURE.md">
+        <a class="card p-5 block" href="docs/architecture-deep-dive/">
           <h3 class="font-semibold mb-2">Deep dive</h3>
-          <p style="color: var(--fg-dim);">Read the full GitHub architecture guide with crate-level detail and implementation notes.</p>
+          <p style="color: var(--fg-dim);">Read the exhaustive crate-level architecture and implementation contracts.</p>
         </a>
         <a class="card p-5 block" href="grpo.html">
           <h3 class="font-semibold mb-2">GRPO guide</h3>
@@ -1473,15 +609,19 @@ kiln adapters list</code></pre>
         </a>
         <a class="card p-5 block" href="troubleshooting.html">
           <h3 class="font-semibold mb-2">Troubleshooting</h3>
-          <p style="color: var(--fg-dim);">Check binary, CUDA or Metal setup, model path, health output, and adapter storage.</p>
+          <p style="color: var(--fg-dim);">Diagnose binaries, backend selection, model setup, health, memory, and adapter state.</p>
         </a>
         <a class="card p-5 block" href="cli.html">
           <h3 class="font-semibold mb-2">CLI reference</h3>
           <p style="color: var(--fg-dim);">Map architecture concepts to <code>kiln serve</code>, <code>kiln health</code>, <code>kiln adapters list</code>, and training commands.</p>
         </a>
-        <a class="card p-5 block" href="https://github.com/ericflo/kiln/blob/main/BENCHMARKS.md">
+        <a class="card p-5 block" href="api.html">
+          <h3 class="font-semibold mb-2">API reference</h3>
+          <p style="color: var(--fg-dim);">Inspect the request, response, error, profile, and mutation contracts.</p>
+        </a>
+        <a class="card p-5 block" href="docs/benchmarks/">
           <h3 class="font-semibold mb-2">Benchmarks</h3>
-          <p style="color: var(--fg-dim);">Decode tok/s, mean and p99 ITL on Qwen3.5-4B against external references on the same single-GPU class.</p>
+          <p style="color: var(--fg-dim);">Read measured throughput, latency, methodology, evidence, and qualification boundaries.</p>
         </a>
       </div>
     </div>
@@ -1506,6 +646,7 @@ kiln adapters list</code></pre>
         <a href="demo/">Demo</a>
         <a href="troubleshooting.html">Troubleshooting</a>
         <a href="architecture.html">Architecture</a>
+        <a href="docs/benchmarks/">Benchmarks</a>
         <a href="https://github.com/ericflo/kiln/blob/main/CHANGELOG.md">Changelog</a>
         <a href="https://github.com/ericflo/kiln/blob/main/SECURITY.md">Security</a>
         <a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License</a>

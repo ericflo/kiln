@@ -2,17 +2,25 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ericflo.github.io/kiln/contracts/thinking-budget-v1.schema.json",
   "title": "Kiln thinking-budget contract v1",
-  "description": "Canonical request, effective-configuration, outcome, and record shapes. An omitted request dimension inherits, null is explicitly unlimited, and a non-negative integer is a finite limit including zero.",
+  "description": "Canonical fragments for thinking-budget request overrides, server defaults, effective resolution, terminal outcomes, complete records, and partial recent-request records. The token and decode-time dimensions resolve independently.",
   "$defs": {
     "limitOverride": {
-      "description": "This definition applies only when the property is present. Property absence means inherit.",
+      "description": "One present request override. Property absence means inherit; null means explicitly unlimited; a non-negative integer is a finite limit, including zero.",
       "oneOf": [
-        { "type": "null", "description": "Explicit unlimited" },
-        { "type": "integer", "minimum": 0, "description": "Finite limit; zero closes immediately" }
+        {
+          "type": "null",
+          "description": "Explicitly remove the inherited finite limit for this dimension."
+        },
+        {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Finite limit. Zero starts reasoning-block closure at the first decode candidate."
+        }
       ]
     },
     "source": {
       "type": "string",
+      "description": "Closed provenance vocabulary for one independently resolved token or time dimension. An `_unlimited` suffix means that surface explicitly removed an inherited limit.",
       "enum": [
         "unlimited",
         "server_default",
@@ -29,30 +37,62 @@
     },
     "trigger": {
       "type": "string",
-      "enum": ["tokens", "time", "max_tokens"]
+      "description": "Boundary that made Kiln force the reasoning close sequence: the thinking-token limit, decode-time limit, or remaining completion-token capacity.",
+      "enum": [
+        "tokens",
+        "time",
+        "max_tokens"
+      ]
     },
     "request": {
       "type": "object",
+      "description": "Thinking-budget properties embedded in a chat or batch request. Other request properties are permitted because this definition describes only the budget fragment.",
       "properties": {
-        "thinking_budget_tokens": { "$ref": "#/$defs/limitOverride" },
-        "thinking_budget_ms": { "$ref": "#/$defs/limitOverride" }
+        "thinking_budget_tokens": {
+          "$ref": "#/$defs/limitOverride",
+          "description": "Maximum generated thinking tokens before Kiln closes an open reasoning block. Omit to inherit the server token default."
+        },
+        "thinking_budget_ms": {
+          "$ref": "#/$defs/limitOverride",
+          "description": "Maximum decode time in milliseconds, starting at the first decode candidate and excluding queue and prefill. Omit to inherit the server time default."
+        }
       },
       "additionalProperties": true
     },
     "serverDefaults": {
       "type": "object",
-      "required": ["default_thinking_budget_tokens", "default_thinking_budget_ms"],
+      "description": "Resolved server-wide defaults. Null means the dimension is unlimited; a non-negative integer is finite, including zero.",
+      "required": [
+        "default_thinking_budget_tokens",
+        "default_thinking_budget_ms"
+      ],
       "properties": {
         "default_thinking_budget_tokens": {
+          "description": "Default thinking-token limit inherited by requests that omit `thinking_budget_tokens`.",
           "oneOf": [
-            { "type": "null" },
-            { "type": "integer", "minimum": 0 }
+            {
+              "type": "null",
+              "description": "No default token limit."
+            },
+            {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Finite default thinking-token limit."
+            }
           ]
         },
         "default_thinking_budget_ms": {
+          "description": "Default decode-time limit inherited by requests that omit `thinking_budget_ms`.",
           "oneOf": [
-            { "type": "null" },
-            { "type": "integer", "minimum": 0 }
+            {
+              "type": "null",
+              "description": "No default decode-time limit."
+            },
+            {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Finite default decode-time limit in milliseconds."
+            }
           ]
         }
       },
@@ -60,64 +100,323 @@
     },
     "effective": {
       "type": "object",
-      "required": ["configured", "tokens_source", "time_source"],
+      "description": "Independently resolved token and time dimensions before runtime applicability or outcome is known. `configured` is true exactly when at least one finite maximum is present.",
+      "required": [
+        "configured",
+        "tokens_source",
+        "time_source"
+      ],
       "properties": {
-        "configured": { "type": "boolean" },
-        "max_tokens": { "type": "integer", "minimum": 0 },
-        "max_time_ms": { "type": "integer", "minimum": 0 },
-        "tokens_source": { "$ref": "#/$defs/source" },
-        "time_source": { "$ref": "#/$defs/source" }
-      }
-    },
-    "outcome": {
-      "type": "object",
-      "required": ["triggered", "closed", "thinking_tokens", "thinking_time_ms"],
-      "properties": {
-        "triggered": { "type": "boolean" },
-        "trigger": { "$ref": "#/$defs/trigger" },
-        "closed": { "type": "boolean" },
-        "thinking_tokens": { "type": "integer", "minimum": 0 },
-        "thinking_time_ms": { "type": "integer", "minimum": 0 }
+        "configured": {
+          "type": "boolean",
+          "description": "Whether at least one of `max_tokens` or `max_time_ms` is finite."
+        },
+        "max_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Effective finite thinking-token limit. Absence means this dimension is unlimited."
+        },
+        "max_time_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Effective finite decode-time limit in milliseconds. Absence means this dimension is unlimited."
+        },
+        "tokens_source": {
+          "$ref": "#/$defs/source",
+          "description": "Surface that supplied the finite token limit or explicit/inherited unlimited state."
+        },
+        "time_source": {
+          "$ref": "#/$defs/source",
+          "description": "Surface that supplied the finite time limit or explicit/inherited unlimited state."
+        }
       },
       "allOf": [
         {
-          "if": { "properties": { "triggered": { "const": true } } },
-          "then": { "required": ["trigger"] },
-          "else": { "not": { "required": ["trigger"] } }
+          "if": {
+            "properties": {
+              "configured": {
+                "const": true
+              }
+            },
+            "required": [
+              "configured"
+            ]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "required": [
+                  "max_tokens"
+                ]
+              },
+              {
+                "required": [
+                  "max_time_ms"
+                ]
+              }
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "max_tokens"
+                  ]
+                },
+                {
+                  "required": [
+                    "max_time_ms"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "max_tokens"
+            ]
+          },
+          "then": {
+            "properties": {
+              "tokens_source": {
+                "enum": [
+                  "server_default",
+                  "request",
+                  "suite",
+                  "run_override",
+                  "example",
+                  "unknown"
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "tokens_source": {
+                "enum": [
+                  "unlimited",
+                  "request_unlimited",
+                  "suite_unlimited",
+                  "run_override_unlimited",
+                  "example_unlimited",
+                  "unknown"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "max_time_ms"
+            ]
+          },
+          "then": {
+            "properties": {
+              "time_source": {
+                "enum": [
+                  "server_default",
+                  "request",
+                  "suite",
+                  "run_override",
+                  "example",
+                  "unknown"
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "time_source": {
+                "enum": [
+                  "unlimited",
+                  "request_unlimited",
+                  "suite_unlimited",
+                  "run_override_unlimited",
+                  "example_unlimited",
+                  "unknown"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "outcome": {
+      "type": "object",
+      "description": "Completion-specific terminal state after the budget controller ran. Natural closure has `triggered=false` and no `trigger`.",
+      "required": [
+        "triggered",
+        "closed",
+        "thinking_tokens",
+        "thinking_time_ms"
+      ],
+      "properties": {
+        "triggered": {
+          "type": "boolean",
+          "description": "Whether Kiln forced the close sequence because a finite or completion-capacity boundary was reached."
+        },
+        "trigger": {
+          "$ref": "#/$defs/trigger",
+          "description": "Boundary that forced closure. Present exactly when `triggered` is true."
+        },
+        "closed": {
+          "type": "boolean",
+          "description": "Whether the tokenizer's complete reasoning close sequence entered model history."
+        },
+        "thinking_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Thinking tokens produced before closure or before the request ended."
+        },
+        "thinking_time_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Decode time from the first candidate to closure or request end, in milliseconds."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "triggered": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "trigger"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "trigger"
+              ]
+            }
+          }
         }
       ],
       "additionalProperties": false
     },
     "record": {
+      "description": "Complete effective configuration, applicability, and optional flat terminal outcome written by current chat, streaming, batch, and eval surfaces.",
       "allOf": [
-        { "$ref": "#/$defs/effective" },
+        {
+          "$ref": "#/$defs/effective"
+        },
         {
           "type": "object",
-          "required": ["applied", "triggered"],
+          "required": [
+            "applied",
+            "triggered"
+          ],
           "properties": {
-            "applied": { "type": "boolean" },
-            "triggered": { "type": "boolean" },
-            "trigger": { "$ref": "#/$defs/trigger" },
-            "closed": { "type": "boolean" },
-            "thinking_tokens": { "type": "integer", "minimum": 0 },
-            "thinking_time_ms": { "type": "integer", "minimum": 0 }
+            "applied": {
+              "type": "boolean",
+              "description": "Whether the request began in reasoning with a configured finite limit and the controller ran."
+            },
+            "triggered": {
+              "type": "boolean",
+              "description": "Whether a finite or completion-capacity boundary forced closure. False also covers inert and natural-close records."
+            },
+            "trigger": {
+              "$ref": "#/$defs/trigger",
+              "description": "Boundary that forced closure. Absent when no forced closure occurred."
+            },
+            "closed": {
+              "type": "boolean",
+              "description": "Whether the complete reasoning close sequence entered model history."
+            },
+            "thinking_tokens": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Thinking tokens observed before closure or request end."
+            },
+            "thinking_time_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Decode time observed from the first candidate to closure or request end, in milliseconds."
+            }
           }
         },
         {
-          "if": { "required": ["closed"] },
+          "if": {
+            "properties": {
+              "applied": {
+                "const": true
+              }
+            },
+            "required": [
+              "applied"
+            ]
+          },
           "then": {
-            "required": ["thinking_tokens", "thinking_time_ms"],
-            "if": { "properties": { "triggered": { "const": true } } },
-            "then": { "required": ["trigger"] },
-            "else": { "not": { "required": ["trigger"] } }
+            "properties": {
+              "configured": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "closed"
+            ]
+          },
+          "then": {
+            "required": [
+              "thinking_tokens",
+              "thinking_time_ms"
+            ],
+            "if": {
+              "properties": {
+                "triggered": {
+                  "const": true
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "trigger"
+              ]
+            },
+            "else": {
+              "not": {
+                "required": [
+                  "trigger"
+                ]
+              }
+            }
           },
           "else": {
-            "properties": { "triggered": { "const": false } },
+            "properties": {
+              "triggered": {
+                "const": false
+              }
+            },
             "not": {
               "anyOf": [
-                { "required": ["trigger"] },
-                { "required": ["thinking_tokens"] },
-                { "required": ["thinking_time_ms"] }
+                {
+                  "required": [
+                    "trigger"
+                  ]
+                },
+                {
+                  "required": [
+                    "thinking_tokens"
+                  ]
+                },
+                {
+                  "required": [
+                    "thinking_time_ms"
+                  ]
+                }
               ]
             }
           }
@@ -126,17 +425,40 @@
       "unevaluatedProperties": false
     },
     "recentRecord": {
+      "description": "Recent-request form of the effective record. `applied` and outcome fields may be absent when failure occurred before applicability or terminal state was known.",
       "allOf": [
-        { "$ref": "#/$defs/effective" },
+        {
+          "$ref": "#/$defs/effective"
+        },
         {
           "type": "object",
           "properties": {
-            "applied": { "type": "boolean" },
-            "triggered": { "type": "boolean" },
-            "trigger": { "$ref": "#/$defs/trigger" },
-            "closed": { "type": "boolean" },
-            "thinking_tokens": { "type": "integer", "minimum": 0 },
-            "thinking_time_ms": { "type": "integer", "minimum": 0 }
+            "applied": {
+              "type": "boolean",
+              "description": "Whether the configured controller applied. Absence means applicability was not established."
+            },
+            "triggered": {
+              "type": "boolean",
+              "description": "Whether a known terminal outcome forced closure."
+            },
+            "trigger": {
+              "$ref": "#/$defs/trigger",
+              "description": "Known boundary that forced closure."
+            },
+            "closed": {
+              "type": "boolean",
+              "description": "Whether the complete reasoning close sequence is known to have entered model history."
+            },
+            "thinking_tokens": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Known thinking-token count at closure or request end."
+            },
+            "thinking_time_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Known decode time from first candidate to closure or request end, in milliseconds."
+            }
           }
         }
       ],

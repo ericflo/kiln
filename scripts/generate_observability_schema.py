@@ -93,6 +93,103 @@ def add_object(
     )
 
 
+FIELD_DESCRIPTIONS = {
+    ("AcceleratorWeightUploadConfigResponse", "configured_mib_per_second"):
+        "Configured accelerator-upload rate in MiB per second; null disables pacing.",
+    ("AcceleratorWeightUploadConfigResponse", "not_applicable_reason"):
+        "Why upload pacing does not apply; null when the policy applies.",
+    ("ConfigResponse", "rocm_graphs"):
+        "Point-in-time ROCm graph statistics, or null when a nonblocking snapshot is unavailable.",
+    ("ConfigResponse", "rocm_graphs_unavailable_reason"):
+        "Closed reason `rocm_graphs` is null; null when statistics are present.",
+    ("ConfigResponse", "rocm_graph_telemetry"):
+        "Lock-independent ROCm graph phase telemetry, or null when no graph runner exists.",
+    ("ConfigResponse", "rocm_graph_telemetry_unavailable_reason"):
+        "Closed reason `rocm_graph_telemetry` is null; null when telemetry is present.",
+    ("CudaGraphInfo", "enabled"):
+        "Whether CUDA graph replay is enabled; null while the nonblocking snapshot is busy.",
+    ("DebugDisabledResponse", "error"):
+        "Stable error code for a disabled debug endpoint.",
+    ("DebugDisabledResponse", "enable_with"):
+        "Configuration change required before restart to enable the endpoint.",
+    ("DebugProvenanceErrorResponse", "error"):
+        "Stable error code for resident provenance that failed validation.",
+    ("DecodeStatsSnapshot", "window_secs"):
+        "Fixed rolling window in seconds.",
+    ("GenerationConfig", "default_thinking_enabled"):
+        "Server-wide thinking default; null preserves the model template's default.",
+    ("GenerationConfig", "default_thinking_budget_tokens"):
+        "Default thinking-token limit; null means unlimited.",
+    ("GenerationConfig", "default_thinking_budget_ms"):
+        "Default thinking-time limit in milliseconds; null means unlimited.",
+    ("HealthResponse", "status"):
+        "`ok` is ready for normal work, `degraded` reports a failed readiness check, and "
+        "`maintenance` reports an intentionally drained server.",
+    ("HealthResponse", "backend"):
+        "Whether the server is using mock responses or a loaded model.",
+    ("HealthResponse", "default_thinking_enabled"):
+        "Server-wide thinking default; null preserves the model template's default.",
+    ("HealthResponse", "default_thinking_budget_tokens"):
+        "Default thinking-token limit; null means unlimited.",
+    ("HealthResponse", "default_thinking_budget_ms"):
+        "Default thinking-time limit in milliseconds; null means unlimited.",
+    ("HealthResponse", "base_weight_identity"):
+        "Loaded base-weight identity; null in mock mode.",
+    ("HealthResponse", "execution_identity"):
+        "Validated execution identity; null when no real-model provenance is resident.",
+    ("HealthResponse", "active_adapter"):
+        "Adapter selected for new inference requests; null selects the base model.",
+    ("HealthResponse", "loaded_adapter"):
+        "Adapter currently resident in the model runner; null when only base weights are loaded.",
+    ("HealthResponse", "loaded_adapter_revision"):
+        "Content revision of the resident adapter; null when no adapter is loaded.",
+    ("HealthResponse", "scheduler"):
+        "Paged-KV scheduler gauges; null when the active backend does not expose them.",
+    ("HealthResponse", "gpu_memory"):
+        "GPU capacity and live all-process memory observation; null without a GPU backend.",
+    ("HealthResponse", "checks"):
+        "The six stable readiness checks whose failures determine `degraded` status and HTTP 503.",
+    ("HttpRuntimeInfo", "send_buffer_requested_bytes"):
+        "Configured send-buffer target in bytes, or null when Kiln leaves the socket default unchanged.",
+    ("HttpRuntimeInfo", "send_buffer_kernel_readback_bytes"):
+        "Send-buffer size reported by the operating system after listener setup, or null when no target "
+        "was requested.",
+    ("HttpRuntimeInfo", "send_buffer_effective_bytes"):
+        "Effective send-buffer target used for startup validation, or null when Kiln leaves the socket "
+        "default unchanged.",
+    ("ModelInfo", "id"):
+        "Served model ID accepted by the inference API.",
+    ("ModelInfo", "object"):
+        "OpenAI-compatible model discriminator.",
+    ("ModelInfo", "owned_by"):
+        "Stable owner label for a model served by Kiln.",
+    ("ModelStateResponse", "rocm_graphs"):
+        "Point-in-time ROCm graph statistics, or null when a nonblocking snapshot is unavailable.",
+    ("ModelStateResponse", "rocm_graphs_unavailable_reason"):
+        "Closed reason `rocm_graphs` is null; null when statistics are present.",
+    ("ModelStateResponse", "rocm_graph_telemetry"):
+        "Lock-independent ROCm graph phase telemetry, or null when no graph runner exists.",
+    ("ModelStateResponse", "rocm_graph_telemetry_unavailable_reason"):
+        "Closed reason `rocm_graph_telemetry` is null; null when telemetry is present.",
+    ("ModelsResponse", "object"):
+        "OpenAI-compatible list discriminator.",
+    ("ModelsResponse", "data"):
+        "The single model served by this Kiln process.",
+}
+
+
+def apply_editorial_descriptions() -> None:
+    for (definition_name, field_name), description in FIELD_DESCRIPTIONS.items():
+        definition = DEFS.get(definition_name)
+        properties = definition.get("properties") if definition else None
+        if not isinstance(properties, dict) or field_name not in properties:
+            raise ValueError(
+                f"editorial description has no generated field owner: "
+                f"{definition_name}.{field_name}"
+            )
+        properties[field_name]["description"] = description
+
+
 def build_definitions() -> None:
     add_definition("Boolean", "bool", {"type": "boolean"}, "A serialized Rust boolean.")
     add_definition("String", "String", {"type": "string"}, "A serialized UTF-8 Rust string.")
@@ -1663,7 +1760,10 @@ def build_definitions() -> None:
         "prompt_full": ref("String"), "completion_full": ref("String"), "user_agent": ref("String"),
         "client": ref("String"), "thinking_budget": ref("RequestThinkingBudget"),
         "latency": ref("RequestLatencyDiagnostics"),
-    }, "One newest-first bounded recent-request record.", optional=(
+    }, (
+        "One newest-first bounded recent-request record. The record can contain full prompt and "
+        "completion text and therefore belongs inside the server's trusted access boundary."
+    ), optional=(
         "adapter", "temperature", "top_p", "max_tokens", "ttft_ms", "model_prefill_ms",
         "model_decode_ms", "error", "thinking_mode", "prefix_cache", "prompt_full",
         "completion_full", "user_agent", "client", "thinking_budget", "latency",
@@ -1729,6 +1829,7 @@ ENTRYPOINTS = (
 
 def build_schema() -> dict[str, Any]:
     build_definitions()
+    apply_editorial_descriptions()
     examples = {name: [example_for(ref(name))] for name in ENTRYPOINTS}
     examples["ModelsResponse"] = [{
         "object": "list",
@@ -1857,8 +1958,11 @@ def build_schema() -> dict[str, Any]:
         "$id": "https://ericflo.github.io/kiln/contracts/kiln-observability-v1.schema.json",
         "title": "Kiln Read-only Serving and Observability API v1",
         "description": (
-            "Closed field-level wire contract for health, resolved configuration, model-state debug, "
-            "model discovery, decode statistics, recent requests, and persistent logit-cache statistics."
+            "Canonical read-only response schemas for health and readiness, resolved configuration, "
+            "opt-in model-state diagnostics, model discovery, decode statistics, recent requests, and "
+            "persistent teacher-logit cache statistics. Kiln does not authenticate these endpoints. "
+            "`GET /v1/stats/recent-requests` can return stored prompt and completion text, so keep the "
+            "server on loopback or behind an authenticated reverse proxy."
         ),
         **STATUS,
         "x-kiln-entrypoints": list(ENTRYPOINTS),

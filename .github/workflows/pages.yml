@@ -1,12 +1,29 @@
 name: Pages
 
 on:
+  pull_request:
+  schedule:
+    # Rebuild the complete public surface monthly so stale generated content,
+    # broken links, and route-inventory drift fail visibly even without a push.
+    - cron: '23 14 1 * *'
   push:
     branches: [main]
     paths:
       - '*.md'
       - 'docs/**'
       - 'assets/**'
+      - 'Cargo.toml'
+      - 'kiln.example.toml'
+      - 'crates/kiln-model/src/backend/**'
+      - 'crates/kiln-model/src/generate.rs'
+      - 'crates/kiln-server/src/api/**'
+      - 'crates/kiln-server/src/bench.rs'
+      - 'crates/kiln-server/src/cli.rs'
+      - 'crates/kiln-server/src/config.rs'
+      - 'crates/kiln-server/src/ui/**'
+      - 'crates/kiln-vulkan-kernel/**'
+      - 'desktop/ui/**'
+      - 'qualification/receipts/**'
       - 'contracts/thinking-budget-v1.schema.json'
       - 'contracts/thinking-budget-v1.conformance.json'
       - 'contracts/kiln-config-v1.schema.json'
@@ -99,6 +116,7 @@ jobs:
           path: _site
 
   deploy:
+    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10

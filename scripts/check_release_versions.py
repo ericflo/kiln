@@ -435,7 +435,7 @@ def resolve_docs_site_url(source: Path, url: str) -> Path:
     parsed = urlsplit(stripped)
     relative_path = unquote(parsed.path)
     base = source.parent / relative_path
-    if stripped.endswith("/") or relative_path in {"", ".", ".."}:
+    if relative_path.endswith("/") or relative_path in {"", ".", ".."}:
         base = base / "index.html"
     return base.resolve()
 
@@ -506,12 +506,24 @@ def check_docs_site_local_links() -> list[str]:
     return errors
 
 
+def check_link_resolution_contract() -> list[str]:
+    source = DOCS_SITE / "example.html"
+    expected = (DOCS_SITE / "docs" / "example" / "index.html").resolve()
+    actual = resolve_docs_site_url(source, "docs/example/#section")
+    if actual != expected:
+        return [
+            "internal link resolver dropped the directory index for a "
+            f"fragment-bearing route: expected {expected}, got {actual}"
+        ]
+    return []
+
+
 def rel(path: Path) -> str:
     return str(path.relative_to(ROOT))
 
 
 def main() -> int:
-    errors: list[str] = []
+    errors = check_link_resolution_contract()
 
     for path in CURRENT_SERVER_SURFACES:
         text = path.read_text()

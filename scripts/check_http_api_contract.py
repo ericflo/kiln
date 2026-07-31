@@ -328,6 +328,8 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
     servers = document.get("servers")
     if servers != [{"url": "http://127.0.0.1:8420"}]:
         errors.append("servers must contain only the documented local default origin")
+    if document.get("security") != []:
+        errors.append("root security must be an empty array because Kiln does not authenticate HTTP requests")
 
     declared_tags = document.get("tags")
     if not isinstance(declared_tags, list):
@@ -1125,6 +1127,10 @@ def validate_artifact_schema(
         "$id": "https://ericflo.github.io/kiln/contracts/kiln-artifacts-v1.schema.json",
         "x-kiln-field-schema-status": "complete",
         "x-kiln-external-contracts": [OBSERVABILITY_SCHEMA_PATH.name, INFERENCE_SCHEMA_PATH.name],
+        "x-kiln-example-boundary": (
+            "Illustrative payloads only. Example backend and build values are not "
+            "runtime defaults, support predicates, qualification evidence, or benchmark receipts."
+        ),
     }
     for key, expected in expected_identity.items():
         if schema.get(key) != expected:
@@ -1219,6 +1225,41 @@ def validate_artifact_schema(
                         registry=registry,
                     )
                 )
+        export_provenance = (
+            examples.get("ExportDetail", [{}])[0]
+            .get("manifest", {})
+            .get("source_execution_provenance", {})
+        )
+        if export_provenance.get("backend") != {
+            "name": "cpu",
+            "device": "cpu",
+            "numerical_runtime_sha256": "sha256:" + "c" * 64,
+        }:
+            errors.append(
+                "artifact export example provenance must use the device-neutral CPU identity"
+            )
+        if export_provenance.get("build", {}).get("target") != "example-target-triple":
+            errors.append(
+                "artifact export example provenance must label its build target as a placeholder"
+            )
+        if export_provenance.get("kernels", {}).get("compiled_features") != []:
+            errors.append(
+                "artifact export example provenance must not imply an accelerator feature default"
+            )
+        grpo_provenance = (
+            examples.get("GrpoExportRequest", [{}])[0]
+            .get("groups", [{}])[0]
+            .get("completions", [{}])[0]
+            .get("provenance", {})
+        )
+        if (
+            grpo_provenance.get("generation_backend") != "cpu"
+            or grpo_provenance.get("behavior_policy", {}).get("implementation")
+            != "kiln/cpu"
+        ):
+            errors.append(
+                "artifact rollout examples must use the device-neutral CPU implementation"
+            )
 
     for response_name in (
         "AdapterDetail",

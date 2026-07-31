@@ -1621,6 +1621,50 @@ fn generated_capability_report_lists_optimizer_dispatch_policy() {
 }
 
 #[test]
+fn generated_capability_report_does_not_overclaim_host_fallback_coverage() {
+    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(&report_path).expect("capability report json should be readable"),
+    )
+    .expect("capability report json should parse");
+
+    assert_eq!(
+        report["source"]["scope"].as_str(),
+        Some("static source and contract inventory"),
+        "the report must identify its evidence boundary"
+    );
+    assert_eq!(
+        report["source"]["does_not_execute_commands"].as_bool(),
+        Some(true),
+        "the report must not imply that generation executes conformance commands"
+    );
+
+    let gate = report["conformance_gates"]
+        .as_array()
+        .expect("conformance_gates should be an array")
+        .iter()
+        .find(|gate| gate["gate"] == "no_unexpected_host_fallback")
+        .expect("host-fallback gate should be present");
+    assert_eq!(
+        gate["status"].as_str(),
+        Some("partial"),
+        "counter attribution alone must not claim end-to-end zero-fallback coverage"
+    );
+    let blockers = gate["coverage_blockers"]
+        .as_array()
+        .expect("host-fallback blockers should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        blockers
+            .iter()
+            .any(|blocker| blocker.contains("not that end-to-end decode and training")),
+        "the partial gate should name the missing end-to-end proof"
+    );
+}
+
+#[test]
 fn generated_capability_report_gates_replay_contract() {
     let report_path = workspace_root().join("docs/backend-capability-report.json");
     let report: Value = serde_json::from_str(

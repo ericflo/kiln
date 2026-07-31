@@ -1,7 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://kiln.local/schemas/qualification-workload-v1.json",
-  "title": "Kiln local hardware qualification workload",
+  "title": "Kiln local qualification workload",
+  "description": "Closed, source-bound contract for one deterministic local qualification workload. JSON Schema validates the wire shape; scripts/qualification/workload.py additionally enforces placeholder delivery, bounded execution, canonical ordering, result ownership, and comparison semantics.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -15,52 +16,75 @@
     "comparison_policy"
   ],
   "properties": {
-    "schema_version": { "const": 1 },
-    "workload_id": { "$ref": "#/$defs/id" },
-    "kind": {
-      "enum": ["environment", "correctness", "serving", "performance", "training", "eval", "soak"]
+    "schema_version": {
+      "const": 1,
+      "description": "Workload contract version. The validator accepts only version 1."
     },
-    "description": { "type": "string", "minLength": 1, "maxLength": 512 },
-    "determinism": { "$ref": "#/$defs/determinism" },
+    "workload_id": {
+      "$ref": "#/$defs/id",
+      "description": "Stable identifier recorded in each case result and qualification receipt."
+    },
+    "kind": {
+      "enum": ["environment", "correctness", "serving", "performance", "training", "eval", "soak"],
+      "description": "Purpose of the workload. The kind constrains seed delivery and which comparison modes are valid."
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "Human explanation of the behavior, boundary, or performance claim being qualified."
+    },
+    "determinism": {
+      "$ref": "#/$defs/determinism",
+      "description": "Seed, repetition, ordering, concurrency, and network rules owned by the runner."
+    },
     "variables": {
       "type": "array",
-      "items": { "$ref": "#/$defs/variable" }
+      "items": { "$ref": "#/$defs/variable" },
+      "description": "Sorted declarations for operator-supplied scalar placeholders. Every declaration must be consumed, and every required variable must be consumed by every variant."
     },
     "variants": {
       "type": "array",
       "minItems": 1,
-      "items": { "$ref": "#/$defs/variant" }
+      "items": { "$ref": "#/$defs/variant" },
+      "description": "Sorted backend/configuration variants. Each variant runs its cases serially in declared order."
     },
     "comparison_policy": {
       "anyOf": [
         { "$ref": "#/$defs/comparisonPolicy" },
         { "type": "null" }
-      ]
+      ],
+      "description": "Explicit metric comparison contract, or null only for environment and soak workloads."
     }
   },
   "$defs": {
     "id": {
       "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$",
+      "description": "Lowercase stable identifier, 3–128 characters, using letters, digits, dots, underscores, or hyphens."
     },
     "nullableScalar": {
-      "type": ["string", "number", "boolean", "null"]
+      "type": ["string", "number", "boolean", "null"],
+      "description": "Finite JSON scalar or null. The semantic validator rejects non-finite numeric values."
     },
     "configValue": {
       "oneOf": [
         { "$ref": "#/$defs/nullableScalar" },
         { "$ref": "#/$defs/configObject" }
-      ]
+      ],
+      "description": "One finite scalar, null, or recursively nested configuration object."
     },
     "configObject": {
       "type": "object",
       "propertyNames": {
         "pattern": "^[a-z][a-z0-9_-]*$"
       },
-      "additionalProperties": { "$ref": "#/$defs/configValue" }
+      "additionalProperties": { "$ref": "#/$defs/configValue" },
+      "description": "Configuration tree whose lowercase keys can be addressed as dot-separated comparison paths."
     },
     "determinism": {
       "type": "object",
+      "description": "Runner-enforced execution envelope. Cases are serial, ordered, offline, and bounded.",
       "additionalProperties": false,
       "required": [
         "seed",
@@ -75,56 +99,93 @@
           "oneOf": [
             { "type": "integer", "minimum": 0 },
             { "type": "null" }
-          ]
+          ],
+          "description": "Non-negative workload seed. It is null only for environment workloads."
         },
         "seed_delivery": {
-          "enum": ["not_applicable", "fixed_fixture", "argv", "environment"]
+          "enum": ["not_applicable", "fixed_fixture", "argv", "environment"],
+          "description": "How every variant receives the seed. argv and environment require the reserved ${seed} placeholder in the corresponding surface."
         },
-        "repetitions": { "type": "integer", "minimum": 1, "maximum": 1000 },
-        "case_order": { "const": "declared" },
-        "max_parallel_cases": { "const": 1 },
-        "network_access": { "const": "forbidden" }
+        "repetitions": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "description": "Number of times the runner executes the declared case sequence."
+        },
+        "case_order": {
+          "const": "declared",
+          "description": "Cases run in the order stored in each variant."
+        },
+        "max_parallel_cases": {
+          "const": 1,
+          "description": "The runner executes at most one case at a time to avoid undeclared contention."
+        },
+        "network_access": {
+          "const": "forbidden",
+          "description": "Cases must use committed or local inputs and cannot depend on network state."
+        }
       }
     },
     "variable": {
       "type": "object",
+      "description": "One operator-resolved scalar placeholder declaration. Variable names are sorted and unique; runner-owned seed and model_path are reserved.",
       "additionalProperties": false,
       "required": ["name", "description", "type", "required", "default", "constraints"],
       "properties": {
         "name": {
           "type": "string",
-          "pattern": "^[a-z][a-z0-9_]{1,63}$"
+          "pattern": "^[a-z][a-z0-9_]{1,63}$",
+          "description": "Placeholder name without ${...}. It must not collide with a runner-owned placeholder."
         },
-        "description": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "type": { "enum": ["string", "integer", "number", "boolean"] },
-        "required": { "type": "boolean" },
-        "default": { "$ref": "#/$defs/nullableScalar" },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Operator-facing meaning and unit of the value."
+        },
+        "type": {
+          "enum": ["string", "integer", "number", "boolean"],
+          "description": "Exact JSON scalar type accepted by parameter resolution."
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Whether the operator must supply the value. Required variables must use a null default and be consumed by every variant."
+        },
+        "default": {
+          "$ref": "#/$defs/nullableScalar",
+          "description": "Optional resolved value when required is false. It must satisfy the declared type and constraints."
+        },
         "constraints": {
           "type": "object",
+          "description": "Complete type-aware bounds. Unused bound kinds remain explicitly null.",
           "additionalProperties": false,
           "required": ["allowed_values", "minimum", "maximum", "pattern"],
           "properties": {
             "allowed_values": {
               "type": "array",
-              "items": { "$ref": "#/$defs/nullableScalar" }
+              "items": { "$ref": "#/$defs/nullableScalar" },
+              "description": "Canonical sorted, unique allowed values of the declared type. An empty list means no enumeration restriction."
             },
             "minimum": {
               "oneOf": [
                 { "type": "number" },
                 { "type": "null" }
-              ]
+              ],
+              "description": "Inclusive finite lower bound for integer or number variables; null otherwise."
             },
             "maximum": {
               "oneOf": [
                 { "type": "number" },
                 { "type": "null" }
-              ]
+              ],
+              "description": "Inclusive finite upper bound for integer or number variables; null otherwise."
             },
             "pattern": {
               "oneOf": [
                 { "type": "string", "minLength": 1 },
                 { "type": "null" }
-              ]
+              ],
+              "description": "Full-match regular expression for string variables; null for numeric and boolean variables."
             }
           }
         }
@@ -132,16 +193,29 @@
     },
     "outputAssertion": {
       "type": "object",
+      "description": "Regular-expression assertion applied to a case's captured output. Duplicate assertions are rejected.",
       "additionalProperties": false,
       "required": ["stream", "match", "pattern"],
       "properties": {
-        "stream": { "enum": ["stdout", "stderr", "combined"] },
-        "match": { "enum": ["required", "forbidden"] },
-        "pattern": { "type": "string", "minLength": 1, "maxLength": 512 }
+        "stream": {
+          "enum": ["stdout", "stderr", "combined"],
+          "description": "Captured stream against which the regular expression is evaluated."
+        },
+        "match": {
+          "enum": ["required", "forbidden"],
+          "description": "Whether the pattern must occur or must not occur."
+        },
+        "pattern": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "Valid regular expression evaluated by the qualification runner."
+        }
       }
     },
     "case": {
       "type": "object",
+      "description": "One bounded argv-based command and its exact exit, output, and structured-result contract.",
       "additionalProperties": false,
       "required": [
         "id",
@@ -156,50 +230,81 @@
         "result_protocol"
       ],
       "properties": {
-        "id": { "$ref": "#/$defs/id" },
-        "description": { "type": "string", "minLength": 1, "maxLength": 512 },
-        "required": { "type": "boolean" },
+        "id": {
+          "$ref": "#/$defs/id",
+          "description": "Stable result identifier. Compared variants must declare identical case/result contracts."
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "Human explanation of the operation and its expected evidence."
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Whether a skip or failure makes qualification fail. At least one case per variant must be required."
+        },
         "command": {
           "type": "array",
           "minItems": 1,
-          "items": { "type": "string", "minLength": 1 }
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Argument vector executed without shell-string evaluation. A placeholder must occupy a complete argument; the executable cannot be a placeholder."
         },
-        "working_directory": { "type": "string", "minLength": 1 },
+        "working_directory": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Repository-relative POSIX path. Absolute paths, backslashes, and parent traversal are rejected."
+        },
         "environment": {
           "type": "object",
           "propertyNames": { "pattern": "^[A-Z_][A-Z0-9_]*$" },
-          "additionalProperties": { "type": "string", "minLength": 1 }
+          "additionalProperties": { "type": "string", "minLength": 1 },
+          "description": "Case-owned environment additions. Runner-owned variables cannot be overridden, and placeholders must occupy complete values."
         },
         "timeout_seconds": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 172800
+          "maximum": 172800,
+          "description": "Per-execution deadline in seconds. The semantic validator also caps aggregate declared wall time."
         },
         "expected_exit_codes": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+          "items": { "type": "integer", "minimum": 0, "maximum": 255 },
+          "description": "Unique accepted process exit codes in ascending order."
         },
         "output_assertions": {
           "type": "array",
-          "items": { "$ref": "#/$defs/outputAssertion" }
+          "items": { "$ref": "#/$defs/outputAssertion" },
+          "description": "Required and forbidden patterns checked after command completion."
         },
         "result_protocol": {
           "type": "object",
+          "description": "Ownership and declared metric names for the strict case-result file.",
           "additionalProperties": false,
           "required": ["format", "producer", "path_environment_variable", "declared_metrics"],
           "properties": {
-            "format": { "const": "qualification-case-result-v1" },
-            "producer": { "enum": ["runner", "command"] },
-            "path_environment_variable": { "const": "KILN_QUALIFICATION_CASE_RESULT" },
+            "format": {
+              "const": "qualification-case-result-v1",
+              "description": "Case-result protocol version."
+            },
+            "producer": {
+              "enum": ["runner", "command"],
+              "description": "runner synthesizes only reserved process metrics; command must write its declared non-runner metrics."
+            },
+            "path_environment_variable": {
+              "const": "KILN_QUALIFICATION_CASE_RESULT",
+              "description": "Runner-owned variable containing the exclusive result-file path."
+            },
             "declared_metrics": {
               "type": "array",
               "uniqueItems": true,
               "items": {
                 "type": "string",
                 "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
-              }
+              },
+              "description": "Sorted, unique metrics this case owns. Runner and command metric namespaces cannot overlap."
             }
           }
         }
@@ -207,6 +312,7 @@
     },
     "variant": {
       "type": "object",
+      "description": "One backend and effective-configuration selection with a complete serial case list. Variant IDs are sorted and unique.",
       "additionalProperties": false,
       "required": [
         "id",
@@ -218,21 +324,43 @@
         "cases"
       ],
       "properties": {
-        "id": { "$ref": "#/$defs/id" },
-        "description": { "type": "string", "minLength": 1, "maxLength": 512 },
-        "backend": { "enum": ["cpu", "cuda", "rocm", "vulkan", "metal"] },
-        "device_requirement": { "enum": ["none", "required"] },
-        "skip_policy": { "enum": ["allow", "fail"] },
-        "effective_config": { "$ref": "#/$defs/configObject" },
+        "id": {
+          "$ref": "#/$defs/id",
+          "description": "Stable variant identifier used by parameter resolution and comparison endpoints."
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "Human explanation of the backend or configuration selection."
+        },
+        "backend": {
+          "enum": ["cpu", "cuda", "rocm", "vulkan", "metal"],
+          "description": "Portable backend family. The contract does not select a machine model."
+        },
+        "device_requirement": {
+          "enum": ["none", "required"],
+          "description": "Whether the selected backend device must exist. Accelerator variants must use required."
+        },
+        "skip_policy": {
+          "enum": ["allow", "fail"],
+          "description": "How an unavailable case is classified. A required device forces fail."
+        },
+        "effective_config": {
+          "$ref": "#/$defs/configObject",
+          "description": "Resolved, comparison-visible configuration tree for this variant. Non-empty trees require command-produced results."
+        },
         "cases": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/case" }
+          "items": { "$ref": "#/$defs/case" },
+          "description": "Non-empty serial case list. Compared variants must expose identical required flags, producers, and declared metrics by case ID."
         }
       }
     },
     "variantPair": {
       "type": "object",
+      "description": "Same-backend A/B endpoint pair. Both variants must consume the same variables and declare identical result contracts.",
       "additionalProperties": false,
       "required": [
         "baseline_variant_id",
@@ -240,8 +368,14 @@
         "allowed_effective_config_differences"
       ],
       "properties": {
-        "baseline_variant_id": { "$ref": "#/$defs/id" },
-        "candidate_variant_id": { "$ref": "#/$defs/id" },
+        "baseline_variant_id": {
+          "$ref": "#/$defs/id",
+          "description": "Declared same-backend baseline variant."
+        },
+        "candidate_variant_id": {
+          "$ref": "#/$defs/id",
+          "description": "Declared same-backend candidate variant."
+        },
         "allowed_effective_config_differences": {
           "type": "array",
           "minItems": 1,
@@ -249,12 +383,14 @@
           "items": {
             "type": "string",
             "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)*$"
-          }
+          },
+          "description": "Sorted dot paths that must exactly equal the scalar leaf differences between baseline and candidate effective_config."
         }
       }
     },
     "backendPair": {
       "type": "object",
+      "description": "Canonical cross-backend correctness pair. Endpoints use different backend families but identical variables, effective configuration, and result contracts.",
       "additionalProperties": false,
       "required": [
         "backend_a",
@@ -264,10 +400,22 @@
         "allowed_environment_differences"
       ],
       "properties": {
-        "backend_a": { "enum": ["cpu", "cuda", "rocm", "vulkan", "metal"] },
-        "variant_a_id": { "$ref": "#/$defs/id" },
-        "backend_b": { "enum": ["cpu", "cuda", "rocm", "vulkan", "metal"] },
-        "variant_b_id": { "$ref": "#/$defs/id" },
+        "backend_a": {
+          "enum": ["cpu", "cuda", "rocm", "vulkan", "metal"],
+          "description": "Backend family for canonical endpoint A."
+        },
+        "variant_a_id": {
+          "$ref": "#/$defs/id",
+          "description": "Variant whose declared backend must equal backend_a."
+        },
+        "backend_b": {
+          "enum": ["cpu", "cuda", "rocm", "vulkan", "metal"],
+          "description": "Different backend family for canonical endpoint B."
+        },
+        "variant_b_id": {
+          "$ref": "#/$defs/id",
+          "description": "Variant whose declared backend must equal backend_b."
+        },
         "allowed_environment_differences": {
           "type": "array",
           "minItems": 1,
@@ -275,12 +423,14 @@
           "items": {
             "type": "string",
             "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)*$"
-          }
+          },
+          "description": "Sorted environment-identity paths acknowledged as expected backend differences. This list does not relax metric equality."
         }
       }
     },
     "metricRule": {
       "type": "object",
+      "description": "One required or advisory comparison over a metric declared by a required case in every selected endpoint.",
       "additionalProperties": false,
       "required": [
         "scope",
@@ -296,24 +446,60 @@
         "required"
       ],
       "properties": {
-        "scope": { "const": "result" },
-        "result_id": { "$ref": "#/$defs/id" },
+        "scope": {
+          "const": "result",
+          "description": "Metrics are owned by one case result."
+        },
+        "result_id": {
+          "$ref": "#/$defs/id",
+          "description": "Required case ID that declares the named metric in every compared variant."
+        },
         "metric": {
           "type": "string",
-          "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+          "pattern": "^[a-z][a-z0-9_.-]{0,127}$",
+          "description": "Exact metric key emitted by the declared result producer."
         },
-        "metric_class": { "enum": ["correctness", "performance"] },
-        "unit": { "type": "string", "minLength": 1 },
-        "aggregation": { "type": "string", "minLength": 1 },
-        "lower_is_better": { "type": "boolean" },
-        "operator": { "enum": ["equal", "not_greater", "not_less"] },
-        "absolute_tolerance": { "type": "number", "minimum": 0 },
-        "relative_tolerance": { "type": "number", "minimum": 0 },
-        "required": { "type": "boolean" }
+        "metric_class": {
+          "enum": ["correctness", "performance"],
+          "description": "Evidence class. Cross-backend rules allow correctness only; performance modes require performance."
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Unit attached to every metric observation. Runner-owned metrics have fixed canonical units."
+        },
+        "aggregation": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Declared reduction across repetitions. Runner-owned metrics have fixed canonical aggregations."
+        },
+        "lower_is_better": {
+          "type": "boolean",
+          "description": "Metric direction used to validate one-sided operators."
+        },
+        "operator": {
+          "enum": ["equal", "not_greater", "not_less"],
+          "description": "Candidate comparison: equality within tolerance, no greater than baseline, or no less than baseline."
+        },
+        "absolute_tolerance": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Non-negative tolerance in the declared unit."
+        },
+        "relative_tolerance": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Non-negative fractional tolerance relative to the baseline magnitude."
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Whether a failed or missing comparison makes the verdict fail. A non-empty rule set needs at least one required rule."
+        }
       }
     },
     "comparisonPolicy": {
       "type": "object",
+      "description": "Closed declaration of which receipts may be compared and how each result metric decides pass or fail.",
       "additionalProperties": false,
       "required": [
         "mode",
@@ -328,19 +514,23 @@
             "declared_ab_variants",
             "cross_backend_correctness",
             "self_contained_correctness"
-          ]
+          ],
+          "description": "Comparison topology. Environment and soak workloads omit the policy; self-contained correctness uses command assertions without metric pairs."
         },
         "variant_pairs": {
           "type": "array",
-          "items": { "$ref": "#/$defs/variantPair" }
+          "items": { "$ref": "#/$defs/variantPair" },
+          "description": "Same-backend A/B pairs, used only by declared_ab_variants."
         },
         "backend_pairs": {
           "type": "array",
-          "items": { "$ref": "#/$defs/backendPair" }
+          "items": { "$ref": "#/$defs/backendPair" },
+          "description": "Cross-backend endpoint pairs, used only by cross_backend_correctness."
         },
         "metric_rules": {
           "type": "array",
-          "items": { "$ref": "#/$defs/metricRule" }
+          "items": { "$ref": "#/$defs/metricRule" },
+          "description": "Metric verdict rules. Performance comparisons require command-produced performance evidence; cross-backend correctness requires equal, required correctness rules."
         }
       }
     }

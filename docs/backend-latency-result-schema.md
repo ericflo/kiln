@@ -1,56 +1,77 @@
-# Backend Latency Result Artifact Schema
+# Legacy Backend Latency Evidence
 
-> **Legacy compatibility contract.** This pipeline predates structured local
-> qualification and retains checked-in raw logs because its validator requires
-> them. Do not add new qualification coverage here. New hardware evidence uses
-> `scripts/qualification/`, keeps raw data under ignored `.qualification/`, and
-> checks in compact receipts under `qualification/receipts/`; see
-> [`ci-policy.md`](ci-policy.md). A legacy artifact is not a qualification
-> receipt and a legacy workflow run is not backend qualification.
+> **Use this pipeline only to maintain or retire an existing fixture.** It
+> predates structured local qualification and keeps a compact result tied to a
+> separately retained raw log. New correctness, performance, capacity, and
+> endurance evidence belongs in `scripts/qualification/`; see
+> [Local hardware qualification](qualification.md).
 
-Hardware latency fixtures remain `fixture_required` until every backend fixture
-has a checked result artifact, locked numeric thresholds, and passing measured
-metrics. The validator is `scripts/check_backend_latency_fixtures.py`.
+A legacy latency artifact answers one narrow question: did a named
+microbenchmark, on its named hardware and source, satisfy its own reviewed
+threshold? It is not a qualification receipt, a cross-device benchmark, a
+backend support gate, or a product default.
 
-## Pending Fixtures
+## Current Legacy Gate State
 
-Pending fixtures live in `docs/backend-latency-fixtures.json` with:
+`docs/backend-latency-fixtures.json` currently reports
+`status: "fixture_required"`.
 
-- `schema_version`: `1`
-- `threshold_state`: `pending_fixture_result`
-- metric `max`: `null`
-- `status`: `fixture_required`
-- `policy.covered_gate_requires`: the checked policy list explaining why the
-  hardware latency gate cannot be covered by local/default-feature checks alone
+| Backend | Fixture state | Meaning |
+| --- | --- | --- |
+| CUDA | One locked RTX 4090 matmul fixture | Its own reviewed metrics have numeric thresholds |
+| ROCm | One locked gfx1151 matmul fixture | Its own reviewed metrics have numeric thresholds |
+| Metal | Two Apple Silicon fixtures pending | Result files exist, but reviewed thresholds are not locked |
+| Vulkan | One Strix Halo decode fixture pending | This machine-specific regression fixture is incomplete |
 
-This state is valid for local and default-feature CI. It must not mark the
-hardware latency conformance gate covered.
+The Vulkan fixture’s device name and self-hosted runner label identify where
+that old measurement must run. They do **not** restrict Kiln’s Vulkan runtime
+to Strix Halo, select a Vulkan device in product code, or define support for
+other Vulkan-capable devices.
 
-Fixture `command` strings are part of the stable fixture digest used by
-reviewed result artifacts. Keep them runner-portable, such as `cargo ...` with
-environment variables or fixture arguments for local model paths, and do not
-bake a developer-local Cargo installation path or placeholder `/path/to/...`
-value into the manifest.
+Check the non-strict manifest state with:
 
-## Covered Fixtures
+```bash
+python3 scripts/check_backend_latency_fixtures.py \
+  docs/backend-latency-fixtures.json
+```
 
-To cover the gate, each fixture must:
+The strict command fails until every required fixture has a reviewed artifact
+and locked thresholds:
 
-- set `threshold_state` to `locked_threshold`
-- set every metric `max` to a numeric threshold
-- write the referenced repo-relative `result_artifact` under
-  `bench-results/backend-latency` with a `.json` extension
-- track the compact `result_artifact` in Git and keep the referenced `raw_log`
-  ignored or externally retained
-- set the manifest `status` to `covered`
-- pass `python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered`
+```bash
+python3 scripts/check_backend_latency_fixtures.py \
+  docs/backend-latency-fixtures.json \
+  --require-covered
+```
 
-A manifest with `status: "covered"` is intentionally rejected unless the
-checker is run with `--require-covered`, so default-feature local checks cannot
-mark the hardware latency gate covered without exercising the strict artifact
-contract.
+## State Machine
 
-The result artifact is JSON:
+| Manifest state | Required fixture fields | What CI may claim |
+| --- | --- | --- |
+| `fixture_required` | At least one fixture still uses `pending_fixture_result`, with metric `max: null` | Default checks may validate the manifest, but may not claim the legacy gate is covered |
+| `covered` | Every fixture uses `locked_threshold`, every metric has a finite numeric threshold, and every result passes strict validation | The legacy fixture set is internally covered |
+
+For a pending fixture:
+
+- `threshold_state` is `pending_fixture_result`;
+- each metric `max` is `null`; and
+- the manifest remains `fixture_required`.
+
+For a covered fixture:
+
+- `threshold_state` is `locked_threshold`;
+- each metric has a reviewed finite threshold;
+- `result_artifact` names a tracked JSON file below
+  `bench-results/backend-latency`; and
+- the ignored or externally retained raw log is bound by digest.
+
+“Covered” means this legacy fixture contract is complete. It does not mean the
+backend is fast on every device, or even that an end-to-end model server met an
+SLO.
+
+## Result Artifact
+
+Artifact schema version 3 is a closed JSON object:
 
 ```json
 {
@@ -76,251 +97,212 @@ The result artifact is JSON:
 }
 ```
 
-Required fields:
+| Field | Meaning and validation |
+| --- | --- |
+| `artifact_schema_version` | Must be `3` |
+| `created_at_utc` | UTC ISO-8601 creation time ending in `Z` |
+| `fixture_id`, `backend`, `hardware`, `source`, `command` | Must exactly match the selected manifest fixture |
+| `manifest` | Non-empty repository-relative manifest path; checked against the validator input when available |
+| `manifest_schema_version` | Must match the manifest’s schema version |
+| `fixture_spec_sha256` | SHA-256 of the stable fixture definition |
+| `source_sha256` | SHA-256 of the fixture source bytes |
+| `raw_log`, `raw_log_sha256` | Repository-relative retention reference and digest for the captured log |
+| `git_commit` | Lowercase 40-hex commit that must exist locally during strict validation |
+| `git_tracked_dirty` | Historical field name for a clean-checkout marker; `false` is required for coverage |
+| `status` | Must be `passed` |
+| `metrics` | Exactly the declared metric names, each with a finite numeric value |
 
-- `artifact_schema_version`: result artifact schema version, currently `3`
-- `created_at_utc`: ISO-8601 UTC timestamp ending in `Z` for when the artifact
-  was materialized
-- `fixture_id`: exactly matches the fixture `id`
-- `backend`: exactly matches the fixture `backend`
-- `status`: `passed`
-- `manifest`: non-empty repo-relative manifest path; checked against the
-  validator input path when available
-- `manifest_schema_version`: exactly matches the fixture manifest
-  `schema_version`
-- `fixture_spec_sha256`: lowercase SHA-256 hex digest of the stable fixture
-  definition (`id`, `backend`, `hardware`, `source`, `command`, metric
-  `name`/`unit`/`comparison`, and `selected_cases` when present)
-- `hardware`: exactly matches the fixture `hardware`
-- `source`: exactly matches the fixture `source`
-- `source_sha256`: lowercase SHA-256 hex digest of the fixture source file
-- `command`: exactly matches the fixture `command`
-- `raw_log`: non-empty repo-relative retention reference for the captured raw
-  fixture log. Covered fixtures require this path to live under
-  `bench-results/backend-latency/raw` and use a `.log` extension. The file must
-  exist at ingestion and threshold-lock time, but may be absent from a clean
-  checkout after its digest and metrics are retained.
-- `raw_log_sha256`: lowercase SHA-256 hex digest of the raw fixture log
-- `git_commit`: lowercase 40-character git commit object for the checkout that
-  captured the artifact
-- `git_tracked_dirty`: historical field name for the writer's clean-checkout
-  marker. The writer computes it from
-  `git status --porcelain --untracked-files=all`, so tracked modifications and
-  untracked repo files both make the artifact dirty. Covered fixtures require
-  this to be `false`
-- `metrics`: object containing exactly every metric named by the fixture, with
-  finite numeric values
+The writer computes `git_tracked_dirty` from
+`git status --porcelain --untracked-files=all`. Despite its name, tracked
+changes and new untracked repository files both make the artifact dirty.
 
-Covered result artifacts must not contain additional top-level keys, and
-`metrics` must not contain undeclared metric names. Additive schema changes
-should bump `artifact_schema_version` and update the validator.
+Unknown top-level keys and undeclared metrics are rejected. Additive artifact
+changes require a schema-version bump and validator update.
 
-The validator's trust boundary is repository evidence, not a hardware oracle:
-it checks that reviewed artifact JSON, raw-log hashes, fixture source, commit
-provenance, metric values, and locked thresholds are mutually consistent. The
-raw log is verified and re-parsed during import and threshold locking but is not
-tracked. A clean-checkout artifact must not be materialized while new
-untracked repo evidence is present; this keeps local scratch files from
-claiming the same provenance as checked-in hardware evidence.
+## Fixture Identity
 
-When `--require-covered` is set, the validator requires the fixture
-`result_artifact`, fixture `source`, result `manifest`, and result `raw_log`
-paths to be repo-relative. It also requires fixture `result_artifact` paths to
-live under `bench-results/backend-latency` with a `.json` extension, result
-`raw_log` paths to live under `bench-results/backend-latency/raw` with a `.log`
-extension, the compact result artifact to be tracked by Git, and any locally
-present raw log to remain untracked. The raw log may be absent after its digest
-and metrics have been retained. When it is locally present, the validator
-checks that its SHA-256 matches `raw_log_sha256` and re-parses every declared
-metric. It always checks the current and committed fixture source against
-`source_sha256`. It requires `git_commit` to be a
-lowercase 40-character commit that exists in the local repository, requires the
-fixture source to exist at `git_commit`, requires `source_sha256` to match the
-source bytes at that commit, and requires `git_tracked_dirty` to be `false` for
-covered validation. The writer sets that field from
-`git status --porcelain --untracked-files=all`. It rejects unknown artifact
-keys and undeclared artifact metrics.
+`fixture_spec_sha256` covers:
 
-The fixture digest deliberately excludes metric `max`, `threshold_state`, and
-`result_artifact` so a reviewed artifact remains valid while thresholds are
-locked from pending to covered. Changing the command, hardware label, source
-path, source file content, metric identities, units, comparisons, or selected
-cases requires a fresh hardware artifact.
+- fixture ID and backend;
+- hardware label;
+- source path;
+- command;
+- metric name, unit, and comparison; and
+- selected cases, when present.
 
-For each fixture metric, the observed value must be finite numeric and satisfy
-its comparison against finite numeric `max`. For example, `comparison: "<="`
-requires observed latency to be less than or equal to `max`; `comparison: ">="`
-requires observed throughput to be greater than or equal to `max`.
+It deliberately excludes metric thresholds, `threshold_state`, and
+`result_artifact`. This lets reviewers ingest a measurement first and lock
+headroom afterward. Changing the command, hardware label, source, source
+bytes, metric identity, unit, comparison, or selected cases requires a new
+hardware artifact.
 
-## Metric Log Lines
+Fixture command strings are part of this digest. Keep them runner-portable:
+use `cargo ...`, declared environment variables, or explicit fixture arguments.
+Do not store a developer-local Cargo path or a placeholder model path.
 
-Fixture benchmarks emit machine-readable metric lines alongside their normal
-human-readable output:
+## Metric Boundary
+
+Benchmarks emit machine-readable lines alongside normal output:
 
 ```text
 KILN_LATENCY_METRIC <metric> <value> <unit>
 ```
 
-The artifact writer extracts the metric names declared by the selected fixture
-and ignores extra metric lines. Covered validation later re-parses the same raw
-log and rejects artifacts whose metric values or units do not match the captured
-`KILN_LATENCY_METRIC` lines; artifact metrics must match the raw log. To run
-one manifest fixture, capture its raw log, and materialize the result artifact
-in one step:
+The writer extracts only metrics declared by the selected fixture. Import and
+threshold locking reparse the raw log and require every retained value and
+unit to match.
 
-```sh
+Each finite observed value is tested against its own fixture threshold:
+
+- `comparison: "<="` means the value must be at most `max`; and
+- `comparison: ">="` means the value must be at least `max`.
+
+Valid conclusions stay within one fixture definition. Do not compare two
+artifacts as interchangeable when their hardware, command, source, selected
+cases, metric definition, or fixture digest differs. These microbenchmark
+numbers are not end-to-end tokens per second or request latency.
+
+## Trust Boundary
+
+Strict validation checks that the manifest, compact artifact, source, commit,
+raw-log digest, parsed metrics, and thresholds agree. It does not prove that:
+
+- the named hardware was honestly reported;
+- the host or artifact producer was authenticated;
+- an external or missing raw log still exists;
+- the artifact is signed;
+- another device will reproduce the measurement; or
+- a model server will achieve corresponding throughput or latency.
+
+At import and threshold-lock time, the raw log must exist below
+`bench-results/backend-latency/raw`, remain ignored, match its SHA-256 digest,
+and reparse to the retained metrics. After locking, the raw log may be absent
+from a clean checkout if it remains in external workflow storage. When a local
+copy is present, strict validation checks it again.
+
+The compact result must be tracked under `bench-results/backend-latency` with a
+`.json` extension. The fixture source must match both the working tree and the
+recorded commit. The receipt has no independent signature or chain of custody.
+
+## Maintain One Existing Fixture
+
+Run the selected command, capture its log, and write the artifact in one step:
+
+```bash
 python3 scripts/run_backend_latency_fixture.py \
   docs/backend-latency-fixtures.json \
   metal_apple_silicon_matmul_qwen35_4b
 ```
 
-The legacy fixture runner executes the selected fixture `command`, writes a
-timestamped raw log under `bench-results/backend-latency/raw`, and invokes the
-same artifact materialization contract used by the standalone writer. If the
-command exits unsuccessfully, or succeeds without the required
-`KILN_LATENCY_METRIC` lines, it reports a bounded raw-log tail. This behavior
-exists only to reproduce and retire the old fixture contract. Do not use it for
-new evidence; the qualification runner must keep raw logs ignored and emit a
-compact failed receipt when a requested device is absent.
+To materialize from an already captured log:
 
-When maintaining an existing legacy artifact, materialize it from its raw log:
-
-```sh
+```bash
 python3 scripts/write_backend_latency_result_artifact.py \
   docs/backend-latency-fixtures.json \
   metal_apple_silicon_matmul_qwen35_4b \
-  /path/to/raw-benchmark.log
+  /absolute/path/to/raw-benchmark.log
 ```
 
-By default the script writes the fixture's `result_artifact`; use `--output` for
+By default, the writer uses the fixture’s `result_artifact`. Use `--output` for
 a scratch artifact.
 
-The manual-only `Perf regression nightly` workflow retains a temporary
-`workflow_dispatch` compatibility handoff. It is neither scheduled nor used by
-pull requests, and it is not qualification evidence. Prefer running structured
-qualification directly on the named machine. To reproduce the legacy handoff,
-set `latency_fixture_id` to
-one manifest fixture and set `latency_runner_labels_json` to the target
-self-hosted runner labels, such as `["self-hosted","linux","cuda-rtx4090"]` or a
-site-local Metal/ROCm/Vulkan label set. The checked-in fixtures use
-`["self-hosted","linux","cuda-rtx4090"]` for the CUDA RTX 4090 fixture,
-`["self-hosted","linux","rocm-gfx1151"]` for the ROCm gfx1151 fixture and
-`["self-hosted","linux","vulkan-strix-halo"]` for the Vulkan Strix Halo
-fixture, so the planner can emit runnable dispatch commands before the hardware
-runners are online. The job runs the same fixture runner and uploads both
-`bench-results/backend-latency/*.json` and
-`bench-results/backend-latency/raw/*.log` as workflow artifacts for review and
-check-in before threshold locking. When `latency_fixture_id` is anything other
-than `none`, the workflow skips the unrelated A6000 training perf matrix so a
-fixture-only dispatch consumes only the selected hardware fixture runner.
-Fixtures may declare `runner_labels` when the repository already has a stable
-label convention; this operator metadata is not part of
-`fixture_spec_sha256`. Use the dispatch planner to list remaining fixture work
-as JSON, including which fixtures still need site-local labels:
+If a manual GitHub Actions run produced a downloadable artifact, import its zip
+or extracted directory:
 
-```sh
+```bash
+python3 scripts/import_backend_latency_artifact.py \
+  /absolute/path/to/downloaded-artifact.zip \
+  --fixture-id metal_apple_silicon_matmul_qwen35_4b
+```
+
+The importer validates record shape, fixture and source identity, raw-log
+digest, parsed values, commit identity, and the clean-checkout marker. It does
+not require locked thresholds. If canonical files already contain different
+bytes, use `--force` only after review has chosen the replacement run.
+
+Commit the compact result and reviewed manifest change. Do not force-add the
+ignored raw log.
+
+## Manual Workflow Compatibility
+
+The manual-only `Perf regression nightly` workflow is an unscheduled
+compatibility handoff. Pull requests do not run it, and its result is not
+structured qualification evidence.
+
+List the remaining fixture work:
+
+```bash
 python3 scripts/plan_backend_latency_fixture_dispatch.py
 ```
 
-Each JSON plan includes the `gh_workflow_run` dispatch command when labels are
-known, plus `gh_run_download`, `import_artifact`, `lock_threshold`, and
-`covered_gate_check` commands for the post-run artifact path. Replace the
-`RUN_ID` placeholder in the download command and artifact name after the
-workflow dispatch is accepted by GitHub Actions.
-Pass `--check-runners` to have the planner query GitHub self-hosted runners via
-`gh api` and attach `github_runner_check` status for each fixture, including
-whether declared labels have an online idle match. Use `--github-repo owner/name`
-when the repository cannot be inferred from `remote.origin.url`.
+The JSON plan reports whether site-local self-hosted runner labels are missing
+and supplies dispatch, download, import, lock, and strict-check commands.
+`runner_labels` is CI routing metadata; it is excluded from the fixture digest
+and has no product-runtime meaning.
 
-Use `--shell` when every selected fixture has labels, either from the manifest
-or from an explicit override:
+Use `--check-runners` to query GitHub runner availability through `gh api`.
+Use `--shell` only when every selected fixture has labels:
 
-```sh
+```bash
 python3 scripts/plan_backend_latency_fixture_dispatch.py \
   --fixture-id cuda_rtx4090_matmul_qwen35_4b \
   --shell
 ```
 
-After downloading the workflow artifact zip or directory, import the result JSON
-and raw log into their canonical paths before locking thresholds. The result is
-reviewable repository evidence; the raw log is ignored local input:
+## Lock Reviewed Thresholds
 
-```sh
-python3 scripts/import_backend_latency_artifact.py \
-  /path/to/backend-latency-metal_apple_silicon_matmul_qwen35_4b-123456789.zip \
-  --fixture-id metal_apple_silicon_matmul_qwen35_4b
-```
+After reviewing the artifact and raw log, add explicit headroom:
 
-The importer accepts either the downloaded zip or an extracted artifact
-directory. It validates the result schema, fixture provenance, source digest,
-raw-log digest, metric values, Git commit, and clean-checkout marker, but it does
-not require locked `max` thresholds. If canonical files already exist with
-different content, pass `--force` only after deciding the newer hardware run
-should replace them. Commit the compact JSON result, manifest thresholds, and
-raw-log SHA-256 only. Do not force-add the ignored raw log.
-
-## Locking Thresholds
-
-After reviewing the hardware result artifacts, lock numeric thresholds in the
-manifest with explicit headroom:
-
-```sh
+```bash
 python3 scripts/lock_backend_latency_thresholds.py \
   docs/backend-latency-fixtures.json \
   --headroom 0.10 \
   --fixture-id metal_apple_silicon_matmul_qwen35_4b
 ```
 
-The threshold locker requires manifest `schema_version: 1`, a recognized
-manifest `status`, and `required_backends` to be a non-empty array of valid
-backend names. It refuses to lock until every required backend has at least one
-fixture. It also requires every fixture result artifact path to be repo-relative,
-live under `bench-results/backend-latency` with a `.json` extension, exist, have
-`status: "passed"`, match the result artifact schema version, include a valid
-UTC creation timestamp, match the fixture `id`, `backend`, manifest schema
-version, stable fixture digest,
-hardware/source/command provenance, source file digest, and contain every
-declared metric with no unknown artifact keys or undeclared metrics. It also
-requires the fixture `source`, result `manifest`, and result `raw_log` paths to
-be repo-relative and result `raw_log` to live under
-`bench-results/backend-latency/raw` with a `.log` extension. Threshold locking
-is the ingestion boundary where the ignored local raw log must still exist: it
-must match `raw_log_sha256`, and every parsed metric value and unit must match
-the compact result. The source must exist and match `source_sha256`.
-It requires `git_commit` to be a lowercase 40-character commit that exists in
-the local repository, requires the fixture source to exist at `git_commit`,
-requires `source_sha256` to match the source bytes at that commit, and requires
-`git_tracked_dirty` to be `false` before thresholds can lock. That field is
-computed with `--untracked-files=all`, so new untracked repo files invalidate
-the clean-checkout marker. It re-parses the raw log and requires each
-artifact metric value and unit to match before deriving thresholds. Pass
-`--fixture-id` repeatedly to lock only selected fixtures as their artifacts land;
-unselected fixtures stay `pending_fixture_result`, and manifest `status` remains
-`fixture_required`. When `--fixture-id` is omitted, it locks every fixture and
-sets the manifest `status` to `covered` once all fixture thresholds are locked.
-The locker applies the headroom by comparison: `<=` thresholds are raised above
-observed latency, while `>=` thresholds are lowered below observed throughput.
-Use `--check` to validate without writing. After locking, retain the raw log in
-the external workflow artifact or delete the ignored local copy; the covered
-gate validates the tracked compact result without requiring that payload.
+The locker:
 
-Then run the covered gate:
+- validates the manifest, result, source, commit, clean-checkout marker, raw
+  log, parsed metrics, and units;
+- raises `<=` limits above the observed value;
+- lowers `>=` floors below the observed value;
+- leaves unselected fixtures pending; and
+- changes the manifest to `covered` only when every fixture is locked.
 
-```sh
+Use `--check` to preview validation without writing. Then run the strict gate:
+
+```bash
 python3 scripts/check_backend_latency_fixtures.py \
   docs/backend-latency-fixtures.json \
   --require-covered
 ```
 
-Run `python3 scripts/run_backend_latency_fixture.py --self-test` to validate the
-fixture-runner capture path without hardware.
-Run `python3 scripts/write_backend_latency_result_artifact.py --self-test` to
-validate the log-line parser and artifact writer without hardware.
-Run `python3 scripts/import_backend_latency_artifact.py --self-test` to validate
-downloaded workflow artifact import without hardware.
-Run `python3 scripts/lock_backend_latency_thresholds.py --self-test` to validate
-the threshold-locking logic without hardware.
-Run `python3 scripts/check_backend_latency_fixtures.py --self-test` to validate
-the artifact-checking logic without hardware.
-Run `python3 scripts/plan_backend_latency_fixture_dispatch.py --self-test` to
-validate the workflow-dispatch planner without hardware.
+## Failure Triage
+
+| Failure | Inspect |
+| --- | --- |
+| Missing metric | Required `KILN_LATENCY_METRIC` line, spelling, and unit |
+| Fixture digest mismatch | Command, hardware label, source, metrics, or selected cases changed |
+| Source digest mismatch | Working-tree source differs from the captured or committed source |
+| Dirty marker rejected | Tracked changes or untracked repository files existed at capture |
+| Raw-log mismatch | Wrong log, changed bytes, or retained metrics differ from reparsing |
+| Commit rejected | Commit is malformed, unavailable locally, or lacks the fixture source |
+| Threshold failure | Observed value violates its own comparison and locked limit |
+| Strict gate remains incomplete | At least one required backend fixture is still pending |
+
+Do not resolve a fixture failure by copying its machine identity into portable
+backend code. Fix the implementation, recapture the same regression fixture,
+or replace the legacy fixture through review.
+
+## Tooling Self-Tests
+
+These checks exercise parsing and workflow mechanics without hardware:
+
+```bash
+python3 scripts/run_backend_latency_fixture.py --self-test
+python3 scripts/write_backend_latency_result_artifact.py --self-test
+python3 scripts/import_backend_latency_artifact.py --self-test
+python3 scripts/lock_backend_latency_thresholds.py --self-test
+python3 scripts/check_backend_latency_fixtures.py --self-test
+python3 scripts/plan_backend_latency_fixture_dispatch.py --self-test
+```

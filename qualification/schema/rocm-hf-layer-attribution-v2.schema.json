@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ericflo.github.io/kiln/schemas/rocm-hf-layer-attribution-v2.schema.json",
   "title": "Kiln ROCm/HF Layer Attribution Result v2",
-  "description": "Source-bound sequential HF and Kiln evidence comparing the final hidden row after embedding, every Qwen3.5 transformer layer, and final RMSNorm for the exact serving divergence state.",
+  "description": "Source-bound sequential comparison of Hugging Face and Kiln ROCm hidden states after embedding, each of 32 Qwen3.5 transformer layers, and final RMSNorm at one exact first-divergence state. It locates where numerical error grows; it does not establish general model parity.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -21,49 +21,100 @@
     "worker"
   ],
   "properties": {
-    "schema": { "const": "kiln.rocm-hf-layer-attribution-result.v2" },
-    "result_sha256": { "$ref": "#/$defs/sha256" },
-    "created_at_utc": { "type": "string", "format": "date-time" },
-    "duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
-    "source": { "$ref": "#/$defs/source" },
-    "binary": { "$ref": "#/$defs/binary" },
-    "implementation": { "$ref": "#/$defs/implementation" },
+    "schema": {
+      "description": "Schema identifier for this layer-attribution result.",
+      "const": "kiln.rocm-hf-layer-attribution-result.v2"
+    },
+    "result_sha256": {
+      "description": "Canonical SHA-256 identity of the complete result after removing this self-hash field.",
+      "$ref": "#/$defs/sha256"
+    },
+    "created_at_utc": {
+      "description": "UTC time when the result record was created.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "duration_seconds": {
+      "description": "Total wall-clock duration of build, two contained executions, verification, and result assembly.",
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "source": {
+      "description": "Clean pushed repository identity used to build and execute the workers.",
+      "$ref": "#/$defs/source"
+    },
+    "binary": {
+      "description": "Bounded offline release build admitted for the Kiln comparison arm.",
+      "$ref": "#/$defs/binary"
+    },
+    "implementation": {
+      "description": "Content identities of the runners, worker, interpreter, and exact-argument gate.",
+      "$ref": "#/$defs/implementation"
+    },
     "model_identity": {
+      "description": "Recomputed content identity of the exact model, tokenizer, chat template, configuration, and weight shards.",
       "$ref": "rocm-hf-next-token-oracle-v2.schema.json#/$defs/modelIdentity"
     },
     "model_fingerprint": {
+      "description": "Implementation and process evidence for the separate contained model-fingerprinting step.",
       "$ref": "rocm-hf-next-token-oracle-v2.schema.json#/$defs/modelFingerprintEvidence"
     },
-    "request": { "$ref": "#/$defs/request" },
-    "reference": { "$ref": "#/$defs/reference" },
-    "containment": { "$ref": "#/$defs/containment" },
-    "worker": { "$ref": "#/$defs/worker" }
+    "request": {
+      "description": "Repository-local first-divergence request and its canonical identity.",
+      "$ref": "#/$defs/request"
+    },
+    "reference": {
+      "description": "Retained Hugging Face boundary artifact and its complete execution evidence.",
+      "$ref": "#/$defs/reference"
+    },
+    "containment": {
+      "description": "Separate host, network, timeout, and exit evidence for the Hugging Face and Kiln arms.",
+      "$ref": "#/$defs/containment"
+    },
+    "worker": {
+      "description": "Boundary-by-boundary Kiln comparison and the location of largest relative error growth.",
+      "$ref": "#/$defs/worker"
+    }
   },
   "$defs": {
     "sha256": {
+      "description": "Lowercase SHA-256 digest with the `sha256:` algorithm prefix.",
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
     },
     "gitObject": {
+      "description": "Full lowercase SHA-1 Git object identifier.",
       "type": "string",
       "pattern": "^[0-9a-f]{40}$"
     },
     "tokenId": {
+      "description": "Tokenizer vocabulary ID for the bound Qwen3.5-4B model identity.",
       "type": "integer",
       "minimum": 0,
       "maximum": 248319
     },
     "source": {
+      "description": "Exact clean commit, matching `origin/main`, and Git tree used for build and execution.",
       "type": "object",
       "additionalProperties": false,
       "required": ["commit", "origin_main", "tree"],
       "properties": {
-        "commit": { "$ref": "#/$defs/gitObject" },
-        "origin_main": { "$ref": "#/$defs/gitObject" },
-        "tree": { "$ref": "#/$defs/gitObject" }
+        "commit": {
+          "description": "Full Git commit checked out during build and execution.",
+          "$ref": "#/$defs/gitObject"
+        },
+        "origin_main": {
+          "description": "Full `origin/main` commit required to equal the checked-out commit.",
+          "$ref": "#/$defs/gitObject"
+        },
+        "tree": {
+          "description": "Git tree object for the checked-out commit.",
+          "$ref": "#/$defs/gitObject"
+        }
       }
     },
     "binary": {
+      "description": "Release executable produced by the bounded offline build and admitted by exact content identity.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -73,13 +124,27 @@
         "sha256"
       ],
       "properties": {
-        "build_duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
-        "build_environment_policy": { "const": "closed-source-build-v1" },
-        "path": { "const": "target/release/examples/rocm_hf_path_attribution" },
-        "sha256": { "$ref": "#/$defs/sha256" }
+        "build_duration_seconds": {
+          "description": "Wall-clock duration of the admitted release build.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "build_environment_policy": {
+          "description": "Identifier of the closed build-environment contract applied to the release binary.",
+          "const": "closed-source-build-v1"
+        },
+        "path": {
+          "description": "Repository-relative path of the admitted layer-attribution executable.",
+          "const": "target/release/examples/rocm_hf_path_attribution"
+        },
+        "sha256": {
+          "description": "SHA-256 identity of the exact admitted executable.",
+          "$ref": "#/$defs/sha256"
+        }
       }
     },
     "implementation": {
+      "description": "Content identities for both worker arms and the code that contains and admits them.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -90,23 +155,47 @@
         "runner_sha256"
       ],
       "properties": {
-        "guarded_exec_sha256": { "$ref": "#/$defs/sha256" },
-        "hf_worker_sha256": { "$ref": "#/$defs/sha256" },
-        "process_runner_sha256": { "$ref": "#/$defs/sha256" },
-        "python_sha256": { "$ref": "#/$defs/sha256" },
-        "runner_sha256": { "$ref": "#/$defs/sha256" }
+        "guarded_exec_sha256": {
+          "description": "SHA-256 identity of the exact-argument executable gate.",
+          "$ref": "#/$defs/sha256"
+        },
+        "hf_worker_sha256": {
+          "description": "SHA-256 identity of the Hugging Face boundary-capture worker.",
+          "$ref": "#/$defs/sha256"
+        },
+        "process_runner_sha256": {
+          "description": "SHA-256 identity of the shared process-containment runner.",
+          "$ref": "#/$defs/sha256"
+        },
+        "python_sha256": {
+          "description": "SHA-256 identity of the Python executable used by the Hugging Face arm.",
+          "$ref": "#/$defs/sha256"
+        },
+        "runner_sha256": {
+          "description": "SHA-256 identity of the source-bound layer-attribution orchestrator.",
+          "$ref": "#/$defs/sha256"
+        }
       }
     },
     "request": {
+      "description": "Repository-local first-divergence request consumed by both comparison arms.",
       "type": "object",
       "additionalProperties": false,
       "required": ["path", "sha256"],
       "properties": {
-        "path": { "type": "string", "minLength": 1 },
-        "sha256": { "$ref": "#/$defs/sha256" }
+        "path": {
+          "description": "Repository-relative path to the retained request.",
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "description": "Canonical SHA-256 identity of the retained request content.",
+          "$ref": "#/$defs/sha256"
+        }
       }
     },
     "hfEvidence": {
+      "description": "Eager Hugging Face boundary capture, final logits, runtime identity, and resource evidence for the exact bound request.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -147,17 +236,32 @@
         "vocab"
       ],
       "properties": {
-        "attention_implementation": { "const": "eager" },
-        "argmax": { "$ref": "#/$defs/tokenId" },
-        "argmax_text": { "type": "string", "minLength": 1 },
-        "boundary_count": { "const": 34 },
+        "attention_implementation": {
+          "description": "Transformers full-attention implementation selected for the reference arm.",
+          "const": "eager"
+        },
+        "argmax": {
+          "description": "Vocabulary ID with the highest final Hugging Face logit.",
+          "$ref": "#/$defs/tokenId"
+        },
+        "argmax_text": {
+          "description": "Tokenizer-decoded text for the Hugging Face argmax token.",
+          "type": "string",
+          "minLength": 1
+        },
+        "boundary_count": {
+          "description": "Number of captured final-row boundaries: embedding, 32 transformer layers, and final RMSNorm.",
+          "const": 34
+        },
         "boundary_names": {
+          "description": "Ordered names for the 34 captured boundaries; positions must align with the retained row tensor.",
           "type": "array",
           "minItems": 34,
           "maxItems": 34,
           "items": { "type": "string", "minLength": 1 }
         },
         "candidate_tokens": {
+          "description": "The disputed Kiln and vLLM candidates annotated with their Hugging Face logits and ranks.",
           "type": "array",
           "minItems": 2,
           "maxItems": 2,
@@ -165,32 +269,106 @@
             "$ref": "rocm-hf-next-token-oracle-v2.schema.json#/$defs/candidateToken"
           }
         },
-        "configuration_sha256": { "$ref": "#/$defs/sha256" },
-        "deterministic_algorithms": { "const": true },
-        "device": { "type": "string", "minLength": 1 },
-        "dtype": { "const": "bfloat16" },
-        "duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
-        "hidden_size": { "const": 2560 },
-        "input_token_count": { "const": 166 },
-        "input_token_ids_sha256": { "$ref": "#/$defs/sha256" },
-        "layer_last_rows_sha256": { "$ref": "#/$defs/sha256" },
+        "configuration_sha256": {
+          "description": "SHA-256 identity of the fixed Hugging Face execution configuration enforced by the worker.",
+          "$ref": "#/$defs/sha256"
+        },
+        "deterministic_algorithms": {
+          "description": "Whether PyTorch deterministic algorithms were required; fixed to true.",
+          "const": true
+        },
+        "device": {
+          "description": "Diagnostic accelerator name reported by PyTorch. It identifies this run but is not a dispatch-policy input.",
+          "type": "string",
+          "minLength": 1
+        },
+        "dtype": {
+          "description": "Model execution dtype used by the Hugging Face reference.",
+          "const": "bfloat16"
+        },
+        "duration_seconds": {
+          "description": "Wall-clock duration of the contained Hugging Face worker.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "hidden_size": {
+          "description": "Width of each captured final hidden row.",
+          "const": 2560
+        },
+        "input_token_count": {
+          "description": "Complete prompt-plus-continuation token count for this fixed first-divergence request.",
+          "const": 166
+        },
+        "input_token_ids_sha256": {
+          "description": "Canonical SHA-256 identity of the complete input-token sequence.",
+          "$ref": "#/$defs/sha256"
+        },
+        "layer_last_rows_sha256": {
+          "description": "SHA-256 identity of the ordered 34-by-2560 F32 Hugging Face boundary-row bytes.",
+          "$ref": "#/$defs/sha256"
+        },
         "linear_attention_implementation": {
+          "description": "Transformers implementation selected for Gated DeltaNet linear-attention layers.",
           "const": "transformers_torch_fallback"
         },
-        "logits_sha256": { "$ref": "#/$defs/sha256" },
-        "memory_high_events": { "const": 0 },
-        "memory_max_events": { "const": 0 },
-        "memory_oom_events": { "const": 0 },
-        "memory_oom_kill_events": { "const": 0 },
-        "memory_peak_bytes": { "type": "integer", "minimum": 1 },
-        "memory_swap_bytes": { "const": 0 },
-        "modeling_sha256": { "$ref": "#/$defs/sha256" },
-        "output_bytes": { "type": "integer", "minimum": 1 },
-        "request_id": { "type": "string", "minLength": 1 },
-        "request_sha256": { "$ref": "#/$defs/sha256" },
-        "tf32_allowed": { "const": false },
-        "top_logit_margin": { "type": "number", "exclusiveMinimum": 0 },
+        "logits_sha256": {
+          "description": "SHA-256 identity of the contiguous F32 full-vocabulary Hugging Face logit bytes.",
+          "$ref": "#/$defs/sha256"
+        },
+        "memory_high_events": {
+          "description": "Cgroup high-threshold events during the Hugging Face worker; retained evidence requires zero.",
+          "const": 0
+        },
+        "memory_max_events": {
+          "description": "Cgroup max-limit events during the Hugging Face worker; retained evidence requires zero.",
+          "const": 0
+        },
+        "memory_oom_events": {
+          "description": "Cgroup out-of-memory events during the Hugging Face worker; retained evidence requires zero.",
+          "const": 0
+        },
+        "memory_oom_kill_events": {
+          "description": "Cgroup out-of-memory kills during the Hugging Face worker; retained evidence requires zero.",
+          "const": 0
+        },
+        "memory_peak_bytes": {
+          "description": "Peak cgroup memory consumption in bytes during the Hugging Face worker.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "memory_swap_bytes": {
+          "description": "Cgroup swap usage in bytes during the Hugging Face worker; retained evidence requires zero.",
+          "const": 0
+        },
+        "modeling_sha256": {
+          "description": "SHA-256 identity of the pinned Transformers Qwen3.5 modeling implementation.",
+          "$ref": "#/$defs/sha256"
+        },
+        "output_bytes": {
+          "description": "Exact size in bytes of the retained Hugging Face boundary artifact.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "request_id": {
+          "description": "Identifier copied from the bound next-token request.",
+          "type": "string",
+          "minLength": 1
+        },
+        "request_sha256": {
+          "description": "Canonical SHA-256 identity of the bound next-token request.",
+          "$ref": "#/$defs/sha256"
+        },
+        "tf32_allowed": {
+          "description": "Whether TF32 matrix operations were permitted; fixed to false.",
+          "const": false
+        },
+        "top_logit_margin": {
+          "description": "Positive difference between the highest and second-highest final Hugging Face logits.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
         "top_tokens": {
+          "description": "Exactly the ten highest final Hugging Face tokens and logits, ordered from highest to lowest.",
           "type": "array",
           "minItems": 10,
           "maxItems": 10,
@@ -198,46 +376,93 @@
             "$ref": "rocm-hf-next-token-oracle-v2.schema.json#/$defs/topToken"
           }
         },
-        "torch_commit": { "$ref": "#/$defs/gitObject" },
-        "torch_hip_version": { "type": "string", "minLength": 1 },
-        "torch_version": { "const": "2.13.0+rocm7.2" },
-        "transformers_version": { "const": "5.13.1" },
-        "vocab": { "const": 248320 }
+        "torch_commit": {
+          "description": "Pinned PyTorch source commit used by the qualification environment.",
+          "$ref": "#/$defs/gitObject"
+        },
+        "torch_hip_version": {
+          "description": "HIP runtime version reported by the pinned PyTorch build.",
+          "type": "string",
+          "minLength": 1
+        },
+        "torch_version": {
+          "description": "Pinned PyTorch distribution version required by this result schema.",
+          "const": "2.13.0+rocm7.2"
+        },
+        "transformers_version": {
+          "description": "Pinned Transformers distribution version required by this result schema.",
+          "const": "5.13.1"
+        },
+        "vocab": {
+          "description": "Vocabulary size used for final logits, ranks, and token-ID bounds.",
+          "const": 248320
+        }
       }
     },
     "reference": {
+      "description": "Retained local Hugging Face artifact containing ordered boundary rows and final logits, plus its execution evidence.",
       "type": "object",
       "additionalProperties": false,
       "required": ["bytes", "evidence", "location", "sha256"],
       "properties": {
-        "bytes": { "type": "integer", "minimum": 1 },
-        "evidence": { "$ref": "#/$defs/hfEvidence" },
-        "location": { "const": "local_ignored" },
-        "sha256": { "$ref": "#/$defs/sha256" }
+        "bytes": {
+          "description": "Exact size of the retained Hugging Face artifact in bytes.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "evidence": {
+          "description": "Hugging Face runtime, input, boundary, logits, and resource evidence bound to the artifact.",
+          "$ref": "#/$defs/hfEvidence"
+        },
+        "location": {
+          "description": "Retention class; `local_ignored` means the artifact is intentionally outside tracked source.",
+          "const": "local_ignored"
+        },
+        "sha256": {
+          "description": "SHA-256 identity of the retained artifact's exact bytes.",
+          "$ref": "#/$defs/sha256"
+        }
       }
     },
     "containmentArm": {
+      "description": "Host-memory preflight, network isolation, and bounded-process evidence for one comparison arm.",
       "type": "object",
       "additionalProperties": false,
       "required": ["host_available_before_gib", "network", "process"],
       "properties": {
-        "host_available_before_gib": { "type": "integer", "minimum": 1 },
-        "network": { "const": "forbidden" },
+        "host_available_before_gib": {
+          "description": "Whole GiB of host memory reported available immediately before this arm launched.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "network": {
+          "description": "Network policy applied to this arm; fixed to an isolated namespace with access forbidden.",
+          "const": "forbidden"
+        },
         "process": {
+          "description": "Bounded process and exit evidence for this arm.",
           "$ref": "rocm-hf-next-token-oracle-v2.schema.json#/$defs/processEvidence"
         }
       }
     },
     "containment": {
+      "description": "Independent containment evidence for the Hugging Face reference arm and the Kiln comparison arm.",
       "type": "object",
       "additionalProperties": false,
       "required": ["hf", "kiln"],
       "properties": {
-        "hf": { "$ref": "#/$defs/containmentArm" },
-        "kiln": { "$ref": "#/$defs/containmentArm" }
+        "hf": {
+          "description": "Containment evidence for Hugging Face boundary capture.",
+          "$ref": "#/$defs/containmentArm"
+        },
+        "kiln": {
+          "description": "Containment evidence for Kiln ROCm boundary capture and comparison.",
+          "$ref": "#/$defs/containmentArm"
+        }
       }
     },
     "boundary": {
+      "description": "Numerical comparison of the final hidden row at one aligned model boundary.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -253,29 +478,83 @@
         "root_mean_square_error"
       ],
       "properties": {
-        "cosine_similarity": { "type": "number", "minimum": -1, "maximum": 1 },
-        "hf_sha256": { "$ref": "#/$defs/sha256" },
-        "index": { "type": "integer", "minimum": 0, "maximum": 33 },
-        "kiln_sha256": { "$ref": "#/$defs/sha256" },
-        "max_abs_error": { "type": "number", "minimum": 0 },
-        "mean_abs_error": { "type": "number", "minimum": 0 },
-        "name": { "type": "string", "minLength": 1 },
-        "reference_root_mean_square": { "type": "number", "exclusiveMinimum": 0 },
-        "relative_root_mean_square_error": { "type": "number", "minimum": 0 },
-        "root_mean_square_error": { "type": "number", "minimum": 0 }
+        "cosine_similarity": {
+          "description": "Cosine similarity between the 2560-element Hugging Face and Kiln final-row vectors.",
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        },
+        "hf_sha256": {
+          "description": "SHA-256 identity of the contiguous F32 Hugging Face final-row bytes.",
+          "$ref": "#/$defs/sha256"
+        },
+        "index": {
+          "description": "Zero-based boundary position: embedding, transformer layers 0–31, then final RMSNorm.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 33
+        },
+        "kiln_sha256": {
+          "description": "SHA-256 identity of the contiguous F32 Kiln final-row bytes.",
+          "$ref": "#/$defs/sha256"
+        },
+        "max_abs_error": {
+          "description": "Largest elementwise absolute difference between the two boundary rows.",
+          "type": "number",
+          "minimum": 0
+        },
+        "mean_abs_error": {
+          "description": "Mean elementwise absolute difference between the two boundary rows.",
+          "type": "number",
+          "minimum": 0
+        },
+        "name": {
+          "description": "Boundary name aligned with the retained Hugging Face boundary-name list.",
+          "type": "string",
+          "minLength": 1
+        },
+        "reference_root_mean_square": {
+          "description": "Root mean square magnitude of the Hugging Face boundary row, used as the relative-error denominator.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "relative_root_mean_square_error": {
+          "description": "Root mean square error divided by the Hugging Face row's root mean square magnitude.",
+          "type": "number",
+          "minimum": 0
+        },
+        "root_mean_square_error": {
+          "description": "Root mean square of the elementwise Kiln-minus-Hugging-Face difference.",
+          "type": "number",
+          "minimum": 0
+        }
       }
     },
     "errorGrowth": {
+      "description": "Boundary whose relative root mean square error increased most from the preceding boundary.",
       "type": "object",
       "additionalProperties": false,
       "required": ["index", "name", "relative_root_mean_square_error_delta"],
       "properties": {
-        "index": { "type": "integer", "minimum": 0, "maximum": 33 },
-        "name": { "type": "string", "minLength": 1 },
-        "relative_root_mean_square_error_delta": { "type": "number" }
+        "index": {
+          "description": "Zero-based index of the boundary with the largest stepwise relative-error increase.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 33
+        },
+        "name": {
+          "description": "Name of the boundary with the largest stepwise relative-error increase.",
+          "type": "string",
+          "minLength": 1
+        },
+        "relative_root_mean_square_error_delta": {
+          "description": "This boundary's relative root mean square error minus the preceding boundary's value.",
+          "type": "number"
+        }
       }
     },
     "worker": {
+      "description": "Kiln boundary comparisons, final output identity, experiment route, and largest error-growth location for the exact bound request.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -291,18 +570,35 @@
         "schema"
       ],
       "properties": {
-        "schema": { "const": "kiln.rocm-hf-layer-attribution.v2" },
+        "schema": {
+          "description": "Schema identifier for the contained Kiln worker marker.",
+          "const": "kiln.rocm-hf-layer-attribution.v2"
+        },
         "boundaries": {
+          "description": "Exactly 34 ordered boundary comparisons: embedding, transformer layers 0–31, and final RMSNorm.",
           "type": "array",
           "minItems": 34,
           "maxItems": 34,
           "items": { "$ref": "#/$defs/boundary" }
         },
-        "final_logits_sha256": { "$ref": "#/$defs/sha256" },
-        "hf_layer_last_rows_sha256": { "$ref": "#/$defs/sha256" },
-        "input_token_count": { "const": 166 },
-        "input_token_ids_sha256": { "$ref": "#/$defs/sha256" },
+        "final_logits_sha256": {
+          "description": "SHA-256 identity of the Kiln final F32 full-vocabulary logits at the bound state.",
+          "$ref": "#/$defs/sha256"
+        },
+        "hf_layer_last_rows_sha256": {
+          "description": "SHA-256 identity of the Hugging Face boundary-row bytes loaded by the Kiln worker.",
+          "$ref": "#/$defs/sha256"
+        },
+        "input_token_count": {
+          "description": "Complete prompt-plus-continuation token count for this fixed first-divergence request.",
+          "const": 166
+        },
+        "input_token_ids_sha256": {
+          "description": "Canonical SHA-256 identity of the complete input-token sequence.",
+          "$ref": "#/$defs/sha256"
+        },
         "kernel_policy": {
+          "description": "ROCm experiment profile used to run the Kiln arm. Fallback profiles isolate specific backend route groups; they are attribution controls, not general serving recommendations.",
           "type": "string",
           "enum": [
             "qualified",
@@ -320,14 +616,22 @@
             "split_q_gate_only"
           ]
         },
-        "largest_relative_error_growth": { "$ref": "#/$defs/errorGrowth" },
+        "largest_relative_error_growth": {
+          "description": "Boundary with the largest increase in relative root mean square error from its predecessor.",
+          "$ref": "#/$defs/errorGrowth"
+        },
         "observed_next_tokens": {
+          "description": "Four Kiln predictions: one after the prompt and one after each of the three forced common continuation tokens.",
           "type": "array",
           "minItems": 4,
           "maxItems": 4,
           "items": { "$ref": "#/$defs/tokenId" }
         },
-        "request_id": { "type": "string", "minLength": 1 }
+        "request_id": {
+          "description": "Identifier copied from the bound next-token request.",
+          "type": "string",
+          "minLength": 1
+        }
       }
     }
   }

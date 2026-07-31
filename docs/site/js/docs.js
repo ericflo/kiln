@@ -2,6 +2,12 @@
   const body = document.body;
   const menuButton = document.querySelector('[data-docs-menu]');
   const sidebar = document.getElementById('docs-sidebar');
+  const mobileNavigation = window.matchMedia('(max-width: 820px)');
+
+  function syncSidebarInteractivity() {
+    if (!sidebar) return;
+    sidebar.inert = mobileNavigation.matches && !body.classList.contains('docs-nav-open');
+  }
 
   function closeMenu({ restoreFocus = false } = {}) {
     if (!menuButton) return;
@@ -9,13 +15,21 @@
     menuButton.setAttribute('aria-expanded', 'false');
     menuButton.setAttribute('aria-label', 'Menu, open documentation navigation');
     menuButton.title = 'Open navigation';
+    syncSidebarInteractivity();
     if (restoreFocus) menuButton.focus();
   }
 
   if (menuButton && sidebar) {
+    syncSidebarInteractivity();
+    mobileNavigation.addEventListener('change', () => {
+      if (!mobileNavigation.matches) body.classList.remove('docs-nav-open');
+      syncSidebarInteractivity();
+    });
+
     menuButton.addEventListener('click', () => {
       const opening = !body.classList.contains('docs-nav-open');
       body.classList.toggle('docs-nav-open', opening);
+      syncSidebarInteractivity();
       menuButton.setAttribute('aria-expanded', String(opening));
       menuButton.setAttribute('aria-label', opening ? 'Menu, close documentation navigation' : 'Menu, open documentation navigation');
       menuButton.title = opening ? 'Close navigation' : 'Open navigation';
@@ -40,6 +54,24 @@
 
   const currentSidebarLink = sidebar?.querySelector('[aria-current="page"]');
   currentSidebarLink?.scrollIntoView({ block: 'nearest' });
+
+  for (const table of document.querySelectorAll('.docs-table-scroll table')) {
+    const labels = Array.from(table.querySelectorAll('thead th'))
+      .map((header) => header.textContent.replace(/\s+/g, ' ').trim());
+    for (const row of table.querySelectorAll('tbody tr')) {
+      Array.from(row.cells).forEach((cell, index) => {
+        const label = labels[index];
+        if (!label) return;
+        cell.dataset.label = label;
+        if (!cell.querySelector(':scope > .docs-table-cell-value')) {
+          const value = document.createElement('span');
+          value.className = 'docs-table-cell-value';
+          while (cell.firstChild) value.append(cell.firstChild);
+          cell.append(value);
+        }
+      });
+    }
+  }
 
   document.addEventListener('click', async (event) => {
     const button = event.target.closest('[data-copy-code]');
@@ -79,6 +111,7 @@
     if (!searchInput || !searchResults) return;
     searchResults.hidden = !open;
     searchInput.setAttribute('aria-expanded', String(open));
+    if (!open) searchInput.removeAttribute('aria-activedescendant');
   }
 
   function loadSearchIndex() {
@@ -94,14 +127,16 @@
 
   function searchScore(entry, terms) {
     const title = entry.title.toLowerCase();
+    const description = entry.description.toLowerCase();
     const headings = entry.headings.join(' ').toLowerCase();
     const content = entry.content.toLowerCase();
     let score = 0;
     for (const term of terms) {
-      if (!title.includes(term) && !headings.includes(term) && !content.includes(term)) return -1;
+      if (!title.includes(term) && !description.includes(term) && !headings.includes(term) && !content.includes(term)) return -1;
       if (title === term) score += 60;
       else if (title.startsWith(term)) score += 30;
       else if (title.includes(term)) score += 20;
+      if (description.includes(term)) score += 12;
       if (headings.includes(term)) score += 8;
       if (content.includes(term)) score += 1;
     }
@@ -112,6 +147,7 @@
     const links = Array.from(searchResults.querySelectorAll('.docs-search-result'));
     if (links.length === 0) {
       activeResult = -1;
+      searchInput?.removeAttribute('aria-activedescendant');
       return;
     }
     activeResult = ((next % links.length) + links.length) % links.length;
@@ -119,6 +155,7 @@
       if (index === activeResult) {
         link.dataset.active = 'true';
         link.setAttribute('aria-selected', 'true');
+        searchInput?.setAttribute('aria-activedescendant', link.id);
         link.scrollIntoView({ block: 'nearest' });
       } else {
         delete link.dataset.active;
@@ -144,14 +181,18 @@
     if (matches.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'docs-search-empty';
-      empty.textContent = 'No matching documentation';
+      empty.setAttribute('role', 'status');
+      empty.textContent = `No documents match “${query.trim()}”. Try fewer or broader words.`;
       searchResults.append(empty);
     } else {
-      for (const { entry } of matches) {
+      for (const [index, { entry }] of matches.entries()) {
         const link = document.createElement('a');
         link.className = 'docs-search-result';
+        link.id = `${searchResults.id}-option-${index}`;
         link.setAttribute('role', 'option');
         link.setAttribute('aria-selected', 'false');
+        link.setAttribute('aria-posinset', String(index + 1));
+        link.setAttribute('aria-setsize', String(matches.length));
         link.href = docsRoot === '.'
           ? entry.url
           : entry.url.startsWith('../')
@@ -165,6 +206,17 @@
         searchResults.append(link);
       }
     }
+    setSearchOpen(true);
+  }
+
+  function renderSearchError() {
+    searchResults.replaceChildren();
+    activeResult = -1;
+    const error = document.createElement('div');
+    error.className = 'docs-search-empty';
+    error.setAttribute('role', 'status');
+    error.textContent = 'Search is unavailable. Use the navigation or reference library.';
+    searchResults.append(error);
     setSearchOpen(true);
   }
 
@@ -184,7 +236,7 @@
       try {
         renderSearchResults(await loadSearchIndex(), searchInput.value);
       } catch {
-        setSearchOpen(false);
+        renderSearchError();
       }
     });
     searchInput.addEventListener('focus', () => {

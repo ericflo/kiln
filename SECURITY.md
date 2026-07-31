@@ -20,7 +20,7 @@ A useful report has:
 
 ## Response expectations
 
-Kiln is maintained by one person right now. Realistic SLAs:
+Kiln is a small maintainer project. Response targets are:
 
 - **Initial acknowledgment:** within 7 days.
 - **Triage and status update:** within 30 days of the acknowledgment.
@@ -30,7 +30,9 @@ If you do not hear back within 7 days, send a follow-up — it almost certainly 
 
 ## Supported versions
 
-Kiln is pre-1.0. **Only the latest tagged release on `main` is supported** — fixes land on `main` and ship in the next release; there are no backports to older minor versions. See [`CHANGELOG.md`](CHANGELOG.md) for the current release.
+Kiln is pre-1.0. **Only the latest tagged release is supported.** Fixes land on
+`main` and ship in the next release; there are no backports to older minor
+versions. See [`CHANGELOG.md`](CHANGELOG.md) for the current release.
 
 Once a v1.0 release exists, this policy will be revisited.
 
@@ -40,21 +42,28 @@ Security issues we want to hear about:
 
 - Remote code execution via training inputs, prompt content, adapter files, or config.
 - Prompt-injection attacks that escape any sandboxing the server claims to provide.
-- Authentication or authorization bypass on management endpoints (adapters, training, admin).
+- Bypass of a security boundary Kiln explicitly enforces, including loopback
+  restrictions, protected diagnostics, or artifact validation.
 - Exfiltration of model weights, LoRA adapters, or training data across tenancy or trust boundaries that the server is supposed to enforce.
 - Denial of service that crashes the server or wedges it into an unrecoverable state from a single malformed request.
 - Supply-chain compromise — a malicious dependency, a tampered release artifact, or a compromised CI workflow.
 
 ## Out of scope
 
-Some things look like vulnerabilities but are documented design choices. Please do not file these as security issues:
+The following are documented deployment responsibilities rather than product
+security boundaries:
 
 - **No HTTP authentication.** Kiln's HTTP API currently has no built-in auth. The deployment model assumes a trusted network (loopback, VPN, or a reverse proxy that adds auth). "I can call `/v1/train/sft` without a token" is the documented behavior.
 - **Training data and adapters at rest are unencrypted.** Disk encryption is delegated to the host filesystem.
 - **Model outputs are not safety-filtered.** Kiln runs the model you load and returns whatever it generates.
-- **Self-DoS via expensive-but-legitimate requests** — long contexts, large training batches, or many concurrent generations can saturate a single GPU. That is a capacity-planning concern, not a security bug.
+- **Expected saturation from expensive but valid work.** Long contexts, large
+  training batches, or many concurrent generations can saturate a single GPU.
+  A malformed request that crashes or permanently wedges the server remains in
+  scope.
 
-If you think one of the above *should* be in scope, open a normal issue or discussion to argue the design — that is the right channel for it.
+If a documented responsibility does not match the boundary Kiln actually
+enforces, report the mismatch privately. Use a normal issue or discussion for a
+proposal to change the documented design.
 
 ## Supply-chain provenance
 

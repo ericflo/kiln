@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Kiln Quickstart &mdash; Run Qwen3.5-4B in 5 minutes</title>
+  <title>Kiln Quickstart &mdash; Serve Qwen3.5-4B on one GPU</title>
   <meta name="description" content="Install Kiln, serve Qwen3.5-4B on one GPU, connect pi or opencode, and verify the first OpenAI-compatible request in the dashboard.">
   <meta name="theme-color" content="#0a0908">
   <meta name="color-scheme" content="dark">
@@ -12,7 +12,7 @@
   <link rel="alternate icon" type="image/png" href="assets/logo.png">
   <link rel="apple-touch-icon" href="assets/logo.png">
 
-  <meta property="og:title" content="Kiln Quickstart &mdash; Run Qwen3.5-4B in 5 minutes">
+  <meta property="og:title" content="Kiln Quickstart &mdash; Serve Qwen3.5-4B on one GPU">
   <meta property="og:description" content="Install Kiln, serve Qwen3.5-4B on one GPU, connect pi or opencode, and verify the first request in the dashboard.">
   <meta property="og:type" content="website">
   <meta property="og:locale" content="en_US">
@@ -24,7 +24,7 @@
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Kiln Quickstart &mdash; Run Qwen3.5-4B in 5 minutes">
+  <meta name="twitter:title" content="Kiln Quickstart &mdash; Serve Qwen3.5-4B on one GPU">
   <meta name="twitter:description" content="Install Kiln, serve Qwen3.5-4B, connect your agent, and verify the first request.">
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image-v3.png">
   <meta name="twitter:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
@@ -67,7 +67,7 @@
       position: absolute;
       left: 1rem;
       top: 0;
-      transform: translateY(-120%);
+      transform: translateY(calc(-100% + 1px));
       z-index: 50;
       background: var(--accent);
       color: #1a0c00;
@@ -393,7 +393,7 @@
         <span class="text-lg font-semibold tracking-tight">Kiln</span>
       </a>
       <nav class="site-nav text-sm">
-        <a href="quickstart.html" aria-current=page>Quickstart</a>
+        <a href="quickstart.html" aria-current="page">Quickstart</a>
         <a href="docs/">Documentation</a>
         <a href="grpo.html">GRPO Guide</a>
         <a href="evals.html">Evals</a>
@@ -412,7 +412,7 @@
   <!-- hero -->
   <section class="hero-glow">
     <div class="max-w-4xl mx-auto px-6 pt-16 pb-10">
-      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">Quickstart &middot; 5-minute path &middot; Qwen3.5-4B</span>
+      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">Quickstart &middot; first-run path &middot; Qwen3.5-4B</span>
       <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">
         Install Kiln, start the server, point your agent at it.
       </h1>
@@ -436,7 +436,7 @@
         <a href="#install"><span class="step">1</span><small>Install</small><strong>Choose one build</strong></a>
         <a href="#serve"><span class="step">2</span><small>Start</small><strong>Serve Qwen3.5-4B</strong></a>
         <a href="#pi-agent"><span class="step">3</span><small>Connect</small><strong>Point your agent at Kiln</strong></a>
-        <a href="#verify"><span class="step">4</span><small>Verify</small><strong>See one captured request</strong></a>
+        <a href="#verify"><span class="step">4</span><small>Verify</small><strong>See one request</strong></a>
       </nav>
       <p class="quickstart-stop">
         <svg class="icn icn-sm" aria-hidden="true" style="color:#4ade80;"><use href="#i-check"></use></svg>
@@ -451,19 +451,27 @@
       <div class="flex items-start gap-3 mb-6">
         <span class="step">1</span>
         <div>
-          <p class="label mb-2">Prerequisites + choose one path</p>
+          <p class="label mb-2">Check requirements + choose one path</p>
           <h2 class="text-2xl font-semibold tracking-tight">Install Kiln</h2>
         </div>
+      </div>
+      <div class="card p-5 mb-6" role="note">
+        <h3 class="font-semibold mb-2">Before you download</h3>
+        <ul class="space-y-2" style="color: var(--fg-dim);">
+          <li>Set aside about 20 GB of free disk space for the model and downloaded artifacts. Training also needs more accelerator memory than a first inference run.</li>
+          <li>Choose the build for your available accelerator runtime: CUDA, ROCm, Vulkan, or Metal.</li>
+          <li>The server archives below target x86_64 Linux and Windows or Apple Silicon macOS. Kiln Desktop installs the matching server build; it does not add support for another CPU architecture.</li>
+        </ul>
       </div>
       <div class="install-grid lg:grid-cols-2">
         <div class="install-card install-card-recommended">
           <div>
             <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-4">Recommended first run</span>
-            <h3 class="font-semibold mb-2">Desktop App &middot; recommended</h3>
+            <h3 class="font-semibold mb-2">Kiln Desktop &middot; recommended</h3>
             <p class="mb-3" style="color: var(--fg-dim);">
               Download <a href="https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.16">Kiln Desktop v0.2.16</a>, then choose or download the Qwen3.5-4B model in the app and start the server from the GUI.
             </p>
-            <p class="text-sm" style="color: var(--fg-mute);">Desktop and server release lines intentionally differ: the Desktop app ships under <code>desktop-v*</code> tags, downloads and verifies the latest <code>kiln-v*</code> server binary for you, and the pinned links here match the newest Desktop release.</p>
+            <p class="text-sm" style="color: var(--fg-mute);">Desktop and server release lines intentionally differ: the Desktop app ships under <code>desktop-v*</code> tags and downloads and verifies the latest <code>kiln-v*</code> server binary for you. These links were checked against the newest Desktop release on July 30, 2026. When the app reports that the server is ready, skip checkpoint two and continue to <a href="#pi-agent">Connect your agent</a>.</p>
           </div>
           <table class="installer-table mb-3" aria-label="Kiln Desktop installer downloads">
             <thead>
@@ -489,62 +497,83 @@
           </table>
         </div>
         <details class="install-alternatives">
-          <summary>Need a terminal-first server binary? <span>5 GPU and platform builds</span></summary>
+          <summary>Need a terminal-first server binary? <span>5 server artifacts</span></summary>
           <div class="install-grid lg:grid-cols-2">
-        <div class="install-card">
-          <h3 class="font-semibold mb-2">Linux x86_64 &middot; CUDA 12.4</h3>
-<pre class="text-sm"><code>KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*&quot;tag_name&quot;: &quot;kiln-v\([^&quot;]*\)&quot;.*/\1/p')
-curl -L -o kiln-linux-cuda.tar.gz \
-  "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-cuda124.tar.gz"
-tar -xzf kiln-linux-cuda.tar.gz</code></pre>
-        </div>
-        <div class="install-card">
-          <h3 class="font-semibold mb-2">Linux x86_64 &middot; ROCm 7.2.4</h3>
-<pre class="text-sm"><code>KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*&quot;tag_name&quot;: &quot;kiln-v\([^&quot;]*\)&quot;.*/\1/p')
-curl -L -o kiln-linux-rocm.tar.gz \
-  "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-rocm724.tar.gz"
-tar -xzf kiln-linux-rocm.tar.gz</code></pre>
-          <p class="text-sm mt-3" style="color: var(--fg-mute);">Use this on AMD Linux systems with ROCm/HIP. The binary includes CDNA, RDNA3, and Strix Halo gfx targets.</p>
-        </div>
-        <div class="install-card">
-          <h3 class="font-semibold mb-2">Linux x86_64 &middot; Vulkan</h3>
-<pre class="text-sm"><code>KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*&quot;tag_name&quot;: &quot;kiln-v\([^&quot;]*\)&quot;.*/\1/p')
-curl -L -o kiln-linux-vulkan.tar.gz \
-  "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-vulkan.tar.gz"
-tar -xzf kiln-linux-vulkan.tar.gz</code></pre>
-          <p class="text-sm mt-3" style="color: var(--fg-mute);">Use this on Linux systems where <code>vulkaninfo --summary</code> lists a compute-capable GPU. Kiln negotiates the loader API up to Vulkan 1.2 and admits optional routes only when the selected device reports every capability they require.</p>
-        </div>
-        <div class="install-card">
-          <h3 class="font-semibold mb-2">macOS Apple Silicon &middot; Metal</h3>
-<pre class="text-sm"><code>KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*&quot;tag_name&quot;: &quot;kiln-v\([^&quot;]*\)&quot;.*/\1/p')
-curl -L -o kiln-macos.tar.gz \
-  "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-aarch64-apple-darwin-metal.tar.gz"
-tar -xzf kiln-macos.tar.gz</code></pre>
-        </div>
-        <div class="install-card">
-          <h3 class="font-semibold mb-2">Windows x86_64 &middot; CUDA 12.4</h3>
-<pre class="text-sm"><code>$KilnVersion = ((Invoke-RestMethod https://api.github.com/repos/ericflo/kiln/releases/latest).tag_name -replace '^kiln-v', '')
-curl.exe -L -o kiln-windows.zip `
-  "https://github.com/ericflo/kiln/releases/download/kiln-v$KilnVersion/kiln-$KilnVersion-x86_64-pc-windows-msvc-cuda124.zip"
-Expand-Archive .\kiln-windows.zip -DestinationPath .\kiln</code></pre>
-        </div>
         <div class="install-card release-verification">
           <div>
             <p class="label mb-2">Release integrity</p>
             <h3 class="font-semibold mb-2">Verify provenance before extraction</h3>
             <p class="text-sm">
-              Every server archive has a SHA-256 file and a Sigstore-backed GitHub build-provenance
-              attestation from the release workflow. The macOS binary is also code-signed and
-              notarized; Linux and Windows archives are intentionally not platform code-signed.
+              Every server archive has a SHA-256 sidecar and a Sigstore-backed GitHub
+              build-provenance attestation from the release workflow. The macOS binary is
+              also code-signed and notarized; Linux and Windows archives do not carry
+              platform code signatures.
             </p>
             <p class="text-sm mt-3">
-              Install the <a href="https://cli.github.com/manual/gh_attestation_verify">GitHub CLI</a>,
-              then replace the example filename with the archive you downloaded.
+              Install the <a href="https://cli.github.com/manual/gh_attestation_verify">GitHub CLI</a>.
+              Each command below verifies its downloaded archive before extracting it.
             </p>
           </div>
-<pre class="text-sm" tabindex="0" aria-label="Verify Kiln release provenance"><code>gh attestation verify kiln-linux-cuda.tar.gz \
+<pre class="text-sm" tabindex="0" aria-label="Verify Kiln release provenance"><code>gh attestation verify ARCHIVE \
   --repo ericflo/kiln \
   --signer-workflow ericflo/kiln/.github/workflows/server-release.yml</code></pre>
+        </div>
+        <div class="install-card">
+          <h3 class="font-semibold mb-2">Linux x86_64 &middot; CUDA 12.4</h3>
+<pre class="text-sm"><code>KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*&quot;tag_name&quot;: &quot;kiln-v\([^&quot;]*\)&quot;.*/\1/p')
+test -n "$KILN_VERSION"
+curl -fsSLo kiln-linux-cuda.tar.gz \
+  "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-cuda124.tar.gz"
+gh attestation verify kiln-linux-cuda.tar.gz \
+  --repo ericflo/kiln \
+  --signer-workflow ericflo/kiln/.github/workflows/server-release.yml
+tar -xzf kiln-linux-cuda.tar.gz</code></pre>
+        </div>
+        <div class="install-card">
+          <h3 class="font-semibold mb-2">Linux x86_64 &middot; ROCm 7.2.4</h3>
+<pre class="text-sm"><code>KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*&quot;tag_name&quot;: &quot;kiln-v\([^&quot;]*\)&quot;.*/\1/p')
+test -n "$KILN_VERSION"
+curl -fsSLo kiln-linux-rocm.tar.gz \
+  "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-rocm724.tar.gz"
+gh attestation verify kiln-linux-rocm.tar.gz \
+  --repo ericflo/kiln \
+  --signer-workflow ericflo/kiln/.github/workflows/server-release.yml
+tar -xzf kiln-linux-rocm.tar.gz</code></pre>
+          <p class="text-sm mt-3" style="color: var(--fg-mute);">Use this on AMD Linux systems with ROCm/HIP. This release artifact is compiled for <code>gfx90a</code>, <code>gfx942</code>, <code>gfx1100</code>, and <code>gfx1151</code>. Those compile targets describe the artifact; runtime admission still follows reported device capabilities rather than a device name or ID.</p>
+        </div>
+        <div class="install-card">
+          <h3 class="font-semibold mb-2">Linux x86_64 &middot; Vulkan</h3>
+<pre class="text-sm"><code>KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*&quot;tag_name&quot;: &quot;kiln-v\([^&quot;]*\)&quot;.*/\1/p')
+test -n "$KILN_VERSION"
+curl -fsSLo kiln-linux-vulkan.tar.gz \
+  "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-vulkan.tar.gz"
+gh attestation verify kiln-linux-vulkan.tar.gz \
+  --repo ericflo/kiln \
+  --signer-workflow ericflo/kiln/.github/workflows/server-release.yml
+tar -xzf kiln-linux-vulkan.tar.gz</code></pre>
+          <p class="text-sm mt-3" style="color: var(--fg-mute);">Use this when <code>vulkaninfo --summary</code> lists a Linux GPU with a compute queue and enough memory for the model. Kiln negotiates the highest mutually supported API version up to Vulkan 1.2 and admits each optional route only when the selected device reports every required capability. Device names and IDs are never routing inputs.</p>
+        </div>
+        <div class="install-card">
+          <h3 class="font-semibold mb-2">macOS Apple Silicon &middot; Metal</h3>
+<pre class="text-sm"><code>KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*&quot;tag_name&quot;: &quot;kiln-v\([^&quot;]*\)&quot;.*/\1/p')
+test -n "$KILN_VERSION"
+curl -fsSLo kiln-macos.tar.gz \
+  "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-aarch64-apple-darwin-metal.tar.gz"
+gh attestation verify kiln-macos.tar.gz \
+  --repo ericflo/kiln \
+  --signer-workflow ericflo/kiln/.github/workflows/server-release.yml
+tar -xzf kiln-macos.tar.gz</code></pre>
+        </div>
+        <div class="install-card">
+          <h3 class="font-semibold mb-2">Windows x86_64 &middot; CUDA 12.4</h3>
+<pre class="text-sm"><code>$KilnVersion = ((Invoke-RestMethod https://api.github.com/repos/ericflo/kiln/releases/latest).tag_name -replace '^kiln-v', '')
+if (-not $KilnVersion) { throw "Could not resolve the latest Kiln release" }
+curl.exe -fsSLo kiln-windows.zip `
+  "https://github.com/ericflo/kiln/releases/download/kiln-v$KilnVersion/kiln-$KilnVersion-x86_64-pc-windows-msvc-cuda124.zip"
+gh attestation verify .\kiln-windows.zip `
+  --repo ericflo/kiln `
+  --signer-workflow ericflo/kiln/.github/workflows/server-release.yml
+Expand-Archive .\kiln-windows.zip -DestinationPath .\kiln</code></pre>
         </div>
           </div>
         </details>
@@ -562,23 +591,33 @@ Expand-Archive .\kiln-windows.zip -DestinationPath .\kiln</code></pre>
           <h2 class="text-2xl font-semibold tracking-tight">Start the server</h2>
         </div>
       </div>
+      <p class="max-w-3xl mb-6" style="color: var(--fg-dim);">
+        If Kiln Desktop already reports that the server is ready, continue to
+        <a href="#pi-agent">checkpoint three</a>. The commands below are for the
+        terminal-first server artifacts.
+      </p>
       <div class="grid lg:grid-cols-2 gap-6">
         <div class="card p-6">
           <h3 class="font-semibold mb-2">a. Download Qwen3.5-4B</h3>
-          <p class="mb-4" style="color: var(--fg-dim);">Point <code>KILN_MODEL_PATH</code> at a local checkout of <code>Qwen/Qwen3.5-4B</code>.</p>
-<pre class="text-sm"><code>pip install -U huggingface_hub
-hf download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B
-export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
+          <p class="mb-4" style="color: var(--fg-dim);">Download <code>Qwen/Qwen3.5-4B</code> into a local directory. Python is used only by this download helper; the Kiln server does not require a Python runtime.</p>
+<pre class="text-sm"><code>python3 -m pip install -U huggingface_hub
+hf download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B</code></pre>
+          <p class="text-sm mt-3" style="color: var(--fg-mute);">PowerShell: run <code>py -m pip install -U huggingface_hub</code>, then use the same <code>hf download</code> command.</p>
         </div>
         <div class="card p-6">
-          <h3 class="font-semibold mb-2">b. Run the server with <code>kiln serve</code></h3>
-          <p class="mb-4" style="color: var(--fg-dim);">Server binaries bind to <code>127.0.0.1:8420</code> by default. No API key required.</p>
+          <h3 class="font-semibold mb-2">b. Run the server</h3>
+          <p class="mb-4" style="color: var(--fg-dim);">Server binaries bind to <code>127.0.0.1:8420</code> by default. The loopback API does not require a key.</p>
 <pre class="text-sm"><code>KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve</code></pre>
+          <p class="text-sm mt-3" style="color: var(--fg-mute);">PowerShell:</p>
+<pre class="text-sm mt-3"><code>$env:KILN_MODEL_PATH = ".\Qwen3.5-4B"
+.\kiln\kiln.exe serve</code></pre>
           <h3 class="font-semibold mt-6 mb-2">Docker (Linux + NVIDIA Container Toolkit)</h3>
-<pre class="text-sm"><code>docker run --gpus all -p 8420:8420 \
+<pre class="text-sm"><code>docker run --gpus all -p 127.0.0.1:8420:8420 \
+  -e KILN_SERVER_HOST=0.0.0.0 \
   -e KILN_MODEL_PATH=/models/Qwen3.5-4B \
   -v "$PWD/Qwen3.5-4B:/models/Qwen3.5-4B:ro" \
   ghcr.io/ericflo/kiln-server:latest serve</code></pre>
+          <p class="text-sm mt-3" style="color: var(--fg-mute);">Kiln must listen on the container interface for Docker's port mapping to work. The host-side publication remains restricted to loopback because the API has no built-in authentication. For a reproducible deployment, replace <code>latest</code> with the release version or immutable digest you validated.</p>
         </div>
       </div>
     </div>
@@ -593,12 +632,12 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
       <div class="flex items-start gap-3 mb-6">
         <span class="step">3</span>
         <div>
-          <p class="label mb-2">The #1 thing to do with Kiln</p>
+          <p class="label mb-2">Use the client you already have</p>
           <h2 class="text-3xl font-bold tracking-tight">Connect your agent</h2>
         </div>
       </div>
       <p class="max-w-3xl mb-8 text-lg leading-relaxed" style="color: var(--fg-dim);">
-        Point <strong style="color: var(--fg);">pi</strong> or <strong style="color: var(--fg);">opencode</strong> at the server you just started. There is no SDK to swap and no key to generate — change the base URL and keep your agent. Every request it makes streams into <code>/ui</code> as training data you can later turn into a better adapter.
+        Point <strong style="color: var(--fg);">pi</strong> or <strong style="color: var(--fg);">opencode</strong> at the server you just started. Keep the same client and change its base URL. Each request appears in <code>/ui</code>; you can later select traces and judgments for an explicit training job.
       </p>
 
       <!-- dashboard-style fact block -->
@@ -621,7 +660,7 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
           <p class="label mb-2" style="font-size:0.66rem;">API key</p>
           <span class="connect-keychip" style="width:100%;">
             <svg class="icn icn-sm" aria-hidden="true"><use href="#i-check"></use></svg>
-            Not required — any value works
+            Loopback: not required
           </span>
         </div>
       </div>
@@ -631,19 +670,19 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
         <div class="card p-6">
           <h3 class="font-semibold mb-1 text-lg">pi</h3>
           <p class="mb-3" style="color: var(--fg-dim);">
-            Configure pi in one command: <code>kiln pi-setup</code> adds Kiln as pi's <code>kiln-local</code> provider and sets <code>Qwen3.5-4B</code> as the default model. It backs up existing <code>models.json</code> and <code>settings.json</code>, then merges the Kiln entries while preserving your other providers.
+            Configure pi in one command: <code>./kiln pi-setup</code> adds Kiln as pi's <code>kiln-local</code> provider and sets <code>Qwen3.5-4B</code> as the default model. It backs up existing <code>models.json</code> and <code>settings.json</code>, then merges the Kiln entries while preserving your other providers.
           </p>
-<pre class="text-sm"><code>kiln pi-setup
+<pre class="text-sm"><code>./kiln pi-setup
 pi -p "Use the bash tool to run: pwd"
 
-# Remote server? /v1 is appended for you:
-kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
-          <p class="text-sm mt-3" style="color: var(--fg-mute);">Backups are written beside the originals as <code>models.json.bak-&lt;timestamp&gt;</code> and <code>settings.json.bak-&lt;timestamp&gt;</code>.</p>
+# Trusted remote server? /v1 is appended for you:
+./kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
+          <p class="text-sm mt-3" style="color: var(--fg-mute);">On Windows, replace <code>./kiln</code> in these examples with <code>.\kiln\kiln.exe</code>. Backups are written beside the originals as <code>models.json.bak-&lt;timestamp&gt;</code> and <code>settings.json.bak-&lt;timestamp&gt;</code>. Kiln's server API is unauthenticated; expose it beyond loopback only through a trusted network or authenticated reverse proxy.</p>
         </div>
         <div class="card p-6">
           <h3 class="font-semibold mb-1 text-lg">opencode</h3>
           <p class="mb-3" style="color: var(--fg-dim);">
-            Add a Kiln provider to <code>~/.config/opencode/opencode.json</code>, then run <code>opencode</code> and pick <strong style="color: var(--fg);">Kiln · Qwen3.5-4B</strong> with <code>/models</code>. Uses the OpenAI-compatible AI SDK adapter — no API key needed.
+            Add a Kiln provider to <code>~/.config/opencode/opencode.json</code>, then run <code>opencode</code> and choose <strong style="color: var(--fg);">Kiln · Qwen3.5-4B</strong> with <code>/models</code>. The configuration uses the OpenAI-compatible AI SDK adapter; its placeholder key is ignored by the loopback server.
           </p>
 <pre class="text-sm"><code>{
   "$schema": "https://opencode.ai/config.json",
@@ -671,7 +710,7 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
           You should now see this request in /ui
         </h3>
         <p style="color: var(--fg-dim);">
-          Open <a href="http://127.0.0.1:8420/ui">http://127.0.0.1:8420/ui</a> and watch <strong style="color: var(--fg);">Recent requests</strong>. The first call from pi or opencode appears within seconds, tagged with its client — proof your agent is wired in and its traffic is being captured.
+          Open <a href="http://127.0.0.1:8420/ui">http://127.0.0.1:8420/ui</a> and watch <strong style="color: var(--fg);">Recent requests</strong>. The first successful call from pi or opencode appears with its client label, confirming that the agent is using Kiln.
         </p>
       </div>
 
@@ -698,13 +737,13 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
         </div>
         <div class="card p-5">
           <h3 class="font-semibold mb-2">Check <code>/health</code></h3>
-<pre class="text-sm"><code>kiln health</code></pre>
-<pre class="text-sm mt-3"><code>curl -s http://127.0.0.1:8420/health \
+<pre class="text-sm"><code>./kiln health</code></pre>
+<pre class="text-sm mt-3"><code>curl -fsS http://127.0.0.1:8420/health \
   | python3 -m json.tool</code></pre>
         </div>
         <div class="card p-5">
           <h3 class="font-semibold mb-2">Send chat</h3>
-<pre class="text-sm"><code>curl -s http://127.0.0.1:8420/v1/chat/completions \
+<pre class="text-sm"><code>curl -fsS http://127.0.0.1:8420/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen3.5-4B",
@@ -713,7 +752,7 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
     "thinking_budget_tokens": 32,
     "temperature": 0.7
   }' | python3 -m json.tool</code></pre>
-          <p class="text-sm mt-3" style="color: var(--fg-mute);">This is the first inference checkpoint: get one response before moving on to <a href="#sft-corrections">SFT</a> or <a href="grpo.html">GRPO</a>. The token budget closes an open thinking block after 32 generated tokens so the remaining completion can carry the final answer; see the <a href="api.html#thinking-budgets">API reference</a> for the product guide and the <a href="https://github.com/ericflo/kiln/blob/main/docs/THINKING_BUDGET_CONTRACT.md">Thinking Budget Contract</a> for normative token, time, inheritance, and unlimited semantics.</p>
+          <p class="text-sm mt-3" style="color: var(--fg-mute);">Get one response before moving on to training. The 32-token thinking budget bounds the reasoning phase; see the <a href="api.html#thinking-budgets">API guide</a> for examples and the <a href="docs/thinking-budgets/">Thinking Budget Contract</a> for normative behavior.</p>
         </div>
       </div>
       <figure class="card mt-6 overflow-hidden">
@@ -721,7 +760,7 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
              srcset="assets/server-ui-dashboard-720.webp 720w, assets/server-ui-dashboard-1440.webp 1440w, assets/server-ui-dashboard.webp 2880w"
              sizes="(max-width: 760px) calc(100vw - 32px), 960px"
              width="2880" height="3534" loading="lazy" decoding="async"
-             alt="Kiln dashboard showing server status, adapters, training, and quick inference controls"
+             alt="Kiln dashboard overview with server status, accelerator, requests, memory, adapters, training, and quick inference controls"
              class="w-full h-auto block">
         <figcaption class="px-5 py-3 text-sm" style="color: var(--fg-mute);">Use the dashboard as your status checkpoint before starting adapter or training workflows.</figcaption>
       </figure>
@@ -729,7 +768,7 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
         If <code>/ui</code>, <code>/health</code>, or the chat request fails, use <a href="troubleshooting.html">Troubleshooting</a> to check the model path, binary download, CUDA/ROCm/Vulkan/Metal setup, Docker, and health checks before retrying.
       </p>
       <p class="text-sm mt-6" style="color: var(--fg-mute);">
-        Prefer terminal-first checks? See the <a href="cli.html">CLI Reference</a> for <code>kiln health</code>, training, and adapter commands.
+        Prefer terminal-first checks? See the <a href="cli.html">CLI reference</a> for <code>./kiln health</code>, training, and adapter commands.
       </p>
     </div>
   </section>
@@ -740,51 +779,100 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
       <div class="flex items-start gap-3 mb-6">
         <span class="step">5</span>
         <div>
-          <p class="label mb-2">Turn traffic into a better model</p>
-          <h2 class="text-2xl font-semibold tracking-tight">Train &amp; evaluate</h2>
+          <p class="label mb-2">Choose the next workflow</p>
+          <h2 class="text-2xl font-semibold tracking-tight">Train and evaluate deliberately</h2>
         </div>
       </div>
-      <div class="card p-5 mb-4" style="background: var(--bg-soft-2); border-color: var(--line-2);">
-        <h3 class="font-semibold mb-2">Training file shapes at a glance</h3>
+      <p class="max-w-3xl mb-6 text-lg leading-relaxed" style="color: var(--fg-dim);">
+        Your first-run path is complete. A request appearing in the dashboard does not
+        change the model: you explicitly choose the data, training method, adapter name,
+        and evaluation boundary for every improvement job.
+      </p>
+      <div class="card p-5 mb-6" style="background: rgba(249, 115, 22, 0.08); border-color: rgba(249, 115, 22, 0.22);">
+        <h3 class="font-semibold mb-2">Restart into a profile that admits training</h3>
+        <p class="mb-3" style="color: var(--fg-dim);">
+          The server command above uses the default <code>stable</code> profile, which rejects training and live
+          adapter-weight transitions. For an interactive local loop, stop it and restart with
+          <code>experimental</code> before submitting SFT, GRPO, or OPD:
+        </p>
+<pre class="text-sm"><code>KILN_SERVER_SERVING_PROFILE=experimental \
+KILN_MODEL_PATH=./Qwen3.5-4B \
+./kiln serve</code></pre>
+        <p class="text-sm mt-3" style="color: var(--fg-mute);">
+          <code>maintenance</code> can drain traffic before a mutation, but the current
+          <code>stable</code> process cannot start with or activate an unmerged saved adapter.
+          Keep the live train/evaluate/adapter loop in a separate <code>experimental</code>
+          process. See <a href="docs/serving-profiles/">Serving profiles</a> for the exact
+          ownership and transition rules.
+        </p>
+      </div>
+      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <a class="card p-5 block" href="docs/native-sft-profile/">
+          <h3 id="sft-corrections" class="font-semibold mb-2">Correct with SFT</h3>
+          <p style="color: var(--fg-dim);">Train a named LoRA adapter from reviewed chat corrections.</p>
+        </a>
+        <a class="card p-5 block" href="grpo.html">
+          <h3 class="font-semibold mb-2">Optimize with GRPO</h3>
+          <p style="color: var(--fg-dim);">Generate candidates, score them, and train from grouped rewards.</p>
+        </a>
+        <a class="card p-5 block" href="api.html#training">
+          <h3 class="font-semibold mb-2">Distill with OPD</h3>
+          <p style="color: var(--fg-dim);">Train against an identity-bound local or vLLM teacher.</p>
+        </a>
+        <a class="card p-5 block" href="evals.html">
+          <h3 class="font-semibold mb-2">Prove with evals</h3>
+          <p style="color: var(--fg-dim);">Compare the adapter with its baseline on held-out data.</p>
+        </a>
+      </div>
+      <details class="card p-5 mb-6" style="background: var(--bg-soft-2); border-color: var(--line-2);">
+        <summary class="font-semibold">Training contracts, file shapes, and exact-resume rules</summary>
+        <div class="mt-4">
+        <h3 class="font-semibold mb-2">SFT, GRPO, and OPD inputs</h3>
         <p style="color: var(--fg-dim);">
-          <code>kiln train sft</code> reads <strong>SFT JSONL</strong>: one chat correction per line, each with a <code>messages</code> array. Rows fail closed by default; use <code>--invalid-row-policy skip</code> only when rejected row hashes in the final receipt are part of your review workflow.
-          <code>kiln train grpo</code> reads either a <strong>GRPO JSON request/batch</strong> or <strong>JSONL with one group per line</strong>: groups of candidate completions with reward scores.
-          <code>kiln train opd</code> reads one <strong>OPD request object</strong>, or a JSON prompt array with <code>--teacher</code>, and requires a registered exact teacher identity.
-          See the <a href="grpo.html">GRPO Guide</a> for the generate &rarr; score &rarr; train loop and the <a href="cli.html">CLI Reference</a> for full command examples.
+          Each command accepts a distinct, validated input:
+        </p>
+        <ul class="mt-3 space-y-2" style="color: var(--fg-dim);">
+              <li><code>./kiln train sft</code> reads SFT JSONL with one chat correction and one <code>messages</code> array per line. Rows fail closed by default.</li>
+              <li><code>./kiln train grpo</code> reads a GRPO JSON request or batch, or JSONL with one candidate-and-reward group per line.</li>
+              <li><code>./kiln train opd</code> reads one OPD request object, or a JSON prompt array with <code>--teacher</code>, and requires a registered exact teacher identity.</li>
+        </ul>
+        <p class="text-sm mt-3" style="color: var(--fg-mute);">
+          Use <code>--invalid-row-policy skip</code> only when your review includes the rejected-row hashes in the final receipt. See the <a href="grpo.html">GRPO Guide</a> for the generate &rarr; score &rarr; train loop and the <a href="cli.html">CLI Reference</a> for complete commands.
         </p>
         <p class="text-sm mt-3" style="color: var(--fg-mute);">
-          Every route uses the same chat message schema. Assistant turns may carry OpenAI-shaped <code>tool_calls</code>; <code>role: "tool"</code> responses may carry <code>name</code> and <code>tool_call_id</code>. String, null/missing, and text-part-array <code>content</code> are accepted. Inline requests, local JSONL, named datasets, rollout provenance, eval, and chat-template rendering preserve these fields instead of flattening the conversation to role and text.
+          All training routes use the same chat-message schema. Assistant turns may carry OpenAI-shaped <code>tool_calls</code>, and <code>role: "tool"</code> responses may carry <code>name</code> and <code>tool_call_id</code>. Inline requests, local JSONL, named datasets, rollout provenance, evals, and chat-template rendering preserve those fields.
         </p>
         <p class="text-sm mt-3" style="color: var(--fg-mute);">
-          SFT does not append the inference generation prompt. It supervises each assistant thinking, answer, or tool-call body plus the message terminator and trailing newline; assistant role headers plus system, user, and tool-response tokens are ignored. The exact Hugging Face and TRL token/label goldens are documented in <a href="https://github.com/ericflo/kiln/blob/main/docs/sft-tokenization.md">SFT Tokenization and Assistant-Only Loss</a>.
+          SFT does not append the inference generation prompt. It supervises assistant reasoning, answers, tool-call bodies, message terminators, and trailing newlines. It ignores assistant role headers and all system, user, and tool-response tokens. See <a href="docs/sft-tokenization/">SFT Tokenization and Assistant-Only Loss</a> for the Hugging Face and TRL token-and-label goldens.
         </p>
         <p class="text-sm mt-3" style="color: var(--fg-mute);">
-          Native SFT is the fixed <code>native_online_lora_v1</code> online-LoRA profile: one conversation per update, constant learning rate, accumulation 1, and no warmup, decay, or gradient clipping. Unknown general-trainer options fail closed. The <a href="https://github.com/ericflo/kiln/blob/main/docs/NATIVE_SFT_PROFILE.md">Native SFT Profile</a> defines the exact update and precision contract; use HF/TRL directly when you need a general trainer.
+          Native SFT uses the fixed <code>native_online_lora_v1</code> online-LoRA profile: one conversation per update, a constant learning rate, accumulation 1, and no warmup, decay, or gradient clipping. Unknown general-trainer options fail closed. The <a href="docs/native-sft-profile/">Native SFT Profile</a> defines the update and precision contract; use HF/TRL when you need a general trainer.
         </p>
         <p class="text-sm mt-3" style="color: var(--fg-mute);">
-          For interruptible SFT, GRPO, or OPD, add <code>--checkpoint-interval N</code>; OPD defaults to 25. Job status reports the newest immutable <code>.kiln-checkpoint</code> basename. Continue with the identical source, route, adapter, and options plus <code>--resume-checkpoint BASENAME</code>; OPD also requires the exact registered teacher revision. This restores exact optimizer and loop state, not just adapter weights.
+          For interruptible SFT, GRPO, or OPD, add <code>--checkpoint-interval N</code>; OPD defaults to 25. Job status reports the newest immutable <code>.kiln-checkpoint</code> basename. Resume with the same source, route, adapter, and options plus <code>--resume-checkpoint BASENAME</code>. OPD also requires the exact registered teacher revision. A valid resume restores optimizer and loop state, not only adapter weights.
         </p>
         <p class="text-sm mt-3" style="color: var(--fg-mute);">
-          Every accepted training submission also prints and persists one exact effective seed before it enters the queue. Record that decimal string with the job ID; the dashboard keeps it visible and copyable. A resume uses the checkpoint&rsquo;s original seed and rejects a mismatch. Reusing a seed is meaningful only with the same weights, data, tokenizer/template, build, backend, device/runtime, precision, kernels, and effective environment.
+          Every accepted submission prints and persists its effective seed before entering the queue. Record that decimal string with the job ID. A resume uses the checkpoint's original seed and rejects a mismatch. Seed reuse is comparable only when weights, data, tokenizer and template, build, backend, runtime, precision, kernels, and effective environment also match.
         </p>
         <p class="text-sm mt-3" style="color: var(--fg-mute);">
-          New checkpoints, train receipts, adapter manifests, and eval jobs also retain the loader&rsquo;s complete base-weight shard manifest. Job detail shows its copyable aggregate and shard count. Exact resume rejects changed shard bytes, sizes, or multiplicity before GPU work; moving or renaming identical shards is allowed, while legacy aggregate-only checkpoints are not exact-resumable. The canonical schema is in the <a href="https://github.com/ericflo/kiln/blob/main/docs/BASE_WEIGHT_PROVENANCE.md">base-weight provenance contract</a>.
+          Checkpoints, training receipts, adapter manifests, and eval jobs retain the loader's complete base-weight shard manifest. Exact resume rejects changed shard bytes, sizes, or multiplicity before GPU work. Moving or renaming identical shards is allowed; legacy aggregate-only checkpoints are not exactly resumable. See the <a href="docs/base-weight-provenance/">base-weight provenance contract</a>.
         </p>
       </div>
       <div class="card p-5 mb-4" style="background: rgba(249, 115, 22, 0.08); border-color: rgba(249, 115, 22, 0.22);">
         <h3 class="font-semibold mb-2">Prove the adapter is better &mdash; evals are a peer of training</h3>
         <p style="color: var(--fg-dim);">
-          Upload an SFT or GRPO JSONL to <code>POST /v1/eval/datasets/upload</code>. Kiln persists group-aware train/validation/holdout views: named training defaults to <code>train</code>, while suite synthesis defaults to <code>holdout</code>. Then <code>POST /v1/eval/run</code> grades any adapter, <code>/v1/eval/compare</code> runs a head-to-head comparison, and <code>post_eval: { suite, data_scope: "held-out", include_baseline: true }</code> rejects detected training overlap before it auto-grades. The whole loop runs locally; the optional LLM judge is itself a LoRA you train from A/B preferences in <code>/ui</code>. See the <a href="evals.html">Evals guide</a> and <a href="docs/dataset-splits/">dataset split contract</a>.
+          Upload SFT or GRPO JSONL with <code>POST /v1/eval/datasets/upload</code>. Kiln persists group-aware train, validation, and holdout views: named training defaults to <code>train</code>, while suite synthesis defaults to <code>holdout</code>. Use <code>POST /v1/eval/run</code> to grade an adapter and <code>POST /v1/eval/compare</code> for a head-to-head comparison. A held-out post-eval with a baseline rejects detected training overlap before grading. See the <a href="evals.html">Evals Guide</a> and <a href="docs/dataset-splits/">dataset split contract</a>.
         </p>
       </div>
-      <h2 class="text-2xl font-semibold tracking-tight mb-4">Where to go next</h2>
+      </details>
+      <h2 class="text-2xl font-semibold tracking-tight mb-4">Open the guide for your next task</h2>
       <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
         <a class="card p-5 block" href="api.html#training">
-          <h3 id="sft-corrections" class="font-semibold mb-2">SFT corrections</h3>
-          <p style="color: var(--fg-dim);">Post simple fixes to <code>/v1/train/sft</code> or use <code>kiln train sft</code> after first inference, then run <code>kiln train status</code> to confirm the job finished before the next chat request.</p>
+          <h3 class="font-semibold mb-2">SFT API and CLI</h3>
+          <p style="color: var(--fg-dim);">Post reviewed corrections to <code>/v1/train/sft</code> or run <code>./kiln train sft</code>, then use <code>./kiln train status</code> to confirm that the job finished before the next chat request.</p>
         </a>
         <a class="card p-5 block" href="grpo.html">
-          <h3 class="font-semibold mb-2">GRPO Guide</h3>
+          <h3 class="font-semibold mb-2">GRPO guide</h3>
           <p style="color: var(--fg-dim);">Run the generate &rarr; score &rarr; train loop against the same server.</p>
         </a>
         <a class="card p-5 block" href="api.html#training">
@@ -792,15 +880,15 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
           <p style="color: var(--fg-dim);">Train against an identity-bound local or vLLM teacher, then resume from exact candidate-boundary checkpoints.</p>
         </a>
         <a class="card p-5 block" href="evals.html">
-          <h3 class="font-semibold mb-2">Evals Guide</h3>
+          <h3 class="font-semibold mb-2">Evals guide</h3>
           <p style="color: var(--fg-dim);">Score adapters with built-in or LLM-judge scorers, synthesize suites from datasets, and run the local A/B judgment flywheel.</p>
         </a>
         <a class="card p-5 block" href="api.html">
-          <h3 class="font-semibold mb-2">API Reference</h3>
+          <h3 class="font-semibold mb-2">API reference</h3>
           <p style="color: var(--fg-dim);">See inference, adapter, training, eval, judgment, metrics, and configuration endpoints.</p>
         </a>
         <a class="card p-5 block" href="cli.html">
-          <h3 class="font-semibold mb-2">CLI Reference</h3>
+          <h3 class="font-semibold mb-2">CLI reference</h3>
           <p style="color: var(--fg-dim);">Keep going from the terminal with health, training, and adapter commands.</p>
         </a>
         <a class="card p-5 block" href="troubleshooting.html">
@@ -809,7 +897,7 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
         </a>
         <a class="card p-5 block" href="demo/">
           <h3 class="font-semibold mb-2">Demo</h3>
-          <p style="color: var(--fg-dim);">Watch the first-token, hot-swap, OpenAI client, and GRPO flows.</p>
+          <p style="color: var(--fg-dim);">Inspect the dashboard fixture captured from source revision <code>f3ae29e4a</code> on July 30, 2026, with each simulated value labelled.</p>
         </a>
         <a class="card p-5 block" href="architecture.html">
           <h3 class="font-semibold mb-2">Architecture</h3>
@@ -820,7 +908,7 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
       <!-- The loop — flywheel ribbon echoing the dashboard. Each node links
            to its guide: Agents → Traffic → Train → Eval → Hot-swap. -->
       <div class="flywheel-wrap mt-10">
-        <div class="flywheel-title"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-refresh"></use></svg> The loop <span class="flywheel-tagline">— your model gets better every time you use it</span></div>
+        <div class="flywheel-title"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-refresh"></use></svg> The loop <span class="flywheel-tagline">— from observed traffic to a verified serving adapter</span></div>
         <div class="flywheel" role="group" aria-label="The improvement loop">
           <a class="flywheel-node hot" href="#pi-agent">
             <span class="fw-eyebrow"><svg class="icn" aria-hidden="true"><use href="#i-link"></use></svg> Agents</span>
@@ -831,7 +919,7 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
           <a class="flywheel-node" href="#verify">
             <span class="fw-eyebrow"><svg class="icn" aria-hidden="true"><use href="#i-activity"></use></svg> Traffic</span>
             <span class="fw-value">/ui</span>
-            <span class="fw-sub">captured requests</span>
+            <span class="fw-sub">observed requests</span>
           </a>
           <span class="flywheel-arrow" aria-hidden="true"><svg class="icn"><use href="#i-arrow-right"></use></svg></span>
           <a class="flywheel-node" href="grpo.html">
@@ -848,8 +936,8 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
           <span class="flywheel-arrow" aria-hidden="true"><svg class="icn"><use href="#i-arrow-right"></use></svg></span>
           <a class="flywheel-node" href="api.html#lora-lifecycle">
             <span class="fw-eyebrow"><svg class="icn" aria-hidden="true"><use href="#i-merge"></use></svg> Hot-swap</span>
-            <span class="fw-value">No restart</span>
-            <span class="fw-sub">live adapter</span>
+            <span class="fw-value">Experimental</span>
+            <span class="fw-sub">live adapter changes</span>
           </a>
         </div>
       </div>
@@ -877,7 +965,7 @@ kiln pi-setup --kiln-url http://office-kiln:8420</code></pre>
         <a href="demo/">Demo</a>
         <a href="troubleshooting.html">Troubleshooting</a>
         <a href="architecture.html">Architecture</a>
-        <a href="https://github.com/ericflo/kiln/blob/main/BENCHMARKS.md">Benchmarks</a>
+        <a href="docs/benchmarks/">Benchmarks</a>
         <a href="https://github.com/ericflo/kiln/blob/main/CHANGELOG.md">Changelog</a>
         <a href="https://github.com/ericflo/kiln/blob/main/SECURITY.md">Security</a>
         <a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License</a>

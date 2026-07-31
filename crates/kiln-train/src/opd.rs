@@ -772,7 +772,7 @@ pub struct OpdConfig {
     pub max_tokens: usize,
 
     /// Number of layer segments used by the memory-bounded student sampler.
-    /// `None` selects the proven default of 18, capped at the model layer
+    /// `None` selects the automatic default of 18, capped at the model layer
     /// count. This affects sampling only, not gradient checkpointing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sampler_segments: Option<usize>,
@@ -1370,11 +1370,9 @@ pub fn prepare_off_policy_distillation_dataset_with_identity(
 
         let env_tokens = tokenized.env_mask.iter().filter(|&&active| active).count() as u64;
         summary.env_tokens = summary.env_tokens.saturating_add(env_tokens);
-        // The env masks built here feed the per-step EchoEnvSpec — the
-        // OPD env-CE root is live again (the GRPO resurrection's OPD
-        // half): the tape path composes via the OPD echo node, the
-        // checkpointed path adds the analytic env grad. The receipt's
-        // echo_combined keys off the term actually firing.
+        // The env masks built here feed the per-step EchoEnvSpec during
+        // execution. Preparation records counts only; the final receipt's
+        // echo_combined value keys off the term actually firing.
         let _ = echo;
 
         prompts.push(prompt);
@@ -4693,15 +4691,11 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
                         )
                     };
 
-                    // (#1082) The `echo_active_this_step` ECHO gate was deleted along
-                    // with the candle gradient-checkpointing path it guarded. ECHO's
-                    // FLCE + candle `.affine()` + candle `.add()` composite has no
-                    // kt-tape coverage, so the tape-authoritative scalar-loss root
-                    // cannot represent `mean_kl + λ·echo_ce`. With the candle fallback
-                    // removed, ECHO env-CE drops out of OPD entirely (re-add it when a
-                    // kt-tape ECHO adapter lands). `env_mask` / `env_count` /
-                    // `total_obs_len` stay computed above for the receipt token-count
-                    // bookkeeping but no longer steer dispatch.
+                    // ECHO no longer uses the retired candle-only gate. When this
+                    // rollout has eligible observation tokens, EchoEnvSpec below
+                    // composes env-CE into the tape-authoritative loss root; the
+                    // checkpointed path applies the same value and analytic hidden
+                    // gradient before replaying its segments.
                     let opd_segments = opd_checkpoint_segments_for_step(
                         runtime,
                         config.grad_checkpoint_segments,
@@ -6606,9 +6600,8 @@ mod tests {
             ce_prepared.summary.action_tokens
         );
         assert!(prepared.summary.env_tokens > 0);
-        // Env masks are built, but the env-CE term has no gradient path
-        // post candle-drop (#1082) — the summary must say it never
-        // combined, even when the config requested it.
+        // Preparation builds masks and counts only. Whether env-CE actually
+        // fires is known during execution and belongs in the final receipt.
         assert!(!prepared.summary.echo_combined);
         Ok(())
     }

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ericflo.github.io/kiln/contracts/kiln-observability-v1.schema.json",
   "title": "Kiln Read-only Serving and Observability API v1",
-  "description": "Closed field-level wire contract for health, resolved configuration, model-state debug, model discovery, decode statistics, recent requests, and persistent logit-cache statistics.",
+  "description": "Canonical read-only response schemas for health and readiness, resolved configuration, opt-in model-state diagnostics, model discovery, decode statistics, recent requests, and persistent teacher-logit cache statistics. Kiln does not authenticate these endpoints. `GET /v1/stats/recent-requests` can return stored prompt and completion text, so keep the server on loopback or behind an authenticated reverse proxy.",
   "x-kiln-field-schema-status": "complete",
   "x-kiln-entrypoints": [
     "CacheStatsResponse",
@@ -2302,7 +2302,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Configured accelerator-upload rate in MiB per second; null disables pacing."
         },
         "rate_limited": {
           "$ref": "#/$defs/Boolean"
@@ -2321,7 +2322,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Why upload pacing does not apply; null when the policy applies."
         },
         "source_byte_accounting": {
           "const": "base_model_source_bytes"
@@ -3591,7 +3593,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Point-in-time ROCm graph statistics, or null when a nonblocking snapshot is unavailable."
         },
         "rocm_graphs_unavailable_reason": {
           "anyOf": [
@@ -3601,7 +3604,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Closed reason `rocm_graphs` is null; null when statistics are present."
         },
         "rocm_graph_telemetry": {
           "anyOf": [
@@ -3611,7 +3615,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Lock-independent ROCm graph phase telemetry, or null when no graph runner exists."
         },
         "rocm_graph_telemetry_unavailable_reason": {
           "anyOf": [
@@ -3621,7 +3626,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Closed reason `rocm_graph_telemetry` is null; null when telemetry is present."
         },
         "cuda_graphs": {
           "$ref": "#/$defs/CudaGraphConfigResponse"
@@ -3759,7 +3765,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Whether CUDA graph replay is enabled; null while the nonblocking snapshot is busy."
         },
         "state": {
           "type": "string",
@@ -3926,10 +3933,12 @@
       ],
       "properties": {
         "error": {
-          "const": "debug endpoint disabled"
+          "const": "debug endpoint disabled",
+          "description": "Stable error code for a disabled debug endpoint."
         },
         "enable_with": {
-          "const": "set server.debug_model_state=true or server.eval_mode=true"
+          "const": "set server.debug_model_state=true or server.eval_mode=true",
+          "description": "Configuration change required before restart to enable the endpoint."
         }
       },
       "description": "HTTP 403 body returned when model-state diagnostics are not enabled.",
@@ -3945,7 +3954,8 @@
       ],
       "properties": {
         "error": {
-          "const": "invalid execution provenance"
+          "const": "invalid execution provenance",
+          "description": "Stable error code for resident provenance that failed validation."
         },
         "detail": {
           "$ref": "#/$defs/NonEmptyString"
@@ -4102,7 +4112,8 @@
           "$ref": "#/$defs/NonNegativeInteger"
         },
         "window_secs": {
-          "const": 60.0
+          "const": 60.0,
+          "description": "Fixed rolling window in seconds."
         }
       },
       "description": "Rolling request-local decode throughput, ITL tail, and bounded stall diagnosis.",
@@ -4567,7 +4578,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Server-wide thinking default; null preserves the model template's default."
         },
         "default_thinking_budget_tokens": {
           "anyOf": [
@@ -4577,7 +4589,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Default thinking-token limit; null means unlimited."
         },
         "default_thinking_budget_ms": {
           "anyOf": [
@@ -4587,7 +4600,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Default thinking-time limit in milliseconds; null means unlimited."
         },
         "fold_reasoning_into_content": {
           "$ref": "#/$defs/Boolean"
@@ -4857,7 +4871,8 @@
             "ok",
             "degraded",
             "maintenance"
-          ]
+          ],
+          "description": "`ok` is ready for normal work, `degraded` reports a failed readiness check, and `maintenance` reports an intentionally drained server."
         },
         "version": {
           "$ref": "#/$defs/NonEmptyString"
@@ -4873,7 +4888,8 @@
           "enum": [
             "mock",
             "model"
-          ]
+          ],
+          "description": "Whether the server is using mock responses or a loaded model."
         },
         "backend_runtime": {
           "$ref": "#/$defs/BackendRuntimeInfo"
@@ -4901,7 +4917,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Server-wide thinking default; null preserves the model template's default."
         },
         "default_thinking_budget_tokens": {
           "anyOf": [
@@ -4911,7 +4928,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Default thinking-token limit; null means unlimited."
         },
         "default_thinking_budget_ms": {
           "anyOf": [
@@ -4921,7 +4939,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Default thinking-time limit in milliseconds; null means unlimited."
         },
         "fold_reasoning_into_content": {
           "$ref": "#/$defs/Boolean"
@@ -4937,7 +4956,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Loaded base-weight identity; null in mock mode."
         },
         "execution_identity": {
           "anyOf": [
@@ -4947,7 +4967,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Validated execution identity; null when no real-model provenance is resident."
         },
         "active_adapter": {
           "anyOf": [
@@ -4957,7 +4978,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Adapter selected for new inference requests; null selects the base model."
         },
         "loaded_adapter": {
           "anyOf": [
@@ -4967,7 +4989,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Adapter currently resident in the model runner; null when only base weights are loaded."
         },
         "loaded_adapter_revision": {
           "anyOf": [
@@ -4977,7 +5000,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Content revision of the resident adapter; null when no adapter is loaded."
         },
         "loaded_adapter_count": {
           "$ref": "#/$defs/NonNegativeInteger"
@@ -5002,7 +5026,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Paged-KV scheduler gauges; null when the active backend does not expose them."
         },
         "self_improve_scheduler": {
           "$ref": "#/$defs/SelfImproveSchedulerStatus"
@@ -5015,7 +5040,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "GPU capacity and live all-process memory observation; null without a GPU backend."
         },
         "vulkan_buffers": {
           "$ref": "#/$defs/VulkanBufferInfo"
@@ -5044,7 +5070,8 @@
             "$ref": "#/$defs/HealthCheck"
           },
           "minItems": 6,
-          "maxItems": 6
+          "maxItems": 6,
+          "description": "The six stable readiness checks whose failures determine `degraded` status and HTTP 503."
         }
       },
       "description": "Complete readiness and runtime diagnostic response returned with HTTP 200 or 503.",
@@ -5068,7 +5095,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Configured send-buffer target in bytes, or null when Kiln leaves the socket default unchanged."
         },
         "send_buffer_kernel_readback_bytes": {
           "anyOf": [
@@ -5078,7 +5106,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Send-buffer size reported by the operating system after listener setup, or null when no target was requested."
         },
         "send_buffer_effective_bytes": {
           "anyOf": [
@@ -5088,7 +5117,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Effective send-buffer target used for startup validation, or null when Kiln leaves the socket default unchanged."
         }
       },
       "description": "Resolved and kernel-readback HTTP socket send-buffer state.",
@@ -6255,13 +6285,16 @@
       ],
       "properties": {
         "id": {
-          "$ref": "#/$defs/String"
+          "$ref": "#/$defs/String",
+          "description": "Served model ID accepted by the inference API."
         },
         "object": {
-          "const": "model"
+          "const": "model",
+          "description": "OpenAI-compatible model discriminator."
         },
         "owned_by": {
-          "const": "kiln"
+          "const": "kiln",
+          "description": "Stable owner label for a model served by Kiln."
         }
       },
       "description": "One OpenAI-compatible served model descriptor.",
@@ -6347,7 +6380,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Point-in-time ROCm graph statistics, or null when a nonblocking snapshot is unavailable."
         },
         "rocm_graphs_unavailable_reason": {
           "anyOf": [
@@ -6357,7 +6391,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Closed reason `rocm_graphs` is null; null when statistics are present."
         },
         "rocm_graph_telemetry": {
           "anyOf": [
@@ -6367,7 +6402,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Lock-independent ROCm graph phase telemetry, or null when no graph runner exists."
         },
         "rocm_graph_telemetry_unavailable_reason": {
           "anyOf": [
@@ -6377,7 +6413,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Closed reason `rocm_graph_telemetry` is null; null when telemetry is present."
         },
         "kv_autoscaler": {
           "$ref": "#/$defs/KvAutoscalerState"
@@ -6411,7 +6448,8 @@
       ],
       "properties": {
         "object": {
-          "const": "list"
+          "const": "list",
+          "description": "OpenAI-compatible list discriminator."
         },
         "data": {
           "type": "array",
@@ -6419,7 +6457,8 @@
             "$ref": "#/$defs/ModelInfo"
           },
           "minItems": 1,
-          "maxItems": 1
+          "maxItems": 1,
+          "description": "The single model served by this Kiln process."
         }
       },
       "description": "OpenAI-compatible list of served models.",
@@ -7284,7 +7323,7 @@
           "$ref": "#/$defs/RequestLatencyDiagnostics"
         }
       },
-      "description": "One newest-first bounded recent-request record.",
+      "description": "One newest-first bounded recent-request record. The record can contain full prompt and completion text and therefore belongs inside the server's trusted access boundary.",
       "x-kiln-rust-type": "RequestRecord",
       "x-kiln-field-schema-status": "complete"
     },

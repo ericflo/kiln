@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Kiln — serve it, teach it, watch it get better</title>
-  <meta name="description" content="Serve, train, and evaluate Qwen3.5-4B on one GPU from one pure-Rust binary. OpenAI-compatible inference, live LoRA training, local evals, and exact receipts.">
+  <title>Kiln — serve, train, and evaluate Qwen3.5-4B locally</title>
+  <meta name="description" content="Serve, train, and evaluate Qwen3.5-4B on one GPU from one native Kiln binary. OpenAI-compatible inference, live LoRA training, local evals, and exact receipts.">
   <meta name="theme-color" content="#0a0908">
   <meta name="color-scheme" content="dark">
   <link rel="canonical" href="https://ericflo.github.io/kiln/">
@@ -17,7 +17,7 @@
   <meta property="og:locale" content="en_US">
   <meta property="og:site_name" content="Kiln">
   <meta property="og:title" content="Kiln — Serve it. Teach it. Watch it get better.">
-  <meta property="og:description" content="Serve, train, and evaluate Qwen3.5-4B on one GPU from one pure-Rust binary.">
+  <meta property="og:description" content="Serve, train, and evaluate Qwen3.5-4B on one GPU from one native Kiln binary.">
   <meta property="og:url" content="https://ericflo.github.io/kiln/">
   <meta property="og:image" content="https://ericflo.github.io/kiln/assets/og-image-v3.png">
   <meta property="og:image:type" content="image/png">
@@ -26,7 +26,7 @@
   <meta property="og:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Kiln — Serve it. Teach it. Watch it get better.">
-  <meta name="twitter:description" content="Serve, train, and evaluate Qwen3.5-4B on one GPU from one pure-Rust binary.">
+  <meta name="twitter:description" content="Serve, train, and evaluate Qwen3.5-4B on one GPU from one native Kiln binary.">
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image-v3.png">
   <meta name="twitter:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
 
@@ -44,7 +44,7 @@
     "name": "Kiln",
     "operatingSystem": "Linux, macOS, Windows",
     "applicationCategory": "DeveloperApplication",
-    "description": "Pure-Rust single-GPU LLM server for OpenAI-compatible inference, LoRA training, and local evaluation.",
+    "description": "Single-GPU model server for OpenAI-compatible inference, LoRA training, and local evaluation.",
     "url": "https://ericflo.github.io/kiln/",
     "downloadUrl": "https://github.com/ericflo/kiln/releases/latest",
     "softwareHelp": "https://ericflo.github.io/kiln/docs/",
@@ -77,7 +77,7 @@
         <span class="brand-mark" aria-hidden="true"><svg class="brand-flame" viewBox="0 0 24 24"><use href="#i-stack"></use></svg></span>
         <span>kiln</span>
       </a>
-      <a class="brand-version" href="https://github.com/ericflo/kiln/releases/latest" rel="noopener">latest</a>
+      <a class="brand-version" href="https://github.com/ericflo/kiln/releases/latest" rel="noopener" aria-label="Latest Kiln server release">latest</a>
 
       <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">
         <span class="sr-only">Open navigation</span>
@@ -114,10 +114,10 @@
         <div class="home-hero-copy">
           <a class="release-chip" href="https://github.com/ericflo/kiln/releases/latest" rel="noopener">
             <span class="release-chip-dot" aria-hidden="true"></span>
-            Latest release
+            Latest server release
             <span aria-hidden="true">→</span>
           </a>
-          <h1>Serve it. Teach it.<br><span>Watch it get better.</span></h1>
+          <h1>Serve it. Teach it.<br> <span>Watch it get better.</span></h1>
           <p class="home-hero-lede">
             Kiln serves, trains, and evaluates <strong>Qwen3.5-4B</strong> on one GPU.
             Turn agent traces and scoring signals into LoRA adapters, prove the change
@@ -125,13 +125,13 @@
           </p>
           <div class="home-hero-actions">
             <a class="btn btn-primary btn-lg" href="quickstart.html">
-              Run Kiln in 5 minutes
+              Start the quickstart
               <svg class="icn" aria-hidden="true"><use href="#i-arrow-right"></use></svg>
             </a>
             <a class="btn btn-lg" href="#learning-pass">See the learning pass</a>
           </div>
           <ul class="hero-proof-list" aria-label="Kiln highlights">
-            <li>Pure Rust</li>
+            <li>Rust server</li>
             <li>One binary</li>
             <li>One GPU</li>
             <li>MIT licensed</li>
@@ -141,8 +141,8 @@
         <div class="learning-pass" id="learning-pass" data-learning-pass>
           <div class="learning-pass-bar">
             <div class="window-dots" aria-hidden="true"><span></span><span></span><span></span></div>
-            <span class="learning-pass-title">repair-policy · evaluation trace</span>
-            <span class="learning-pass-live"><i aria-hidden="true"></i> local</span>
+            <span class="learning-pass-title">repair-policy · illustrative trace</span>
+            <span class="learning-pass-live"><i aria-hidden="true"></i> local example</span>
           </div>
           <div class="learning-pass-body">
             <div class="learning-prompt">
@@ -158,7 +158,7 @@
               <p>Rewrite the module so the implementation is easier to reason about.</p>
             </div>
 
-            <div class="learning-heat" aria-label="One local training update">
+            <div class="learning-heat" aria-label="One illustrative local training update">
               <div class="learning-heat-line" aria-hidden="true"><span></span></div>
               <div class="learning-heat-event">
                 <span class="learning-event-icon" aria-hidden="true"><svg class="icn"><use href="#i-flask"></use></svg></span>
@@ -166,7 +166,7 @@
                   <strong>reward accepted · adapter updated</strong>
                   <code>POST /v1/train/grpo</code>
                 </div>
-                <span class="learning-event-time">1 pass</span>
+                <span class="learning-event-time">1 update</span>
               </div>
             </div>
 
@@ -190,7 +190,7 @@
         </div>
       </div>
       <div class="page hero-capability-rail" aria-label="Core capabilities">
-        <span><strong>OpenAI API</strong> drop-in clients</span>
+        <span><strong>OpenAI-compatible API</strong> for existing clients</span>
         <span><strong>SFT · GRPO · OPD</strong> over HTTP</span>
         <span><strong>CUDA · ROCm · Metal · Vulkan</strong></span>
         <span><strong>Exact receipts</strong> and strict replay</span>
@@ -201,7 +201,7 @@
       <div class="page">
         <header class="home-section-head">
           <span class="eyebrow eyebrow--accent">One local improvement loop</span>
-          <h2>From real work to a verified adapter.<br>Nothing leaves the machine.</h2>
+          <h2>From real work to a verified adapter.<br>Keep the loop on your machine.</h2>
           <p>
             Most inference servers stop after the response. Kiln keeps the entire
             improvement cycle beside the model—from captured work to an adapter you can
@@ -221,7 +221,7 @@
             <span class="loop-number">02</span>
             <svg class="icn" aria-hidden="true"><use href="#i-database"></use></svg>
             <h3>Capture</h3>
-            <p>Requests, tool calls, scores, and A/B judgments become a local corpus.</p>
+            <p>Collect agent traces, scores, and A/B judgments into a local corpus.</p>
           </article>
           <span class="loop-arrow" aria-hidden="true">→</span>
           <article class="loop-step loop-step-hot">
@@ -290,7 +290,13 @@
               <span>04</span>
               <div><h3>Keep the evidence</h3><p>Receipts bind model, data, runtime, adapter, and replay identity.</p></div>
             </article>
-            <a class="product-demo-link" href="demo/">Watch the recorded workflow <span aria-hidden="true">→</span></a>
+            <p class="product-profile-note">
+              <strong>Serving-profile boundary:</strong> the default <code>stable</code>
+              profile serves traffic but rejects training and live adapter changes.
+              Use <code>experimental</code> for the interactive learning loop.
+              <a href="docs/serving-profiles/">Read the profile contract.</a>
+            </p>
+            <a class="product-demo-link" href="demo/">Explore the current product tour <span aria-hidden="true">→</span></a>
           </div>
         </div>
       </div>
@@ -310,7 +316,7 @@
         <div class="principle-grid">
           <article class="principle principle-featured">
             <span class="principle-kicker">One model, end to end</span>
-            <h3>A scalpel, not a framework.</h3>
+            <h3>Purpose-built for Qwen3.5-4B.</h3>
             <p>
               The scheduler, paged KV cache, kernels, quantization, LoRA routes, and
               training memory plans are tuned for Qwen3.5-4B’s hybrid architecture.
@@ -321,7 +327,7 @@
           </article>
           <article class="principle">
             <span class="principle-kicker">One runtime</span>
-            <h3>Pure Rust. No Python at runtime.</h3>
+            <h3>Rust server. No Python runtime.</h3>
             <p>A single executable owns inference, training, evals, adapter lifecycle, metrics, and the dashboard.</p>
           </article>
           <article class="principle">
@@ -337,7 +343,7 @@
           <article class="principle">
             <span class="principle-kicker">Your hardware</span>
             <h3>Four backends. One source tree.</h3>
-            <p>CUDA, ROCm, Metal, and Vulkan builds span workstation GPUs and Apple Silicon.</p>
+            <p>Native CUDA, ROCm, Metal, and Vulkan builds cover Linux GPUs and Apple Silicon; CUDA also ships for Windows.</p>
           </article>
         </div>
       </div>
@@ -349,9 +355,10 @@
           <span class="eyebrow eyebrow--accent">Run it locally</span>
           <h2>One binary.<br>One model path.<br>One endpoint.</h2>
           <p>
-            Provenance-attested release archives are available for Linux CUDA, ROCm, and
-            Vulkan; Apple Silicon Metal; and Windows CUDA. The macOS binary is also signed
-            and notarized. The full quickstart covers drivers, Docker, Desktop, and every backend.
+            The latest server release publishes five provenance-attested archives: Linux
+            CUDA, ROCm, and Vulkan; Apple Silicon Metal; and Windows CUDA. The
+            macOS binary is signed and notarized. The full quickstart covers
+            drivers, Docker, Desktop, and every backend.
           </p>
           <div class="install-actions">
             <a class="btn btn-primary btn-lg" href="quickstart.html">Choose your platform</a>
@@ -365,7 +372,7 @@
             <span class="code-title">linux · cuda 12.4</span>
             <button class="copy-btn" type="button" data-target="home-install-code" aria-label="Copy install commands">copy</button>
           </div>
-<pre id="home-install-code" tabindex="0" aria-label="Kiln installation commands"><code># Resolve the newest provenance-attested server release
+<pre id="home-install-code" tabindex="0" aria-label="Kiln installation commands"><code># Resolve the current provenance-attested server release
 KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest \
   | sed -n 's/.*"tag_name": "kiln-v\([^"]*\)".*/\1/p')
 
@@ -379,7 +386,7 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
 ./kiln pi-setup</code></pre>
           <div class="install-terminal-status">
             <span><i aria-hidden="true"></i> listening on <strong>localhost:8420/v1</strong></span>
-            <span>API key not required</span>
+            <span>loopback only · no API key</span>
           </div>
         </div>
       </div>
@@ -400,12 +407,12 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
           <article class="evidence-result">
             <div class="evidence-result-head">
               <span class="evidence-status"><i aria-hidden="true"></i> Vulkan decode · recovered</span>
-              <a href="docs/benchmarks/">correction branch <span aria-hidden="true">→</span></a>
+              <a href="https://github.com/ericflo/kiln/commit/f3ae29e4a">verified source · f3ae29e4a <span aria-hidden="true">↗</span></a>
             </div>
 
             <div class="evidence-result-main">
               <strong>13.46 <small>tok/s</small></strong>
-              <p>Qwen3.5-4B · 64-token prompt · 8-token seeded latency run</p>
+              <p>Qwen3.5-4B · seeded short diagnostic · 56 prompt / 9 generated tokens</p>
             </div>
 
             <dl class="evidence-metrics">
@@ -421,14 +428,14 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
             </p>
 
             <div class="evidence-actions">
-              <a href="docs/benchmarks/">Read the benchmark receipt <span aria-hidden="true">→</span></a>
+              <a href="docs/benchmarks/">Read the benchmark evidence <span aria-hidden="true">→</span></a>
               <a href="https://github.com/ericflo/kiln/commit/28d8c6028d1b187107688c9adea0b079d203f687">Inspect the regression boundary <span aria-hidden="true">↗</span></a>
             </div>
           </article>
 
           <article class="release-proof">
             <div class="release-proof-head">
-              <span class="eyebrow">The release matrix</span>
+              <span class="eyebrow">Latest server release</span>
               <h3>Five native artifacts.<br>One source tree.</h3>
             </div>
             <ul class="release-platforms">
@@ -478,7 +485,7 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
           <span class="brand-mark" aria-hidden="true"><svg class="brand-flame" viewBox="0 0 24 24"><use href="#i-stack"></use></svg></span>
           <span>kiln</span>
         </a>
-        <p class="footer-blurb">A pure-Rust, single-GPU server for inference, learning, and proof.</p>
+        <p class="footer-blurb">A single-GPU model server for inference, learning, and proof.</p>
       </div>
       <div>
         <h3>Docs</h3>
@@ -496,7 +503,7 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
         <ul>
           <li><a href="api.html">API Reference</a></li>
           <li><a href="cli.html">CLI Reference</a></li>
-          <li><a href="https://github.com/ericflo/kiln/blob/main/BENCHMARKS.md">Benchmarks</a></li>
+          <li><a href="docs/benchmarks/">Benchmarks</a></li>
           <li><a href="demo/">Demo</a></li>
         </ul>
       </div>
@@ -504,9 +511,10 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
         <h3>Project</h3>
         <ul>
           <li><a href="https://github.com/ericflo/kiln">GitHub</a></li>
-          <li><a href="https://github.com/ericflo/kiln/releases/latest">Latest release</a></li>
+          <li><a href="https://github.com/ericflo/kiln/releases/latest">Latest server release</a></li>
           <li><a href="https://github.com/ericflo/kiln/issues">Issues</a></li>
           <li><a href="https://github.com/ericflo/kiln/blob/main/CHANGELOG.md">Changelog</a></li>
+          <li><a href="https://github.com/ericflo/kiln/blob/main/SECURITY.md">Security</a></li>
           <li><a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License</a></li>
         </ul>
       </div>

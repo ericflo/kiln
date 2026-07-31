@@ -475,6 +475,11 @@ def run_self_tests(schema: dict[str, Any]) -> list[str]:
         ({"unknown": {}}, False, "unknown root section"),
         ({"server": {"porrt": 8420}}, False, "unknown field"),
         ({"server": {"port": True}}, False, "boolean is not an integer"),
+        (
+            {"server": {"shutdown_timeout_secs": 0}},
+            False,
+            "zero shutdown timeout",
+        ),
         ({"server": {"max_decode_batch": "auto"}}, True, "auto union"),
         ({"server": {"max_decode_batch": 0}}, False, "bounded union"),
         (

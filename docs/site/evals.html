@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Kiln Evals &mdash; Score every adapter, locally</title>
-  <meta name="description" content="A site-local guide to the Kiln eval system: pluggable scorers, dataset-to-suite synthesis, post-training auto-eval, and the local A/B judgment flywheel.">
+  <title>Kiln Evals &mdash; Evaluate adapters before activation</title>
+  <meta name="description" content="Grade one target, compare adapters on shared sampling inputs, replay exact decoder bytes, and gate LoRA activation with held-out Kiln evals.">
   <meta name="theme-color" content="#0a0908">
   <meta name="color-scheme" content="dark">
   <link rel="canonical" href="https://ericflo.github.io/kiln/evals.html">
@@ -12,8 +12,8 @@
   <link rel="alternate icon" type="image/png" href="assets/logo.png">
   <link rel="apple-touch-icon" href="assets/logo.png">
 
-  <meta property="og:title" content="Kiln Evals &mdash; Score every adapter, locally">
-  <meta property="og:description" content="Pluggable scorers, dataset-to-suite synthesis, post-training auto-eval, and the local A/B judgment flywheel &mdash; no frontier LLM called.">
+  <meta property="og:title" content="Kiln Evals &mdash; Evidence before adapter activation">
+  <meta property="og:description" content="Grade one target, compare adapters on shared sampling inputs, replay exact decoder bytes, and gate LoRA activation with held-out evals.">
   <meta property="og:type" content="website">
   <meta property="og:locale" content="en_US">
   <meta property="og:site_name" content="Kiln">
@@ -24,8 +24,8 @@
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Kiln Evals &mdash; Score every adapter, locally">
-  <meta name="twitter:description" content="Pluggable scorers, dataset-to-suite synthesis, post-training auto-eval, and the local A/B judgment flywheel.">
+  <meta name="twitter:title" content="Kiln Evals &mdash; Evidence before adapter activation">
+  <meta name="twitter:description" content="Grade one target, compare adapters on shared sampling inputs, replay exact decoder bytes, and gate LoRA activation with held-out evals.">
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image-v3.png">
   <meta name="twitter:image:alt" content="Kiln — Serve it. Teach it. Watch it get better. OpenAI-compatible inference, live LoRA training, and local evals in one server.">
 
@@ -80,7 +80,7 @@
       position: absolute;
       left: 1rem;
       top: 0;
-      transform: translateY(-120%);
+      transform: translateY(calc(-100% + 1px));
       z-index: 50;
       background: var(--accent);
       color: #1a0c00;
@@ -274,23 +274,26 @@
   <!-- hero -->
   <section class="hero-glow">
     <div class="max-w-4xl mx-auto px-6 pt-16 pb-10">
-      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">Evals &middot; a peer of training</span>
+      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">Evals &middot; evidence before activation</span>
       <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">
-        Score every adapter you ship &mdash; entirely on your own GPU.
+        Evaluate each adapter before you activate it.
       </h1>
       <p class="text-lg leading-relaxed max-w-3xl" style="color: var(--fg-dim);">
-        Kiln treats evals as a peer of training, not an afterthought. Pluggable scorers, dataset &rarr; suite synthesis, head-to-head adapter comparisons, and post-training auto-grading run on the same single-GPU binary that serves traffic.
-        The optional LLM judge is itself a local LoRA you train from A/B preferences &mdash; <strong>no frontier-model call is ever required</strong>.
+        Grade one target, compare several targets on the same sampling inputs,
+        replay one run byte-for-byte, or bind activation to held-out evidence.
+        These are separate operations with separate claims. Adapter evaluation
+        and live promotion require the <code>experimental</code> profile; a
+        base-model suite can run under <code>stable</code>.
       </p>
       <div class="flex flex-wrap gap-3 mt-8">
         <a href="api.html#evals" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
-          Eval API &rarr;
+          Inspect eval endpoints &rarr;
         </a>
         <a href="https://github.com/ericflo/kiln/blob/main/docs/EVAL_GUIDE.md" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
-          Full GitHub guide &rarr;
+          Read the complete Eval guide &rarr;
         </a>
         <a href="quickstart.html#sft-corrections" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
-          Train first &rarr;
+          Start a training workflow &rarr;
         </a>
       </div>
     </div>
@@ -301,13 +304,15 @@
       <div class="card p-5">
         <div class="label mb-3">On this page</div>
         <div class="flex flex-wrap gap-2 text-sm">
-          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#why-evals">Why evals</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#why-evals">How it works</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#scorers">Scorers</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#synthesize">Dataset &rarr; suite</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#run-suite">Run a suite</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#strict-replay">Strict replay</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#compare">Compare adapters</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#post-eval">Post-training auto-eval</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#flywheel">Judgment flywheel</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#cli">CLI</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#where-to-go-next">Where to go next</a>
         </div>
       </div>
@@ -317,30 +322,57 @@
   <main id="content" tabindex="-1" class="max-w-4xl mx-auto px-6 py-12">
     <div class="grid gap-6">
       <article class="card p-6">
-        <div class="label mb-3">Where things live</div>
-        <h2 id="why-evals" class="text-2xl font-semibold mb-4">Two crates, three on-disk stores</h2>
-        <p class="leading-relaxed" style="color: var(--fg-dim);">
-          The eval system splits into <code>kiln-eval</code> (pure-CPU types: suites, scorers, results, dataset synthesis) and <code>kiln-server::eval</code> (queue, worker, registries, HTTP surface). Suites, datasets, and judgments persist under <code>&lt;eval-root&gt;/{suites,datasets,judgments}/</code> (configurable via <code>[eval] root</code>). The eval worker rides the GPU read-lock so it runs concurrently with serving and training. The full type and request reference is in <a href="https://github.com/ericflo/kiln/blob/main/docs/EVAL_GUIDE.md">EVAL_GUIDE.md</a>; the queue/worker deep-dive is in <a href="architecture.html#eval-pipeline">Architecture &rsaquo; Eval pipeline</a>.
+        <div class="label mb-3">How it works</div>
+        <h2 id="why-evals" class="text-2xl font-semibold mb-4">Choose the operation that answers your question</h2>
+        <div class="endpoint-list mb-5">
+          <div class="endpoint"><code>run</code> &mdash; how does one base model or adapter score on this suite?</div>
+          <div class="endpoint"><code>compare</code> &mdash; which targets perform better on shared per-example sampling inputs?</div>
+          <div class="endpoint"><code>rerun</code> &mdash; do the previously failing examples pass after an intentional change? This is a subset diagnostic, not reproduction.</div>
+          <div class="endpoint"><code>replay</code> &mdash; can this completed run reproduce the same bound identities and raw decoder bytes?</div>
+          <div class="endpoint"><code>post_eval</code> &mdash; did this exact trained revision satisfy the declared evidence gate for activation?</div>
+        </div>
+        <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
+          Eval generation shares the inference side of the GPU lock: it can run
+          beside ordinary inference but waits while training has exclusive
+          accelerator ownership. <code>maintenance</code> rejects eval admission.
+          Use <code>experimental</code> when a run needs a saved adapter or when
+          training and gated promotion share one process.
+        </p>
+        <p class="text-sm" style="color: var(--fg-mute);">
+          By default, Kiln stores suites, datasets, and judgments under
+          <code>&lt;adapter-dir&gt;/.eval/{suites,datasets,judgments}/</code>. To
+          choose another root, set <code>eval_dir = "/path/to/eval"</code> in
+          <code>[eval]</code>; <code>eval.root</code> is not an accepted field.
+          See the complete <a href="docs/evals/">Eval guide</a> for wire
+          contracts and <a href="architecture.html#eval-pipeline">Architecture
+          &rsaquo; Eval pipeline</a> for the worker flow.
         </p>
       </article>
 
       <article class="card p-6">
         <div class="label mb-3">Scorers</div>
-        <h2 id="scorers" class="text-2xl font-semibold mb-4">Pluggable scorers, registered by <code>kind</code></h2>
+        <h2 id="scorers" class="text-2xl font-semibold mb-4">Choose a scorer with <code>kind</code></h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          Scorers are variants of the serde-tagged <code>kiln_eval::scorers::Scorer</code> enum — each variant computes a 0/1 outcome from <code>(generated, target, metadata)</code>, and the <code>kind</code> field on the wire selects which one runs. Built-ins cover the common shapes; adding one means appending a variant, dispatching it in <code>score_completion</code>, and adding a <code>kind_label</code> arm. Synthesis and the UI pick it up automatically.
+          Each scorer compares a generated completion with the example target and
+          metadata, then records a numeric score and a <code>pass</code>,
+          <code>fail</code>, <code>invalid</code>, or <code>error</code> outcome.
+          The suite or individual example selects a scorer through
+          <code>kind</code>.
         </p>
         <div class="endpoint-list">
-          <div class="endpoint"><code>exact_match</code> &mdash; single-source-of-truth answers (math, classification, structured labels).</div>
-          <div class="endpoint"><code>contains</code> &middot; <code>regex</code> &mdash; free-text key-phrase or pattern matching.</div>
-          <div class="endpoint"><code>json_validity</code> &middot; <code>multiple_choice</code> &middot; <code>numeric_tolerance</code> &mdash; structured outputs and graded numeric responses.</div>
-          <div class="endpoint"><code>tool_call</code> &mdash; selected tool + arg shape + per-arg inner-content quality (works for trajectories that end in a tool call).</div>
-          <div class="endpoint"><code>code</code> with <strong>bash introspection</strong> &mdash; code-output evals, including <code>python -c</code>/<code>node -e</code>/<code>uv run</code> inlined inside <code>bash</code>.</div>
-          <div class="endpoint"><code>llm_judge</code> &mdash; route grading through a local judge LoRA (see <a href="#flywheel">the flywheel</a>).</div>
-          <div class="endpoint"><strong>All</strong> &middot; <strong>Any</strong> composites &mdash; combine scorers per example for weighted-vote grading.</div>
+          <div class="endpoint"><code>exact_match</code> &mdash; compare the answer with one target or its aliases under declared case and whitespace rules.</div>
+          <div class="endpoint"><code>contains</code> &middot; <code>regex</code> &mdash; require selected phrases or a regular-expression match in free text.</div>
+          <div class="endpoint"><code>json_validity</code> &middot; <code>multiple_choice</code> &middot; <code>numeric_tolerance</code> &mdash; grade structured JSON, answer labels, or numbers within declared tolerances.</div>
+          <div class="endpoint"><code>tool_call</code> &mdash; compare the selected tool, argument shape, and per-argument content for a trajectory that ends in a tool call.</div>
+          <div class="endpoint"><code>code</code> &mdash; grade code output, including <code>python -c</code>, <code>node -e</code>, or <code>uv run</code> embedded in a <code>bash</code> call.</div>
+          <div class="endpoint"><code>llm_judge</code> &mdash; grade through a named local judge LoRA; see <a href="#flywheel">the judgment workflow</a>.</div>
+          <div class="endpoint"><code>all</code> &middot; <code>any</code> &mdash; require every nested scorer to pass or accept the first passing scorer.</div>
         </div>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">
-          Auto-detect picks a scorer from the target shape (JSON &rarr; <code>JsonValidity</code> + structural checks, short literal &rarr; <code>ExactMatch</code>, code block &rarr; <code>Code</code>, free text &rarr; <code>Contains</code>/<code>LlmJudge</code>).
+          <code>auto_detect</code> checks the target in this order:
+          multiple-choice label, number, tool call, code, valid JSON, short exact
+          text, then long-form key phrases with <code>contains</code>. It never
+          selects <code>llm_judge</code> implicitly.
         </p>
       </article>
 
@@ -348,11 +380,17 @@
         <div class="label mb-3">Dataset &rarr; suite</div>
         <h2 id="synthesize" class="text-2xl font-semibold mb-4">Turn an SFT or GRPO file into a graded suite</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          Upload one corpus and Kiln persists content-addressed, group-aware <code>train</code>, <code>validation</code>, and <code>holdout</code> views. Named training defaults to <code>train</code>; synthesis defaults to <code>holdout</code>. The training rows never become a held-out grader merely because they came from the same JSONL. Reservoir-sampled <code>max_examples</code> caps keep suites runnable in seconds even on hundreds of thousands of rows.
+          Upload one corpus and Kiln creates content-addressed, group-aware
+          <code>train</code>, <code>validation</code>, and <code>holdout</code>
+          views. Named training defaults to <code>train</code>; suite synthesis
+          defaults to <code>holdout</code>. Split assignment, not the shared JSONL
+          file, determines whether a row is training or held-out data. The
+          reservoir-sampled <code>max_examples</code> limit bounds memory use for
+          large sources.
         </p>
         <section class="endpoint">
           <h3 class="font-semibold mb-2">1. Upload a JSONL dataset</h3>
-          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/eval/datasets/upload \
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/eval/datasets/upload \
   -F "file=@/tmp/sft-trajectories.jsonl" \
   -F "name=trajectories-v1" \
   -F "format=sft_chat" \
@@ -360,7 +398,7 @@
         </section>
         <section class="endpoint mt-4">
           <h3 class="font-semibold mb-2">2. Synthesize a suite</h3>
-          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/eval/datasets/trajectories-v1/synthesize \
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/eval/datasets/trajectories-v1/synthesize \
   -H "Content-Type: application/json" \
   -d '{
     "suite_name": "trajectories-suite",
@@ -389,7 +427,7 @@
           </div>
         </div>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">
-          The persisted split manifest keeps normalized duplicates and declared groups/sessions together. Inspect or replace it through <code>GET/PUT /v1/eval/datasets/{name}/split</code>. The complete identity, migration, contamination, and provenance contract is in <a href="docs/dataset-splits/">Dataset Splits and Train/Eval Separation</a>.
+          The persisted split manifest keeps normalized duplicates and declared groups or sessions together. Inspect or replace it through <code>GET/PUT /v1/eval/datasets/{name}/split</code>. The complete identity, migration, contamination, and provenance contract is in <a href="docs/dataset-splits/">Dataset splits and train/eval separation</a>.
         </p>
       </article>
 
@@ -397,14 +435,19 @@
         <div class="label mb-3">Run a suite</div>
         <h2 id="run-suite" class="text-2xl font-semibold mb-4">Grade an adapter against a registered or inline suite</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          <code>POST /v1/eval/run</code> queues the job and returns immediately with a <code>job_id</code> and exact <code>effective_seed</code>. The eval worker resolves the suite from disk (or uses an inline copy), drives the in-process inference path through the requested adapter, and writes per-example outcomes plus a headline accuracy as it goes. Drill into <code>/ui</code> &rsaquo; Evals to watch progress and copy the job or per-completion seeds.
+          <code>POST /v1/eval/run</code> queues a job and returns its
+          <code>job_id</code> and immutable <code>effective_seed</code> immediately.
+          The worker resolves the registered suite or validates its inline copy,
+          runs the requested base model or adapter, and persists each outcome and
+          aggregate metrics. Open <code>/ui</code> &rsaquo; Evals to watch progress
+          and copy the job and per-completion seeds.
         </p>
         <p class="text-sm mb-5" style="color: var(--fg-mute);">
           Admission also snapshots the resident <code>kiln.base-weight-shards.v1</code> manifest and startup-owned <code>kiln.execution-provenance.v1</code> record. Job detail and raw JSON retain every shard plus the complete backend/device, runtime, executable/source, model/tokenizer/template, precision, kernel, and effective-configuration envelope. The dashboard and <code>kiln-eval</code> show compact exact-copy summaries; downloaded outcome JSONL carries both complete records on every standalone row, and terminal archives validate them again on restart. See the <a href="https://github.com/ericflo/kiln/blob/main/docs/BASE_WEIGHT_PROVENANCE.md">base-weight</a> and <a href="https://github.com/ericflo/kiln/blob/main/docs/EXECUTION_PROVENANCE.md">execution provenance</a> contracts.
         </p>
         <section class="endpoint">
           <h3 class="font-semibold mb-2">Run a registered suite against an adapter</h3>
-          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/eval/run \
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/eval/run \
   -H "Content-Type: application/json" \
   -d '{
     "suite": "trajectories-suite",
@@ -415,7 +458,10 @@
         </section>
         <section class="endpoint mt-4">
           <h3 class="font-semibold mb-2">Poll the job</h3>
-          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/eval/jobs/$JOB_ID | python3 -m json.tool</code></pre>
+          <p class="text-sm mb-3" style="color: var(--fg-dim);">Set <code>JOB_ID</code> to the exact <code>job_id</code> returned by submission.</p>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>JOB_ID=replace-with-returned-job-id
+curl -fsS "http://localhost:8420/v1/eval/jobs/${JOB_ID}" \
+  | python3 -m json.tool</code></pre>
         </section>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">
           Re-run only failures from a completed job with <code>POST /v1/eval/jobs/{id}/rerun</code>. The re-run retains the original effective seed by default; send <code>{"seed": 73}</code> only when changing it deliberately. A failure rerun is a subset diagnostic and makes no byte-reproduction claim; use strict replay for that contract.
@@ -424,15 +470,25 @@
 
       <article class="card p-6">
         <div class="label mb-3">Reproducibility</div>
-        <h2 id="strict-replay" class="text-2xl font-semibold mb-4">Replay a seeded run and compare exact decoder bytes</h2>
+        <h2 id="strict-replay" class="text-2xl font-semibold mb-4">Replay one run and compare exact decoder bytes</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          Every new completed production run carries a self-validating <code>kiln.eval-replay.v1</code> record. It binds the exact suite and generation override, effective and per-completion seeds, resolved thinking budgets, full scorer configurations, candidate and judge targets, base weights, execution environment, and one content-addressed reference for every raw decoder continuation and normalized scoring text. The execution identity covers backend/device and runtime evidence, binary/source, model, tokenizer vocabulary/configuration, chat templates, precision, kernels/features, and effective configuration/environment.
+          Every newly completed server eval run carries a self-validating
+          <code>kiln.eval-replay.v1</code> record. It binds the exact suite,
+          generation overrides, effective and per-completion seeds, resolved
+          thinking budgets, scorer configurations, candidate and judge targets,
+          base weights, execution environment, and content hashes for every raw
+          decoder continuation and normalized scoring text.
+        </p>
+        <p class="text-sm mb-5" style="color: var(--fg-mute);">
+          The examples use illustrative job IDs. Replace them with IDs from a
+          completed run or compare job. The <code>kiln-eval</code> command also
+          assumes that you built and placed that client on your <code>PATH</code>.
         </p>
         <section class="endpoint">
           <h3 class="font-semibold mb-2">Strictly replay run zero</h3>
           <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>kiln-eval replay --job eval_123
 
-curl -s -X POST http://localhost:8420/v1/eval/jobs/eval_123/replay \
+curl -fsS -X POST http://localhost:8420/v1/eval/jobs/eval_123/replay \
   -H "Content-Type: application/json" \
   -d '{}'</code></pre>
         </section>
@@ -441,7 +497,7 @@ curl -s -X POST http://localhost:8420/v1/eval/jobs/eval_123/replay \
           <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>kiln-eval replay --job eval_compare_123 --run-index 1 --json</code></pre>
         </section>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">
-          Admission refuses legacy/incomplete sources, changed execution or base-weight digests, and changed candidate or judge adapter bytes before queue visibility. The executor rechecks the loaded candidate before decoding and each loaded judge before scoring. Terminal <code>replay_verdict.status</code> is <code>matched</code>, <code>mismatch</code>, or <code>error</code>; the CLI watches to terminal state and exits nonzero unless all bound identities and raw continuations match byte-for-byte. The Evals dashboard offers the same operation and exact-copy hashes for the selected run.
+          Admission refuses legacy or incomplete sources, changed execution or base-weight digests, and changed candidate or judge adapter bytes before the replay enters the queue. The executor rechecks the loaded candidate before decoding and each loaded judge before scoring. Terminal <code>replay_verdict.status</code> is <code>matched</code>, <code>mismatch</code>, or <code>error</code>; the CLI waits for a terminal state and exits nonzero unless every bound identity and raw continuation matches byte-for-byte. The Evals dashboard offers the same operation and copyable hashes for the selected run.
         </p>
         <p class="text-sm mt-3" style="color: var(--fg-mute);">
           A match proves reproduction for that declared run and environment, not driver correctness or cross-backend determinism. A mismatch is retained evidence and blocks the claim; nondeterministic backend operations may still be the cause. New terminal archives require and validate replay records, while legacy archives remain readable but cannot be strict-replayed. The complete identity, race-boundary, archive, and verdict contract is in <a href="https://github.com/ericflo/kiln/blob/main/docs/EVAL_GUIDE.md#strict-byte-replay">EVAL_GUIDE.md</a>.
@@ -452,11 +508,17 @@ curl -s -X POST http://localhost:8420/v1/eval/jobs/eval_123/replay \
         <div class="label mb-3">Compare</div>
         <h2 id="compare" class="text-2xl font-semibold mb-4">Head-to-head adapter comparison</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          <code>POST /v1/eval/compare</code> materializes one job seed, derives stable seeds from each <code>example_id</code> and completion index, and runs every adapter on those same sampling inputs. Empty or duplicate resolved example IDs are rejected so seeds and aggregate rows cannot alias. Pass an empty string for one adapter entry to compare against the no-adapter baseline. Omit <code>seed</code> for a recorded random value or set it at the top level without replacing the suite's other generation settings.
+          <code>POST /v1/eval/compare</code> materializes one job seed, derives
+          stable seeds from each <code>example_id</code> and completion index, and
+          runs every target on those same sampling inputs. Empty or duplicate
+          resolved example IDs are rejected so seed and result rows cannot alias.
+          An empty adapter string selects the no-adapter baseline. Omit
+          <code>seed</code> for a recorded random value, or set it at the top level
+          without replacing other suite generation settings.
         </p>
         <section class="endpoint">
           <h3 class="font-semibold mb-2">Compare three adapters + baseline</h3>
-          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/eval/compare \
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/eval/compare \
   -H "Content-Type: application/json" \
   -d '{
     "suite": "trajectories-suite",
@@ -469,22 +531,34 @@ curl -s -X POST http://localhost:8420/v1/eval/jobs/eval_123/replay \
         <p class="text-sm mt-4" style="color: var(--fg-mute);">
           Results encode <code>effective_seed</code> and each outcome's <code>generation_seed</code> as decimal strings so browser clients preserve all 64 bits. <code>seed_derivation: "kiln.eval-seed.v1"</code> versions the mapping. Seeded inputs support same-environment comparison and audit; they do not imply byte-identical output across different model revisions, binaries, drivers, devices, kernels, or precision policies.
         </p>
+        <p class="text-sm mt-3" style="color: var(--fg-mute);">
+          A compare job is diagnostic: it never activates an adapter. Use a
+          training request with <code>post_eval.min_accuracy</code> when held-out
+          evidence must gate activation of the exact trained revision.
+        </p>
       </article>
 
       <article class="card p-6">
         <div class="label mb-3">Post-training auto-eval</div>
         <h2 id="post-eval" class="text-2xl font-semibold mb-4">Grade training against declared held-out data</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
+          This live train &rarr; eval &rarr; promotion workflow requires the
+          <code>experimental</code> serving profile. The default
+          <code>stable</code> profile rejects training and adapter-weight
+          transitions. <code>maintenance</code> admits drained training but rejects
+          every eval request because inference is disabled.
+        </p>
+        <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
           An SFT or GRPO request can carry a <code>post_eval</code> block whose <code>data_scope</code> defaults to <code>held-out</code>. Before publishing the training job, Kiln rejects exact, normalized, source-row, group, or session overlap with the admitted corpus. After training, it queues the adapter eval and optional baseline comparison and links both from training detail.
         </p>
         <section class="endpoint">
           <h3 class="font-semibold mb-2">SFT request with auto-eval</h3>
-          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/train/sft \
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -fsS http://localhost:8420/v1/train/sft \
   -H "Content-Type: application/json" \
   -d '{
     "dataset": "trajectories-v1",
     "dataset_split": "train",
-    "config": { "output_name": "my-coder-v4" },
+    "config": { "output_name": "my-coder-v4", "auto_load": true },
     "post_eval": {
       "suite": "trajectories-suite",
       "data_scope": "held-out",
@@ -496,14 +570,18 @@ curl -s -X POST http://localhost:8420/v1/eval/jobs/eval_123/replay \
   | python3 -m json.tool</code></pre>
         </section>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">
-          The same <code>post_eval</code> shape is supported on <code>/v1/train/grpo</code>. Intentional training-data measurement must use <code>data_scope: "train-set-eval"</code>; that diagnostic label cannot be combined with <code>min_accuracy</code>. See <a href="docs/dataset-splits/">Dataset Splits and Train/Eval Separation</a> and the generated <a href="docs/control-plane-api-schema/">control-plane schema</a> for the full contract.
+          The same <code>post_eval</code> shape is supported on <code>/v1/train/grpo</code>. Intentional training-data measurement must use <code>data_scope: "train-set-eval"</code>; that diagnostic label cannot be combined with <code>min_accuracy</code>. See <a href="docs/dataset-splits/">Dataset splits and train/eval separation</a> and the generated <a href="docs/control-plane-api-schema/">control-plane schema</a> for the full contract.
         </p>
         <h3 class="font-semibold mt-7 mb-3">Fail-closed promotion evidence</h3>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
           <code>min_accuracy</code> enables the fixed <code>paired_wilson_v1</code> policy. Kiln compares the candidate with the previously active adapter, or the base model, under the same versioned suite, generation identity, seed derivation, and reduced per-example aggregation. It requires at least 20 independent reduced examples, runs a two-sided exact sign test at <code>alpha=0.05</code>, and requires the candidate&rsquo;s 95% Wilson lower bound to reach <code>min_accuracy</code>. A point estimate never promotes an adapter.
         </p>
         <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
-          The minimum is deliberately fixed rather than caller-configurable, and it is only a floor: 20 passes from 20 examples have a Wilson lower bound of about 0.84, so they cannot prove a 0.90 accuracy requirement. Multi-sample suites reduce to one independent result per example before this calculation.
+          The 20-example minimum and <code>alpha</code> are fixed rather than
+          caller-configurable. The accuracy threshold is a floor, not a point-estimate
+          check: 20 passes from 20 examples have a Wilson lower bound of about
+          0.84, so they cannot prove a 0.90 requirement. Multi-sample suites reduce
+          to one independent result per example before this calculation.
         </p>
         <div class="overflow-x-auto">
           <table class="w-full text-sm" style="border-collapse: collapse;">
@@ -536,7 +614,12 @@ curl -s -X POST http://localhost:8420/v1/eval/jobs/eval_123/replay \
         <div class="label mb-3">Judgment flywheel</div>
         <h2 id="flywheel" class="text-2xl font-semibold mb-4">A/B preferences &rarr; SFT &rarr; judge LoRA</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          The flywheel turns human A/B/Tie/Skip preferences into a local judge LoRA you can drop into any future suite as an <code>llm_judge</code> scorer. The keyboard-driven A/B compare playground at <code>/ui</code> &rsaquo; Judgments writes every pick to a <code>JudgmentStore</code>; one curl compiles the picks into an SFT dataset and another trains the judge — all on the same GPU.
+          The judgment workflow turns human A/B/Tie/Skip preferences into a
+          local judge LoRA that a future suite can use as an
+          <code>llm_judge</code> scorer. In <code>/ui</code> &rsaquo; Judgments,
+          each choice is written to a judgment dataset. Compile those choices
+          into SFT JSONL, train the judge in the <code>experimental</code>
+          profile, and validate it against a held-out slice before use.
         </p>
         <div class="endpoint-list">
           <div class="endpoint"><span class="method">POST</span> <code>/v1/judgments</code> &mdash; create a judgment dataset.</div>
@@ -546,9 +629,16 @@ curl -s -X POST http://localhost:8420/v1/eval/jobs/eval_123/replay \
         </div>
         <section class="endpoint mt-5">
           <h3 class="font-semibold mb-2">Use the trained judge in a suite</h3>
-          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>{
+<pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>{
   "name": "code-quality-suite",
-  "examples": [...],
+  "examples": [{
+    "id": "sum-47-138",
+    "messages": [{
+      "role": "user",
+      "content": "What is 47 + 138? Explain briefly."
+    }],
+    "target": "185"
+  }],
   "default_scorer": {
     "kind": "llm_judge",
     "judge_adapter": "my-judge-v1",
@@ -557,7 +647,9 @@ curl -s -X POST http://localhost:8420/v1/eval/jobs/eval_123/replay \
 }</code></pre>
         </section>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">
-          The judge LoRA is hot-swapped exactly like any other adapter, so the eval worker resolves it through the same scheduler that serves your inference traffic.
+          The eval worker loads the named judge through the same adapter scheduler
+          used for inference and binds that adapter's attested content identity
+          into the run.
         </p>
       </article>
 
@@ -565,12 +657,31 @@ curl -s -X POST http://localhost:8420/v1/eval/jobs/eval_123/replay \
         <div class="label mb-3">CLI</div>
         <h2 id="cli" class="text-2xl font-semibold mb-4"><code>kiln-eval</code> CLI</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
-          The <code>kiln-eval</code> binary wraps the HTTP surface for scripted use: <code>list</code>, <code>register</code> a suite JSON, <code>run</code> a suite against an adapter (with <code>--watch</code>), <code>compare</code> multiple adapters head-to-head, <code>probe</code> with a one-shot prompt+target+scorer, and <code>replay</code> a completed run to a strict terminal byte verdict. Synthesis stays HTTP-only — call <code>POST /v1/eval/datasets/&lt;name&gt;/synthesize</code>. See the <a href="cli.html">CLI Reference</a> and <a href="https://github.com/ericflo/kiln/blob/main/docs/EVAL_GUIDE.md">EVAL_GUIDE.md</a>.
+          <code>kiln-eval</code> wraps the HTTP API for scripts: list or register
+          suites, run or compare targets, probe one prompt, and strict-replay a
+          completed run. It is not included in the current prebuilt server
+          archives. Build this client from source with the command below, or use
+          the HTTP examples on this page. Dataset-to-suite synthesis remains
+          HTTP-only at <code>POST /v1/eval/datasets/&lt;name&gt;/synthesize</code>.
+          See the <a href="cli.html">CLI Reference</a> and complete
+          <a href="docs/evals/">Eval guide</a>.
         </p>
+        <section class="endpoint mb-4">
+          <h3 class="font-semibold mb-2">Build the eval client from source</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>cargo build --release --locked \
+  -p kiln-server --bin kiln-eval
+
+./target/release/kiln-eval --help</code></pre>
+        </section>
         <section class="endpoint">
           <h3 class="font-semibold mb-2">Run a suite from the terminal</h3>
-          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>kiln-eval run --suite trajectories-suite --adapter my-coder-v3
-kiln-eval replay --job eval_123 --json</code></pre>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>./target/release/kiln-eval run \
+  --suite trajectories-suite \
+  --adapter my-coder-v3
+
+./target/release/kiln-eval replay \
+  --job eval_123 \
+  --json</code></pre>
         </section>
       </article>
     </div>
@@ -582,19 +693,19 @@ kiln-eval replay --job eval_123 --json</code></pre>
       <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <a class="card p-5 block" href="api.html#evals">
           <h3 class="font-semibold mb-2">Eval API</h3>
-          <p style="color: var(--fg-dim);">Every <code>/v1/eval/*</code> and <code>/v1/judgments/*</code> endpoint with request shapes.</p>
+          <p style="color: var(--fg-dim);">Inspect every <code>/v1/eval/*</code> and <code>/v1/judgments/*</code> operation and its request shape.</p>
         </a>
         <a class="card p-5 block" href="architecture.html#eval-pipeline">
           <h3 class="font-semibold mb-2">Eval pipeline</h3>
-          <p style="color: var(--fg-dim);">Suite registry, eval queue + worker, drill-in modal flow, post-training auto-eval hook.</p>
+          <p style="color: var(--fg-dim);">Follow suite admission, queueing, execution, persistence, strict replay, and post-training gating.</p>
         </a>
         <a class="card p-5 block" href="grpo.html">
-          <h3 class="font-semibold mb-2">GRPO Guide</h3>
-          <p style="color: var(--fg-dim);">Generate &rarr; score &rarr; train. Pair with auto-eval to grade every adapter you ship.</p>
+          <h3 class="font-semibold mb-2">GRPO guide</h3>
+          <p style="color: var(--fg-dim);">Generate and score rollouts, train an adapter, and bind activation to held-out evidence.</p>
         </a>
-        <a class="card p-5 block" href="https://github.com/ericflo/kiln/blob/main/docs/EVAL_GUIDE.md">
-          <h3 class="font-semibold mb-2">EVAL_GUIDE.md</h3>
-          <p style="color: var(--fg-dim);">Full scorer reference, request schemas, judge-training walkthrough, and CLI subcommands.</p>
+        <a class="card p-5 block" href="docs/evals/">
+          <h3 class="font-semibold mb-2">Eval guide</h3>
+          <p style="color: var(--fg-dim);">Read the complete scorer, suite, result, replay, promotion, and CLI contracts.</p>
         </a>
       </div>
     </div>
@@ -619,7 +730,7 @@ kiln-eval replay --job eval_123 --json</code></pre>
         <a href="demo/">Demo</a>
         <a href="troubleshooting.html">Troubleshooting</a>
         <a href="architecture.html">Architecture</a>
-        <a href="https://github.com/ericflo/kiln/blob/main/BENCHMARKS.md">Benchmarks</a>
+        <a href="docs/benchmarks/">Benchmarks</a>
         <a href="https://github.com/ericflo/kiln/blob/main/CHANGELOG.md">Changelog</a>
         <a href="https://github.com/ericflo/kiln/blob/main/SECURITY.md">Security</a>
         <a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License</a>

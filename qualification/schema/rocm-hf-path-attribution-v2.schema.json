@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ericflo.github.io/kiln/schemas/rocm-hf-path-attribution-v2.schema.json",
   "title": "Kiln ROCm/HF Numerical Path Attribution Result v2",
-  "description": "Source-bound evidence comparing Kiln eager-full, eager-greedy, retained-HIP-graph-full, and retained-HIP-graph-greedy paths with one retained eager Hugging Face full-vocabulary reference.",
+  "description": "Source-bound comparison of four Kiln ROCm paths—eager full logits, eager greedy selection, retained HIP-graph full logits, and retained HIP-graph greedy selection—against one retained eager Hugging Face full-vocabulary reference at the exact first-divergence state.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -21,19 +21,42 @@
     "worker"
   ],
   "properties": {
-    "schema": { "const": "kiln.rocm-hf-path-attribution-result.v2" },
-    "result_sha256": { "$ref": "#/$defs/sha256" },
-    "created_at_utc": { "type": "string", "format": "date-time" },
-    "duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
+    "schema": {
+      "description": "Schema identifier for this path-attribution result.",
+      "const": "kiln.rocm-hf-path-attribution-result.v2"
+    },
+    "result_sha256": {
+      "description": "Canonical SHA-256 identity of the complete result after removing this self-hash field.",
+      "$ref": "#/$defs/sha256"
+    },
+    "created_at_utc": {
+      "description": "UTC time when the result record was created.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "duration_seconds": {
+      "description": "Total wall-clock duration of build, fingerprinting, contained execution, verification, and result assembly.",
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
     "source": {
       "description": "The exact clean commit, origin/main commit, and Git tree used to build and execute the worker.",
       "type": "object",
       "additionalProperties": false,
       "required": ["commit", "origin_main", "tree"],
       "properties": {
-        "commit": { "$ref": "#/$defs/gitObject" },
-        "origin_main": { "$ref": "#/$defs/gitObject" },
-        "tree": { "$ref": "#/$defs/gitObject" }
+        "commit": {
+          "description": "Full Git commit checked out during build and execution.",
+          "$ref": "#/$defs/gitObject"
+        },
+        "origin_main": {
+          "description": "Full `origin/main` commit required to equal the checked-out commit.",
+          "$ref": "#/$defs/gitObject"
+        },
+        "tree": {
+          "description": "Git tree object for the checked-out commit.",
+          "$ref": "#/$defs/gitObject"
+        }
       }
     },
     "binary": {
@@ -47,10 +70,23 @@
         "sha256"
       ],
       "properties": {
-        "build_duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
-        "build_environment_policy": { "const": "closed-source-build-v1" },
-        "path": { "const": "target/release/examples/rocm_hf_path_attribution" },
-        "sha256": { "$ref": "#/$defs/sha256" }
+        "build_duration_seconds": {
+          "description": "Wall-clock duration of the admitted release build.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "build_environment_policy": {
+          "description": "Identifier of the closed build-environment contract applied to the release binary.",
+          "const": "closed-source-build-v1"
+        },
+        "path": {
+          "description": "Repository-relative path of the admitted attribution executable.",
+          "const": "target/release/examples/rocm_hf_path_attribution"
+        },
+        "sha256": {
+          "description": "SHA-256 identity of the exact executable admitted by the guarded runner.",
+          "$ref": "#/$defs/sha256"
+        }
       }
     },
     "implementation": {
@@ -59,9 +95,18 @@
       "additionalProperties": false,
       "required": ["guarded_exec_sha256", "process_runner_sha256", "runner_sha256"],
       "properties": {
-        "guarded_exec_sha256": { "$ref": "#/$defs/sha256" },
-        "process_runner_sha256": { "$ref": "#/$defs/sha256" },
-        "runner_sha256": { "$ref": "#/$defs/sha256" }
+        "guarded_exec_sha256": {
+          "description": "SHA-256 identity of the exact-argument executable gate.",
+          "$ref": "#/$defs/sha256"
+        },
+        "process_runner_sha256": {
+          "description": "SHA-256 identity of the process-containment runner.",
+          "$ref": "#/$defs/sha256"
+        },
+        "runner_sha256": {
+          "description": "SHA-256 identity of the source-bound path-attribution orchestrator.",
+          "$ref": "#/$defs/sha256"
+        }
       }
     },
     "request": {
@@ -70,14 +115,23 @@
       "additionalProperties": false,
       "required": ["path", "sha256"],
       "properties": {
-        "path": { "type": "string", "minLength": 1 },
-        "sha256": { "$ref": "#/$defs/sha256" }
+        "path": {
+          "description": "Repository-relative path to the retained first-divergence request.",
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "description": "Canonical SHA-256 identity of the retained request content.",
+          "$ref": "#/$defs/sha256"
+        }
       }
     },
     "model_identity": {
+      "description": "Recomputed content identity of the exact model, tokenizer, chat template, configuration, and weight shards.",
       "$ref": "rocm-hf-next-token-oracle-v2.schema.json#/$defs/modelIdentity"
     },
     "model_fingerprint": {
+      "description": "Implementation and process evidence for the separate contained model-fingerprinting step.",
       "$ref": "rocm-hf-next-token-oracle-v2.schema.json#/$defs/modelFingerprintEvidence"
     },
     "oracle_reference": {
@@ -92,11 +146,28 @@
         "raw_sha256"
       ],
       "properties": {
-        "bytes": { "type": "integer", "minimum": 1 },
-        "oracle_result_path": { "type": "string", "minLength": 1 },
-        "oracle_result_sha256": { "$ref": "#/$defs/sha256" },
-        "raw_location": { "const": "local_ignored" },
-        "raw_sha256": { "$ref": "#/$defs/sha256" }
+        "bytes": {
+          "description": "Exact size in bytes of the retained full-vocabulary Hugging Face logits artifact.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "oracle_result_path": {
+          "description": "Repository-relative path to the retained Hugging Face oracle result.",
+          "type": "string",
+          "minLength": 1
+        },
+        "oracle_result_sha256": {
+          "description": "Canonical SHA-256 identity recorded by the retained oracle result.",
+          "$ref": "#/$defs/sha256"
+        },
+        "raw_location": {
+          "description": "Retention class for the raw logits file; `local_ignored` means it is intentionally outside tracked source.",
+          "const": "local_ignored"
+        },
+        "raw_sha256": {
+          "description": "SHA-256 identity of the retained raw logits artifact's exact bytes.",
+          "$ref": "#/$defs/sha256"
+        }
       }
     },
     "containment": {
@@ -105,44 +176,70 @@
       "additionalProperties": false,
       "required": ["host_available_before_gib", "network", "process"],
       "properties": {
-        "host_available_before_gib": { "type": "integer", "minimum": 1 },
-        "network": { "const": "forbidden" },
+        "host_available_before_gib": {
+          "description": "Whole GiB of host memory reported available immediately before contained worker launch.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "network": {
+          "description": "Network policy applied to the worker; fixed to an isolated namespace with access forbidden.",
+          "const": "forbidden"
+        },
         "process": {
+          "description": "Bounded process and exit evidence for the contained Kiln worker.",
           "$ref": "rocm-hf-next-token-oracle-v2.schema.json#/$defs/processEvidence"
         }
       }
     },
-    "worker": { "$ref": "#/$defs/worker" }
+    "worker": {
+      "description": "Four-path numerical evidence and the first path that explains the observed divergence.",
+      "$ref": "#/$defs/worker"
+    }
   },
   "$defs": {
     "sha256": {
+      "description": "Lowercase SHA-256 digest with the `sha256:` algorithm prefix.",
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
     },
     "gitObject": {
+      "description": "Full lowercase SHA-1 Git object identifier.",
       "type": "string",
       "pattern": "^[0-9a-f]{40}$"
     },
     "tokenId": {
+      "description": "Tokenizer vocabulary ID for the bound Qwen3.5-4B model identity.",
       "type": "integer",
       "minimum": 0,
       "maximum": 248319
     },
     "tokenSequence": {
-      "description": "The predicted token after the prompt and after each of the three forced common continuation tokens.",
+      "description": "Four predicted tokens: one after the prompt and one after each of the three forced common continuation tokens.",
       "type": "array",
       "minItems": 4,
       "maxItems": 4,
       "items": { "$ref": "#/$defs/tokenId" }
     },
     "candidateLogit": {
+      "description": "One disputed candidate token annotated with its logit and one-based rank in a Kiln full-vocabulary path.",
       "type": "object",
       "additionalProperties": false,
       "required": ["logit", "rank", "token_id"],
       "properties": {
-        "logit": { "type": "number" },
-        "rank": { "type": "integer", "minimum": 1, "maximum": 248320 },
-        "token_id": { "$ref": "#/$defs/tokenId" }
+        "logit": {
+          "description": "Kiln F32 logit at this candidate's vocabulary ID.",
+          "type": "number"
+        },
+        "rank": {
+          "description": "One-based rank of this candidate in the complete Kiln vocabulary, with 1 denoting the argmax.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 248320
+        },
+        "token_id": {
+          "description": "Vocabulary ID of the disputed candidate.",
+          "$ref": "#/$defs/tokenId"
+        }
       }
     },
     "comparison": {
@@ -160,37 +257,79 @@
         "top10_overlap"
       ],
       "properties": {
-        "argmax": { "$ref": "#/$defs/tokenId" },
-        "argmax_equal": { "type": "boolean" },
+        "argmax": {
+          "description": "Kiln argmax token ID for this full-logits path.",
+          "$ref": "#/$defs/tokenId"
+        },
+        "argmax_equal": {
+          "description": "Whether this Kiln argmax equals the retained Hugging Face argmax.",
+          "type": "boolean"
+        },
         "candidate_tokens": {
+          "description": "The disputed Kiln and vLLM candidates annotated with their logit and rank in this Kiln path.",
           "type": "array",
           "minItems": 2,
           "maxItems": 2,
           "items": { "$ref": "#/$defs/candidateLogit" }
         },
-        "cosine_similarity": { "type": "number", "minimum": -1, "maximum": 1 },
-        "logits_sha256": { "$ref": "#/$defs/sha256" },
-        "max_abs_error": { "type": "number", "minimum": 0 },
-        "mean_abs_error": { "type": "number", "minimum": 0 },
-        "top10_overlap": { "type": "integer", "minimum": 0, "maximum": 10 }
+        "cosine_similarity": {
+          "description": "Cosine similarity between this complete Kiln F32 logit vector and the retained Hugging Face vector.",
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        },
+        "logits_sha256": {
+          "description": "SHA-256 identity of this path's contiguous F32 full-vocabulary logit bytes.",
+          "$ref": "#/$defs/sha256"
+        },
+        "max_abs_error": {
+          "description": "Largest elementwise absolute difference from the retained Hugging Face logits.",
+          "type": "number",
+          "minimum": 0
+        },
+        "mean_abs_error": {
+          "description": "Mean elementwise absolute difference from the retained Hugging Face logits.",
+          "type": "number",
+          "minimum": 0
+        },
+        "top10_overlap": {
+          "description": "Number of vocabulary IDs shared by the two unordered top-ten token sets.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        }
       }
     },
     "fullPath": {
+      "description": "One Kiln path that materializes full-vocabulary logits at the final forced-continuation state.",
       "type": "object",
       "additionalProperties": false,
       "required": ["comparison", "observed_next_tokens"],
       "properties": {
-        "comparison": { "$ref": "#/$defs/comparison" },
-        "observed_next_tokens": { "$ref": "#/$defs/tokenSequence" }
+        "comparison": {
+          "description": "Numerical comparison between this path's final logits and the retained Hugging Face reference.",
+          "$ref": "#/$defs/comparison"
+        },
+        "observed_next_tokens": {
+          "description": "Predicted token after the prompt and after each forced continuation step.",
+          "$ref": "#/$defs/tokenSequence"
+        }
       }
     },
     "greedyPath": {
+      "description": "One Kiln greedy-selection path that records tokens without retaining a full-vocabulary comparison.",
       "type": "object",
       "additionalProperties": false,
       "required": ["final_token_matches_reference", "observed_next_tokens"],
       "properties": {
-        "final_token_matches_reference": { "type": "boolean" },
-        "observed_next_tokens": { "$ref": "#/$defs/tokenSequence" }
+        "final_token_matches_reference": {
+          "description": "Whether the token selected after the third forced continuation equals the retained Hugging Face argmax.",
+          "type": "boolean"
+        },
+        "observed_next_tokens": {
+          "description": "Predicted token after the prompt and after each forced continuation step.",
+          "$ref": "#/$defs/tokenSequence"
+        }
       }
     },
     "graph": {
@@ -209,15 +348,47 @@
         "replay_successes"
       ],
       "properties": {
-        "cache_admission_successes": { "type": "integer", "minimum": 1 },
-        "capture_attempts": { "type": "integer", "minimum": 1 },
-        "capture_failures": { "const": 0 },
-        "capture_successes": { "type": "integer", "minimum": 1 },
-        "enabled": { "const": true },
-        "fallbacks": { "const": 0 },
-        "replay_attempts": { "type": "integer", "minimum": 7 },
-        "replay_failures": { "const": 0 },
-        "replay_successes": { "type": "integer", "minimum": 7 }
+        "cache_admission_successes": {
+          "description": "Number of captured graphs admitted to the retained graph cache.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "capture_attempts": {
+          "description": "Number of HIP graph-capture attempts during the worker.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "capture_failures": {
+          "description": "Number of HIP graph-capture failures; retained evidence requires zero.",
+          "const": 0
+        },
+        "capture_successes": {
+          "description": "Number of successful HIP graph captures during the worker.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "enabled": {
+          "description": "Whether the retained HIP graph route was enabled.",
+          "const": true
+        },
+        "fallbacks": {
+          "description": "Number of graph-path executions that fell back to eager execution; retained evidence requires zero.",
+          "const": 0
+        },
+        "replay_attempts": {
+          "description": "Number of retained HIP graph-replay attempts, including priming and both comparison paths.",
+          "type": "integer",
+          "minimum": 7
+        },
+        "replay_failures": {
+          "description": "Number of HIP graph-replay failures; retained evidence requires zero.",
+          "const": 0
+        },
+        "replay_successes": {
+          "description": "Number of successful retained HIP graph replays.",
+          "type": "integer",
+          "minimum": 7
+        }
       }
     },
     "worker": {
@@ -239,8 +410,12 @@
         "schema"
       ],
       "properties": {
-        "schema": { "const": "kiln.rocm-hf-path-attribution.v2" },
+        "schema": {
+          "description": "Schema identifier for the contained worker marker.",
+          "const": "kiln.rocm-hf-path-attribution.v2"
+        },
         "attribution": {
+          "description": "First evaluated path that diverges from the retained Hugging Face argmax, or `serving_only_or_not_reproduced` when all four isolated paths match.",
           "enum": [
             "eager_full_logits",
             "hip_graph_full_logits",
@@ -249,16 +424,47 @@
             "serving_only_or_not_reproduced"
           ]
         },
-        "eager_full": { "$ref": "#/$defs/fullPath" },
-        "eager_greedy": { "$ref": "#/$defs/greedyPath" },
-        "graph": { "$ref": "#/$defs/graph" },
-        "graph_full": { "$ref": "#/$defs/fullPath" },
-        "graph_greedy": { "$ref": "#/$defs/greedyPath" },
-        "hf_argmax": { "$ref": "#/$defs/tokenId" },
-        "input_token_count": { "const": 166 },
-        "input_token_ids_sha256": { "$ref": "#/$defs/sha256" },
-        "kernel_policy": { "const": "qualified" },
-        "request_id": { "type": "string", "minLength": 1 }
+        "eager_full": {
+          "description": "Eager Kiln path that retains and compares full-vocabulary logits.",
+          "$ref": "#/$defs/fullPath"
+        },
+        "eager_greedy": {
+          "description": "Eager Kiln path that uses ordinary greedy token selection.",
+          "$ref": "#/$defs/greedyPath"
+        },
+        "graph": {
+          "description": "Cumulative capture, cache-admission, replay, and fallback counters proving that the graph paths actually replayed.",
+          "$ref": "#/$defs/graph"
+        },
+        "graph_full": {
+          "description": "Retained HIP graph path that returns and compares full-vocabulary logits.",
+          "$ref": "#/$defs/fullPath"
+        },
+        "graph_greedy": {
+          "description": "Retained HIP graph path that uses ordinary greedy token selection.",
+          "$ref": "#/$defs/greedyPath"
+        },
+        "hf_argmax": {
+          "description": "Argmax token ID from the retained eager Hugging Face reference.",
+          "$ref": "#/$defs/tokenId"
+        },
+        "input_token_count": {
+          "description": "Complete prompt-plus-continuation token count for this fixed first-divergence request.",
+          "const": 166
+        },
+        "input_token_ids_sha256": {
+          "description": "Canonical SHA-256 identity of the complete input-token sequence.",
+          "$ref": "#/$defs/sha256"
+        },
+        "kernel_policy": {
+          "description": "ROCm kernel profile installed for the isolated worker.",
+          "const": "qualified"
+        },
+        "request_id": {
+          "description": "Identifier copied from the bound next-token request.",
+          "type": "string",
+          "minLength": 1
+        }
       }
     }
   }

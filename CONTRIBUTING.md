@@ -1,24 +1,50 @@
 # Contributing to Kiln
 
-## Welcome
+Kiln welcomes bug fixes, performance work, backend and kernel improvements,
+tests, documentation, examples, and developer-experience changes.
 
-Kiln is a single-GPU inference server with live LoRA training, written in pure Rust and tuned for one model — [Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B). Contributions of all sizes are welcome: bug reports, performance improvements, kernel work (CUDA, Metal, MLX), documentation, examples, and developer-experience polish.
+Kiln is deliberately focused: it is a single-process Rust serving and training
+runtime for Qwen3.5-4B. Its accelerator paths cover CUDA, ROCm, Vulkan, and
+Metal. A contribution should deepen that implementation instead of turning it
+into a general model framework or adding a sidecar runtime.
 
-A note on scope: Kiln is deliberately a scalpel, not a framework. The scheduler, memory manager, and kernels are all tuned for Qwen3.5-4B's hybrid architecture (24 Gated DeltaNet + 8 GQA layers). PRs that add support for a second model family will be closed unless the design has been agreed in an issue first. The same goes for adding a Python sidecar process — the single-binary, single-process constraint is a core feature, not an accident.
+## Start here
 
-## Before you start
+| Your change | Read first | Evidence expected |
+| --- | --- | --- |
+| Runtime, scheduler, memory, or backend behavior | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Focused behavioral tests and affected contract checks |
+| Public API or configuration | [HTTP API contract](contracts/kiln-http-api-v1.openapi.json) or [configuration](docs/public/CONFIGURATION.md) | Schema, implementation, examples, and docs updated together |
+| Training or evaluation | Relevant guide under `docs/` | Request, lifecycle, receipt, and failure-path tests |
+| Performance | [`BENCHMARKS.md`](BENCHMARKS.md), [`PROFILING.md`](PROFILING.md), and [local qualification](docs/qualification.md) | Comparable before/after evidence on the same declared workload |
+| Documentation site | [`docs/plans/public-site-audit-and-copyediting-plan.md`](docs/plans/public-site-audit-and-copyediting-plan.md) | Docs build, smoke test, links, and desktop/mobile review |
 
-- **File an issue first** for anything non-trivial — roughly 50+ lines of changes, any new dependency, any new kernel, or any new public API surface. A 5-minute conversation up front saves a 5-day rewrite later.
-- **Read [`ARCHITECTURE.md`](ARCHITECTURE.md)** so your change fits the existing seams: `BackendRuntime` for device dispatch, the scheduler for batching, the block manager for paged KV, the `kiln-eval` crate + `crates/kiln-server/src/eval/` for the eval queue and scorer trait, and the kernel crates (`kiln-flash-attn`, `kiln-gdn-kernel`, `kiln-marlin-gemm`, `kiln-rmsnorm-kernel`, `kiln-conv1d-kernel`, `kiln-flce-kernel`) for fused ops.
-- **Adding an eval scorer?** `kiln_eval::scorers::Scorer` is a serde-tagged enum, not a trait — append a variant with the right `#[serde(rename_all = "snake_case")]` `kind`, add the matching `kind_label()` arm, implement the scoring logic in `crates/kiln-eval/src/scorers/<name>.rs`, and dispatch it in `score_completion`. Add it to `auto_detect_scorer` in `synthesis.rs` if the target shape is recognizable, then document the request shape in `docs/EVAL_GUIDE.md` and `docs/site/evals.html`. Synthesis, the UI, and the CLI pick scorers up via `kind_label` once those four edits land — that's the seam to preserve.
-- **For performance changes**, attach a before/after benchmark from `kiln-bench` (median of 3 back-to-back runs; A6000 if you have access). Cite the kernel crate or the specific region in `crates/kiln-model/src/forward.rs` you touched, and include the NVTX hot-region percentages from `PROFILING.md` if relevant.
-- **Search closed PRs** before vendoring a kernel or proposing a fusion. Several speculative wins have already been measured and rejected — the closed-PR history is the cheapest way to avoid burning a weekend on a null result.
+Open an issue before a non-trivial change, new dependency, new kernel, new
+public surface, or model-scope proposal. Describe the problem, the intended
+boundary, and how you will prove the result. Search open and closed issues and
+pull requests first; prior experiments may already contain measurements or a
+rejected design.
+
+## Non-negotiable design boundaries
+
+- **Capability-driven accelerators.** Runtime selection must use available
+  backend capabilities and validated contracts. Marketing names, laptop
+  models, device IDs, and one machine’s memory size belong in evidence—not
+  product dispatch or defaults.
+- **One model family.** Support for another architecture requires prior design
+  agreement because scheduling, memory, kernels, tokenization, and training are
+  specialized for Qwen3.5-4B.
+- **One process and one model allocation.** Do not add a Python sidecar or a
+  second model copy as an implementation shortcut.
+- **Fail closed.** Missing capabilities, inconsistent identity, unsafe memory
+  bounds, and malformed evidence must produce explicit errors rather than
+  silently selecting an unproved path.
+- **Claims follow evidence.** A compile-only backend job is not hardware
+  execution, a microbenchmark is not end-to-end throughput, and one device’s
+  receipt is not support policy for every device.
 
 ## Development setup
 
-Install the repository-pinned Rust toolchain. Rustup reads
-[`rust-toolchain.toml`](rust-toolchain.toml) automatically, including the exact
-`rustfmt` component used by CI:
+Rustup automatically reads the pinned toolchain in `rust-toolchain.toml`.
 
 ```bash
 rustc --version
@@ -26,114 +52,226 @@ rustup show active-toolchain
 cargo fmt --version
 ```
 
-Do not override the repository toolchain with a floating `stable` toolchain.
-Toolchain upgrades are explicit changes to `rust-toolchain.toml` so formatting,
-local builds, release builds, and CI move together.
+Do not override the repository toolchain with a floating toolchain. A toolchain
+upgrade is an explicit change to `rust-toolchain.toml`.
 
-Build the default (no-GPU) configuration. On Linux, use the bounded wrapper.
-It refuses to overlap another compiler, requires adequate available memory,
-uses one build job, and places the complete compiler/linker process tree under
-one no-swap memory ceiling:
+On Linux, build the default no-accelerator configuration with the bounded
+wrapper:
 
 ```bash
 scripts/cargo-bounded.sh build --locked
 ```
 
-This matters on unified-memory accelerator hosts: even a filtered
-`kiln-server` test can link a 400+ MiB debug test executable. Direct `cargo`
-remains available when an operator has independently isolated the build.
+The wrapper serializes compilation, applies a no-swap memory boundary, and
+keeps the compiler and linker process tree together. Direct `cargo` remains
+appropriate when the operator has already isolated resources.
 
-Build with Apple Silicon GPU support (M-series Macs, Xcode Command Line Tools sufficient):
-
-```bash
-cargo build --locked --features metal
-```
-
-Build with NVIDIA CUDA support (Linux + CUDA 12.0+):
+Build one accelerator feature only on a host with its required toolchain:
 
 ```bash
+# NVIDIA CUDA
 cargo build --locked --features cuda
+
+# Vulkan loader, driver, and shader toolchain
+cargo build --locked --features vulkan
+
+# Apple Metal
+cargo build --locked --features metal
+
+# ROCm/HIP
+ROCM_PATH=/opt/rocm \
+  cargo build --locked --no-default-features --features rocm
 ```
 
-CUDA builds compile a fair amount of `nvcc` per architecture. To target only an A6000-class GPU and cut nvcc time by 3-4×, set `KILN_CUDA_ARCHS=86`:
+`KILN_CUDA_ARCHS` and `KILN_ROCM_ARCHS` are optional build controls for
+explicit toolchain targets. If you use them, record the exact values in build
+or qualification evidence. Never turn a local architecture value into a
+runtime device allowlist.
+
+## Run the right tests
+
+Start with the narrowest test that exercises your change, then widen the
+verification surface.
 
 ```bash
-KILN_CUDA_ARCHS=86 cargo build --release --features cuda
+# One package
+scripts/cargo-bounded.sh test --locked -p kiln-core
+
+# Default workspace members
+scripts/cargo-bounded.sh test --locked
 ```
 
-Run the test suite. The skipped `test_health_with_real_backend` depends on a live network backend and is intentionally excluded from automatic CI. Env-mutating tests are serialized via an internal `ENV_LOCK` mutex and run safely in parallel. Run Metal feature tests locally with `--test-threads=1` because of a known race in `candle-metal`'s `MetalDevice::new`:
+`test_health_with_real_backend` is ignored because it requires a real model and
+backend. Do not convert an unavailable accelerator test into a passing skip
+when the claim requires hardware; run the matching local qualification
+workload and retain its receipt.
+
+On Apple Silicon, serialize Metal feature tests because concurrent
+`MetalDevice::new` calls still hit an upstream device-construction race:
 
 ```bash
-scripts/cargo-bounded.sh test --locked -- --skip test_health_with_real_backend
-
-# On an Apple Silicon qualification machine:
 cargo test --locked --features metal -- --test-threads=1
 ```
 
-Do not run workspace-wide `cargo-nextest` concurrently with another build or
-accelerator workload. Its parallelism is throughput-oriented and is not the
-resource-bounded verification path.
+`cargo nextest run --locked` is an optional throughput-oriented local runner.
+Do not run it concurrently with another build or accelerator workload, and do
+not treat it as the repository’s bounded verification path.
+
+Before pushing Rust changes:
 
 ```bash
-cargo nextest run --locked
+cargo fmt --all --check
+scripts/cargo-bounded.sh build --locked
+scripts/cargo-bounded.sh test --locked
 ```
 
-Run the license / source / bans policy check that CI runs:
+Run dependency policy when `Cargo.toml` or `Cargo.lock` changes:
 
 ```bash
-cargo install --locked cargo-deny  # if not already installed
 cargo deny check --all-features
 ```
 
-This validates that any new dependency satisfies the workspace's MIT/Apache-compatible license allowlist and other policy rules in `deny.toml`. CI pins cargo-deny to a specific action SHA (see `.github/workflows/ci.yml`); local runs with the latest version are fine for catching gross violations before pushing.
+Install the pinned-compatible `cargo-deny` tool if it is not already available.
+The policy in `deny.toml` checks licenses, bans, sources, and advisories.
 
-Tests that read implementation source and assert substrings are tracked as migration
-obligations, not correctness evidence. Check the exact inventory and monotonic limits
-before pushing:
+## Contract and qualification checks
+
+Run the checker owned by every contract you edit. Common examples:
 
 ```bash
+python3 scripts/check_runtime_env_contract.py
 python3 scripts/check_source_parsing_tests.py
+python3 scripts/check_repository_artifacts.py
+python3 scripts/qualification/workload.py qualification/workloads/*.json
+find qualification/receipts -type f -name '*.json' -print0 \
+  | sort -z \
+  | xargs -0 python3 scripts/qualification/receipt.py
 ```
 
-Replace an inventoried test with a compile-time constraint, runtime behavior test,
-property test, or structured metadata assertion, then regenerate with `--write`.
-The command lowers the checked-in limits and refuses to bless an increase. See the
-[verification test inventory](docs/VERIFICATION_TEST_INVENTORY.md) for ownership and
-the complete queue.
+Use the explicit checker named by a guide or test suite when its contract is
+not in this representative list.
 
-## Running the server locally
+Tests that read implementation source and assert substrings are migration debt,
+not correctness evidence. Replace them with compile-time constraints, runtime
+behavior, property/state-machine tests, or typed contract assertions. The
+[source-parsing test debt](docs/VERIFICATION_TEST_INVENTORY.md) page explains
+the zero-debt gate.
 
-See [`QUICKSTART.md`](QUICKSTART.md) for the full zero-to-running walkthrough — model download, config, first chat completion, first SFT POST. The default port is `8420` and the embedded web dashboard lives at `/ui`.
+## Documentation changes
 
-## Submitting changes
+Update the source document, schema, example, and navigation label together.
+Generated pages must be changed through their generator or machine-readable
+contract.
 
-- Branch from `main`. Forks and direct branches are both fine.
-- One logical change per PR. Small PRs land faster and are easier to bisect when something regresses.
-- Run `scripts/cargo-bounded.sh build --locked` and `scripts/cargo-bounded.sh test --locked` (with the documented skips above) before pushing on Linux. Automatic CI reruns the Linux default-feature checks; GPU backend builds are deliberate manual jobs and real hardware evidence comes from local qualification receipts. See [`docs/ci-policy.md`](docs/ci-policy.md).
-- Open the PR with a **plain title** — no project prefix. Describe what changed and why in the body.
-- For performance PRs, include comparable local qualification receipts. Record the exact source/model/workload identity, named hardware, tail latency, throughput, memory, and raw-log hash; a green compile-only job is not performance evidence. Follow the [local hardware qualification guide](docs/qualification.md) so another machine can validate and extend the evidence chain.
+Install the pinned docs dependencies once:
 
-## Code style
+```bash
+npm ci --prefix scripts/docs-site
+```
 
-- Run `cargo fmt --all` before committing. CI enforces `cargo fmt --all --check` with the exact toolchain pinned in `rust-toolchain.toml`.
-- **Avoid adding dependencies casually.** Kiln deliberately keeps the dep tree small; every new crate is a build-time cost, an attack-surface increase, and a maintenance burden. Justify new deps in the PR body.
-- **No new `unwrap()` in the request path.** Prefer `?` with helpful errors. The error-message style added in PR #545 is a good reference: say what failed, why, and what to try next, instead of bubbling up a bare `io::Error`.
-- Keep comments short and load-bearing. Explain *why*, not *what* — the code already shows what.
+Then run:
 
-## What we will probably reject
+```bash
+npm test --prefix scripts/docs-site
+node scripts/docs-site/build.mjs --out /tmp/kiln-docs-site
+KILN_DOCS_SITE_ROOT=/tmp/kiln-docs-site \
+KILN_DOCS_REQUIRE_GENERATED=true \
+  node scripts/check_docs_site_smoke.mjs
+```
 
-Setting expectations honestly so you don't waste your time:
+Inspect every changed route at desktop and mobile widths. A successful build
+does not catch unreadable tables, misleading hierarchy, stale screenshots, or
+copy that is technically true but impossible to follow.
 
-- PRs that add support for a second model family. Kiln is scoped to Qwen3.5-4B on purpose; the entire perf story depends on that focus.
-- PRs that introduce a Python sidecar process or a second copy of the model in VRAM. Pure Rust + single process is a core constraint.
-- PRs that bypass safety checks: `--no-verify` git hooks, deleting tests rather than fixing them, removing assertions because they fire, etc.
-- Speculative performance "optimizations" without a profile and a bench. If the change is meant to make Kiln faster, prove it.
-- Large refactors with no behavior change. Kiln favors incremental cleanup that ships alongside real work.
+## Performance changes
 
-## License
+Begin with a hypothesis and profile the affected path. Name the kernel, route,
+or scheduling region you changed and cite the relevant profile evidence.
 
-Kiln is MIT-licensed (see [`LICENSE`](LICENSE)). By submitting a pull request you agree to release your contribution under the MIT License.
+Before and after measurements must keep model, tokenizer, prompts, sampling,
+output length, concurrency, repetitions, configuration, backend, and device
+identity comparable. Use the same committed workload and comparison policy.
+Report correctness, throughput, latency, memory, failures, and the raw-evidence
+hash—not only the metric that improved.
 
-## Questions / discussion
+Use whatever supported device is available for development. The receipt should
+identify that machine precisely, while the implementation remains
+capability-driven. If a change is intended to help Vulkan generally, explain
+the required Vulkan capabilities and test more than one implementation when
+available; do not branch on the device that happened to produce the first
+measurement.
 
-Open an issue or a discussion on [`ericflo/kiln`](https://github.com/ericflo/kiln). There is no Discord or Slack — GitHub is the canonical place for design conversations and bug reports.
+An isolated kernel microbenchmark can localize a change, but it does not replace
+an end-to-end serving receipt when the pull request makes a serving claim.
+Failed or first-nonfit rows are counterevidence and must remain visible.
+
+## Adding an eval scorer
+
+`kiln_eval::scorers::Scorer` is a serde-tagged enum, not a trait. To add a
+scorer:
+
+1. Add the snake-case serde variant and its `kind_label()` arm.
+2. Implement scoring in `crates/kiln-eval/src/scorers/<name>.rs`.
+3. Dispatch the variant from `score_completion`.
+4. Extend `auto_detect_scorer` only when the target shape is unambiguous.
+5. Add focused unit and end-to-end eval lifecycle tests.
+6. Document the request and result behavior in `docs/EVAL_GUIDE.md` and the
+   public eval page.
+
+Keep schema, CLI, UI, synthesis, and server behavior aligned with the enum’s
+single source of truth.
+
+## Code and error style
+
+- Run `cargo fmt --all`; do not hand-format around the pinned formatter.
+- Justify every new dependency in the pull request.
+- Do not add `unwrap()` or `expect()` to request, persistence, or cleanup paths.
+- Errors should say what failed, why it matters, and what the operator can do.
+- Keep comments load-bearing: explain the invariant or reason, not the syntax.
+- Preserve unrelated work in a dirty tree and avoid broad mechanical rewrites
+  unless they are part of the reviewed change.
+
+## Prepare the pull request
+
+Before opening a pull request:
+
+1. Rebase or merge the current `main` according to the repository workflow.
+2. Keep one logical change per pull request.
+3. Review the diff for generated files, accidental artifacts, secrets, and
+   unrelated formatting.
+4. Run formatting, focused tests, the default build/test path, and every
+   contract checker affected by the diff.
+5. Build and visually inspect changed documentation.
+6. Include the problem, design boundary, behavior change, failure behavior,
+   tests, and remaining limitations in the description.
+7. Attach comparable receipts for performance or hardware claims.
+
+Use a plain descriptive title without a project prefix. Automatic CI reruns
+formatting, Linux default-feature checks, policy checks, and documentation
+checks based on changed paths. Backend compile jobs are deliberate manual
+checks; real backend behavior comes from local, source-bound qualification.
+See [CI and local qualification policy](docs/ci-policy.md).
+
+## Changes that need prior agreement
+
+Expect design discussion before work that:
+
+- adds another model family;
+- adds a sidecar process or duplicate model allocation;
+- creates public configuration outside the typed startup registry;
+- dispatches by a marketing device name or machine-specific identity;
+- bypasses memory, identity, provenance, cleanup, or validation checks;
+- introduces a broad refactor without a behavioral reason; or
+- claims a performance improvement without comparable evidence.
+
+The goal is not to block ambitious work. It is to agree on the boundary and
+proof before a large implementation makes review expensive.
+
+## License and discussion
+
+Kiln is MIT-licensed; see [`LICENSE`](LICENSE). By submitting a pull request,
+you agree to release your contribution under that license.
+
+Use [GitHub issues and discussions](https://github.com/ericflo/kiln) for design
+questions, bug reports, and contributor coordination. There is no project
+Discord or Slack.

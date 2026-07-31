@@ -1,239 +1,253 @@
-# `kiln-tensor` substrate quickstart
+# Tensor substrate quickstart
 
-This is the contributor entry point for the in-house tensor /
-autograd / optimizer / graph-capture substrate that
-[#1082](https://github.com/ericflo/kiln/issues/1082) introduces.
-Read this if you're touching any code under `crates/kiln-tensor/`,
-`crates/kiln-blas/`, `crates/kiln-mps/`, `crates/kiln-vulkan-blas/`,
-`crates/kiln-param/`, `crates/kiln-autograd/`, `crates/kiln-optim/`,
-or `crates/kiln-graph/`.
+Use this guide when changing `kiln-tensor`, adding an operation, or debugging a
+device, dtype, shape, layout, or dispatch failure. `kiln-tensor` is an internal
+workspace API: callers and implementations may change together, but every
+change still needs an explicit behavioral contract.
 
-For the full design, see the [migration substrate section of
-ARCHITECTURE.md](../ARCHITECTURE.md#1082-migration-substrate-phase-1-onward)
-and the [#1082 issue body](https://github.com/ericflo/kiln/issues/1082).
+## Start here
 
-For the current shipped status, see
-[`bench-results/substrate-status.md`](../bench-results/substrate-status.md)
-(regenerable via `scripts/audit-substrate-status.sh`).
+| Question | Source of truth |
+| --- | --- |
+| How do I create and inspect a tensor? | `crates/kiln-tensor/src/tensor.rs` |
+| Which scalar types and packed formats exist? | `crates/kiln-tensor/src/dtype.rs` and `element.rs` |
+| How is an operation dispatched? | `crates/kiln-tensor/src/device_op.rs` |
+| Which operation modules are public? | `crates/kiln-tensor/src/ops/mod.rs` |
+| Which backend capabilities are reported? | [Backend capability report](backend-capability-report.md) |
+| Where does the tensor layer sit in the runtime? | [Architecture package boundaries](../ARCHITECTURE.md#package-boundaries) |
 
-## The 8 substrate crates at a glance
+Start with a CPU reference test. Add accelerator evidence only after the
+operation’s numerical, shape, dtype, and error behavior is unambiguous.
 
-```
-kiln-tensor          Tensor + Storage + Layout + DType + TensorId
-                     + ops (11 CPU op families today)
-                     + StreamPlanner + Allocator + CpuAllocator
-                     + Activation registry + profile counters
-                     + safetensors load/save + determinism contract
+## Create, run, and verify one operation
 
-kiln-blas            CUDA cublasLt path (production AlgoCache +
-                     WorkspacePool today; cublasLt MatmulHandle Phase 2.x)
-                     Carries candle-core dep behind `probe` feature
-                     today; Phase 7 swaps to direct cudarc.
+This complete test constructs two CPU tensors, multiplies them, and checks the
+four observable contracts:
 
-kiln-mps             Metal MPS path (MpsTilePolicy + MpsUmaHint)
-                     Carries candle-core dep behind `probe` feature.
+```rust
+use kiln_tensor::{DType, Device, Result, Tensor, ops};
 
-kiln-vulkan-blas     Vulkan compute path (VkWorkgroupConfig +
-                     VkPipelineCacheKey + VkCooperativeMatrixSupport)
-                     **No candle dep** — kiln-vulkan-kernel is already
-                     candle-free.
+#[test]
+fn documented_cpu_matmul_contract() -> Result<()> {
+    let lhs = Tensor::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], (2, 2))?;
+    let rhs = Tensor::from_slice(&[5.0_f32, 6.0, 7.0, 8.0], (2, 2))?;
 
-kiln-param           Parameter handle: one logical parameter, one
-                     stable TensorId, multiple physical storages
-                     (forward + backward + transposed_cache + lora_delta
-                     + output heads). AmpPolicy carried per-Parameter.
+    let output = ops::matmul(&lhs, &rhs)?;
 
-kiln-autograd        Tape-based reverse-mode autograd over
-                     kiln_tensor::Tensor + TensorId. Anti-pattern 16
-                     enforcement via Arc<AtomicU64> version handles.
-
-kiln-optim           Fused per-backend optimizer step. AdamW + SGD
-                     concrete CPU impls; Lion + Muon scaffolds.
-                     MomentLocation + StochasticRoundingPolicy.
-
-kiln-graph           Command-list capture for CUDA / Metal / Vulkan.
-                     CapturedGraph trait + CaptureSession (RAII guard)
-                     + AllocatorMode (re-exported from kiln-tensor)
-                     + dangling-pointer audit (anti-pattern 16's twin).
+    assert_eq!(output.device(), Device::Cpu);
+    assert_eq!(output.dtype(), DType::F32);
+    assert_eq!(output.shape(), &[2, 2]);
+    assert_eq!(output.to_vec::<f32>()?, vec![19.0, 22.0, 43.0, 50.0]);
+    Ok(())
+}
 ```
 
-## The dispatch flow
+The checked-in version lives in
+`crates/kiln-tensor/tests/docs_quickstart.rs`. Run it with:
+
+```bash
+scripts/cargo-bounded.sh test --locked \
+  -p kiln-tensor --test docs_quickstart
+```
+
+`Tensor::from_slice` derives the dtype from the Rust element type, verifies
+that the shape’s element count equals the slice length, and creates contiguous
+CPU storage. `ops::matmul` dispatches from the tensors’ device. `to_vec`
+returns logical row-major values and requires an exact element-type match.
+
+## The tensor contract
+
+A `Tensor` combines four kinds of state:
+
+| Part | Meaning | Common mistake |
+| --- | --- | --- |
+| Storage | Owned backend memory and its dtype | Assuming a `Device` label alone makes CPU bytes valid GPU storage |
+| Layout | Shape, strides, and start offset over that storage | Passing a view to a kernel that only accepts contiguous input |
+| `TensorId` | Autograd and optimizer identity for this tensor node | Assuming a general view keeps its parent’s identity |
+| Version | Mutation counter shared by aliases | Mutating storage without bumping the version and invalidating tape assumptions |
+
+Treat device, dtype, shape, strides, and identity as part of the operation’s
+public behavior. Do not validate only the numerical values.
+
+## Device selection and movement
+
+`Device` represents `Cpu`, `Cuda(index)`, `Metal(index)`, `Vulkan(index)`, or
+`Rocm(index)`. The index is a logical device selection, not a marketing model,
+vendor allowlist, or memory-size shortcut.
+
+Production code receives the device chosen by the runtime’s capability and
+configuration owners. Tensor operations must not branch on a GPU name, PCI ID,
+host label, or one qualification machine.
+
+Use the device-parametric constructors when the caller already owns a valid
+selection:
+
+```rust
+let input = Tensor::from_vec_on(
+    selected_device,
+    vec![1.0_f32, 2.0, 3.0, 4.0],
+    vec![2, 2],
+)?;
+let zeros = Tensor::zeros_on(selected_device, vec![2, 2], DType::F32)?;
+```
+
+The corresponding backend feature must be compiled. A request for
+`Device::Vulkan(0)` without the `vulkan` feature, for example, returns an
+explicit feature-disabled error.
+
+`Tensor::to_device` supports same-device clones and the host/device transfers
+implemented by the selected feature. Cross-backend and cross-GPU movement is
+not implicit. If two inputs to `dispatch2` or three inputs to `dispatch3` live
+on different devices, dispatch fails before the operation runs.
+
+## Dtypes and readback
+
+Typed constructors accept these Rust element types:
+
+| Rust type | Tensor dtype |
+| --- | --- |
+| `f32` | `DType::F32` |
+| `half::bf16` | `DType::BF16` |
+| `half::f16` | `DType::F16` |
+| `u32` | `DType::U32` |
+| `u8` | `DType::U8` |
+| `i64` | `DType::I64` |
+
+FP8 and packed four-bit formats are storage formats, not ordinary Rust scalar
+elements. Load their validated raw bytes through the owning weight or raw-byte
+path; do not pretend a byte is one logical packed element.
+
+There is no implicit cast during readback:
+
+```rust
+let tensor = Tensor::from_slice(&[1.0_f32, 2.0], (2,))?;
+let values = tensor.to_vec::<f32>()?; // valid
+let wrong = tensor.to_vec::<u32>();   // error: no implicit cast
+```
+
+Use `ops::cast` deliberately when a conversion is part of the algorithm.
+Document the output dtype and tolerance for any lossy conversion.
+
+## Shapes, layouts, and contiguity
+
+The product of the shape dimensions must match the logical element count.
+Shape errors include both values:
 
 ```text
-User call site
-  └─ kiln_tensor::ops::matmul(&a, &b)
-       └─ dispatch2(&MatmulOp, &a, &b)
-            └─ match a.device() {
-                 Device::Cpu     -> op.cpu_fwd(&a, &b),
-                 Device::Cuda(_) -> op.cuda_fwd(&a, &b)
-                                    (default Ok(None) ⇒ fall back to cpu_fwd),
-                 Device::Metal(_)-> op.metal_fwd(...),
-                 Device::Vulkan(_)-> op.vulkan_fwd(...),
-               }
-            └─ Op may record on the autograd tape (Phase 6a) if
-              requires_grad is set on the parent Parameter
-            └─ Returns kiln_tensor::Tensor (zero-copy views via Layout)
+Tensor::from_slice: shape [2, 2] has 4 elements but slice has 3
 ```
 
-Training:
+`narrow`, `reshape`, and `transpose` produce zero-copy views when their layout
+rules permit it. A zero-copy view shares storage and the mutation version with
+its parent, but receives a fresh `TensorId`. A plain clone preserves the ID.
+`Parameter` separately owns one stable logical ID across its physical storage
+variants.
 
-```text
-forward → kiln_autograd::Tape::record per op
-       → loss tensor
-       → tape.backward(loss_id, seed_grad, accumulator) → GradStore
-       → optimizer.step(parameter, grad) per parameter
-            └─ reads parameter.amp_policy() for dispatch dtype
-            └─ updates parameter.backward_storage() in place
-              (in-place mutation calls tensor.bump_version()
-              — anti-pattern 16)
-       → Tape::clear() (required before next forward)
+`contiguous()` is a materialization boundary, not a harmless formatting call.
+When it copies, it increments
+`kiln_tensor::profile::contiguous_copy_count()`. A kernel should declare and
+test its stride support. Do not insert an unmeasured `.contiguous()` merely to
+make a backend path accept a view.
+
+## Dispatch and fallback
+
+`DeviceOp1`, `DeviceOp2`, and `DeviceOp3` define operations by input arity.
+Each backend method returns:
+
+| Result | Meaning |
+| --- | --- |
+| `Ok(Some(output))` | This backend produced the output |
+| `Ok(None)` | No native implementation accepted this input; apply the dispatcher’s fallback policy |
+| `Err(error)` | The operation or backend failed; stop dispatch |
+
+CPU is the mandatory numerical reference. Missing native behavior is handled
+differently by backend:
+
+- Metal, Vulkan, and ROCm may stage inputs to CPU, run the reference
+  implementation, and copy the result back. Each such event increments the
+  backend-and-arity counters returned by
+  `profile::device_op_host_fallback_counts()`.
+- CUDA does not perform that host round trip. The dispatcher tries the CPU
+  method against the original storage, so operations that require CPU storage
+  fail and expose the missing native path.
+
+A host fallback is a correctness bridge. It is not proof of acceptable
+latency, throughput, or memory traffic. Decode and training hot paths must
+assert that unexpected fallback counters remain zero and must be qualified on
+the real device relevant to the claim.
+
+## Add or change an operation
+
+1. Define the operation’s accepted ranks, shapes, dtypes, devices, output, and
+   failure cases before choosing a kernel.
+2. Add or update its module under `crates/kiln-tensor/src/ops/`.
+3. Use `DeviceOp1`, `DeviceOp2`, or `DeviceOp3` when the standard dispatcher
+   owns the operation. Some multi-output or specialized operations have an
+   explicit owning API instead; follow that existing boundary.
+4. Implement `cpu_fwd` as the canonical numerical reference.
+5. Validate shared shape and dtype rules consistently across every native
+   backend method.
+6. Return `Ok(None)` only when the documented fallback is safe. Return an
+   actionable error for an invalid input or failed backend operation.
+7. Export the convenience function from `ops/mod.rs`.
+8. Add CPU arithmetic, shape, dtype, layout, and error tests.
+9. Add same-input backend parity tests for every native implementation.
+10. For a hot path, add evidence that no unexpected host fallback or
+    contiguous copy occurred, then run the relevant local qualification
+    workload.
+
+Do not use a hardcoded device model to choose a kernel. Query the capabilities
+that the kernel actually requires, validate the input geometry, and keep
+machine identity in the resulting evidence.
+
+## Verification ladder
+
+Run the smallest relevant test first:
+
+```bash
+scripts/cargo-bounded.sh test --locked \
+  -p kiln-tensor --test docs_quickstart
+
+scripts/cargo-bounded.sh test --locked -p kiln-tensor
 ```
 
-Graph capture:
+Then build and test the feature you changed on a suitable host:
 
-```text
-allocator.warm(dtype, n, count) for every shape the captured graph needs
-session = CaptureSession::begin()
-allocator.set_mode(AllocatorMode::Frozen)
-... per-backend graph capture ops, each session.pin(&tensor) ...
-session.finalize()
-// On every replay:
-session.audit_pinned(&live)  // Err(DanglingPointer) if pinned id dropped
-captured.replay()
+```bash
+cargo test --locked -p kiln-tensor --features cuda
+cargo test --locked -p kiln-tensor --features rocm
+cargo test --locked -p kiln-tensor --features vulkan
+cargo test --locked -p kiln-tensor --features metal -- --test-threads=1
 ```
 
-## The 11 CPU op families (Phase 1 reference)
+Feature compilation and tests that skip unavailable hardware are not
+on-device proof. For an accelerator correctness or performance claim, run the
+checked-in workload through `scripts/qualification/run.py`, require every case,
+and retain the source-bound receipt.
 
-| Op | Path | Migration target |
-|---|---|---|
-| `embedding(weight, ids)` | `ops::embedding` | `Tensor::index_select` axis 0 |
-| `index_select(x, axis, ids)` | `ops::index_select` | `Tensor::index_select` any axis |
-| `rms_norm(x, weight, eps)` | `ops::rmsnorm` | candle's `RmsNorm` |
-| `add` / `sub` / `mul` / `div` | `ops::elementwise` | `Tensor::{add,sub,mul,div}` |
-| `silu` / `sigmoid` | `ops::activation` | `Tensor::{silu, sigmoid}` |
-| `softmax_last_dim(x)` | `ops::softmax` | `candle_nn::ops::softmax_last_dim` |
-| `matmul(a, b)` | `ops::matmul` | `Tensor::matmul` |
-| `argmax_last_dim(x)` | `ops::argmax` | `Tensor::argmax_keepdim(-1)` |
-| `cast(x, dtype)` | `ops::cast` | `Tensor::to_dtype` |
-| `rope(x, cos, sin, rotary_dim)` | `ops::rope` | `candle_nn::rotary_emb::rope` |
-| `l2_norm(x, eps)` | `ops::l2norm` | `Tensor::l2_normalize(-1)` |
-| `mul_sigmoid_gate(gate, up)` | `ops::silu_mul` | fused silu*mul from MLP work |
-| `sum_all` / `mean_all` / `sum_axis` / `mean_axis` | `ops::reduce` | reductions |
-| `masked_fill(x, mask, value)` | `ops::mask` | pre-softmax masking |
-| `causal_mask(seq_len)` | `ops::mask` | `Tensor::tril` / `triu` equivalent |
+## Failure triage
 
-Each op:
+| Symptom | Check first |
+| --- | --- |
+| Constructor reports the wrong element count | Compare the value length with the product of the declared shape |
+| `to_vec` reports a dtype mismatch | Read back with the exact element type, or cast explicitly before readback |
+| Dispatch reports inputs on different devices | Move data once at the owning boundary; do not hide movement inside the operation |
+| “feature is not enabled” | Build the owning crate and caller with the intended backend feature |
+| “no backend produced output” | Confirm the native method or permitted host fallback exists for that device and input |
+| Correct values but poor accelerator performance | Inspect host-fallback and contiguous-copy counters before changing the math |
+| A view fails in a kernel | Check strides and the kernel’s support predicate; materialize only at an explicit, measured boundary |
+| Backward reports a version mismatch | Find the in-place mutation that failed to bump or respect the shared version |
 
-- Implements `DeviceOp1`, `DeviceOp2`, or `DeviceOp3`
-- Provides `cpu_fwd` (mandatory, canonical reference)
-- Has default-`None` `cuda_fwd` / `metal_fwd` / `vulkan_fwd`
-- Declares `name()` + `determinism()` for the parity-tolerance + Phase 9 audit
-- Returns `bwd() -> Option<Box<dyn BackwardOp>>` (None today; Phase 6b/c
-  fills in)
+## Invariants worth preserving
 
-## Adding a new op
-
-1. Pick `DeviceOp1` / `DeviceOp2` / `DeviceOp3` based on arity.
-2. Create `crates/kiln-tensor/src/ops/<name>.rs`.
-3. Implement the struct + the trait methods.
-4. Add a convenience free function (`pub fn my_op(...) -> Result<Tensor>`)
-   that wraps `dispatch{1,2,3}`.
-5. Wire into `crates/kiln-tensor/src/ops/mod.rs` (module + pub use).
-6. Write 6-10 unit tests at minimum:
-   - Happy path with exact known arithmetic
-   - BF16 path with ULP tolerance (use `1e-2` for elementwise / reductions)
-   - Multi-dim shape preservation
-   - Each validation error path
-   - Op metadata (name + determinism)
-7. Add a row to `scripts/audit-substrate-status.sh`'s ROWS table.
-8. Update `bench-results/parity-tolerance.csv` with the new
-   op × dtype × backend cells if the op introduces a new category.
-
-## Adding a per-backend Allocator impl
-
-1. New file `crates/kiln-tensor/src/cuda_allocator.rs` (or metal /
-   vulkan).
-2. Feature-gate with `#[cfg(feature = "cuda")]`.
-3. Impl `kiln_tensor::Allocator`. Mirror `CpuAllocator`'s structure
-   (mode + cache + bytes tracking).
-4. Add `cuda_zeros`-style convenience constructors that route
-   through the allocator.
-5. Tests: gate on `KILN_TENSOR_CUDA_TEST=1` env + a real GPU context;
-   silent skip otherwise (the existing CudaStorage tests follow
-   this pattern).
-
-## Adding a per-backend CapturedGraph impl
-
-Lives in a new crate `kiln-graph-cuda` / `kiln-graph-metal` /
-`kiln-graph-vulkan`. The trait is `kiln_graph::CapturedGraph`. Each
-impl wraps:
-
-- CUDA: `cudarc::driver::CudaGraphExec`
-- Metal: `MTLIndirectCommandBuffer` + `MTLBinaryArchive` for AOT cache
-- Vulkan: secondary command buffer + `cmd_batch.rs` extension
-
-## Anti-patterns: read these before touching the substrate
-
-The full list is in
-[#1082](https://github.com/ericflo/kiln/issues/1082). Top-of-mind:
-
-1. **`kiln-tensor` is not a candle wrapper.** Storage is
-   `cudarc::CudaSlice` / `metal::Buffer` / `ash::vk::Buffer` directly.
-   No `candle_core::Tensor` field anywhere.
-2. **Every `contiguous()` is logged.** `Tensor::contiguous()` calls
-   `profile::emit_contiguous_copy()` on the materializing branch;
-   the bench-gate's "copies per token" metric reads this counter.
-4. **The `BackendRuntime` trait is the seam.** `kiln-tensor` slots in
-   *below* it. Don't restructure `forward.rs` during the migration.
-5. **No "big rewrite" PR.** Every phase is many small mergeable PRs
-   (this substrate landed in ~60).
-10. **`narrow` / `reshape` / `transpose` / `slice` are zero-copy.**
-    Downstream kernels declare stride support in their `supports_*`
-    function — don't silently `.contiguous()` to satisfy a kernel.
-11. **One Parameter, one TensorId — stable across variants.**
-    Forward-quantized + backward-master + transposed cache + LoRA
-    delta all live behind one `Parameter` keyed on one
-    `kiln_tensor::TensorId`. Verified by
-    `crates/kiln-optim/tests/integration.rs::adamw_lora_swap_preserves_optimizer_state`.
-13. **NVTX range names are part of the trace contract.** Don't rename
-    `kiln/gdn/in_proj` etc. without explicit deliberation; PROFILING.md
-    hot-region percentages stay comparable across the migration.
-16. **In-place mutation invalidates the tape.** Call
-    `tensor.bump_version()` on every in-place mutation; the tape walker
-    asserts. Verified by
-    `crates/kiln-autograd/tests/end_to_end.rs::backward_anti_pattern_16_detection_end_to_end`.
-19. **Specialize to Qwen3.5-4B; generality is a perf cost.** Hot-path
-    APIs that take `hidden_dim` / `intermediate_dim` / `vocab_size` as
-    runtime parameters when fixed for Qwen3.5-4B are code smell.
-
-## Next-step PR shapes
-
-These are good first contributions:
-
-- **Per-backend `Allocator` impl.** Today's `CpuAllocator` is the
-  reference; `CudaAllocator` (cudaMemPool_t), `MetalAllocator`
-  (MTLHeap), `VulkanAllocator` (lift `buffer_pool.rs`) are
-  straight-line ports.
-- **Per-op CUDA forward.** Pick an op family from the table above
-  whose CUDA path needs implementing (most do); write a
-  `kiln_tensor::ops::<op>::cuda_fwd` impl. Cite the parity-tolerance
-  row in your PR.
-- **CustomOpN porting.** Each of the 15 sites from Phase 0.2's audit
-  (`bench-results/customop-audit.csv`) ports onto the new
-  `DeviceOp` shape. Three of the ports already exist as forward-only
-  scaffolds; the others need fwd + bwd.
-- **Per-backend `CapturedGraph` impl.** Create `kiln-graph-cuda` /
-  `-metal` / `-vulkan`. The Phase 5 issue text and
-  `crates/kiln-graph/src/captured_graph.rs` trait doc are the
-  starting points.
-- **kiln-train migration.** Migrate one
-  `crates/kiln-train/src/trainer.rs::AdamWMoments` HashMap entry off
-  candle's TensorId onto `kiln_tensor::TensorId` + `kiln-optim::AdamW`.
-  Behind a feature flag (`KILN_USE_KILN_OPTIM`).
-
-## Where to ask
-
-- Slack / dev channel: tag `@kiln-substrate`
-- The `#1082` issue thread for design questions
-
-Happy hacking.
+- CPU remains a tested numerical reference.
+- Device selection is capability-driven and explicit.
+- Mixed-device inputs fail rather than moving silently.
+- Dtype changes are explicit.
+- Views stay zero-copy until an owned materialization boundary.
+- In-place mutation updates the shared version.
+- Clones preserve `TensorId`; ordinary view operations receive a fresh ID;
+  `Parameter` preserves its own logical ID across storage variants.
+- Fallback and copy counters remain visible in performance-sensitive paths.
+- Errors name the violated device, dtype, shape, layout, or capability
+  boundary and give the contributor a next check.
