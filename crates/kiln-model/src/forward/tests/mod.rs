@@ -7204,6 +7204,48 @@ fn test_causal_conv1d_update_matches_fallback_metal() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn causal_conv1d_single_token_prefill_matches_decode_cpu() -> Result<()> {
+    let (batch, channels, kernel_size) = (1usize, 7usize, 4usize);
+    let x_data: Vec<f32> = (0..batch * channels)
+        .map(|i| ((i as f32 + 1.0) * 0.071).sin())
+        .collect();
+    let weight_data: Vec<f32> = (0..channels * kernel_size)
+        .map(|i| ((i as f32 + 3.0) * 0.037).cos())
+        .collect();
+    let state_data: Vec<f32> = (0..batch * channels * (kernel_size - 1))
+        .map(|i| ((i as f32 + 5.0) * 0.053).sin())
+        .collect();
+    let x = Tensor::from_vec(x_data, (batch, channels, 1))?;
+    let weight = Tensor::from_vec(weight_data, (channels, 1, kernel_size))?;
+    let initial_state = Tensor::from_vec(state_data, (batch, channels, kernel_size - 1))?;
+
+    let mut prefill_state = initial_state.clone();
+    let prefill = causal_conv1d_prefill(&x, &weight, &mut prefill_state, kernel_size)?;
+    let mut decode_state = initial_state;
+    let decode = causal_conv1d_decode(&x, &weight, &mut decode_state, kernel_size)?;
+
+    let output_diff = (prefill - decode)?
+        .abs()?
+        .flatten_all()?
+        .max(0)?
+        .to_scalar::<f32>()?;
+    let state_diff = (prefill_state - decode_state)?
+        .abs()?
+        .flatten_all()?
+        .max(0)?
+        .to_scalar::<f32>()?;
+    assert!(
+        output_diff <= 1e-6,
+        "single-token prefill/decode output drifted by {output_diff:e}"
+    );
+    assert!(
+        state_diff <= 1e-6,
+        "single-token prefill/decode state drifted by {state_diff:e}"
+    );
+    Ok(())
+}
+
 #[cfg(feature = "metal")]
 #[test]
 fn test_causal_conv1d_prefill_bf16_parity_on_metal() -> Result<()> {
@@ -8202,6 +8244,70 @@ fn test_gated_deltanet_forward_streaming_matches_monolithic_cpu() -> Result<()> 
         "streaming GDN conv state drifted: max_abs_diff={max_abs_conv:e}"
     );
 
+    Ok(())
+}
+
+#[cfg(feature = "rocm")]
+#[test]
+fn rocm_tape_streaming_gdn_records_single_token_tail() -> Result<()> {
+    if !kiln_tensor::rocm_is_available() {
+        eprintln!("skip rocm_tape_streaming_gdn_records_single_token_tail: no ROCm device");
+        return Ok(());
+    }
+
+    let config = streaming_test_config();
+    let device = Device::Rocm(0);
+    let weights = make_hybrid_gpu_weights(
+        &device,
+        config.vocab_size,
+        config.hidden_size,
+        config.num_attention_heads,
+        config.num_kv_heads,
+        config.head_dim,
+        config.intermediate_size,
+        config.num_layers,
+        config.full_attention_interval,
+    )?;
+    let lin_weights = match &weights.layers[0].attention {
+        GpuAttentionWeights::Linear(weights) => weights,
+        GpuAttentionWeights::Full(_) => panic!("test setup error: layer 0 must be GDN"),
+    };
+    let backend = crate::backend::for_device_kt(&device);
+    let tile = GDN_CHUNK_SIZE;
+    let total = tile + 1;
+    let input_values = (0..total * config.hidden_size)
+        .map(|i| ((i as f32 * 0.019).sin()) * 0.1)
+        .collect::<Vec<_>>();
+    let input = Tensor::from_vec_on(device, input_values, vec![1, total, config.hidden_size])?;
+    let mut state = LinearAttentionState::new(&config, &device)?;
+
+    let (output, tape) = kiln_autograd::with_thread_local_tape(|| {
+        gated_deltanet_forward_streaming(
+            &*backend,
+            &input,
+            lin_weights,
+            &config,
+            &mut state.recurrent_states[0],
+            &mut state.conv_states[0],
+            tile,
+            None,
+        )
+    });
+    let output = output?;
+    assert_eq!(output.dims(), &[1, total, config.hidden_size]);
+    assert!(
+        tape.reachable_from(output.id()).contains(&input.id()),
+        "streaming GDN output must remain connected through the one-token tail to its input"
+    );
+    let seed = Tensor::ones(output.shape().to_vec(), output.dtype(), &device)?;
+    let gradients = tape.backward(output.id(), seed, kiln_tensor::ops::add)?;
+    let input_gradient = gradients
+        .get(input.id())
+        .context("streaming GDN tape omitted the input gradient after a one-token tail")?;
+    assert!(
+        input_gradient.all_finite()?,
+        "streaming GDN one-token-tail input gradient is non-finite"
+    );
     Ok(())
 }
 

@@ -888,12 +888,21 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
                         cuda_silu(&y)?
                     }
                 }
+            } else if tape_recording_active {
+                // A partial streaming tail can contain exactly one token (for
+                // example 1025 tokens with a 256-token tile). Decode's
+                // in-place state path is intentionally forward-only, but the
+                // portable prefill composite supports T=1 and has the
+                // authoritative tape recorder. Use it here so the tail stays
+                // connected to in_proj_qkv instead of rejecting an otherwise
+                // valid training trajectory. Its shift-and-append state update
+                // is algebraically identical to causal_conv1d_decode at T=1.
+                kiln_nvtx::range!(c"kiln/gdn/conv/fallback_prefill_single_token_tape");
+                let y =
+                    causal_conv1d_prefill(&mixed_qkv_ct, &weights.conv1d, conv_state, kernel_size)?;
+                let y = record_prefill_conv(&y)?;
+                cuda_silu(&y)?
             } else {
-                if tape_recording_active {
-                    anyhow::bail!(
-                        "active tape scope cannot run GDN single-token causal conv1d without a recorder"
-                    );
-                }
                 kiln_nvtx::range!(c"kiln/gdn/conv/fallback_decode");
                 let y =
                     causal_conv1d_decode(&mixed_qkv_ct, &weights.conv1d, conv_state, kernel_size)?;
