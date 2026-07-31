@@ -206,6 +206,7 @@ def build_adapter_definitions() -> None:
             "environment_name": ref("NonEmptyString"),
             "environment_base_url": ref("NonEmptyString"),
             "openapi_version": ref("NonEmptyString"),
+            "discovery_sha256": ref("Sha256"),
             "environment_schema_sha256": ref("Sha256"),
             "action_schema_sha256": ref("Sha256"),
             "groups": ref("PositiveInteger"),
@@ -214,7 +215,7 @@ def build_adapter_definitions() -> None:
             "terminations": ref("OpenEnvTerminationCountsV1"),
         },
         "One protocol endpoint and immutable schema identity represented in an OpenEnv training corpus.",
-        optional=("openapi_version",),
+        optional=("openapi_version", "discovery_sha256"),
     )
     add_object(
         "OpenEnvTrainingDataProvenanceV1",

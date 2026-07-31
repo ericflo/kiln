@@ -363,7 +363,7 @@ OpenEnv RL
         <pre class="mt-5"><code>persisted run request + environment URLs + aligned credentials/reset plan
   -> idempotent persisted creation
   -> bounded FIFO workflow admission
-  -> inspect identity and compile self-contained action schema
+  -> canonicalize complete discovery identity and compile self-contained action schema
   -> round-robin seed-matched candidate episodes
   -> validate every model action before its environment step
   -> environment-owned returns
@@ -374,6 +374,14 @@ OpenEnv RL
   -> paired held-out environment evaluation
   -> promote, retain, or reject adapter
   -> completed evidence or typed terminal failure</code></pre>
+        <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
+          Current inspection binds a canonical <code>kiln.openenv-discovery.v1</code> SHA-256 over
+          the complete raw metadata, schema, environment inventory, and OpenAPI values before typed
+          projection. Whitespace and object-key order are irrelevant; unknown extension fields remain
+          identity-bearing. Every session also repeats status-only health immediately before its
+          WebSocket upgrade. Rollout and corpus provenance retain the digest, while legacy v1 evidence
+          without it remains readable.
+        </p>
         <p class="mt-4 leading-relaxed" style="color: var(--fg-dim);">
           The advertised action schema is enforced, not merely shown to the policy. Inspection
           auto-detects its JSON Schema draft, supports internal references, and rejects external

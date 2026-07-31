@@ -108,12 +108,13 @@ For a stage collected from OpenEnv, replace `openenv: null` with:
   "candidate_summary_sha256": "sha256:…",
   "paired_return_decision": "passed",
   "paired_return_outcome": "promoted",
+  "environment_discovery_sha256": ["sha256:…"],
   "environment_schema_sha256": ["sha256:…"],
   "environment_deployment_identity": ["image-or-binary-sha256:…"]
 }
 ```
 
-The URL and schema hash in a rollout identify what Kiln observed; they do not
+The URL, canonical complete-discovery digest, and schema hash in a rollout identify what Kiln observed; they do not
 prove that an implementation behind the URL stayed unchanged. The deployment
 identity closes that evidence gap.
 
@@ -251,7 +252,7 @@ Before any GPU work in a stage N ≥ 2:
 
    - if Rule A selected OpenEnv, CLI or server inspection succeeds for every
      environment, its self-contained action schema compiles without external
-     references, and its schema identity matches the planned stage; require
+     references, and its complete-discovery plus schema identity matches the planned stage; require
      sampled-action schema failures to remain local `invalid_model_action`
      evidence rather than environment `VALIDATION_ERROR`; retain the
      server `run_id` and linked `training_job_id`; submit the complete request

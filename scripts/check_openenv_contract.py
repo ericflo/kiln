@@ -60,6 +60,7 @@ def fixtures() -> dict[str, dict]:
                 "documentation_url": None,
             },
             "schema_sha256": hash_value("a"),
+            "discovery_sha256": hash_value("b"),
         },
         "schema": {
             "action": {
@@ -435,6 +436,18 @@ def main() -> int:
     openenv_training_data_schema = control_plane.get("$defs", {}).get(
         "OpenEnvTrainingDataProvenanceV1", {}
     )
+    for definition in [
+        "OpenEnvIdentity",
+        "OpenEnvRolloutProvenanceV1",
+        "OpenEnvTrainingEnvironmentV1",
+    ]:
+        properties = (
+            control_plane.get("$defs", {}).get(definition, {}).get("properties", {})
+        )
+        if properties.get("discovery_sha256") != {"$ref": "#/$defs/Sha256"}:
+            failures.append(
+                f"control-plane schema {definition} is missing complete discovery identity"
+            )
     if (
         openenv_training_data_schema.get("properties", {})
         .get("schema", {})
@@ -726,6 +739,9 @@ def main() -> int:
         "ensure_unchanged",
         "EnvironmentIdentityChanged",
         "pub async fn revalidate",
+        "canonical_json_sha256",
+        "kiln.openenv-discovery.v1",
+        "every session connection",
     ]:
         if term not in client:
             failures.append(f"kiln-openenv client is missing session-lifecycle term {term}")
@@ -770,6 +786,7 @@ def main() -> int:
         "OpenEnvCollectionStage::Revalidating",
         "environment.revalidate(expected)",
         "before artifact publication",
+        "complete discovery digest",
     ]:
         if term not in cli:
             failures.append(f"openenv_cli.rs is missing identity-revalidation term {term}")
@@ -803,6 +820,8 @@ def main() -> int:
         "identity_verification",
         "ACTION_SCHEMA_VALIDATION_FAILED",
         "external HTTP/filesystem",
+        "canonical complete-discovery SHA-256",
+        "status-only health check",
     ]:
         if command not in guide:
             failures.append(f"OpenEnv guide is missing {command!r}")
@@ -821,6 +840,8 @@ def main() -> int:
         "requires exact equality",
         "ACTION_SCHEMA_VALIDATION_FAILED",
         "without HTTP/filesystem reference",
+        "canonical complete-discovery digest",
+        "health-gated connection",
     ]:
         if term not in replay_reference:
             failures.append(f"OpenEnv replay reference is missing {term!r}")

@@ -1042,6 +1042,9 @@ pub async fn run_openenv(command: &OpenEnvCommands) -> Result<()> {
                     "  OpenAPI version: {}",
                     identity.openapi_version.as_deref().unwrap_or("unspecified")
                 );
+                if let Some(discovery_sha256) = &identity.discovery_sha256 {
+                    println!("  Discovery SHA-256: {discovery_sha256}");
+                }
                 println!("  Schema SHA-256: {}", identity.schema_sha256);
                 println!("  Description:    {}", identity.metadata.description.trim());
                 println!();
@@ -2833,6 +2836,11 @@ async fn run_candidate_episode(
         inspection.identity.metadata.name.clone(),
         inspection.identity.base_url.clone(),
         inspection.identity.openapi_version.clone(),
+        inspection
+            .identity
+            .discovery_sha256
+            .clone()
+            .context("current OpenEnv inspection omitted its complete discovery digest")?,
         inspection.identity.schema_sha256.clone(),
         action_schema_sha256,
         reset_sha256,

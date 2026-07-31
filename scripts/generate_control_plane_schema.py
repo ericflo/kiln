@@ -373,6 +373,7 @@ def build_grpo_types() -> None:
             "environment_name": ref("NonEmptyString"),
             "environment_base_url": ref("NonEmptyString"),
             "openapi_version": ref("NonEmptyString"),
+            "discovery_sha256": ref("Sha256"),
             "environment_schema_sha256": ref("Sha256"),
             "action_schema_sha256": ref("Sha256"),
             "behavior_policy": external_ref(INFERENCE_SCHEMA, "RolloutBehaviorPolicyIdentityV1"),
@@ -385,7 +386,12 @@ def build_grpo_types() -> None:
             "protocol_error_code": ref("NonEmptyString"),
         },
         "Fail-closed environment, task, and outcome identity attached to a native OpenEnv rollout.",
-        optional=("openapi_version", "behavior_policy", "protocol_error_code"),
+        optional=(
+            "openapi_version",
+            "discovery_sha256",
+            "behavior_policy",
+            "protocol_error_code",
+        ),
         extra={
             "x-kiln-semantic-constraints": [
                 "terminal_done is true exactly when termination is done",
@@ -497,9 +503,10 @@ def build_openenv_types() -> None:
             "environments": array(ref("String")),
             "metadata": ref("OpenEnvMetadata"),
             "schema_sha256": ref("Sha256"),
+            "discovery_sha256": ref("Sha256"),
         },
         "Content-addressed identity established by OpenEnv discovery.",
-        optional=("authentication", "openapi_version"),
+        optional=("authentication", "openapi_version", "discovery_sha256"),
     )
     add_object(
         "OpenEnvInspection",
@@ -1429,6 +1436,7 @@ def build_training_responses() -> None:
             "environment_name": ref("NonEmptyString"),
             "environment_base_url": ref("NonEmptyString"),
             "openapi_version": ref("NonEmptyString"),
+            "discovery_sha256": ref("Sha256"),
             "environment_schema_sha256": ref("Sha256"),
             "action_schema_sha256": ref("Sha256"),
             "groups": ref("PositiveInteger"),
@@ -1437,7 +1445,7 @@ def build_training_responses() -> None:
             "terminations": ref("OpenEnvTerminationCountsV1"),
         },
         "One protocol endpoint and immutable schema identity represented in an OpenEnv training corpus.",
-        optional=("openapi_version",),
+        optional=("openapi_version", "discovery_sha256"),
     )
     add_object(
         "OpenEnvTrainingDataProvenanceV1",
@@ -1779,6 +1787,7 @@ def build_examples() -> dict[str, list[Any]]:
                 "documentation_url": None,
             },
             "schema_sha256": "sha256:" + "0" * 64,
+            "discovery_sha256": "sha256:" + "1" * 64,
         },
         "schema": {
             "action": {"type": "object", "required": ["arm"]},
@@ -1880,6 +1889,7 @@ def build_examples() -> dict[str, list[Any]]:
                 "environment_name": "bandit",
                 "environment_base_url": "http://127.0.0.1:8000",
                 "openapi_version": "3.1.0",
+                "discovery_sha256": "sha256:" + "4" * 64,
                 "environment_schema_sha256": "sha256:" + "5" * 64,
                 "action_schema_sha256": "sha256:" + "6" * 64,
                 "groups": 8,

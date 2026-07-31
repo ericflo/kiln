@@ -1093,8 +1093,9 @@ curl -fsS http://localhost:8420/v1/train/opd \
           restart and execution use it without recomputing defaults, and summary v5 embeds the same
           settings before artifact publication.
           After the final episode, status enters <code>revalidating</code> while Kiln re-reads each
-          endpoint&rsquo;s complete stable discovery identity. A metadata, advertised-name, OpenAPI,
-          authentication, URL, digest, or schema mismatch fails as
+          endpoint&rsquo;s complete stable discovery identity. The canonical discovery digest binds
+          every raw metadata, schema, inventory, and OpenAPI field before typed projection. A metadata,
+          advertised-name, OpenAPI, authentication, URL, digest, or schema mismatch fails as
           <code>environment_identity_changed</code> at <code>identity_verification</code> and publishes
           no mixed-identity artifacts.
           Failed workflows retain a bounded <code>kiln.openenv-run-failure.v1</code>
@@ -1106,7 +1107,7 @@ curl -fsS http://localhost:8420/v1/train/opd \
           training</strong>; collect-only requests reject every training-only field.
         </p>
         <div class="endpoint-list" style="color: var(--fg-dim);">
-          <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/inspect</code> &mdash; discover and normalize protocol metadata and schemas, and compile the self-contained action schema without resolving external references.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/inspect</code> &mdash; discover and canonically content-address complete protocol metadata, schema, inventory, and OpenAPI JSON before typed projection, then compile the self-contained action schema without resolving external references.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/tasks</code> &mdash; list the environment&rsquo;s reset-task catalog through the same origin and credential policy.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/training/preflight</code> &mdash; validate direct OpenEnv training before collection and return its exact effective GRPO config plus a non-reserving queue/tracked-capacity snapshot. Final submission rechecks live queue and memory.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/openenv/runs</code> &mdash; preflight and accept a collect-only or collect-and-train run into bounded FIFO execution. A new run returns 202; the same retained idempotency key and normalized request return the original status with 200; changed reuse returns 409.</div>

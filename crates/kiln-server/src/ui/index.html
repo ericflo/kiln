@@ -543,7 +543,7 @@
       </div>
 
       <div class="tab-content" id="tab-openenv" role="tabpanel" aria-labelledby="training-tab-openenv" hidden inert>
-        <p class="method-lead">Train directly against any OpenEnv-compatible reinforcement-learning environment. Kiln discovers and compiles its self-contained action schema, validates every model action before stepping a seed-matched stateful WebSocket episode, preserves environment-owned rewards and exact replay artifacts, then owns native GRPO and requested evaluation through their terminal outcomes.</p>
+        <p class="method-lead">Train directly against any OpenEnv-compatible reinforcement-learning environment. Kiln content-addresses its complete discovery surface, compiles its self-contained action schema, validates every model action before stepping a health-gated, seed-matched stateful WebSocket episode, preserves environment-owned rewards and exact replay artifacts, then owns native GRPO and requested evaluation through their terminal outcomes.</p>
         <form id="openenv-form">
           <div class="form-group">
             <label for="openenv-environments">Environment URLs <span class="hint">— one OpenEnv HTTP base URL per line</span></label>
@@ -551,7 +551,7 @@
             <div class="form-help">Groups are assigned round-robin across environments. Server-launched runs accept loopback origins by default; an operator can explicitly allow trusted remote origins in <code>[openenv]</code>.</div>
             <div style="display:flex;gap:var(--space-2);align-items:center;margin-top:var(--space-2);">
               <button class="btn btn-sm" id="openenv-inspect" type="button">Inspect protocol</button>
-              <span id="openenv-inspection" class="form-help" role="status" aria-live="polite">Add an environment URL to inspect its identity and compile its action schema. External schema references are rejected.</span>
+              <span id="openenv-inspection" class="form-help" role="status" aria-live="polite">Add an environment URL to bind its complete discovery identity and compile its action schema. External schema references are rejected.</span>
             </div>
           </div>
           <div class="form-group">

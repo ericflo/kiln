@@ -111,8 +111,10 @@ Restore the original bundle or recollect instead of editing retained artifacts.
 After the last episode and before deriving artifacts, collection re-reads every
 stable discovery surface for every endpoint and requires exact equality with
 its initial inspection. Persisted status calls this phase `revalidating`.
-Metadata, advertised names, OpenAPI version, authentication method, URLs,
-schema digest, and action/observation/state schemas are all compared. A mismatch
+The canonical complete-discovery digest binds raw metadata, advertised names,
+OpenAPI, and schema documents—including unknown extension fields—independent of
+whitespace and object-key order. Authentication method, URLs, typed metadata,
+schema digest, and action/observation/state schemas are also compared. A mismatch
 publishes no bundle. The summary therefore proves equal discovery identity at
 the collection boundaries; it cannot prove that an implementation behind the
 same URL remained unchanged between those observations or after publication.
@@ -295,7 +297,7 @@ kiln openenv replay --summary openenv.rollout-summary.json
 Live replay first performs the complete offline verification. It then:
 
 1. discovers every live target and requires the complete captured discovery
-   identity and action/observation/state schemas;
+   digest, identity, and action/observation/state schemas;
 2. opens fresh capacity-aware sessions;
 3. sends the exact effective reset objects and captured actions; and
 4. compares reset observations, observations, tagged rewards, `done`, protocol
@@ -537,7 +539,7 @@ Kiln commit. The current pin publishes a C99 counter plus twenty-two
 text-profiled servers—fourteen arcade/synthesis environments and eight
 text-first math families—then tests:
 
-- discovery, typed schema identity, and close;
+- health-gated connection, canonical complete-discovery identity, typed schema identity, and close;
 - the optional `input_text` profile across every environment in the matrix, without
   making that downstream convention a protocol requirement;
 - schema-discovered answer strings, deterministic seeded prompts, recoverable
@@ -579,7 +581,8 @@ and reset semantics are deployed at the captured URL. Stable schema identity
 does not imply stable behavior.
 
 **A run fails with `environment_identity_changed`.** The environment's stable
-HTTP discovery identity changed between initial inspection and the post-episode
+HTTP discovery identity—including an unprojected metadata, schema, inventory,
+or OpenAPI extension—changed between initial inspection and the post-episode
 `revalidating` phase. Pin or stabilize the deployment, inspect it again, and
 submit a new run with a new idempotency key. Kiln deliberately publishes none
 of the completed episodes from that attempt.

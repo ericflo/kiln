@@ -814,6 +814,9 @@ pub fn verify_openenv_artifacts(
                     && provenance.environment_name == environment.identity.metadata.name
                     && provenance.environment_base_url == environment.identity.base_url
                     && provenance.openapi_version == environment.identity.openapi_version
+                    && provenance.discovery_sha256.as_ref().is_none_or(|digest| {
+                        environment.identity.discovery_sha256.as_ref() == Some(digest)
+                    })
                     && provenance.environment_schema_sha256 == environment.identity.schema_sha256
                     && provenance.action_schema_sha256 == sha256_json(&environment.schema.action)?
                     && provenance.reset_sha256 == sha256_json(&replay_group.reset_payload)?,
@@ -1352,6 +1355,7 @@ mod tests {
                     documentation_url: None,
                 },
                 schema_sha256: format!("sha256:{}", "a".repeat(64)),
+                discovery_sha256: Some(format!("sha256:{}", "d".repeat(64))),
             },
             schema: OpenEnvSchema {
                 action: json!({"type": "object"}),

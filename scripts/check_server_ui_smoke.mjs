@@ -1381,6 +1381,7 @@ async function startServer({
       environment_name: 'math-env',
       environment_base_url: 'https://env.test',
       openapi_version: '3.1.0',
+      discovery_sha256: `sha256:${'4'.repeat(64)}`,
       environment_schema_sha256: `sha256:${'e'.repeat(64)}`,
       action_schema_sha256: `sha256:${'f'.repeat(64)}`,
       groups: 2,
@@ -2072,6 +2073,7 @@ async function startServer({
             environments: ['smoke-bandit'],
             metadata: { name: 'smoke-bandit', description: 'Choose an arm.', version: '1.0.0' },
             schema_sha256: `sha256:${'a'.repeat(64)}`,
+            discovery_sha256: `sha256:${'b'.repeat(64)}`,
           },
           schema: {
             action: { type: 'object', required: ['arm'], properties: { arm: { type: 'integer' } } },
@@ -5007,7 +5009,7 @@ async function runSmoke(baseUrl, {
     await waitForPanelText(page, '#openenv-runs', /Training collection · mean return 0\.625 · range -1\.000…1\.000 · 6 done · 1 max steps · 0 invalid JSON\/schema actions · 1 protocol errors · 19 steps · 144 policy tokens · 12\.5 ms mean model latency · 2 recoveries · 3 capacity retries/, 'OpenEnv run history should expose artifact-bound rollout quality, recovery, and policy-cost statistics');
     await waitForPanelText(page, '#openenv-runs', /Held-out baseline · mean return 0\.100[\s\S]*Held-out candidate · mean return 0\.800/, 'OpenEnv run history should expose both held-out policy collection statistics');
     await waitForPanelText(page, '#openenv-runs', /dataset[\s\S]*aaaaaaaaaaaa/, 'OpenEnv artifact controls should expose the manifest digest identity');
-    await waitForPanelText(page, '#openenv-runs', /OpenEnv corpus · math-env · 2 groups · 4 rollouts · policy base@bbbbbbbbbbbb · seeds 7–8/, 'OpenEnv run history should expose admitted corpus and behavior-policy lineage without opening a second control plane');
+    await waitForPanelText(page, '#openenv-runs', /OpenEnv corpus · math-env · 2 groups · 4 rollouts · policy base@bbbbbbbbbbbb · discovery 444444444444 · seeds 7–8/, 'OpenEnv run history should expose admitted corpus, complete discovery, and behavior-policy lineage without opening a second control plane');
     await waitForPanelText(page, '#openenv-runs', /train_receipt[\s\S]*adapter_manifest/, 'OpenEnv run history should expose retained native training evidence');
     if (setEvalSuites) setEvalSuites([]);
 

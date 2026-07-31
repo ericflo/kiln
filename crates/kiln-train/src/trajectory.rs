@@ -661,6 +661,10 @@ pub struct OpenEnvRolloutProvenanceV1 {
     pub environment_base_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openapi_version: Option<String>,
+    /// Canonical digest of the complete metadata, schema, environment-list,
+    /// and OpenAPI discovery surfaces. Older v1 artifacts may omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_sha256: Option<String>,
     pub environment_schema_sha256: String,
     pub action_schema_sha256: String,
     /// Exact immutable policy revision that sampled every action in this
@@ -692,6 +696,8 @@ impl<'de> Deserialize<'de> for OpenEnvRolloutProvenanceV1 {
             environment_base_url: String,
             #[serde(default)]
             openapi_version: Option<String>,
+            #[serde(default)]
+            discovery_sha256: Option<String>,
             environment_schema_sha256: String,
             action_schema_sha256: String,
             #[serde(default)]
@@ -712,6 +718,7 @@ impl<'de> Deserialize<'de> for OpenEnvRolloutProvenanceV1 {
             environment_name: wire.environment_name,
             environment_base_url: wire.environment_base_url,
             openapi_version: wire.openapi_version,
+            discovery_sha256: wire.discovery_sha256,
             environment_schema_sha256: wire.environment_schema_sha256,
             action_schema_sha256: wire.action_schema_sha256,
             behavior_policy: wire.behavior_policy,
@@ -734,6 +741,7 @@ impl OpenEnvRolloutProvenanceV1 {
         environment_name: impl Into<String>,
         environment_base_url: impl Into<String>,
         openapi_version: Option<String>,
+        discovery_sha256: String,
         environment_schema_sha256: String,
         action_schema_sha256: String,
         reset_sha256: String,
@@ -749,6 +757,7 @@ impl OpenEnvRolloutProvenanceV1 {
             environment_name: environment_name.into(),
             environment_base_url: environment_base_url.into(),
             openapi_version,
+            discovery_sha256: Some(discovery_sha256),
             environment_schema_sha256,
             action_schema_sha256,
             behavior_policy: None,
@@ -800,6 +809,9 @@ impl OpenEnvRolloutProvenanceV1 {
                 version,
                 MAX_ROLLOUT_IDENTITY_TEXT_BYTES,
             )?;
+        }
+        if let Some(discovery_sha256) = &self.discovery_sha256 {
+            validate_sha256("openenv.discovery_sha256", discovery_sha256)?;
         }
         validate_sha256(
             "openenv.environment_schema_sha256",
@@ -1098,6 +1110,7 @@ mod tests {
             "CounterEnvironment",
             "http://127.0.0.1:8990",
             Some("0.1.0".to_string()),
+            hash('8'),
             hash('9'),
             hash('a'),
             hash('b'),
@@ -1118,6 +1131,11 @@ mod tests {
         let parsed: OpenEnvRolloutProvenanceV1 = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(parsed, provenance);
         assert_eq!(parsed.schema(), OPENENV_ROLLOUT_PROVENANCE_SCHEMA_V1);
+
+        let mut legacy = value.clone();
+        legacy.as_object_mut().unwrap().remove("discovery_sha256");
+        let legacy: OpenEnvRolloutProvenanceV1 = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.discovery_sha256, None);
 
         let mut inconsistent_done = value.clone();
         inconsistent_done["terminal_done"] = serde_json::json!(false);

@@ -122,8 +122,8 @@ The runtime is implementation-neutral: miniopenenv is a pinned CI oracle, not
 a dependency, configuration namespace, or special execution path.
 Native GRPO admission preserves a validated OpenEnv corpus identity through
 live job status, the train receipt, and the installed adapter manifest. Its
-ordered plan digest binds each endpoint, schema, reset hash, seed, and candidate
-count. Every action also carries one content-addressed behavior-policy identity
+ordered plan digest binds each endpoint, canonical complete-discovery digest,
+schema, reset hash, seed, and candidate count. Every action also carries one content-addressed behavior-policy identity
 covering the base model, inference config/runtime, and optional adapter bytes;
 drift fails collection or admission instead of silently becoming off-policy.
 Checkpoint resume separately binds every exact input byte.
@@ -225,8 +225,8 @@ invalid model actions, and OpenEnv protocol errors remain distinct. The
 shared reset object can be replaced by an ordered object per environment for
 heterogeneous portfolios. Kiln strips caller-supplied seeds, assigns groups
 round-robin, and publishes a receipt-verifiable reset-plan digest; every listed
-endpoint must be exercised. Rollouts carry environment name, URL,
-action-schema hash, reset hash, exact behavior-policy revision, seed,
+endpoint must be exercised. Rollouts carry environment name, URL, canonical
+complete-discovery digest, action-schema hash, reset hash, exact behavior-policy revision, seed,
 steps, return, and termination identity directly into Kiln's scored-payload
 hash.
 
@@ -242,16 +242,19 @@ The reusable `kiln-openenv` crate implements bounded HTTP discovery and the
 lock-step stateful `WS /ws` protocol, including tagged rewards and the complete
 OpenEnv error vocabulary. Recoverable protocol errors become corrective policy
 turns, while capacity saturation triggers bounded fresh-session acquisition.
+Every session connection repeats OpenEnv's status-only `/health` precondition
+immediately before the WebSocket upgrade.
 Kiln continues pumping Ping/Pong control frames while the model is generating
 an action, so slow policies do not lose their non-resumable episode. A timeout,
 malformed or unsolicited application frame, wrong response type, or transport
 failure permanently poisons that socket; Kiln never risks assigning a late
 lock-step response to the wrong action.
 After the final episode, Kiln enters an explicit `revalidating` phase and
-re-reads every stable discovery surface for every endpoint. Metadata, advertised
-environment names, OpenAPI version, authentication mode, URLs, schema digest,
-and all action/observation/state schemas must exactly match the identities that
-started collection. A mid-run redeploy becomes the typed
+re-reads every stable discovery surface for every endpoint. A canonical digest
+binds the complete raw metadata, schema, advertised environment inventory, and
+OpenAPI documents—including extension fields that typed display models do not
+project—while typed metadata, authentication, URLs, and schemas remain directly
+comparable. All must match the identities that started collection. A mid-run redeploy becomes the typed
 `environment_identity_changed` failure at `identity_verification`; mixed-identity
 episodes never reach an artifact or trainer. Exact live replay applies the same
 complete discovery comparison rather than accepting a matching schema alone.

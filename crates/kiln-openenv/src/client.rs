@@ -146,6 +146,11 @@ pub struct OpenEnvIdentity {
     pub environments: Vec<String>,
     pub metadata: OpenEnvMetadata,
     pub schema_sha256: String,
+    /// Canonical digest of every stable JSON discovery surface: metadata,
+    /// schema, environment inventory, and OpenAPI. Legacy artifacts may omit
+    /// this field; current inspection always emits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -205,6 +210,11 @@ impl OpenEnvInspection {
             (
                 self.identity.schema_sha256 != current.identity.schema_sha256,
                 "identity.schema_sha256",
+            ),
+            (
+                self.identity.discovery_sha256.is_some()
+                    && self.identity.discovery_sha256 != current.identity.discovery_sha256,
+                "identity.discovery_sha256",
             ),
             (self.schema.action != current.schema.action, "schema.action"),
             (
@@ -524,25 +534,30 @@ impl OpenEnvClient {
     /// may answer it independently of environment construction.
     pub async fn inspect(&self) -> Result<OpenEnvInspection, OpenEnvClientError> {
         self.health().await?;
-        let (metadata, schema, environments, openapi) = tokio::try_join!(
-            self.metadata(),
-            self.schema(),
-            self.list_environments(),
-            self.openapi()
+        let (metadata_value, schema_value, environments_value, openapi) = tokio::try_join!(
+            self.get_json::<Value>("metadata"),
+            self.get_json::<Value>("schema"),
+            self.get_json::<Value>("list_environments"),
+            self.get_json::<Value>("openapi.json")
         )?;
-        let schema_bytes = serde_json::to_vec(&schema)
-            .map_err(|error| OpenEnvClientError::InvalidMessage(error.to_string()))?;
-        let schema_sha256 = format!(
-            "sha256:{}",
-            Sha256::digest(schema_bytes)
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        );
+        let schema_sha256 = canonical_json_sha256(&schema_value)?;
         let openapi_version = openapi
             .pointer("/info/version")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
+        let discovery_sha256 = canonical_json_sha256(&serde_json::json!({
+            "schema": "kiln.openenv-discovery.v1",
+            "metadata": &metadata_value,
+            "environment_schema": &schema_value,
+            "environments": &environments_value,
+            "openapi": &openapi,
+        }))?;
+        let metadata: OpenEnvMetadata = serde_json::from_value(metadata_value)
+            .map_err(|error| OpenEnvClientError::InvalidMessage(error.to_string()))?;
+        let schema: OpenEnvSchema = serde_json::from_value(schema_value)
+            .map_err(|error| OpenEnvClientError::InvalidMessage(error.to_string()))?;
+        let environments: Vec<String> = serde_json::from_value(environments_value)
+            .map_err(|error| OpenEnvClientError::InvalidMessage(error.to_string()))?;
         let inspection = OpenEnvInspection {
             identity: OpenEnvIdentity {
                 schema: "kiln.openenv-identity.v1".to_string(),
@@ -558,6 +573,7 @@ impl OpenEnvClient {
                 environments,
                 metadata,
                 schema_sha256,
+                discovery_sha256: Some(discovery_sha256),
             },
             schema,
         };
@@ -581,6 +597,9 @@ impl OpenEnvClient {
     }
 
     pub async fn connect(&self) -> Result<OpenEnvSession, OpenEnvClientError> {
+        // OpenEnv client requirement 8.B.2 makes readiness a precondition of
+        // every session connection, not merely of optional discovery.
+        self.health().await?;
         let socket_config = WebSocketConfig::default()
             .read_buffer_size(16 * 1024)
             .write_buffer_size(16 * 1024)
@@ -1081,6 +1100,42 @@ fn contains_credential(payload: &[u8], credential: &[u8]) -> bool {
             .any(|candidate| candidate == credential)
 }
 
+/// Hash JSON by semantic value rather than response formatting or object-key
+/// order. Discovery documents are external inputs, so their digest must remain
+/// stable if a server merely changes whitespace or map serialization order.
+fn canonical_json_sha256(value: &Value) -> Result<String, OpenEnvClientError> {
+    let mut canonical = value.clone();
+    canonicalize_json(&mut canonical);
+    let encoded = serde_json::to_vec(&canonical)
+        .map_err(|error| OpenEnvClientError::InvalidMessage(error.to_string()))?;
+    Ok(format!(
+        "sha256:{}",
+        Sha256::digest(encoded)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
+
+fn canonicalize_json(value: &mut Value) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                canonicalize_json(value);
+            }
+        }
+        Value::Object(object) => {
+            let mut entries = std::mem::take(object).into_iter().collect::<Vec<_>>();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            for (key, mut value) in entries {
+                canonicalize_json(&mut value);
+                object.insert(key, value);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
 fn unexpected(expected: &'static str, message: &OpenEnvServerMessage) -> OpenEnvClientError {
     let actual = match message {
         OpenEnvServerMessage::Observation(_) => "observation",
@@ -1304,15 +1359,11 @@ mod tests {
             .route("/health", get(|| async { AxumStatusCode::OK }))
             .route(
                 "/metadata",
-                get(|State(changed): State<Arc<AtomicBool>>| async move {
+                get(|| async {
                     Json(json!({
                         "name": "MutableEnvironment",
-                        "description": if changed.load(Ordering::Relaxed) {
-                            "deployment two"
-                        } else {
-                            "deployment one"
-                        },
-                        "version": if changed.load(Ordering::Relaxed) { "2" } else { "1" }
+                        "description": "typed metadata remains unchanged",
+                        "version": "1"
                     }))
                 }),
             )
@@ -1332,7 +1383,16 @@ mod tests {
             )
             .route(
                 "/openapi.json",
-                get(|| async { Json(json!({"info": {"version": "1.0"}})) }),
+                get(|State(changed): State<Arc<AtomicBool>>| async move {
+                    Json(json!({
+                        "info": {"version": "1.0"},
+                        "paths": if changed.load(Ordering::Relaxed) {
+                            json!({"/ws-contract-changed": {}})
+                        } else {
+                            json!({"/ws": {}})
+                        }
+                    }))
+                }),
             )
             .with_state(changed.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1362,6 +1422,7 @@ mod tests {
                     documentation_url: None,
                 },
                 schema_sha256: format!("sha256:{}", "a".repeat(64)),
+                discovery_sha256: Some(format!("sha256:{}", "c".repeat(64))),
             },
             schema: OpenEnvSchema {
                 action: json!({"type": "object", "required": ["move"]}),
@@ -1394,6 +1455,7 @@ mod tests {
         current.identity.metadata.description = "secret changed description".into();
         current.schema.action = json!({"type": "object", "required": ["answer"]});
         current.identity.schema_sha256 = format!("sha256:{}", "b".repeat(64));
+        current.identity.discovery_sha256 = Some(format!("sha256:{}", "d".repeat(64)));
         let error = expected.ensure_unchanged(&current).unwrap_err();
         let OpenEnvClientError::EnvironmentIdentityChanged {
             endpoint,
@@ -1415,6 +1477,7 @@ mod tests {
             &[
                 "identity.metadata",
                 "identity.schema_sha256",
+                "identity.discovery_sha256",
                 "schema.action"
             ]
         );
@@ -1433,9 +1496,55 @@ mod tests {
         assert!(matches!(
             &error,
             OpenEnvClientError::EnvironmentIdentityChanged { changed_fields, .. }
-                if changed_fields == &["identity.metadata"]
+                if changed_fields == &["identity.discovery_sha256"]
         ));
-        assert!(!error.to_string().contains("deployment two"));
+        assert!(!error.to_string().contains("ws-contract-changed"));
+        server.abort();
+    }
+
+    #[test]
+    fn discovery_digest_is_stable_across_object_key_order() {
+        let left = json!({
+            "z": [{"b": 2, "a": 1}],
+            "a": {"nested": true}
+        });
+        let right: Value =
+            serde_json::from_str(r#"{"a":{"nested":true},"z":[{"a":1,"b":2}]}"#).unwrap();
+        assert_eq!(
+            canonical_json_sha256(&left).unwrap(),
+            canonical_json_sha256(&right).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn session_connection_requires_ready_health_before_websocket_upgrade() {
+        let websocket_reached = Arc::new(AtomicBool::new(false));
+        let app = Router::new()
+            .route(
+                "/health",
+                get(|| async { AxumStatusCode::SERVICE_UNAVAILABLE }),
+            )
+            .route(
+                "/ws",
+                get(|State(reached): State<Arc<AtomicBool>>| async move {
+                    reached.store(true, Ordering::Relaxed);
+                    AxumStatusCode::INTERNAL_SERVER_ERROR
+                }),
+            )
+            .with_state(websocket_reached.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let error = OpenEnvClient::new(format!("http://{address}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap_err();
+        assert_eq!(error.http_status_code(), Some(503));
+        assert!(!websocket_reached.load(Ordering::Relaxed));
         server.abort();
     }
 

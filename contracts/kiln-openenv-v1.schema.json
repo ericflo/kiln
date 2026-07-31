@@ -84,7 +84,11 @@
           "items": { "type": "string" }
         },
         "metadata": { "$ref": "#/$defs/Metadata" },
-        "schema_sha256": { "$ref": "#/$defs/Sha256" }
+        "schema_sha256": { "$ref": "#/$defs/Sha256" },
+        "discovery_sha256": {
+          "$ref": "#/$defs/Sha256",
+          "description": "Canonical digest of metadata, schema, environment inventory, and OpenAPI. Omitted only by legacy artifacts."
+        }
       }
     },
     "EnvironmentSchema": {

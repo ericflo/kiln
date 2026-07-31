@@ -232,7 +232,7 @@ async fn bearer_auth_covers_discovery_task_api_and_the_websocket_upgrade() {
     assert!(discovery_error.contains("response body redacted"));
     let websocket_error = rejected.connect().await.unwrap_err().to_string();
     assert!(!websocket_error.contains(wrong_token), "{websocket_error}");
-    assert!(websocket_error.contains("response redacted"));
+    assert!(websocket_error.contains("response body redacted"));
 
     let reflected_http = OpenEnvClient::new(format!("http://{address}"))
         .unwrap()

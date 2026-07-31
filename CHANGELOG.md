@@ -80,6 +80,12 @@
   Mid-run redeployment fails as typed `environment_identity_changed` at
   `identity_verification`, publishes no mixed-identity corpus, and uses the same
   strict comparison during live replay.
+  Complete discovery identity now canonically hashes the full raw metadata,
+  environment inventory, schema, and OpenAPI JSON—including unknown extension
+  fields—before typed projection. Current rollout, group-plan, training receipt,
+  and adapter-manifest provenance carry that digest while legacy v1 records
+  remain readable. Every WebSocket connection also repeats the protocol's
+  status-only health precondition immediately before upgrade.
   Advertised action schemas are now compiled during discovery with automatic
   JSON Schema draft selection and no HTTP/filesystem reference resolution.
   Every model action is validated locally before its WebSocket step;

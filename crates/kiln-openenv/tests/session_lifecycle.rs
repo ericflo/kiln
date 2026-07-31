@@ -3,7 +3,11 @@ use std::{future::Future, time::Duration};
 use futures::{SinkExt, StreamExt};
 use kiln_openenv::{OpenEnvClient, OpenEnvClientError};
 use serde_json::{Value, json};
-use tokio::{net::TcpStream, task::JoinHandle};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    task::JoinHandle,
+};
 use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
 
 type ServerSocket = WebSocketStream<TcpStream>;
@@ -16,6 +20,24 @@ where
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
+        let (mut health_stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0u8; 1024];
+            let read = health_stream.read(&mut chunk).await.unwrap();
+            assert_ne!(read, 0, "health request ended before its headers");
+            request.extend_from_slice(&chunk[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        assert!(request.starts_with(b"GET /health HTTP/1.1\r\n"));
+        health_stream
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        health_stream.shutdown().await.unwrap();
+
         let (stream, _) = listener.accept().await.unwrap();
         let socket = accept_async(stream).await.unwrap();
         handler(socket).await;

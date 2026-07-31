@@ -2134,6 +2134,9 @@
         "openapi_version": {
           "$ref": "#/$defs/NonEmptyString"
         },
+        "discovery_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
         "environment_schema_sha256": {
           "$ref": "#/$defs/Sha256"
         },

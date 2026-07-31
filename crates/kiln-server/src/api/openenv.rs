@@ -3424,6 +3424,7 @@ mod tests {
                     "CounterEnvironment",
                     "http://127.0.0.1:8000",
                     Some("1.0".into()),
+                    format!("sha256:{}", "d".repeat(64)),
                     format!("sha256:{}", "a".repeat(64)),
                     format!("sha256:{}", "b".repeat(64)),
                     format!("sha256:{}", "c".repeat(64)),

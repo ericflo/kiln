@@ -76,6 +76,8 @@ pub struct OpenEnvTrainingEnvironmentV1 {
     pub environment_base_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openapi_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_sha256: Option<String>,
     pub environment_schema_sha256: String,
     pub action_schema_sha256: String,
     pub groups: usize,
@@ -236,6 +238,7 @@ struct OpenEnvGroupPlanIdentityV1<'a> {
     environment_name: &'a str,
     environment_base_url: &'a str,
     openapi_version: &'a Option<String>,
+    discovery_sha256: &'a Option<String>,
     environment_schema_sha256: &'a str,
     action_schema_sha256: &'a str,
     reset_sha256: &'a str,
@@ -370,6 +373,7 @@ impl OpenEnvTrainingDataAccumulator {
             environment_name: &first.environment_name,
             environment_base_url: &first.environment_base_url,
             openapi_version: &first.openapi_version,
+            discovery_sha256: &first.discovery_sha256,
             environment_schema_sha256: &first.environment_schema_sha256,
             action_schema_sha256: &first.action_schema_sha256,
             reset_sha256: &first.reset_sha256,
@@ -402,6 +406,7 @@ impl OpenEnvTrainingDataAccumulator {
                     environment_name: first.environment_name.clone(),
                     environment_base_url: first.environment_base_url.clone(),
                     openapi_version: first.openapi_version.clone(),
+                    discovery_sha256: first.discovery_sha256.clone(),
                     environment_schema_sha256: first.environment_schema_sha256.clone(),
                     action_schema_sha256: first.action_schema_sha256.clone(),
                     groups: 0,
@@ -412,6 +417,7 @@ impl OpenEnvTrainingDataAccumulator {
             });
         if environment.environment.environment_name != first.environment_name
             || environment.environment.openapi_version != first.openapi_version
+            || environment.environment.discovery_sha256 != first.discovery_sha256
             || environment.environment.environment_schema_sha256 != first.environment_schema_sha256
             || environment.environment.action_schema_sha256 != first.action_schema_sha256
         {
@@ -494,6 +500,7 @@ fn same_group_task(left: &OpenEnvRolloutProvenanceV1, right: &OpenEnvRolloutProv
     left.environment_name == right.environment_name
         && left.environment_base_url == right.environment_base_url
         && left.openapi_version == right.openapi_version
+        && left.discovery_sha256 == right.discovery_sha256
         && left.environment_schema_sha256 == right.environment_schema_sha256
         && left.action_schema_sha256 == right.action_schema_sha256
         && left.reset_sha256 == right.reset_sha256
@@ -513,6 +520,9 @@ fn validate_environment(environment: &OpenEnvTrainingEnvironmentV1) -> Result<()
     )?;
     if let Some(version) = environment.openapi_version.as_deref() {
         validate_identity_text("openenv_training_data.openapi_version", version, 256)?;
+    }
+    if let Some(discovery_sha256) = environment.discovery_sha256.as_deref() {
+        validate_sha256("openenv_training_data.discovery_sha256", discovery_sha256)?;
     }
     validate_sha256(
         "openenv_training_data.environment_schema_sha256",
@@ -619,6 +629,7 @@ mod tests {
             "math-env",
             "http://env.test",
             Some("3.1.0".to_string()),
+            hash('d'),
             hash('a'),
             hash('b'),
             hash('c'),
@@ -655,6 +666,7 @@ mod tests {
         assert_eq!(first.total_steps, 8);
         assert_eq!(first.terminations.done, 4);
         assert_eq!(first.environments.len(), 1);
+        assert_eq!(first.environments[0].discovery_sha256, Some(hash('d')));
         assert_eq!(first.behavior_policy, Some(behavior_policy('e')));
     }
 
@@ -728,6 +740,18 @@ mod tests {
         drifted.completions[1].openenv.as_mut().unwrap().seed = 8;
         assert!(
             openenv_training_data_provenance(&[drifted])
+                .unwrap_err()
+                .contains("does not share")
+        );
+
+        let mut discovery_drifted = group(7);
+        discovery_drifted.completions[1]
+            .openenv
+            .as_mut()
+            .unwrap()
+            .discovery_sha256 = Some(hash('f'));
+        assert!(
+            openenv_training_data_provenance(&[discovery_drifted])
                 .unwrap_err()
                 .contains("does not share")
         );

@@ -6327,7 +6327,6 @@ mod tests {
         let req = grpo_req(Some("/tmp/grpo.jsonl"), Vec::new());
         validate_grpo_submission_source(&req, None).unwrap();
     }
-
     #[test]
     fn openenv_no_correction_admission_requires_the_current_behavior_policy() {
         let state = teacher_binding_test_state();
@@ -6336,6 +6335,7 @@ mod tests {
             "math-env",
             "https://env.test",
             Some("3.1.0".to_string()),
+            format!("sha256:{}", "d".repeat(64)),
             format!("sha256:{}", "a".repeat(64)),
             format!("sha256:{}", "b".repeat(64)),
             format!("sha256:{}", "c".repeat(64)),

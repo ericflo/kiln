@@ -24,6 +24,7 @@ fn openenv_grpo_group(seed: u64) -> GrpoGroup {
         "math-env",
         "https://env.test",
         Some("3.1.0".to_string()),
+        format!("sha256:{}", "d".repeat(64)),
         format!("sha256:{}", "a".repeat(64)),
         format!("sha256:{}", "b".repeat(64)),
         format!("sha256:{}", "c".repeat(64)),

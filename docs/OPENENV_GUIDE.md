@@ -77,9 +77,9 @@ kiln openenv inspect --environment http://127.0.0.1:8990 --json
 kiln openenv tasks --environment http://127.0.0.1:8990 --split train
 ```
 
-Inspection checks `/health`, then reads `/metadata`, `/schema`, `/list_environments`, and
-`/openapi.json`. It reports the WebSocket URL, client profile, OpenAPI version, and a SHA-256
-over the typed action/observation/state schema.
+Inspection checks `/health`, then reads `/metadata`, `/schema`, `/list_environments`, and `/openapi.json`.
+It reports the WebSocket URL, client profile, OpenAPI version, schema SHA-256, and a
+canonical complete-discovery SHA-256 over all four raw JSON values. Object-key order and whitespace do not matter; unknown extension fields do. Every session repeats the status-only health check before upgrade.
 
 Inspect before collection. Task API 501 means unsupported; catalog rows remain
 untrusted because OpenEnv defines no portable row-to-reset mapping.

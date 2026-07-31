@@ -432,6 +432,7 @@ CLI train/start/status/artifact · dashboard · /v1/openenv/*
         │                     (before persistence or direct discovery/episodes/GPU work)
         │
         ├── bounded GET health · metadata · schema · environments · OpenAPI
+        ├── canonical complete-discovery digest (including extension fields)
         ├── compile self-contained action schema (no HTTP/file resolution)
         │
         ▼
@@ -542,7 +543,8 @@ the manifest-to-receipt hash link. These small records are capped at 4 MiB each
 and become ordinary run-manifest artifacts, so the OpenEnv lifecycle remains
 self-contained after adapter retention or installation changes.
 
-The WebSocket path is load-bearing. OpenEnv's HTTP `/reset` and `/step` routes
+The WebSocket path is load-bearing. Every connection repeats the status-only
+`GET /health` readiness precondition immediately before upgrade. OpenEnv's HTTP `/reset` and `/step` routes
 construct a fresh environment for each request and cannot carry episode state.
 The client is strictly lock-step because OpenEnv has no correlation IDs and
 permits no server-initiated application messages. While the selected policy is
@@ -560,6 +562,14 @@ environment protocol error. The collector reuses the compiled validator for
 every generated action. A mismatch produces bounded keyword and JSON Pointer
 evidence, receives the configured protocol-error reward, terminates as
 `invalid_model_action`, and never writes the action to the episode socket.
+
+Discovery identity is computed before typed projection. Kiln canonicalizes and
+hashes the complete `/metadata`, `/schema`, `/list_environments`, and
+`/openapi.json` JSON values under `kiln.openenv-discovery.v1`; object-key order
+and whitespace are irrelevant, while unknown extension fields remain bound.
+Current rollout and corpus provenance carry that digest. Legacy v1 artifacts
+without it remain readable, but every current collection and revalidation
+requires it.
 
 Every group is assigned exactly one environment and reset seed. Candidates may
 run concurrently, but their initial messages must be identical or collection

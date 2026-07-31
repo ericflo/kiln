@@ -3784,6 +3784,9 @@
         },
         "schema_sha256": {
           "$ref": "#/$defs/Sha256"
+        },
+        "discovery_sha256": {
+          "$ref": "#/$defs/Sha256"
         }
       },
       "description": "Content-addressed identity established by OpenEnv discovery.",
@@ -4015,6 +4018,9 @@
         },
         "openapi_version": {
           "$ref": "#/$defs/NonEmptyString"
+        },
+        "discovery_sha256": {
+          "$ref": "#/$defs/Sha256"
         },
         "environment_schema_sha256": {
           "$ref": "#/$defs/Sha256"
@@ -5023,6 +5029,9 @@
         },
         "openapi_version": {
           "$ref": "#/$defs/NonEmptyString"
+        },
+        "discovery_sha256": {
+          "$ref": "#/$defs/Sha256"
         },
         "environment_schema_sha256": {
           "$ref": "#/$defs/Sha256"
@@ -7982,7 +7991,8 @@
                 "author": null,
                 "documentation_url": null
               },
-              "schema_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+              "schema_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+              "discovery_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
             },
             "schema": {
               "action": {
@@ -8103,7 +8113,8 @@
                   "author": null,
                   "documentation_url": null
                 },
-                "schema_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                "schema_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "discovery_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
               }
             ],
             "artifacts": [
@@ -8179,6 +8190,7 @@
                       "environment_name": "bandit",
                       "environment_base_url": "http://127.0.0.1:8000",
                       "openapi_version": "3.1.0",
+                      "discovery_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
                       "environment_schema_sha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
                       "action_schema_sha256": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
                       "groups": 8,
@@ -8364,7 +8376,8 @@
               "author": null,
               "documentation_url": null
             },
-            "schema_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            "schema_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "discovery_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
           }
         ],
         "artifacts": [
@@ -8440,6 +8453,7 @@
                   "environment_name": "bandit",
                   "environment_base_url": "http://127.0.0.1:8000",
                   "openapi_version": "3.1.0",
+                  "discovery_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
                   "environment_schema_sha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
                   "action_schema_sha256": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
                   "groups": 8,
