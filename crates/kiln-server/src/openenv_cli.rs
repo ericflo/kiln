@@ -1875,6 +1875,29 @@ mod tests {
     }
 
     #[test]
+    fn rollout_float_aggregates_survive_json_roundtrip_exactly() {
+        let exact_receipt_value = 51.24817837550540_4_f64;
+        let decoded_receipt_value: f64 =
+            serde_json::from_str(&serde_json::to_string(&exact_receipt_value).unwrap()).unwrap();
+        assert_eq!(
+            decoded_receipt_value, exact_receipt_value,
+            "OpenEnv receipt floats must retain their exact IEEE-754 value"
+        );
+
+        let latencies = vec![1.468847_f64, 1.302474_f64];
+        let mean = latencies.iter().sum::<f64>() / latencies.len() as f64;
+        let encoded = serde_json::to_vec(&(mean, &latencies)).unwrap();
+        let (decoded_mean, decoded_latencies): (f64, Vec<f64>) =
+            serde_json::from_slice(&encoded).unwrap();
+
+        assert_eq!(
+            decoded_latencies.iter().sum::<f64>() / decoded_latencies.len() as f64,
+            decoded_mean,
+            "published OpenEnv records must reproduce their exact aggregate receipt"
+        );
+    }
+
+    #[test]
     fn reset_seed_overrides_file_value_and_is_hashed_canonically() {
         let base = json!({"difficulty": 3, "seed": 999});
         let reset = reset_payload(&base, 7).unwrap();

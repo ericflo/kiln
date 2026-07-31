@@ -581,9 +581,11 @@ pub fn verify_openenv_artifacts(
         rollout_count == summary.rollout_count && summary.rollouts.len() == summary.rollout_count,
         "OpenEnv rollout count differs across artifacts"
     );
+    let computed_stats = crate::openenv_cli::summarize_rollouts(&summary.rollouts);
     anyhow::ensure!(
-        crate::openenv_cli::summarize_rollouts(&summary.rollouts) == summary.stats,
-        "OpenEnv summary aggregate statistics do not match its rollout records"
+        computed_stats == summary.stats,
+        "OpenEnv summary aggregate statistics do not match its rollout records: recorded={:?}, computed={computed_stats:?}",
+        summary.stats
     );
 
     let report = OpenEnvVerificationReport {
