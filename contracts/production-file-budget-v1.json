@@ -29,8 +29,8 @@
     },
     {
       "path": "crates/kiln-server/src/api/training.rs",
-      "max_lines": 6540,
-      "rationale": "Streaming GRPO admission tests now live in a focused child module while this API retains the shared inline/JSONL OpenEnv corpus validation and bounded request admission; the lowered exact cap prevents orchestration from drifting back."
+      "max_lines": 6613,
+      "rationale": "The training API owns OpenEnv corpus admission, including the exact behavior-policy match required before no-importance-correction GRPO; the added focused invariant test stays beside that admission boundary and this exact cap prevents unrelated growth."
     },
     {
       "path": "crates/kiln-server/src/batching_engine.rs",
@@ -49,13 +49,13 @@
     },
     {
       "path": "crates/kiln-server/src/state.rs",
-      "max_lines": 8320,
-      "rationale": "Application state adds only the shared OpenEnv run-registry handle and constructor wiring while all lifecycle logic stays in api/openenv.rs; this exact cap blocks unrelated ownership growth."
+      "max_lines": 8384,
+      "rationale": "Application state is the authority for resolving an OpenEnv rollout policy to immutable base-model, inference-config, runtime, and adapter-content revisions; collection and admission share this one canonical identity boundary, and the exact cap blocks unrelated ownership growth."
     },
     {
       "path": "crates/kiln-server/src/training_queue.rs",
-      "max_lines": 7807,
-      "rationale": "Training admission, execution, and publication retain coupled transactional invariants; this exact increase is limited to validating and carrying typed OpenEnv corpus provenance in the server-owned streamed-GRPO receipt."
+      "max_lines": 7960,
+      "rationale": "Training execution and publication share the adapter mutation barrier; OpenEnv adds a final behavior-policy revision check and an immutable trainer-local adapter snapshot under that same lock so admitted rollouts cannot race mutable weights. The exact cap forbids unrelated growth."
     },
     {
       "path": "crates/kiln-tensor/src/cuda_storage.rs",
