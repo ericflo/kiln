@@ -8052,6 +8052,7 @@
               "max_steps": 8,
               "concurrency": 4,
               "max_action_tokens": 256,
+              "thinking_budget_tokens": 128,
               "temperature": 1.0,
               "thinking": false,
               "protocol_error_reward": -1.0,
@@ -8103,6 +8104,9 @@
               "total_model_tokens": 384,
               "mean_model_latency_ms": 125.5
             },
+            "warnings": [
+              "One rollout produced no assistant tokens and was excluded."
+            ],
             "environments": [
               {
                 "schema": "kiln.openenv-identity.v1",
@@ -8262,6 +8266,7 @@
         "max_steps": 8,
         "concurrency": 4,
         "max_action_tokens": 256,
+        "thinking_budget_tokens": 128,
         "temperature": 1.0,
         "thinking": false,
         "protocol_error_reward": -1.0,
@@ -8315,6 +8320,7 @@
           "max_steps": 8,
           "concurrency": 4,
           "max_action_tokens": 256,
+          "thinking_budget_tokens": 128,
           "temperature": 1.0,
           "thinking": false,
           "protocol_error_reward": -1.0,
@@ -8366,6 +8372,9 @@
           "total_model_tokens": 384,
           "mean_model_latency_ms": 125.5
         },
+        "warnings": [
+          "One rollout produced no assistant tokens and was excluded."
+        ],
         "environments": [
           {
             "schema": "kiln.openenv-identity.v1",

@@ -2003,7 +2003,7 @@ mod tests {
         );
         assert_eq!(
             json["serving_profile"]["effective_policy"]["allocator_reclaim"],
-            false
+            true
         );
         assert_eq!(
             json["serving_profile"]["effective_policy"]["vulkan_resident_prefill"],
@@ -2177,7 +2177,7 @@ mod tests {
         );
         assert_eq!(
             json["decode_runtime"]["accelerator_runtime"]["rocm_kernel_profile"]["effective"],
-            "portable_fallback"
+            "native_default"
         );
         assert_eq!(
             json["decode_runtime"]["rocm_synchronization"]["active"],
@@ -2225,7 +2225,7 @@ mod tests {
         );
         let cuda_graphs = &json["decode_runtime"]["cuda_graphs"];
         assert_eq!(cuda_graphs["requested"], true);
-        assert_eq!(cuda_graphs["capture_allowed_by_serving_profile"], false);
+        assert_eq!(cuda_graphs["capture_allowed_by_serving_profile"], true);
         assert_eq!(cuda_graphs["enabled"], false);
         assert_eq!(cuda_graphs["state"], "disabled");
         assert_eq!(cuda_graphs["max_cached_graphs"], 8);
@@ -2294,7 +2294,7 @@ mod tests {
         );
         assert_eq!(
             json["decode_runtime"]["memory_governor"]["disabled_by_serving_profile"],
-            true
+            false
         );
         for counter in [
             "automatic_attempts",

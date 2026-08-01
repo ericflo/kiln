@@ -194,7 +194,7 @@ EXPECTED_COMPONENT_SCHEMA_COUNTS = {
     "total": 144,
 }
 HTTP_METHODS = ("get", "post", "put", "patch", "delete")
-EXPECTED_METHOD_COUNTS = {"DELETE": 13, "GET": 57, "POST": 52, "PUT": 1}
+EXPECTED_METHOD_COUNTS = {"DELETE": 13, "GET": 59, "POST": 52, "PUT": 1}
 EXPECTED_TAG_COUNTS = {
     "adapters": 9,
     "agents": 16,
@@ -209,7 +209,7 @@ EXPECTED_TAG_COUNTS = {
     "recipes": 2,
     "teachers": 5,
     "training": 15,
-    "ui": 9,
+    "ui": 11,
 }
 ALLOWED_MEDIA_TYPES = {
     "application/gzip",
@@ -217,6 +217,8 @@ ALLOWED_MEDIA_TYPES = {
     "application/json",
     "application/octet-stream",
     "application/x-ndjson",
+    "font/ttf",
+    "font/woff2",
     "multipart/form-data",
     "text/css",
     "text/event-stream",
@@ -318,8 +320,8 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
     expected_root = {
         "openapi": "3.1.1",
         "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
-        "x-kiln-path-count": 109,
-        "x-kiln-operation-count": 123,
+        "x-kiln-path-count": 111,
+        "x-kiln-operation-count": 125,
         "x-kiln-method-counts": EXPECTED_METHOD_COUNTS,
         "x-kiln-tag-counts": EXPECTED_TAG_COUNTS,
         "x-kiln-field-schema-status": "complete",
@@ -369,8 +371,8 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
     if not isinstance(paths, dict):
         errors.append("paths must be an object")
         return errors
-    if len(paths) != 109:
-        errors.append(f"paths must contain 109 entries, got {len(paths)}")
+    if len(paths) != 111:
+        errors.append(f"paths must contain 111 entries, got {len(paths)}")
     if list(paths) != sorted(paths):
         errors.append("paths must be sorted lexicographically")
 
@@ -537,8 +539,8 @@ def validate_contract(document: dict[str, Any]) -> list[str]:
         if path in EXPLICIT_ERROR_PATHS and "default" in responses:
             errors.append(f"{label}: explicit error responses must not retain a fictitious default error")
 
-    if operation_count != 123:
-        errors.append(f"operation count must be 123, got {operation_count}")
+    if operation_count != 125:
+        errors.append(f"operation count must be 125, got {operation_count}")
     if dict(sorted(method_counts.items())) != EXPECTED_METHOD_COUNTS:
         errors.append(f"observed method counts drifted: {dict(sorted(method_counts.items()))}")
     if dict(sorted(tag_counts.items())) != EXPECTED_TAG_COUNTS:

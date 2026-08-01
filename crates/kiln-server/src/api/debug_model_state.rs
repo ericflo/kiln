@@ -944,14 +944,14 @@ mod tests {
         );
         assert_eq!(
             json["accelerator_runtime"]["rocm_kernel_profile"]["effective"],
-            "portable_fallback"
+            "native_default"
         );
         assert_eq!(json["cuda_graphs"]["requested"], true);
         assert_eq!(
             json["cuda_graphs"]["capture_allowed_by_serving_profile"],
-            false
+            true
         );
-        assert_eq!(json["cuda_graphs"]["effective_policy_enabled"], false);
+        assert_eq!(json["cuda_graphs"]["effective_policy_enabled"], true);
         assert_eq!(json["cuda_graphs"]["max_cached_graphs"], 8);
         assert_eq!(json["cuda_graphs"]["stable_paged_metadata"], true);
         assert_eq!(json["cuda_graphs"]["batched_capture_available"], false);

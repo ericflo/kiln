@@ -1224,7 +1224,7 @@ mod tests {
         );
         assert_eq!(
             json["accelerator_runtime"]["rocm_kernel_profile"]["effective"],
-            "portable_fallback"
+            "native_default"
         );
         assert_eq!(
             json["accelerator_runtime"]["rocm_graph_mode"]["effective"],
@@ -1891,10 +1891,10 @@ mod tests {
             10 * gib
         );
         assert_eq!(json["governor"]["reclaim_mode_requested"], "automatic");
-        assert_eq!(json["governor"]["reclaim_mode_effective"], "off");
+        assert_eq!(json["governor"]["reclaim_mode_effective"], "automatic");
         assert_eq!(
             json["governor"]["reclaim_disabled_by_serving_profile"],
-            true
+            false
         );
         assert_eq!(json["governor"]["capacity_limit_bytes"], 24 * gib);
         assert_eq!(json["governor"]["reclaim_mode_source"], "config_file");

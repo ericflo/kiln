@@ -5553,7 +5553,7 @@
   "x-kiln-operation-count": 125,
   "x-kiln-method-counts": {
     "DELETE": 13,
-    "GET": 57,
+    "GET": 59,
     "POST": 52,
     "PUT": 1
   },
@@ -5571,7 +5571,7 @@
     "recipes": 2,
     "teachers": 5,
     "training": 15,
-    "ui": 9
+    "ui": 11
   },
   "x-kiln-field-schema-status": "complete",
   "x-kiln-component-schema-counts": {

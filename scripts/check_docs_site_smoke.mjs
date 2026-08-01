@@ -516,7 +516,7 @@ const generatedDocsPages = [
       'aggregate field status',
       'field-complete',
       'complete',
-      'DELETE 13, GET 57, POST 52, PUT 1',
+      'DELETE 13, GET 59, POST 52, PUT 1',
       '/v1/agent/runs/{id}/events',
       '/v1/corrections/mark_trained',
       '/v1/eval/datasets/{name}/preview',
@@ -1068,7 +1068,7 @@ const expectedQuickstartLinks = [
 ];
 
 const expectedDemoSections = [
-  { label: 'freshness', terms: ['captured july 30, 2026', 'ui source 1eacf5100'] },
+  { label: 'freshness', terms: ['captured july 30, 2026', 'ui source e7adfd721'] },
   { label: 'provenance', terms: ['ui: embedded dashboard source at', '1eacf5100', 'data: deterministic seeded demo fixtures', 'not a live performance run'] },
   { label: 'observe', terms: ['know what is actually running', 'backend truth', 'request evidence'] },
   { label: 'serve', terms: ['test the exact request path', 'openai-compatible', 'adapter-explicit'] },
@@ -1240,7 +1240,7 @@ const expectedApiReaderSections = [
   { label: 'first requests', terms: ['copy-paste first requests'] },
   { label: 'advanced requests', terms: ['copyable advanced requests'] },
   { label: 'generation', terms: ['openai-compatible generation'] },
-  { label: 'adapter lifecycle', terms: ['lora lifecycle', 'stable profile cannot serve or evaluate one'] },
+  { label: 'adapter lifecycle', terms: ['lora lifecycle', 'available under the default stable profile', 'maintenance performs the same mutations with inference drained'] },
   { label: 'training', terms: ['sft, grpo, opd, status, and queue control', 'current hybrid vulkan server rejects it before dataset admission'] },
   { label: 'teachers', terms: ['verified remote teachers and identity-bound cache'] },
   { label: 'evals', terms: ['run eval suites, synthesize datasets, train a local judge'] },
@@ -1418,7 +1418,7 @@ const expectedTroubleshootingReaderSections = [
   { label: 'memory pressure', terms: ['memory admission fails or vulkan pauses under pressure'] },
   { label: 'batching diagnosis', terms: ['inference pauses or throughput collapses at concurrency', 'do not label a scheduling pause as vram rebalancing'] },
   { label: 'CUDA graph policy', terms: ['cuda graph capture is absent, unstable, or unexpectedly eager'] },
-  { label: 'ROCm latency', terms: ['rocm token pauses or irregular decode latency', 'a pause alone is not evidence', 'rollback', 'Stable accepts explicit diagnostic backend settings'] },
+  { label: 'ROCm latency', terms: ['rocm token pauses or irregular decode latency', 'a pause alone is not evidence', 'cleanup_quarantined=true', 'quarantine is process-lifetime state'] },
   { label: 'ROCm prefill', terms: ['rocm long prefill pauses or runs out of memory'] },
   { label: 'training tape', terms: ['tape switches do not isolate training or inference'] },
   { label: 'model weights', terms: ['model weights are not found'] },

@@ -220,18 +220,15 @@ only for application data. One-step exact-verifier environments—including
 eight math families—need no adapter; their text actions flow unchanged end to
 end.
 
+An unexpected application message can poison the socket; without request IDs, lock-step cannot resynchronize. Kiln does not resend.
+
 ## Identity and artifacts
 
-Each rollout binds environment discovery, reset, seed, outcome, and exact
-behavior policy. Collection rejects policy drift and revalidates every
-endpoint after its last episode; discovery drift publishes no mixed-deployment
-corpus. Native GRPO validates coherent group identity and one behavior policy
-against live model and adapter bytes. JSONL trains, replay retains exchanges,
-and summary binds configuration, statistics, hashes, and submission. Artifacts
-are bounded, manifest-declared, and rehashed on download. Pin deployments: the
-final check proves boundary equality, not future URL immutability. See the
-[replay and recovery reference](OPENENV_REPLAY_REFERENCE.md) for full identity,
-artifact, metric, size, and drift contracts.
+Each rollout binds discovery, reset, seed, outcome, and exact behavior policy. Native GRPO checks that identity against live model and adapter bytes. JSONL trains; replay retains exchanges; summary binds configuration, statistics, and hashes.
+
+After the final episode, `revalidating` repeats complete discovery. A mismatch fails at `identity_verification` with `environment_identity_changed`; nothing is published. This proves boundary equality, not future URL immutability.
+
+One 512 MiB aggregate retained-representation budget covers live and published forms. Only manifest-declared artifacts download; each request rechecks bytes and SHA-256. Exhaustion publishes no partial bundle: every file must fit and pass before publication.
 
 ## Failure and capacity semantics
 
