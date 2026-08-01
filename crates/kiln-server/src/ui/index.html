@@ -30,6 +30,7 @@
   <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.4 3.6a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></symbol>
   <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.2"/></symbol>
   <symbol id="i-warning" viewBox="0 0 24 24"><path d="M10.3 3.9 1.9 18a2 2 0 0 0 1.7 3h16.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9.5v4.5"/><path d="M12 17.5h.01"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></symbol>
   <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
   <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.4V20a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9.4"/><path d="M9.5 21v-6h5v6"/></symbol>
   <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/></symbol>
@@ -298,36 +299,52 @@
       </div>
     </div>
 
-    <!-- Quick actions row — four most common next-steps -->
-    <div class="quick-actions">
-      <button class="quick-action-btn" type="button" data-quick-action="new-eval">
-        <span class="quick-action-icon"><svg class="icn"><use href="#i-chart"></use></svg></span>
-        <span>
-          <span class="quick-action-title">Run an eval</span>
-          <div class="quick-action-sub">Compare any adapter against a suite</div>
-        </span>
-      </button>
-      <button class="quick-action-btn" type="button" data-quick-action="train-sft">
-        <span class="quick-action-icon"><svg class="icn"><use href="#i-flask"></use></svg></span>
-        <span>
-          <span class="quick-action-title">Train an adapter</span>
-          <div class="quick-action-sub">Submit SFT or GRPO from a dataset</div>
-        </span>
-      </button>
-      <button class="quick-action-btn" type="button" data-quick-action="judge">
-        <span class="quick-action-icon"><svg class="icn"><use href="#i-scale"></use></svg></span>
-        <span>
-          <span class="quick-action-title">Judge A/B pairs</span>
-          <div class="quick-action-sub">Build a local judge LoRA from your picks</div>
-        </span>
-      </button>
-      <button class="quick-action-btn" type="button" data-quick-action="playground">
-        <span class="quick-action-icon"><svg class="icn"><use href="#i-chat"></use></svg></span>
-        <span>
-          <span class="quick-action-title">Open playground</span>
-          <div class="quick-action-sub">Try a prompt against the active adapter</div>
-        </span>
-      </button>
+    <!-- Next best action — one contextual recommendation derived from the
+         same live caches that drive the flywheel (health, traffic, training,
+         evals, corrections), plus quieter always-available alternatives. -->
+    <div class="next-action-wrap">
+      <div class="next-action-hero" id="next-action-hero">
+        <div class="next-action-kicker"><svg class="icn icn-sm" aria-hidden="true"><use href="#i-refresh"></use></svg> <span id="next-action-reason">Suggested next step</span></div>
+        <button class="next-action-main" type="button" id="next-action-main">
+          <span class="next-action-icon" id="next-action-icon"><svg class="icn"><use href="#i-flask"></use></svg></span>
+          <span class="next-action-body">
+            <span class="next-action-title" id="next-action-title">Train an adapter</span>
+            <span class="next-action-sub" id="next-action-sub">Turn your traffic and corrections into a better model</span>
+          </span>
+          <svg class="icn next-action-arrow" aria-hidden="true"><use href="#i-arrow-right"></use></svg>
+        </button>
+      </div>
+      <div class="next-action-alt-label">Or jump straight to</div>
+      <div class="quick-actions">
+        <button class="quick-action-btn" type="button" data-quick-action="new-eval">
+          <span class="quick-action-icon"><svg class="icn"><use href="#i-chart"></use></svg></span>
+          <span>
+            <span class="quick-action-title">Run an eval</span>
+            <div class="quick-action-sub">Compare any adapter against a suite</div>
+          </span>
+        </button>
+        <button class="quick-action-btn" type="button" data-quick-action="train-sft">
+          <span class="quick-action-icon"><svg class="icn"><use href="#i-flask"></use></svg></span>
+          <span>
+            <span class="quick-action-title">Train an adapter</span>
+            <div class="quick-action-sub">Submit SFT or GRPO from a dataset</div>
+          </span>
+        </button>
+        <button class="quick-action-btn" type="button" data-quick-action="judge">
+          <span class="quick-action-icon"><svg class="icn"><use href="#i-scale"></use></svg></span>
+          <span>
+            <span class="quick-action-title">Judge A/B pairs</span>
+            <div class="quick-action-sub">Build a local judge LoRA from your picks</div>
+          </span>
+        </button>
+        <button class="quick-action-btn" type="button" data-quick-action="playground">
+          <span class="quick-action-icon"><svg class="icn"><use href="#i-chat"></use></svg></span>
+          <span>
+            <span class="quick-action-title">Open playground</span>
+            <div class="quick-action-sub">Try a prompt against the active adapter</div>
+          </span>
+        </button>
+      </div>
     </div>
 
     <!-- Recent requests — the operator's #1 job: watch live agent traffic and
@@ -367,6 +384,7 @@
         <h2>Corrections <span class="corr-count" id="corr-count">0</span></h2>
         <span class="eyebrow" style="text-transform:none;letter-spacing:0;">Fix what pi got wrong, then train it in — once</span>
         <span style="flex:1;"></span>
+        <button type="button" class="btn btn-sm" id="corr-review" hidden title="Step through the corrections that still need an ideal answer (j / k to move)">Review answers</button>
         <button type="button" class="btn btn-sm" id="corr-clear">Clear</button>
       </div>
       <div class="card-body" id="corrections-list"></div>
@@ -544,7 +562,41 @@
       <div class="sr-only" role="status" id="training-queue-status"></div>
 
       <div class="tab-content active" id="tab-queue" role="tabpanel" aria-labelledby="training-tab-queue" aria-busy="true" data-panel-id="training-queue-panel">
-        <div class="skel-stack" aria-hidden="true"><div class="skeleton" style="height:40px;width:96%;"></div><div class="skeleton" style="height:40px;width:92%;"></div><div class="skeleton" style="height:40px;width:94%;"></div></div>
+        <!-- Guided method chooser — plain-language on-ramp. Shown when the
+             queue is empty (or until dismissed); each card activates the
+             existing method tab, no duplicated forms. -->
+        <div class="method-chooser" id="method-chooser" hidden>
+          <div class="method-chooser-head">
+            <div>
+              <div class="method-chooser-title">Start a training run</div>
+              <div class="method-chooser-sub">Pick the approach that matches what you have — you can always switch tabs after.</div>
+            </div>
+            <button type="button" class="method-chooser-dismiss" id="method-chooser-dismiss" aria-label="Hide chooser">&times;</button>
+          </div>
+          <div class="method-chooser-grid">
+            <button type="button" class="method-card" data-method="sft">
+              <span class="method-card-icon"><svg class="icn"><use href="#i-flask"></use></svg></span>
+              <span class="method-card-title">Teach from examples</span>
+              <span class="method-card-desc">You have correct answers — corrections, style, project conventions. The everyday choice.</span>
+              <span class="method-card-tag">SFT</span>
+            </button>
+            <button type="button" class="method-card" data-method="grpo">
+              <span class="method-card-icon"><svg class="icn"><use href="#i-chart"></use></svg></span>
+              <span class="method-card-title">Improve against a reward</span>
+              <span class="method-card-desc">You can score answers — pass/fail, quality numbers. The model learns to prefer what scores well.</span>
+              <span class="method-card-tag">GRPO</span>
+            </button>
+            <button type="button" class="method-card" data-method="openenv">
+              <span class="method-card-icon"><svg class="icn"><use href="#i-activity"></use></svg></span>
+              <span class="method-card-title">Learn through interaction</span>
+              <span class="method-card-desc">You have a live environment — games, tools, agents. The model acts, gets feedback, improves.</span>
+              <span class="method-card-tag">OpenEnv RL</span>
+            </button>
+          </div>
+        </div>
+        <div id="training-queue-list">
+          <div class="skel-stack" aria-hidden="true"><div class="skeleton" style="height:40px;width:96%;"></div><div class="skeleton" style="height:40px;width:92%;"></div><div class="skeleton" style="height:40px;width:94%;"></div></div>
+        </div>
       </div>
 
       <div class="tab-content" id="tab-openenv" role="tabpanel" aria-labelledby="training-tab-openenv" hidden inert>
@@ -634,7 +686,7 @@
               <div class="form-group"><label for="openenv-temperature">Action temperature</label><input id="openenv-temperature" type="number" value="1" min="0" step="0.1"></div>
               <div class="form-group"><label for="openenv-max-action-tokens">Max action tokens</label><input id="openenv-max-action-tokens" type="number" value="256" min="1" max="16384"></div>
               <div class="form-group"><label for="openenv-thinking-budget-tokens">Thinking budget <span class="hint">— optional</span></label><input id="openenv-thinking-budget-tokens" type="number" min="0" max="16383" placeholder="unlimited"><div class="form-help">When blank, Kiln never force-closes thinking. Rollouts that emit no final action are retained for diagnosis and discarded from GRPO.</div></div>
-              <div class="form-group"><label for="openenv-lora-rank">LoRA rank</label><input id="openenv-lora-rank" type="number" value="8" min="1" max="128" disabled aria-describedby="openenv-optimizer-support"></div>
+              <div class="form-group"><label for="openenv-lora-rank" data-explain="lora-rank">LoRA rank</label><input id="openenv-lora-rank" type="number" value="8" min="1" max="128" disabled aria-describedby="openenv-optimizer-support"></div>
               <div class="form-group"><label for="openenv-protocol-error-reward">Protocol-error reward</label><input id="openenv-protocol-error-reward" type="number" value="-1" step="0.1"></div>
               <div class="form-group"><label for="openenv-max-recoverable-errors">Recoverable errors</label><input id="openenv-max-recoverable-errors" type="number" value="3" min="0" max="64"></div>
               <div class="form-group"><label for="openenv-capacity-wait">Capacity wait (seconds)</label><input id="openenv-capacity-wait" type="number" value="300" min="1" max="3600"></div>
@@ -750,7 +802,7 @@
                 <div class="form-help" id="sft-overfit-hint" hidden style="color: var(--warning-fg);"></div>
               </div>
               <div class="form-group">
-                <label for="sft-optimizer">Optimizer</label>
+                <label for="sft-optimizer" data-explain="muon">Optimizer</label>
                 <select id="sft-optimizer" name="optimizer" aria-describedby="sft-optimizer-support" disabled>
                   <option value="muon" selected>Muon</option>
                   <option value="adam_w">AdamW</option>
@@ -758,12 +810,12 @@
                 </select>
               </div>
               <div class="form-group">
-                <label for="sft-learning-rate">Learning rate</label>
+                <label for="sft-learning-rate" data-explain="learning-rate">Learning rate</label>
                 <input type="text" id="sft-learning-rate" name="learning_rate" value="" placeholder="auto (per optimizer)">
                 <div class="form-help">How hard each step pushes the weights. Blank picks the right value for the optimizer.</div>
               </div>
               <div class="form-group">
-                <label for="sft-rank">LoRA rank</label>
+                <label for="sft-rank" data-explain="lora-rank">LoRA rank</label>
                 <input type="number" id="sft-rank" name="rank" value="8" min="1" max="128" aria-describedby="sft-optimizer-support" disabled>
                 <div class="form-help">Adapter capacity. 8 is plenty for corrections.</div>
               </div>
@@ -869,12 +921,12 @@
           <div class="adv-body" id="grpo-advanced" hidden>
             <div class="form-row">
               <div class="form-group">
-                <label for="grpo-kl-coeff">KL coefficient</label>
+                <label for="grpo-kl-coeff" data-explain="kl">KL coefficient</label>
                 <input type="text" id="grpo-kl-coeff" name="kl_coeff" value="0.1">
                 <div class="form-help">How tightly the adapter sticks to the base model.</div>
               </div>
               <div class="form-group">
-                <label for="grpo-optimizer">Optimizer</label>
+                <label for="grpo-optimizer" data-explain="muon">Optimizer</label>
                 <select id="grpo-optimizer" name="optimizer" aria-describedby="grpo-optimizer-support" disabled>
                   <option value="muon" selected>Muon</option>
                   <option value="adam_w">AdamW</option>
@@ -882,12 +934,12 @@
                 </select>
               </div>
               <div class="form-group">
-                <label for="grpo-learning-rate">Learning rate</label>
+                <label for="grpo-learning-rate" data-explain="learning-rate">Learning rate</label>
                 <input type="text" id="grpo-learning-rate" name="learning_rate" value="" placeholder="auto (per optimizer)">
                 <div class="form-help">How hard each step pushes the weights. Blank picks the right value for the optimizer.</div>
               </div>
               <div class="form-group">
-                <label for="grpo-rank">LoRA rank</label>
+                <label for="grpo-rank" data-explain="lora-rank">LoRA rank</label>
                 <input type="number" id="grpo-rank" name="rank" value="8" min="1" max="128" aria-describedby="grpo-optimizer-support" disabled>
                 <div class="form-help">Adapter capacity. 8 is plenty to start.</div>
               </div>
@@ -1438,6 +1490,36 @@
            (teachers/recipes/preflight) · Assets (cache/library/agent traces).
            Labels + separators are not .tab elements, so the tab JS ignores
            them; every data-tab/aria-controls is preserved. -->
+      <!-- Goal chooser — plain-language on-ramp above the grouped tabs.
+           Dismissible; each card activates an existing sub-tab (no new forms). -->
+      <div class="distill-chooser" id="distill-chooser" hidden>
+        <div class="distill-chooser-head">
+          <span class="distill-chooser-title">What do you want to do?</span>
+          <button type="button" class="method-chooser-dismiss" id="distill-chooser-dismiss" aria-label="Hide chooser">&times;</button>
+        </div>
+        <div class="method-chooser-grid distill-chooser-grid">
+          <button type="button" class="method-card" data-distill-goal="opd">
+            <span class="method-card-icon"><svg class="icn"><use href="#i-sparkles"></use></svg></span>
+            <span class="method-card-title">Distill from a teacher</span>
+            <span class="method-card-desc">A bigger model grades your model&rsquo;s answers; the gap becomes the training signal.</span>
+          </button>
+          <button type="button" class="method-card" data-distill-goal="refresh">
+            <span class="method-card-icon"><svg class="icn"><use href="#i-refresh"></use></svg></span>
+            <span class="method-card-title">Refresh an adapter</span>
+            <span class="method-card-desc">Keep an existing adapter current as new data arrives — continual learning.</span>
+          </button>
+          <button type="button" class="method-card" data-distill-goal="merge">
+            <span class="method-card-icon"><svg class="icn"><use href="#i-merge"></use></svg></span>
+            <span class="method-card-title">Merge capabilities</span>
+            <span class="method-card-desc">Combine two trained adapters into one that keeps both behaviors.</span>
+          </button>
+          <button type="button" class="method-card" data-distill-goal="library">
+            <span class="method-card-icon"><svg class="icn"><use href="#i-stack"></use></svg></span>
+            <span class="method-card-title">Browse the library</span>
+            <span class="method-card-desc">Install or publish adapters — start from one that already works.</span>
+          </button>
+        </div>
+      </div>
       <div class="tabs distill-tabs" role="tablist" aria-label="Distill views" data-distill-tabs>
         <span class="tab-group-label" aria-hidden="true">Methods</span>
         <button class="tab active" id="distill-tab-opd" data-tab="opd" type="button" role="tab" aria-selected="true" aria-controls="distill-tab-opd-pane" aria-describedby="distill-tab-opd-intro" tabindex="0" title="Train your model on a teacher model&rsquo;s token-by-token feedback">Distill</button>
@@ -1527,7 +1609,7 @@
               <div class="form-help">Blank picks the right value for the optimizer.</div>
             </div>
             <div class="form-group">
-              <label for="opd-rank">LoRA rank</label>
+              <label for="opd-rank" data-explain="lora-rank">LoRA rank</label>
               <input type="number" id="opd-rank" name="lora_rank" value="32" min="1" max="256" aria-describedby="opd-optimizer-support" disabled>
               <div class="form-help" id="opd-optimizer-support" role="status" aria-live="polite">OPD uses Muon. Optimizer capability details are still loading. Training remains disabled.</div>
             </div>

@@ -198,6 +198,7 @@ renderChat();
 updateChatSendState();
 initConnect();
 initCorrections();
+initExplainers();
 pollHealth();
 pollAdapters();
 pollTraining();

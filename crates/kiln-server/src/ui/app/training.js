@@ -107,7 +107,11 @@ function matchTraining(j) {
   ].join(' ').toLowerCase().includes(q);
 }
 function renderTrainingQueue(data) {
-  const el = document.getElementById('tab-queue');
+  // The queue LIST lives in #training-queue-list; the method chooser is a
+  // sibling that we show/hide rather than destroy, so its dismiss state and
+  // bound listeners survive every poll.
+  const el = document.getElementById('training-queue-list') || document.getElementById('tab-queue');
+  const chooser = document.getElementById('method-chooser');
   // Snapshot filter focus/selection BEFORE rewriting innerHTML so a
   // background poll that fires while the user is typing doesn't yank
   // focus away mid-keystroke.
@@ -164,8 +168,16 @@ function renderTrainingQueue(data) {
     html += `<div class="eval-empty" style="margin-top:var(--space-3);"><div class="eval-empty-body">No training jobs match <code>${escapeHtml(trainingQueueFilter)}</code>.</div></div>`;
   }
 
-  if (!data.running && (!data.queued || !data.queued.length) && (!data.completed || !data.completed.length)) {
-    html = `<div class="eval-empty empty">
+  const emptyQueue = !data.running && (!data.queued || !data.queued.length) && (!data.completed || !data.completed.length);
+  // Guided chooser: show on an empty queue (unless the user dismissed it),
+  // hide as soon as real jobs exist — it is an on-ramp, not furniture.
+  const dismissed = (() => { try { return localStorage.getItem('kiln.methodChooser.dismissed') === '1'; } catch { return false; } })();
+  const showChooser = emptyQueue && !dismissed;
+  if (chooser) chooser.hidden = !showChooser;
+  if (emptyQueue) {
+    // When the chooser is up it already explains how to start — the generic
+    // empty state would be redundant. Only show it when the chooser is hidden.
+    html = showChooser ? '' : `<div class="eval-empty empty">
       <div class="eval-empty-icon"><svg class="icn"><use href="#i-flask"></use></svg></div>
       <div class="eval-empty-title">No training jobs yet.</div>
       <div class="eval-empty-body">Submit SFT examples to teach a correction, or use GRPO for scored completions. Datasets uploaded under Evals can be picked directly in the SFT/GRPO submit forms. New here? Read the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener">Quickstart</a> or the <a href="https://ericflo.github.io/kiln/grpo.html" target="_blank" rel="noopener">GRPO Guide</a>.</div>
@@ -405,6 +417,19 @@ function fillGrpoSamplePayload() {
 
 document.getElementById('use-sft-sample').addEventListener('click', fillSftSamplePayload);
 document.getElementById('use-grpo-sample').addEventListener('click', fillGrpoSamplePayload);
+
+// Guided method chooser (queue on-ramp): cards activate the existing method
+// tabs — no duplicated forms. Dismissal persists so experts see it once.
+document.querySelectorAll('#method-chooser .method-card').forEach(card => {
+  card.addEventListener('click', () => {
+    document.getElementById('training-tab-' + card.dataset.method)?.click();
+  });
+});
+document.getElementById('method-chooser-dismiss')?.addEventListener('click', () => {
+  try { localStorage.setItem('kiln.methodChooser.dismissed', '1'); } catch {}
+  const chooser = document.getElementById('method-chooser');
+  if (chooser) chooser.hidden = true;
+});
 
 /* ====== Direct "drop a file and train" data input (SFT + GRPO) ==============
    /v1/train/{sft,grpo} take inline examples/groups, so the primary path is:

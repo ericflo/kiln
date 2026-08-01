@@ -932,6 +932,91 @@ function refreshRequestHealth() {
   updateAmbient(lastRequestHealth);
 }
 
+/* === Jargon explainers =====================================================
+   Accessible term glossary. Any element with data-explain="term" gets an
+   info affordance; hover / focus / click shows a plain-language popover.
+   Trigger is a <button> so it's keyboard- and screen-reader reachable. */
+const EXPLAIN_TERMS = {
+  'lora-rank': 'LoRA rank — how much new capacity the adapter gets. Higher learns more but uses more memory and can overfit small datasets. 8 is a good default.',
+  'muon': 'Muon — the optimizer Kiln uses to update weights. It converges faster and more stably than Adam at this scale; you rarely need to change it.',
+  'learning-rate': 'Learning rate — how big each training step is. "Auto" picks a safe value from your dataset size and rank; only tune it if training diverges.',
+  'seed-groups': 'Seed groups — independent rollouts started from different random seeds. More groups give a more reliable reward signal but take longer.',
+  'grpo': 'GRPO — Group Relative Policy Optimization. The model sees several answers to the same prompt and learns to prefer the higher-scoring ones.',
+  'sft': 'SFT — Supervised Fine-Tuning. Show the model (prompt, ideal answer) pairs and it learns to imitate them. The simplest way to teach a correction or style.',
+  'kl': 'KL penalty — how far the tuned model may drift from the original. Higher keeps it closer to base (safer, learns less); lower allows bigger changes.',
+  'gate': 'Promotion gate — an automatic check that a new adapter actually beats what is serving before it goes live. Failed gates never hot-swap.',
+  'adapter': 'Adapter (LoRA) — a small patch on top of the frozen base model. You keep one base and swap adapters to change behavior without reloading weights.',
+  'hot-swap': 'Hot-swap — switching which adapter is serving without restarting or reloading the base model. Instant and reversible.',
+  'judge': 'Judge — a small local model trained from your A/B picks that scores new answers the way you would, so you can eval without labeling by hand.',
+  'corrections': 'Corrections — answers you rewrote after pi got them wrong. Training on them is the fastest, most targeted way to improve the model.',
+};
+let explainPopover = null;
+function explainClose() { if (explainPopover) { explainPopover.remove(); explainPopover = null; } }
+function explainShow(trigger) {
+  const term = trigger.getAttribute('data-explain');
+  const text = EXPLAIN_TERMS[term];
+  if (!text) return;
+  explainClose();
+  const pop = document.createElement('div');
+  pop.className = 'explain-pop';
+  pop.setAttribute('role', 'tooltip');
+  pop.innerHTML = `<span class="explain-pop-text">${escapeHtml(text)}</span>`;
+  document.body.appendChild(pop);
+  const r = trigger.getBoundingClientRect();
+  const pw = Math.min(320, window.innerWidth - 24);
+  pop.style.maxWidth = pw + 'px';
+  // Position below the trigger, clamped into the viewport.
+  let x = r.left + r.width / 2 - pop.offsetWidth / 2;
+  x = Math.max(12, Math.min(x, window.innerWidth - pop.offsetWidth - 12));
+  let y = r.bottom + 8;
+  if (y + pop.offsetHeight > window.innerHeight - 12) y = r.top - pop.offsetHeight - 8;
+  pop.style.left = (x + window.scrollX) + 'px';
+  pop.style.top = (y + window.scrollY) + 'px';
+  explainPopover = pop;
+  trigger.setAttribute('aria-expanded', 'true');
+}
+function initExplainers() {
+  // Upgrade every labeled term once: wrap an info button after the element.
+  document.querySelectorAll('[data-explain]').forEach(el => {
+    if (el.dataset.explainBound) return;
+    el.dataset.explainBound = '1';
+    el.classList.add('explain-term');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'explain-btn';
+    btn.setAttribute('data-explain', el.getAttribute('data-explain'));
+    btn.setAttribute('aria-label', 'What is ' + el.textContent.trim() + '?');
+    btn.setAttribute('aria-expanded', 'false');
+    btn.innerHTML = '<svg class="icn" aria-hidden="true"><use href="#i-info"></use></svg>';
+    // Inline at the end of the label text — clicking the icon must not
+    // activate the label's control, so stop that in the handler below.
+    el.appendChild(btn);
+  });
+  const on = e => {
+    const t = e.target.closest('[data-explain].explain-btn');
+    if (!t) return;
+    // Don't let the info click activate the enclosing label's control.
+    e.preventDefault();
+    e.stopPropagation();
+    if (explainPopover && t.getAttribute('aria-expanded') === 'true') { explainClose(); t.setAttribute('aria-expanded', 'false'); }
+    else explainShow(t);
+  };
+  document.addEventListener('click', e => {
+    if (explainPopover && !e.target.closest('.explain-pop') && !e.target.closest('.explain-btn')) explainClose();
+    on(e);
+  });
+  document.addEventListener('mouseover', e => {
+    const t = e.target.closest('[data-explain].explain-btn');
+    if (t) explainShow(t);
+  });
+  document.addEventListener('focusin', e => {
+    const t = e.target.closest('[data-explain].explain-btn');
+    if (t) explainShow(t);
+  });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') explainClose(); });
+  document.addEventListener('scroll', () => explainClose(), true);
+}
+
 /* === Corrections basket — the flywheel's core loop, one-click =============
    pi gives a bad answer → "Use as correction" APPENDS it here (not overwrite)
    → you fix the ideal answer inline → "Train" turns the whole basket into ONE
@@ -1183,11 +1268,69 @@ function markCorrState(c) {
     if (st.getAttribute('data-corr-state') === c.request_id) st.innerHTML = corrStateHtml(ready);
   });
 }
+/* Focused review: step through the corrections that still need an ideal
+   answer, one at a time, with j/k keyboard nav scoped to the card. */
+let corrReviewIdx = -1;
+function corrTodoItems() {
+  return correctionsBasket.filter(c => !corrTrainable(c));
+}
+function corrReviewStep(delta) {
+  const todo = corrTodoItems();
+  if (!todo.length) { corrReviewExit(); return; }
+  corrReviewIdx = ((corrReviewIdx + delta) % todo.length + todo.length) % todo.length;
+  const target = todo[corrReviewIdx];
+  document.querySelectorAll('.corr-item').forEach(el => el.classList.remove('is-review-focus'));
+  const item = document.querySelector(`.corr-item[data-corr="${CSS.escape(target.request_id)}"]`);
+  if (item) {
+    item.classList.add('is-review-focus');
+    item.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const ta = item.querySelector('.corr-ideal');
+    if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+  }
+  updateCorrReviewLabel();
+}
+function corrReviewExit() {
+  corrReviewIdx = -1;
+  document.querySelectorAll('.corr-item.is-review-focus').forEach(el => el.classList.remove('is-review-focus'));
+  updateCorrReviewLabel();
+}
+function updateCorrReviewLabel() {
+  const btn = document.getElementById('corr-review');
+  if (!btn) return;
+  const todo = corrTodoItems().length;
+  btn.hidden = todo === 0;
+  btn.textContent = corrReviewIdx >= 0
+    ? `Reviewing ${corrReviewIdx + 1} of ${todo} — done`
+    : `Review ${todo} answer${todo === 1 ? '' : 's'}`;
+}
+function initCorrReview() {
+  const btn = document.getElementById('corr-review');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    if (corrReviewIdx >= 0) { corrReviewExit(); return; }
+    corrReviewStep(1);
+  });
+  const card = document.getElementById('corrections-card');
+  if (card) card.addEventListener('keydown', e => {
+    if (corrReviewIdx < 0) return;
+    if (e.key === 'j' || (e.key === 'ArrowDown' && e.target.tagName !== 'TEXTAREA')) { e.preventDefault(); corrReviewStep(1); }
+    else if (e.key === 'k' || (e.key === 'ArrowUp' && e.target.tagName !== 'TEXTAREA')) { e.preventDefault(); corrReviewStep(-1); }
+    else if (e.key === 'Escape') corrReviewExit();
+  });
+}
+
 function updateCorrFoot() {
   const ready = correctionsBasket.filter(corrTrainable).length;
   const todo = correctionsBasket.length - ready;
   const admission = trainingOptimizerAdmissionState('sft', 'muon', 8);
   setText('corr-train-n', String(ready));
+  updateCorrReviewLabel();
+  // If the focused item became trainable (user filled its answer), advance.
+  if (corrReviewIdx >= 0) {
+    const remaining = corrTodoItems();
+    if (!remaining.length) corrReviewExit();
+    else if (corrReviewIdx >= remaining.length) corrReviewIdx = remaining.length - 1;
+  }
   const note = document.getElementById('corr-foot-note');
   if (note) note.textContent = todo > 0
     ? `${todo} still need${todo === 1 ? 's' : ''} an answer · only edited items train`
@@ -1294,6 +1437,7 @@ function initCorrections() {
   corrSyncFromServer();
   document.getElementById('corr-clear')?.addEventListener('click', clearCorrections);
   document.getElementById('corr-train')?.addEventListener('click', trainFromCorrections);
+  initCorrReview();
   // Inline adapter-name validation so a bad name isn't a submit-time surprise.
   const nameInput = document.getElementById('corr-adapter-name');
   if (nameInput) nameInput.addEventListener('input', () => {
@@ -1487,6 +1631,103 @@ function updateFlywheel() {
 
   // The journey strip reads the same caches — keep it in lockstep.
   updateJourneyStrip();
+  // The next-action hero reads the same caches too.
+  updateNextAction();
+}
+
+/* === Next best action ======================================================
+   One contextual recommendation derived from the same live caches as the
+   flywheel. The priority order mirrors the flywheel's "hot node" logic so the
+   two surfaces never disagree. Every claim is truthful: it only states what
+   the caches actually show, and never invents metrics. */
+function deriveNextAction() {
+  const rows = recentRequestsCache || [];
+  const tj = (typeof trainingJobsCache !== 'undefined') ? trainingJobsCache : null;
+  const running = tj && tj.running ? 1 : 0;
+  const corrReady = (typeof correctionsBasket !== 'undefined' && typeof corrTrainable === 'function')
+    ? correctionsBasket.filter(corrTrainable).length : 0;
+  const corrTotal = (typeof correctionsBasket !== 'undefined') ? correctionsBasket.length : 0;
+  const ec = (typeof evalJobCounts !== 'undefined') ? evalJobCounts : null;
+  const evalLive = ec ? (ec.running + ec.queued) : 0;
+  const evalCompleted = ec ? ec.completed : 0;
+  const noEvals = !!ec && evalCompleted === 0 && evalLive === 0;
+  const active = lastHealth && lastHealth.active_adapter;
+  const activeVerdict = active && typeof adapterCompareVerdict === 'function' ? adapterCompareVerdict(active) : null;
+
+  const go = (fn) => fn;
+  // Priority 1: you authored fixes and they're ready — train them in.
+  if (corrReady > 0) return {
+    reason: `${corrReady} correction${corrReady === 1 ? '' : 's'} ready`,
+    icon: 'i-flask',
+    title: `Train your ${corrReady === 1 ? 'correction' : corrReady + ' corrections'} in`,
+    sub: 'Turn the fixes you wrote into a permanent improvement',
+    act: () => { selectPage('overview'); setTimeout(() => document.getElementById('corrections-card')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 40); },
+  };
+  // Priority 2: unanswered corrections — finish writing the ideal answers.
+  if (corrTotal > 0) return {
+    reason: `${corrTotal} correction${corrTotal === 1 ? '' : 's'} to answer`,
+    icon: 'i-flask',
+    title: 'Finish your corrections',
+    sub: 'Write the ideal answers so they can be trained in',
+    act: () => { selectPage('overview'); setTimeout(() => document.getElementById('corrections-card')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 40); },
+  };
+  // Priority 3: an adapter is live but never evaluated — prove it beats base.
+  if (active && noEvals) return {
+    reason: 'Active adapter is unproven',
+    icon: 'i-chart',
+    title: `Prove "${active}" beats base`,
+    sub: 'Run an eval suite against it before you trust it in production',
+    act: () => { selectPage('evals'); document.getElementById('evals-tab-suites')?.click(); },
+  };
+  // Priority 4: training is running — nothing to do but watch.
+  if (running) return {
+    reason: 'Training in progress',
+    icon: 'i-flask',
+    title: 'Watch the training run',
+    sub: 'A job is training now — monitor loss and progress',
+    act: () => { selectPage('training'); },
+  };
+  // Priority 5: traffic flowing on the base model — capture it as training data.
+  if (rows.length > 0 && !active) return {
+    reason: 'Traffic on the base model',
+    icon: 'i-flask',
+    title: 'Train an adapter from your traffic',
+    sub: 'Your requests are evidence — teach the model from them',
+    act: () => { selectPage('training'); document.getElementById('training-tab-sft')?.click(); },
+  };
+  // Priority 6: adapter active and evaluated — the loop is closed; refine further.
+  if (active && activeVerdict && activeVerdict.significant === true && activeVerdict.delta > 0.5) return {
+    reason: 'Loop is closed',
+    icon: 'i-refresh',
+    title: 'Keep the loop turning',
+    sub: `"${active}" is proven better — collect more corrections to go further`,
+    act: () => { selectPage('playground'); },
+  };
+  // Default cold-start: connect an agent so traffic starts flowing.
+  return {
+    reason: 'Get started',
+    icon: 'i-link',
+    title: 'Connect your first agent',
+    sub: 'Point pi or any OpenAI-compatible client at this server to begin',
+    act: () => openConnect(),
+  };
+}
+
+function updateNextAction() {
+  const hero = document.getElementById('next-action-hero');
+  if (!hero) return;
+  const next = deriveNextAction();
+  const set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+  set('next-action-reason', next.reason);
+  set('next-action-title', next.title);
+  set('next-action-sub', next.sub);
+  const iconUse = document.querySelector('#next-action-icon use');
+  if (iconUse) iconUse.setAttribute('href', '#' + next.icon);
+  const main = document.getElementById('next-action-main');
+  if (main && !main.dataset.bound) {
+    main.dataset.bound = '1';
+    main.addEventListener('click', () => { const n = deriveNextAction(); n.act(); });
+  }
 }
 
 function bindFlywheel() {

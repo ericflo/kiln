@@ -302,6 +302,24 @@ document.addEventListener('click', async (ev) => {
 });
 
 // --- Submit OPD (/v1/train/opd) -------------------------------------
+// Distill goal chooser — plain-language on-ramp. Shown on first visit until
+// dismissed; cards activate the corresponding sub-tab (no duplicated forms).
+(function initDistillChooser() {
+  const chooser = document.getElementById('distill-chooser');
+  if (!chooser) return;
+  const dismissed = (() => { try { return localStorage.getItem('kiln.distillChooser.dismissed') === '1'; } catch { return false; } })();
+  chooser.hidden = dismissed;
+  chooser.querySelectorAll('[data-distill-goal]').forEach(card => {
+    card.addEventListener('click', () => {
+      document.getElementById('distill-tab-' + card.dataset.distillGoal)?.click();
+    });
+  });
+  document.getElementById('distill-chooser-dismiss')?.addEventListener('click', () => {
+    try { localStorage.setItem('kiln.distillChooser.dismissed', '1'); } catch {}
+    chooser.hidden = true;
+  });
+})();
+
 document.getElementById('opd-use-sample')?.addEventListener('click', () => {
   document.getElementById('opd-prompts').value = JSON.stringify([
     { messages: [{ role: 'user', content: 'Solve for x: 2x^2 - 5x + 3 = 0.' }, { role: 'assistant', content: 'Use the quadratic formula: x = (5 ± √(25 - 24)) / 4 = (5 ± 1)/4, so x = 3/2 or x = 1.' }] },
