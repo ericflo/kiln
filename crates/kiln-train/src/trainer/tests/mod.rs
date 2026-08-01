@@ -1441,7 +1441,7 @@ fn grpo_dry_run_rejects_malformed_trajectory_roles() {
 }
 
 #[test]
-fn grpo_dry_run_rejects_empty_action_mask() {
+fn grpo_dry_run_rejects_trajectory_without_action_tokens() {
     let tmp = tempfile::tempdir().unwrap();
     let tok = make_echo_smoke_tokenizer().unwrap();
     let group = dry_run_group(vec![crate::ScoredRollout::from_trajectory(
@@ -1462,7 +1462,11 @@ fn grpo_dry_run_rejects_empty_action_mask() {
     )
     .unwrap_err();
 
-    assert!(err.to_string().contains("empty action_mask"));
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("has no action token from which to derive its prompt boundary"),
+        "{rendered}"
+    );
 }
 
 /// Resurrection PR2: ECHO + env tokens TRAINS again, so the dry run
@@ -6502,7 +6506,9 @@ fn make_echo_smoke_tokenizer() -> Result<KilnTokenizer> {
 {% else %}<|im_start|>{{ message.role }}
 {{ message.content }}<|im_end|>
 {% endif %}\
-{% endfor %}";
+{% endfor %}\
+{% if add_generation_prompt %}<|im_start|>assistant
+{% endif %}";
     let tok = KilnTokenizer::from_bytes(json.as_bytes())
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .with_chat_template(template.to_string());

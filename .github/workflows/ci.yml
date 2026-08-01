@@ -2,8 +2,9 @@ name: CI
 
 on:
   schedule:
-    # A weekly full-workspace safety net replaces paying for every unchanged
-    # crate on every push. Missing event diff state selects the full workspace.
+    # A weekly default-members safety net replaces paying for every unchanged
+    # crate on every push. Backend-only crates stay in their dedicated lanes;
+    # missing event diff state selects every host-testable default member.
     - cron: '41 12 * * 0'
   push:
     branches: [main]
@@ -140,7 +141,7 @@ jobs:
           command: check
           arguments: --all-features
 
-      - name: Free disk space for a full-workspace fallback
+      - name: Free disk space for a full host-testable fallback
         if: steps.scope.outputs.full_workspace == 'true'
         run: |
           df -h /

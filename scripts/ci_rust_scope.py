@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select the workspace packages whose tests can be affected by a git diff."""
+"""Select host-testable workspace packages affected by a git diff."""
 
 from __future__ import annotations
 
@@ -53,6 +53,19 @@ def reverse_closure(changed: set[str], reverse: dict[str, set[str]]) -> set[str]
     return affected
 
 
+def host_testable_members(metadata: dict[str, object]) -> set[str]:
+    """Return Cargo's default members, which are safe on the CPU CI host.
+
+    Kiln's workspace also contains backend-only crates whose default features
+    require CUDA, ROCm, Metal, or Vulkan toolchains. Cargo's
+    ``workspace_default_members`` is the authoritative, already-maintained
+    boundary between portable tests and those dedicated backend lanes.
+    """
+
+    workspace_members = set(metadata["workspace_members"])
+    return set(metadata.get("workspace_default_members") or workspace_members)
+
+
 def is_openenv_change(paths: list[str], full_workspace: bool) -> bool:
     if full_workspace:
         return True
@@ -87,6 +100,7 @@ def is_openenv_change(paths: list[str], full_workspace: bool) -> bool:
 def select(paths: list[str] | None) -> tuple[list[str], bool, bool, bool]:
     metadata = json.loads(command("cargo", "metadata", "--locked", "--format-version", "1"))
     workspace_members = set(metadata["workspace_members"])
+    testable_members = host_testable_members(metadata)
     packages = {package["id"]: package for package in metadata["packages"]}
 
     full_workspace = paths is None or any(path in FULL_WORKSPACE_FILES for path in paths)
@@ -113,7 +127,7 @@ def select(paths: list[str] | None) -> tuple[list[str], bool, bool, bool]:
                 break
 
     if full_workspace:
-        affected = workspace_members
+        affected = testable_members
     else:
         reverse: dict[str, set[str]] = defaultdict(set)
         for node in metadata["resolve"]["nodes"]:
@@ -122,7 +136,10 @@ def select(paths: list[str] | None) -> tuple[list[str], bool, bool, bool]:
             for dependency in node["deps"]:
                 if dependency["pkg"] in workspace_members:
                     reverse[dependency["pkg"]].add(node["id"])
-        affected = reverse_closure(changed_members, reverse)
+        # A backend-only crate can still affect portable reverse dependents,
+        # but it cannot itself be compiled on this no-GPU runner. Its own
+        # compile/test coverage belongs to the dedicated backend lane.
+        affected = reverse_closure(changed_members, reverse) & testable_members
 
     names = sorted(packages[package_id]["name"] for package_id in affected)
     dependency_policy = paths is None or any(
@@ -136,6 +153,13 @@ def self_test() -> None:
     graph = {"core": {"train", "server"}, "train": {"server"}}
     assert reverse_closure({"core"}, graph) == {"core", "train", "server"}
     assert reverse_closure({"train"}, graph) == {"train", "server"}
+    assert host_testable_members(
+        {
+            "workspace_members": ["core", "cuda-kernel", "server"],
+            "workspace_default_members": ["core", "server"],
+        }
+    ) == {"core", "server"}
+    assert host_testable_members({"workspace_members": ["core"]}) == {"core"}
     assert is_openenv_change(["crates/kiln-openenv/src/client.rs"], False)
     assert is_openenv_change(["crates/kiln-train/src/openenv_provenance.rs"], False)
     assert not is_openenv_change(["crates/kiln-server/src/health.rs"], False)
