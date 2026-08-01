@@ -37,6 +37,12 @@ const XTERM_JS: &str = include_str!("../ui/vendor/xterm.js");
 const XTERM_CSS: &str = include_str!("../ui/vendor/xterm.css");
 const XTERM_FIT_JS: &str = include_str!("../ui/vendor/xterm-addon-fit.js");
 
+// UI typefaces — Inter Variable (100–900) + JetBrains Mono Variable (100–800).
+// Two files, every weight, baked into the binary so the dashboard renders
+// identically offline. (OFL-licensed; see THIRD_PARTY_LICENSES.md.)
+const FONT_INTER: &[u8] = include_bytes!("../ui/fonts/InterVariable.woff2");
+const FONT_JBMONO: &[u8] = include_bytes!("../ui/fonts/JetBrainsMonoVariable.ttf");
+
 // Every /ui* response is marked no-cache: the assets are baked into the
 // binary, so after a binary upgrade the browser must revalidate rather than
 // pair a cached stale app.js with a new index.html. (When everything was
@@ -101,6 +107,24 @@ async fn serve_xterm_fit_js() -> impl IntoResponse {
     ui_asset("application/javascript", XTERM_FIT_JS)
 }
 
+fn font_asset(content_type: &'static str, body: &'static [u8]) -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, NO_CACHE),
+        ],
+        body,
+    )
+}
+
+async fn serve_font_inter() -> impl IntoResponse {
+    font_asset("font/woff2", FONT_INTER)
+}
+
+async fn serve_font_jbmono() -> impl IntoResponse {
+    font_asset("font/ttf", FONT_JBMONO)
+}
+
 pub fn routes() -> Router<crate::state::AppState> {
     Router::new()
         .route("/", get(redirect_root_to_ui))
@@ -112,4 +136,9 @@ pub fn routes() -> Router<crate::state::AppState> {
         .route("/ui/vendor/xterm.js", get(serve_xterm_js))
         .route("/ui/vendor/xterm.css", get(serve_xterm_css))
         .route("/ui/vendor/xterm-addon-fit.js", get(serve_xterm_fit_js))
+        .route("/ui/fonts/InterVariable.woff2", get(serve_font_inter))
+        .route(
+            "/ui/fonts/JetBrainsMonoVariable.ttf",
+            get(serve_font_jbmono),
+        )
 }

@@ -2491,6 +2491,17 @@ let pendingRequestDrillId = null;
 // agent/status/text filters. The inspect modal's prev/next steps through THIS —
 // so under "Needs attention" you walk only the problem requests.
 let lastRenderedRequestIds = [];
+// Ids from the previous recent-requests paint — null until the first render
+// completes so the initial load doesn't flash every row as "new".
+let previousRequestIds = null;
+
+// Scroll shadow: once the page scrolls under the sticky bars, give them a
+// quiet drop shadow so content visibly passes *under* the chrome.
+(function initScrollShadow() {
+  const update = () => document.body.classList.toggle('is-scrolled', window.scrollY > 4);
+  window.addEventListener('scroll', update, { passive: true });
+  update();
+})();
 
 function fmtRelTime(unixMs) {
   if (!unixMs) return '-';
@@ -2694,6 +2705,10 @@ function renderRecentRequests(rows) {
   // Record display order so the inspect modal can step prev/next within the
   // current filter (e.g. walk only the "Needs attention" rows).
   lastRenderedRequestIds = filtered.map(r => r.id).filter(Boolean);
+  // Snapshot this paint's ids so the NEXT poll can tell which rows just
+  // arrived (drives the .row-new arrival flash). Kept separate from
+  // lastRenderedRequestIds, which the inspect modal mutates for navigation.
+  previousRequestIds = new Set(lastRenderedRequestIds);
   if (filtered.length === 0) {
     el.innerHTML = chipsHtml + `<div class="empty">No requests match this filter.</div>`;
     bindAgentChips(el);
@@ -2722,8 +2737,12 @@ function renderRecentRequests(rows) {
     const promptText = r.prompt_preview || '—';
     const completionText = r.completion_preview || '—';
     const attn = requestNeedsAttention(r);
+    // Newly-arrived rows flash a brief ember tint so live traffic feels alive.
+    // lastRenderedRequestIds holds the previous paint's ids (undefined on the
+    // very first render — nothing is "new" then).
+    const isNew = previousRequestIds !== null && r.id && !previousRequestIds.has(r.id);
     return `
-      <li class="recent-row${attn ? ' attn' : ''}" data-ts="${r.timestamp_unix_ms || 0}" data-id="${escapeHtml(r.id || '')}" tabindex="0" role="button" aria-label="Inspect request ${escapeHtml(shortId(r.id || ''))} from ${escapeHtml(r._client.label)}${attn ? ' — needs attention' : ''}">
+      <li class="recent-row${attn ? ' attn' : ''}${isNew ? ' row-new' : ''}" data-ts="${r.timestamp_unix_ms || 0}" data-id="${escapeHtml(r.id || '')}" tabindex="0" role="button" aria-label="Inspect request ${escapeHtml(shortId(r.id || ''))} from ${escapeHtml(r._client.label)}${attn ? ' — needs attention' : ''}">
         <div class="recent-time">${fmtRelTime(r.timestamp_unix_ms)}</div>
         <div class="recent-previews">
           <div class="recent-prompt" title="${escapeHtml(promptText)}">${agentPill}${adapterPill}${streamPill}${escapeHtml(promptText)}</div>

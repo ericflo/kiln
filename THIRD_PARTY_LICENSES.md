@@ -11,6 +11,27 @@ cargo install cargo-about --version 0.6.6 --locked
 cargo about generate --workspace --all-features -o THIRD_PARTY_LICENSES.md about.hbs
 ```
 
+## Bundled runtime assets (not Rust crates)
+
+The released binary also embeds a small number of non-Rust assets that are
+compiled in via `include_str!` / `include_bytes!`. These are not enumerated by
+`cargo-about`, so they are credited here:
+
+- **Inter** (variable font, weights 100–900) — Copyright (c) 2016–2024 The Inter
+  Project Authors. Licensed under the **SIL Open Font License 1.1**.
+  <https://github.com/rsms/inter> · Embedded at `crates/kiln-server/src/ui/fonts/InterVariable.woff2`.
+- **JetBrains Mono** (variable font, weights 100–800) — Copyright (c) 2020 The
+  JetBrains Mono Project Authors. Licensed under the **SIL Open Font License 1.1**.
+  <https://github.com/JetBrains/JetBrainsMono> · Embedded at `crates/kiln-server/src/ui/fonts/JetBrainsMonoVariable.ttf`.
+- **xterm.js** (+ fit addon) — Copyright (c) 2014–present, the xterm.js authors.
+  Licensed under the **MIT License**.
+  <https://github.com/xtermjs/xterm.js> · Vendored at `crates/kiln-server/src/ui/vendor/`.
+
+The SIL Open Font License permits redistribution of the fonts, including
+embedding within a binary, provided they are not sold by themselves and the
+license + copyright notice are preserved (this section satisfies that). Both
+fonts are used unmodified.
+
 ## Overview of Licenses
 
 - [MIT License](#MIT) (296 crates)

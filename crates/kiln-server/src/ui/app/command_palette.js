@@ -176,6 +176,15 @@ function renderCmdkResults(query) {
     suite: 'Suites', 'suite-run': 'Suite actions',
     job: 'Jobs',
   };
+  // Highlight the matched substring in each result so it's obvious why an
+  // item surfaced — the palette feels far more responsive with this.
+  const highlight = (text) => {
+    const esc = escapeHtml(text);
+    if (!q) return esc;
+    const idx = text.toLowerCase().indexOf(q);
+    if (idx < 0) return esc;
+    return escapeHtml(text.slice(0, idx)) + '<mark>' + escapeHtml(text.slice(idx, idx + q.length)) + '</mark>' + escapeHtml(text.slice(idx + q.length));
+  };
   let html = '';
   let lastGroup = '';
   filtered.forEach((it, i) => {
@@ -187,8 +196,8 @@ function renderCmdkResults(query) {
     html += `<div class="cmdk-item ${i === cmdkActiveIdx ? 'cmdk-active' : ''}" data-cmdk-idx="${i}">
       <span class="cmdk-item-icon">${it.icon || '·'}</span>
       <div class="cmdk-item-body">
-        <div class="cmdk-item-title">${escapeHtml(it.title)}</div>
-        <div class="cmdk-item-sub">${escapeHtml(it.sub || '')}</div>
+        <div class="cmdk-item-title">${highlight(it.title)}</div>
+        <div class="cmdk-item-sub">${highlight(it.sub || '')}</div>
       </div>
       <span class="cmdk-item-action">↵</span>
     </div>`;

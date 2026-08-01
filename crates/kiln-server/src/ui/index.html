@@ -83,15 +83,20 @@
   </button>
 
   <nav class="header-help" aria-label="Help links">
-    <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a>
-    <a href="https://ericflo.github.io/kiln/docs/" target="_blank" rel="noopener noreferrer">Documentation</a>
-    <a href="https://ericflo.github.io/kiln/docs/openenv/" target="_blank" rel="noopener noreferrer">OpenEnv Guide</a>
-    <a href="https://ericflo.github.io/kiln/grpo.html" target="_blank" rel="noopener noreferrer">GRPO Guide</a>
-    <a href="https://ericflo.github.io/kiln/api.html" target="_blank" rel="noopener noreferrer">API Reference</a>
-    <a href="https://ericflo.github.io/kiln/cli.html" target="_blank" rel="noopener noreferrer">CLI Reference</a>
-    <a href="https://ericflo.github.io/kiln/demo/" target="_blank" rel="noopener noreferrer">Demo</a>
-    <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting</a>
-    <a href="https://ericflo.github.io/kiln/architecture.html" target="_blank" rel="noopener noreferrer">Architecture</a>
+    <details class="help-menu" id="help-menu">
+      <summary><svg class="icn" aria-hidden="true"><use href="#i-book"></use></svg> Docs</summary>
+      <div class="help-menu-list">
+        <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a>
+        <a href="https://ericflo.github.io/kiln/docs/" target="_blank" rel="noopener noreferrer">Documentation</a>
+        <a href="https://ericflo.github.io/kiln/docs/openenv/" target="_blank" rel="noopener noreferrer">OpenEnv Guide</a>
+        <a href="https://ericflo.github.io/kiln/grpo.html" target="_blank" rel="noopener noreferrer">GRPO Guide</a>
+        <a href="https://ericflo.github.io/kiln/api.html" target="_blank" rel="noopener noreferrer">API Reference</a>
+        <a href="https://ericflo.github.io/kiln/cli.html" target="_blank" rel="noopener noreferrer">CLI Reference</a>
+        <a href="https://ericflo.github.io/kiln/demo/" target="_blank" rel="noopener noreferrer">Demo</a>
+        <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting</a>
+        <a href="https://ericflo.github.io/kiln/architecture.html" target="_blank" rel="noopener noreferrer">Architecture</a>
+      </div>
+    </details>
     <a class="gh" href="https://github.com/ericflo/kiln" target="_blank" rel="noopener noreferrer" aria-label="View Kiln on GitHub">
       <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
       GitHub
@@ -346,7 +351,7 @@
            content-keyed repaint of a 30-row list would be re-read in full. -->
       <div class="sr-only" role="status" id="recent-requests-status"></div>
       <div class="card-body" id="recent-requests-panel" aria-busy="true">
-        <div class="empty">Loading recent requests…</div>
+        <div class="skel-stack" aria-hidden="true"><div class="skeleton" style="height:14px;width:92%;"></div><div class="skeleton" style="height:14px;width:96%;"></div><div class="skeleton" style="height:14px;width:88%;"></div><div class="skeleton" style="height:14px;width:94%;"></div><div class="skeleton" style="height:14px;width:90%;"></div><div class="skeleton" style="height:14px;width:95%;"></div></div>
       </div>
     </div>
 
@@ -390,7 +395,7 @@
              the whole diagnostics block each time. Online/offline transitions
              are announced by the scoped aria-live status chip in the header. -->
         <div class="card-body" id="server-status" data-panel-id="server-status-panel" aria-busy="true">
-          <div class="empty">Loading server diagnostics…</div>
+          <div class="skel-stack" aria-hidden="true"><div class="skeleton" style="height:14px;width:70%;"></div><div class="skeleton" style="height:14px;width:55%;"></div><div class="skeleton" style="height:14px;width:62%;"></div></div>
         </div>
         <!-- Runtime config expander — deliberately a SIBLING of the keyed
              #server-status region. renderServerStatus repaints
@@ -423,7 +428,7 @@
              traffic, and announcing continuous metrics every repaint is a
              screen-reader firehose with no transition to anchor on. -->
         <div class="card-body" id="decode-perf-panel" data-panel-id="decode-stats-panel" aria-busy="true">
-          <div class="empty">Loading live metrics…</div>
+          <div class="skel-stack" aria-hidden="true"><div class="skeleton" style="height:14px;width:100%;"></div><div class="skeleton" style="height:14px;width:48%;"></div><div class="skeleton" style="height:14px;width:60%;"></div></div>
         </div>
       </div>
     </div>
@@ -445,7 +450,7 @@
            unload, upload, delete, merge, training completion) already speaks
            through the toast channel. -->
       <div class="card-body" id="adapters-panel" aria-busy="true" style="padding: var(--space-4);">
-        <div class="empty">Loading adapter list…</div>
+        <div class="skel-stack" aria-hidden="true"><div class="skeleton" style="height:60px;width:48%;"></div><div class="skeleton" style="height:60px;width:48%;"></div><div class="skeleton" style="height:60px;width:48%;"></div></div>
       </div>
     </div>
 
@@ -539,7 +544,7 @@
       <div class="sr-only" role="status" id="training-queue-status"></div>
 
       <div class="tab-content active" id="tab-queue" role="tabpanel" aria-labelledby="training-tab-queue" aria-busy="true" data-panel-id="training-queue-panel">
-        <div class="empty">Loading queued training jobs…</div>
+        <div class="skel-stack" aria-hidden="true"><div class="skeleton" style="height:40px;width:96%;"></div><div class="skeleton" style="height:40px;width:92%;"></div><div class="skeleton" style="height:40px;width:94%;"></div></div>
       </div>
 
       <div class="tab-content" id="tab-openenv" role="tabpanel" aria-labelledby="training-tab-openenv" hidden inert>

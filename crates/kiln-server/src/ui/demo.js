@@ -641,6 +641,53 @@
     '/v1/preflight/compatibility': preflightCompat,
     '/v1/preflight/tiers': preflightTiers,
     '/v1/agent/traces': agentTraces,
+    // Historical OpenEnv runs — one mid-flight training run and one completed
+    // run with a post-eval + held-out environment gate, shaped exactly like
+    // the production /v1/openenv/runs envelope so run cards render fully.
+    '/v1/openenv/runs': () => ({
+      runs: [
+        {
+          run_id: 'run_9f2ac41d-77e3-4c2a-9d8b-3e5f6a7b8c9d',
+          kind: 'train', state: 'training_running',
+          environments: [{ metadata: { name: 'arcade-cartpole' } }],
+          progress: { groups_total: 8, groups_completed: 8, rollouts_completed: 32, rollouts_total: 32 },
+          request: { adapter: 'base', idempotency_key: 'openenv-cartpole-v1' },
+          admission: { queue_wait_ms: 18_400 },
+          rollout_stats: { episodes: 32, mean_return: 187.4, mean_steps: 6.2, protocol_errors: 0 },
+          training: { state: 'running', progress: 0.42, current_loss: 0.318, epoch: 1,
+            training_data: { admitted_corpus_sha256: 'sha256:77aa10c2f0e84d1a9b3c', openenv: { environments: [{ environment_name: 'arcade-cartpole', discovery_sha256: 'sha256:9c1f0a2b3d4e5f607182' }], groups: 8, rollouts: 32, group_plan_sha256: 'sha256:12ab34cd56ef7890', seed_min: 0, seed_max: 7, behavior_policy: { base_model_sha256: 'sha256:base0f1e2d3c4b5a69' } } } },
+          training_contract: { effective_config: { optimizer: { kind: 'muon' }, lora_rank: 8, output_name: 'openenv-agent', auto_load: true }, behavior_policy: { base_model_sha256: 'sha256:base0f1e2d3c4b5a69' } },
+          training_job_id: 'job_45_openenv_cartpole',
+          warnings: [], artifacts: [], post_evaluations: [], environment_evaluation: null, failure: null, error: null,
+        },
+        {
+          run_id: 'run_3b7de902-1a48-4f6c-b5d2-8e9f0a1b2c3d',
+          kind: 'train', state: 'completed',
+          environments: [{ metadata: { name: 'textsprint-wordle' } }],
+          progress: { groups_total: 8, groups_completed: 8, rollouts_completed: 32, rollouts_total: 32 },
+          request: { adapter: 'base', idempotency_key: 'openenv-wordle-v3' },
+          admission: { queue_wait_ms: 2_100 },
+          rollout_stats: { episodes: 32, mean_return: 0.66, mean_steps: 5.1, protocol_errors: 1 },
+          training: { state: 'completed', progress: 1.0, current_loss: 0.241,
+            training_data: { admitted_corpus_sha256: 'sha256:44bb20d3f1a95e2b8c4d', openenv: { environments: [{ environment_name: 'textsprint-wordle', discovery_sha256: 'sha256:aa10bb20cc30dd40ee50' }], groups: 8, rollouts: 32, group_plan_sha256: 'sha256:fe98dc76ba540312', seed_min: 0, seed_max: 7, behavior_policy: { base_model_sha256: 'sha256:base0f1e2d3c4b5a69' } } } },
+          training_contract: { effective_config: { optimizer: { kind: 'muon' }, lora_rank: 8, output_name: 'wordle-agent-v3', auto_load: true }, behavior_policy: { base_model_sha256: 'sha256:base0f1e2d3c4b5a69' } },
+          training_job_id: 'job_46_openenv_wordle',
+          warnings: [],
+          artifacts: [
+            { kind: 'trajectories', url: '/v1/openenv/runs/run_3b7de902/artifacts/trajectories', bytes: 4_812_044, sha256: 'sha256:ab12cd34ef56ab78cd90ef12ab34cd56' },
+            { kind: 'replay-bundle', url: '/v1/openenv/runs/run_3b7de902/artifacts/replay', bytes: 1_204_811, sha256: 'sha256:0098ff76ee54dd32cc10bb98aa76ff54' },
+          ],
+          post_evaluations: [
+            { suite_name: 'wordle-solve-eval', state: 'completed', examples_completed: 120, examples_total: 120, headline_accuracy: 0.78 },
+          ],
+          environment_evaluation: { state: 'completed', progress: { groups_completed: 20, groups_total: 20 }, outcome: 'promoted',
+            evidence: { baseline_mean_return: 0.41, candidate_mean_return: 0.63, mean_return_improvement: 0.22, exact_sign_test_p_value: 0.0031 },
+            baseline_stats: { episodes: 20, mean_return: 0.41, mean_steps: 5.8, protocol_errors: 2 },
+            candidate_stats: { episodes: 20, mean_return: 0.63, mean_steps: 4.9, protocol_errors: 0 } },
+          failure: null, error: null,
+        },
+      ],
+    }),
   };
 
   // Parameterized GETs (detail drills) — matched by pattern, not exact path.

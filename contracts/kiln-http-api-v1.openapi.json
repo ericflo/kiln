@@ -276,6 +276,56 @@
         }
       }
     },
+    "/ui/fonts/InterVariable.woff2": {
+      "get": {
+        "tags": [
+          "ui"
+        ],
+        "summary": "Serve the Inter Variable UI typeface (weights 100\u2013900)",
+        "operationId": "ui_serve_font_inter_get_ui_fonts_intervariable_woff2",
+        "x-kiln-handler": "ui::serve_font_inter",
+        "x-kiln-rust-signature": "async fn serve_font_inter() -> impl IntoResponse",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "font/woff2": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryArchive"
+                }
+              }
+            },
+            "x-kiln-rust-type": "BinaryArchive"
+          }
+        }
+      }
+    },
+    "/ui/fonts/JetBrainsMonoVariable.ttf": {
+      "get": {
+        "tags": [
+          "ui"
+        ],
+        "summary": "Serve the JetBrains Mono Variable code typeface (weights 100\u2013800)",
+        "operationId": "ui_serve_font_jbmono_get_ui_fonts_jetbrainsmonovariable_ttf",
+        "x-kiln-handler": "ui::serve_font_jbmono",
+        "x-kiln-rust-signature": "async fn serve_font_jbmono() -> impl IntoResponse",
+        "x-kiln-transport": "http",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "font/ttf": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryArchive"
+                }
+              }
+            },
+            "x-kiln-rust-type": "BinaryArchive"
+          }
+        }
+      }
+    },
     "/ui/styles.css": {
       "get": {
         "tags": [
@@ -5499,8 +5549,8 @@
       }
     }
   },
-  "x-kiln-path-count": 109,
-  "x-kiln-operation-count": 123,
+  "x-kiln-path-count": 111,
+  "x-kiln-operation-count": 125,
   "x-kiln-method-counts": {
     "DELETE": 13,
     "GET": 57,
