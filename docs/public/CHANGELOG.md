@@ -4,20 +4,25 @@ This page summarizes user-visible changes. It separates work on `main` from
 published releases and links to the full engineering ledger for exhaustive
 implementation detail.
 
-## Unreleased on `main`
+## kiln-v0.5.2 — 2026-08-01
 
-### Capability-derived Vulkan execution
+### First-class OpenEnv RL, fast stable serving, and the new dashboard
 
-- Vulkan policy v6 derives route legality from the selected device's reported
-  Vulkan capabilities. Device names, vendor IDs, device IDs, PCI identities,
-  and driver names are not routing inputs.
-- Instance creation negotiates the loader API up to Vulkan 1.2. Most shaders
-  target Vulkan 1.0; subgroup-tiled attention shaders require the corresponding
-  Vulkan 1.1 subgroup capabilities and otherwise use an untiled route.
-- The tracked short diagnostic measures 13.46 decode tok/s at 74.29 ms mean
-  inter-token latency. This is source-verified evidence, not a published-release
-  or cross-device claim. See [Benchmarks](BENCHMARKS.md) for the workload,
-  hardware, source revision, and remaining prefill gap.
+- Added native, reproducible OpenEnv discovery, rollout, replay, GRPO training,
+  held-out evaluation, provenance, artifact verification, CLI, API, telemetry,
+  and dashboard workflows for any protocol-compatible environment.
+- Made Stable the normal complete product across CUDA, ROCm, Metal, and Vulkan,
+  including inference, training, adapters, memory management, and qualified
+  graph acceleration. Experimental is no longer required for normal speed or
+  training.
+- Added the new embedded ember dashboard with guided training and distillation
+  on-ramps, contextual next actions, training-time hints, loss/run visibility,
+  bundled fonts, and resilient empty/error/retry behavior.
+- Vulkan execution derives route legality from device capabilities rather than
+  device names or IDs. The tracked source receipt measures 13.46 decode tok/s
+  at 74.29 ms mean inter-token latency on its recorded workload.
+
+[Release notes and artifacts](https://github.com/ericflo/kiln/releases/tag/kiln-v0.5.2)
 
 ## kiln-v0.5.1 — 2026-07-30
 

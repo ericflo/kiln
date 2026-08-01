@@ -1446,7 +1446,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-autograd"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "half",
  "kiln-tensor",
@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-blas"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "cc",
  "cudarc",
@@ -1467,7 +1467,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-conv1d-kernel"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "cc",
  "half",
@@ -1477,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-core"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "chrono",
  "kiln-tensor",
@@ -1495,7 +1495,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-eval"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1518,7 +1518,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-flash-attn"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "cc",
  "half",
@@ -1529,7 +1529,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-flce-kernel"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "kiln-autograd",
  "kiln-tensor",
@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-gdn-kernel"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "cc",
  "half",
@@ -1547,7 +1547,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-graph"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "kiln-tensor",
  "thiserror 2.0.18",
@@ -1555,7 +1555,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-graph-cuda"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "kiln-graph",
  "kiln-tensor",
@@ -1564,7 +1564,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-graph-metal"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "kiln-graph",
  "kiln-tensor",
@@ -1573,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-graph-vulkan"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "kiln-graph",
  "kiln-tensor",
@@ -1582,11 +1582,11 @@ dependencies = [
 
 [[package]]
 name = "kiln-hip"
-version = "0.5.1"
+version = "0.5.2"
 
 [[package]]
 name = "kiln-kt-bridge"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "kiln-autograd",
  "kiln-tensor",
@@ -1594,7 +1594,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-marlin-gemm"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "cc",
  "half",
@@ -1604,14 +1604,14 @@ dependencies = [
 
 [[package]]
 name = "kiln-memory"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "tracing",
 ]
 
 [[package]]
 name = "kiln-model"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1653,7 +1653,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-mps"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "cc",
  "half",
@@ -1665,11 +1665,11 @@ dependencies = [
 
 [[package]]
 name = "kiln-nvtx"
-version = "0.5.1"
+version = "0.5.2"
 
 [[package]]
 name = "kiln-opd-loss-kernel"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "cc",
  "half",
@@ -1680,7 +1680,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-openenv"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -1697,7 +1697,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-optim"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "bytemuck",
  "half",
@@ -1711,7 +1711,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-param"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "kiln-tensor",
  "thiserror 2.0.18",
@@ -1719,7 +1719,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-resource"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "libc",
  "rustix",
@@ -1727,7 +1727,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-rmsnorm-kernel"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "cc",
  "half",
@@ -1738,7 +1738,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-rocblas"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "cc",
  "half",
@@ -1750,7 +1750,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-scheduler"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "kiln-core",
  "thiserror 2.0.18",
@@ -1759,7 +1759,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-server"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -1808,7 +1808,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-tensor"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "bytemuck",
  "cc",
@@ -1831,11 +1831,11 @@ dependencies = [
 
 [[package]]
 name = "kiln-tensor-id"
-version = "0.5.1"
+version = "0.5.2"
 
 [[package]]
 name = "kiln-train"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1876,7 +1876,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-vulkan-blas"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "half",
  "kiln-blas",
@@ -1889,7 +1889,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-vulkan-kernel"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "ash",

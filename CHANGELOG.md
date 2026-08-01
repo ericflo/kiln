@@ -1,6 +1,18 @@
 # Kiln Server Changelog
 
-## Unreleased — capability-derived Vulkan execution
+## kiln-v0.5.2 — 2026-08-01 — first-class OpenEnv RL and fast stable serving
+
+- Stable is now the complete, accelerated serving product on CUDA, ROCm,
+  Metal, and Vulkan: inference, native training, adapter transitions, dynamic
+  KV resizing, allocator reclaim, and correctness-qualified graph execution
+  are enabled without an experimental profile. Experimental is reserved for
+  quarantined backend qualification; maintenance remains an intentionally
+  drained operational profile.
+- The embedded dashboard has a new ember design system, task-oriented guided
+  on-ramps, richer training and distillation explanations, contextual next
+  actions, historical training-time hints, bundled variable fonts, and robust
+  empty/error/retry states. The dashboard remains fully offline and embedded
+  in every server binary.
 
 - OpenEnv reinforcement learning is now a native Kiln workflow. The new
   `kiln-openenv` crate implements bounded HTTP discovery, typed tagged rewards
