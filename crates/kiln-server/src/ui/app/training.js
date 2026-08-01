@@ -89,7 +89,13 @@ async function pollTraining() {
   } catch (e) {
     // Invalidate the queue's render key — the failure HTML replaced the list.
     lastTrainingKey = null;
-    queuePanel.innerHTML = apiFailureHtml('Training queue', e, 'pollTraining');
+    // Keep the stable tab shell and its chooser/list mount points intact so a
+    // successful Retry can render back into the same structure. Replacing the
+    // whole tab here permanently deleted those nodes and left recovery blank.
+    const chooser = document.getElementById('method-chooser');
+    if (chooser) chooser.hidden = true;
+    const queueList = document.getElementById('training-queue-list') || queuePanel;
+    queueList.innerHTML = apiFailureHtml('Training queue', e, 'pollTraining');
   } finally {
     setPanelBusy('tab-queue', false);
   }
@@ -451,8 +457,10 @@ document.querySelectorAll('#method-chooser .method-card').forEach(card => {
 });
 document.getElementById('method-chooser-dismiss')?.addEventListener('click', () => {
   try { localStorage.setItem('kiln.methodChooser.dismissed', '1'); } catch {}
-  const chooser = document.getElementById('method-chooser');
-  if (chooser) chooser.hidden = true;
+  // Re-render from the loaded queue immediately. The queue poll is keyed on
+  // job state, so merely hiding the chooser would otherwise leave a blank
+  // panel forever when an empty queue remains unchanged.
+  if (trainingJobsCache) renderTrainingQueue(trainingJobsCache);
 });
 
 /* ====== Direct "drop a file and train" data input (SFT + GRPO) ==============

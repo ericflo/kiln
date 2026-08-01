@@ -40,6 +40,11 @@ const uiVendorFiles = {
   'xterm.css': 'text/css',
   'xterm-addon-fit.js': 'application/javascript',
 };
+const uiFontDir = resolve(uiDir, 'fonts');
+const uiFontFiles = {
+  'InterVariable.woff2': 'font/woff2',
+  'JetBrainsMonoVariable.ttf': 'font/ttf',
+};
 const expectedHeaderHelpLinks = [
   ['Quickstart', 'https://ericflo.github.io/kiln/quickstart.html'],
   ['OpenEnv Guide', 'https://ericflo.github.io/kiln/docs/openenv/'],
@@ -1522,6 +1527,14 @@ async function startServer({
       const contentType = uiVendorFiles[name];
       if (contentType) {
         text(res, await readFile(resolve(uiVendorDir, name), 'utf8'), contentType);
+        return;
+      }
+    }
+    if (url.pathname.startsWith('/ui/fonts/')) {
+      const name = url.pathname.slice('/ui/fonts/'.length);
+      const contentType = uiFontFiles[name];
+      if (contentType) {
+        text(res, await readFile(resolve(uiFontDir, name)), contentType);
         return;
       }
     }
@@ -3038,7 +3051,7 @@ async function expectRocmMatmulRuntimeConfig(page, scenarioLabel) {
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Full-attention score ceiling[\s\S]*2,048 MiB[\s\S]*default/, `${prefix} should render immutable full-attention geometry and source`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*CUDA kernel profile[\s\S]*native_default[\s\S]*config_file/, `${prefix} should render the immutable CUDA backend route set and source`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Metal kernel profile[\s\S]*native_default[\s\S]*config_file/, `${prefix} should render the immutable Metal backend route set and source`);
-  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*CUDA graph policy[\s\S]*disabled[\s\S]*profile blocked/, `${prefix} should render the profile-resolved CUDA graph request`);
+  await waitForPanelText(page, selector, /Accelerator execution[\s\S]*CUDA graph policy[\s\S]*enabled/, `${prefix} should render stable CUDA graph acceleration as enabled`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*CUDA graph cache[\s\S]*8/, `${prefix} should render the typed CUDA graph cache bound`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*CUDA graph contract[\s\S]*stable metadata[\s\S]*single-row only/, `${prefix} should render fixed CUDA graph safety invariants`);
   await waitForPanelText(page, selector, /Accelerator execution[\s\S]*Strided batched matmul[\s\S]*disabled[\s\S]*default/, `${prefix} should render the portable strided-batched route and source`);
@@ -3796,7 +3809,7 @@ async function runSmoke(baseUrl, {
         await recoverPanel('#decode-perf-panel', /No recent token gaps/i, 'Decode panel did not recover after the APIs healed');
         await recoverPanel('#recent-requests-panel', /No recent requests yet\./, 'Recent requests did not recover after the APIs healed');
         await goToPrimaryTab(page, 'training');
-        await recoverPanel('#tab-queue', /No training jobs yet\./, 'Training queue did not recover after the APIs healed');
+        await recoverPanel('#tab-queue', /Start a training run|No training jobs yet\./, 'Training queue did not recover after the APIs healed');
         await goToPrimaryTab(page, 'adapters');
         await recoverPanel('#adapters-panel', /adapter-alpha/, 'Adapters did not recover after the APIs healed');
 
@@ -3818,7 +3831,7 @@ async function runSmoke(baseUrl, {
         setFailDashboardApis(false);
         await recoverPanel('#adapters-panel', /adapter-alpha/, 'Adapters stuck on failure HTML after second recovery (dedupe key not invalidated)');
         await goToPrimaryTab(page, 'training');
-        await recoverPanel('#tab-queue', /No training jobs yet\./, 'Training queue stuck on failure HTML after second recovery (dedupe key not invalidated)');
+        await recoverPanel('#tab-queue', /Start a training run|No training jobs yet\./, 'Training queue stuck on failure HTML after second recovery (dedupe key not invalidated)');
         await goToPrimaryTab(page, 'overview');
         await recoverPanel('#server-status', /GPU VRAM/, 'Server status stuck on failure HTML after second recovery');
         await recoverPanel('#decode-perf-panel', /No recent token gaps/i, 'Decode panel stuck on failure HTML after second recovery');
@@ -4217,7 +4230,7 @@ async function runSmoke(baseUrl, {
     // The Training click below asserts the canonical ONE-entry push
     // (#training/sft via the empty-queue redirect); that redirect requires a
     // LOADED queue cache, so gate on the queue render first.
-    await waitForPanelText(page, '#tab-queue', /No training jobs yet\./, 'Training queue poll should land before the hash-navigation walk');
+    await waitForPanelText(page, '#tab-queue', /Start a training run/, 'Training queue poll should land before the hash-navigation walk');
     await goToPrimaryTab(page, 'adapters');
     await expectActivePageAndHash(page, 'adapters', 'Clicking the Adapters tab should push #adapters');
     await goToPrimaryTab(page, 'training');
@@ -4507,6 +4520,12 @@ async function runSmoke(baseUrl, {
     await expectTrainingToast(page, 'Merged 2 sources → merged-smoke-adapter (32 tensors, mode=weighted_average)');
 
     await goToPrimaryTab(page, 'training');
+    await clickAndWait(page, '#training-tab-queue', 'Could not open the empty training queue');
+    await waitForPanelText(page, '#method-chooser', /Start a training run/, 'Empty training queue should show the guided method chooser');
+    await waitForPanelText(page, '#method-chooser', /Teach from examples/, 'Training method chooser should explain the SFT path');
+    await waitForPanelText(page, '#method-chooser', /Improve against a reward/, 'Training method chooser should explain the GRPO path');
+    await waitForPanelText(page, '#method-chooser', /Learn through interaction/, 'Training method chooser should explain the OpenEnv path');
+    await clickAndWait(page, '#method-chooser-dismiss', 'Could not dismiss the training method chooser');
     await waitForPanelText(page, '#tab-queue', /No training jobs yet\./, 'Empty training queue state missing');
     await expectPanelLink(page, '#tab-queue .empty', 'Quickstart', 'https://ericflo.github.io/kiln/quickstart.html');
     await expectPanelLink(page, '#tab-queue .empty', 'GRPO Guide', 'https://ericflo.github.io/kiln/grpo.html');
@@ -4541,7 +4560,7 @@ async function runSmoke(baseUrl, {
     await waitForPanelText(page, '#runtime-config-body', /Effective cap[\s\S]*24\.00 GiB/, 'Runtime config should render the effective capacity cap');
     await waitForPanelText(page, '#runtime-config-body', /Usable[\s\S]*12\.50 GiB/, 'Runtime config should render live usable memory after the governor floor');
     await waitForPanelText(page, '#runtime-config-body', /Probe cadence[\s\S]*750 ms/, 'Runtime config should render the governor probe cadence');
-    await waitForPanelText(page, '#runtime-config-body', /Reclaim[\s\S]*off[\s\S]*requested automatic/, 'Runtime config should distinguish effective reclaim from a profile-constrained request');
+    await waitForPanelText(page, '#runtime-config-body', /Reclaim[\s\S]*automatic[\s\S]*config_file/, 'Stable runtime config should render automatic reclaim as the effective requested policy');
     await waitForPanelText(page, '#runtime-config-body', /Graph live[\s\S]*busy[\s\S]*model runner busy/, 'Runtime config should take live graph contention from the health poll');
     await waitForPanelText(page, '#runtime-config-body', /Graph current phase[\s\S]*native capture[\s\S]*\d+\.\d s/, 'Runtime config should show the runner-lock-independent in-progress graph phase from health');
     await waitForPanelText(page, '#runtime-config-body', /1,024/, 'Runtime config should render the KV cache block count');
@@ -5463,7 +5482,7 @@ async function runSmoke(baseUrl, {
     await page.waitForFunction(() => document.getElementById('chat-thinking-budget-preview')?.dataset.state === 'incomplete', { timeout: 5000 })
       .catch(() => fail('Malformed finite thinking budget should mark the effective preview incomplete'));
     await page.type('#chat-input', 'This malformed budget must not be sent.');
-    await page.click('#chat-send');
+    await page.$eval('#chat-send', (button) => button.click());
     await page.waitForFunction(() => (
       /Thinking tokens must be a whole number/.test(document.getElementById('toasts')?.textContent || '')
       && document.activeElement?.id === 'chat-thinking-budget-tokens'
@@ -5501,7 +5520,7 @@ async function runSmoke(baseUrl, {
     await page.keyboard.type('e');
     const nativeBadInput = await page.$eval('#chat-thinking-budget-tokens', (input) => input.validity.badInput);
     if (!nativeBadInput) fail('The browser did not enter the native malformed number state used by the budget regression');
-    await page.click('#chat-send');
+    await page.$eval('#chat-send', (button) => button.click());
     await page.waitForFunction(() => (
       /Thinking tokens must be a whole number/.test(document.getElementById('toasts')?.textContent || '')
       && document.activeElement?.id === 'chat-thinking-budget-tokens'
