@@ -85,6 +85,7 @@ async function pollTraining() {
     const liveCount = (data.running ? 1 : 0) + (data.queued ? data.queued.length : 0);
     setText('training-count', String(liveCount));
     updateFlywheel();
+    updateTrainingTimeHints();
   } catch (e) {
     // Invalidate the queue's render key — the failure HTML replaced the list.
     lastTrainingKey = null;
@@ -92,6 +93,29 @@ async function pollTraining() {
   } finally {
     setPanelBusy('tab-queue', false);
   }
+}
+
+// "How long will this take?" — answered truthfully from real history: the
+// most recent completed job of the same kind. No estimate is invented; when
+// there is no history the hint simply stays at its default text.
+function updateTrainingTimeHints() {
+  const tj = (typeof trainingJobsCache !== 'undefined') ? trainingJobsCache : null;
+  if (!tj || !Array.isArray(tj.completed)) return;
+  const lastOf = (kind) => tj.completed.find(j =>
+    String(j.job_type || '').toUpperCase() === kind && j.state === 'Completed' && j.elapsed_secs != null);
+  const fmt = (secs) => {
+    const s = Math.floor(Number(secs));
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.round(s / 60) + ' min';
+    return Math.floor(s / 3600) + 'h ' + Math.round((s % 3600) / 60) + 'm';
+  };
+  const set = (id, base, job) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = job ? `${base} Last one finished in ${fmt(job.elapsed_secs)}.` : base;
+  };
+  set('sft-next-hint', 'Trains a LoRA from your examples, then hot-swaps it in.', lastOf('SFT'));
+  set('grpo-next-hint', 'Trains a LoRA against your reward scores, then hot-swaps it in.', lastOf('GRPO'));
 }
 
 let trainingQueueFilter = '';

@@ -586,7 +586,11 @@ async function refreshLibraryList() {
     const res = await api('/v1/library');
     const adapters = res.adapters || [];
     if (adapters.length === 0) {
-      node.innerHTML = '<div class="empty">No published adapters yet.</div>';
+      node.innerHTML = `<div class="eval-empty">
+        <div class="eval-empty-icon"><svg class="icn"><use href="#i-stack"></use></svg></div>
+        <div class="eval-empty-title">No published adapters yet</div>
+        <div class="eval-empty-body">The library is where adapters are shared — install one a teammate published, or publish your own after training. Train an adapter first (Training tab), then publish it here.</div>
+      </div>`;
       return;
     }
     node.innerHTML = adapters.map(a => `<div class="adapter-card" style="display:flex; align-items:center; gap:var(--space-3); margin-bottom:var(--space-2);">
