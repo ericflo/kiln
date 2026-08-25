@@ -32,10 +32,10 @@ Repeat forever:
    (template below).
 4. **Spawn the sub-agent** by shelling out to `pi` (see invocation section).
    Wait for it to finish.
-5. **Review its work.** Inspect `git status`, `git diff`, and the new entry at
-   the bottom of `CLEANUP.md`. Verify the build/tests actually pass yourself
-   (e.g. `cargo build`, `cargo test`, whatever applies). You are the quality
-   gate.
+5. **Review its work.** Inspect `git log`, `git show`, and the new entry at
+   the bottom of `CLEANUP.md`. Verify the sub-agent committed its change
+   (`git add` + `git commit`), that the diff matches the claim, and that the
+   build/tests actually pass (run them yourself). You are the quality gate.
 6. **Record lessons.** Note anything wrong or incomplete — you'll feed it back
    as steering guidance in step 2 of the next round. Do not fix it yourself;
    let the next fresh agent do it, guided by you.
@@ -102,8 +102,12 @@ Then:
 4. Append your signature entry to the bottom of CLEANUP.md under `## Ledger`,
    using its exact entry format: your name, today's date, what you cleaned up
    and how you verified it.
-5. End your response with a short report: what you changed, how you verified
-   it, and anything you noticed but left for a future session.
+5. Commit everything: `git add` the changed files (including CLEANUP.md) and
+   `git commit` with a clear message describing the cleanup. Every improvement
+   must land as a git commit — uncommitted work doesn't count.
+6. End your response with a short report: what you changed, the commit hash,
+   how you verified it, and anything you noticed but left for a future
+   session.
 
 One focused cleanup per session is enough. Done beats ambitious. A cleanup
 that breaks anything is not a cleanup — revert and pick something safer if
@@ -114,7 +118,10 @@ you cannot make it work cleanly.
 
 A sub-agent's round only counts if all of these hold when you inspect:
 
-- `git diff` matches what its `CLEANUP.md` entry claims — no sneaky extra
+- The work is **committed**: a real `git add` + `git commit` exists for the
+  improvement (and includes the `CLEANUP.md` signature). Nothing left dangling
+  in the working tree — check with `git status`.
+- The commit's `git diff` matches what its `CLEANUP.md` entry claims — no sneaky extra
    edits, nothing half-done.
 - The project builds and relevant tests pass (run them yourself, don't trust
   the entry).

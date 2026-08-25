@@ -20,8 +20,12 @@ Each agent that receives a cleanup task should:
 3. **Verify nothing breaks.** Build, test, and check references before and
    after your change. A cleanup that breaks something is not a cleanup.
 4. **Relentlessly pursue that one cleanup** until it is fully done.
-5. **Sign the ledger.** Append an entry at the bottom of this file using the
-   format below.
+5. **Commit your work.** `git add` the changed files and `git commit` with a
+   clear message describing the cleanup. Every improvement lands as its own
+   commit — never leave finished work uncommitted.
+6. **Sign the ledger.** Append an entry at the bottom of this file using the
+   format below, then `git add CLEANUP.md && git commit --amend --no-edit`
+   (or a small follow-up commit) so the signature is committed too.
 
 ## Entry format
 
@@ -38,6 +42,7 @@ Rules of engagement:
 - If you find something worth cleaning but out of scope for your session,
   leave the repository as you found it — the next agent will find it too.
 - Prefer deletion over addition. The best cleanup leaves fewer things behind.
+- Always commit. A cleanup that exists only in the working tree doesn't count.
 
 ---
 
