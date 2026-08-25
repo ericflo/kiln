@@ -15,7 +15,7 @@ into a general model framework or adding a sidecar runtime.
 | Runtime, scheduler, memory, or backend behavior | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Focused behavioral tests and affected contract checks |
 | Public API or configuration | [HTTP API contract](contracts/kiln-http-api-v1.openapi.json) or [configuration](docs/public/CONFIGURATION.md) | Schema, implementation, examples, and docs updated together |
 | Training or evaluation | Relevant guide under `docs/` | Request, lifecycle, receipt, and failure-path tests |
-| Performance | [`BENCHMARKS.md`](BENCHMARKS.md), [`PROFILING.md`](PROFILING.md), and [local qualification](docs/qualification.md) | Comparable before/after evidence on the same declared workload |
+| Performance | [`BENCHMARKS.md`](BENCHMARKS.md), [`PROFILING.md`](docs/archive/profiling/PROFILING.md), and [local qualification](docs/qualification.md) | Comparable before/after evidence on the same declared workload |
 | Documentation site | [`docs/plans/public-site-audit-and-copyediting-plan.md`](docs/plans/public-site-audit-and-copyediting-plan.md) | Docs build, smoke test, links, and desktop/mobile review |
 
 Open an issue before a non-trivial change, new dependency, new kernel, new

@@ -49,4 +49,4 @@ Each `phase-cXX/` dir typically contains:
 - One or more `.json` / `.csv` / `.log` artifacts captured during the investigation
 - Occasionally an `artifacts/` subdir for larger captures
 
-For the active live story, start from `PROFILING.md` at the repo root — it cites individual phase verdicts inline and is the authoritative current state of the optimization frontier.
+For the active live story, start from [`PROFILING.md`](../profiling/PROFILING.md) under `docs/archive/profiling/` — it cites individual phase verdicts inline and is the authoritative current state of the optimization frontier.

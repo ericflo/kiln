@@ -1,6 +1,6 @@
-# Archived profiling reports
+# Profiling reports
 
-These are frozen-in-time profiling phase reports from the Phase 6 / native-MTP investigations. The live profiling report lives at [/PROFILING.md](../../../PROFILING.md).
+The live profiling report — [PROFILING.md](PROFILING.md) — lives in this directory alongside its frozen-in-time phase reports from the Phase 6 / native-MTP investigations.
 
 | File | Phase / topic |
 | --- | --- |

@@ -130,7 +130,7 @@
 > (2026-04-29).** All three Phase 10 chapters closed; remaining Liger
 > priority kernels (RoPE, SwiGLU/GeGLU, Layer Norm, FleCE Phase C) are
 > sub-floor under the math-ceiling rule on the post-#647 SFT-step profile.
-> See [`docs/audits/PHASE10_CLOSURE.md`](docs/audits/PHASE10_CLOSURE.md)
+> See [`docs/audits/PHASE10_CLOSURE.md`](../../audits/PHASE10_CLOSURE.md)
 > for the verdict consolidation, math-ceiling table, and ranked pivot
 > recommendations. No further Liger kernel ports planned without a fresh
 > re-profile that surfaces a candidate ≥1.05× ceiling.
@@ -248,7 +248,7 @@ shuffle is deterministic.
 
 These are the **default** parity-test bands. Specific `{op, dtype,
 backend}` cells override in
-[`bench-results/parity-tolerance.csv`](bench-results/parity-tolerance.csv)
+[`bench-results/parity-tolerance.csv`](../../../bench-results/parity-tolerance.csv)
 (Phase 0.4):
 
 | dtype | forward | backward |
@@ -302,13 +302,13 @@ parity-tolerance row fails the Phase 9 audit.
 
 ### Cited prior art in this repo
 
-- [`crates/kiln-rmsnorm-kernel/csrc/fused_rmsnorm_bwd.cu`](crates/kiln-rmsnorm-kernel/csrc/fused_rmsnorm_bwd.cu) — the canonical example
+- [`crates/kiln-rmsnorm-kernel/csrc/fused_rmsnorm_bwd.cu`](../../../crates/kiln-rmsnorm-kernel/csrc/fused_rmsnorm_bwd.cu) — the canonical example
   of category 2 (atomicAdd cross-row grad_w) co-existing with category 3
   (per-row deterministic reduction).
-- [`crates/kiln-vulkan-kernel/csrc/shaders/vk_index_select_rows_bwd_f32.comp`](crates/kiln-vulkan-kernel/csrc/shaders/vk_index_select_rows_bwd_f32.comp) —
+- [`crates/kiln-vulkan-kernel/csrc/shaders/vk_index_select_rows_bwd_f32.comp`](../../../crates/kiln-vulkan-kernel/csrc/shaders/vk_index_select_rows_bwd_f32.comp) —
   Vulkan-side embedding-table backward using atomic-add on a uint-reinterpret
   of f32.
-- [`crates/kiln-flash-attn/csrc/flash_attn/src/flash_bwd_kernel.h:124`](crates/kiln-flash-attn/csrc/flash_attn/src/flash_bwd_kernel.h) —
+- [`crates/kiln-flash-attn/csrc/flash_attn/src/flash_bwd_kernel.h:124`](../../../crates/kiln-flash-attn/csrc/flash_attn/src/flash_bwd_kernel.h) —
   flash-attention backward already exposes a deterministic path.
 
 ---
@@ -488,7 +488,7 @@ $40/90 min cap. Required Cargo.toml fix on the pod (NOT in this PR's
 diff): `kiln-server`'s `cuda` feature did not propagate to
 `kiln-train/cuda`, so the `kiln-flce-kernel` CUDA path errored out
 at runtime. Cite:
-[`docs/audits/PHASE10_S3_CANDIDATE_PREFLIGHT.md`](docs/audits/PHASE10_S3_CANDIDATE_PREFLIGHT.md).
+[`docs/audits/PHASE10_S3_CANDIDATE_PREFLIGHT.md`](../../audits/PHASE10_S3_CANDIDATE_PREFLIGHT.md).
 
 ## Phase 7 end-to-end native-MTP self-spec decode bench (2026-04-25)
 
@@ -519,14 +519,14 @@ GPU spend. Reopen triggers: median α reliably clearing 0.72 across
 humaneval+gsm8k+c4 with ≥10 seeds, a fused/short-circuit verifier
 landing, k>1 MTP variant, or workload-distribution shift to
 genuinely chat-template-heavy traffic. See
-[`docs/archive/phase-c/phase-c66/post-535-mtp-decode-bench.md`](docs/archive/phase-c/phase-c66/post-535-mtp-decode-bench.md)
+[`docs/archive/phase-c/phase-c66/post-535-mtp-decode-bench.md`](../phase-c/phase-c66/post-535-mtp-decode-bench.md)
 for the full protocol, anti-duplication evidence, per-run table
 (off vs `mtp_forced` vs the resolver-downgraded `mtp_unforced`
 control), decision-rule application, paired-seed delta breakdown,
 P99 ITL bimodality discussion, α progression timeline (PR #316 →
 this PR), and reproduction commands. Raw data:
-[`docs/archive/phase-c/phase-c66/post-535-mtp-decode-bench.csv`](docs/archive/phase-c/phase-c66/post-535-mtp-decode-bench.csv)
-and [`docs/archive/phase-c/phase-c66/artifacts/`](docs/archive/phase-c/phase-c66/artifacts/) (9 raw
+[`docs/archive/phase-c/phase-c66/post-535-mtp-decode-bench.csv`](../phase-c/phase-c66/post-535-mtp-decode-bench.csv)
+and [`docs/archive/phase-c/phase-c66/artifacts/`](../phase-c/phase-c66/artifacts/) (9 raw
 bench logs, 3 seeds × 3 arms).
 
 ## Phase 7 H18 hand-rolled HF transformers MTP α reference (2026-04-25)
@@ -569,7 +569,7 @@ or future vLLM/SGLang stable that loads on driver 550.x) producing
 α materially > 0.3636; running H18 against a future BF16-only kiln
 build to isolate the W4A16 confounder; or reproducing H18 with
 different seeds and obtaining a materially different median α. See
-[`docs/audits/phase7-h18-hf-transformers-alpha-reference.md`](docs/audits/phase7-h18-hf-transformers-alpha-reference.md)
+[`docs/audits/phase7-h18-hf-transformers-alpha-reference.md`](../../audits/phase7-h18-hf-transformers-alpha-reference.md)
 for the full verdict, decision-rule application, per-seed
 divergence analysis, anti-duplication evidence, reproduction
 commands, and detailed reopen triggers. Raw data:
@@ -619,7 +619,7 @@ succeeded on first try (no fallback needed); pod
 H17b cap. Reopen preconditions: vLLM publishing a `+cu124`/`+cu128`
 0.20.x wheel; RunPod stock driver upgrade to ≥580; or H18
 hand-rolled reference closing the question independently. See
-[`docs/audits/phase7-h17b-vllm-020-alpha-microbench.md`](docs/audits/phase7-h17b-vllm-020-alpha-microbench.md)
+[`docs/audits/phase7-h17b-vllm-020-alpha-microbench.md`](../../audits/phase7-h17b-vllm-020-alpha-microbench.md)
 for the full verdict, the runtime-stack delta table, the canonical
 3-attempt crash trace, anti-duplication evidence, reproduction
 commands, and detailed reopen triggers. Raw data:
@@ -664,7 +664,7 @@ opportunistic vLLM v0.20.0 retest (~30 min / $0.25), hand-rolled HF
 transformers reference H18 (~2-4 hrs engineering, $0 GPU), or accept the
 H15b `kiln_native_ceiling` verdict as operational conclusion and
 deprioritize MTP-side α work entirely. See
-[`docs/audits/phase7-h17-sglang-alpha-microbench.md`](docs/audits/phase7-h17-sglang-alpha-microbench.md)
+[`docs/audits/phase7-h17-sglang-alpha-microbench.md`](../../audits/phase7-h17-sglang-alpha-microbench.md)
 for the full verdict, three crash signatures, per-config outcome table,
 SGLang prerequisites discovered, workload matching, reproduction
 commands, anti-duplication evidence, and detailed reopen triggers. Raw
@@ -709,7 +709,7 @@ PR #530. Re-classifies PR #527's "SGLang has no MTP for Qwen3.5"
 cross-reference: SGLang has had `Qwen3_5ForCausalLMMTP` since 2026-02-09
 PR #18489 — PR #526's accurate claim was about *RadixAttention*
 MTP-awareness, a different question. See
-[`docs/audits/phase7-h16-external-alpha-options-audit.md`](docs/audits/phase7-h16-external-alpha-options-audit.md)
+[`docs/audits/phase7-h16-external-alpha-options-audit.md`](../../audits/phase7-h16-external-alpha-options-audit.md)
 for the 8-candidate table with file:line evidence and commit SHAs, the
 pre-registered decision rule + application, the H17 task scope, the free
 pre-step protocol, the explicit reopen preconditions per candidate, and
@@ -737,7 +737,7 @@ patch and re-run this PR's `scripts/h15c_*` as-is, or (c) refocus Phase 7
 onto non-α decode-path wins (PR #521 prefix-cache + CUDA graphs landed,
 PR #526 SGLang RadixAttention port queued). Kiln median α at this
 workload (re-derived from PR #529 c1_attr CSVs): 0.3636. See
-[`docs/audits/phase7-h15c-vllm-alpha-microbench.md`](docs/audits/phase7-h15c-vllm-alpha-microbench.md)
+[`docs/audits/phase7-h15c-vllm-alpha-microbench.md`](../../audits/phase7-h15c-vllm-alpha-microbench.md)
 for the full verdict, segfault signature + crash backtrace, per-seed α
 table, vLLM config used (BF16 confounder vs kiln Marlin W4A16),
 reproduction commands, anti-duplication evidence, and detailed reopen
@@ -766,7 +766,7 @@ Both strata show 100% top-1 agreement and median J@10 = 1.0000. Verifier
 numerical drift on reject rows is RULED OUT on this checkpoint.
 Recommendation: queue a vLLM α microbench next to establish whether an
 external-reference upper bound exists above kiln's current α. See
-[`docs/audits/phase7-h15b-stratified-c29-v2.md`](docs/audits/phase7-h15b-stratified-c29-v2.md)
+[`docs/audits/phase7-h15b-stratified-c29-v2.md`](../../audits/phase7-h15b-stratified-c29-v2.md)
 for the full verdict, per-position stratified table, decision-rule
 application, anti-duplication evidence, and reopen triggers. Raw data:
 `docs/archive/phase-c/phase-c29-v2/c29-v2-stratified-compare.{json,md}` and
@@ -794,7 +794,7 @@ evidence that α at this anchor is workload-deterministic, not pack-determined.
 A6000 / ~$0.25) per PR #527 §"Recommended next H." Decision belongs to the
 next planning cycle. Full methodology, decision rule, period-10 collision
 table, anti-duplication evidence, and reopen triggers in
-[`docs/audits/phase7-h15a-marlin-determinism.md`](docs/audits/phase7-h15a-marlin-determinism.md).
+[`docs/audits/phase7-h15a-marlin-determinism.md`](../../audits/phase7-h15a-marlin-determinism.md).
 Raw script + verbatim output: `scripts/phase-c40f/h15a_correlation.py` and
 `docs/archive/phase-c/phase-c40f/h15a_correlation_output.txt`.
 
@@ -817,7 +817,7 @@ the existing dump pipeline but split by accept/reject, since C29's clean
 verdict was measured only on accepted-token positions. Falsification cost
 ~30 min A6000 / ~$0.25. Full inventory table, scoring, anti-duplication
 evidence, and bench plan in
-[`docs/audits/phase7-mtp-acceptance-state-of-play.md`](docs/audits/phase7-mtp-acceptance-state-of-play.md).
+[`docs/audits/phase7-mtp-acceptance-state-of-play.md`](../../audits/phase7-mtp-acceptance-state-of-play.md).
 
 ## Phase 7 SGLang RadixAttention design audit (2026-04-24)
 
@@ -829,7 +829,7 @@ pod spend, no new Rust code.
 **Outcome:** design parity sufficient for kiln's target workloads; port-to-radix
 on the real path is speculative without branching-workload evidence. Detailed
 findings, 16-feature classification table, and reopen precondition in
-[`docs/audits/phase7-sglang-radix-audit.md`](docs/audits/phase7-sglang-radix-audit.md).
+[`docs/audits/phase7-sglang-radix-audit.md`](../../audits/phase7-sglang-radix-audit.md).
 
 ## Phase 7 kill-switch bisection follow-up (2026-04-24)
 
@@ -839,7 +839,7 @@ fused-kernel kill switch per arm (`KILN_DISABLE_FUSED_GDN_GATES`,
 `KILN_DISABLE_FUSED_CONV1D`, `KILN_DISABLE_FUSED_PAGED_DECODE`) to isolate the
 post-#166 decode regression. Full per-arm tables, variance analysis, and
 recommended next steps in
-[`docs/archive/phase-c/phase-c64/post523-killswitch-bisection.md`](docs/archive/phase-c/phase-c64/post523-killswitch-bisection.md).
+[`docs/archive/phase-c/phase-c64/post523-killswitch-bisection.md`](../phase-c/phase-c64/post523-killswitch-bisection.md).
 
 **Outcome: null. No single fused-kernel default path accounts for the gap.**
 
@@ -872,7 +872,7 @@ post-#521 profile refresh below. Toggles `KILN_PREFIX_CACHE_ENABLED` on and off
 on current main (`821ccd3`, PR #522 docs-only) and compares decode tok/s,
 ITL, and prefill on `kiln-bench --paged`. Full methodology, per-run tables,
 and structural analysis in
-[`docs/archive/phase-c/phase-c64/post522-prefix-cache-ab.md`](docs/archive/phase-c/phase-c64/post522-prefix-cache-ab.md).
+[`docs/archive/phase-c/phase-c64/post522-prefix-cache-ab.md`](../phase-c/phase-c64/post522-prefix-cache-ab.md).
 
 **Outcome: prefix-cache hooks are not the source of the bench-visible regression.**
 Both structurally and empirically:
@@ -4887,7 +4887,7 @@ decode path — the OOM ceiling at ≥65536 prompt tokens is set by GDN prefill
 state, not by the GQA KV cache, so halving the KV cache does not extend the
 context ceiling on this GPU.
 
-Raw per-run data: [`profiling-artifacts/fp8_kv_verify_2026-04-20.csv`](profiling-artifacts/fp8_kv_verify_2026-04-20.csv).
+Raw per-run data: [`profiling-artifacts/fp8_kv_verify_2026-04-20.csv`](../../../profiling-artifacts/fp8_kv_verify_2026-04-20.csv).
 
 ### Why this verification was run
 
@@ -8166,7 +8166,7 @@ layer 1 `input_layernorm` itself?
 
 **Preflight outcome:** proceed. Fresh `origin/main` at `e569d22` (PR #428
 merged) still had
-[`docs/archive/phase-c/phase-c41/c41-layer1-subop-bisect.md`](docs/archive/phase-c/phase-c41/c41-layer1-subop-bisect.md)
+[`docs/archive/phase-c/phase-c41/c41-layer1-subop-bisect.md`](../phase-c/phase-c41/c41-layer1-subop-bisect.md)
 as the latest committed source of truth for this path, and that doc still
 recorded `layer_1_post_input_norm` as the earliest shared bad C41 tap for both
 seeds. Fresh main did not already contain committed C42 taps or a doc that

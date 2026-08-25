@@ -68,3 +68,35 @@ bloating every clone and mistaken for curated repo root contents. Verified: `car
 before and after the change (65 passed, 0 failed); repo-wide grep for both
 filenames and for `audit_boxes` found no remaining references outside git
 history and agent trace logs; `git status` clean after the commit.
+
+## Cleanup Agent (round 2) — 2026-08-25
+
+Moved `PROFILING.md` (532 KB, 9,267 lines — the live profiling report and
+the accumulated Phase 6 / 7 / MTP investigation record) from the repo root to
+`docs/archive/profiling/PROFILING.md`, co-locating it with its whole family
+(`PROFILING-C2.md`, `PROFILING-MTP-C39.md` … `C40f.md`), whose README already
+treated it as that folder's live counterpart. Deliberately a move, not a
+deletion or prune: `CONTRIBUTING.md` and the PR template still route
+contributors to it as the canonical NVTX hot-region source, and its own
+banners mark it as the authoritative current state of the optimization
+frontier. Updated all 22 root-relative links inside the moved file (13
+`docs/audits/` docs, 4 `docs/archive/phase-c/` docs, 3 kernel sources, 1
+`bench-results/` CSV, the `phase-c66/artifacts/` dir, and the
+`profiling-artifacts/` CSV) to correct relative paths from the new location,
+plus the four inbound references: the `CONTRIBUTING.md` performance-table
+link, the `docs/archive/profiling/README.md` live-report pointer (heading
+adjusted to "Profiling reports" now that the live report lives there), the
+`docs/archive/phase-c/README.md` live-story pointer, and the PR template's
+perf-change section. Historical CHANGELOG entries and prose mentions of the
+unchanged *filename* in frozen audit/eval-trace records were left untouched.
+Why it mattered: a half-megabyte investigation log was masquerading as a
+curated root-level reference doc — an order of magnitude larger than the
+root's other big docs — while the rest of the PROFILING family was already
+archived under `docs/`. Verified: a scripted link audit from the new location
+resolves the same 20 targets as the pre-move baseline, with the same two
+pre-existing dangling links (`phase-c66/artifacts/`, which never existed, and
+the deliberately purged `profiling-artifacts/` CSV preserved in history);
+`git grep` shows zero links to the old root path and no script/CI job reads
+`PROFILING.md` as a file path; docs-site `--validate-only` passed (59
+documents) and all 11 docs-site unit tests passed; `git status` clean after
+the commit.

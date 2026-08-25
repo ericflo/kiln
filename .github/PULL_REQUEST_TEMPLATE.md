@@ -17,7 +17,7 @@ Link any related issues or prior PRs.
 
 ## Perf change?
 
-If this PR changes performance, paste before/after `kiln-bench` median-of-3 numbers (per CONTRIBUTING.md "For performance changes"). Link the kernel crate or `forward.rs` region touched and the relevant `PROFILING.md` NVTX hot region.
+If this PR changes performance, paste before/after `kiln-bench` median-of-3 numbers (per CONTRIBUTING.md "For performance changes"). Link the kernel crate or `forward.rs` region touched and the relevant NVTX hot region in `docs/archive/profiling/PROFILING.md`.
 
 ## Checklist
 
