@@ -100,3 +100,20 @@ the deliberately purged `profiling-artifacts/` CSV preserved in history);
 `PROFILING.md` as a file path; docs-site `--validate-only` passed (59
 documents) and all 11 docs-site unit tests passed; `git status` clean after
 the commit.
+
+## Cleanup Agent (round 3) — 2026-08-25
+
+Anchored the unanchored `adapters/` rule in `.gitignore` to `/adapters/`. The
+broad form matched any directory named `adapters` at any depth, silently hiding
+scratch/output directories from `git status` (a scratch dir under `crates/`
+was demonstrably invisible before the fix). The rule's own comment scopes it to
+the root-level default runtime state directory, so the anchored form matches
+the stated intent; nested `adapters/` dirs that legitimately exist (under the
+already-ignored `.qualification/` and `Qwen3.5-4B/`) remain ignored by their
+parent rules. Verified: `git ls-files | grep -E '(^|/)adapters/'` returns zero
+tracked paths, so nothing tracked depends on the broad form; `git check-ignore`
+confirms the root `adapters/` dir is still ignored while a hypothetical nested
+`adapters/junk.bin` is no longer masked by this rule; repo-wide grep found no
+script or CI job parsing `.gitignore` or relying on ignore semantics for nested
+adapters paths; `scripts/check_repository_artifacts.py` passes after the change
+(6712 tracked paths); `git status` shows only the intended `.gitignore` edit.
