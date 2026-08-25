@@ -597,8 +597,8 @@ mod tests {
 
     #[test]
     fn captured_rtx_6000_ada_limits_select_compatible_routes() {
-        // Core limits captured in the repository's
-        // VP_VULKANINFO_NVIDIA_RTX_6000_Ada_Generation_550_127_8_0.json.
+        // Core limits captured from `vulkaninfo` on an NVIDIA RTX 6000 Ada
+        // Generation (driver 550.127.8.0).
         // Memory topology stays discrete: ordinary host-visible staging memory
         // is not assumed to be device-local.
         let caps = VulkanComputeCapabilities {

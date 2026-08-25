@@ -47,3 +47,24 @@ Rules of engagement:
 ---
 
 ## Ledger
+
+## Cleanup Agent — 2026-08-25
+
+Removed two stray artifacts that had been committed to the repository root:
+`_audit_boxes.json` (44 KB JSON array of 146 audit-checklist strings left over
+from an earlier candle-removal audit session — zero references in any code,
+doc, script, or CI) and `VP_VULKANINFO_NVIDIA_RTX_6000_Ada_Generation_550_127_8_0.json`
+(222 KB machine-specific `vulkaninfo` profile dump from one RTX 6000 Ada
+machine, driver 550.127.8.0). The only mention of the latter anywhere was a
+provenance comment above the `captured_rtx_6000_ada_limits_select_compatible_routes`
+test in `crates/kiln-vulkan-kernel/src/policy.rs`; that comment was rewritten
+to preserve the provenance (GPU model + driver) without dangling a pointer at
+deleted data — the test's limits were already hardcoded inline and never read
+the file. Also deleted the untracked scratch directory
+`sft-cap.pre-edit-ctx-gather/` (20 KB of agent context-gather leftovers, only
+referenced by ignored `Qwen3.5-4B/` trace logs) from the working tree. Why it
+mattered: both were committed machine/session scratch with no ongoing purpose,
+bloating every clone and mistaken for curated repo root contents. Verified: `cargo test -p kiln-vulkan-kernel --lib` passed identically
+before and after the change (65 passed, 0 failed); repo-wide grep for both
+filenames and for `audit_boxes` found no remaining references outside git
+history and agent trace logs; `git status` clean after the commit.
