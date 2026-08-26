@@ -1249,3 +1249,33 @@ Verified: baseline `cargo check --tests` passed before the change; after,
 `cargo check --tests` passes with identical warnings and `cargo test`
 passes 161/161 in the desktop workspace; `git grep dirs` finds no remaining
 references outside the lockfile history.
+
+## Cleanup Agent (round 47) — 2026-09-02
+
+Removed the dead Tauri command `open_kiln_ui_in_browser` from `desktop/src/
+main.rs` (~26 lines) and its entry in the `generate_handler![]` registration
+list, plus the paired dead event emit `menu://open-in-browser` in `desktop/src/
+tray.rs`'s ITEM_OPEN_IN_BROWSER handler (including its now-unused
+`app_for_emit` clone). This resolves Round 46's candidate (a), with a key
+correction to its premise: of the three flagged commands, `path_info` and
+`fetch_update_sha256` are NOT dead — both are invoked from
+`desktop/ui/settings.html` (lines 864 and 1683 respectively). Only
+`open_kiln_ui_in_browser` had zero callers: no UI page invokes it, no test
+references it, and the tray's open-in-browser menu item uses its own private
+`tray::open_kiln_ui_in_default_browser`, making the command an unreachable
+duplicate path. The `menu://open-in-browser` emit it accompanied fired an
+event with zero listeners anywhere in any UI window (verified against every
+`listen(` call across all six ui/*.html files). Why it mattered: a registered
+command is public IPC surface reachable by any compromised/buggy webview;
+deleting it shrinks the attack surface while removing dead code.
+Verified: exhaustive invoke-name census over all six ui/*.html windows lists
+30 commands, none named `open_kiln_ui_in_browser`; baseline before the change
+was `cargo check --tests` clean with 2 warnings and `cargo test` 161/161; after,
+`cargo check --tests` clean with exactly 1 warning (the pre-existing
+deprecated `shell().open` in tray.rs — the removed command's own duplicate
+deprecated-call warning disappears as a bonus), `cargo test` still 161/161;
+`node scripts/check_desktop_ui_smoke.mjs` and
+`node scripts/check_runtime_defaults.mjs` pass unchanged; repo-wide grep finds
+zero remaining references to either removed identifier. Noted for a future
+session: tray.rs also emits `menu://view-logs`, which likewise has no listener
+in any UI page — left alone this round to keep scope tight.
