@@ -818,11 +818,10 @@ pub(super) fn flush_marlin_pack_inputs(
         "marlin batch pack complete"
     );
     eprintln!(
-        "[kiln] marlin {scope} batch pack: {n_packed}/{n_inputs} projections in {pack_elapsed_ms} ms ({})",
-        "parallel"
+        "[kiln] marlin {scope} batch pack: {n_packed}/{n_inputs} projections in {pack_elapsed_ms} ms (parallel)"
     );
 
-    for (entry, maybe_packed) in metadata.into_iter().zip(packed.into_iter()) {
+    for (entry, maybe_packed) in metadata.into_iter().zip(packed) {
         if let Some(packed) = maybe_packed {
             install_marlin_packed(&mut layers[entry.layer_idx], entry.kind, packed, device)
                 .with_context(|| {
@@ -876,9 +875,8 @@ impl GpuWeights {
             t.to_device(device)
                 .map_err(|e| anyhow::anyhow!("to_device_deep: {e}"))
         };
-        let mv_opt = |t: &Option<Tensor>| -> Result<Option<Tensor>> {
-            t.as_ref().map(|t| mv(t)).transpose()
-        };
+        let mv_opt =
+            |t: &Option<Tensor>| -> Result<Option<Tensor>> { t.as_ref().map(&mv).transpose() };
         let mv_w8 =
             |w: &Option<crate::rocm_w8_proj::RocmW8Proj>| -> Result<Option<crate::rocm_w8_proj::RocmW8Proj>> {
                 w.as_ref()

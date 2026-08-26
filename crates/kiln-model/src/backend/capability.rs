@@ -2337,12 +2337,10 @@ impl KvCacheFp8Policy {
 }
 
 fn gdn_gated_rms_norm_preserves_tape_residency(name: &str, device: kiln_tensor::Device) -> bool {
-    match backend_kind_for_runtime(name, device) {
-        kiln_tensor::Backend::Cuda | kiln_tensor::Backend::Rocm | kiln_tensor::Backend::Metal => {
-            true
-        }
-        _ => false,
-    }
+    matches!(
+        backend_kind_for_runtime(name, device),
+        kiln_tensor::Backend::Cuda | kiln_tensor::Backend::Rocm | kiln_tensor::Backend::Metal
+    )
 }
 
 fn gdn_chunk_pre_permute_bf16_support(name: &str, device: kiln_tensor::Device) -> Support {

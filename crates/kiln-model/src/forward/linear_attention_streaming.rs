@@ -231,7 +231,6 @@ impl Drop for GdnPrefillResidentStateLayerScope<'_> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 /// #1082 box-102 BUG2 fix: wrap the GDN decode so the recurrent + conv state
 /// update lands IN-PLACE in the caller's persistent buffers. The inner decode
 /// updates them functionally (`*state = <new tensor>`); under CUDA-graph capture

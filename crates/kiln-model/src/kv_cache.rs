@@ -558,7 +558,7 @@ mod tests {
 
         // FP8 has limited precision — check approximate match.
         let k_vals = full_k.to_vec::<f32>().map_err(|e| anyhow::anyhow!("{e}"))?;
-        let expected_k = vec![1.0, 2.0, 3.0, 4.0, 9.0, 10.0];
+        let expected_k = [1.0, 2.0, 3.0, 4.0, 9.0, 10.0];
         for (i, (got, exp)) in k_vals.iter().zip(expected_k.iter()).enumerate() {
             let rel_err = (got - exp).abs() / exp.abs().max(0.01);
             assert!(
@@ -568,7 +568,7 @@ mod tests {
         }
 
         let v_vals = full_v.to_vec::<f32>().map_err(|e| anyhow::anyhow!("{e}"))?;
-        let expected_v = vec![5.0, 6.0, 7.0, 8.0, 11.0, 12.0];
+        let expected_v = [5.0, 6.0, 7.0, 8.0, 11.0, 12.0];
         for (i, (got, exp)) in v_vals.iter().zip(expected_v.iter()).enumerate() {
             let rel_err = (got - exp).abs() / exp.abs().max(0.01);
             assert!(

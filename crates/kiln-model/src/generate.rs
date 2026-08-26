@@ -2004,7 +2004,7 @@ fn run_lm_head_sample_batch_with_contexts(
                 continue;
             }
             let (indices, counts) = unique_history_counts_for_batch_sample(history);
-            for (idx, count) in indices.into_iter().zip(counts.into_iter()) {
+            for (idx, count) in indices.into_iter().zip(counts) {
                 history_rows.push(row_idx as u32);
                 history_indices.push(idx);
                 history_counts.push(count);
@@ -2732,9 +2732,7 @@ impl ModelRunner {
         // buffers in place. Nonresident caches cannot do that and are released
         // eagerly as before.
         let take_nonresident_cache = |cache: &mut Option<CachedBatchedState>| {
-            let Some(cached) = cache.as_ref() else {
-                return None;
-            };
+            let cached = cache.as_ref()?;
             if !cached.row_ids.contains(&row_id) {
                 return None;
             }
@@ -6699,7 +6697,7 @@ impl ModelRunner {
                 continue;
             }
             let (indices, counts) = unique_history_counts_for_batch_sample(history);
-            for (idx, count) in indices.into_iter().zip(counts.into_iter()) {
+            for (idx, count) in indices.into_iter().zip(counts) {
                 history_rows.push(row_idx as u32);
                 history_indices.push(idx);
                 history_counts.push(count);
@@ -9771,7 +9769,7 @@ impl ModelRunner {
                                 )?;
                                 prefill_split_snapshot = runner_guard
                                     .authoritative_prefix_snapshot(
-                                        &linear_state,
+                                        linear_state,
                                         "streaming-prefix-cache-split",
                                         split_pos,
                                     )

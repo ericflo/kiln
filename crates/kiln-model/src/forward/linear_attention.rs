@@ -1717,7 +1717,7 @@ pub(super) fn gdn_chunkwise_recurrence_head_last_full_chunks(
 /// `conv_state`: [batch, conv_dim, kernel_size-1] — mutable conv buffer, updated in place
 ///
 /// Returns: [batch, seq_len, hidden_size]
-
+///
 /// Candle-op reference path for the Step-6 GDN gates. This is the original
 /// Phase-6 implementation; it's kept as a fallback for shapes/dtypes outside
 /// the fused kernel's envelope and as the algorithmic oracle for parity tests.

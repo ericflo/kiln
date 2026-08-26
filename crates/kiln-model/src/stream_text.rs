@@ -451,7 +451,7 @@ mod tests {
     #[test]
     fn stop_gate_never_emits_a_live_stop_prefix() {
         let stop = "</tool_call>".to_string();
-        let mut g = StopTailGate::new(&[stop.clone()]);
+        let mut g = StopTailGate::new(std::slice::from_ref(&stop));
         let mut out = String::new();
         for chunk in ["abc</to", "ol_", "call>tail"] {
             out.push_str(&g.push(chunk).emit);

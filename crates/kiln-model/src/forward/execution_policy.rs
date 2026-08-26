@@ -376,12 +376,12 @@ pub(super) fn full_attn_adaptive_max_tile_tokens_with_budget(
     let score_element_denom = batch
         .saturating_mul(num_heads)
         .saturating_mul(key_prefix_len);
-    let budgeted = if score_element_denom == 0 {
-        budgeted
-    } else {
-        let max_by_elements = (full_attn_score_tile_max_elements() / score_element_denom).max(1);
-        budgeted.min(max_by_elements)
-    };
+    let budgeted = budgeted.min(
+        full_attn_score_tile_max_elements()
+            .checked_div(score_element_denom)
+            .map(|n| n.max(1))
+            .unwrap_or(budgeted),
+    );
     let granularity = MATERIALIZED_FULL_ATTN_TILE_GRANULARITY;
     let aligned = if budgeted >= granularity {
         (budgeted / granularity).max(1) * granularity

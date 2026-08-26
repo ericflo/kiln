@@ -109,7 +109,7 @@ pub(super) fn split_q_gate_output_chunk_features_for_device(
         Device::Rocm(_) => unreachable!("ROCm policy returned above"),
         // Vulkan's linear offset path already has submit-size ceilings. Use
         // the same split contract when BF16 projection slices are available.
-        Device::Vulkan(_) => full_dim.min(1024).max(1),
+        Device::Vulkan(_) => full_dim.clamp(1, 1024),
         _ => full_dim.max(1),
     }
 }
@@ -1246,11 +1246,11 @@ pub fn gqa_attention_core_prefill(
         );
     }
 
-    Ok(reshape_hole0_3(
+    reshape_hole0_3(
         &attn_output.transpose(1, 2)?.contiguous()?,
         seq_len,
         num_heads * head_dim,
-    )?)
+    )
 }
 
 pub fn gqa_attention_apply_output_gate(

@@ -536,7 +536,7 @@ fn create_snapshot_directory(
     if let Some(root) = configured_snapshot_root {
         fs::create_dir_all(root)
             .with_context(|| format!("create configured snapshot root {}", root.display()))?;
-        ensure_directory(&root, "configured model snapshot root")?;
+        ensure_directory(root, "configured model snapshot root")?;
         return builder()
             .tempdir_in(root)
             .with_context(|| format!("create private snapshot under {}", root.display()));
@@ -739,9 +739,7 @@ fn available_space(path: &Path) -> Result<Option<u64>> {
     } else {
         stat.f_frsize
     };
-    Ok(Some(
-        (stat.f_bavail as u64).saturating_mul(fragment_size as u64),
-    ))
+    Ok(Some(stat.f_bavail.saturating_mul(fragment_size)))
 }
 
 #[cfg(not(unix))]
@@ -939,7 +937,7 @@ fn validate_shard_filename(filename: &str) -> Result<&str> {
             "safetensors index shard path must be one relative filename without traversal: {filename:?}"
         ),
     }
-    if filename.as_bytes().len() > 255 || !filename.ends_with(".safetensors") {
+    if filename.len() > 255 || !filename.ends_with(".safetensors") {
         bail!("invalid safetensors shard filename in index: {filename:?}");
     }
     Ok(filename)
@@ -3038,7 +3036,7 @@ mod tests {
             ));
 
             // scales: [num_groups, out], all F16 1.0
-            let scales_bytes: Vec<u8> = vec![0x00, 0x3C].repeat(num_groups * out);
+            let scales_bytes: Vec<u8> = [0x00, 0x3C].repeat(num_groups * out);
             result.push((
                 format!("{name}.scales"),
                 vec![num_groups, out],
