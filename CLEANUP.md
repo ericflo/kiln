@@ -1360,3 +1360,39 @@ Purged the last candle-era references from the live build-cache operator
 tooling and fixed a stale pointer in `.gitignore`. (1) `scripts/setup-build-cache.sh`'s restore-count `find` still matched `-name 'candle-flash-attn-*'` alongside `kiln-flash-attn-*`; the external candle-flash-attn dependency was removed by #1082 (Cargo.lock has zero candle packages, and every build dir under `target/release/build/` is named `kiln-flash-attn-<hash>`), so the branch could only ever match nothing. Dropped it. (2) `scripts/push-build-cache.sh` — the producer half of the same B2 flash-attn artifact cache that setup pulls (`build-cache/kiln/${ARCH}/artifacts/flash-attn/`) — had the same dual-pattern `find` plus a comment claiming support for "candle-flash-attn (external dep)"; pattern dropped and comment replaced with an explicit historical note citing #1082. Both scripts stay in the repo: push-build-cache.sh is unreferenced by CI/docs but is the intentional manual counterpart to setup-build-cache.sh's live pull path (used by deploy/runpod per round 23). (3) `.gitignore`'s node-tooling comment pointed at `scripts/capture-screenshots.mjs`, which does not exist; corrected to the actual file `scripts/capture-desktop-screenshots.mjs`.
 Why it mattered: the two scripts are the documented RunPod cold-build path; both still described a dependency that no longer exists, and the .gitignore pointer sent readers to a nonexistent script.
 Verified BEFORE: `bash -n` on both scripts; baseline find with old dual pattern vs new single pattern over the real `target/release/build/` returns byte-identical directory lists (8 kiln-flash-attn dirs), proving no behavioral change today; `git status` clean. Verified AFTER: `bash -n` passes on both scripts; find-equivalence check still holds; restored-file count logic exercises cleanly (36 files); repo-wide grep confirms the only remaining `candle-flash-attn` mention is the intentional historical note; `.gitignore` target filename exists as tracked path; `scripts/check_repository_artifacts.py` passes; diff is exactly 3 files, comment/pattern-only.
+## Cleanup Agent (round 53) — 2026-09-03
+
+Repaired a false positive in `scripts/check_docs_site_smoke.mjs` that made the
+Pages CI's own smoke checker unrunnable against the committed source site: any
+static hub page linking into the build-generated `docs/<slug>/` tree (e.g. the
+`<a href="docs/">Documentation</a>` nav entry present in all eight top-level
+pages, plus per-page `docs/<slug>/` deep links) failed with "broken local href"
+because `docs/site/docs/` only exists after `scripts/docs-site/build.mjs`
+emits it — so `node scripts/check_docs_site_smoke.mjs` exited 1 on an untouched
+tree before ever reaching its Chromium stage. Fixed by adding a generated-target
+branch to `validateDocsSiteLocalLinks`: when a resolved target is missing, lies
+under `<siteRoot>/docs/`, and `KILN_DOCS_REQUIRE_GENERATED` is not set (i.e.
+we're validating source, not a built site), the reference is validated against
+`docs/site/docs-manifest.json` instead of the filesystem — the hub link passes,
+`docs/<slug>/` must match a manifest slug, and `#fragment` anchors into Markdown
+documents are verified against `slugifyHeading`-derived heading IDs of the
+document's committed `.md` source (imported from `scripts/docs-site/lib.mjs`,
+side-effect free). Built-site CI runs (`KILN_DOCS_SITE_ROOT` +
+`KILN_DOCS_REQUIRE_GENERATED=true`) are unchanged: targets exist there, so the
+existing filesystem path handles them as before. Deliberate bad-reference
+injection tests confirm the new branch still catches unknown slugs and wrong
+anchors ("no manifest document with slug nope", "missing heading #zzz-wrong in
+docs/NATIVE_SFT_PROFILE.md").
+Why it mattered: the checker guarding the published site could only be run in
+CI against a prebuilt tree; locally it reported a healthy site as broken, and
+anyone adding a legitimate docs/ link got a false failure with no way to pass.
+Verified BEFORE: static-only run fails exactly on `api.html: broken local href
+docs/`; scripted sweep shows all 206 raw missing-target hrefs resolve into
+generated `docs/site/docs/` (zero genuine broken non-generated links). AFTER:
+`KILN_DOCS_SMOKE_STATIC_ONLY=true node scripts/check_docs_site_smoke.mjs` exits
+0; built-site mode also exits 0 after a real `/tmp/site-build` build; negative
+injection tests both fail with the new precise messages; injected edits
+reverted (`git diff` clean on api.html); `npm test --prefix scripts/docs-site`
+passes 11/11 (lib.mjs import surface intact); full smoke still blocked locally
+only by absent Chromium, identical to baseline. Diff is one file,
+43 insertions / 3 deletions.

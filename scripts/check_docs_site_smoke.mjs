@@ -6,6 +6,8 @@ import { dirname, extname, relative, sep, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import process from 'node:process';
 
+import { slugifyHeading } from './docs-site/lib.mjs';
+
 const repoRoot = resolve(import.meta.dirname, '..');
 const configuredSiteRoot = process.env.KILN_DOCS_SITE_ROOT?.trim() || 'docs/site';
 const siteRoot = resolve(repoRoot, configuredSiteRoot);
@@ -3220,21 +3222,59 @@ function validateDocsSiteLocalLinks() {
       if (isIgnoredHref(href)) continue;
 
       const targetPath = resolveLocalHref(sourcePath, href);
+      const targetRelativePath = relative(siteRoot, targetPath).split(sep).join('/');
+      const inGeneratedOutput = targetRelativePath === 'docs'
+        || targetRelativePath.startsWith('docs/');
+      if (!existsSync(targetPath) && inGeneratedOutput && !generatedDocsRequired) {
+        // The docs/<slug>/ tree is emitted by scripts/docs-site/build.mjs and is
+        // not committed, so validate these references against the manifest and
+        // their Markdown sources instead of the filesystem.
+        validateGeneratedTargetReference(sourcePath, href, targetRelativePath);
+        continue;
+      }
       if (!existsSync(targetPath) || statSync(targetPath).isDirectory()) {
         fail(`${sourcePath}: broken local href ${href} (resolved target: ${relative(repoRoot, targetPath)})`);
       }
 
       const fragment = hrefFragment(href);
       if (fragment) {
-        const targetRelativePath = relative(repoRoot, targetPath).split(sep).join('/');
-        if (!htmlIdsForPath(targetRelativePath, idCache).has(fragment)) {
-          fail(`${sourcePath}: broken local href anchor ${href} (resolved target: ${targetRelativePath}, missing fragment: #${fragment})`);
+        const targetRepoPath = relative(repoRoot, targetPath).split(sep).join('/');
+        if (!htmlIdsForPath(targetRepoPath, idCache).has(fragment)) {
+          fail(`${sourcePath}: broken local href anchor ${href} (resolved target: ${targetRepoPath}, missing fragment: #${fragment})`);
         }
       }
     }
   }
 }
 
+
+function validateGeneratedTargetReference(sourcePath, href, targetRelativePath) {
+  if (targetRelativePath === 'docs/index.html') {
+    // The documentation hub page; no committed source to verify anchors against.
+    return;
+  }
+  const match = targetRelativePath.match(/^docs\/([a-z0-9-]+)\/index\.html$/);
+  if (!match) {
+    fail(`${sourcePath}: broken local href ${href} (unresolvable generated reference: ${targetRelativePath})`);
+  }
+  const document = docsManifest.documents.find((candidate) => candidate.slug === match[1]);
+  if (!document) {
+    fail(`${sourcePath}: broken local href ${href} (no manifest document with slug ${match[1]})`);
+  }
+  const fragment = hrefFragment(href);
+  if (!fragment) return;
+  if (!document.source || !document.source.endsWith('.md')) {
+    fail(`${sourcePath}: cannot verify anchor ${href} against non-Markdown generated document ${document.slug}`);
+  }
+  const source = readFileSync(resolve(repoRoot, document.source), 'utf8');
+  const headingIds = new Set();
+  for (const heading of source.matchAll(/^#{1,6}\s+(.+)$/gm)) {
+    headingIds.add(slugifyHeading(heading[1].replace(/[#*`]/g, '').trim()));
+  }
+  if (!headingIds.has(fragment)) {
+    fail(`${sourcePath}: broken local href anchor ${href} (missing heading #${fragment} in ${document.source})`);
+  }
+}
 
 function markdownLocalLinkSourcePaths() {
   const docsDir = resolve(repoRoot, 'docs');
