@@ -1226,3 +1226,26 @@ src/cli.rs` (JudgeCommands, SelfImprove, DriftCheck variants) and
 `--validate-only` passes (59 documents); repo grep confirms no remaining
 phantom flags outside frozen plan docs; no code touched; `git status` shows
 only the two doc edits plus this ledger entry.
+
+## Cleanup Agent (round 46) — 2026-09-02
+
+Audited the never-before-touched `desktop/` Tauri crate for unused
+dependencies, dead config keys, and UI↔backend command drift, per this
+round's steering candidate (b). Findings: all ten tauri plugins in Cargo.toml
+are registered in main.rs and permissioned in capabilities/default.json; every
+`tauri.conf.json` key is live; every one of the 30 `invoke("…")` calls across
+the six ui/*.html windows resolves to a command registered in the
+`generate_handler![]` list; CHANGELOG.md / Cargo.toml / tauri.conf.json all
+agree on version 0.2.16; flate2/tar/sha2/semver/toml/reqwest are all genuinely
+used by installer/settings/hf_download. One real find: the `dirs = "5"`
+dependency was declared but referenced nowhere in desktop/src, build.rs, or
+the capabilities config — removed it from `desktop/Cargo.toml`; `cargo check`
+regenerated `desktop/Cargo.lock`, dropping the orphaned dirs/dirs-sys chain
+(−88 lines).
+Why it mattered: an unused dependency silently ships its full platform
+backend (dirs-sys, plus the only remaining reason for that windows-sys entry)
+into every desktop build and lockfile audit.
+Verified: baseline `cargo check --tests` passed before the change; after,
+`cargo check --tests` passes with identical warnings and `cargo test`
+passes 161/161 in the desktop workspace; `git grep dirs` finds no remaining
+references outside the lockfile history.
