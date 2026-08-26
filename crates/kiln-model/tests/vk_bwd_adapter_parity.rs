@@ -27,9 +27,12 @@
 //!      kernel. The analytic side always comes through `VkBwdAdapter::apply`;
 //!      the perturbed forward evals use a CPU oracle that mirrors the shader.
 //!
-//! Plus bounded contract tests: zero-copy buffer sharing (Arc strong_count > 1
-//! + pointer identity), non-float-dtype rejection (I64 grad), input_count vs
-//! backward() Vec length, and non-Vulkan-grad rejection.
+//! Plus bounded contract tests: zero-copy buffer sharing (Arc strong_count > 1)
+//!
+//! - zero-copy buffer sharing (Arc strong_count > 1 + pointer identity)
+//! - non-float-dtype rejection (I64 grad)
+//! - `input_count` vs `backward()` Vec length
+//! - non-Vulkan-grad rejection
 //!
 //! HOST-SAFETY: every test is a SINGLE bounded GPU dispatch over tiny shapes
 //! (<= [4,5]@[5,3]). NO training loop, NO multi-step iteration. Each test

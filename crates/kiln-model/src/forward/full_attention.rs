@@ -2811,11 +2811,8 @@ impl CachedPagedDecodeMeta {
     /// downstream call sites (e.g. `gqa_attention_paged_decode_contiguous_batch`)
     /// can keep their existing `&meta.block_table_tensor` access pattern.
     ///
-    /// Shape contract (the caller is responsible for upholding it):
-    ///   * `stable_block_table_gpu` must be
-    ///     `[batch, (bucket_max_seqlen_k / kBlockN) * (kBlockN / paged_cache.block_size())]` u32
-    ///   * `stable_seqused_k_gpu` must be `[batch]` i32
-    /// where `bucket_max_seqlen_k = ceil((max(start_positions) + 1) / kBlockN) * kBlockN`
+    /// Shape contract (the caller is responsible for upholding it), where
+    /// `bucket_max_seqlen_k = ceil((max(start_positions) + 1) / kBlockN) * kBlockN`
     /// — the K/V chunk-bucketed value, identical to
     /// `CudaBatchedGraphKey::new`'s formula in `cuda_graph.rs`. The bucket
     /// ensures one captured graph can serve every decode step within
@@ -2824,6 +2821,10 @@ impl CachedPagedDecodeMeta {
     /// (needed by the strict-path kernel). `kernel_max_seqlen_k` holds the
     /// bucketed value because the dynamic-length kernel's launch bound is
     /// captured by value and must remain valid as replay lengths grow.
+    ///
+    ///   * `stable_block_table_gpu` must be
+    ///     `[batch, (bucket_max_seqlen_k / kBlockN) * (kBlockN / paged_cache.block_size())]` u32
+    ///   * `stable_seqused_k_gpu` must be `[batch]` i32
     pub fn build_with_stable_buffers(
         paged_cache: &PagedKvCache,
         block_tables: &[&BlockTable],
