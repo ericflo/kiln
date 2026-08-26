@@ -397,7 +397,7 @@ pub fn sdpa_fallback_backward_no_grad(
     let expand_heads = |t: &Tensor, last: usize| -> Result<Tensor> {
         if gqa_ratio > 1 {
             Ok(t.unsqueeze(2)?
-                .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, last])?
+                .expand([batch, num_kv_heads, gqa_ratio, kv_len, last])?
                 .contiguous()?
                 .reshape((batch, num_heads, kv_len, last))?)
         } else {
@@ -571,8 +571,8 @@ pub(super) fn gdn_chunk_prep_f32(
     // sites above use. This prep runs on CUDA inside the GDN recurrence backward
     // (tape-authoritative); inference uses the fused kernel, so it never hit
     // this cast before.
-    let mask_ones = Tensor::ones((batch, heads, chunk, chunk), DType::F32, &device)?;
-    let mask_zeros = Tensor::zeros((batch, heads, chunk, chunk), DType::F32, &device)?;
+    let mask_ones = Tensor::ones((batch, heads, chunk, chunk), DType::F32, device)?;
+    let mask_zeros = Tensor::zeros((batch, heads, chunk, chunk), DType::F32, device)?;
     let strict_mask = strict_bool.where_cond(&mask_ones, &mask_zeros)?;
     let causal_mask = causal_bool.where_cond(&mask_ones, &mask_zeros)?;
 

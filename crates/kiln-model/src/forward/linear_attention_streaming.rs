@@ -1076,7 +1076,7 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
                 let expand = |src: &Tensor, label: &'static str| -> Result<Tensor> {
                     let expanded = src
                         .unsqueeze(3)?
-                        .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+                        .expand([batch, seq_len, nk, gqa_ratio, dk])?
                         .contiguous()?
                         .reshape((batch, seq_len, nv, dk))?;
                     #[cfg(any(
@@ -1226,12 +1226,12 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
                         if gqa_ratio > 1 {
                             let q_exp = q
                                 .unsqueeze(3)?
-                                .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+                                .expand([batch, seq_len, nk, gqa_ratio, dk])?
                                 .contiguous()?
                                 .reshape((batch, seq_len, nv, dk))?;
                             let k_exp = k
                                 .unsqueeze(3)?
-                                .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+                                .expand([batch, seq_len, nk, gqa_ratio, dk])?
                                 .contiguous()?
                                 .reshape((batch, seq_len, nv, dk))?;
                             // CP-4 Increment 3 (#1082): the unsqueeze+expand+
@@ -1595,12 +1595,12 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
             kiln_nvtx::range!(c"kiln/gdn/head_expand_recur_fallback");
             let q_exp = q
                 .unsqueeze(3)?
-                .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+                .expand([batch, seq_len, nk, gqa_ratio, dk])?
                 .contiguous()?
                 .reshape((batch, seq_len, nv, dk))?;
             let k_exp = k
                 .unsqueeze(3)?
-                .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+                .expand([batch, seq_len, nk, gqa_ratio, dk])?
                 .contiguous()?
                 .reshape((batch, seq_len, nv, dk))?;
             // CP-4 Increment 3 (#1082): same head-expand chaining fix as the

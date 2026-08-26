@@ -1782,12 +1782,12 @@ fn flash_attention_forward(
         // [batch, kv_len, num_kv_heads, head_dim] -> [batch, kv_len, num_heads, head_dim]
         let k = k
             .unsqueeze(3)?
-            .expand(&[batch, kv_len, num_kv_heads, gqa_ratio, hd])?
+            .expand([batch, kv_len, num_kv_heads, gqa_ratio, hd])?
             .contiguous()?
             .reshape((batch, kv_len, num_heads, hd))?;
         let v = v
             .unsqueeze(3)?
-            .expand(&[batch, kv_len, num_kv_heads, gqa_ratio, hd])?
+            .expand([batch, kv_len, num_kv_heads, gqa_ratio, hd])?
             .contiguous()?
             .reshape((batch, kv_len, num_heads, hd))?;
         (k, v)

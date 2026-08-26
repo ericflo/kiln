@@ -1058,7 +1058,7 @@ mod tests {
     #[test]
     fn test_logits_to_probs_sums_to_one() {
         let device = kiln_tensor::Device::Cpu;
-        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0, 0.5], &device).unwrap();
+        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0, 0.5], device).unwrap();
         let probs = logits_to_probs(&logits, 1.0).unwrap();
 
         let sum: f32 = probs.iter().sum();
@@ -1076,7 +1076,7 @@ mod tests {
     #[test]
     fn test_logits_to_probs_temperature_effect() {
         let device = kiln_tensor::Device::Cpu;
-        let logits = Tensor::new(&[1.0_f32, 5.0, 1.0], &device).unwrap();
+        let logits = Tensor::new(&[1.0_f32, 5.0, 1.0], device).unwrap();
 
         // Low temperature should make distribution more peaked
         let probs_low = logits_to_probs(&logits, 0.1).unwrap();
@@ -1095,7 +1095,7 @@ mod tests {
     fn test_logits_to_probs_2d() {
         let device = kiln_tensor::Device::Cpu;
         // [seq_len=2, vocab_size=3]
-        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &device)
+        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], device)
             .unwrap()
             .reshape((2, 3))
             .unwrap();

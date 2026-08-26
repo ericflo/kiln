@@ -704,7 +704,7 @@ impl BackendRuntime for FixedMlpBackend {}
 fn test_backend_linear_decode_adds_lora_delta() -> Result<()> {
     let device = Device::Cpu;
     let x = Tensor::from_vec(vec![1.0f32, 2.0], (1, 1, 2))?.to_device(device)?;
-    let weight_t = Tensor::zeros((2, 3), DType::F32, &device)?;
+    let weight_t = Tensor::zeros((2, 3), DType::F32, device)?;
     let lora = LoraProjectionWeights {
         // #1082: `LoraProjectionWeights.{a,b}` are now kt `KtTensor`; pass
         // the kt tensors directly (no candle bridge).
@@ -741,7 +741,7 @@ fn test_backend_linear_decode_adds_lora_delta() -> Result<()> {
 fn test_swiglu_down_only_lora_keeps_backend_gate_up_decode() -> Result<()> {
     let device = Device::Cpu;
     let x = Tensor::from_vec(vec![1.0f32, 2.0], (1, 1, 2))?.to_device(device)?;
-    let zero_proj = Tensor::zeros((2, 2), DType::F32, &device)?;
+    let zero_proj = Tensor::zeros((2, 2), DType::F32, device)?;
     let zero_proj_t = zero_proj.t()?.contiguous()?;
     let mlp = GpuFfnWeights {
         gate_proj: zero_proj.clone(),
@@ -804,7 +804,7 @@ fn test_swiglu_down_only_lora_keeps_backend_gate_up_decode() -> Result<()> {
 fn test_swiglu_attention_only_lora_keeps_backend_mlp_decode() -> Result<()> {
     let device = Device::Cpu;
     let x = Tensor::from_vec(vec![1.0f32, 2.0], (1, 1, 2))?.to_device(device)?;
-    let zero_proj = Tensor::zeros((2, 2), DType::F32, &device)?;
+    let zero_proj = Tensor::zeros((2, 2), DType::F32, device)?;
     let zero_proj_t = zero_proj.t()?.contiguous()?;
     let mlp = GpuFfnWeights {
         gate_proj: zero_proj.clone(),
@@ -1167,7 +1167,7 @@ fn test_embedding_lookup() -> Result<()> {
         1.0, 1.1, 1.2, // token 3
         1.3, 1.4, 1.5, // token 4
     ];
-    let embed = Tensor::new(&embed_data, &device)?.reshape((5, 3))?;
+    let embed = Tensor::new(&embed_data, device)?.reshape((5, 3))?;
 
     let result = embedding_lookup(&[2, 0, 4], &embed)?;
     assert_eq!(result.dims(), &[3, 3]); // [seq_len=3, hidden_size=3]
@@ -1195,7 +1195,7 @@ fn test_embedding_lookup_from_transposed_matches_table() -> Result<()> {
         1.0, 1.1, 1.2, //
         1.3, 1.4, 1.5,
     ];
-    let embed = Tensor::new(&embed_data, &device)?.reshape((5, 3))?;
+    let embed = Tensor::new(&embed_data, device)?.reshape((5, 3))?;
     let embed_t = embed.t()?.contiguous()?;
 
     let direct = embedding_lookup(&[2, 0, 4], &embed)?;
@@ -1213,8 +1213,8 @@ fn test_rms_norm_known_values() -> Result<()> {
     // Effective weight = 1 + w = [1, 1, 1]
     // RMS = sqrt(mean([1,4,9])) = sqrt(14/3) ≈ 2.1602
     // normed = [1/2.1602, 2/2.1602, 3/2.1602] ≈ [0.4629, 0.9258, 1.3887]
-    let x = Tensor::new(&[1.0_f32, 2.0, 3.0], &device)?.unsqueeze(0)?; // [1, 3]
-    let w = Tensor::new(&[0.0_f32, 0.0, 0.0], &device)?;
+    let x = Tensor::new(&[1.0_f32, 2.0, 3.0], device)?.unsqueeze(0)?; // [1, 3]
+    let w = Tensor::new(&[0.0_f32, 0.0, 0.0], device)?;
 
     let result = rms_norm(&x, &w, 1e-8)?;
     let vals = result.to_vec2::<f32>()?;
@@ -1230,8 +1230,8 @@ fn test_rms_norm_known_values() -> Result<()> {
 #[test]
 fn test_rms_norm_with_weight() -> Result<()> {
     let device = Device::Cpu;
-    let x = Tensor::new(&[2.0_f32, 2.0, 2.0], &device)?.unsqueeze(0)?;
-    let w = Tensor::new(&[0.5_f32, 1.0, 2.0], &device)?;
+    let x = Tensor::new(&[2.0_f32, 2.0, 2.0], device)?.unsqueeze(0)?;
+    let w = Tensor::new(&[0.5_f32, 1.0, 2.0], device)?;
 
     let result = rms_norm(&x, &w, 1e-8)?;
     let vals = result.to_vec2::<f32>()?;
@@ -1630,12 +1630,12 @@ fn test_rope_preserves_shape() -> Result<()> {
     let num_kv_heads = 1;
     let head_dim = 8;
 
-    let q = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, num_heads, head_dim), &device)?;
+    let q = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, num_heads, head_dim), device)?;
     let k = Tensor::randn(
         0.0_f32,
         1.0,
         (batch, seq_len, num_kv_heads, head_dim),
-        &device,
+        device,
     )?;
     let positions: Vec<u32> = (0..seq_len as u32).collect();
 
@@ -1654,7 +1654,7 @@ fn test_rope_position_zero_is_identity() -> Result<()> {
     // At position 0, cos=1 and sin=0, so rotation should be identity
     let head_dim = 4;
     let q_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
-    let q = Tensor::new(q_data.as_slice(), &device)?.reshape((1, 1, 1, head_dim))?;
+    let q = Tensor::new(q_data.as_slice(), device)?.reshape((1, 1, 1, head_dim))?;
     let k = q.clone();
 
     let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
@@ -1678,7 +1678,7 @@ fn test_rope_position_zero_is_identity() -> Result<()> {
 fn test_rope_different_positions_differ() -> Result<()> {
     let device = Device::Cpu;
     let head_dim = 8;
-    let q = Tensor::ones((1, 2, 1, head_dim), DType::F32, &device)?;
+    let q = Tensor::ones((1, 2, 1, head_dim), DType::F32, device)?;
     let k = q.clone();
 
     let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
@@ -1702,7 +1702,7 @@ fn test_partial_rope_passthrough_dims_unchanged() -> Result<()> {
     let head_dim = 8;
     let rotary_dim = 4; // only rotate first 4 dims, last 4 pass through
     let q_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-    let q = Tensor::new(q_data.as_slice(), &device)?.reshape((1, 1, 1, head_dim))?;
+    let q = Tensor::new(q_data.as_slice(), device)?.reshape((1, 1, 1, head_dim))?;
     let k = q.clone();
 
     // Position 100 — the rotary dims should change, passthrough dims should not
@@ -1741,12 +1741,12 @@ fn test_partial_rope_preserves_shape() -> Result<()> {
     let head_dim = 16;
     let rotary_dim = 4; // partial rotation
 
-    let q = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, num_heads, head_dim), &device)?;
+    let q = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, num_heads, head_dim), device)?;
     let k = Tensor::randn(
         0.0_f32,
         1.0,
         (batch, seq_len, num_kv_heads, head_dim),
-        &device,
+        device,
     )?;
     let positions: Vec<u32> = (0..seq_len as u32).collect();
 
@@ -1767,10 +1767,10 @@ fn test_swiglu_output_shape() -> Result<()> {
     let hidden = 4;
     let intermediate = 8;
 
-    let x = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, hidden), &device)?;
-    let gate = Tensor::randn(0.0_f32, 0.1, (intermediate, hidden), &device)?;
-    let up = Tensor::randn(0.0_f32, 0.1, (intermediate, hidden), &device)?;
-    let down = Tensor::randn(0.0_f32, 0.1, (hidden, intermediate), &device)?;
+    let x = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, hidden), device)?;
+    let gate = Tensor::randn(0.0_f32, 0.1, (intermediate, hidden), device)?;
+    let up = Tensor::randn(0.0_f32, 0.1, (intermediate, hidden), device)?;
+    let down = Tensor::randn(0.0_f32, 0.1, (hidden, intermediate), device)?;
     let gate_t = gate.t()?.contiguous()?;
     let up_t = up.t()?.contiguous()?;
     let down_t = down.t()?.contiguous()?;
@@ -1801,11 +1801,11 @@ fn test_swiglu_zero_gate_gives_zero() -> Result<()> {
     let hidden = 4;
     let intermediate = 8;
 
-    let x = Tensor::ones((1, 1, hidden), DType::F32, &device)?;
+    let x = Tensor::ones((1, 1, hidden), DType::F32, device)?;
     // Gate weights all zero -> silu(0) = 0 -> output is zero regardless of up/down
-    let gate = Tensor::zeros((intermediate, hidden), DType::F32, &device)?;
-    let up = Tensor::ones((intermediate, hidden), DType::F32, &device)?;
-    let down = Tensor::ones((hidden, intermediate), DType::F32, &device)?;
+    let gate = Tensor::zeros((intermediate, hidden), DType::F32, device)?;
+    let up = Tensor::ones((intermediate, hidden), DType::F32, device)?;
+    let down = Tensor::ones((hidden, intermediate), DType::F32, device)?;
     let gate_t = gate.t()?.contiguous()?;
     let up_t = up.t()?.contiguous()?;
     let down_t = down.t()?.contiguous()?;
@@ -1967,9 +1967,9 @@ fn test_fused_gate_up_proj_matches_split_path() -> Result<()> {
     // so all operands here use F32 directly: bit-exact comparison is
     // meaningful, the device-specific BF16 path is exercised by the
     // existing real-model integration tests.
-    let x = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, hidden), &device)?;
-    let gate_t = Tensor::randn(0.0_f32, 0.05, (hidden, intermediate), &device)?.contiguous()?;
-    let up_t = Tensor::randn(0.0_f32, 0.05, (hidden, intermediate), &device)?.contiguous()?;
+    let x = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, hidden), device)?;
+    let gate_t = Tensor::randn(0.0_f32, 0.05, (hidden, intermediate), device)?.contiguous()?;
+    let up_t = Tensor::randn(0.0_f32, 0.05, (hidden, intermediate), device)?.contiguous()?;
     let gate_up_t = Tensor::cat(&[&gate_t, &up_t], LAST_DIM)?.contiguous()?;
 
     let gate_split = broadcast_matmul_cpu_compatible(&x, &gate_t)?;
@@ -2019,10 +2019,10 @@ fn test_swiglu_with_fused_gate_up_cache_matches_legacy() -> Result<()> {
     let hidden = 8usize;
     let intermediate = 16usize;
 
-    let x = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, hidden), &device)?;
-    let gate = Tensor::randn(0.0_f32, 0.05, (intermediate, hidden), &device)?;
-    let up = Tensor::randn(0.0_f32, 0.05, (intermediate, hidden), &device)?;
-    let down = Tensor::randn(0.0_f32, 0.05, (hidden, intermediate), &device)?;
+    let x = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, hidden), device)?;
+    let gate = Tensor::randn(0.0_f32, 0.05, (intermediate, hidden), device)?;
+    let up = Tensor::randn(0.0_f32, 0.05, (intermediate, hidden), device)?;
+    let down = Tensor::randn(0.0_f32, 0.05, (hidden, intermediate), device)?;
     let gate_t = gate.t()?.contiguous()?;
     let up_t = up.t()?.contiguous()?;
     let down_t = down.t()?.contiguous()?;
@@ -4254,7 +4254,7 @@ fn test_gqa_attention_output_shape() -> Result<()> {
     let head_dim = 8;
     let hidden = num_heads * head_dim; // 32
 
-    let x = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, hidden), &device)?;
+    let x = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, hidden), device)?;
     let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
     let positions: Vec<u32> = (0..seq_len as u32).collect();
 
@@ -4292,7 +4292,7 @@ fn test_gqa_head_expansion() -> Result<()> {
     let head_dim = 8;
     let hidden = num_heads * head_dim;
 
-    let x = Tensor::randn(0.0_f32, 0.5, (batch, seq_len, hidden), &device)?;
+    let x = Tensor::randn(0.0_f32, 0.5, (batch, seq_len, hidden), device)?;
     let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
     let positions: Vec<u32> = (0..seq_len as u32).collect();
 
@@ -4337,7 +4337,7 @@ fn test_gqa_single_token() -> Result<()> {
     let head_dim = 4;
     let hidden = num_heads * head_dim;
 
-    let x = Tensor::randn(0.0_f32, 1.0, (1, 1, hidden), &device)?;
+    let x = Tensor::randn(0.0_f32, 1.0, (1, 1, hidden), device)?;
     let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
 
     let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
@@ -4367,7 +4367,7 @@ fn test_gqa_single_token() -> Result<()> {
 fn test_causal_mask() -> Result<()> {
     let device = Device::Cpu;
     // A 3x3 score matrix
-    let scores = Tensor::ones((1, 1, 3, 3), DType::F32, &device)?;
+    let scores = Tensor::ones((1, 1, 3, 3), DType::F32, device)?;
     let masked = apply_causal_mask(&scores, 3)?;
     let vals = masked.flatten_all()?.to_vec1::<f32>()?;
     // Row 0: [1, -inf, -inf]
@@ -4397,19 +4397,19 @@ fn test_transformer_block_output_shape() -> Result<()> {
     let hidden = num_heads * head_dim;
     let intermediate = hidden * 2;
 
-    let x = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, hidden), &device)?;
+    let x = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, hidden), device)?;
     let positions: Vec<u32> = (0..seq_len as u32).collect();
 
-    let gate_proj = Tensor::randn(0.0_f32, 0.02, (intermediate, hidden), &device)?;
-    let up_proj = Tensor::randn(0.0_f32, 0.02, (intermediate, hidden), &device)?;
-    let down_proj = Tensor::randn(0.0_f32, 0.02, (hidden, intermediate), &device)?;
+    let gate_proj = Tensor::randn(0.0_f32, 0.02, (intermediate, hidden), device)?;
+    let up_proj = Tensor::randn(0.0_f32, 0.02, (intermediate, hidden), device)?;
+    let down_proj = Tensor::randn(0.0_f32, 0.02, (hidden, intermediate), device)?;
     let gate_proj_t = gate_proj.t()?.contiguous()?;
     let up_proj_t = up_proj.t()?.contiguous()?;
     let down_proj_t = down_proj.t()?.contiguous()?;
 
     let layer = GpuLayerWeights {
-        input_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
-        post_attention_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
+        input_layernorm: Tensor::zeros(hidden, DType::F32, device)?,
+        post_attention_layernorm: Tensor::zeros(hidden, DType::F32, device)?,
         attention: GpuAttentionWeights::Full(make_test_attn_weights(
             num_heads,
             num_kv_heads,
@@ -4468,19 +4468,19 @@ fn test_transformer_block_residual_connections() -> Result<()> {
     let intermediate = hidden * 2;
 
     // Input with known non-zero values
-    let x = Tensor::ones((1, 2, hidden), DType::F32, &device)?;
+    let x = Tensor::ones((1, 2, hidden), DType::F32, device)?;
     let positions = vec![0u32, 1];
 
-    let gate_proj = Tensor::randn(0.0_f32, 0.02, (intermediate, hidden), &device)?;
-    let up_proj = Tensor::randn(0.0_f32, 0.02, (intermediate, hidden), &device)?;
-    let down_proj = Tensor::randn(0.0_f32, 0.02, (hidden, intermediate), &device)?;
+    let gate_proj = Tensor::randn(0.0_f32, 0.02, (intermediate, hidden), device)?;
+    let up_proj = Tensor::randn(0.0_f32, 0.02, (intermediate, hidden), device)?;
+    let down_proj = Tensor::randn(0.0_f32, 0.02, (hidden, intermediate), device)?;
     let gate_proj_t = gate_proj.t()?.contiguous()?;
     let up_proj_t = up_proj.t()?.contiguous()?;
     let down_proj_t = down_proj.t()?.contiguous()?;
 
     let layer = GpuLayerWeights {
-        input_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
-        post_attention_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
+        input_layernorm: Tensor::zeros(hidden, DType::F32, device)?,
+        post_attention_layernorm: Tensor::zeros(hidden, DType::F32, device)?,
         attention: GpuAttentionWeights::Full(make_test_attn_weights(
             num_heads,
             num_kv_heads,
@@ -4545,35 +4545,35 @@ fn test_transformer_block_rejects_linear_attention() -> Result<()> {
     let hidden = 8;
 
     let layer = GpuLayerWeights {
-        input_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
-        post_attention_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
+        input_layernorm: Tensor::zeros(hidden, DType::F32, device)?,
+        post_attention_layernorm: Tensor::zeros(hidden, DType::F32, device)?,
         attention: GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
-            in_proj_qkv: Tensor::zeros((1, 1), DType::F32, &device)?,
-            in_proj_z: Tensor::zeros((1, 1), DType::F32, &device)?,
-            out_proj: Tensor::zeros((1, 1), DType::F32, &device)?,
-            in_proj_a: Tensor::zeros((1, 1), DType::F32, &device)?,
-            in_proj_b: Tensor::zeros((1, 1), DType::F32, &device)?,
-            conv1d: Tensor::zeros((1, 1), DType::F32, &device)?,
-            norm: Tensor::zeros((1,), DType::F32, &device)?,
-            a_log: Tensor::zeros((1,), DType::F32, &device)?,
-            a_log_gates: Tensor::zeros((1,), DType::F32, &device)?,
-            dt_bias: Tensor::zeros((1,), DType::F32, &device)?,
-            in_proj_qkv_t: Tensor::zeros((1, 1), DType::F32, &device)?,
-            in_proj_z_t: Tensor::zeros((1, 1), DType::F32, &device)?,
-            in_proj_a_t: Tensor::zeros((1, 1), DType::F32, &device)?,
-            in_proj_b_t: Tensor::zeros((1, 1), DType::F32, &device)?,
+            in_proj_qkv: Tensor::zeros((1, 1), DType::F32, device)?,
+            in_proj_z: Tensor::zeros((1, 1), DType::F32, device)?,
+            out_proj: Tensor::zeros((1, 1), DType::F32, device)?,
+            in_proj_a: Tensor::zeros((1, 1), DType::F32, device)?,
+            in_proj_b: Tensor::zeros((1, 1), DType::F32, device)?,
+            conv1d: Tensor::zeros((1, 1), DType::F32, device)?,
+            norm: Tensor::zeros((1,), DType::F32, device)?,
+            a_log: Tensor::zeros((1,), DType::F32, device)?,
+            a_log_gates: Tensor::zeros((1,), DType::F32, device)?,
+            dt_bias: Tensor::zeros((1,), DType::F32, device)?,
+            in_proj_qkv_t: Tensor::zeros((1, 1), DType::F32, device)?,
+            in_proj_z_t: Tensor::zeros((1, 1), DType::F32, device)?,
+            in_proj_a_t: Tensor::zeros((1, 1), DType::F32, device)?,
+            in_proj_b_t: Tensor::zeros((1, 1), DType::F32, device)?,
             in_proj_ab_t: None,
-            out_proj_t: Tensor::zeros((1, 1), DType::F32, &device)?,
+            out_proj_t: Tensor::zeros((1, 1), DType::F32, device)?,
             out_proj_marlin: None,
             in_proj_qkvzab_w8: None,
         }),
         mlp: GpuFfnWeights {
-            gate_proj: Tensor::zeros((1, hidden), DType::F32, &device)?,
-            up_proj: Tensor::zeros((1, hidden), DType::F32, &device)?,
-            down_proj: Tensor::zeros((hidden, 1), DType::F32, &device)?,
-            gate_proj_t: Tensor::zeros((hidden, 1), DType::F32, &device)?,
-            up_proj_t: Tensor::zeros((hidden, 1), DType::F32, &device)?,
-            down_proj_t: Tensor::zeros((1, hidden), DType::F32, &device)?,
+            gate_proj: Tensor::zeros((1, hidden), DType::F32, device)?,
+            up_proj: Tensor::zeros((1, hidden), DType::F32, device)?,
+            down_proj: Tensor::zeros((hidden, 1), DType::F32, device)?,
+            gate_proj_t: Tensor::zeros((hidden, 1), DType::F32, device)?,
+            up_proj_t: Tensor::zeros((hidden, 1), DType::F32, device)?,
+            down_proj_t: Tensor::zeros((1, hidden), DType::F32, device)?,
             gate_up_proj_t: None,
             gate_proj_marlin: None,
             up_proj_marlin: None,
@@ -4583,7 +4583,7 @@ fn test_transformer_block_rejects_linear_attention() -> Result<()> {
         },
     };
 
-    let x = Tensor::ones((1, 1, hidden), DType::F32, &device)?;
+    let x = Tensor::ones((1, 1, hidden), DType::F32, device)?;
     let cfg = make_test_config(2, 1, 4, 8);
     let inv_freq = compute_rotary_inv_freq(4, 10_000.0, &device)?;
     let backend = test_backend(&device);
@@ -6113,9 +6113,9 @@ fn test_linear_attention_state_vulkan_inference_backend_uses_model_dtype() -> Re
 
 #[test]
 fn resident_gdn_row_stride_uses_normalized_f32_storage() -> Result<()> {
-    let bf16 = Tensor::zeros((1, 2, 3, 4), DType::BF16, &Device::Cpu)?;
-    let f16 = Tensor::zeros((1, 3, 5), DType::F16, &Device::Cpu)?;
-    let f32 = Tensor::zeros((1, 7), DType::F32, &Device::Cpu)?;
+    let bf16 = Tensor::zeros((1, 2, 3, 4), DType::BF16, Device::Cpu)?;
+    let f16 = Tensor::zeros((1, 3, 5), DType::F16, Device::Cpu)?;
+    let f32 = Tensor::zeros((1, 7), DType::F32, Device::Cpu)?;
 
     assert_eq!(resident_gdn_f32_row_bytes(&bf16, "recurrent")?, 96);
     assert_eq!(resident_gdn_f32_row_bytes(&f16, "recurrent")?, 60);
@@ -6127,7 +6127,7 @@ fn resident_gdn_row_stride_uses_normalized_f32_storage() -> Result<()> {
 fn test_causal_mask_with_offset() -> Result<()> {
     let device = Device::Cpu;
     // Simulate decode: 1 new query, 4 total KV (3 cached + 1 new)
-    let scores = Tensor::ones((1, 1, 1, 4), DType::F32, &device)?;
+    let scores = Tensor::ones((1, 1, 1, 4), DType::F32, device)?;
     let masked = apply_causal_mask_with_offset(&scores, 1, 4, 3)?;
     // Single query should attend to all 4 positions (no masking for q_len=1)
     let vals = masked.flatten_all()?.to_vec1::<f32>()?;
@@ -6137,7 +6137,7 @@ fn test_causal_mask_with_offset() -> Result<()> {
     );
 
     // Simulate prefill with offset: 2 new queries, 5 total KV (3 cached + 2 new)
-    let scores = Tensor::ones((1, 1, 2, 5), DType::F32, &device)?;
+    let scores = Tensor::ones((1, 1, 2, 5), DType::F32, device)?;
     let masked = apply_causal_mask_with_offset(&scores, 2, 5, 3)?;
     let vals = masked.flatten_all()?.to_vec1::<f32>()?;
     // Row 0 (abs pos 3): can attend to positions 0..4 (first 4), mask position 4
@@ -6246,7 +6246,7 @@ fn test_gdn_chunkwise_matches_sequential() -> Result<()> {
     let g_raw = det_tensor(&[b, nv, t], 0.2, 0.0, &device)?.to_dtype(dtype)?;
     let g = (g_raw.abs()? * (-1.0_f64))?;
 
-    let state_init = Tensor::zeros((b, nv, dk, dv), dtype, &device)?;
+    let state_init = Tensor::zeros((b, nv, dk, dv), dtype, device)?;
     let backend = test_backend(&device);
 
     let mut state_chunk = state_init.clone();
@@ -6329,9 +6329,9 @@ fn test_gdn_chunkwise_masks_decay_before_exp() -> Result<()> {
     let q = det_tensor(&[b, nv, t, dk], 0.3, 0.0, &device)?.to_dtype(dtype)?;
     let k = det_tensor(&[b, nv, t, dk], 0.2, 0.0, &device)?.to_dtype(dtype)?;
     let v = det_tensor(&[b, nv, t, dv], 0.4, 0.0, &device)?.to_dtype(dtype)?;
-    let beta = Tensor::ones((b, nv, t), dtype, &device)?;
+    let beta = Tensor::ones((b, nv, t), dtype, device)?;
     let g = Tensor::from_vec(vec![-100.0f32; b * nv * t], (b, nv, t))?.to_device(device)?;
-    let state_init = Tensor::zeros((b, nv, dk, dv), dtype, &device)?;
+    let state_init = Tensor::zeros((b, nv, dk, dv), dtype, device)?;
     let backend = test_backend(&device);
 
     let mut state = state_init.clone();
@@ -8168,7 +8168,7 @@ fn test_gated_deltanet_forward_streaming_matches_monolithic_cpu() -> Result<()> 
     let tile = GDN_CHUNK_SIZE; // 64-token tiles -> 3 tiles
     let n: usize = total * config.hidden_size;
     let data: Vec<f32> = (0..n).map(|i| ((i as f32 * 0.013).sin()) * 0.1).collect();
-    let x = Tensor::new(&data, &device)?.reshape((1, total, config.hidden_size))?;
+    let x = Tensor::new(&data, device)?.reshape((1, total, config.hidden_size))?;
 
     // Monolithic.
     let mut mono_state = LinearAttentionState::new(&config, &device)?;
@@ -8338,7 +8338,7 @@ fn test_model_forward_segment_streaming_matches_monolithic_cpu() -> Result<()> {
     let tile = GDN_CHUNK_SIZE; // 64-token tiles -> 3 tiles
     let n: usize = total * config.hidden_size;
     let data: Vec<f32> = (0..n).map(|i| ((i as f32 * 0.017).cos()) * 0.1).collect();
-    let hidden = Tensor::new(&data, &device)?.reshape((1, total, config.hidden_size))?;
+    let hidden = Tensor::new(&data, device)?.reshape((1, total, config.hidden_size))?;
     let positions: Vec<u32> = (0..total as u32).collect();
 
     let backend_defaults = StreamingPrefillBackendPolicy::for_backend("cpu", device);

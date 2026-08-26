@@ -1989,12 +1989,12 @@ pub fn gdn_qkv_from_mixed_training(
     let (q, k) = if gqa_ratio > 1 {
         let q = q
             .unsqueeze(3)?
-            .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+            .expand([batch, seq_len, nk, gqa_ratio, dk])?
             .contiguous()?
             .reshape((batch, seq_len, nv, dk))?;
         let k = k
             .unsqueeze(3)?
-            .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+            .expand([batch, seq_len, nk, gqa_ratio, dk])?
             .contiguous()?
             .reshape((batch, seq_len, nv, dk))?;
         (q, k)

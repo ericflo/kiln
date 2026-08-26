@@ -399,7 +399,7 @@ fn apply_penalties_on_device(
     }
 
     // Gather current logit values for those token ids.
-    let indices = Tensor::new(unique.as_slice(), &device)?;
+    let indices = Tensor::new(unique.as_slice(), device)?;
     let selected = flat.index_select(&indices, 0)?;
     let current: Vec<f32> =
         crate::execution_phase::profile_accelerator_readback(selected.device(), || {
@@ -407,7 +407,7 @@ fn apply_penalties_on_device(
         })?;
     let deltas = penalty_deltas(&unique, &counts, &current, repetition, presence, frequency);
 
-    let delta_tensor = Tensor::new(deltas.as_slice(), &device)?;
+    let delta_tensor = Tensor::new(deltas.as_slice(), device)?;
     // `index_add` returns a new tensor with `source` added at the given
     // `indices` along dim 0. kt's `index_add` composes scatter_add + add,
     // both of which dispatch to the holding device (CPU/CUDA/Metal), so
@@ -1082,7 +1082,7 @@ mod tests {
     #[test]
     fn test_greedy_sample_1d() -> Result<()> {
         let device = Device::Cpu;
-        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
+        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], device)?;
         let token = greedy_sample(&logits)?;
         assert_eq!(token, 1); // index of 5.0
         Ok(())
@@ -1098,7 +1098,7 @@ mod tests {
                 5.0, 6.0, 7.0, 8.0, // position 1
                 0.1, 0.2, 9.0, 0.3, // position 2 (last) — max at index 2
             ],
-            &device,
+            device,
         )?
         .reshape((3, 4))?;
         let token = greedy_sample(&logits)?;
@@ -1115,7 +1115,7 @@ mod tests {
                 1.0_f32, 2.0, 3.0, // position 0
                 7.0, 5.0, 6.0, // position 1 (last) — max at index 0
             ],
-            &device,
+            device,
         )?
         .reshape((1, 2, 3))?;
         let token = greedy_sample(&logits)?;
@@ -1213,7 +1213,7 @@ mod tests {
                 3.0, 1.0, 2.0, // max index 0
                 -1.0, -0.5, -0.25, // max index 2
             ],
-            &device,
+            device,
         )?
         .reshape((3, 3))?;
         assert_eq!(greedy_sample_rows(&logits)?, vec![1, 0, 2]);
@@ -1230,7 +1230,7 @@ mod tests {
                 -1.0, -0.5, -0.25, // max index 2
                 4.0, 5.0, 1.0, // max index 1
             ],
-            &device,
+            device,
         )?
         .reshape((2, 2, 3))?;
         assert_eq!(greedy_sample_rows(&logits)?, vec![1, 0, 2, 1]);
@@ -1289,7 +1289,7 @@ mod tests {
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .unwrap()
             .0 as u32;
-        let logits = Tensor::new(values.as_slice(), &device)?;
+        let logits = Tensor::new(values.as_slice(), device)?;
         assert_eq!(greedy_sample(&logits)?, expected);
         Ok(())
     }
@@ -1297,7 +1297,7 @@ mod tests {
     #[test]
     fn test_sample_temperature_zero_is_greedy() -> Result<()> {
         let device = Device::Cpu;
-        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
+        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], device)?;
         let token = sample_with_params(&logits, 0.0, 1.0, 0, Some(42))?;
         assert_eq!(token, 1); // same as greedy
         Ok(())
@@ -1306,7 +1306,7 @@ mod tests {
     #[test]
     fn test_sample_top_k_one_is_greedy() -> Result<()> {
         let device = Device::Cpu;
-        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
+        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], device)?;
         for seed in 0..20 {
             let token = sample_with_params(&logits, 0.8, 0.2, 1, Some(seed))?;
             assert_eq!(
@@ -1321,7 +1321,7 @@ mod tests {
     fn test_sample_very_low_temperature_is_near_greedy() -> Result<()> {
         let device = Device::Cpu;
         // With very low temperature, sampling should consistently pick the max
-        let logits = Tensor::new(&[1.0_f32, 10.0, 3.0, 2.0], &device)?;
+        let logits = Tensor::new(&[1.0_f32, 10.0, 3.0, 2.0], device)?;
         for seed in 0..20 {
             let token = sample_with_params(&logits, 0.01, 1.0, 0, Some(seed))?;
             assert_eq!(
@@ -1336,7 +1336,7 @@ mod tests {
     fn test_top_k_filtering() -> Result<()> {
         let device = Device::Cpu;
         // With top_k=2, only the 2 highest logits should be candidates
-        let logits = Tensor::new(&[1.0_f32, 10.0, 8.0, 2.0, 0.5], &device)?;
+        let logits = Tensor::new(&[1.0_f32, 10.0, 8.0, 2.0, 0.5], device)?;
         for seed in 0..50 {
             let token = sample_with_params(&logits, 1.0, 1.0, 2, Some(seed))?;
             assert!(
@@ -1353,7 +1353,7 @@ mod tests {
         // naive host-side sort over the full vocab.
         let device = Device::Cpu;
         let values: Vec<f32> = vec![1.0, 5.0, 3.0, 8.0, 2.0, 7.0, 4.0, 9.0, 0.5, 6.0, 2.5, 4.5];
-        let logits = Tensor::new(values.as_slice(), &device)?;
+        let logits = Tensor::new(values.as_slice(), device)?;
 
         // Expected top-3 indices (descending by logit): 9.0->7, 8.0->3, 7.0->5
         let mut expected: Vec<(u32, f32)> = values
@@ -1381,7 +1381,7 @@ mod tests {
     fn test_top_p_filtering() -> Result<()> {
         let device = Device::Cpu;
         // Logits designed so that after softmax, token 0 has ~99.5% probability
-        let logits = Tensor::new(&[10.0_f32, 0.0, 0.0, 0.0], &device)?;
+        let logits = Tensor::new(&[10.0_f32, 0.0, 0.0, 0.0], device)?;
         for seed in 0..20 {
             let token = sample_with_params(&logits, 1.0, 0.95, 0, Some(seed))?;
             // With top_p=0.95, token 0 alone exceeds the threshold
@@ -1396,7 +1396,7 @@ mod tests {
     #[test]
     fn test_sample_with_seed_is_deterministic() -> Result<()> {
         let device = Device::Cpu;
-        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0, 2.5], &device)?;
+        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0, 2.5], device)?;
         let t1 = sample_with_params(&logits, 1.0, 1.0, 0, Some(12345))?;
         let t2 = sample_with_params(&logits, 1.0, 1.0, 0, Some(12345))?;
         assert_eq!(t1, t2, "same seed should produce same result");
@@ -1406,7 +1406,7 @@ mod tests {
     #[test]
     fn test_full_distribution_sampling_tolerates_non_finite_logits() -> Result<()> {
         let device = Device::Cpu;
-        let logits = Tensor::new(&[f32::NAN, f32::NEG_INFINITY, f32::NAN], &device)?;
+        let logits = Tensor::new(&[f32::NAN, f32::NEG_INFINITY, f32::NAN], device)?;
         let token = sample_with_params(&logits, 1.0, 1.0, 0, Some(12345))?;
         assert_eq!(token, 2);
         Ok(())
@@ -1415,7 +1415,7 @@ mod tests {
     #[test]
     fn test_top_p_outside_range_is_full_distribution() -> Result<()> {
         let device = Device::Cpu;
-        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0, 2.5, 0.25, -0.5], &device)?;
+        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0, 2.5, 0.25, -0.5], device)?;
         for seed in 0..80 {
             let full = sample_with_params(&logits, 1.0, 1.0, 0, Some(seed))?;
             let zero = sample_with_params(&logits, 1.0, 0.0, 0, Some(seed))?;
@@ -1442,7 +1442,7 @@ mod tests {
         // Determinism must also hold when the top-k on-device path is used.
         let device = Device::Cpu;
         let values: Vec<f32> = (0..512).map(|i| (i as f32 * 0.09).cos() * 3.0).collect();
-        let logits = Tensor::new(values.as_slice(), &device)?;
+        let logits = Tensor::new(values.as_slice(), device)?;
         for seed in [1_u64, 42, 7777, 123456] {
             let a = sample_with_params(&logits, 1.0, 0.9, 50, Some(seed))?;
             let b = sample_with_params(&logits, 1.0, 0.9, 50, Some(seed))?;
@@ -1491,7 +1491,7 @@ mod tests {
     #[test]
     fn test_full_params_greedy_short_circuits() -> Result<()> {
         let device = Device::Cpu;
-        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
+        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], device)?;
         let mut params = full_params_with_seed(42);
         params.temperature = 0.0;
         let token = sample_with_full_params(&logits, &params, &[])?;
@@ -1501,7 +1501,7 @@ mod tests {
 
     #[test]
     fn traced_greedy_sampling_has_unit_probability() -> Result<()> {
-        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &Device::Cpu)?;
+        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], Device::Cpu)?;
         let mut params = full_params_with_seed(42);
         params.temperature = 0.0;
         let sampled = sample_with_full_params_and_logprob(&logits, &params, &[])?;
@@ -1512,7 +1512,7 @@ mod tests {
     #[test]
     fn traced_sampling_matches_token_path_and_full_distribution_probability() -> Result<()> {
         let values = [0.0_f32, 1.0, 2.0, -1.0];
-        let logits = Tensor::new(&values, &Device::Cpu)?;
+        let logits = Tensor::new(&values, Device::Cpu)?;
         let mut params = full_params_with_seed(0);
         params.temperature = 1.0;
         params.top_p = 1.0;
@@ -1539,7 +1539,7 @@ mod tests {
 
     #[test]
     fn traced_sampling_reports_probability_after_penalties_and_filters() -> Result<()> {
-        let logits = Tensor::new(&[3.0_f32, 2.0, 1.0, 0.0], &Device::Cpu)?;
+        let logits = Tensor::new(&[3.0_f32, 2.0, 1.0, 0.0], Device::Cpu)?;
         let mut params = full_params_with_seed(0);
         params.temperature = 1.0;
         params.top_k = 3;
@@ -1643,7 +1643,7 @@ mod tests {
         // With penalties off, min_p=0, the full sampler must produce the
         // same token as the legacy sample_with_params for any given seed.
         let device = Device::Cpu;
-        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
+        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], device)?;
         let mut params = full_params_with_seed(123);
         params.temperature = 1.0;
         params.top_p = 1.0;
@@ -1777,7 +1777,7 @@ mod tests {
     fn test_min_p_drops_low_probability_tokens() -> Result<()> {
         let device = Device::Cpu;
         // Token 0 dominates the distribution (~99%); tokens 1-3 are tiny.
-        let logits = Tensor::new(&[10.0_f32, 0.0, 0.0, 0.0], &device)?;
+        let logits = Tensor::new(&[10.0_f32, 0.0, 0.0, 0.0], device)?;
         let mut params = full_params_with_seed(7);
         params.temperature = 1.0;
         params.top_p = 1.0;
@@ -1797,7 +1797,7 @@ mod tests {
         // Token 1 is the natural argmax. With a strong repetition
         // penalty AND token 1 in history, the sampler should prefer
         // another token.
-        let logits = Tensor::new(&[2.0_f32, 5.0, 4.0, 1.0], &device)?;
+        let logits = Tensor::new(&[2.0_f32, 5.0, 4.0, 1.0], device)?;
         let mut params = full_params_with_seed(0);
         params.temperature = 1e-6; // near-greedy so the result is dominated by the highest logit
         params.top_p = 1.0;
@@ -1814,7 +1814,7 @@ mod tests {
     #[test]
     fn test_presence_penalty_suppresses_seen_tokens() -> Result<()> {
         let device = Device::Cpu;
-        let logits = Tensor::new(&[2.0_f32, 5.0, 4.0, 1.0], &device)?;
+        let logits = Tensor::new(&[2.0_f32, 5.0, 4.0, 1.0], device)?;
         let mut params = full_params_with_seed(0);
         params.temperature = 1e-6;
         params.top_p = 1.0;
@@ -1833,7 +1833,7 @@ mod tests {
     #[test]
     fn test_frequency_penalty_scales_with_count() -> Result<()> {
         let device = Device::Cpu;
-        let logits = Tensor::new(&[2.0_f32, 5.0, 4.0, 1.0], &device)?;
+        let logits = Tensor::new(&[2.0_f32, 5.0, 4.0, 1.0], device)?;
         let mut params = full_params_with_seed(0);
         params.temperature = 1e-6;
         params.top_p = 1.0;
@@ -1854,7 +1854,7 @@ mod tests {
         // Confirm that repetition + presence + frequency stack
         // additively on the same token without one stomping the other.
         let device = Device::Cpu;
-        let logits = Tensor::new(&[10.0_f32, 1.0, 1.0, 1.0], &device)?;
+        let logits = Tensor::new(&[10.0_f32, 1.0, 1.0, 1.0], device)?;
         let mut params = full_params_with_seed(0);
         params.temperature = 1e-6;
         params.top_p = 1.0;
@@ -1878,7 +1878,7 @@ mod tests {
     fn test_min_p_combined_with_top_k() -> Result<()> {
         let device = Device::Cpu;
         // 6 tokens with descending logits.
-        let logits = Tensor::new(&[5.0_f32, 4.5, 4.0, 1.0, 0.5, 0.0], &device)?;
+        let logits = Tensor::new(&[5.0_f32, 4.5, 4.0, 1.0, 0.5, 0.0], device)?;
         let mut params = full_params_with_seed(0);
         params.temperature = 1.0;
         params.top_p = 1.0;
@@ -1902,7 +1902,7 @@ mod tests {
     fn test_empty_history_with_penalties_no_op() -> Result<()> {
         // No generated tokens yet → penalties should be inert.
         let device = Device::Cpu;
-        let logits = Tensor::new(&[10.0_f32, 1.0, 1.0, 1.0], &device)?;
+        let logits = Tensor::new(&[10.0_f32, 1.0, 1.0, 1.0], device)?;
         let mut params = full_params_with_seed(0);
         params.temperature = 1e-6;
         params.repetition_penalty = 100.0;
@@ -1922,7 +1922,7 @@ mod tests {
         let values: Vec<f32> = (0..152_064)
             .map(|i| ((i as f32) * 0.137).sin() * 7.5 + (i as f32) * 0.0001)
             .collect();
-        let logits = Tensor::new(values.as_slice(), &device)?;
+        let logits = Tensor::new(values.as_slice(), device)?;
         for &k in &[1, 20, 50, 200, 1024] {
             let heap = topk_via_host_sort(&logits, Some(k))?;
             let mut full: Vec<(u32, f32)> = values
@@ -2006,7 +2006,7 @@ mod tests {
     #[test]
     fn test_seed_determinism_with_full_params() -> Result<()> {
         let device = Device::Cpu;
-        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0, 2.5, 0.5, -1.0], &device)?;
+        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0, 2.5, 0.5, -1.0], device)?;
         let mut params = full_params_with_seed(42);
         params.temperature = 0.8;
         params.top_p = 0.9;

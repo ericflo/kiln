@@ -534,11 +534,11 @@ fn create_snapshot_directory(
         builder
     };
     if let Some(root) = configured_snapshot_root {
-        fs::create_dir_all(&root)
+        fs::create_dir_all(root)
             .with_context(|| format!("create configured snapshot root {}", root.display()))?;
         ensure_directory(&root, "configured model snapshot root")?;
         return builder()
-            .tempdir_in(&root)
+            .tempdir_in(root)
             .with_context(|| format!("create private snapshot under {}", root.display()));
     }
 

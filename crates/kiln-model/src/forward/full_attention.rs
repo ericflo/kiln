@@ -1157,12 +1157,12 @@ pub fn gqa_attention_core_prefill(
     let (k, v) = if gqa_ratio > 1 {
         let k = k_he
             .unsqueeze(2)?
-            .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
+            .expand([batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
             .contiguous()?
             .reshape((batch, num_heads, kv_len, head_dim))?;
         let v = v_he
             .unsqueeze(2)?
-            .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
+            .expand([batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
             .contiguous()?
             .reshape((batch, num_heads, kv_len, head_dim))?;
         (k, v)
@@ -1981,11 +1981,11 @@ pub fn gqa_attention_pre_o(
         // Expand [batch, num_kv_heads, kv_len, head_dim] -> [batch, num_heads, kv_len, head_dim]
         let out = (
             k.unsqueeze(2)?
-                .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
+                .expand([batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
                 .contiguous()?
                 .reshape((batch, num_heads, kv_len, head_dim))?,
             v.unsqueeze(2)?
-                .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
+                .expand([batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
                 .contiguous()?
                 .reshape((batch, num_heads, kv_len, head_dim))?,
         );
@@ -4663,12 +4663,12 @@ pub(super) fn gqa_attention_paged_with_rope_tables(
     let (k, v) = if gqa_ratio > 1 {
         let k = k
             .unsqueeze(2)?
-            .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
+            .expand([batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
             .contiguous()?
             .reshape((batch, num_heads, kv_len, head_dim))?;
         let v = v
             .unsqueeze(2)?
-            .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
+            .expand([batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
             .contiguous()?
             .reshape((batch, num_heads, kv_len, head_dim))?;
         (k, v)
