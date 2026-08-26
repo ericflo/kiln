@@ -3373,7 +3373,7 @@ impl ModelRunner {
 
     /// Compute the number of blocks needed for a given number of tokens.
     fn blocks_needed(num_tokens: usize, block_size: usize) -> usize {
-        (num_tokens + block_size - 1) / block_size
+        num_tokens.div_ceil(block_size)
     }
 
     /// Initial block capacity for the batching engine.

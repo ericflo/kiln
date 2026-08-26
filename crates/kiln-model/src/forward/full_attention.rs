@@ -2714,7 +2714,7 @@ impl CachedPagedDecodeMeta {
         let page_block_size = try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache);
         #[cfg(not(feature = "cuda"))]
         let page_block_size = paged_cache.block_size();
-        let max_blocks_per_seq = ((max_seqlen_k + page_block_size - 1) / page_block_size).max(1);
+        let max_blocks_per_seq = max_seqlen_k.div_ceil(page_block_size).max(1);
         let mut block_table_vec = Vec::<u32>::with_capacity(batch * max_blocks_per_seq);
         // #1082: kt flash-attn requires `seqused_k` U32 (see
         // kiln-flash-attn/src/kt_api.rs); the count is a non-negative
@@ -2868,7 +2868,7 @@ impl CachedPagedDecodeMeta {
         // actual seqlen into garbage slots). Used for the struct's
         // public field consumed by both the strict and dyn_seqlen
         // dispatches below.
-        let max_blocks_per_seq = ((max_seqlen_k + page_block_size - 1) / page_block_size).max(1);
+        let max_blocks_per_seq = max_seqlen_k.div_ceil(page_block_size).max(1);
 
         // The stable buffer is sized via the same bucketed formula as the
         // graph keys (`CudaBatchedGraphKey` / MetalGraphKey):
@@ -3144,8 +3144,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                 try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache);
             #[cfg(not(feature = "cuda"))]
             let page_block_size = paged_cache.block_size();
-            let max_blocks_per_seq =
-                ((max_seqlen_k + page_block_size - 1) / page_block_size).max(1);
+            let max_blocks_per_seq = max_seqlen_k.div_ceil(page_block_size).max(1);
             let mut block_table_vec = Vec::<u32>::with_capacity(batch * max_blocks_per_seq);
             // #1082: kt flash-attn requires `seqused_k` U32 (kt_api.rs); the
             // count is a non-negative sequence length, faithful as u32.

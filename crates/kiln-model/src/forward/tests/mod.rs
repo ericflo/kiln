@@ -7499,7 +7499,7 @@ fn make_paged_setup(
     block_size: usize,
     device: &Device,
 ) -> Result<(PagedKvCache, BlockTable)> {
-    let num_blocks = (seq_len + block_size - 1) / block_size;
+    let num_blocks = seq_len.div_ceil(block_size);
     // #1082: `device` is already a kt `Device`.
     let device_kt = *device;
     let cache = crate::PagedKvCacheKt::new(

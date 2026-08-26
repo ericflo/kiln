@@ -3047,7 +3047,7 @@ mod tests {
             ));
 
             // qzeros: [num_groups, out/8], all 8s
-            let out_packed_actual = (out + pack_factor - 1) / pack_factor;
+            let out_packed_actual = out.div_ceil(pack_factor);
             let mut qzeros_words = Vec::new();
             for _ in 0..num_groups * out_packed_actual {
                 let packed: u32 = (0..pack_factor as u32).map(|i| 8u32 << (i * 4)).sum();
