@@ -803,7 +803,7 @@ pub fn dispatch_kernel_bytes(
     let stage_info = vk::PipelineShaderStageCreateInfo::default()
         .stage(vk::ShaderStageFlags::COMPUTE)
         .module(shader_module)
-        .name(std::ffi::CStr::from_bytes_with_nul(b"main\0").unwrap());
+        .name(c"main");
 
     let pipeline_info = vk::ComputePipelineCreateInfo::default()
         .stage(stage_info)
@@ -1669,7 +1669,7 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
     );
 
     let stage_start = profile_stages.then(Instant::now);
-    let all_handles = vec![
+    let all_handles = [
         x_buf.handle(),
         qkv_weight_t.handle(),
         z_weight_t.handle(),
@@ -2570,7 +2570,7 @@ fn dispatch_linear_decode_cached_single_submit_bytes(
         )
     };
 
-    let all_handles = vec![x_buf.handle(), weight_t.handle(), out_buf.handle()];
+    let all_handles = [x_buf.handle(), weight_t.handle(), out_buf.handle()];
     let (set_layout, layout, pipeline) = vk_device.get_or_create_compute_pipeline(
         &spirv,
         all_handles.len(),
@@ -2885,7 +2885,7 @@ fn dispatch_linear_decode_argmax_cached_single_submit(
     };
     let blocks_spirv = crate::pipeline::ShaderPipeline::compile_shader(blocks_glsl)?;
     let block_push: [u32; 3] = [hidden as u32, out_dim as u32, block_count as u32];
-    let block_handles = vec![
+    let block_handles = [
         x_buf.handle(),
         weight_t.handle(),
         block_score_buf.handle(),
@@ -2904,7 +2904,7 @@ fn dispatch_linear_decode_argmax_cached_single_submit(
     );
     let reduce_spirv = crate::pipeline::ShaderPipeline::compile_shader(reduce_glsl)?;
     let reduce_push: [u32; 1] = [block_count as u32];
-    let reduce_handles = vec![
+    let reduce_handles = [
         block_score_buf.handle(),
         block_index_buf.handle(),
         out_index_buf.handle(),
@@ -3743,7 +3743,7 @@ fn dispatch_linear_decode_argmax_batched_cached_impl_bytes(
     } else {
         total_blocks
     };
-    let block_handles = vec![
+    let block_handles = [
         x_buf.handle(),
         weight_t.handle(),
         block_score_buf.handle(),
@@ -3762,7 +3762,7 @@ fn dispatch_linear_decode_argmax_batched_cached_impl_bytes(
     );
     let reduce_spirv = crate::pipeline::ShaderPipeline::compile_shader(reduce_glsl)?;
     let reduce_push: [u32; 1] = [block_count as u32];
-    let reduce_handles = vec![
+    let reduce_handles = [
         block_score_buf.handle(),
         block_index_buf.handle(),
         out_index_buf.handle(),
@@ -4094,7 +4094,7 @@ fn dispatch_full_attn_qkv_decode_cached_single_submit(
     let out_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, out_size)
         .context("failed to create full_attn_qkv_decode output staging buffer")?;
 
-    let all_handles = vec![
+    let all_handles = [
         x_buf.handle(),
         q_weight_t.handle(),
         k_weight_t.handle(),
@@ -9302,7 +9302,7 @@ pub fn dispatch_gdn_recurrent_step_resident_state_bytes(
         dispatch_counts,
         dispatch_limits
     );
-    let all_handles = vec![
+    let all_handles = [
         q_buf.handle(),
         k_buf.handle(),
         v_buf.handle(),
@@ -9595,7 +9595,7 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state_bytes(
     } else {
         (workgroup_count, 1, 1)
     };
-    let all_handles = vec![
+    let all_handles = [
         q_buf.handle(),
         k_buf.handle(),
         v_buf.handle(),
@@ -9880,7 +9880,7 @@ fn dispatch_gdn_recurrent_step_single_submit_bytes(
         dispatch_counts,
         dispatch_limits
     );
-    let all_handles = vec![
+    let all_handles = [
         q_buf.handle(),
         k_buf.handle(),
         v_buf.handle(),

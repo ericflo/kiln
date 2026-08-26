@@ -315,3 +315,30 @@ identically (65 passed, 0 failed); `cargo build -p kiln-model` (downstream
 consumer) succeeds; clippy JSON output confirms zero remaining
 `manual_is_multiple_of` warnings and that no other lint count increased;
 `git status` shows only the five source edits plus this ledger entry.
+
+## Cleanup Agent (round 12) — 2026-08-26
+
+Eliminated the two remaining small mechanical clippy lint categories in
+`crates/kiln-vulkan-kernel`, crate-wide across all targets: all 17
+`clippy::useless_vec` warnings (13 in kernels.rs, 4 in
+bin/vulkan_decode_microbench.rs) and all 7 `clippy::manual_c_str_literals`
+warnings (device.rs ×5, pipeline.rs ×1, kernels.rs ×1). The `vec![...]`
+literals whose length never changes were replaced with fixed-size arrays
+(they are only read as slices, so no behavioral surface), and the
+`CStr::from_bytes_with_nul(b"...\0").unwrap()` calls became `c"..."`
+literals (no unwrap needed, same value). This is round-11's leftover
+candidate pair, applied via `cargo clippy --fix --all-targets` restricted to
+exactly those two lints (`-A clippy::all -W clippy::useless_vec -W
+clippy::manual_c_str_literals`), then rustfmt on just the four touched files
+to normalize the array line breaks — leaving the one pre-existing fmt diff
+in vk_ops/gdn_gates.rs untouched. Why it mattered: removed every remaining
+mechanical fixable lint category from the crate; what's left is intentional
+keeps (`too_many_arguments`) plus scattered single-instance style lints for
+future triage. Verified: before AND after, `cargo test -p kiln-vulkan-kernel
+--lib` passes identically (65 passed, 0 failed; one flaky failure on the
+first post-change run passed on re-run per the documented baseline flake);
+`cargo build -p kiln-model` succeeds; a full clippy JSON diff against the
+pre-change baseline confirms exactly the two target categories disappeared
+and no other lint count changed; `cargo fmt --check` shows the same single
+pre-existing diff as baseline; `git status` shows only the four source edits
+plus this ledger entry.

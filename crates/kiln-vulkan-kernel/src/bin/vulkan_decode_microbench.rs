@@ -908,8 +908,8 @@ fn run_full_token_resident_mixed_batched(
         upload_bf16_packed_buffer_from_slice(device, &make_bf16_weight_slice(Q_DIM, HIDDEN))?;
     let gdn_recurrent_norm_w = upload_f32_buffer_from_slice(device, &vec![1.0f32; GDN_HEAD_DIM])?;
     let gdn_conv_w = upload_f32_buffer_from_slice(device, &vec![0.0f32; QKV_DIM * conv_kernel])?;
-    let gdn_a_log = upload_f32_buffer_from_slice(device, &vec![-1.0f32; GDN_NUM_VALUE_HEADS])?;
-    let gdn_dt_bias = upload_f32_buffer_from_slice(device, &vec![0.0f32; GDN_NUM_VALUE_HEADS])?;
+    let gdn_a_log = upload_f32_buffer_from_slice(device, &[-1.0f32; GDN_NUM_VALUE_HEADS])?;
+    let gdn_dt_bias = upload_f32_buffer_from_slice(device, &[0.0f32; GDN_NUM_VALUE_HEADS])?;
     let gdn_out_w =
         upload_bf16_packed_buffer_from_slice(device, &make_bf16_weight_slice(GDN_V_DIM, HIDDEN))?;
 
@@ -1560,8 +1560,8 @@ fn run_gdn_block_resident_batched(
     let norm_w = upload_f32_buffer_from_slice(device, &vec![1.0f32; HIDDEN])?;
     let recurrent_norm_w = upload_f32_buffer_from_slice(device, &vec![1.0f32; GDN_HEAD_DIM])?;
     let conv_w = upload_f32_buffer_from_slice(device, &vec![0.0f32; QKV_DIM * conv_kernel])?;
-    let a_log = upload_f32_buffer_from_slice(device, &vec![-1.0f32; GDN_NUM_VALUE_HEADS])?;
-    let dt_bias = upload_f32_buffer_from_slice(device, &vec![0.0f32; GDN_NUM_VALUE_HEADS])?;
+    let a_log = upload_f32_buffer_from_slice(device, &[-1.0f32; GDN_NUM_VALUE_HEADS])?;
+    let dt_bias = upload_f32_buffer_from_slice(device, &[0.0f32; GDN_NUM_VALUE_HEADS])?;
     let out_w =
         upload_bf16_packed_buffer_from_slice(device, &make_bf16_weight_slice(GDN_V_DIM, HIDDEN))?;
 

@@ -191,8 +191,8 @@ impl VulkanDevice {
         let instance_api_version = Self::negotiated_instance_api_version(&entry)?;
 
         let app_info = vk::ApplicationInfo::default()
-            .application_name(CStr::from_bytes_with_nul(b"Kiln Probe\0").unwrap())
-            .engine_name(CStr::from_bytes_with_nul(b"Kiln\0").unwrap())
+            .application_name(c"Kiln Probe")
+            .engine_name(c"Kiln")
             .api_version(instance_api_version);
 
         let validation_layer = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
@@ -252,8 +252,8 @@ impl VulkanDevice {
 
         // Create instance
         let app_info = vk::ApplicationInfo::default()
-            .application_name(CStr::from_bytes_with_nul(b"Kiln Vulkan Backend\0").unwrap())
-            .engine_name(CStr::from_bytes_with_nul(b"Kiln\0").unwrap())
+            .application_name(c"Kiln Vulkan Backend")
+            .engine_name(c"Kiln")
             .api_version(instance_api_version);
 
         let policy = vulkan_device_policy();
@@ -754,7 +754,7 @@ impl VulkanDevice {
         let stage_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(shader_module)
-            .name(CStr::from_bytes_with_nul(b"main\0").unwrap());
+            .name(c"main");
         let pipeline = unsafe {
             self.device.create_compute_pipelines(
                 vk::PipelineCache::null(),
