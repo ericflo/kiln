@@ -3,7 +3,7 @@
 Issue: #1082
 Branch: `feat/vk-tape-harmonization`
 Status: **SPEC ONLY — not implemented.** PR1+PR2 are code on this branch; PR3–PR7 are specs.
-Parent plan: [`docs/vulkan-train-harmonization-plan.md`](../vulkan-train-harmonization-plan.md) §4 "PR4 — Backward into the Tape (the long pole)".
+Parent plan: [`docs/vulkan-train-harmonization-plan.md`](../../vulkan-train-harmonization-plan.md) §4 "PR4 — Backward into the Tape (the long pole)".
 
 > All `file:line` anchors below were read out of the worktree at branch HEAD
 > (`b94feeac`). Line numbers drift; every anchor is paired with a **grep

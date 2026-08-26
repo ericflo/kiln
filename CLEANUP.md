@@ -1079,3 +1079,33 @@ Noted but left alone: `scripts/audit-candle-usage.sh` still documents an
 excluded vendored tree and `scripts/phase7-migrate-candle-bail.py` matches
 on `vendor/candle-core` paths — inert post-deletion, candidate for a future
 session.
+
+## Cleanup Agent (round 41) — 2026-09-01
+
+Archived `docs/vk-harmonization/` (12 files, ~5,079 lines — this round's
+steering primary candidate a) to `docs/archive/vk-harmonization/` following
+the rounds 33–34 playbook. Confirmed the archive trigger before moving: the
+entire PR1–PR7 series landed on main via PR #1441 (`feat/vk-tape-harmonization`),
+including PR6 (`3b226d620`, orchestration flip routing Vulkan SFT/GRPO/OPD
+through shared trainer.rs/opd.rs) and PR7 (`a909d46ff`, deletion of the legacy
+fork `vk_train.rs`/`vk_forward.rs`/server opt-out family — verified gone from
+the tree), so the specs, test scaffolds, review notes, and soak handoff are a
+completed-effort coordination record whose present-tense "SPEC ONLY — not
+implemented" statuses no longer describe reality. Moved with `git mv`
+(history preserved); added an archive README stating the rationale and
+completion status (mirroring round 33's metal/ and round 34's candle-removal/
+precedents). Link fixes: the one relative markdown link in PR4-spec.md
+deepened to `../../`; three in-archive prose `docs/vk-harmonization/...`
+mentions updated to the archived path; both inbound live references rewritten
+(`crates/kiln-model/tests/vk_tape_record_proof.rs:326` comment, now noting
+PR1–PR7 landed via #1441, and `docs/vulkan-train-harmonization-plan.md:279`,
+which stays live as the authoritative plan). Why it mattered: ~5k lines of
+landed-effort planning no longer masquerade as pending work at docs/ root.
+Verified: scripted relative-link audit over all moved markdown files resolves
+every link (0 MISSING); repo-wide git grep finds no un-updated
+`vk-harmonization` reference outside CLEANUP.md, the plan doc's updated
+pointer, and the archived dir itself; `cargo fmt --check -p kiln-model` clean
+(the only .rs change is a comment); scripts/check_repository_artifacts.py
+passes (6694 tracked paths, same count — moves not deletions); git status
+shows exactly the 11 renames, new README, two reference edits, and this
+ledger entry.

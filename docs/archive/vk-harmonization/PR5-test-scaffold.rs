@@ -1,7 +1,7 @@
 //! PR5 forward-harmonization test scaffold — **HISTORICAL, DO NOT COPY AS CURRENT TEST CODE.**
 //!
 //! Issue #1082, branch `feat/vk-tape-harmonization`. This file is a *spec
-//! companion* to `docs/vk-harmonization/PR5-spec.md`. It is NOT wired into any
+//! companion* to `docs/archive/vk-harmonization/PR5-spec.md`. It is NOT wired into any
 //! Cargo target yet and is NOT expected to compile until PR5's recorder/gate
 //! edits AND PR3's `vulkan_fwd` op coverage land. The implementer drops the
 //! bounded tests (T1–T7) into `crates/kiln-model/tests/vk_tape_forward_parity.rs`

@@ -491,7 +491,7 @@ regress them:
 Add **one** cheap, single-step, GPU-gated test asserting the harmonized save path
 works end-to-end without the fork. Suggested home:
 `crates/kiln-train/tests/vk_harmonized_save_smoke.rs` (scaffold provided —
-`docs/vk-harmonization/PR7-test-scaffold.rs`, **WIP / `#[ignore]`**). It:
+`docs/archive/vk-harmonization/PR7-test-scaffold.rs`, **WIP / `#[ignore]`**). It:
 1. probes Vulkan; skips if absent,
 2. builds two tiny LoRA `Parameter`s on `Device::Vulkan` (via PR2 `host_to_vulkan_copy`),
 3. wraps them in a one-layer `LoraParams`,

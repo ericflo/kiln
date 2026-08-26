@@ -1,6 +1,6 @@
 //! PR7 bounded test scaffold — WIP, DO NOT COMPILE AS-IS.
 //!
-//! ⚠️  This is a SPEC ARTIFACT shipped with `docs/vk-harmonization/PR7-spec.md`.
+//! ⚠️  This is a SPEC ARTIFACT shipped with `docs/archive/vk-harmonization/PR7-spec.md`.
 //!     It is NOT wired into any crate's `tests/` yet and is intentionally left
 //!     OUT of the build. The PR7 implementer drops the relevant test into
 //!     `crates/kiln-train/tests/vk_harmonized_save_smoke.rs` and fixes the

@@ -323,7 +323,7 @@ fn vk_tape_matmul_bf16w_records_and_backprops() {
 // yet drive Tape::backward on rmsnorm — the backward composite + the native
 // rmsnorm fault are the human-GPU-soak frontier (recovering from a context
 // loss needs a human at the console). Extend to backward+CPU-parity during the
-// PR6 soak, not autonomously. See docs/vk-harmonization/STATUS-AND-SOAK-HANDOFF.md.
+// PR6 soak, not autonomously. See `docs/archive/vk-harmonization/STATUS-AND-SOAK-HANDOFF.md` (archived; PR1–PR7 landed via #1441).
 #[ignore = "human-soak only: forward-record verified PASS standalone; backward on native \
             rmsnorm is the GPUVM-fault soak frontier — do not run autonomously (host crash risk)"]
 fn vk_tape_rms_norm_records_on_vulkan() {

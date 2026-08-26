@@ -276,7 +276,7 @@ Per-PR validation:
 - **PR1/PR2:** implemented + bounded-validated in this branch (named unit tests
   for the AdamW seam: `vulkan.rs:5628/5711/5804`; round-trip storage tests
   replacing the negatives at `tensor.rs:1491/1499`).
-- **PR3–PR7:** specced in `docs/vk-harmonization/`; each carries a bounded
+- **PR3–PR7:** specced in `docs/archive/vk-harmonization/`; each carries a bounded
   validation recipe (named tests + single-step smokes), with full GPU soak called
   out as a human-gated step rather than run autonomously.
 
