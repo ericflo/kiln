@@ -454,7 +454,10 @@ mod tests {
     fn stochastic_bf16_is_unbiased_over_full_rng_range() {
         // Averaging across every 16-bit draw reproduces the f32 value:
         // P(round up) == truncated_mantissa / 2^16, so E[round] == v.
-        for &v in &[0.1f32, -0.1, 1.00390625, -3.7, 1234.567] {
+        // 1.0 + 1.0/256.0: exactly half a bf16 ULP above 1.0 (the exact
+        // value 1.00390625, written in closed form to keep the mantissa
+        // midpoint explicit).
+        for &v in &[0.1f32, -0.1, 1.0 + 1.0 / 256.0, -3.7, 1234.567] {
             let mut sum = 0.0f64;
             for r in 0u32..=0xffff {
                 sum +=
@@ -508,7 +511,7 @@ mod tests {
         // 0x8000), so the stochastic branch rounds up ~50% of the time:
         // over 256 elements it must produce BOTH neighbors, whereas
         // round-to-nearest is constant. P(no variation) = 2^-256.
-        let v = 1.00390625f32;
+        let v = 1.0f32 + 1.0f32 / 256.0f32;
         let vals = vec![v; 256];
         let rtn = build_master_tensor(
             DType::BF16,
@@ -534,7 +537,7 @@ mod tests {
         );
         let (down, up) = bf16_neighbors(v);
         assert!(
-            sto_v.iter().any(|&x| x == down) && sto_v.iter().any(|&x| x == up),
+            sto_v.contains(&down) && sto_v.contains(&up),
             "stochastic branch did not produce both neighbors (down={down} up={up})"
         );
     }

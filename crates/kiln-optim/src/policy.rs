@@ -15,12 +15,13 @@
 ///
 /// `#[non_exhaustive]` — future Phase 8.x may add `IpcShared` for
 /// multi-process training.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum MomentLocation {
     /// On the same device as the parameter's `backward_storage`.
     /// Fastest but consumes ~8 bytes/param at FP32.
     /// Default on 80 GiB tier.
+    #[default]
     Device,
     /// In pinned host RAM. Async-paged for the optimizer step.
     /// Default on 16 GiB tier (per the Phase 6.5 auto-sizer).
@@ -48,22 +49,17 @@ impl MomentLocation {
     }
 }
 
-impl Default for MomentLocation {
-    fn default() -> Self {
-        MomentLocation::Device
-    }
-}
-
 /// Rounding policy for BF16 master updates.
 ///
 /// Per the Phase 6.5 issue bullet: stochastic rounding preserves the
 /// in-expectation update under small learning rates. Product training uses
 /// round-to-nearest until a typed, checkpoint-bound policy is introduced;
 /// explicit programmatic callers may select stochastic rounding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum StochasticRoundingPolicy {
     /// Standard IEEE-754 round-to-nearest-even.
+    #[default]
     RoundToNearest,
     /// Stochastic rounding: round up or down with probability
     /// proportional to the fractional position.
@@ -81,12 +77,6 @@ impl StochasticRoundingPolicy {
     /// Construct a stochastic-rounding policy with an explicit seed.
     pub const fn stochastic_with_seed(seed: u64) -> Self {
         StochasticRoundingPolicy::Stochastic { seed }
-    }
-}
-
-impl Default for StochasticRoundingPolicy {
-    fn default() -> Self {
-        StochasticRoundingPolicy::RoundToNearest
     }
 }
 

@@ -101,9 +101,7 @@ fn full_training_step_substrate_composes_end_to_end() {
     // ── Backward via tape ──────────────────────────────────────────
     // Seed: d(loss)/d(loss) = 1.
     let seed = kt::Tensor::from_slice(&[1.0f32], vec![]).unwrap();
-    let store = tape
-        .backward(loss.id(), seed, |a, b| kt::ops::add(a, b))
-        .unwrap();
+    let store = tape.backward(loss.id(), seed, kt::ops::add).unwrap();
     // PassthroughBwd ran twice (once per recorded op).
     assert_eq!(apply_count.load(Ordering::SeqCst), 2);
 
@@ -169,9 +167,7 @@ fn multi_step_training_loop_preserves_parameter_identity() {
         );
         // Backward → store.
         let seed = kt::Tensor::from_slice(&[1.0f32, 1.0], vec![2]).unwrap();
-        let _store = tape
-            .backward(out.id(), seed, |a, b| kt::ops::add(a, b))
-            .unwrap();
+        let _store = tape.backward(out.id(), seed, kt::ops::add).unwrap();
         // Optimizer step.
         opt.step(&mut param, &grad).unwrap();
         // Verify state advances exactly once per step.

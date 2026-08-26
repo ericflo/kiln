@@ -1854,3 +1854,68 @@ RC=0 both times (all receipts OK — none hash or locate the deleted file);
 6694 tracked paths, exactly the one deletion); post-deletion repo-wide grep
 finds zero remaining references to the filename outside CLEANUP.md and git
 history; `git status` shows only the one deletion plus this ledger entry.
+
+## Cleanup Agent (round 64) — 2026-08-26
+
+First-ever audit of `crates/kiln-optim` (round 63's carry-over candidate B),
+eliminating all 15 of the crate's clippy warnings plus one stale comment.
+The live crate (substrate dashboard Phase 6.5 + 6.5.1; consumed by
+kiln-train, kiln-model, kiln-autograd tests) now compiles with zero clippy
+diagnostics of its own, matching the rounds 16–18 per-crate standard. Fixed,
+each verified value- or semantics-identical: (1) `derivable_impls` ×2 in
+src/policy.rs — hand-written `impl Default` for `MomentLocation` and
+`StochasticRoundingPolicy` replaced with `#[derive(Default)]` +
+`#[default]` on the `Device` / `RoundToNearest` variants (rounds 19/31
+playbook); (2) `excessive_precision` ×2 in src/adamw.rs tests — the literal
+`1.00390625` (the exact bf16 half-ULP midpoint above 1.0, the
+stochastic-rounding boundary value) rewritten in closed form as
+`1.0 + 1.0 / 256.0` (f32) — bit-identical value, self-documenting, and
+immune to clippy's value-changing suggestion (better outcome than the
+kiln-tensor 0.7978845608 keeps from round 19, which had no closed form);
+(3) `manual_contains` ×2 at the same assertion — `iter().any(|&x| x == v)`
+→ `contains(&v)`; (4) `needless_range_loop` in src/lion_muon.rs Muon
+heavy-ball update — reviewed, not mechanical: `grad_f32` has exactly `n`
+elements (shape-checked) and `entry.m.len() == n` is enforced, so the zip
+rewrite pairs the identical n elements in the identical order with the
+identical expression; (5) `unused_imports` — dropped `DType` from the
+test-module import (the lib-level import is separate and used);
+(6) `unused_parens` — removed the redundant outer parentheses of a closure
+body in a test; (7) `redundant_closure` ×2 in tests/full_training_step.rs —
+`|a, b| kt::ops::add(a, b)` → `kt::ops::add` (`add` is a plain non-generic
+`fn(&Tensor, &Tensor) -> Result<Tensor>`), then collapsed the now-short call
+as cargo fmt requires; (8) `neg_multiply` in
+tests/microbatch_accumulation.rs — `(-1.0) * x2` → `-x2` (IEEE-identical);
+(9) Cargo.toml — the `half` dependency comment named nonexistent files
+`lion.rs` / `muon.rs` (pre-#1082 split, rounds 36/38 drift class) and
+omitted `grad_accumulator.rs`; now lists the actual decoders
+(`adamw.rs / sgd.rs / lion_muon.rs / grad_accumulator.rs`). Audited and
+deliberately NOT touched: the `Sgd.rounding` field (stored, public via
+`new_with_rounding`, never read — intentional Phase 6.5.x bf16 master-write
+scaffolding, and removal would be a breaking API change; its
+`#[allow(dead_code)]` stays); `lr_schedule` and `GradAccumulator` /
+`accumulate_then_step` (public API surface with their own tests, no
+external consumers yet — scaffolding, not dead code); the lib.rs candle
+mention (a quoted Phase 6.5 issue bullet inside the crate's historical
+module doc — kept per the rounds 38–40 historical-claim precedent); all
+seven dependencies (each used by at least one module). Verification:
+`cargo clippy -p kiln-optim --all-targets` 15 → 0 warnings from the crate
+(16 → 0 including the two sub-note diagnostics; kiln-tensor's pre-existing
+warnings untouched); `cargo test -p kiln-optim` 107 passed before and after
+(90 lib + 17 integration, zero failures); `cargo test -p kiln-autograd
+--lib` 272 passed; `cargo test -p kiln-autograd --test training_loop_descent`
+2 passed; `cargo test -p kiln-model --test adamw_pytorch_oracle` target
+compiles and runs 0 tests under default features (the file is
+`#![cfg(any(feature = "cuda", "rocm", "metal", "vulkan"))]` — the
+feature-gated consumer the steering warned about; its fixture include of
+`crates/kiln-optim/tests/fixtures/` is intact); `cargo check -p kiln-train`
+clean (its ~26 feature-gated unused-import warnings are the pre-existing
+protected set); `cargo check -p kiln-server` finished, 22 pre-existing lib
+warnings unchanged; `cargo fmt --check` clean; `cargo doc -p kiln-optim
+--no-deps` 0 unresolved links (already clean before this round);
+`python3 scripts/check_repository_artifacts.py` passes (6694 tracked paths,
+unmodified — edits only); substrate dashboard still 65/65.
+Landmine found and avoided: the standalone `~/.cargo/bin/rustfmt` binary
+sorts `use` imports differently from the toolchain rustfmt that `cargo fmt`
+invokes (it re-ordered this file's `std::sync` imports, breaking
+`cargo fmt --check`). Future rounds: touch files with `edit` and validate
+with `cargo fmt --check` only; never invoke the standalone rustfmt.

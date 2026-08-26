@@ -493,8 +493,8 @@ impl OptimStep for Muon {
         entry.step += 1;
 
         // 1. Heavy-ball momentum: m = momentum*m + g (state update).
-        for i in 0..n {
-            entry.m[i] = self.momentum * entry.m[i] + grad_f32[i];
+        for (m, &g) in entry.m.iter_mut().zip(grad_f32.iter()) {
+            *m = self.momentum * *m + g;
         }
         // 2. Look-ahead direction b = nesterov ? g + momentum*m : m.
         let mut b = vec![0.0f32; n];
@@ -681,7 +681,7 @@ fn matmul_kk(a: &[f32], b: &[f32], out: &mut [f32], k: usize) {
 mod tests {
     use super::*;
     use kiln_param::{AmpPolicy, ForwardStorage};
-    use kiln_tensor::{DType, Tensor};
+    use kiln_tensor::Tensor;
 
     fn fresh_param() -> Parameter {
         let fwd = Tensor::from_slice(&[1.0f32, 2.0], vec![2]).unwrap();
@@ -1077,7 +1077,7 @@ mod tests {
         let cases: &[(usize, usize)] = &[(2, 2), (3, 3), (2, 5), (5, 2), (4, 6), (6, 4)];
         for &(rows, cols) in cases {
             let w: Vec<f32> = (0..rows * cols)
-                .map(|i| ((i as f32 * 0.37).sin() - 0.2 * (i as f32 * 0.11).cos()))
+                .map(|i| (i as f32 * 0.37).sin() - 0.2 * (i as f32 * 0.11).cos())
                 .collect();
             let got = newton_schulz(&w, rows, cols, 5);
             let want = newton_schulz_direct(&w, rows, cols, 5);

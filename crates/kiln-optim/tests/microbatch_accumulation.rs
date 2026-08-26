@@ -73,7 +73,7 @@ fn microbatch_grad_accum_converges_via_accumulate_then_step() {
         let x2 = ((i as f32) * 0.11).cos();
         x_data.push(x1);
         x_data.push(x2);
-        y_data.push(2.0 * x1 + (-1.0) * x2 + 0.5);
+        y_data.push(2.0 * x1 - x2 + 0.5);
     }
     let x_full = Tensor::from_slice(&x_data, vec![n_total, 2]).unwrap();
     let y_full = Tensor::from_slice(&y_data, vec![n_total, 1]).unwrap();
