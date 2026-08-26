@@ -22,7 +22,7 @@ fn alloc_for(
     let bytes = (n_elements * dtype.byte_size()).max(dtype.byte_size());
     // BF16 buffers are interpreted as u32[]; round up to 4-byte multiple.
     let bytes = if matches!(dtype, VkDType::Bf16) {
-        ((bytes + 3) / 4) * 4
+        bytes.div_ceil(4) * 4
     } else {
         bytes
     };
@@ -39,8 +39,8 @@ pub fn vk_cast_f32_to_bf16_no_grad(t: &VkTensor) -> Result<VkTensor> {
     let n = t.num_elements();
     anyhow::ensure!(n > 0, "vk_cast: empty tensor");
     let out = alloc_for(t.device(), n, VkDType::Bf16)?;
-    let total_words = (n + 1) / 2;
-    let workgroups = ((total_words + 255) / 256) as u32;
+    let total_words = n.div_ceil(2);
+    let workgroups = total_words.div_ceil(256) as u32;
     let push_constants = [n as u32];
     dispatch_simple(
         t.device(),
@@ -66,7 +66,7 @@ pub fn vk_cast_bf16_to_f32_no_grad(t: &VkTensor) -> Result<VkTensor> {
     let n = t.num_elements();
     anyhow::ensure!(n > 0, "vk_cast: empty tensor");
     let out = alloc_for(t.device(), n, VkDType::F32)?;
-    let workgroups = ((n + 255) / 256) as u32;
+    let workgroups = n.div_ceil(256) as u32;
     let push_constants = [n as u32];
     dispatch_simple(
         t.device(),

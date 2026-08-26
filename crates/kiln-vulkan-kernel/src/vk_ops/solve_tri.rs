@@ -64,7 +64,7 @@ pub fn vk_solve_tri_no_grad(
 
     // GPU path: vk_solve_tri_v2.comp (32 KB shared memory).
     let dv_per_wg = 64u32;
-    let dv_tiles = (dv as u32 + dv_per_wg - 1) / dv_per_wg;
+    let dv_tiles = (dv as u32).div_ceil(dv_per_wg);
     let push = [batch as u32, heads as u32, chunk as u32, dv as u32];
     dispatch_simple_2d(
         device,

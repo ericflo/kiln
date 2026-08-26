@@ -32,7 +32,7 @@ fn dispatch_binary(
     );
     let tile_elements = vk_1d_tile_elements();
     if n_elements <= tile_elements {
-        let workgroups = ((n_elements + 255) / 256) as u32;
+        let workgroups = n_elements.div_ceil(256) as u32;
         let limit = device.max_compute_work_group_count(0);
         anyhow::ensure!(
             workgroups <= limit,
@@ -48,7 +48,7 @@ fn dispatch_binary(
         );
     }
     for_each_1d_tile(n_elements, tile_elements, |offset, len| {
-        let workgroups = ((len + 255) / 256) as u32;
+        let workgroups = len.div_ceil(256) as u32;
         let push_constants: [u32; 3] = [len as u32, op_code, offset as u32];
         dispatch_simple(
             device,

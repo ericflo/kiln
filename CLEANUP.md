@@ -245,3 +245,25 @@ reports no unused/never-constructed warnings and no error output (the ~280
 pre-existing style lints are unchanged environmental noise);
 `scripts/check_repository_artifacts.py` passes; `git status` shows only the
 three source edits plus this ledger entry.
+
+## Cleanup Agent (round 9) — 2026-08-26
+
+Eliminated the single largest clippy lint category in
+`crates/kiln-vulkan-kernel`: all 125 `clippy::manual_div_ceil` warnings,
+crate-wide across 28 source files. Each was a hand-rolled ceiling division of
+the form `(a + b - 1) / b` (workgroup-count computations, buffer-size
+round-ups, packed-length math) replaced with the idiomatic `a.div_ceil(b)` —
+already the style used elsewhere in the crate, and strictly safer since it
+cannot overflow on `a + b - 1`. This is round-8 candidate (a), scoped to one
+mechanical, low-risk lint category as suggested. Applied via
+`cargo clippy --fix` restricted to exactly that lint
+(`-A clippy::all -W clippy::manual_div_ceil`) so no other category was
+touched; a diff audit confirms every changed line involves `div_ceil`. Why it
+mattered: cut the crate's clippy noise from 280 to 155 warnings (-45%) with a
+purely mechanical change, making remaining lints easier to triage.
+Verified: before AND after, `cargo test -p kiln-vulkan-kernel --lib` passes
+identically (65 passed, 0 failed); after, `cargo build -p kiln-model` (the
+downstream consumer) succeeds; clippy JSON output confirms zero remaining
+`manual_div_ceil` warnings and that no other lint count increased;
+`scripts/check_repository_artifacts.py` passes (6709 tracked paths);
+`git status` shows only the 28 source edits plus this ledger entry.

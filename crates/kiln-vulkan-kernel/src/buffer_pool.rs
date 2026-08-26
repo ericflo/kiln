@@ -500,13 +500,13 @@ fn bucket_for(bytes: u64) -> u64 {
     let bytes = bytes.max(4);
     if bytes <= 65_536 {
         // 64 KB granularity for small buffers
-        ((bytes + 65_535) / 65_536) * 65_536
+        bytes.div_ceil(65_536) * 65_536
     } else if bytes <= 4 * 1024 * 1024 {
         // 256 KB granularity up to 4 MB
-        ((bytes + 262_143) / 262_144) * 262_144
+        bytes.div_ceil(262_144) * 262_144
     } else {
         // 4 MB granularity for big buffers
-        ((bytes + (4 * 1024 * 1024 - 1)) / (4 * 1024 * 1024)) * (4 * 1024 * 1024)
+        bytes.div_ceil(4 * 1024 * 1024) * (4 * 1024 * 1024)
     }
 }
 

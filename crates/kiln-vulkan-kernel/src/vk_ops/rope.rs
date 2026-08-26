@@ -65,7 +65,7 @@ fn dispatch_rope(
     rotary_dim: usize,
 ) -> Result<()> {
     let total = rows * heads * head_dim;
-    let workgroups = ((total + 255) / 256) as u32;
+    let workgroups = total.div_ceil(256) as u32;
     let push = [
         rows as u32,
         heads as u32,

@@ -84,8 +84,8 @@ fn dispatch_transpose_2d_f32(
     rows: usize,
     cols: usize,
 ) -> Result<()> {
-    let wg_x = ((cols + 15) / 16) as u32;
-    let wg_y = ((rows + 15) / 16) as u32;
+    let wg_x = cols.div_ceil(16) as u32;
+    let wg_y = rows.div_ceil(16) as u32;
     let limit_x = device.max_compute_work_group_count(0);
     let limit_y = device.max_compute_work_group_count(1);
     anyhow::ensure!(
@@ -109,8 +109,8 @@ fn dispatch_transpose_2d_bf16(
     rows: usize,
     cols: usize,
 ) -> Result<()> {
-    let total_words = ((rows * cols) + 1) / 2;
-    let workgroups = ((total_words + 255) / 256) as u32;
+    let total_words = (rows * cols).div_ceil(2);
+    let workgroups = total_words.div_ceil(256) as u32;
     let limit = device.max_compute_work_group_count(0);
     anyhow::ensure!(
         workgroups <= limit,
@@ -134,7 +134,7 @@ fn alloc_transpose_output(
     let mut bytes = (n_elements * dtype.byte_size()).max(dtype.byte_size());
     if dtype == VkDType::Bf16 {
         // BF16 shaders address storage as u32-packed pairs.
-        bytes = ((bytes + 3) / 4) * 4;
+        bytes = bytes.div_ceil(4) * 4;
     }
     crate::buffer_pool::pool_alloc_device_local(device, bytes as u64)
         .context("vk_transpose_2d: acquire output buffer")

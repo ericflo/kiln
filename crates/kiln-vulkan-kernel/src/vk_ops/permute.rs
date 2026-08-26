@@ -28,7 +28,7 @@ fn dispatch_three_dim(
     let total = dim0 * dim1 * dim2;
     let tile_elements = vk_1d_tile_elements();
     if total <= tile_elements {
-        let workgroups = ((total + 255) / 256) as u32;
+        let workgroups = total.div_ceil(256) as u32;
         let push = [dim0 as u32, dim1 as u32, dim2 as u32];
         return dispatch_simple(
             device,
@@ -44,7 +44,7 @@ fn dispatch_three_dim(
         other => anyhow::bail!("vk_permute: no offset shader for {other}"),
     };
     for_each_1d_tile(total, tile_elements, |offset, len| {
-        let workgroups = ((len + 255) / 256) as u32;
+        let workgroups = len.div_ceil(256) as u32;
         let push = [
             dim0 as u32,
             dim1 as u32,
@@ -196,7 +196,7 @@ fn dispatch_kv_repeat(
     let total = heads_kv * groups * rows * head_dim;
     let tile_elements = vk_1d_tile_elements();
     if total <= tile_elements {
-        let workgroups = ((total + 255) / 256) as u32;
+        let workgroups = total.div_ceil(256) as u32;
         let push = [heads_kv as u32, groups as u32, rows as u32, head_dim as u32];
         return dispatch_simple(
             device,
@@ -207,7 +207,7 @@ fn dispatch_kv_repeat(
         );
     }
     for_each_1d_tile(total, tile_elements, |offset, len| {
-        let workgroups = ((len + 255) / 256) as u32;
+        let workgroups = len.div_ceil(256) as u32;
         let push = [
             heads_kv as u32,
             groups as u32,
@@ -238,7 +238,7 @@ fn dispatch_kv_sum(
     let total = heads_kv * rows * head_dim;
     let tile_elements = vk_1d_tile_elements();
     if total <= tile_elements {
-        let workgroups = ((total + 255) / 256) as u32;
+        let workgroups = total.div_ceil(256) as u32;
         let push = [heads_kv as u32, groups as u32, rows as u32, head_dim as u32];
         return dispatch_simple(
             device,
@@ -249,7 +249,7 @@ fn dispatch_kv_sum(
         );
     }
     for_each_1d_tile(total, tile_elements, |offset, len| {
-        let workgroups = ((len + 255) / 256) as u32;
+        let workgroups = len.div_ceil(256) as u32;
         let push = [
             heads_kv as u32,
             groups as u32,

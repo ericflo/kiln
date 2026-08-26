@@ -91,7 +91,7 @@ pub fn vk_gather_contiguous_f32(
 
     if n > 0 {
         // One invocation per output element.
-        let workgroups = ((n + 255) / 256) as u32;
+        let workgroups = n.div_ceil(256) as u32;
         dispatch_simple(
             device,
             "vk_gather_contiguous_f32",
@@ -130,15 +130,15 @@ pub fn vk_gather_contiguous_bf16(
 
     // BF16 output: n * 2 bytes, rounded up to a u32-word multiple (the shader
     // addresses storage as u32-packed pairs). Mirrors `alloc_transpose_output`.
-    let bytes = (((n * 2).max(2) + 3) / 4) * 4;
+    let bytes = (n * 2).max(2).div_ceil(4) * 4;
     let out = crate::buffer_pool::pool_alloc_device_local(device, bytes as u64)
         .context("vk_gather_contiguous_bf16: acquire output buffer")?;
     let push = gather_push(rank, n, start_offset, shape, strides);
 
     if n > 0 {
         // One invocation per output WORD (two packed BF16 elements).
-        let total_words = (n + 1) / 2;
-        let workgroups = ((total_words + 255) / 256) as u32;
+        let total_words = n.div_ceil(2);
+        let workgroups = total_words.div_ceil(256) as u32;
         dispatch_simple(
             device,
             "vk_gather_contiguous_bf16",

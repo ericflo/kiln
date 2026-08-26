@@ -8675,7 +8675,7 @@ pub fn dispatch_gdn_forward_substitution_bytes(
 
     // Workgroup count: total elements / 256
     let total = batch * heads * chunk * dv;
-    let workgroup_count = ((total + 255) / 256) as u32;
+    let workgroup_count = total.div_ceil(256) as u32;
 
     // Bindings: A_strict=0, V_prime=1, beta=2, out=3
     let all_handles = vec![
@@ -10354,7 +10354,7 @@ pub fn dispatch_gdn_chunk_prep_bytes(
 
     // Workgroup count: total elements / 256
     let total = batch * heads * (chunk * chunk + chunk * dv + chunk + 1);
-    let workgroup_count = ((total + 255) / 256) as u32;
+    let workgroup_count = total.div_ceil(256) as u32;
 
     // Bindings: g=0, v=1, kkt=2, qkt=3, ks_entry=4, q_s=5,
     //           a_strict=6, b_mask=7, v_prime=8, q_s_scaled=9, decay_last_col=10, p_last=11
@@ -10735,7 +10735,7 @@ pub fn dispatch_gdn_chunk_scan_bytes(
 
     // Workgroup count: total elements / 256
     let total = batch * heads * chunk * dv;
-    let workgroup_count = ((total + 255) / 256) as u32;
+    let workgroup_count = total.div_ceil(256) as u32;
 
     // Bindings: a_strict=0, b_mask=1, v_prime=2, q_s_scaled=3, beta=4, decay_last_col=5, out=6, p_out=7
     let all_handles = vec![

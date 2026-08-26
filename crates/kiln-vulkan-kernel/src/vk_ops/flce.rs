@@ -113,7 +113,7 @@ fn run_flce_forward(
     let correct = alloc_f32(device, num_active)?;
     // Initialize correct to 0
     {
-        let workgroups = ((num_active + 255) / 256) as u32;
+        let workgroups = num_active.div_ceil(256) as u32;
         let push = [num_active as u32, 0.0_f32.to_bits()];
         dispatch_simple(
             device,
@@ -167,7 +167,7 @@ fn run_flce_forward(
                 global_sumexp.handle(),
             ],
             &combine_push,
-            ((num_active + 255) / 256) as u32,
+            num_active.div_ceil(256) as u32,
         )?;
         // gather correct logit if in this chunk
         let gather_push = [num_active as u32, cur_len as u32, chunk_off as u32];
@@ -180,7 +180,7 @@ fn run_flce_forward(
                 correct.handle(),
             ],
             &gather_push,
-            ((num_active + 255) / 256) as u32,
+            num_active.div_ceil(256) as u32,
         )?;
         chunk_off += cur_len;
         first = false;
@@ -199,7 +199,7 @@ fn run_flce_forward(
             per_row.handle(),
         ],
         &push,
-        ((num_active + 255) / 256) as u32,
+        num_active.div_ceil(256) as u32,
     )?;
 
     let per_row_tensor =
@@ -240,7 +240,7 @@ impl VkBackwardOp for FlceBackward {
         let grad_hidden = alloc_f32(device, self.num_active * self.hidden_dim)?;
         // initialize to zero
         {
-            let workgroups = ((self.num_active * self.hidden_dim + 255) / 256) as u32;
+            let workgroups = (self.num_active * self.hidden_dim).div_ceil(256) as u32;
             let push = [
                 (self.num_active * self.hidden_dim) as u32,
                 0.0_f32.to_bits(),
@@ -274,7 +274,7 @@ impl VkBackwardOp for FlceBackward {
                 chunk_off as u32,
                 scale.to_bits(),
             ];
-            let workgroups = (((self.num_active * cur_len) + 255) / 256) as u32;
+            let workgroups = (self.num_active * cur_len).div_ceil(256) as u32;
             dispatch_simple(
                 device,
                 "vk_flce_grad_chunk_f32",
@@ -295,7 +295,7 @@ impl VkBackwardOp for FlceBackward {
                 VkDType::Bf16 => vk_matmul_bf16w_bwd_no_grad(&logits_chunk, &w_chunk)?,
             };
             // accumulate into grad_hidden
-            let workgroups = (((self.num_active * self.hidden_dim) + 255) / 256) as u32;
+            let workgroups = (self.num_active * self.hidden_dim).div_ceil(256) as u32;
             let push = [
                 (self.num_active * self.hidden_dim) as u32,
                 0u32, // OP_ADD
@@ -384,7 +384,7 @@ impl VkBackwardOp for GrpoBackward {
 
         let grad_hidden = alloc_f32(device, self.num_active * self.hidden_dim)?;
         {
-            let workgroups = ((self.num_active * self.hidden_dim + 255) / 256) as u32;
+            let workgroups = (self.num_active * self.hidden_dim).div_ceil(256) as u32;
             let push = [
                 (self.num_active * self.hidden_dim) as u32,
                 0.0_f32.to_bits(),
@@ -417,7 +417,7 @@ impl VkBackwardOp for GrpoBackward {
                 chunk_off as u32,
                 scale.to_bits(),
             ];
-            let workgroups = (((self.num_active * cur_len) + 255) / 256) as u32;
+            let workgroups = (self.num_active * cur_len).div_ceil(256) as u32;
             dispatch_simple(
                 device,
                 "vk_grpo_grad_chunk_f32",
@@ -436,7 +436,7 @@ impl VkBackwardOp for GrpoBackward {
                 VkDType::F32 => vk_matmul_no_grad(&logits_chunk, &w_chunk)?,
                 VkDType::Bf16 => vk_matmul_bf16w_bwd_no_grad(&logits_chunk, &w_chunk)?,
             };
-            let workgroups = (((self.num_active * self.hidden_dim) + 255) / 256) as u32;
+            let workgroups = (self.num_active * self.hidden_dim).div_ceil(256) as u32;
             let push = [
                 (self.num_active * self.hidden_dim) as u32,
                 0u32, // OP_ADD
@@ -746,7 +746,7 @@ pub fn vk_selected_log_probs(
             out.handle(),
         ],
         &push,
-        ((num_active + 255) / 256) as u32,
+        num_active.div_ceil(256) as u32,
     )?;
     Ok(VkTensor::from_buffer(
         out,
@@ -907,7 +907,7 @@ pub fn vk_grpo_loss_with_saved_state_ext(
             coeff.handle(),
         ],
         &push,
-        ((num_active + 255) / 256) as u32,
+        num_active.div_ceil(256) as u32,
     )?;
 
     let per_row_tensor =
@@ -947,7 +947,7 @@ pub fn vk_grpo_selected_log_probs_from_saved_state(saved: &GrpoSavedState) -> Re
             out.handle(),
         ],
         &push,
-        ((saved.num_active + 255) / 256) as u32,
+        saved.num_active.div_ceil(256) as u32,
     )?;
     Ok(VkTensor::from_buffer(
         out,

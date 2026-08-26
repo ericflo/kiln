@@ -111,7 +111,7 @@ fn record_narrow_lastdim_no_grad(
     let total = outer * len;
     let tile_elements = crate::vk_ops::vk_1d_tile_elements();
     if total <= tile_elements {
-        let workgroups = ((total + 255) / 256) as u32;
+        let workgroups = total.div_ceil(256) as u32;
         let push = [outer as u32, inner_in as u32, start as u32, len as u32];
         if barrier_before {
             batch.record_shader(
@@ -130,7 +130,7 @@ fn record_narrow_lastdim_no_grad(
         }
     } else {
         crate::vk_ops::for_each_1d_tile(total, tile_elements, |offset, chunk_len| {
-            let workgroups = ((chunk_len + 255) / 256) as u32;
+            let workgroups = chunk_len.div_ceil(256) as u32;
             let push = [
                 outer as u32,
                 inner_in as u32,
@@ -207,7 +207,7 @@ fn record_scatter_to_lastdim_slice_inplace(
     let total = outer_dst * len;
     let tile_elements = crate::vk_ops::vk_1d_tile_elements();
     if total <= tile_elements {
-        let workgroups = ((total + 255) / 256) as u32;
+        let workgroups = total.div_ceil(256) as u32;
         let push = [outer_dst as u32, inner_in as u32, start as u32, len as u32];
         batch.record_shader(
             SHADER_NARROW_LASTDIM_BWD_F32,
@@ -217,7 +217,7 @@ fn record_scatter_to_lastdim_slice_inplace(
         )?;
     } else {
         crate::vk_ops::for_each_1d_tile(total, tile_elements, |offset, chunk_len| {
-            let workgroups = ((chunk_len + 255) / 256) as u32;
+            let workgroups = chunk_len.div_ceil(256) as u32;
             let push = [
                 outer_dst as u32,
                 inner_in as u32,
@@ -245,8 +245,8 @@ fn record_matmul_batched_no_grad(
     let (batch_dim, m, n, k_dim) = check_batched_matmul_record(a, b)?;
     let out = alloc_f32(a.device(), batch_dim * m * n)?;
     let workgroups = Workgroups::ThreeD(
-        ((n + 15) / 16) as u32,
-        ((m + 15) / 16) as u32,
+        n.div_ceil(16) as u32,
+        m.div_ceil(16) as u32,
         batch_dim as u32,
     );
     let push = [batch_dim as u32, m as u32, n as u32, k_dim as u32];
@@ -309,8 +309,8 @@ fn record_transpose_batched_2d_no_grad(
         &[t.buffer().handle(), out.handle()],
         &push,
         Workgroups::ThreeD(
-            ((cols + 15) / 16) as u32,
-            ((rows + 15) / 16) as u32,
+            cols.div_ceil(16) as u32,
+            rows.div_ceil(16) as u32,
             batch_dim as u32,
         ),
     )?;
@@ -368,7 +368,7 @@ fn record_gdn_chunk_prep_no_grad(
 
     let per_bh = chunk * chunk + chunk * dv + chunk + 1;
     let total = bh * per_bh;
-    let workgroups = ((total + 255) / 256) as u32;
+    let workgroups = total.div_ceil(256) as u32;
     let push = [batch as u32, heads as u32, chunk as u32, dv as u32];
     batch_rec.record_shader(
         SHADER_GDN_CHUNK_PREP,
@@ -461,7 +461,7 @@ fn record_solve_tri_no_grad(
     let device = a_strict.device();
     let out = alloc_f32(device, batch * heads * chunk * dv)?;
     let dv_per_wg = 64u32;
-    let dv_tiles = (dv as u32 + dv_per_wg - 1) / dv_per_wg;
+    let dv_tiles = (dv as u32).div_ceil(dv_per_wg);
     let push = [batch as u32, heads as u32, chunk as u32, dv as u32];
     batch_rec.record_shader(
         SHADER_SOLVE_TRI_V2,
@@ -501,7 +501,7 @@ fn record_broadcast_mul_lastdim_no_grad(
         SHADER_BROADCAST_MUL_LASTDIM,
         &[a.buffer().handle(), b.buffer().handle(), out_buf.handle()],
         &push,
-        Workgroups::OneD(((total + 255) / 256) as u32),
+        Workgroups::OneD(total.div_ceil(256) as u32),
     )?;
     Ok(VkTensor::from_buffer(
         out_buf,
@@ -530,7 +530,7 @@ fn record_add_no_grad(
     let n_elements = a.num_elements();
     let tile_elements = crate::vk_ops::vk_1d_tile_elements();
     if n_elements <= tile_elements {
-        let workgroups = ((n_elements + 255) / 256) as u32;
+        let workgroups = n_elements.div_ceil(256) as u32;
         let push = [n_elements as u32, OP_ADD];
         batch.record_shader(
             SHADER_ELEMENTWISE_BINARY_F32,
@@ -540,7 +540,7 @@ fn record_add_no_grad(
         )?;
     } else {
         crate::vk_ops::for_each_1d_tile(n_elements, tile_elements, |offset, len| {
-            let workgroups = ((len + 255) / 256) as u32;
+            let workgroups = len.div_ceil(256) as u32;
             let push = [len as u32, OP_ADD, offset as u32];
             batch.record_shader(
                 SHADER_ELEMENTWISE_BINARY_F32_OFFSET,
@@ -724,7 +724,7 @@ fn vk_broadcast_mul_lastdim_no_grad(a: &VkTensor, b: &VkTensor, n: usize) -> Res
         "vk_broadcast_mul_lastdim",
         &[a.buffer().handle(), b.buffer().handle(), out_buf.handle()],
         &push,
-        ((total as u32 + 255) / 256) as u32,
+        (total as u32).div_ceil(256) as u32,
     )?;
     Ok(VkTensor::from_buffer(
         out_buf,

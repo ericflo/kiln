@@ -21,7 +21,7 @@ fn dispatch_silu_fwd(
 ) -> Result<()> {
     let tile_elements = vk_exp_tile_elements();
     if n <= tile_elements {
-        let workgroups = ((n + 255) / 256) as u32;
+        let workgroups = n.div_ceil(256) as u32;
         let push = [n as u32];
         return dispatch_simple(
             device,
@@ -32,7 +32,7 @@ fn dispatch_silu_fwd(
         );
     }
     for_each_1d_tile(n, tile_elements, |offset, len| {
-        let workgroups = ((len + 255) / 256) as u32;
+        let workgroups = len.div_ceil(256) as u32;
         let push = [len as u32, offset as u32];
         dispatch_simple(
             device,
@@ -53,7 +53,7 @@ fn dispatch_silu_bwd(
 ) -> Result<()> {
     let tile_elements = vk_exp_tile_elements();
     if n <= tile_elements {
-        let workgroups = ((n + 255) / 256) as u32;
+        let workgroups = n.div_ceil(256) as u32;
         let push = [n as u32];
         return dispatch_simple(
             device,
@@ -64,7 +64,7 @@ fn dispatch_silu_bwd(
         );
     }
     for_each_1d_tile(n, tile_elements, |offset, len| {
-        let workgroups = ((len + 255) / 256) as u32;
+        let workgroups = len.div_ceil(256) as u32;
         let push = [len as u32, offset as u32];
         dispatch_simple(
             device,

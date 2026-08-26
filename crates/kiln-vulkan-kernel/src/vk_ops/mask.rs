@@ -24,7 +24,7 @@ pub fn vk_causal_mask_inplace(scores: &VkTensor, kv_offset: usize) -> Result<()>
     let q_len = scores.shape()[1];
     let k_len = scores.shape()[2];
     let total = bh * q_len * k_len;
-    let workgroups = ((total + 255) / 256) as u32;
+    let workgroups = total.div_ceil(256) as u32;
     let push = [bh as u32, q_len as u32, k_len as u32, kv_offset as u32];
     dispatch_simple(
         scores.device(),
@@ -41,7 +41,7 @@ pub fn vk_scale_inplace(t: &VkTensor, scale: f32) -> Result<()> {
     let n = t.num_elements();
     let tile_elements = vk_1d_tile_elements();
     if n <= tile_elements {
-        let workgroups = ((n + 255) / 256) as u32;
+        let workgroups = n.div_ceil(256) as u32;
         let push = [n as u32, scale.to_bits()];
         return dispatch_simple(
             t.device(),
@@ -52,7 +52,7 @@ pub fn vk_scale_inplace(t: &VkTensor, scale: f32) -> Result<()> {
         );
     }
     for_each_1d_tile(n, tile_elements, |offset, len| {
-        let workgroups = ((len + 255) / 256) as u32;
+        let workgroups = len.div_ceil(256) as u32;
         let push = [len as u32, scale.to_bits(), offset as u32];
         dispatch_simple(
             t.device(),

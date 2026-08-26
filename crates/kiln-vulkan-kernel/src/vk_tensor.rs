@@ -45,7 +45,7 @@ fn device_buffer_bytes(n_elements: usize, dtype: VkDType) -> usize {
     if dtype == VkDType::Bf16 {
         // BF16 kernels view storage as u32 words containing two logical
         // lanes. Round odd element counts up so the final word is addressable.
-        bytes = ((bytes + 3) / 4) * 4;
+        bytes = bytes.div_ceil(4) * 4;
     }
     bytes
 }

@@ -36,7 +36,7 @@ fn dispatch_fwd(
     let total = outer * len;
     let tile_elements = vk_1d_tile_elements();
     if total <= tile_elements {
-        let workgroups = ((total + 255) / 256) as u32;
+        let workgroups = total.div_ceil(256) as u32;
         let push = [outer as u32, inner_in as u32, start as u32, len as u32];
         return dispatch_simple(
             device,
@@ -47,7 +47,7 @@ fn dispatch_fwd(
         );
     }
     for_each_1d_tile(total, tile_elements, |offset, chunk_len| {
-        let workgroups = ((chunk_len + 255) / 256) as u32;
+        let workgroups = chunk_len.div_ceil(256) as u32;
         let push = [
             outer as u32,
             inner_in as u32,
@@ -78,7 +78,7 @@ fn dispatch_bwd(
     let total = outer * len;
     let tile_elements = vk_1d_tile_elements();
     if total <= tile_elements {
-        let workgroups = ((total + 255) / 256) as u32;
+        let workgroups = total.div_ceil(256) as u32;
         let push = [outer as u32, inner_in as u32, start as u32, len as u32];
         return dispatch_simple(
             device,
@@ -89,7 +89,7 @@ fn dispatch_bwd(
         );
     }
     for_each_1d_tile(total, tile_elements, |offset, chunk_len| {
-        let workgroups = ((chunk_len + 255) / 256) as u32;
+        let workgroups = chunk_len.div_ceil(256) as u32;
         let push = [
             outer as u32,
             inner_in as u32,

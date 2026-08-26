@@ -57,7 +57,7 @@ pub fn vk_embedding_lookup_f32(
     );
     let num_tokens = ids.num_elements();
     let out = alloc_f32(weight.device(), num_tokens * hidden)?;
-    let workgroups = ((num_tokens * hidden + 255) / 256) as u32;
+    let workgroups = (num_tokens * hidden).div_ceil(256) as u32;
     let push = [num_tokens as u32, hidden as u32, vocab as u32];
     dispatch_simple(
         weight.device(),
@@ -105,7 +105,7 @@ pub fn vk_embedding_lookup_bf16(
     );
     let num_tokens = ids.num_elements();
     let out = alloc_f32(weight.device(), num_tokens * hidden)?;
-    let workgroups = ((num_tokens * hidden + 255) / 256) as u32;
+    let workgroups = (num_tokens * hidden).div_ceil(256) as u32;
     let push = [num_tokens as u32, hidden as u32, vocab as u32];
     dispatch_simple(
         weight.device(),

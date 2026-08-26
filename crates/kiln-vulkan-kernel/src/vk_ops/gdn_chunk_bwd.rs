@@ -63,7 +63,7 @@ pub fn vk_solve_tri_transpose_no_grad(
     let out = alloc_f32(device, batch * nv * chunk * dv)?;
 
     let dv_per_wg = 64u32;
-    let dv_tiles = (dv as u32 + dv_per_wg - 1) / dv_per_wg;
+    let dv_tiles = (dv as u32).div_ceil(dv_per_wg);
     let push = [batch as u32, nv as u32, chunk as u32, dv as u32];
     crate::vk_ops::dispatch_simple_2d(
         device,

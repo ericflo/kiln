@@ -143,7 +143,7 @@ pub fn vk_gdn_gated_rms_norm_bwd_no_grad(
         "vk_fill_f32",
         &[ones_buf.handle()],
         &push_fill,
-        ((rows + 255) / 256) as u32,
+        rows.div_ceil(256) as u32,
     )?;
     let ones_t = VkTensor::from_buffer(ones_buf, vec![1, rows], VkDType::F32, Arc::clone(device));
     let dw_2d = crate::vk_ops::matmul::vk_matmul_no_grad(&ones_t, &dw_partial_t)?;

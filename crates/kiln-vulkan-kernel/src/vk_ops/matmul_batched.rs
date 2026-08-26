@@ -42,8 +42,8 @@ fn dispatch_matmul_batched(
     n: usize,
     k: usize,
 ) -> Result<()> {
-    let wg_x = ((n + 15) / 16) as u32;
-    let wg_y = ((m + 15) / 16) as u32;
+    let wg_x = n.div_ceil(16) as u32;
+    let wg_y = m.div_ceil(16) as u32;
     let wg_z = batch as u32;
     let push = [batch as u32, m as u32, n as u32, k as u32];
     dispatch_3d(
@@ -63,8 +63,8 @@ fn dispatch_transpose_3d(
     rows: usize,
     cols: usize,
 ) -> Result<()> {
-    let wg_x = ((cols + 15) / 16) as u32;
-    let wg_y = ((rows + 15) / 16) as u32;
+    let wg_x = cols.div_ceil(16) as u32;
+    let wg_y = rows.div_ceil(16) as u32;
     let wg_z = batch as u32;
     let push = [batch as u32, rows as u32, cols as u32];
     dispatch_3d(
@@ -120,8 +120,8 @@ fn dispatch_matmul_batched_bf16(
     n: usize,
     k: usize,
 ) -> Result<()> {
-    let wg_x = ((n + 15) / 16) as u32;
-    let wg_y = ((m + 15) / 16) as u32;
+    let wg_x = n.div_ceil(16) as u32;
+    let wg_y = m.div_ceil(16) as u32;
     let wg_z = batch as u32;
     let push = [batch as u32, m as u32, n as u32, k as u32];
     dispatch_3d(
@@ -143,8 +143,8 @@ fn dispatch_matmul_lhs_t_batched(
     n: usize,
     k: usize,
 ) -> Result<()> {
-    let wg_x = ((n + 15) / 16) as u32;
-    let wg_y = ((m + 15) / 16) as u32;
+    let wg_x = n.div_ceil(16) as u32;
+    let wg_y = m.div_ceil(16) as u32;
     let wg_z = batch as u32;
     let push = [batch as u32, m as u32, n as u32, k as u32];
     dispatch_3d(
@@ -166,8 +166,8 @@ fn dispatch_matmul_lhs_t_batched_bf16(
     n: usize,
     k: usize,
 ) -> Result<()> {
-    let wg_x = ((n + 15) / 16) as u32;
-    let wg_y = ((m + 15) / 16) as u32;
+    let wg_x = n.div_ceil(16) as u32;
+    let wg_y = m.div_ceil(16) as u32;
     let wg_z = batch as u32;
     let push = [batch as u32, m as u32, n as u32, k as u32];
     dispatch_3d(
@@ -189,8 +189,8 @@ fn dispatch_matmul_rhs_t_batched(
     n: usize,
     k: usize,
 ) -> Result<()> {
-    let wg_x = ((n + 15) / 16) as u32;
-    let wg_y = ((m + 15) / 16) as u32;
+    let wg_x = n.div_ceil(16) as u32;
+    let wg_y = m.div_ceil(16) as u32;
     let wg_z = batch as u32;
     let push = [batch as u32, m as u32, n as u32, k as u32];
     dispatch_3d(
@@ -212,8 +212,8 @@ fn dispatch_matmul_rhs_t_batched_bf16(
     n: usize,
     k: usize,
 ) -> Result<()> {
-    let wg_x = ((n + 15) / 16) as u32;
-    let wg_y = ((m + 15) / 16) as u32;
+    let wg_x = n.div_ceil(16) as u32;
+    let wg_y = m.div_ceil(16) as u32;
     let wg_z = batch as u32;
     let push = [batch as u32, m as u32, n as u32, k as u32];
     dispatch_3d(

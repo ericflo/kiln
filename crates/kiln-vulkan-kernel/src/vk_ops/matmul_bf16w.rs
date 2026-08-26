@@ -33,7 +33,7 @@ fn dispatch_fwd(
     hidden: usize,
     out_dim: usize,
 ) -> Result<()> {
-    let col_groups = (out_dim + 31) / 32;
+    let col_groups = out_dim.div_ceil(32);
     let workgroups = (col_groups * batch) as u32;
     let limit = device.max_compute_work_group_count(0);
     anyhow::ensure!(
@@ -64,7 +64,7 @@ fn dispatch_fwd_rows(
     hidden: usize,
     out_dim: usize,
 ) -> Result<()> {
-    let col_groups = (out_dim + 31) / 32;
+    let col_groups = out_dim.div_ceil(32);
     let workgroups = (col_groups * rows) as u32;
     let limit = device.max_compute_work_group_count(0);
     anyhow::ensure!(
@@ -95,7 +95,7 @@ fn dispatch_fwd_tiled(
     hidden: usize,
     out_dim: usize,
 ) -> Result<()> {
-    let col_groups = (out_dim + 31) / 32;
+    let col_groups = out_dim.div_ceil(32);
     let limit = device.max_compute_work_group_count(0) as usize;
     let max_rows_by_limit = (limit / col_groups.max(1)).max(1);
     let tile = bf16w_row_tile_len().min(max_rows_by_limit).max(1);
@@ -118,7 +118,7 @@ fn dispatch_bwd(
     out_dim: usize, // forward's out_dim = bwd's k_dim
     hidden: usize,  // forward's hidden  = bwd's n_dim
 ) -> Result<()> {
-    let col_groups = (hidden + 31) / 32;
+    let col_groups = hidden.div_ceil(32);
     let workgroups = (col_groups * batch) as u32;
     let limit = device.max_compute_work_group_count(0);
     anyhow::ensure!(
@@ -145,7 +145,7 @@ fn dispatch_bwd_rows(
     out_dim: usize,
     hidden: usize,
 ) -> Result<()> {
-    let col_groups = (hidden + 31) / 32;
+    let col_groups = hidden.div_ceil(32);
     let workgroups = (col_groups * rows) as u32;
     let limit = device.max_compute_work_group_count(0);
     anyhow::ensure!(
@@ -176,7 +176,7 @@ fn dispatch_bwd_tiled(
     out_dim: usize,
     hidden: usize,
 ) -> Result<()> {
-    let col_groups = (hidden + 31) / 32;
+    let col_groups = hidden.div_ceil(32);
     let limit = device.max_compute_work_group_count(0) as usize;
     let max_rows_by_limit = (limit / col_groups.max(1)).max(1);
     let tile = bf16w_row_tile_len().min(max_rows_by_limit).max(1);

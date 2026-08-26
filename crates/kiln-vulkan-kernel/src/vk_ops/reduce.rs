@@ -29,7 +29,7 @@ pub(crate) fn dispatch_fill(
     anyhow::ensure!(n_elements > 0, "vk_fill: n_elements must be > 0");
     let tile_elements = vk_1d_tile_elements();
     if n_elements <= tile_elements {
-        let workgroups = ((n_elements + 255) / 256) as u32;
+        let workgroups = n_elements.div_ceil(256) as u32;
         let limit = device.max_compute_work_group_count(0);
         anyhow::ensure!(
             workgroups <= limit,
@@ -45,7 +45,7 @@ pub(crate) fn dispatch_fill(
         );
     }
     for_each_1d_tile(n_elements, tile_elements, |offset, len| {
-        let workgroups = ((len + 255) / 256) as u32;
+        let workgroups = len.div_ceil(256) as u32;
         let push_constants: [u32; 3] = [len as u32, value.to_bits(), offset as u32];
         dispatch_simple(
             device,
@@ -105,7 +105,7 @@ fn dispatch_broadcast_scalar(
     );
     let tile_elements = vk_1d_tile_elements();
     if n_elements <= tile_elements {
-        let workgroups = ((n_elements + 255) / 256) as u32;
+        let workgroups = n_elements.div_ceil(256) as u32;
         let limit = device.max_compute_work_group_count(0);
         anyhow::ensure!(
             workgroups <= limit,
@@ -121,7 +121,7 @@ fn dispatch_broadcast_scalar(
         );
     }
     for_each_1d_tile(n_elements, tile_elements, |offset, len| {
-        let workgroups = ((len + 255) / 256) as u32;
+        let workgroups = len.div_ceil(256) as u32;
         let push_constants: [u32; 3] = [len as u32, scale.to_bits(), offset as u32];
         dispatch_simple(
             device,
@@ -265,7 +265,7 @@ pub fn vk_sum_all_no_grad(t: &VkTensor) -> Result<VkTensor> {
     // second pass at one workgroup of 256 reading 4 elem per lane via
     // grid-stride within the same kernel — fine).
     let max_partials: usize = 1024;
-    let first_pass_workgroups: usize = max_partials.min(((n + 255) / 256).max(1));
+    let first_pass_workgroups: usize = max_partials.min(n.div_ceil(256).max(1));
 
     let partials_buf = alloc_f32_buffer(device, first_pass_workgroups)?;
     dispatch_reduce_sum_pass(

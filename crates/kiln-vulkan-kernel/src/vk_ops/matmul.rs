@@ -33,8 +33,8 @@ fn dispatch_matmul_f32(
         m > 0 && n > 0 && k > 0,
         "vk_matmul: zero dimension (M={m}, N={n}, K={k})"
     );
-    let wg_x = ((n + 15) / 16) as u32;
-    let wg_y = ((m + 15) / 16) as u32;
+    let wg_x = n.div_ceil(16) as u32;
+    let wg_y = m.div_ceil(16) as u32;
     let lx = device.max_compute_work_group_count(0);
     let ly = device.max_compute_work_group_count(1);
     anyhow::ensure!(

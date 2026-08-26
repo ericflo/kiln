@@ -79,7 +79,7 @@ pub fn vk_gdn_chunk_prep_no_grad(
 
     let per_bh = chunk * chunk + chunk * dv + chunk + 1;
     let total = bh * per_bh;
-    let workgroups = ((total + 255) / 256) as u32;
+    let workgroups = total.div_ceil(256) as u32;
     let push = [batch as u32, heads as u32, chunk as u32, dv as u32];
 
     dispatch_simple(

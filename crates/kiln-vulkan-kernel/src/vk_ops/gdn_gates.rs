@@ -66,7 +66,7 @@ pub fn vk_gdn_gates_no_grad(
     let beta_out = alloc_f32(device, total)?;
     let g_out = alloc_f32(device, total)?;
 
-    let workgroups = ((total + 255) / 256) as u32;
+    let workgroups = total.div_ceil(256) as u32;
     let push = [total as u32, nv as u32];
     dispatch_simple(
         device,
@@ -121,7 +121,7 @@ pub fn vk_gdn_gates_bwd_no_grad(
     let red_dalog_buf = alloc_f32(device, total)?;
     let red_ddt_buf = alloc_f32(device, total)?;
 
-    let workgroups = ((total + 255) / 256) as u32;
+    let workgroups = total.div_ceil(256) as u32;
     let push = [total as u32, nv as u32];
     crate::vk_ops::dispatch_simple(
         device,
@@ -166,7 +166,7 @@ pub fn vk_gdn_gates_bwd_no_grad(
         "vk_fill_f32",
         &[ones_buf.handle()],
         &push_fill,
-        ((outer + 255) / 256) as u32,
+        outer.div_ceil(256) as u32,
     )?;
     let ones_t = VkTensor::from_buffer(ones_buf, vec![1, outer], VkDType::F32, Arc::clone(device));
     let dalog_2d = crate::vk_ops::matmul::vk_matmul_no_grad(&ones_t, &dalog_partial_t)?;

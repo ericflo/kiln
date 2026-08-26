@@ -38,7 +38,7 @@ fn dispatch_fwd(
     n_rows_in: usize,
 ) -> Result<()> {
     let total = n_out * dim;
-    let workgroups = ((total + 255) / 256) as u32;
+    let workgroups = total.div_ceil(256) as u32;
     let push = [n_out as u32, dim as u32, n_rows_in as u32];
     dispatch_simple(
         device,
@@ -59,7 +59,7 @@ fn dispatch_bwd(
     n_rows_in: usize,
 ) -> Result<()> {
     let total = n_out * dim;
-    let workgroups = ((total + 255) / 256) as u32;
+    let workgroups = total.div_ceil(256) as u32;
     let push = [n_out as u32, dim as u32, n_rows_in as u32];
     dispatch_simple(
         device,
@@ -97,7 +97,7 @@ impl VkBackwardOp for IndexSelectRowsBackward {
             "vk_fill_f32",
             &[grad_buf.handle()],
             &push_zero,
-            ((total_in + 255) / 256) as u32,
+            total_in.div_ceil(256) as u32,
         )?;
         dispatch_bwd(
             device,
@@ -199,7 +199,7 @@ pub fn vk_scatter_rows_to_full(
         "vk_fill_f32",
         &[grad_buf.handle()],
         &push_zero,
-        ((total_in + 255) / 256) as u32,
+        total_in.div_ceil(256) as u32,
     )?;
 
     let indices_buf = upload_indices(device, indices)?;

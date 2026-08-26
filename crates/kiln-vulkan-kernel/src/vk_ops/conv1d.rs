@@ -55,7 +55,7 @@ pub fn vk_causal_conv1d_no_grad(
     let tile_elements = vk_1d_tile_elements();
     if total <= tile_elements {
         let total_u32 = total as u32;
-        let workgroups = (total_u32 + 255) / 256;
+        let workgroups = total_u32.div_ceil(256);
         let push = [
             batch as u32,
             channels as u32,
@@ -76,7 +76,7 @@ pub fn vk_causal_conv1d_no_grad(
         )?;
     } else {
         for_each_1d_tile(total, tile_elements, |offset, len| {
-            let workgroups = ((len + 255) / 256) as u32;
+            let workgroups = len.div_ceil(256) as u32;
             let push = [
                 batch as u32,
                 channels as u32,
@@ -141,7 +141,7 @@ pub fn vk_causal_conv1d_pre_silu_no_grad(
     let tile_elements = vk_1d_tile_elements();
     if total <= tile_elements {
         let total_u32 = total as u32;
-        let workgroups = (total_u32 + 255) / 256;
+        let workgroups = total_u32.div_ceil(256);
         let push = [
             batch as u32,
             channels as u32,
@@ -162,7 +162,7 @@ pub fn vk_causal_conv1d_pre_silu_no_grad(
         )?;
     } else {
         for_each_1d_tile(total, tile_elements, |offset, len| {
-            let workgroups = ((len + 255) / 256) as u32;
+            let workgroups = len.div_ceil(256) as u32;
             let push = [
                 batch as u32,
                 channels as u32,
@@ -252,7 +252,7 @@ fn vk_causal_conv1d_dx_no_grad(
     let tile_elements = vk_1d_tile_elements();
     if total <= tile_elements {
         let total_u32 = total as u32;
-        let workgroups = (total_u32 + 255) / 256;
+        let workgroups = total_u32.div_ceil(256);
         let push = [
             batch as u32,
             channels as u32,
@@ -272,7 +272,7 @@ fn vk_causal_conv1d_dx_no_grad(
         )?;
     } else {
         for_each_1d_tile(total, tile_elements, |offset, len| {
-            let workgroups = ((len + 255) / 256) as u32;
+            let workgroups = len.div_ceil(256) as u32;
             let push = [
                 batch as u32,
                 channels as u32,
@@ -422,7 +422,7 @@ pub fn vk_causal_conv1d_bwd_no_grad(
     let tile_elements = vk_1d_tile_elements();
     if total <= tile_elements {
         let total_u32 = total as u32;
-        let workgroups = (total_u32 + 255) / 256;
+        let workgroups = total_u32.div_ceil(256);
         let push = [
             batch as u32,
             channels as u32,
@@ -442,7 +442,7 @@ pub fn vk_causal_conv1d_bwd_no_grad(
         )?;
     } else {
         for_each_1d_tile(total, tile_elements, |offset, len| {
-            let workgroups = ((len + 255) / 256) as u32;
+            let workgroups = len.div_ceil(256) as u32;
             let push = [
                 batch as u32,
                 channels as u32,
