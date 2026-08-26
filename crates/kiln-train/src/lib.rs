@@ -1976,12 +1976,12 @@ impl GrpoConfig {
                 self.clip_epsilon
             ));
         }
-        if let Some(clip_high) = self.clip_eps_high {
-            if !clip_high.is_finite() || clip_high < 0.0 {
-                return Err(format!(
-                    "clip_eps_high must be finite and non-negative, got {clip_high}"
-                ));
-            }
+        if let Some(clip_high) = self.clip_eps_high
+            && (!clip_high.is_finite() || clip_high < 0.0)
+        {
+            return Err(format!(
+                "clip_eps_high must be finite and non-negative, got {clip_high}"
+            ));
         }
         if !self.cispo_max_weight.is_finite() || self.cispo_max_weight <= 0.0 {
             return Err(format!(

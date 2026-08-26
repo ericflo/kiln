@@ -553,23 +553,23 @@ impl<Inner: LogitSource + std::fmt::Debug> LogitSource for CachedLogitSource<Inn
                         format!("read cache position {position}: {error:#}"),
                     )
                 })?;
-            if let Some(entry) = cached {
-                if entry.top_k >= requested_k {
-                    let row = SparseRow {
-                        indices: entry.indices[..requested_k].to_vec(),
-                        logprobs: entry.logprobs[..requested_k].to_vec(),
-                    };
-                    validate_topk_logprob_row(
-                        &caps,
-                        requested_k,
-                        slot_index,
-                        &row.indices,
-                        &row.logprobs,
-                    )?;
-                    result_slots[slot_index] = Some(row.clone());
-                    resolved_rows.insert(position, row);
-                    continue;
-                }
+            if let Some(entry) = cached
+                && entry.top_k >= requested_k
+            {
+                let row = SparseRow {
+                    indices: entry.indices[..requested_k].to_vec(),
+                    logprobs: entry.logprobs[..requested_k].to_vec(),
+                };
+                validate_topk_logprob_row(
+                    &caps,
+                    requested_k,
+                    slot_index,
+                    &row.indices,
+                    &row.logprobs,
+                )?;
+                result_slots[slot_index] = Some(row.clone());
+                resolved_rows.insert(position, row);
+                continue;
             }
 
             let miss_index = miss_positions.len();

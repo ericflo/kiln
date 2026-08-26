@@ -403,10 +403,10 @@ pub fn verify_chain_integrity(
 /// kiln version stamped into request records and lineage. Single-source so
 /// changing it later (e.g. wiring vergen for git sha) is one-liner.
 pub fn kiln_commit() -> String {
-    if let Ok(v) = std::env::var("KILN_COMMIT") {
-        if !v.is_empty() {
-            return v;
-        }
+    if let Ok(v) = std::env::var("KILN_COMMIT")
+        && !v.is_empty()
+    {
+        return v;
     }
     env!("CARGO_PKG_VERSION").to_string()
 }

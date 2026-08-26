@@ -2354,15 +2354,15 @@ fn histogram_contains(value: f64, min: Option<f64>, max: Option<f64>) -> bool {
     if value == 0.0 {
         return min == Some(0.0) && max == Some(0.0);
     }
-    if let Some(min) = min {
-        if value <= min {
-            return false;
-        }
+    if let Some(min) = min
+        && value <= min
+    {
+        return false;
     }
-    if let Some(max) = max {
-        if value > max {
-            return false;
-        }
+    if let Some(max) = max
+        && value > max
+    {
+        return false;
     }
     true
 }

@@ -946,18 +946,18 @@ impl GrpoCheckpointDescriptor {
             },
         )]);
         let rounding = &self.precision_policy.stochastic_rounding;
-        if rounding.get("mode").and_then(serde_json::Value::as_str) == Some("stochastic") {
-            if let Some(seed) = rounding.get("seed").and_then(serde_json::Value::as_u64) {
-                states.insert(
-                    "optimizer-rounding".to_string(),
-                    crate::checkpoint::TrainingCheckpointRngState {
-                        algorithm: "kiln.optimizer-stochastic-rounding.v1".to_string(),
-                        seed,
-                        position: step,
-                        state_file: None,
-                    },
-                );
-            }
+        if rounding.get("mode").and_then(serde_json::Value::as_str) == Some("stochastic")
+            && let Some(seed) = rounding.get("seed").and_then(serde_json::Value::as_u64)
+        {
+            states.insert(
+                "optimizer-rounding".to_string(),
+                crate::checkpoint::TrainingCheckpointRngState {
+                    algorithm: "kiln.optimizer-stochastic-rounding.v1".to_string(),
+                    seed,
+                    position: step,
+                    state_file: None,
+                },
+            );
         }
         states
     }

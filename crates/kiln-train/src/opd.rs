@@ -3397,18 +3397,18 @@ impl OpdCheckpointDescriptor {
             );
         }
         let rounding = &self.precision_policy.stochastic_rounding;
-        if rounding.get("mode").and_then(serde_json::Value::as_str) == Some("stochastic") {
-            if let Some(seed) = rounding.get("seed").and_then(serde_json::Value::as_u64) {
-                states.insert(
-                    "optimizer-rounding".to_string(),
-                    crate::checkpoint::TrainingCheckpointRngState {
-                        algorithm: "kiln.optimizer-stochastic-rounding.v1".to_string(),
-                        seed,
-                        position: loop_state.global_step,
-                        state_file: None,
-                    },
-                );
-            }
+        if rounding.get("mode").and_then(serde_json::Value::as_str) == Some("stochastic")
+            && let Some(seed) = rounding.get("seed").and_then(serde_json::Value::as_u64)
+        {
+            states.insert(
+                "optimizer-rounding".to_string(),
+                crate::checkpoint::TrainingCheckpointRngState {
+                    algorithm: "kiln.optimizer-stochastic-rounding.v1".to_string(),
+                    seed,
+                    position: loop_state.global_step,
+                    state_file: None,
+                },
+            );
         }
         Ok(states)
     }
@@ -4036,13 +4036,13 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
     };
 
     let learning_rate = config.effective_learning_rate();
-    if let Some(explicit) = config.learning_rate {
-        if let Some(warning) = crate::learning_rate_band_warning(
+    if let Some(explicit) = config.learning_rate
+        && let Some(warning) = crate::learning_rate_band_warning(
             explicit,
             crate::resolve_learning_rate(&config.optimizer, crate::TrainMode::Opd),
-        ) {
-            tracing::warn!(optimizer = ?config.optimizer, "OPD {warning}");
-        }
+        )
+    {
+        tracing::warn!(optimizer = ?config.optimizer, "OPD {warning}");
     }
 
     tracing::info!(

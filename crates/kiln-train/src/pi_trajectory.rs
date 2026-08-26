@@ -248,15 +248,15 @@ pub fn detect_warning_prefix(text: &str) -> Option<usize> {
     if !text.starts_with("WARNINGS:\n") {
         return None;
     }
-    if let Some(idx) = text.find("<command_output>") {
-        if idx > 0 {
-            return Some(idx);
-        }
+    if let Some(idx) = text.find("<command_output>")
+        && idx > 0
+    {
+        return Some(idx);
     }
-    if let Some(idx) = text.find("\n\n") {
-        if idx > 0 {
-            return Some(idx + 2);
-        }
+    if let Some(idx) = text.find("\n\n")
+        && idx > 0
+    {
+        return Some(idx + 2);
     }
     Some("WARNINGS:\n".len())
 }

@@ -478,10 +478,10 @@ pub(super) fn grpo_dry_run_jsonl_with_pass_hook(
             filter_enabled,
             "dry-run token and mask validation",
             |line_no, _source_index, group| {
-                if let Some(plan) = reward_filter_plan.as_ref() {
-                    if !plan.keeps_source_line(line_no) || plan.skip_training {
-                        return Ok(());
-                    }
+                if let Some(plan) = reward_filter_plan.as_ref()
+                    && (!plan.keeps_source_line(line_no) || plan.skip_training)
+                {
+                    return Ok(());
                 }
                 if config.dynamic_sampling && is_degenerate_grpo_group(group) {
                     dynamic_groups_filtered = dynamic_groups_filtered
@@ -1648,13 +1648,13 @@ pub fn grpo_train_pinned_jsonl_to_with_checkpoint_root_and_runtime(
         training_precision_policy,
         model_config_has_linear_attention(model_config),
     );
-    if let Some(explicit) = config.learning_rate {
-        if let Some(warning) = crate::learning_rate_band_warning(
+    if let Some(explicit) = config.learning_rate
+        && let Some(warning) = crate::learning_rate_band_warning(
             explicit,
             crate::resolve_learning_rate(&config.optimizer, crate::TrainMode::Grpo),
-        ) {
-            tracing::warn!(optimizer = ?config.optimizer, "GRPO {warning}");
-        }
+        )
+    {
+        tracing::warn!(optimizer = ?config.optimizer, "GRPO {warning}");
     }
     tracing::info!(
         dataset = %dataset_path.display(),

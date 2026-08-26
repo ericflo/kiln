@@ -154,15 +154,15 @@ pub(super) fn reward_filter_group_matches(
     var_min: Option<f64>,
     var_max: Option<f64>,
 ) -> (bool, Option<String>) {
-    if let Some(min) = var_min {
-        if variance < min {
-            return (false, Some(format!("variance_below_min:{min}")));
-        }
+    if let Some(min) = var_min
+        && variance < min
+    {
+        return (false, Some(format!("variance_below_min:{min}")));
     }
-    if let Some(max) = var_max {
-        if variance > max {
-            return (false, Some(format!("variance_above_max:{max}")));
-        }
+    if let Some(max) = var_max
+        && variance > max
+    {
+        return (false, Some(format!("variance_above_max:{max}")));
     }
     (true, None)
 }

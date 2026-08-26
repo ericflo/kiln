@@ -327,13 +327,13 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
         .as_ref()
         .map_or(0, |state| state.dynamic_groups_filtered as usize);
     let learning_rate = config.effective_learning_rate();
-    if let Some(explicit) = config.learning_rate {
-        if let Some(warning) = crate::learning_rate_band_warning(
+    if let Some(explicit) = config.learning_rate
+        && let Some(warning) = crate::learning_rate_band_warning(
             explicit,
             crate::resolve_learning_rate(&config.optimizer, crate::TrainMode::Grpo),
-        ) {
-            tracing::warn!(optimizer = ?config.optimizer, "GRPO {warning}");
-        }
+        )
+    {
+        tracing::warn!(optimizer = ?config.optimizer, "GRPO {warning}");
     }
     tracing::info!(
         num_groups = groups.len(),
@@ -651,10 +651,10 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
         let mut trainable_source_indices: Vec<u64> = Vec::new();
         for (idx, group) in groups.iter().enumerate() {
             let source_index = idx + 1;
-            if let Some(plan) = reward_filter_plan.as_ref() {
-                if !plan.keeps_source_index(source_index) {
-                    continue;
-                }
+            if let Some(plan) = reward_filter_plan.as_ref()
+                && !plan.keeps_source_index(source_index)
+            {
+                continue;
             }
             if dynamic_sampling && is_degenerate_grpo_group(group) {
                 dynamic_dropped += 1;

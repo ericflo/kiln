@@ -278,12 +278,12 @@ pub fn validate_topk_logprob_row(
                 "row {row_index} candidate {candidate_index} has invalid logprob {logprob}"
             )));
         }
-        if let Some(previous) = previous_logprob {
-            if logprob > previous {
-                return Err(invalid(format!(
-                    "row {row_index} logprobs are not non-increasing at candidate {candidate_index}: {logprob} follows {previous}"
-                )));
-            }
+        if let Some(previous) = previous_logprob
+            && logprob > previous
+        {
+            return Err(invalid(format!(
+                "row {row_index} logprobs are not non-increasing at candidate {candidate_index}: {logprob} follows {previous}"
+            )));
         }
         previous_logprob = Some(logprob);
         probability_mass += (logprob as f64).exp();
@@ -452,15 +452,15 @@ pub fn target_token_positions_to_logits_rows(
                 ),
             ));
         }
-        if let Some(previous) = previous {
-            if target_position <= previous {
-                return Err(LogitSourceError::invalid(
-                    teacher_id,
-                    format!(
-                        "target positions must be strictly increasing and unique: {target_position} follows {previous}"
-                    ),
-                ));
-            }
+        if let Some(previous) = previous
+            && target_position <= previous
+        {
+            return Err(LogitSourceError::invalid(
+                teacher_id,
+                format!(
+                    "target positions must be strictly increasing and unique: {target_position} follows {previous}"
+                ),
+            ));
         }
         previous = Some(target_position);
         logits_rows.push(target_position - 1);

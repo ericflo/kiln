@@ -489,13 +489,13 @@ pub(super) fn sft_train_prepared_to_with_checkpoint_root(
         runtime.checkpoint_planning_identity_for_device(device);
 
     let learning_rate = config.effective_learning_rate();
-    if let Some(explicit) = config.learning_rate {
-        if let Some(warning) = crate::learning_rate_band_warning(
+    if let Some(explicit) = config.learning_rate
+        && let Some(warning) = crate::learning_rate_band_warning(
             explicit,
             crate::resolve_learning_rate(&config.optimizer, crate::TrainMode::Sft),
-        ) {
-            tracing::warn!(optimizer = ?config.optimizer, "SFT {warning}");
-        }
+        )
+    {
+        tracing::warn!(optimizer = ?config.optimizer, "SFT {warning}");
     }
 
     tracing::info!(

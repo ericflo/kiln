@@ -428,14 +428,14 @@ pub(super) fn validate_analytic_sft_tail_grad_inputs(
             seq_len
         );
     }
-    if let Some(normed) = normed {
-        if normed.dims() != hidden.dims() {
-            anyhow::bail!(
-                "normed hidden shape {:?} does not match hidden shape {:?}",
-                normed.dims(),
-                hidden.dims()
-            );
-        }
+    if let Some(normed) = normed
+        && normed.dims() != hidden.dims()
+    {
+        anyhow::bail!(
+            "normed hidden shape {:?} does not match hidden shape {:?}",
+            normed.dims(),
+            hidden.dims()
+        );
     }
     let hidden_size = dims[2];
     if final_norm_weight.dims() != [hidden_size] {

@@ -1183,11 +1183,11 @@ pub(super) fn train_tokenized_grpo_group_with_grad_norms(
         }
 
         group_loss_sum += loss_val;
-        if let Some(env_ce) = comp_echo_env_ce {
-            if comp.total_obs_len > 0 {
-                group_echo_ce_sum += env_ce * comp.total_obs_len as f64;
-                group_echo_ce_weight = group_echo_ce_weight.saturating_add(comp.total_obs_len);
-            }
+        if let Some(env_ce) = comp_echo_env_ce
+            && comp.total_obs_len > 0
+        {
+            group_echo_ce_sum += env_ce * comp.total_obs_len as f64;
+            group_echo_ce_weight = group_echo_ce_weight.saturating_add(comp.total_obs_len);
         }
     }
 

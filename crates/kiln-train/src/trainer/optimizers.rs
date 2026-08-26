@@ -202,42 +202,41 @@ pub(super) fn apply_adamw_update_kt(
     let primary = param.forward_storage().primary_tensor().clone();
     // On-device registry path: param + grad + the REAL per-param m/v must
     // all be resident, then the CUDA kernel updates param/m/v in place.
-    if let Some(moments) = moments {
-        if resident_activation
-            && ResidencyBackend::runtime_has_resident_activation(backend, &primary)
-            && ResidencyBackend::runtime_has_resident_activation(backend, &moments.m)
-            && ResidencyBackend::runtime_has_resident_activation(backend, &moments.v)
-        {
-            ResidencyBackend::runtime_register_resident_activation(backend, grad)?;
-            let dispatched = match OptimizerBackend::runtime_dispatch_adamw_step(
-                backend,
-                &primary,
-                grad,
-                &moments.m,
-                &moments.v,
-                lr as f32,
-                beta1,
-                beta2,
-                eps,
-                weight_decay,
-                step,
-            ) {
-                Ok(b) => b,
-                Err(e) => {
-                    ResidencyBackend::runtime_evict_resident_activation(backend, grad);
-                    return Err(e);
-                }
-            };
-            if dispatched {
-                // The kernel updated param/m/v in place. Forward primary IS
-                // the master for LoRA params, so the update is already live;
-                // re-assert residency of the param buffer for the next fwd.
+    if let Some(moments) = moments
+        && resident_activation
+        && ResidencyBackend::runtime_has_resident_activation(backend, &primary)
+        && ResidencyBackend::runtime_has_resident_activation(backend, &moments.m)
+        && ResidencyBackend::runtime_has_resident_activation(backend, &moments.v)
+    {
+        ResidencyBackend::runtime_register_resident_activation(backend, grad)?;
+        let dispatched = match OptimizerBackend::runtime_dispatch_adamw_step(
+            backend,
+            &primary,
+            grad,
+            &moments.m,
+            &moments.v,
+            lr as f32,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            step,
+        ) {
+            Ok(b) => b,
+            Err(e) => {
                 ResidencyBackend::runtime_evict_resident_activation(backend, grad);
-                ResidencyBackend::runtime_update_resident_activation(backend, &primary)?;
-                return Ok(OptimizerStateAuthority::Device);
+                return Err(e);
             }
+        };
+        if dispatched {
+            // The kernel updated param/m/v in place. Forward primary IS
+            // the master for LoRA params, so the update is already live;
+            // re-assert residency of the param buffer for the next fwd.
             ResidencyBackend::runtime_evict_resident_activation(backend, grad);
+            ResidencyBackend::runtime_update_resident_activation(backend, &primary)?;
+            return Ok(OptimizerStateAuthority::Device);
         }
+        ResidencyBackend::runtime_evict_resident_activation(backend, grad);
     }
 
     ensure_training_optimizer_fallback_allowed(backend, primary.device(), "AdamW")?;
@@ -302,39 +301,38 @@ pub(super) fn apply_muon_update_kt(
     // On-device registry path: param + grad + the per-param momentum
     // must all be resident, then the kernel updates param/momentum in
     // place.
-    if let Some(momentum_state) = momentum_state {
-        if resident_activation
-            && ResidencyBackend::runtime_has_resident_activation(backend, &primary)
-            && ResidencyBackend::runtime_has_resident_activation(backend, &momentum_state.m)
-        {
-            ResidencyBackend::runtime_register_resident_activation(backend, grad)?;
-            let dispatched = match OptimizerBackend::runtime_dispatch_muon_step(
-                backend,
-                &primary,
-                grad,
-                &momentum_state.m,
-                lr as f32,
-                momentum,
-                nesterov,
-                ns_iters,
-                weight_decay,
-            ) {
-                Ok(b) => b,
-                Err(e) => {
-                    ResidencyBackend::runtime_evict_resident_activation(backend, grad);
-                    return Err(e);
-                }
-            };
-            if dispatched {
-                // The kernel updated param/momentum in place. Forward
-                // primary IS the master for LoRA params, so the update
-                // is already live; re-assert residency for the next fwd.
+    if let Some(momentum_state) = momentum_state
+        && resident_activation
+        && ResidencyBackend::runtime_has_resident_activation(backend, &primary)
+        && ResidencyBackend::runtime_has_resident_activation(backend, &momentum_state.m)
+    {
+        ResidencyBackend::runtime_register_resident_activation(backend, grad)?;
+        let dispatched = match OptimizerBackend::runtime_dispatch_muon_step(
+            backend,
+            &primary,
+            grad,
+            &momentum_state.m,
+            lr as f32,
+            momentum,
+            nesterov,
+            ns_iters,
+            weight_decay,
+        ) {
+            Ok(b) => b,
+            Err(e) => {
                 ResidencyBackend::runtime_evict_resident_activation(backend, grad);
-                ResidencyBackend::runtime_update_resident_activation(backend, &primary)?;
-                return Ok(OptimizerStateAuthority::Device);
+                return Err(e);
             }
+        };
+        if dispatched {
+            // The kernel updated param/momentum in place. Forward
+            // primary IS the master for LoRA params, so the update
+            // is already live; re-assert residency for the next fwd.
             ResidencyBackend::runtime_evict_resident_activation(backend, grad);
+            ResidencyBackend::runtime_update_resident_activation(backend, &primary)?;
+            return Ok(OptimizerStateAuthority::Device);
         }
+        ResidencyBackend::runtime_evict_resident_activation(backend, grad);
     }
 
     ensure_training_optimizer_fallback_allowed(backend, primary.device(), "Muon")?;
