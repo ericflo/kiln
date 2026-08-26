@@ -363,6 +363,8 @@ pub(super) fn full_attn_adaptive_max_tile_tokens(
     )
 }
 
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn full_attn_adaptive_max_tile_tokens_with_budget(
     device: &Device,
     dtype: DType,
@@ -412,6 +414,8 @@ pub(super) fn full_attn_adaptive_max_tile_tokens_with_budget(
     base_tile_tokens.min(aligned).max(1)
 }
 
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn full_attn_adaptive_tile_len(
     device: &Device,
     dtype: DType,
@@ -436,6 +440,8 @@ pub(super) fn full_attn_adaptive_tile_len(
     )
 }
 
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn full_attn_adaptive_tile_len_with_budget(
     device: &Device,
     dtype: DType,
@@ -482,6 +488,8 @@ pub(super) fn full_attn_adaptive_tile_len_with_budget(
     }
 }
 
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn full_attn_adaptive_tile_plan_summary(
     device: &Device,
     dtype: DType,

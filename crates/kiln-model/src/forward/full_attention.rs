@@ -1661,6 +1661,8 @@ pub(super) fn candle_reshape_with_spec(x: &Tensor, dims: &[ReshapeArg]) -> Resul
 
 /// Returns the gated attention value before the final output projection:
 /// [batch, seq_len, num_heads * head_dim].
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub fn gqa_attention_pre_o(
     backend: &dyn BackendRuntime,
     x: &Tensor,
@@ -2107,6 +2109,8 @@ pub fn gqa_attention_output_projection(
 }
 
 /// Returns: [batch, seq_len, hidden_size]
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub fn gqa_attention(
     backend: &dyn BackendRuntime,
     x: &Tensor,
@@ -3683,6 +3687,8 @@ pub(super) fn try_metal_paged_decode_icb_attention(
 ///
 /// The caller must ensure the block table has enough blocks allocated for all
 /// positions up to `positions.last() + 1`.
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub fn gqa_attention_paged(
     backend: &dyn BackendRuntime,
     x: &Tensor,

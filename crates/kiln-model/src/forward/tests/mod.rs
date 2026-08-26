@@ -4828,6 +4828,8 @@ fn test_cached_transpose_materializes_on_metal() -> Result<()> {
 
 /// Helper: build tiny GpuWeights for testing model_forward shape propagation.
 /// Uses full-attention layers only (no linear attention) with small dimensions.
+// Test helper; dimensions are intentionally individual.
+#[allow(clippy::too_many_arguments)]
 fn make_tiny_gpu_weights(
     device: &Device,
     vocab_size: usize,
@@ -5268,6 +5270,8 @@ fn test_model_forward_kv_cache_token_by_token() -> Result<()> {
 }
 
 /// Helper: build tiny GpuWeights with a mix of full and linear attention layers.
+// Test helper; dimensions are intentionally individual.
+#[allow(clippy::too_many_arguments)]
 fn make_hybrid_gpu_weights(
     device: &Device,
     vocab_size: usize,

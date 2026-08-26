@@ -67,6 +67,8 @@ pub fn load_gptq_config(model_dir: &Path) -> Result<Option<GptqConfig>> {
 ///
 /// The GPTQ format stores weights column-major: `qweight[in/8, out]`.
 /// The output is in kiln's standard layout: `[out_features, in_features]`.
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub fn dequantize_gptq_weight(
     qweight_data: &[u8],
     qweight_shape: &[usize],

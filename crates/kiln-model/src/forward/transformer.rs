@@ -15,6 +15,8 @@ use super::*;
 /// `full_attn_layer_idx`: index into the KV cache's layer array
 ///
 /// Returns: [batch, seq_len, hidden_size]
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub fn transformer_block(
     backend: &dyn BackendRuntime,
     x: &Tensor,
@@ -874,6 +876,8 @@ pub(super) fn transformer_block_detached_prefill_chunked(
 ///
 /// Same as [`transformer_block`] but reads/writes K/V through a [`PagedKvCache`]
 /// and [`BlockTable`] instead of a contiguous [`KvCache`].
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub fn transformer_block_paged(
     backend: &dyn BackendRuntime,
     x: &Tensor,

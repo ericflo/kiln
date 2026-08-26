@@ -1431,6 +1431,8 @@ pub(super) fn reshape_hole0_4(t: &Tensor, d1: usize, d2: usize, d3: usize) -> Re
 /// `linear_state`: mutable linear attention state (only entries for layers in range are touched).
 ///
 /// Returns: [1, seq_len, hidden_size] — output hidden state.
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub fn model_forward_segment(
     backend: &dyn BackendRuntime,
     hidden: Tensor,
@@ -1861,6 +1863,8 @@ pub fn model_forward_no_head_with_policy(
 /// stable so the captured graph reads updated position values on replay.
 ///
 /// Returns logits tensor with shape [1, seq_len, vocab_size].
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub fn model_forward_paged(
     backend: &dyn BackendRuntime,
     token_ids: &[u32],
@@ -2018,6 +2022,8 @@ pub fn model_forward_paged_with_kt(
 /// every position when only completion log-probs are needed).
 ///
 /// Returns hidden tensor with shape `[1, seq_len, hidden_size]`.
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub fn model_forward_paged_normed_hidden(
     backend: &dyn BackendRuntime,
     token_ids: &[u32],
@@ -2106,6 +2112,8 @@ pub fn model_forward_paged_last_token_hidden(
 /// This runs the same layer loop and paged KV writes as [`model_forward_paged`]
 /// but only projects the final hidden row through the LM head, returning
 /// logits with shape `[1, 1, vocab_size]`.
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub fn model_forward_paged_last_token(
     backend: &dyn BackendRuntime,
     token_ids: &[u32],
@@ -2745,6 +2753,8 @@ pub(super) fn resident_decode_pool_ready(
 /// fuses the final-row LM-head projection with argmax when the backend supports
 /// it, avoiding a `[1, 1, vocab_size]` logits tensor that greedy sampling would
 /// immediately reduce.
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub fn model_forward_paged_last_token_greedy(
     backend: &dyn BackendRuntime,
     token_ids: &[u32],
@@ -2858,6 +2868,8 @@ pub fn model_forward_paged_last_token_greedy(
 /// This keeps the existing logits APIs intact but, on the Metal BF16 decode
 /// path, fuses the LM-head projection with argmax so generation does not
 /// materialize `[1, 1, vocab_size]` logits only to immediately reduce them.
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub fn model_forward_paged_next_token_greedy(
     backend: &dyn BackendRuntime,
     token_id: u32,
@@ -3518,6 +3530,8 @@ pub fn model_forward_paged_batched_decode_hidden(
 /// draft token against position 0 (`logits[:, 0, :]` predicts what should
 /// follow the last committed token) and sample a bonus token from position
 /// `seq_len - 1` on full acceptance.
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub fn model_forward_paged_with_last_hidden(
     backend: &dyn BackendRuntime,
     token_ids: &[u32],
@@ -3561,6 +3575,8 @@ pub fn model_forward_paged_with_last_hidden(
 /// Returns only the last-row logits plus the last-row pre-final-norm hidden
 /// state. MTP prefill does not need per-position logits, so this avoids
 /// projecting every prompt row through the large tied LM head.
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub fn model_forward_paged_last_token_with_last_hidden(
     backend: &dyn BackendRuntime,
     token_ids: &[u32],
@@ -4379,6 +4395,8 @@ pub(crate) fn model_forward_paged_last_token_layer_group(
 /// each tile builds its own per-tile position vector inside the inner fn.
 /// Streaming prefill is incompatible with CUDA graph replay (which requires
 /// a stable shape per call) and is only used outside of graph-captured paths.
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub fn model_forward_paged_streaming(
     backend: &dyn BackendRuntime,
     token_ids: &[u32],
@@ -4563,6 +4581,8 @@ pub(crate) fn model_forward_paged_streaming_with_progress_offset_and_policy(
 /// Same tiled execution as [`model_forward_paged_streaming`], but the final
 /// tile returns both last-token logits and the post-final-norm `h_prev` needed
 /// to seed native MTP decoding.
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub fn model_forward_paged_streaming_last_token_with_last_hidden(
     backend: &dyn BackendRuntime,
     token_ids: &[u32],
@@ -4755,6 +4775,8 @@ pub fn model_forward_paged_streaming_last_token_hidden_with(
 
 /// Explicit-tile variant of
 /// [`model_forward_paged_streaming_last_token_with_last_hidden`].
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub fn model_forward_paged_streaming_last_token_with_last_hidden_with(
     backend: &dyn BackendRuntime,
     token_ids: &[u32],
@@ -4839,6 +4861,8 @@ pub fn model_forward_paged_streaming_last_token_with_last_hidden_with(
 /// process-wide env vars (which would race under parallel test runners).
 ///
 /// `tile_size` must be a positive multiple of `GDN_CHUNK_SIZE`.
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub fn model_forward_paged_streaming_with(
     backend: &dyn BackendRuntime,
     token_ids: &[u32],

@@ -23,6 +23,8 @@ use super::*;
 ///
 /// Used by [`model_forward_segment_with_policy`] when the injected policy
 /// enables streaming and the segment's sequence length exceeds `tile_size`.
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub fn gated_deltanet_forward_streaming(
     backend: &dyn BackendRuntime,
     x: &Tensor,

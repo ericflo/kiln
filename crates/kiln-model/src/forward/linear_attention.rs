@@ -1079,6 +1079,8 @@ pub(super) fn gdn_single_token_recurrence(
 /// F32-state invariant.
 ///
 /// Returns: `[B, nv, T, dv]`.
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn gdn_chunkwise_recurrence(
     backend: &dyn BackendRuntime,
     q: &Tensor,         // [B, nv, T, dk]
@@ -1645,6 +1647,8 @@ pub(super) fn gdn_recurrent_prefill_native_head_last(
 /// Returns a contiguous head-last `[B, T, nv, dv]` tensor so the caller can feed
 /// Metal gated RMSNorm without the `[B,nv,T,dv]` cat + transpose + contiguous
 /// copy chain.
+// Intentionally wide forward signature; bundling would break the public API.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn gdn_chunkwise_recurrence_head_last_full_chunks(
     backend: &dyn BackendRuntime,
     q: &Tensor,         // [B, nv, T, dk]

@@ -3573,6 +3573,8 @@ impl ModelRunner {
         })
     }
 
+    // Intentionally wide decode-loop signature; bundling would churn the decode plumbing.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_paged_batched_decode_with_prefix_cache(
         &self,
         prompt_tokens: &[TokenId],
@@ -3642,6 +3644,8 @@ impl ModelRunner {
     /// unbounded prompt forward. Exact cache hits are immediately ready;
     /// otherwise the returned state must be advanced and externally
     /// synchronized one bounded quantum at a time.
+    // Intentionally wide decode-loop signature; bundling would churn the decode plumbing.
+    #[allow(clippy::too_many_arguments)]
     pub fn begin_paged_batched_decode_with_prefix_cache(
         &self,
         prompt_tokens: &[TokenId],
@@ -3914,6 +3918,8 @@ impl ModelRunner {
         }
     }
 
+    // Intentionally wide decode-loop signature; bundling would churn the decode plumbing.
+    #[allow(clippy::too_many_arguments)]
     fn generate_from_tokens_paged_interleaved_with_prefix_blocks(
         &self,
         prompt_tokens: &[TokenId],
@@ -5995,6 +6001,8 @@ impl ModelRunner {
         )
     }
 
+    // Intentionally wide decode-loop signature; bundling would churn the decode plumbing.
+    #[allow(clippy::too_many_arguments)]
     fn decode_from_prefill_logits(
         &self,
         // (#1082) kt-native logits — sampler (greedy_sample/sample_step) is kt.
@@ -6044,6 +6052,8 @@ impl ModelRunner {
         result
     }
 
+    // Intentionally wide decode-loop signature; bundling would churn the decode plumbing.
+    #[allow(clippy::too_many_arguments)]
     fn decode_from_prefill_token(
         &self,
         mut next_token: TokenId,
@@ -7099,6 +7109,8 @@ impl ModelRunner {
         }
     }
 
+    // Intentionally wide decode-loop signature; bundling would churn the decode plumbing.
+    #[allow(clippy::too_many_arguments)]
     fn decode_next_token_paged_sample_metal_graph(
         &self,
         params: &SamplingParams,
@@ -7214,6 +7226,8 @@ impl ModelRunner {
         }
     }
 
+    // Intentionally wide decode-loop signature; bundling would churn the decode plumbing.
+    #[allow(clippy::too_many_arguments)]
     fn decode_next_token_paged_interleaved(
         &self,
         params: &SamplingParams,
@@ -9574,6 +9588,8 @@ impl ModelRunner {
     /// settlement contract as the non-prefix variant. Prefill panics quarantine
     /// the backend and retain the request lifetime, allocation metadata, and
     /// prefix-cache finalizer rather than releasing an unproven cache lease.
+    // Intentionally wide forward signature; bundling would break the public API.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_streaming_paged_shared_tokens_with_prefix_cache<F, L>(
         runner_lock: Arc<std::sync::RwLock<Self>>,
         prompt_tokens: Vec<TokenId>,
@@ -10426,6 +10442,8 @@ impl ModelRunner {
     /// threaded callers can spawn the loop and return the receiver to the
     /// async layer immediately, instead of waiting for `max_tokens` decode
     /// steps before the receiver becomes observable.
+    // Intentionally wide decode-loop signature; bundling would churn the decode plumbing.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_stream_decode_loop_with_first(
         &self,
         tx: &mpsc::Sender<StreamEvent>,
