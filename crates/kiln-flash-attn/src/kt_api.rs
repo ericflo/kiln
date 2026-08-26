@@ -40,10 +40,9 @@ use crate::{
 #[cfg(feature = "cuda")]
 use kiln_tensor::CudaStorage;
 
-/// Error type for the kiln-tensor-typed flash-attn surface. Stays
-/// independent of candle's error so Phase 7 can delete candle
-/// without rewriting this module. Carries the bridge error message
-/// when storage validation fails.
+/// Error type for the kiln-tensor-typed flash-attn surface.
+/// Self-contained (independent of any other backend's error type).
+/// Carries the bridge error message when storage validation fails.
 #[derive(Debug)]
 pub enum FlashAttnError {
     Msg(String),

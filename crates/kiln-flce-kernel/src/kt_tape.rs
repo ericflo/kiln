@@ -5,18 +5,17 @@
 //!
 //! # Why this module exists
 //!
-//! The candle `kiln_train::flce_candle_shim::fused_linear_cross_entropy_phase_b_via_kt_forward_op`
-//! shim wraps the FLCE Phase B forward+backward inside a candle
-//! `CustomOp1` (`KtForwardOp1`). That keeps the candle dependency
-//! alive in the flce-kernel crate today — even though the kt-typed
-//! forward + backward
+//! The historical candle shim `kiln_train::flce_candle_shim::fused_linear_cross_entropy_phase_b_via_kt_forward_op`
+//! wrapped the FLCE Phase B forward+backward inside a candle
+//! `CustomOp1` (`KtForwardOp1`), keeping the candle dependency alive in
+//! the flce-kernel crate — even though the kt-typed forward + backward
 //! ([`crate::kt_api::fused_linear_cross_entropy_phase_b_kt`],
 //! [`crate::kt_api::fused_linear_cross_entropy_phase_b_backward_kt`])
 //! already run end-to-end over `kiln_tensor::Tensor` without a
 //! candle node in sight.
 //!
-//! This module is the parallel entry that drops the candle CustomOp
-//! wrapper and records the backward directly onto a
+//! This module is the entry that drops the candle CustomOp
+//! wrapper (deleted along with the shim post-#1082) and records the backward directly onto a
 //! `kiln_autograd::Tape`. Same kt-typed forward, same kt-typed
 //! backward, same envelope. The only difference is who owns the
 //! autograd recording: candle's `BackpropOp` chain (legacy) vs.
@@ -47,8 +46,9 @@
 //!
 //! # Envelope
 //!
-//! Matches the shim envelope in
-//! `kiln_train::flce_candle_shim::fused_linear_cross_entropy_phase_b_via_kt_forward_op`:
+//! Matches the original candle shim envelope (the deleted
+//! `kiln_train::flce_candle_shim::fused_linear_cross_entropy_phase_b_via_kt_forward_op`,
+//! whose predicate this function preserves):
 //!
 //! - `hidden.device()` is CUDA (FLCE's production path is CUDA-only
 //!   in the trainer; CPU FLCE uses the candle Phase B body
@@ -82,8 +82,8 @@ use crate::kt_api::{
 };
 
 /// Returns `true` when `(hidden, head_t)` is inside the kt-tape FLCE
-/// forward+backward envelope. Matches the
-/// `kiln_train::flce_candle_shim::shim_envelope_ok` semantics: CUDA + dtype
+/// forward+backward envelope. Preserves the semantics of the deleted
+/// candle shim's `shim_envelope_ok`: CUDA + dtype
 /// in {F32, BF16} + matching head_t dtype + 3-D hidden + 2-D head_t
 /// + matching hidden_size.
 fn envelope_ok(hidden: &KtTensor, head_t: &KtTensor) -> bool {
@@ -240,7 +240,8 @@ impl BackwardOp for CudaFlcePhaseBBackward {
 }
 
 /// kt-tape FLCE Phase B forward+backward — Phase 6a/CP-4 successor to
-/// the candle `kiln_train::flce_candle_shim::fused_linear_cross_entropy_phase_b_via_kt_forward_op`.
+/// the historical candle shim `fused_linear_cross_entropy_phase_b_via_kt_forward_op`
+/// (last at `kiln_train::flce_candle_shim`, removed post-#1082).
 ///
 /// Runs the kt-typed forward via
 /// [`fused_linear_cross_entropy_phase_b_kt`], then records a tape
@@ -251,13 +252,10 @@ impl BackwardOp for CudaFlcePhaseBBackward {
 ///
 /// # Envelope
 ///
-/// Matches the
-/// `kiln_train::flce_candle_shim::fused_linear_cross_entropy_phase_b_via_kt_forward_op`
-/// shim envelope (see [`envelope_ok`]). Out-of-envelope inputs
-/// return an `Err` rather than silently falling back; the
-/// production caller is expected to pre-check via the same
-/// envelope predicate exactly like the existing
-/// `fused_linear_cross_entropy_phase_b_via_kt_forward_op` shim.
+/// Matches the original candle shim envelope (see [`envelope_ok`]).
+/// Out-of-envelope inputs return an `Err` rather than silently
+/// falling back; the production caller is expected to pre-check via
+/// the same envelope predicate.
 ///
 /// # Tape integration
 ///

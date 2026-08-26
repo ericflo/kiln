@@ -1,11 +1,9 @@
-//! `kiln_tensor::Tensor`-typed surface alongside the candle-typed
-//! conv1d API.
+//! `kiln_tensor::Tensor`-typed conv1d API — the crate's only Rust surface.
 //!
-//! Phase 7 prep — line 322's spirit applied to kiln-conv1d-kernel.
-//! Same C-ABI/FFI; same shape contract; only the Rust shell types
-//! switch from `candle_core::Tensor` to `kiln_tensor::Tensor`. The
-//! candle-typed `causal_conv1d_update` / `causal_conv1d_prefill`
-//! remain in place; Phase 7 deletes them when call sites migrate.
+//! Phase 7 (#1082) landed: same C-ABI/FFI; same shape contract; the Rust
+//! shell types are `kiln_tensor::Tensor`. The former candle-typed
+//! `causal_conv1d_update` / `causal_conv1d_prefill` were deleted once
+//! every call site migrated to these `*_kt` wrappers.
 
 use kiln_kt_bridge::BridgeError;
 use kiln_tensor::{DType as KtDType, Device as KtDevice, Tensor as KtTensor};
@@ -240,17 +238,16 @@ pub fn causal_conv1d_prefill_kt(
     Ok(out)
 }
 
-/// kt-typed twin of [`crate::supports`].
+/// kt-typed envelope predicate for [`crate::supports`]-style checks.
 ///
 /// Returns `true` only for the exact bf16/f32/K=4 envelope the
-/// vendored kernel was specialised for. Mirrors the candle-typed
-/// [`crate::supports_update`] but takes `&KtTensor` so callers on
-/// the kt-substrate don't need to round-trip through candle for the
-/// pre-dispatch envelope check.
+/// vendored kernel was specialised for. Mirrors the deleted
+/// candle-typed [`crate::supports_update`] but takes `&KtTensor` so
+/// callers on the kt-substrate never needed to round-trip through
+/// candle for the pre-dispatch envelope check.
 ///
-/// Phase 7 (#1082) — once every caller is on this kt-typed
-/// predicate, the candle-typed `supports*` can be deleted alongside
-/// the candle dep itself.
+/// Phase 7 (#1082) complete — every caller is on this kt-typed
+/// predicate and the candle dep is gone.
 pub fn supports_kt(
     x: &KtTensor,
     weight: &KtTensor,

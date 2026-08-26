@@ -991,3 +991,36 @@ end-to-end against them (py_compile + live invocation exercising parse →
 null-baseline error path); grep confirms no remaining candle-era claims in
 any of the three files; `scripts/check_repository_artifacts.py` passes (6694
 tracked paths); diff is comment/docstring-only plus one JSON string value.
+## Cleanup Agent (round 38) — 2026-08-30
+
+Fixed the stale candle-era comment cluster in kernel-crate `kt_api.rs`
+surfaces (this round's steering candidate a), the largest of which was
+kiln-flce-kernel still describing itself as a Phase 7 *prep* surface:
+`kt_api.rs` claimed "today's Phase A/B forward+backward run on
+`candle_core::Tensor` ops", that the kt entries were only a future
+"migration target" for external integrations, and pointed ~17 times across
+lib.rs/kt_api.rs/kt_tape.rs at the deleted module
+`kiln_train::flce_candle_shim` (its `FlceMatmulProvider`, `shim_envelope_ok`,
+the parity oracle, and the `KILN_FLCE_PHASE_A` escape hatch) as if live —
+all false post-#1082: kiln-train/src/lib.rs records flce_candle_shim was
+deleted and FLCE is kt-native via these very kt entries; no reader of
+KILN_FLCE_PHASE_A or FlceMatmulProvider exists outside this crate's own
+comments. Rewritten to present-day reality (crate 100% candle-free; kt-typed
+entries are the production path) with explicitly historical framing where
+the narrative is kept. Same class of fix in kiln-conv1d-kernel/src/kt_api.rs
+(header said candle-typed functions "remain in place; Phase 7 deletes them"
+and supports_kt doc awaited their deletion — they were already removed per
+that crate's own updated lib.rs) and kiln-flash-attn/src/kt_api.rs
+(FlashAttnError doc justified its design by "so Phase 7 can delete candle",
+which has happened). Comment-only changes; zero code touched.
+Verified: every claim cross-checked before editing (grep for
+flce_candle_shim/KILN_FLCE_PHASE_A/FlceMatmulProvider repo-wide;
+kiln-train imports DEFAULT_CHUNK_SIZE directly from kiln_flce_kernel);
+baseline-vs-after `cargo check -p kiln-flce-kernel -p kiln-conv1d-kernel
+-p kiln-flash-attn` fails identically (pre-existing environmental cudarc
+build-script failure — no local CUDA toolkit, same as round 35's baseline);
+comment edits are syntactically valid per `cargo fmt --check` on all three
+crates (clean) and full-workspace fmt stays clean;
+scripts/check_repository_artifacts.py passes (6694 tracked paths);
+remaining flce_candle_shim mentions are all explicitly historical;
+git status shows only the five source edits plus this ledger entry.

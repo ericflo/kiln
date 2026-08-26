@@ -22,13 +22,13 @@
 //!   [`fused_linear_cross_entropy_phase_b_unit_grad_via_kt_tape`]) that record
 //!   the FLCE backward onto a `kiln_autograd::Tape`.
 //!
-//! The candle-typed glue that the SFT/FLCE trainer needs — the pure-candle
+//! The candle-typed glue the SFT/FLCE trainer temporarily needed — the pure-candle
 //! Phase A reference, the Phase B candle `CustomOp1`, the `KtForwardOp1`
 //! kt-forward-op shim, and the kt-tape production-caller adapter — moved UP
-//! into `kiln-train::flce_candle_shim`, which legitimately keeps
-//! `candle-core` (and already depends on `kiln-kt-bridge`). Those moved
-//! paths call the kt entries this crate re-exports. The relocation kept the
-//! FLCE math byte-identical — only the crate location changed.
+//! into `kiln-train::flce_candle_shim` during #1082 so this crate could go
+//! 100% candle-free; that shim module has since been deleted outright, leaving
+//! the kt-native entries in this crate as the only FLCE path. The relocation
+//! kept the FLCE math byte-identical — only the crate location changed.
 //!
 //! # Phase A vs Phase B (history)
 //!
@@ -42,9 +42,9 @@
 //! storing only the scalar loss. The kt-typed forward/backward here
 //! implement the same chunked log-sum-exp math, numerically equivalent to
 //! the candle Phase A/B reference up to floating-point associativity in the
-//! chunked reduction. The candle Phase A/B reference now lives in
+//! chunked reduction. The deleted candle Phase A/B reference lived last in
 //! `kiln-train::flce_candle_shim` as the parity oracle + `KILN_FLCE_PHASE_A`
-//! escape hatch.
+//! escape hatch before that module was removed post-#1082.
 //!
 //! # Target
 //!
@@ -77,7 +77,6 @@ pub use kt_tape::{
 /// V=151936, a chunk of 4096 means ~37 chunks per forward — small enough
 /// that per-chunk launch cost is absorbed.
 ///
-/// Re-exported by the candle-typed surface in
-/// `kiln-train::flce_candle_shim` so both `kiln_flce_kernel::DEFAULT_CHUNK_SIZE`
-/// and `flce_candle_shim::DEFAULT_CHUNK_SIZE` resolve to the same value.
+/// Shared by every FLCE entry point in this crate (and by
+/// `kiln-train`, which imports it directly).
 pub const DEFAULT_CHUNK_SIZE: usize = 4096;
