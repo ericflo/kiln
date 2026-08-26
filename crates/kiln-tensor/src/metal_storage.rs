@@ -42,7 +42,8 @@
 //! > are still UMA — no host pinning needed.
 //!
 //! Candle's `allocate_zeros` returns a `Shared`-mode buffer (the
-//! `RESOURCE_OPTIONS` constant in `vendor/candle-core/src/metal_backend`).
+//! `RESOURCE_OPTIONS` constant in candle-core's `metal_backend`; see the
+//! pre-#1082 vendor tree for that original definition).
 //! `MetalStorage::is_unified_memory()` returns true; the zero-copy
 //! host accessor lands in a follow-up PR (it needs a stride/layout
 //! check that this PR keeps off the critical path).

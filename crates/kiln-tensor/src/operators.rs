@@ -16,7 +16,8 @@
 //!
 //! # Faithful mirror of candle's `bin_trait!`
 //!
-//! `vendor/candle-core/src/tensor.rs` defines a `bin_trait!` macro that
+//! candle-core's upstream `tensor.rs` (captured in the pre-#1082 vendor
+//! tree) defines a `bin_trait!` macro that
 //! emits, for each of `Add/Sub/Mul/Div`:
 //!
 //! - `Tensor      ⊕ B: Borrow<Tensor>` → `Result<Tensor>`

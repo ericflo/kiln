@@ -1057,3 +1057,25 @@ matching this README's reframing); kiln-tensor metal_storage.rs/method_api.rs/
 operators.rs still cite deleted vendor/candle-core paths in comments —
 same class as round 33's precedent, left for a future session.
 
+## Cleanup Agent (round 40) — 2026-08-31
+
+Rewrote three present-tense citations of the deleted `vendor/candle-core/`
+tree in kiln-tensor source comments — Round 39's flagged leftover: (1)
+`crates/kiln-tensor/src/metal_storage.rs` cited `vendor/candle-core/src/
+metal_backend`'s `RESOURCE_OPTIONS` constant as if on disk; reframed as
+candle-core's upstream `metal_backend`, with the pre-#1082 vendor tree
+named explicitly as history; (2) `crates/kiln-tensor/src/method_api.rs`
+claimed method signatures "are matched against `vendor/candle-core/src/
+tensor.rs`"; reframed to candle-core's upstream `tensor.rs` API surface
+captured by that vendor snapshot; (3) `crates/kiln-tensor/src/operators.rs`
+said "`vendor/candle-core/src/tensor.rs` defines a `bin_trait!` macro";
+reframed as the upstream file captured pre-#1082. Comment-only changes;
+zero code touched. Verified: baseline-vs-after `cargo test -p kiln-tensor
+--lib` identical (992 passed, 0 failed both sides); repo-wide grep shows no
+remaining vendor-path citations outside CLEANUP.md itself, the explicitly
+historical cublaslt_probe.cu header (kept per round 39), and two phase-7
+guard scripts whose vendor-path string matching is their own concern.
+Noted but left alone: `scripts/audit-candle-usage.sh` still documents an
+excluded vendored tree and `scripts/phase7-migrate-candle-bail.py` matches
+on `vendor/candle-core` paths — inert post-deletion, candidate for a future
+session.

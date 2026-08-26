@@ -14,7 +14,8 @@
 //! This module adds those inherent methods. Each one **delegates** to
 //! the existing `ops::` free function (or composes a few of them when
 //! candle exposes a method kt only has as primitives). The signatures
-//! are matched against `vendor/candle-core/src/tensor.rs` so the flip is
+//! are matched against candle-core's upstream `tensor.rs` (the API surface
+//! captured by the pre-#1082 vendor tree) so the flip is
 //! a no-brainer.
 //!
 //! # Purely additive
