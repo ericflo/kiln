@@ -3270,8 +3270,10 @@ mod tests {
     fn loss_config_validation_rejects_untrainable_compositions() {
         // ECHO + env tokens trains again (resurrection PR2) — both shapes
         // validate.
-        let mut cfg = LossConfig::default();
-        cfg.echo = Some(EchoConfig::default());
+        let cfg = LossConfig {
+            echo: Some(EchoConfig::default()),
+            ..Default::default()
+        };
         assert!(cfg.validate_for_kt_tape(false).is_ok());
         assert!(
             cfg.validate_for_kt_tape(true).is_ok(),
@@ -3280,8 +3282,10 @@ mod tests {
 
         // no_policy_loss + ECHO (the default) = §5.5 verifier-free mode:
         // env-CE rows drive while the PG term is masked — VALIDATES.
-        let mut cfg = LossConfig::default();
-        cfg.no_policy_loss = true;
+        let mut cfg = LossConfig {
+            no_policy_loss: true,
+            ..Default::default()
+        };
         assert!(cfg.validate_for_kt_tape(true).is_ok());
         // Without an enabled ECHO term there is nothing to train on.
         cfg.echo = None;
@@ -3290,16 +3294,20 @@ mod tests {
         assert!(err.contains("nothing to train"), "{err}");
 
         // Reserved OPD slot: point at the real endpoint.
-        let mut cfg = LossConfig::default();
-        cfg.opd = Some(OpdAuxConfig { lambda: 1.0 });
+        let cfg = LossConfig {
+            opd: Some(OpdAuxConfig { lambda: 1.0 }),
+            ..Default::default()
+        };
         let err = cfg.validate_for_kt_tape(false).unwrap_err();
         assert!(err.contains("/v1/train/opd"), "{err}");
     }
 
     #[test]
     fn loss_config_echo_lambda_returns_zero_when_disabled() {
-        let mut cfg = LossConfig::default();
-        cfg.echo = None;
+        let cfg = LossConfig {
+            echo: None,
+            ..Default::default()
+        };
         assert_eq!(cfg.echo_lambda(), 0.0);
         assert!(!cfg.echo_enabled());
     }

@@ -2754,10 +2754,12 @@ fn sample_student_rollout(
     let device = weights.embed_tokens.device().clone();
     let head_t = weights.embed_tokens_t.clone();
 
-    let mut params = SamplingParams::default();
-    params.temperature = temperature;
-    params.top_p = top_p;
-    params.seed = seed;
+    let params = SamplingParams {
+        temperature,
+        top_p,
+        seed,
+        ..Default::default()
+    };
     let mut step_seed = seed;
 
     // Walk the prompt + generated suffix through the streaming
@@ -6952,8 +6954,10 @@ mod tests {
         assert_eq!(json["sampler_segments"], 12);
         assert_eq!(json["rollout_prompt_rendering"], "chat_template");
 
-        let mut invalid = OpdConfig::default();
-        invalid.sampler_segments = Some(0);
+        let invalid = OpdConfig {
+            sampler_segments: Some(0),
+            ..Default::default()
+        };
         assert!(invalid.validate_runtime_contract().is_err());
     }
 

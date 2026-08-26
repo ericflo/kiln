@@ -6289,17 +6289,22 @@ fn test_agentic_grpo_plumbing_trains_echo_variants_and_base_adapter() -> Result<
 
         let mk_config =
             |echo: Option<crate::EchoConfig>, no_policy_loss: bool, base_adapter: Option<&str>| {
-                let mut config = GrpoConfig::default();
-                config.dynamic_sampling = false;
-                config.learning_rate = Some(0.05);
-                config.lora_rank = 4;
-                config.lora_alpha = 8.0;
-                config.optimizer = Optimizer::Sgd;
-                config.kl_estimator = KlEstimator::None;
-                config.kl_reference_policy = KlReferencePolicy::None;
-                config.seed = Some(0xA6E17C_u64);
-                config.loss.echo = echo;
-                config.loss.no_policy_loss = no_policy_loss;
+                let mut config = GrpoConfig {
+                    dynamic_sampling: false,
+                    learning_rate: Some(0.05),
+                    lora_rank: 4,
+                    lora_alpha: 8.0,
+                    optimizer: Optimizer::Sgd,
+                    kl_estimator: KlEstimator::None,
+                    kl_reference_policy: KlReferencePolicy::None,
+                    seed: Some(0xA6E17C_u64),
+                    loss: crate::LossConfig {
+                        echo,
+                        no_policy_loss,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
                 config.base_adapter = base_adapter.map(str::to_string);
                 config
             };

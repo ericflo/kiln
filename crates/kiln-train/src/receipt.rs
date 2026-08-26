@@ -479,8 +479,10 @@ mod tests {
             dynamics_holdout_ce_initial: Some(3.96),
             dynamics_holdout_ce_final: Some(1.12),
         };
-        let mut summary = DiagnosticSummary::default();
-        summary.echo = Some(echo.clone());
+        let summary = DiagnosticSummary {
+            echo: Some(echo.clone()),
+            ..Default::default()
+        };
         let receipt =
             AdapterReceipt::new("echo-adapter", "grpo", 4218).with_diagnostic_summary(summary);
         let s = serde_json::to_string(&receipt).unwrap();
