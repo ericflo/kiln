@@ -292,7 +292,7 @@ pub fn linear_step_via_tape(inputs: LinearStepInputs<'_>) -> Result<StepOutput> 
     let seed = Tensor::from_slice(&[1.0_f32], vec![])
         .context("tape_step: build scalar seed gradient (1.0)")?;
     let grads = tape
-        .backward(loss.id(), seed, |a, b| add(a, b))
+        .backward(loss.id(), seed, add)
         .context("tape_step: Tape::backward walk")?;
 
     let d_w = grads
@@ -467,7 +467,7 @@ pub fn mlp_step_via_tape(inputs: MlpStepInputs<'_>) -> Result<MlpStepOutput> {
     let seed =
         Tensor::from_slice(&[1.0_f32], vec![]).context("mlp_step: build scalar seed gradient")?;
     let grads = tape
-        .backward(loss.id(), seed, |a, b| add(a, b))
+        .backward(loss.id(), seed, add)
         .context("mlp_step: Tape::backward walk")?;
 
     let d_w1 = grads
@@ -806,7 +806,7 @@ pub fn transformer_block_step_via_tape(
     let seed = Tensor::from_slice(&[1.0_f32], vec![])
         .context("transformer_block_step: build scalar seed gradient")?;
     let grads = tape
-        .backward(loss.id(), seed, |a, b| add(a, b))
+        .backward(loss.id(), seed, add)
         .context("transformer_block_step: Tape::backward walk")?;
 
     Ok(TransformerBlockStepOutput {
@@ -1349,7 +1349,7 @@ mod tests {
             }),
         );
         let seed = Tensor::from_slice(&[1.0_f32], vec![]).unwrap();
-        let grads = tape.backward(loss.id(), seed, |a, b| add(a, b)).unwrap();
+        let grads = tape.backward(loss.id(), seed, add).unwrap();
         let dx = grads
             .get(x.id())
             .expect("silu_via_tape did not key d_x on the original x.id()");
@@ -1381,7 +1381,7 @@ mod tests {
             }),
         );
         let seed = Tensor::from_slice(&[1.0_f32], vec![]).unwrap();
-        let grads = tape.backward(loss.id(), seed, |x, y| add(x, y)).unwrap();
+        let grads = tape.backward(loss.id(), seed, add).unwrap();
         let da = grads
             .get(a.id())
             .expect("matmul_via_tape did not key d_a on the original a.id()");
@@ -1422,7 +1422,7 @@ mod tests {
             }),
         );
         let seed = Tensor::from_slice(&[1.0_f32], vec![]).unwrap();
-        let grads = tape.backward(loss.id(), seed, |a, b| add(a, b)).unwrap();
+        let grads = tape.backward(loss.id(), seed, add).unwrap();
         let dx = grads
             .get(x.id())
             .expect("rms_norm_via_tape did not key d_x on the original x.id()");
@@ -1460,7 +1460,7 @@ mod tests {
         assert_eq!(loss.shape(), &[] as &[usize], "loss must be scalar");
 
         let seed = Tensor::from_slice(&[1.0_f32], vec![]).unwrap();
-        let grads = tape.backward(loss.id(), seed, |a, b| add(a, b)).unwrap();
+        let grads = tape.backward(loss.id(), seed, add).unwrap();
         let d_logits = grads
             .get(logits.id())
             .expect("cross_entropy_via_tape did not key d_logits on logits.id()");

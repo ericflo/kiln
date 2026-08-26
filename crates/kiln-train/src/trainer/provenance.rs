@@ -86,7 +86,7 @@ pub fn open_replay_state_to(
     output_adapter_dir: &Path,
     adapter_name: &str,
 ) -> Result<(ReplayState, u64)> {
-    let seed = config_seed.unwrap_or_else(|| rand::random());
+    let seed = config_seed.unwrap_or_else(rand::random);
     let kiln_commit = replay::kiln_commit();
     let submitted_at = chrono::Utc::now().to_rfc3339();
     let request = RequestRecord {
