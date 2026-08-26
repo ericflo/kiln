@@ -616,3 +616,26 @@ only consumer-facing API); `cargo check` before showed 3 warnings including
 pre-existing deprecated-method warnings; `cargo test` passes 161/161;
 `node scripts/check_desktop_ui_smoke.mjs` and
 `node scripts/check_runtime_defaults.mjs` pass unchanged.
+## Cleanup Agent (round 25) — 2026-08-25
+
+Deleted the three #1082-era agent-orchestration prompt scratch files in
+`scripts/`: `metal_bridge_removal_workflow.js` (130 lines),
+`metal_flip_workflow.js` (201), and `metal_gemm_design_workflow.js` (117).
+Each was a one-shot multi-agent workflow template (phases + embedded String.raw
+prompt text) drafted to drive the candle-removal effort — bridge removal in
+metal.rs, kt-native kernel flips, and Metal GEMM backend design. That effort
+has fully landed: Cargo.lock contains zero candle packages,
+`crates/kiln-model/src/backend/metal.rs` has no `candle_core` surface or
+`kt_logits_to_candle` bridges, and kiln-tensor now owns `metal_matmul.rs` plus
+a metal_fwd matmul op — so the prompts describe work that no longer exists.
+Repo-wide grep found zero references to any of the three filenames outside git
+history (not even from the historical bench-results/ docs that reference other
+candle-audit scripts, which were therefore left in place as generators of
+checked-in artifacts); nothing enumerates or imports scripts/*.js generically.
+Why it mattered: 448 lines of completed-effort scratch masquerading as live
+scripting surface. Verified before AND after:
+`python3 scripts/check_source_parsing_tests.py` (0 tests, 0 reads) and
+`python3 scripts/check_repository_artifacts.py` pass with exactly three fewer
+tracked paths (6709 → 6706); `scripts/qualification/
+validate_retained_evidence.sh` passes untouched (all receipts OK); `git
+status` shows only the three deletions plus this ledger entry.
