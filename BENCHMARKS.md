@@ -773,13 +773,13 @@ the post-#534 NVTX hotspot tables are in
 
 ## macOS / Apple Silicon (Metal)
 
-Kiln also runs on Apple Silicon via candle-metal. Measured numbers are
+Kiln also runs on Apple Silicon via its native Metal backend. Measured numbers are
 not yet in this doc — the methodology below lets a contributor with
 M3/M4 Max hardware drop them in.
 
 ### Provision
 M3 Pro/Max, M4 Pro/Max, or M2 Ultra. Xcode Command Line Tools only
-(full Xcode is **not** required — candle-metal-kernels JIT-compiles MSL
+(full Xcode is **not** required — the Metal runtime JIT-compiles MSL
 at runtime). Rust stable. No x86_64 Macs — Metal perf there is
 unusable.
 
@@ -805,7 +805,7 @@ mixed-platform reports can split runs without parsing GPU names.
 - **MLX-LM**: Apple's reference inference stack; good baseline for
   Apple Silicon peak perf.
 
-Kiln's Metal backend uses `candle_nn::ops::sdpa` for both prefill and
-paged decode (the latter via an `index_select` gather from the paged
-pool). GDN linear-attention layers run on the portable candle
-composition.
+Kiln's Metal backend runs the attention hot path (prefill and paged decode,
+the latter via an `index_select` gather from the paged pool) on kiln's own
+fused MLX-style SDPA MSL kernels; GDN linear-attention layers use the
+native fused GDN dispatches with portable fallbacks.

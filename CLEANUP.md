@@ -808,3 +808,35 @@ kiln-server -p kiln-eval -p kiln-core -p kiln-scheduler` clean; `cargo test
 clean; `cargo fmt --all --check` clean; clippy JSON confirms zero remaining
 target-category warnings; `scripts/check_repository_artifacts.py` passes;
 diff audit confirms only mechanical rewrites plus the four import restores.
+## Cleanup Agent (round 32) — 2026-08-30
+
+Fixed six stale candle-era claims about the Metal backend in the live root
+docs — README.md (×3), QUICKSTART.md (×2), and BENCHMARKS.md (×3 sites in
+three blocks). #1082 fully removed candle from the workspace: Cargo.lock
+contains zero `candle-core`/`candle-nn`/`candle-metal-kernels` packages, and
+the Metal lane now runs on kiln's own substrate (`kiln-tensor/src/metal_rt/`
++ `metal_kernels.rs`, JIT-compiling MSL via objc2-metal's
+`new_library_with_source`; attention runs the native fused MLX-style SDPA
+MSL kernels, GDN uses native fused dispatches with portable fallbacks). Yet
+the docs still said "Metal backend via candle" (README build table), "macOS
+drives the candle-metal build" (README desktop section), "runs via the
+candle-metal backend" (README phase-history paragraph), "`candle-metal-kernels`
+JIT-compiles MSL" (QUICKSTART ×2, BENCHMARKS), "via candle-metal"
+(BENCHMARKS macOS section), and "Kiln's Metal backend uses
+`candle_nn::ops::sdpa` ... portable candle composition" (BENCHMARKS run
+section). All rewritten to describe the current native Metal path; README's
+phase-history line keeps its v0.2.0 historical clause with an explicit
+"(candle removed in #1082)" note. Historical narrative elsewhere (the
+BENCHMARKS broadcast_matmul fix story at line ~552) was left untouched since
+it correctly describes the pre-fix candle era. Also audited but left alone:
+docs/METAL_INTEGRATION.md and docs/metal-types-objc2-swap-plan-2026-05-28.md
+still reference candle APIs — both are dated migration-pattern records whose
+text explicitly frames candle as present-at-writing; flagged for a future
+decision on archiving them under docs/archive/.
+Verified: each corrected fact cross-checked against code before editing
+(Cargo.lock package list, kiln-tensor Cargo.toml feature comments,
+metal_rt/device.rs + metal_kernels.rs `new_library_with_source`, metal.rs
+module surface); repo-wide grep confirms zero remaining stale claims in live
+docs; docs-site `--validate-only` passes (59 documents);
+`scripts/check_repository_artifacts.py` passes (6692 tracked paths); no code
+touched. Diff is 11 insertions / 11 deletions across the three docs.

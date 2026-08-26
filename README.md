@@ -544,7 +544,7 @@ cargo build --release --features vulkan   # Vulkan compute kernels via ash + SPI
 ROCM_PATH=/opt/rocm KILN_ROCM_ARCHS='gfx90a;gfx942;gfx1100;gfx1151' cargo build --release --no-default-features --features rocm
 
 # macOS + Apple Silicon
-cargo build --release --features metal    # Metal backend via candle
+cargo build --release --features metal    # native Metal backend (kiln-owned MSL kernels)
 ```
 
 Start the source-built server (using the weights downloaded above):
@@ -1650,7 +1650,7 @@ Full v0.1 threat model and per-finding analysis: [`docs/audits/security-audit-v0
 
 Kiln Desktop is a system-tray app that wraps the `kiln` server for people who don't want to use a CLI. It spawns and supervises the `kiln` binary as a child process, shows server status in the tray, and opens a dashboard, settings, and log viewer in native windows.
 
-**Windows, Linux, and macOS (Apple Silicon).** Windows drives the CUDA build of `kiln`; Linux chooses CUDA on NVIDIA systems and Vulkan on AMD/Intel systems; macOS drives the candle-metal build on M-series hardware. Intel Macs are not supported.
+**Windows, Linux, and macOS (Apple Silicon).** Windows drives the CUDA build of `kiln`; Linux chooses CUDA on NVIDIA systems and Vulkan on AMD/Intel systems; macOS drives the native Metal build on M-series hardware. Intel Macs are not supported.
 
 **Download — [Kiln Desktop v0.2.16](https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.16):**
 
@@ -1724,7 +1724,7 @@ sudo systemctl enable --now kiln
 
 ## Status
 
-Kiln v0.1.0 shipped on 2026-04-19 and the current release line follows the latest `kiln-v*` GitHub release. Phases 1–10 are shipped or chapter-closed: core inference, LoRA serving, SFT and GRPO training over HTTP, production hardening, the Phase 6 performance sprint (FP8 KV cache, CUDA graphs, GPTQ + Marlin W4A16 quantization, fused decode kernels, SGLang-style radix prefix cache), Phase 7 developer experience, Phase 8 advanced features (adapter upload/download, TIES + concatenation merge modes, per-request adapter composition, batch completions for GRPO, training webhooks), Phase 9 public-release prep (Sigstore-signed provenance, GHCR image, signed binaries for Linux/macOS/Windows), and Phase 10 Liger-style long-context training kernels (closed by [`docs/audits/PHASE10_CLOSURE.md`](docs/audits/PHASE10_CLOSURE.md)). Inference on macOS / Apple Silicon runs via the candle-metal backend, with a fused Metal kernel family landed in v0.2.0. Phase 11 — onboarding, the first-class eval system (suites, scorers, dataset → eval synthesis, judgment flywheel, post-training auto-eval), and the dashboard overhaul (drill-in modals, live loss curves, A/B compare, ⌘K command palette) — is the active line. See [`CHANGELOG.md`](CHANGELOG.md) for what landed in the most recent release and [`BENCHMARKS.md`](BENCHMARKS.md) for the current serving acceptance protocol and historical results.
+Kiln v0.1.0 shipped on 2026-04-19 and the current release line follows the latest `kiln-v*` GitHub release. Phases 1–10 are shipped or chapter-closed: core inference, LoRA serving, SFT and GRPO training over HTTP, production hardening, the Phase 6 performance sprint (FP8 KV cache, CUDA graphs, GPTQ + Marlin W4A16 quantization, fused decode kernels, SGLang-style radix prefix cache), Phase 7 developer experience, Phase 8 advanced features (adapter upload/download, TIES + concatenation merge modes, per-request adapter composition, batch completions for GRPO, training webhooks), Phase 9 public-release prep (Sigstore-signed provenance, GHCR image, signed binaries for Linux/macOS/Windows), and Phase 10 Liger-style long-context training kernels (closed by [`docs/audits/PHASE10_CLOSURE.md`](docs/audits/PHASE10_CLOSURE.md)). Inference on macOS / Apple Silicon runs via the native Metal backend (candle removed in #1082), with a fused Metal kernel family landed in v0.2.0. Phase 11 — onboarding, the first-class eval system (suites, scorers, dataset → eval synthesis, judgment flywheel, post-training auto-eval), and the dashboard overhaul (drill-in modals, live loss curves, A/B compare, ⌘K command palette) — is the active line. See [`CHANGELOG.md`](CHANGELOG.md) for what landed in the most recent release and [`BENCHMARKS.md`](BENCHMARKS.md) for the current serving acceptance protocol and historical results.
 
 Not yet production-hardened for multi-tenant use. Designed for single-user, single-GPU deployments — your home server, your dev box, your dedicated cloud instance.
 
