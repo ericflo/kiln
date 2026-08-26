@@ -53,12 +53,7 @@ pub fn masked_select(x: &Tensor, mask: &Tensor) -> Result<Tensor> {
     let mb = m_cpu.as_bytes();
 
     // First pass: count selected.
-    let mut count = 0usize;
-    for i in 0..n {
-        if mb[i] != 0 {
-            count += 1;
-        }
-    }
+    let count = mb.iter().take(n).filter(|&&b| b != 0).count();
     let mut out = vec![0u8; count * per];
     let mut w = 0usize;
     for i in 0..n {

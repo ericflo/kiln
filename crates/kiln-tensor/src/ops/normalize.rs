@@ -62,8 +62,8 @@ pub fn normalize(x: &Tensor, p: f32, eps: f32) -> Result<Tensor> {
             .sum::<f32>()
             .powf(1.0 / p)
             .max(eps);
-        for i in 0..last {
-            let y = row[i] / pn;
+        for (i, &v) in row.iter().enumerate() {
+            let y = v / pn;
             let idx = r * last + i;
             match dtype {
                 DType::F32 => out[idx * 4..idx * 4 + 4].copy_from_slice(&y.to_le_bytes()),

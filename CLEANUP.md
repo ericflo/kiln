@@ -495,3 +495,28 @@ passes identically (992 passed, 0 failed); after, `cargo build -p kiln-model`
 target categories disappeared with no new ones; `cargo fmt --check` remains
 clean repo-wide; `scripts/check_repository_artifacts.py` passes (6709 tracked
 paths); `git status` shows only the six source edits plus this ledger entry.
+## Cleanup Agent (round 20) — 2026-08-27
+
+Fixed 5 of the 15 `clippy::needless_range_loop` warnings in
+`crates/kiln-tensor` — the carefully-reviewed subset of round 19's leftover
+candidate, chosen where index-vs-borrow semantics are provably identical:
+(1) `ops/cast.rs` ×3 (`u8_to_f32`, `u8_to_bf16`, `u8_to_f16`): each loop only
+used `i` to read `bytes[i]`; rewritten as `for &b in bytes.iter().take(n)`,
+preserving the exact n-element read window (and strictly safer if the buffer
+were ever shorter). (2) `ops/masked_select.rs`: the first-pass count loop
+(`if mb[i] != 0 { count += 1 }`) became a single iterator expression
+(`mb.iter().take(n).filter(|&&b| b != 0).count()`); the second-pass copy loop
+was left as a range loop since it genuinely needs the index for both src/dst
+slices. (3) `ops/normalize.rs`: the write-back loop indexed `row[i]` where
+`row` was built immediately above with exactly `last` elements — rewritten as
+`for (i, &v) in row.iter().enumerate()`. The remaining 10 warnings were left:
+each uses the index both for iteration AND arithmetic (strided byte offsets)
+or has a length relationship that would silently change panic semantics if
+naively converted. Why it mattered: cut the crate's largest remaining lint
+category by a third while keeping every rewrite individually auditable.
+Verified: before AND after, `cargo test -p kiln-tensor --lib` passes
+identically (992 passed, 0 failed); clippy JSON confirms exactly 5
+`needless_range_loop` warnings disappeared (15 → 10) with no new categories;
+`cargo build -p kiln-model` (downstream consumer) succeeds;
+`cargo fmt --check` remains clean repo-wide; `git status` shows only the three
+source edits plus this ledger entry.

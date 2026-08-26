@@ -368,24 +368,24 @@ fn i64_to_u32(bytes: &[u8], n: usize) -> Result<Vec<u8>> {
 
 fn u8_to_f32(bytes: &[u8], n: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(n * 4);
-    for i in 0..n {
-        out.extend_from_slice(&(bytes[i] as f32).to_le_bytes());
+    for &b in bytes.iter().take(n) {
+        out.extend_from_slice(&(b as f32).to_le_bytes());
     }
     out
 }
 
 fn u8_to_bf16(bytes: &[u8], n: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(n * 2);
-    for i in 0..n {
-        out.extend_from_slice(&half::bf16::from_f32(bytes[i] as f32).to_le_bytes());
+    for &b in bytes.iter().take(n) {
+        out.extend_from_slice(&half::bf16::from_f32(b as f32).to_le_bytes());
     }
     out
 }
 
 fn u8_to_f16(bytes: &[u8], n: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(n * 2);
-    for i in 0..n {
-        out.extend_from_slice(&half::f16::from_f32(bytes[i] as f32).to_le_bytes());
+    for &b in bytes.iter().take(n) {
+        out.extend_from_slice(&half::f16::from_f32(b as f32).to_le_bytes());
     }
     out
 }
