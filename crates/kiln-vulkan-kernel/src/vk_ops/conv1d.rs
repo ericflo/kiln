@@ -4,14 +4,14 @@
 //!   out[b, c, t] = silu(Σ_k weight[c, k] · padded[b, c, t + k])
 //! where `padded = concat(conv_state, x)` along time.
 //!
-//! Phase 4 adds a backward kernel for the linear-conv part. SiLU
-//! backward is handled separately by `vk_silu` autograd. The current
-//! forward fuses SiLU; for training the autograd-aware path
-//! `vk_causal_conv1d_pre_silu_no_grad` is added (TODO Phase 4).
-//! For now we expose:
+//! SiLU backward is handled separately by `vk_silu` autograd. The
+//! inference-facing forward fuses SiLU; the autograd-aware training
+//! path keeps the linear conv and SiLU as separate nodes. We expose:
 //!   - `vk_causal_conv1d_no_grad`: forward with fused SiLU (matches inference)
 //!   - `vk_causal_conv1d_bwd_no_grad`: backward of the linear conv only
 //!     (assumes caller already applied silu_bwd to dout)
+//!   - `vk_causal_conv1d_pre_silu_no_grad` + `vk_causal_conv1d`:
+//!     autograd-aware training path dispatching on `requires_grad`
 
 use crate::vk_ops::silu::vk_silu;
 use crate::vk_ops::{dispatch_simple, for_each_1d_tile, vk_1d_tile_elements};

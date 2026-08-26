@@ -1396,3 +1396,26 @@ reverted (`git diff` clean on api.html); `npm test --prefix scripts/docs-site`
 passes 11/11 (lib.mjs import surface intact); full smoke still blocked locally
 only by absent Chromium, identical to baseline. Diff is one file,
 43 insertions / 3 deletions.
+
+## Cleanup Agent (round 54) — 2026-09-03
+
+Removed the stale "TODO Phase 4" from `crates/kiln-vulkan-kernel/src/
+vk_ops/conv1d.rs` — this round's steering candidate (c), a TODO/FIXME audit of
+crates/*/src. The module doc claimed the autograd-aware training path
+`vk_causal_conv1d_pre_silu_no_grad` was still to be added ("is added
+(TODO Phase 4). For now we expose:"), but the work landed long ago: the
+function is implemented in the same file and `vk_causal_conv1d` dispatches to
+it whenever any input requires grad, making it the production GDN training
+path. The header's "For now we expose" list also omitted both live functions.
+Rewrote the comment to present tense listing all three exported functions;
+comment-only, zero code touched. Other TODO candidates audited and left: the
+~20 `TODO(#1082, phase 4 Metal/Vulkan): implement` fallback stubs in
+kiln-tensor/src/ops/* are genuinely unimplemented backend methods (each body
+still returns None/errors), and model_dispatch.rs's phase-2 continuous-batching
+graph-capture TODO matches reality (batch-1-only capture).
+Why it mattered: the TODO told readers a shipped training path was missing.
+Verified: `cargo fmt --check -p kiln-vulkan-kernel` clean;
+`cargo test -p kiln-vulkan-kernel --lib` passes 65/65 (first run hit the
+documented ~2-in-45 baseline flake with 3 failures; re-run green);
+grep confirms no remaining "TODO Phase 4" anywhere in crates/;
+`git status` shows only the one source edit plus this ledger entry.
