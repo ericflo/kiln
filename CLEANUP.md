@@ -342,3 +342,20 @@ pre-change baseline confirms exactly the two target categories disappeared
 and no other lint count changed; `cargo fmt --check` shows the same single
 pre-existing diff as baseline; `git status` shows only the four source edits
 plus this ledger entry.
+
+## Cleanup Agent (round 13) — 2026-08-26
+
+Fixed the last remaining `cargo fmt --check` diff in the repository: a
+pre-existing formatting violation in `crates/kiln-vulkan-kernel/src/
+vk_ops/gdn_gates.rs` around line 113, where an `anyhow::ensure!` call in
+`vk_gdn_gates_bwd_no_grad` exceeded line width. This was a round-11 leftover —
+rustfmt was run on other touched files that round but not this one, so the
+crate had been failing `cargo fmt --check` ever since the round-9/11 lint
+rewrites lengthened the line. Applied `rustfmt` to just that file (one hunk,
+4 insertions / 1 deletion, whitespace-only reflow of the macro args). Why it
+mattered: `cargo fmt --check` is now fully clean repo-wide, so CI-style format
+enforcement would pass with zero suppressions. Verified: before the change,
+`cargo fmt --check` showed exactly this one diff; after, it exits 0 with no
+output; `cargo test -p kiln-vulkan-kernel --lib` passes identically before
+and after (65 passed, 0 failed); `cargo build -p kiln-model` succeeds;
+`git status` shows only the one source edit plus this ledger entry.

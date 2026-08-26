@@ -113,7 +113,10 @@ pub fn vk_gdn_gates_bwd_no_grad(
     nv: usize,
 ) -> Result<(VkTensor, VkTensor, VkTensor, VkTensor)> {
     let total = a.num_elements();
-    anyhow::ensure!(total.is_multiple_of(nv), "gates_bwd: total not divisible by nv");
+    anyhow::ensure!(
+        total.is_multiple_of(nv),
+        "gates_bwd: total not divisible by nv"
+    );
 
     let device = a.device();
     let d_a = alloc_f32(device, total)?;
