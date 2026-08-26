@@ -134,7 +134,7 @@ pub fn vk_sdpa_prefill(q: &VkTensor, k: &VkTensor, v: &VkTensor, scale: f32) -> 
         v.shape()
     );
     anyhow::ensure!(
-        heads_q % heads_kv == 0,
+        heads_q.is_multiple_of(heads_kv),
         "heads_q ({heads_q}) must be a multiple of heads_kv ({heads_kv})"
     );
     let groups = heads_q / heads_kv;
@@ -214,7 +214,7 @@ fn check_flash_sdpa_flat_inputs(
         "vk_flash_sdpa_prefill_flat: heads > 0"
     );
     anyhow::ensure!(
-        heads_q % heads_kv == 0,
+        heads_q.is_multiple_of(heads_kv),
         "vk_flash_sdpa_prefill_flat: heads_q ({heads_q}) must be a multiple of heads_kv ({heads_kv})"
     );
     anyhow::ensure!(
@@ -367,7 +367,7 @@ pub fn vk_flash_sdpa_decode_split_flat_no_grad(
         "vk_flash_sdpa_decode_split_flat: empty key window"
     );
     anyhow::ensure!(
-        heads_q % heads_kv == 0,
+        heads_q.is_multiple_of(heads_kv),
         "vk_flash_sdpa_decode_split_flat: heads_q ({heads_q}) must be a multiple of heads_kv ({heads_kv})"
     );
     anyhow::ensure!(

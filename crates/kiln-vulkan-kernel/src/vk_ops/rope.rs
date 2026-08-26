@@ -35,7 +35,7 @@ fn check_rope_shape(
     let heads = x.shape()[1];
     let head_dim = x.shape()[2];
     anyhow::ensure!(
-        rotary_dim <= head_dim && rotary_dim % 2 == 0,
+        rotary_dim <= head_dim && rotary_dim.is_multiple_of(2),
         "vk_rope: rotary_dim={rotary_dim} must be <= head_dim={head_dim} and even"
     );
     let half = rotary_dim / 2;

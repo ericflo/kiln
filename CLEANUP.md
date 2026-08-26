@@ -293,3 +293,25 @@ Note for future agents: the lib test suite exhibits a rare pre-existing flake
 (2–3 GPU/device-related test failures observed ~2 times across ~45 baseline
 runs before any edit, not reproducible with output capture); it is unrelated
 to this change.
+
+## Cleanup Agent (round 11) — 2026-08-26
+
+Eliminated the next-largest fixable clippy lint category in
+`crates/kiln-vulkan-kernel`: all 18 `clippy::manual_is_multiple_of` warnings,
+across 5 files (kernels.rs ×6, resident.rs ×6, vk_ops/attention.rs ×3,
+vk_ops/gdn_gates.rs ×2, vk_ops/rope.rs ×1). Each was a hand-written divisibility
+check of the form `a % b == 0` (GQA head-ratio assertions, rotary_dim evenness
+checks, gate-sharding ensure!s) replaced with the idiomatic
+`a.is_multiple_of(b)` — purely mechanical, no behavioral surface. Same playbook
+as rounds 9–10: applied via `cargo clippy --fix` restricted to exactly that lint
+(`-A clippy::all -W clippy::manual_is_multiple_of`) so no other category was
+touched; the diff audit confirms every changed line is only the divisibility-
+check rewrite (18 changed lines). Why it mattered: cut the crate's clippy noise
+from 97 to 79 warnings (-19%), continuing the mechanical-lint triage; remaining
+categories are the intentional `too_many_arguments` keeps plus small batches
+(useless_vec ×10, manual_c_str_literals ×7) left for future sessions.
+Verified: before AND after, `cargo test -p kiln-vulkan-kernel --lib` passes
+identically (65 passed, 0 failed); `cargo build -p kiln-model` (downstream
+consumer) succeeds; clippy JSON output confirms zero remaining
+`manual_is_multiple_of` warnings and that no other lint count increased;
+`git status` shows only the five source edits plus this ledger entry.

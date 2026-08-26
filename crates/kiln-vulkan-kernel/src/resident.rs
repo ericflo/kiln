@@ -1425,7 +1425,7 @@ pub fn dispatch_rotary_one_resident(
     rotary_dim: usize,
 ) -> Result<()> {
     anyhow::ensure!(
-        rotary_dim <= head_dim && rotary_dim % 2 == 0,
+        rotary_dim <= head_dim && rotary_dim.is_multiple_of(2),
         "rotary_one_resident: rotary_dim={rotary_dim} must be <= head_dim={head_dim} and even"
     );
     let need = (rows * num_heads * head_dim * 4) as u64;
@@ -1476,7 +1476,7 @@ pub fn dispatch_rotary_qk_resident(
     rotary_dim: usize,
 ) -> Result<()> {
     anyhow::ensure!(
-        rotary_dim <= head_dim && rotary_dim % 2 == 0,
+        rotary_dim <= head_dim && rotary_dim.is_multiple_of(2),
         "rotary_qk_resident: rotary_dim={rotary_dim} must be <= head_dim={head_dim} and even"
     );
     let q_need = (rows * num_q_heads * head_dim * 4) as u64;
@@ -1561,7 +1561,7 @@ pub fn dispatch_rotary_q_paged_kv_write_slots_resident(
         "rotary_q_paged_kv_write_slots_resident: push constant dimension exceeds u32"
     );
     anyhow::ensure!(
-        rotary_dim <= head_dim && rotary_dim % 2 == 0,
+        rotary_dim <= head_dim && rotary_dim.is_multiple_of(2),
         "rotary_q_paged_kv_write_slots_resident: rotary_dim={rotary_dim} must be <= head_dim={head_dim} and even"
     );
     let q_elems = batch
@@ -1767,7 +1767,7 @@ pub fn dispatch_paged_attn_decode_batch_f32_resident(
         "paged_attn_resident: head_dim {head_dim} > 256"
     );
     anyhow::ensure!(
-        num_heads % num_kv_heads == 0,
+        num_heads.is_multiple_of(num_kv_heads),
         "paged_attn_resident: num_heads {num_heads} not divisible by num_kv_heads {num_kv_heads}"
     );
     anyhow::ensure!(
@@ -1827,7 +1827,7 @@ pub fn dispatch_paged_attn_decode_batch_paged_f32_resident(
         "paged_attn_paged_resident: head_dim {head_dim} > 256"
     );
     anyhow::ensure!(
-        num_heads % num_kv_heads == 0,
+        num_heads.is_multiple_of(num_kv_heads),
         "paged_attn_paged_resident: num_heads not divisible by num_kv_heads"
     );
     anyhow::ensure!(
@@ -1912,7 +1912,7 @@ pub fn record_paged_attn_decode_batch_paged_splitk_resident(
         "paged_attn_splitk_resident: num_chunks {num_chunks} exceeds max {PAGED_ATTN_SPLITK_MAX_CHUNKS}"
     );
     anyhow::ensure!(
-        num_heads % num_kv_heads == 0,
+        num_heads.is_multiple_of(num_kv_heads),
         "paged_attn_splitk_resident: num_heads not divisible by num_kv_heads"
     );
 

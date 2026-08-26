@@ -4564,7 +4564,7 @@ pub fn dispatch_paged_attn_decode_batch_f32_bytes(
         "paged_attn_decode_batch supports head_dim <= 256"
     );
     anyhow::ensure!(
-        num_heads % num_kv_heads == 0,
+        num_heads.is_multiple_of(num_kv_heads),
         "paged_attn_decode_batch requires integer GQA ratio"
     );
     anyhow::ensure!(
@@ -4757,7 +4757,7 @@ pub fn dispatch_paged_attn_decode_batch_paged_f32_bytes(
         total_slots * num_kv_heads * head_dim * 4,
     );
     anyhow::ensure!(
-        num_heads % num_kv_heads == 0,
+        num_heads.is_multiple_of(num_kv_heads),
         "paged_attn_decode_batch_paged: requires integer GQA ratio"
     );
     for &len in seq_lens {
@@ -4968,7 +4968,7 @@ pub fn dispatch_paged_attn_decode_batch_paged_splitk_f32_bytes(
         kv_expected,
     );
     anyhow::ensure!(
-        num_kv_heads > 0 && num_heads % num_kv_heads == 0,
+        num_kv_heads > 0 && num_heads.is_multiple_of(num_kv_heads),
         "paged_attn_decode_batch_paged_splitk: requires integer GQA ratio"
     );
     for &len in seq_lens {
@@ -9514,7 +9514,7 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state_bytes(
         "native-head resident recurrent q_heads must be positive"
     );
     anyhow::ensure!(
-        heads % q_heads == 0,
+        heads.is_multiple_of(q_heads),
         "native-head resident recurrent heads {heads} must be divisible by q_heads {q_heads}"
     );
 
@@ -10153,7 +10153,7 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_with_options_bytes(
         "native-head recurrent q_heads must be positive"
     );
     anyhow::ensure!(
-        heads % q_heads == 0,
+        heads.is_multiple_of(q_heads),
         "native-head recurrent heads {heads} must be divisible by q_heads {q_heads}"
     );
 
@@ -10221,7 +10221,7 @@ pub fn dispatch_gdn_recurrent_qk_norm_step_native_head_last_with_options_bytes(
         "native-head qk-norm recurrent q_heads must be positive"
     );
     anyhow::ensure!(
-        heads % q_heads == 0,
+        heads.is_multiple_of(q_heads),
         "native-head qk-norm recurrent heads {heads} must be divisible by q_heads {q_heads}"
     );
     anyhow::ensure!(
