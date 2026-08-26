@@ -347,7 +347,7 @@ This section snapshots the Phase 7 (developer experience) kt_api
 migration as visible from a profiling / hot-path perspective. The
 short version: **kt-typed paths are now production-driveable on CUDA
 end-to-end, and the kt_api migration is essentially complete at the
-kernel-crate level (Tier 1 of `docs/CANDLE_REMOVAL_PLAN.md`).**
+kernel-crate level (Tier 1 of `docs/archive/candle-removal/CANDLE_REMOVAL_PLAN.md`).**
 
 ### What's production-driveable today
 
@@ -368,7 +368,7 @@ That's **~95 production call sites** carrying kt-typed tensors on the
 decode hot path. The candle-typed surface on each crate is no longer
 called from `forward.rs` or `cuda_train.rs`; it survives only as
 back-compat scaffolding pending the crate-level `Cargo.toml` candle
-dependency drop (Tier-1 closeout in `docs/CANDLE_REMOVAL_PLAN.md`).
+dependency drop (Tier-1 closeout in `docs/archive/candle-removal/CANDLE_REMOVAL_PLAN.md`).
 
 ### Profiling implications
 
@@ -405,7 +405,7 @@ and deleting the candle fallback branches. Tier-2 crates
 (`kiln-opd-loss-kernel`, `kiln-flce-kernel` Phase B closeout,
 `kiln-vulkan-kernel` shim cleanup) follow. The `kiln-kt-bridge` candle
 dep is removed last, at which point `vendor/candle-core/` is deleted
-(Tier 5). The full sequence lives in `docs/CANDLE_REMOVAL_PLAN.md`.
+(Tier 5). The full sequence lives in `docs/archive/candle-removal/CANDLE_REMOVAL_PLAN.md`.
 
 ### Substrate-side passthroughs (2026-05-26)
 

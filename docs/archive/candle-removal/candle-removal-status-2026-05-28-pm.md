@@ -4,8 +4,8 @@
 > migration state from May 2026. The `KILN_USE_TAPE_*` and
 > `KILN_USE_TAPE_AUTHORITATIVE` switches mentioned below were removed without
 > aliases or replacement fields. Current GPU training uses an internal tape
-> scope as its sole routing authority. See [Configuration](./CONFIGURATION.md)
-> and [Native SFT Profile](./NATIVE_SFT_PROFILE.md) for current behavior.
+> scope as its sole routing authority. See [Configuration](../../CONFIGURATION.md)
+> and [Native SFT Profile](../../NATIVE_SFT_PROFILE.md) for current behavior.
 
 Quick-reference dashboard so a fresh agent can read current state without
 scanning 110 KB of issue #1082 body + 7 STOP docs. Companion to
@@ -74,7 +74,7 @@ candle-free replacement for `kiln-train::trainer::InjectTensorGradient`:
   returns a candle scalar zero (matches the existing `apply_op1`
   callsite contract).
 
-What's left for CP-4 closeout (`docs/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`):
+What's left for CP-4 closeout (`docs/archive/candle-removal/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`):
 
 1. ✅ Wrap `trainer::sft_train` step root in `with_tape_scope_emit_to_grad_store` — **landed in `675e0dea`** (gated on `KILN_USE_TAPE_FORWARD=1`).
 2. ✅ **6 InjectTensorGradient sites flipped + struct deleted** (Option-2 substrate landed across e2f8723c → a86e9b12; 3/3 parity tests pass on A6000 — incl. `inject_grad_propagation_through_intermediate`, the production pattern that the Option-0 substrate couldn't handle).

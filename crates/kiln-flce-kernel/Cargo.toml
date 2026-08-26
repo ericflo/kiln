@@ -49,4 +49,4 @@ rocm = ["kiln-tensor/rocm"]
 # `candle-nn = { workspace = true }` dev-dep was unused — no src/, tests/,
 # or benches/ file referenced `candle_nn` — and was dropped as part of
 # the #1082 candle-core dep evaluation
-# (`docs/kiln-flce-kernel-candle-drop-stop-2026-05-28.md`).
+# (`docs/archive/candle-removal/kiln-flce-kernel-candle-drop-stop-2026-05-28.md`).

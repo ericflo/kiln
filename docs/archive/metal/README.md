@@ -17,5 +17,5 @@ longer reflect the codebase.
   substrate.
 
 Companion STOP/status docs from the same campaign remain under `docs/`
-(e.g. `docs/metal-cargo-toml-candle-drop-stop-2026-05-28.md`,
-`docs/candle-removal-status-2026-05-28-pm.md`).
+(e.g. `docs/archive/candle-removal/metal-cargo-toml-candle-drop-stop-2026-05-28.md`,
+`docs/archive/candle-removal/candle-removal-status-2026-05-28-pm.md`).

@@ -316,7 +316,7 @@ impl MetalStorage {
     /// Mirror of [`crate::CudaStorage::zeros_ctx`] (commit d3caf46b) —
     /// same shape, same rationale (the parallel-constructor step of
     /// the CP-1 substrate lift documented in
-    /// `docs/issue-1082-tier-4-5-roadmap-2026-05-27.md`).
+    /// `docs/archive/candle-removal/issue-1082-tier-4-5-roadmap-2026-05-27.md`).
     pub fn zeros_kt(
         device: &MetalRawDevice,
         device_index: usize,
@@ -461,7 +461,7 @@ impl MetalStorage {
     ///
     /// Mirror of [`crate::CudaStorage::context`] — same shape, same
     /// rationale (the read-bridge step of the CP-1 substrate lift
-    /// documented in `docs/issue-1082-tier-4-5-roadmap-2026-05-27.md`).
+    /// documented in `docs/archive/candle-removal/issue-1082-tier-4-5-roadmap-2026-05-27.md`).
     pub fn metal_device_handle(&self) -> MetalRawDevice {
         self.metal_handle.clone()
     }

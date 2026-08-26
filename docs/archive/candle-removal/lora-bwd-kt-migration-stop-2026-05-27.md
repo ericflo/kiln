@@ -3,7 +3,7 @@
 > Historical audit. The three Candle LoRA `CustomOp::bwd` bodies and the
 > uncalled `try_kt_mul_scalar` scaffold described below were subsequently
 > deleted; the kt tape is now the sole LoRA autograd producer. See
-> `docs/CANDLE_REMOVAL_PLAN.md` for current guidance.
+> `docs/archive/candle-removal/CANDLE_REMOVAL_PLAN.md` for current guidance.
 
 ## TL;DR
 

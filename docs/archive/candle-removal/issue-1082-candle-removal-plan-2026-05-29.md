@@ -4,8 +4,8 @@
 > migration state from May 2026. The `KILN_USE_TAPE_*` and
 > `KILN_USE_TAPE_AUTHORITATIVE` switches mentioned below were removed without
 > aliases or replacement fields. Current GPU training uses an internal tape
-> scope as its sole routing authority. See [Configuration](./CONFIGURATION.md)
-> and [Native SFT Profile](./NATIVE_SFT_PROFILE.md) for current behavior.
+> scope as its sole routing authority. See [Configuration](../../CONFIGURATION.md)
+> and [Native SFT Profile](../../NATIVE_SFT_PROFILE.md) for current behavior.
 
 ## 1. Executive Reframe: The Substrate Is Done — This Is Mechanical Type-Swapping
 

@@ -7,7 +7,7 @@ This doc lays out the **step-by-step PR sequence** for retiring the
 substrate.
 
 It supersedes the **scope-blocked** STOP doc
-[`metal-cargo-toml-candle-drop-stop-2026-05-28.md`](../../metal-cargo-toml-candle-drop-stop-2026-05-28.md):
+[`metal-cargo-toml-candle-drop-stop-2026-05-28.md`](../candle-removal/metal-cargo-toml-candle-drop-stop-2026-05-28.md):
 that doc was correctly written when the touch scope was constrained to
 `kiln-tensor`-only; this doc covers the multi-PR sequence that crosses
 into `kiln-model` (the dominant consumer) and lands the substrate flip
@@ -19,9 +19,9 @@ autograd is not required to flip the Metal substrate. They can ship
 in parallel.
 
 Companion docs:
-- [`candle-removal-status-2026-05-28-pm.md`](../../candle-removal-status-2026-05-28-pm.md) — overall dashboard
-- [`issue-1082-tier-4-5-roadmap-2026-05-27.md`](../../issue-1082-tier-4-5-roadmap-2026-05-27.md) — CP-2 description (parallel to CP-1)
-- [`metal-cargo-toml-candle-drop-stop-2026-05-28.md`](../../metal-cargo-toml-candle-drop-stop-2026-05-28.md) — the prior scope-blocked attempt
+- [`candle-removal-status-2026-05-28-pm.md`](../candle-removal/candle-removal-status-2026-05-28-pm.md) — overall dashboard
+- [`issue-1082-tier-4-5-roadmap-2026-05-27.md`](../candle-removal/issue-1082-tier-4-5-roadmap-2026-05-27.md) — CP-2 description (parallel to CP-1)
+- [`metal-cargo-toml-candle-drop-stop-2026-05-28.md`](../candle-removal/metal-cargo-toml-candle-drop-stop-2026-05-28.md) — the prior scope-blocked attempt
 
 ---
 
@@ -407,7 +407,7 @@ land.
 ### Should this update the existing STOP doc?
 
 When **Step 14 lands**, the existing STOP doc
-[`metal-cargo-toml-candle-drop-stop-2026-05-28.md`](../../metal-cargo-toml-candle-drop-stop-2026-05-28.md)
+[`metal-cargo-toml-candle-drop-stop-2026-05-28.md`](../candle-removal/metal-cargo-toml-candle-drop-stop-2026-05-28.md)
 should get a closing entry like:
 
 ```markdown
@@ -418,7 +418,7 @@ landed in PR #NNNN. This STOP doc is closed.
 ```
 
 The dashboard row in
-[`candle-removal-status-2026-05-28-pm.md`](../../candle-removal-status-2026-05-28-pm.md)
+[`candle-removal-status-2026-05-28-pm.md`](../candle-removal/candle-removal-status-2026-05-28-pm.md)
 also flips from `kiln-tensor: Yes (metal_types re-exports)` to `No` (still
 `Yes` if CP-1 hasn't landed for the CUDA side).
 
@@ -462,7 +462,7 @@ since they touch disjoint helper families in `metal.rs`.
 ## 7. Why this doc supersedes the prior STOP
 
 The earlier STOP doc
-[`metal-cargo-toml-candle-drop-stop-2026-05-28.md`](../../metal-cargo-toml-candle-drop-stop-2026-05-28.md)
+[`metal-cargo-toml-candle-drop-stop-2026-05-28.md`](../candle-removal/metal-cargo-toml-candle-drop-stop-2026-05-28.md)
 was scope-blocked: the task that produced it constrained edits to
 `kiln-tensor` only. That STOP correctly identified the 5 chokepoint
 re-exports as the blocker; this doc completes the analysis by:
@@ -485,9 +485,9 @@ record; this doc is the forward plan.
 
 ## See also
 
-- [`candle-removal-status-2026-05-28-pm.md`](../../candle-removal-status-2026-05-28-pm.md) — dashboard
-- [`issue-1082-tier-4-5-roadmap-2026-05-27.md`](../../issue-1082-tier-4-5-roadmap-2026-05-27.md) — CP-2 description
-- [`metal-cargo-toml-candle-drop-stop-2026-05-28.md`](../../metal-cargo-toml-candle-drop-stop-2026-05-28.md) — predecessor STOP doc
+- [`candle-removal-status-2026-05-28-pm.md`](../candle-removal/candle-removal-status-2026-05-28-pm.md) — dashboard
+- [`issue-1082-tier-4-5-roadmap-2026-05-27.md`](../candle-removal/issue-1082-tier-4-5-roadmap-2026-05-27.md) — CP-2 description
+- [`metal-cargo-toml-candle-drop-stop-2026-05-28.md`](../candle-removal/metal-cargo-toml-candle-drop-stop-2026-05-28.md) — predecessor STOP doc
 - `crates/kiln-tensor/src/metal_types.rs:47-62` — in-source migration notes (the `Raw*` substrate's intent)
 - `crates/kiln-tensor/src/metal_storage.rs:455-560` — `metal_softmax_last_axis` (the implementation template for Step 2)
 - Commits `3f00a979`, `a07e7781`, `ae08652c`, `d8d43c6d`, `56bdaffd` — the Wave 14 substrate-prep landings this doc builds on.

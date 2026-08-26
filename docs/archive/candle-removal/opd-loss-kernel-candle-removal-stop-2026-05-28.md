@@ -4,8 +4,8 @@
 > migration state from May 2026. The `KILN_USE_TAPE_*` and
 > `KILN_USE_TAPE_AUTHORITATIVE` switches mentioned below were removed without
 > aliases or replacement fields. Current GPU training uses an internal tape
-> scope as its sole routing authority. See [Configuration](./CONFIGURATION.md)
-> and [Native SFT Profile](./NATIVE_SFT_PROFILE.md) for current behavior.
+> scope as its sole routing authority. See [Configuration](../../CONFIGURATION.md)
+> and [Native SFT Profile](../../NATIVE_SFT_PROFILE.md) for current behavior.
 
 ## TL;DR
 
@@ -284,7 +284,7 @@ candle dependency. The re-audit at HEAD (after `73109cbe`,
   the CUDA feature to compile and builds successfully under
   `cargo check -p kiln-opd-loss-kernel --features cuda --tests` per
   the wave-13 pod runs documented in
-  `docs/kt-tape-substrate-landed-in-kiln-train-2026-05-28.md`).
+  `docs/archive/candle-removal/kt-tape-substrate-landed-in-kiln-train-2026-05-28.md`).
 
 * No new candle test-only refs were introduced by wave-14. There
   is no surviving candle ref that would benefit from a

@@ -85,7 +85,7 @@
 //!   declared in [`phase_b`]. The candle `CustomOp1` wrapper that
 //!   previously hosted this (`OpdLossCustomOp` / `opd_top_k_reverse_kl_phase_b`)
 //!   was deleted in (#1082, 2026-05-28); see
-//!   `docs/opd-loss-kernel-candle-removal-stop-2026-05-28.md`.
+//!   `docs/archive/candle-removal/opd-loss-kernel-candle-removal-stop-2026-05-28.md`.
 //!
 //! # Numerical contract
 //!

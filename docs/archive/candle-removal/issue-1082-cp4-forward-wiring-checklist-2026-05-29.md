@@ -6,8 +6,8 @@
 > migration state from May 2026. The `KILN_USE_TAPE_*` and
 > `KILN_USE_TAPE_AUTHORITATIVE` switches mentioned below were removed without
 > aliases or replacement fields. Current GPU training uses an internal tape
-> scope as its sole routing authority. See [Configuration](./CONFIGURATION.md)
-> and [Native SFT Profile](./NATIVE_SFT_PROFILE.md) for current behavior.
+> scope as its sole routing authority. See [Configuration](../../CONFIGURATION.md)
+> and [Native SFT Profile](../../NATIVE_SFT_PROFILE.md) for current behavior.
 
 This is the authoritative wiring plan for the tape-authoritative training forward pass (prefill, `seq_len>1`, F32 tiny model on CUDA, all 7 tape gates on). It maps every op on the `cross_entropy → embedding` loss→input path, groups the unwired ops into monotonic-coverage increments, and lists the new adapters and chaining hazards. The measured starting state is `tape_has_grad=0/50` LoRA Vars (~5% of the forward wired).
 

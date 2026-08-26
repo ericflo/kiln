@@ -1,7 +1,7 @@
 //! kt-tape FLCE Phase B forward+backward — Phase 6a/CP-4 pilot port of
 //! `kt_forward_op.rs` from `candle::CustomOp1` (`KtForwardOp1`) onto the
 //! kt-side `kiln_autograd::Tape` substrate ((#1082) — see
-//! `docs/CANDLE_REMOVAL_PLAN.md`).
+//! `docs/archive/candle-removal/CANDLE_REMOVAL_PLAN.md`).
 //!
 //! # Why this module exists
 //!

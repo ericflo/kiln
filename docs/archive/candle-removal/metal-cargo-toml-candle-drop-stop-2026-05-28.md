@@ -200,7 +200,7 @@ used.
 
 ## See also
 
-- `docs/issue-1082-tier-4-5-roadmap-2026-05-27.md` — the broader #1082
+- `docs/archive/candle-removal/issue-1082-tier-4-5-roadmap-2026-05-27.md` — the broader #1082
   roadmap. Section CP-2 ("`kiln-tensor::MetalStorage` candle removal
   (parallel to CP-1)") is now complete; the remaining work this STOP
   doc describes is the chokepoint-flip side of the same item.

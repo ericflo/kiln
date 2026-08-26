@@ -47,7 +47,7 @@
 // were removed. Production now runs the forward as a kt-typed
 // composite (`crate::kt_api::per_position_forward_kt`) on CUDA storage,
 // and the metrics path had no live caller. See
-// `docs/opd-loss-kernel-candle-removal-stop-2026-05-28.md` for the
+// `docs/archive/candle-removal/opd-loss-kernel-candle-removal-stop-2026-05-28.md` for the
 // audit; the deletion drops 1 fused FWD kernel + 1 metrics kernel
 // (~290 LOC) while keeping the kt-shim and kt-tape paths bit-identical
 // on the backward via the surviving `kiln_opd_topk_kl_bwd_*` symbols.
@@ -410,7 +410,7 @@ extern "C" int32_t kiln_opd_topk_kl_bwd_f32(
 // `kiln_opd_topk_metrics_{bf16,f32}` were deleted in (#1082) — they were
 // the device-side path for `crate::phase_b::compute_per_position_metrics`,
 // which had no external callers (the audit at
-// `docs/opd-loss-kernel-candle-removal-stop-2026-05-28.md` records the
+// `docs/archive/candle-removal/opd-loss-kernel-candle-removal-stop-2026-05-28.md` records the
 // scan). The kt-typed sibling `compute_per_position_metrics_kt` covers
 // the same diagnostic via a CUDA composite (`per_position_forward_kt`)
 // when (and if) a caller wires it up.

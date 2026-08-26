@@ -1334,7 +1334,7 @@ deleted.** `CudaLoraAddF32`, `CudaLoraLinearBf16`, and
 `crates/kiln-model/src/forward.rs`; the kt tape
 (`try_tape_lora_linear_cuda` / `try_tape_lora_add_cuda`) is the
 sole LoRA autograd producer. The May 2026 STOP analysis remains in
-`docs/lora-bwd-kt-migration-stop-2026-05-27.md` as a historical
+`docs/archive/candle-removal/lora-bwd-kt-migration-stop-2026-05-27.md` as a historical
 record, not current implementation guidance. The unused
 `try_kt_mul_scalar` scaffold and its environment gate were removed
 after whole-tree reachability checks found no call site.

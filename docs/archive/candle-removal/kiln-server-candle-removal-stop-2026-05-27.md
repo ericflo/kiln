@@ -211,5 +211,5 @@ attempting to "remove candle from kiln-server" should:
    reduces zero dependencies and adds zero value.
 
 This STOP follows the same pattern as
-`docs/lora-bwd-kt-migration-stop-2026-05-27.md`: re-audit at HEAD,
+`docs/archive/candle-removal/lora-bwd-kt-migration-stop-2026-05-27.md`: re-audit at HEAD,
 confirm the prior tier sequencing, refuse to ship cosmetic churn.

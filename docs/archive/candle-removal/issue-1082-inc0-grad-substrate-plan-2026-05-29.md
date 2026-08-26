@@ -4,8 +4,8 @@
 > migration state from May 2026. The `KILN_USE_TAPE_*` and
 > `KILN_USE_TAPE_AUTHORITATIVE` switches mentioned below were removed without
 > aliases or replacement fields. Current GPU training uses an internal tape
-> scope as its sole routing authority. See [Configuration](./CONFIGURATION.md)
-> and [Native SFT Profile](./NATIVE_SFT_PROFILE.md) for current behavior.
+> scope as its sole routing authority. See [Configuration](../../CONFIGURATION.md)
+> and [Native SFT Profile](../../NATIVE_SFT_PROFILE.md) for current behavior.
 
 > Map+synthesis of the kiln-train grad-delivery/optimizer-keying surface. 6-PR sequence to move off candle GradStore/Var/TensorId. PR1 (moments re-key) landed first.
 

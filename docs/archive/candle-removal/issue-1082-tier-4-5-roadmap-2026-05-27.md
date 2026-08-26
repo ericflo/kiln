@@ -79,7 +79,7 @@ Two `CustomOp::bwd` families were **deliberately not migrated**:
   per-step Phase-7 `try_kt_*` gates are already the closest
   status-quo-preserving migration.
 - 3× `CudaLora*::bwd` — STOPped in `cca536cb` and re-confirmed by
-  [`docs/lora-bwd-kt-migration-stop-2026-05-27.md`](./lora-bwd-kt-migration-stop-2026-05-27.md).
+  [`docs/archive/candle-removal/lora-bwd-kt-migration-stop-2026-05-27.md`](./lora-bwd-kt-migration-stop-2026-05-27.md).
   Same shape as sigmoid_mul: multi-step composites without a fused
   backward FFI. Revisit when `kiln_lora_*_bwd` kernels land in
   `kiln-rmsnorm-kernel/csrc/`.
@@ -185,9 +185,9 @@ underlying API didn't actually require candle:
 When a tier looked superficially migratable but the substrate revealed
 deeper blockers, the audit landed as a STOP doc rather than churn:
 
-- [`docs/kiln-server-candle-removal-stop-2026-05-27.md`](./kiln-server-candle-removal-stop-2026-05-27.md)
+- [`docs/archive/candle-removal/kiln-server-candle-removal-stop-2026-05-27.md`](./kiln-server-candle-removal-stop-2026-05-27.md)
   (`02d5e88b`) — kiln-server cannot drop candle without Tier 3.
-- [`docs/lora-bwd-kt-migration-stop-2026-05-27.md`](./lora-bwd-kt-migration-stop-2026-05-27.md)
+- [`docs/archive/candle-removal/lora-bwd-kt-migration-stop-2026-05-27.md`](./lora-bwd-kt-migration-stop-2026-05-27.md)
   (`038cd756`) — the three LoRA `CustomOp::bwd` bodies cannot bridge-migrate
   without fused `kiln_lora_*_bwd` FFI kernels.
 - In-source STOPs on test/example files (each `(#1082)` commit):

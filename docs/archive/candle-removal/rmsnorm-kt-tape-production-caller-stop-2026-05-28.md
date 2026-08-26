@@ -4,8 +4,8 @@
 > migration state from May 2026. The `KILN_USE_TAPE_*` and
 > `KILN_USE_TAPE_AUTHORITATIVE` switches mentioned below were removed without
 > aliases or replacement fields. Current GPU training uses an internal tape
-> scope as its sole routing authority. See [Configuration](./CONFIGURATION.md)
-> and [Native SFT Profile](./NATIVE_SFT_PROFILE.md) for current behavior.
+> scope as its sole routing authority. See [Configuration](../../CONFIGURATION.md)
+> and [Native SFT Profile](../../NATIVE_SFT_PROFILE.md) for current behavior.
 
 ## TL;DR
 
@@ -491,5 +491,5 @@ describes** (a clean replacement of `loss.backward()` with
 `Tape::backward`). The bridge path lands earlier; the deletion
 moment is when every kernel-crate `kt_forward_op.rs` has its
 `try_tape_*_cuda` sibling AND production training has flipped to
-the bridge by default. See `docs/candle-removal-status-2026-05-28-pm.md`
+the bridge by default. See `docs/archive/candle-removal/candle-removal-status-2026-05-28-pm.md`
 for the current per-crate state.

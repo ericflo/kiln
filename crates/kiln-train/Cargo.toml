@@ -13,7 +13,7 @@ license.workspace = true
 # `loss.backward()`; the kt-tape entry sits alongside it as the
 # substrate proof point that future PRs extend to cover the full
 # per-step graph. See `crates/kiln-train/src/tape_step.rs` module
-# docstring + `docs/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`
+# docstring + `docs/archive/candle-removal/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`
 # for the full CP-4 rationale. (#1082)
 kiln-autograd = { workspace = true }
 kiln-core = { workspace = true }
@@ -40,7 +40,7 @@ kiln-tensor = { workspace = true }
 # profile. This is the substrate PR for the
 # `cd_types::TensorId (= candle_core::TensorId)` →
 # `kiln_tensor_id::TensorId` migration tracked in
-# `docs/kiln-train-candle-core-deps-still-required-2026-05-28.md`. The
+# `docs/archive/candle-removal/kiln-train-candle-core-deps-still-required-2026-05-28.md`. The
 # crate is dependency-free (see `crates/kiln-tensor-id/Cargo.toml`), so
 # pulling it into the default build adds no transitive cost.
 # `vk_train.rs` continues to import the symbol from

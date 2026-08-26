@@ -47,7 +47,7 @@
 //!   `kiln_opd_topk_metrics_{bf16,f32}` FFI declarations (no external
 //!   callers; the kt-typed sibling `compute_per_position_metrics_kt`
 //!   covers the same diagnostic, and neither has a live caller as of
-//!   the audit in `docs/opd-loss-kernel-candle-removal-stop-2026-05-28.md`).
+//!   the audit in `docs/archive/candle-removal/opd-loss-kernel-candle-removal-stop-2026-05-28.md`).
 //!
 //! The matching `extern "C"` definitions for the deleted kernels in
 //! `csrc/opd_topk_kl.cu` are removed in the same commit so the static

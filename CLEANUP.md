@@ -863,3 +863,38 @@ in `docs/site/docs-manifest.json`, scripts, or CI. Verified: scripted link
 audit of all three files in their new location resolves every relative link
 (0 MISSING); `cargo check -p kiln-tensor --lib` passes with only the
 pre-existing `cuda_tag` dead-code warning, identical before and after.
+## Cleanup Agent (round 34) — 2026-08-30
+
+Archived all 19 dated candle-era coordination records under `docs/` (the
+Round-33 steering primary candidate) into a new `docs/archive/candle-removal/`
+directory: CANDLE_REMOVAL_PLAN.md, candle-removal-status-2026-05-28-pm.md,
+inject-grad-flip-blocked-2026-05-28.md, all seven issue-1082-* plan/checklist/
+roadmap/audit docs, and the eight per-crate STOP/status docs (kiln-flce,
+kiln-rmsnorm, kiln-server, kiln-train-deps, kt-tape-substrate, lora-bwd,
+metal-cargo-toml, opd-loss, rmsnorm-caller). All are fully landed #1082
+records — candle is completely removed from Cargo.lock and every backend runs
+kt-native — so none qualified as still-live. Inventory classification: 19 of
+19 archived; zero live-doc consumers; inbound references found only in code
+comments, two archived Metal docs, and archived PROFILING.md, all rewritten.
+Link rewrites: within moved files, the boilerplate "current behavior" links to
+./CONFIGURATION.md / ./NATIVE_SFT_PROFILE.md deepened to ../../ (20 links),
+and backtick `docs/<member>.md` prose mentions updated to the archive path;
+inbound: 12 crate files' comment/doc paths (kiln-autograd, kiln-flce-kernel
+incl. its Cargo.toml, kiln-opd-loss-kernel incl. opd_topk_kl.cu ×2,
+kiln-rmsnorm-kernel, kiln-tensor/metal_storage.rs ×2, kiln-train ×4),
+docs/archive/metal/{metal-types-objc2-swap-plan,README}.md (10 links + 2 prose
+paths → ../candle-removal/), and PROFILING.md's three CANDLE_REMOVAL_PLAN
+pointers. Added docs/archive/candle-removal/README.md stating the archival
+rationale and completion status, mirroring round 33's metal/ precedent.
+Why it mattered: ~5,900 lines of completed-effort coordination scratch no
+longer masquerade as live top-level docs; docs/ root drops from 60 to 41
+entries with the #1082 story consolidated next to its metal/ sibling.
+Verified: scripted relative-link audit over all 19 moved files + both edited
+archive docs resolves every link (0 MISSING); repo-wide git grep for each
+filename finds no un-updated reference outside CLEANUP.md/git internals/
+protected .qualification search indices; `cargo check` on all six affected
+crates passes with only pre-existing warnings identical to baseline
+(cuda_tag dead_code, grpo dead_code); docs-site --validate-only passes
+(59 documents — none of these files were ever in docs-manifest.json);
+scripts/check_repository_artifacts.py passes; git status shows exactly the
+19 renames, 15 modified files, new README, and this ledger entry.

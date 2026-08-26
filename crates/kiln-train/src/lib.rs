@@ -63,7 +63,7 @@ pub mod sft_tape_shim;
 // CP-4 substrate pilot — `kiln_autograd::Tape`-based parallel training
 // entry. Sits alongside the candle-typed `trainer` module so future PRs
 // can extend it to cover the full per-step graph. See module docstring
-// + `docs/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`. (#1082)
+// + `docs/archive/candle-removal/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`. (#1082)
 pub mod tape_step;
 pub mod teacher_identity;
 pub mod train_receipt;

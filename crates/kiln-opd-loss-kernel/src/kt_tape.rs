@@ -1,7 +1,7 @@
 //! kt-tape OPD top-K reverse-KL forward+backward — Phase 6a/CP-4 port of
 //! `kt_forward_op.rs` from `candle::CustomOp1` onto the kt-side
 //! `kiln_autograd::Tape` substrate ((#1082) — see
-//! `docs/CANDLE_REMOVAL_PLAN.md` and the rmsnorm sibling
+//! `docs/archive/candle-removal/CANDLE_REMOVAL_PLAN.md` and the rmsnorm sibling
 //! `crates/kiln-rmsnorm-kernel/src/kt_tape.rs`, commit `895162ca`).
 //!
 //! # Why this module exists

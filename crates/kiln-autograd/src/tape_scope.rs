@@ -10,7 +10,7 @@
 //! `&mut Tape` in scope.
 //!
 //! The wave-12 (#1082) audit
-//! ([`docs/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`])
+//! ([`docs/archive/candle-removal/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`])
 //! documented why a per-call-site `&mut Tape` flip of
 //! `kiln_model::forward::rms_norm` could not land: 20+ candle-typed
 //! call sites would all need to thread the parameter, with no caller
