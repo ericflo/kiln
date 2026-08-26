@@ -9,6 +9,7 @@ use super::*;
 /// 4. Optimizing a clipped importance-sampling objective with KL penalty
 ///
 /// Returns the path to the saved adapter directory.
+#[allow(clippy::too_many_arguments)]
 pub fn grpo_train(
     groups: &[GrpoGroup],
     config: &GrpoConfig,

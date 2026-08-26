@@ -6681,6 +6681,7 @@ fn checkpoint_test_vram(gib: u64) -> kiln_memory::vram::GpuVramInfo {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sft_tail_loss_value(
     hidden_data: &[f32],
     seq_len: usize,

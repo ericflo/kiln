@@ -185,6 +185,7 @@ pub(super) enum OptimizerStateAuthority {
     Host,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn apply_adamw_update_kt(
     backend: &dyn BackendRuntime,
     param: &mut Parameter,

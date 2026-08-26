@@ -2441,6 +2441,7 @@ pub fn build_local_teacher_fixture_with_coordination_and_policy(
 /// This is the shared forward+log_softmax+top-K core behind both the
 /// pre-computed [`build_local_teacher_fixture`] and the live
 /// [`LiveLocalTeacher`]. Runs in inference (detached) — no tape recording.
+#[allow(clippy::too_many_arguments)]
 fn forward_topk_at_positions(
     tokens: &[u32],
     positions: &[usize],

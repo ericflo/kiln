@@ -1320,6 +1320,7 @@ pub(crate) fn observe_lora_grad_norms_from_kt_grad_store(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn validate_lora_gradient_metadata(
     context: &str,
     leaf: &str,

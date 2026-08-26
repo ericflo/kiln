@@ -260,6 +260,7 @@ pub(super) fn synchronize_tail_chunk(_context: &'static str) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn analytic_sft_tail_grad_pre_final_norm(
     final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
     hidden: &Tensor,
@@ -295,6 +296,7 @@ pub(super) fn analytic_sft_tail_grad_pre_final_norm(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn analytic_sft_tail_grad_from_normed_pre_final_norm(
     final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
     hidden: &Tensor,
@@ -329,6 +331,7 @@ pub(super) fn analytic_sft_tail_grad_from_normed_pre_final_norm(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn analytic_sft_tail_grad_from_normed_pre_final_norm_with_flce_metadata(
     final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
     hidden: &Tensor,
@@ -364,6 +367,7 @@ pub(super) fn analytic_sft_tail_grad_from_normed_pre_final_norm_with_flce_metada
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn analytic_sft_tail_grad_from_validated_normed_pre_final_norm(
     final_rmsnorm_backward_route: FinalRmsNormBackwardRoute,
     hidden: &Tensor,

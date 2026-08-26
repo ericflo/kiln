@@ -547,6 +547,7 @@ pub(crate) fn canonical_checkpoint_json_value(
     serde_json::from_slice(&encoded).context("decode canonical checkpoint JSON")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn sft_checkpoint_auxiliary_state(
     model_config: &ModelConfig,
     tokenizer: &KilnTokenizer,

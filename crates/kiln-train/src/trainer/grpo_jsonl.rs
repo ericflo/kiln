@@ -1318,6 +1318,7 @@ pub(super) fn build_grpo_jsonl_preflight_plan(
 ///
 /// Each non-empty line must be one [`GrpoGroup`]. Unlike [`grpo_train`], this
 /// path does not retain all parsed or tokenized groups before training.
+#[allow(clippy::too_many_arguments)]
 pub fn grpo_train_jsonl(
     dataset_path: &Path,
     config: &GrpoConfig,

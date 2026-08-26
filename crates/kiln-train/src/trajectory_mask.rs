@@ -285,6 +285,7 @@ fn count_supervised_segments(trajectory: &[TurnSegment]) -> usize {
 ///   `<|im_start|>user` block as `<tool_response>\n{content}\n</tool_response>`.
 ///   The masker therefore looks for the `<tool_response>` / `</tool_response>`
 ///   pair, not for a `<|im_start|>tool` marker (which Qwen3.5 does not emit).
+#[allow(clippy::too_many_arguments)]
 fn byte_search_strategy(
     trajectory: &[TurnSegment],
     full_text: &str,
@@ -454,6 +455,7 @@ fn byte_search_strategy(
 ///
 /// Mirrors `label_mask_by_prefix_tokenization` (trainer.rs:2475) but
 /// generalizes to two roles (Action + Observation).
+#[allow(clippy::too_many_arguments)]
 fn prefix_tokenization_strategy(
     trajectory: &[TurnSegment],
     prompt_messages: &[ChatMessage],

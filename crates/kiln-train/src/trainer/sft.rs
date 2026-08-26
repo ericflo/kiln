@@ -186,6 +186,7 @@ pub(super) fn run_coordinated_grpo_gpu_phase<T>(
     Ok(outcome.value)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn sft_train(
     examples: &[SftExample],
     config: &SftConfig,

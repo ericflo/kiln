@@ -460,6 +460,7 @@ pub(super) fn record_reward_filter_plan(
     data_stats.reward_filter_sidecar = Some(plan.sidecar_path.display().to_string());
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn run_adapter_smoke_test_best_effort(
     adapter_name: &str,
     backend: &dyn BackendRuntime,
