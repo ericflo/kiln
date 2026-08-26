@@ -1294,3 +1294,29 @@ the entire codebase is `menu://check-updates` in dashboard.html. Verified:
 repo-wide grep finds no remaining reference to `view-logs`; the `emit` import
 in tray.rs remains used by other live emits (`open-dashboard`,
 `open-settings`, `check-updates`). No other code touched.
+
+## Cleanup Agent (round 49) — 2026-09-02
+
+Removed 18 unused crate dependencies across 11 workspace manifests, found by
+an exhaustive scan (`cargo metadata --no-deps` dependency names vs. every
+`.rs` file in each crate including `build.rs`, hyphen→underscore normalized):
+`chrono` (kiln-core), `memmap2` (kiln-tensor), `half` (kiln-rocblas),
+`thiserror` (kiln-autograd, kiln-graph-metal, kiln-graph-cuda,
+kiln-graph-vulkan, kiln-param, kiln-scheduler), and `kiln-tensor` + `half` +
+`serde` + `serde_json` (kiln-mps and kiln-vulkan-blas). Every flagged name had
+zero occurrences anywhere in its crate's sources — the kiln-mps /
+kiln-vulkan-blas entries are Phase 2.2/2.3 scaffolding deps pre-declared for
+code that never landed, the same pattern as the #1082 candle-core removal
+documented in those manifests. Regenerated Cargo.lock (−17 lines; no external
+packages dropped since other crates still use them). Why it mattered: unused
+deps inflate compile times and lockfile audits and mislead readers about what
+each crate actually needs. Verified: baseline `cargo check` passed on all 11
+crates (plus `--features probe` for kiln-mps and `--features vulkan` for
+kiln-vulkan-blas) before the change, identical result after; `cargo test`
+passes on kiln-core (103+0f), kiln-tensor (992+0f), kiln-autograd (272+0f),
+kiln-param (66+0f), kiln-scheduler (12+0f), kiln-rocblas (23+0f);
+`cargo check -p kiln-server` (largest dependents) passes before and after with
+identical output (one pre-existing warning); full `--workspace` check fails
+only inside cudarc's build script (`nvcc` not installed) — reproduced
+identically on a pristine stash, i.e. environmental, not caused by this
+change.

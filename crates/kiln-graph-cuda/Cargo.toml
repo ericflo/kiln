@@ -18,7 +18,6 @@ repository.workspace = true
 [dependencies]
 kiln-graph = { workspace = true }
 kiln-tensor = { workspace = true }
-thiserror = { workspace = true }
 
 [features]
 # Reserved for the real cudarc-backed capture pipeline. Without this feature

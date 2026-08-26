@@ -34,11 +34,6 @@ probe = []
 # Backend-agnostic types come from kiln-blas; we re-export the
 # matching shapes here so Metal users have one consistent import path.
 kiln-blas = { workspace = true }
-kiln-tensor = { workspace = true }
-
-half = "2"
-serde = { workspace = true }
-serde_json = { workspace = true }
 
 [build-dependencies]
 cc = "1"

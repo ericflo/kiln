@@ -16,5 +16,4 @@ repository.workspace = true
 
 [dependencies]
 kiln-tensor = { workspace = true }
-thiserror = { workspace = true }
 half = "2"

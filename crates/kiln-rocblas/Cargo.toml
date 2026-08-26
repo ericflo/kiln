@@ -23,7 +23,6 @@ rocm = ["hipblaslt"]
 # the workspace so the compiled crate unifies with every kiln crate holding a
 # RocmContext / RocmSlice.
 kiln-hip = { workspace = true, optional = true }
-half = "2"
 kiln-resource = { workspace = true }
 
 serde = { workspace = true }

@@ -44,7 +44,6 @@ bytemuck = { version = "1", features = ["extern_crate_alloc"] }
 # Phase 1.9 — safetensors loader. Pinned to the workspace version so
 # the loader reads the same file format every other crate writes.
 safetensors = { workspace = true }
-memmap2 = { workspace = true }
 
 # candle-core / candle-nn optional deps removed (#1082): kiln-tensor is now
 # fully candle-free under every feature. The last user was the

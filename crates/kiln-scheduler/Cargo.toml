@@ -9,4 +9,3 @@ license.workspace = true
 [dependencies]
 kiln-core = { workspace = true }
 tracing = { workspace = true }
-thiserror = { workspace = true }

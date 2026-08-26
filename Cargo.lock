@@ -1450,7 +1450,6 @@ version = "0.5.2"
 dependencies = [
  "half",
  "kiln-tensor",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1479,7 +1478,6 @@ dependencies = [
 name = "kiln-core"
 version = "0.5.2"
 dependencies = [
- "chrono",
  "kiln-tensor",
  "kiln-vulkan-kernel",
  "minijinja",
@@ -1559,7 +1557,6 @@ version = "0.5.2"
 dependencies = [
  "kiln-graph",
  "kiln-tensor",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1568,7 +1565,6 @@ version = "0.5.2"
 dependencies = [
  "kiln-graph",
  "kiln-tensor",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1577,7 +1573,6 @@ version = "0.5.2"
 dependencies = [
  "kiln-graph",
  "kiln-tensor",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1656,11 +1651,7 @@ name = "kiln-mps"
 version = "0.5.2"
 dependencies = [
  "cc",
- "half",
  "kiln-blas",
- "kiln-tensor",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1714,7 +1705,6 @@ name = "kiln-param"
 version = "0.5.2"
 dependencies = [
  "kiln-tensor",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1741,7 +1731,6 @@ name = "kiln-rocblas"
 version = "0.5.2"
 dependencies = [
  "cc",
- "half",
  "kiln-hip",
  "kiln-resource",
  "serde",
@@ -1753,7 +1742,6 @@ name = "kiln-scheduler"
 version = "0.5.2"
 dependencies = [
  "kiln-core",
- "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -1821,7 +1809,6 @@ dependencies = [
  "kiln-rocblas",
  "kiln-tensor-id",
  "kiln-vulkan-kernel",
- "memmap2",
  "objc2",
  "objc2-foundation",
  "objc2-metal",
@@ -1878,13 +1865,9 @@ dependencies = [
 name = "kiln-vulkan-blas"
 version = "0.5.2"
 dependencies = [
- "half",
  "kiln-blas",
  "kiln-resource",
- "kiln-tensor",
  "kiln-vulkan-kernel",
- "serde",
- "serde_json",
 ]
 
 [[package]]

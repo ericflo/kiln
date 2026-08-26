@@ -17,7 +17,6 @@ repository.workspace = true
 [dependencies]
 kiln-graph = { workspace = true }
 kiln-tensor = { workspace = true }
-thiserror = { workspace = true }
 
 [features]
 # Enables the Metal ICB replay object. Without this feature the crate exposes

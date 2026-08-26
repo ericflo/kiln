@@ -24,11 +24,7 @@ vulkan = ["dep:kiln-vulkan-kernel"]
 # Backend-agnostic types from kiln-blas.
 kiln-blas = { workspace = true }
 kiln-resource = { workspace = true }
-kiln-tensor = { workspace = true }
 
 # Optional under the `vulkan` feature.
 kiln-vulkan-kernel = { workspace = true, optional = true }
 
-half = "2"
-serde = { workspace = true }
-serde_json = { workspace = true }
