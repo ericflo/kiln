@@ -2,7 +2,7 @@
 //!
 //! Every explicit [`Tensor::contiguous`](crate::Tensor::contiguous) and
 //! every kernel that internally materializes a copy emits a
-//! [`kiln_profile_contiguous_copy`] event. The counter is aggregated
+//! `kiln_profile_contiguous_copy` event. The counter is aggregated
 //! by `bench-results/` regression scripts and surfaces as a
 //! "copies per token" metric — anti-pattern 2 mandates that
 //! regressions on the 712-call layout surface in `forward.rs` (the

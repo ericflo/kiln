@@ -40,7 +40,7 @@ use std::fmt;
 ///   dtype, bad shape, allocator OOM, etc.).
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    /// Free-form error message. Use [`bail!`] / [`ensure!`] to construct.
+    /// Free-form error message. Use `bail!` / `ensure!` to construct.
     #[error("{0}")]
     Msg(String),
 }

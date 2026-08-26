@@ -25,7 +25,7 @@ pub trait Element: Copy + 'static {
     /// Convert a slice of `Self` to the byte buffer the storage carries.
     fn to_bytes(values: &[Self]) -> Vec<u8>;
     /// Decode a byte buffer (little-endian, `Self::SIZE` bytes per
-    /// element) back into a `Vec<Self>`. The inverse of [`to_bytes`].
+    /// element) back into a `Vec<Self>`. The inverse of [`Self::to_bytes`].
     ///
     /// Used by [`Tensor::to_vec`](crate::Tensor::to_vec) to read a
     /// contiguous CPU storage back to host scalars — the candle-free

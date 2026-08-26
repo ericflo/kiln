@@ -2,7 +2,8 @@
 //!
 //! Both inputs F32/BF16/F16, same shape. Output is a U8 mask where
 //! `1` indicates the comparison held and `0` indicates it did not.
-//! These compose naturally with [`where_select`] and `masked_fill`.
+//! These compose naturally with [`where_select`](fn@crate::ops::where_select)
+//! and `masked_fill`.
 //!
 //! Non-differentiable (boolean output).
 //!

@@ -1595,3 +1595,34 @@ kiln-vulkan-kernel --no-deps` goes from exactly 53 unresolved-link warnings to 0
 `cargo fmt --check -p kiln-vulkan-kernel` clean; `cargo test -p kiln-vulkan-kernel --lib` passes
 65/65; `cargo check -p kiln-model` succeeds; scripts/check_repository_artifacts.py passes;
 git status shows only the nine source edits plus this ledger entry.
+## Cleanup Agent (round 60) — 2026-08-30
+
+Finished an interrupted round's work (a previous sub-agent crashed mid-round
+after editing but before committing) plus one extension, both fixing the same
+class of defect — broken rustdoc intra-doc links in kernel crates. (1)
+Adopted the verified uncommitted edit in `crates/kiln-rmsnorm-kernel/src/
+lib.rs`: 19 broken `[`fn`]` intra-doc links in the module doc (references to
+kt-typed kernel entry points that rustdoc could not resolve) converted to
+plain backticked names per the Round 59 playbook. Re-verified independently:
+`cargo doc -p kiln-rmsnorm-kernel --no-deps` reports zero unresolved-link
+warnings with the change. (2) Extended the sweep to the other kernel crates.
+`kiln-conv1d-kernel` and `kiln-gdn-kernel` cannot be doc-built locally (cudarc
+build script requires a CUDA toolkit; environmental, not code-related), so no
+action possible there this session. `kiln-tensor` had 12 unresolved links
+across 5 files; fixed each by its best treatment: proper links where the
+target exists ungated (`Self::to_bytes` in element.rs,
+`[where_select](fn@crate::ops::where_select)` in ops/compare.rs with a
+function-disambiguator since `ops::where_select` is both a function and a
+module, `Self::bump_version` in tensor.rs), backticked names where it does
+not or cannot resolve under default features (`bail!`/`ensure!` macros in
+error.rs, the `kiln_profile_contiguous_copy` metric label in profile.rs which
+is a counter name not a code item, and the `#[cfg(feature = "cuda")]`
+methods/paths `cuda_zeros_on`, `cuda_from_slice`, `host_to_cuda_copy`,
+`host_to_cuda_copy_ctx` in tensor.rs — unverifiable locally without CUDA, so
+backticks are the safe uniform treatment).
+Why it mattered: two more kernel crates now document without rustdoc warning
+noise, matching the Round 57–59 vulkan-kernel link repairs.
+Verified: `cargo doc -p kiln-tensor --no-deps` goes from 12 unresolved to 0;
+`cargo test -p kiln-tensor --lib` passes identically after the edit (994
+passed, 0 failed); `git status` shows only the six source edits plus this
+ledger entry.

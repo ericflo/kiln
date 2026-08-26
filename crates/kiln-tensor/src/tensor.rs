@@ -43,7 +43,8 @@ use crate::{
 ///
 /// See the module doc for the layout. Clones are O(1) — they share
 /// the underlying storage, layout (cheap copy), `TensorId`, and the
-/// version counter. Mutating one clone's storage via [`bump_version`]
+/// version counter. Mutating one clone's storage via
+/// [`Self::bump_version`].
 /// is observed by every other clone (the version is `Arc<AtomicU64>`).
 ///
 /// # Version counter (anti-pattern 16 hook)
@@ -268,7 +269,7 @@ impl Tensor {
     /// Allocate a fresh zero-initialized tensor on the given device.
     ///
     /// Device-parametric companion to [`Self::zeros_cpu`] /
-    /// [`Self::cuda_zeros_on`]: the caller picks the device, the
+    /// `Self::cuda_zeros_on`: the caller picks the device, the
     /// constructor routes to the matching backend allocator. Enables
     /// callers that derive the destination device from an input
     /// tensor's storage (e.g. accumulators in chunked
@@ -278,7 +279,7 @@ impl Tensor {
     /// | `device`        | Behavior                                  |
     /// |-----------------|-------------------------------------------|
     /// | `Device::Cpu`   | identical to [`Self::zeros_cpu`]          |
-    /// | `Device::Cuda(i)` (with `cuda` feature) | routes to [`Self::cuda_zeros_on`] |
+    /// | `Device::Cuda(i)` (with `cuda` feature) | routes to `Self::cuda_zeros_on` |
     /// | `Device::Cuda(_)` (without `cuda` feature) | `Err` — cuda not linked |
     /// | `Device::Metal(_)` / `Device::Vulkan(_)` | `Err` — NYI (substrate-side, #1082) |
     ///
@@ -346,13 +347,13 @@ impl Tensor {
     /// Build a tensor on the given device from a typed [`Vec`].
     ///
     /// Device-parametric companion to [`Self::from_vec`] /
-    /// [`Self::cuda_from_slice`]: the caller picks the device, the
+    /// `Self::cuda_from_slice`: the caller picks the device, the
     /// constructor either lands directly on CPU or stages-then-uploads
     /// for CUDA. Same routing table as [`Self::zeros_on`].
     ///
     /// Internally the CUDA path builds a CPU tensor via
-    /// [`Self::from_vec`] and uploads via [`crate::host_to_cuda_copy`]
-    /// — the same path [`Self::cuda_from_slice`] uses. The element
+    /// [`Self::from_vec`] and uploads via `crate::host_to_cuda_copy`
+    /// — the same path `Self::cuda_from_slice` uses. The element
     /// type `E` parameter mirrors [`Self::from_vec`] / [`Self::from_slice`].
     #[track_caller]
     pub fn from_vec_on<E: Element>(
@@ -420,7 +421,7 @@ impl Tensor {
     ///
     /// CPU: wraps the byte buffer directly (zero per-element work). CUDA:
     /// wraps on the host then H2D-uploads via the candle-free
-    /// [`crate::host_to_cuda_copy_ctx`]. Metal, Vulkan, and ROCm upload through
+    /// `crate::host_to_cuda_copy_ctx`. Metal, Vulkan, and ROCm upload through
     /// their backend host-copy helpers when the corresponding feature is enabled.
     #[track_caller]
     pub fn from_raw_bytes_on(

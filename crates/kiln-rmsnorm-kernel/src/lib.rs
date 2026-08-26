@@ -2,7 +2,7 @@
 //!
 //! This crate hosts decode-critical Liger-style fused norm kernels for kiln:
 //!
-//! 1. [`fused_rmsnorm_kt`] / [`fused_rmsnorm_backward_kt`] — Phase 10
+//! 1. `fused_rmsnorm_kt` / `fused_rmsnorm_backward_kt` — Phase 10
 //!    long-context training path: Qwen3.5-style RMSNorm
 //!    `(1 + w) * x * rsqrt(mean(x^2) + eps)` plus a manual GPU backward
 //!    kernel. The candle-autograd shim that wires these through
@@ -13,22 +13,22 @@
 //!    candle ops behind `kiln-model::forward::rms_norm`. Used by
 //!    `kiln/norm/pre_attn` and `kiln/norm/pre_mlp`. For Qwen3.5-4B at
 //!    T=8192 this avoids ~32 × 2 saved F32 RMSNorm intermediates per
-//!    training segment. [`fused_rmsnorm_frozen_weight_via_kt_tape`] is the
+//!    training segment. `fused_rmsnorm_frozen_weight_via_kt_tape` is the
 //!    LoRA-training path: it records only the activation and computes no
 //!    normalization-weight gradient.
-//! 2. [`fused_l2_qk_norm_kt`] — fused L2-norm(Q) + scale(Q) + L2-norm(K) used
+//! 2. `fused_l2_qk_norm_kt` — fused L2-norm(Q) + scale(Q) + L2-norm(K) used
 //!    by GDN linear attention. Replaces the ~11 candle ops behind the
 //!    `kiln/gdn/qk_norm` block in `forward.rs`.
-//! 3. [`fused_l2_qk_norm_gqa_kt`] — CUDA GDN GQA fast path that normalizes
+//! 3. `fused_l2_qk_norm_gqa_kt` — CUDA GDN GQA fast path that normalizes
 //!    unexpanded `[B, T, nk, dk]` Q/K and emits expanded `[B, T, nv, dk]`
 //!    outputs in one launch.
-//! 4. [`fused_rotary_qk_kt`] — decode/paged-attention RoPE(Q,K) for contiguous
+//! 4. `fused_rotary_qk_kt` — decode/paged-attention RoPE(Q,K) for contiguous
 //!    bf16 Q/K tensors using precomputed f32 cos/sin tables. (kt-typed only;
 //!    the candle-typed wrappers were removed in (#1082).)
-//! 5. [`fused_mlp_silu_mul_kt`] — fused bf16 `silu(gate) * up` for Qwen3.5
+//! 5. `fused_mlp_silu_mul_kt` — fused bf16 `silu(gate) * up` for Qwen3.5
 //!    SwiGLU MLPs. (kt-typed only; the candle-typed wrappers were removed
 //!    in (#1082).)
-//! 6. [`fused_sigmoid_mul_kt`] — fused bf16 `x * sigmoid(gate)` for attention
+//! 6. `fused_sigmoid_mul_kt` — fused bf16 `x * sigmoid(gate)` for attention
 //!    output gates. The candle-typed `fused_sigmoid_mul` entry was removed
 //!    in (#1082); the storage-level `fused_sigmoid_mul_storage` candle
 //!    CustomOp2 backing for `CudaSigmoidMulTrainingBf16` moved to
@@ -57,18 +57,18 @@
 //!
 //! # APIs
 //!
-//! - [`fused_rmsnorm_kt`] / [`fused_rmsnorm_backward_kt`] — kt-typed
+//! - `fused_rmsnorm_kt` / `fused_rmsnorm_backward_kt` — kt-typed
 //!   RMSNorm forward + trainable-weight GPU backward.
-//! - [`fused_rmsnorm_backward_dx_kt`] /
-//!   [`fused_rmsnorm_frozen_weight_via_kt_tape`] — dx-only backward and
+//! - `fused_rmsnorm_backward_dx_kt` /
+//!   `fused_rmsnorm_frozen_weight_via_kt_tape` — dx-only backward and
 //!   tape integration for a frozen normalization weight.
-//! - [`fused_rmsnorm_via_kt_tape`] — trainable-weight tape integration.
-//! - [`supports_rmsnorm_kt`] — kt-typed `(x, weight)` capability check for
+//! - `fused_rmsnorm_via_kt_tape` — trainable-weight tape integration.
+//! - `supports_rmsnorm_kt` — kt-typed `(x, weight)` capability check for
 //!   the RMSNorm kernel.
-//! - [`fused_l2_qk_norm_kt`] — kt-typed wrapper around the GDN QK fused-norm
+//! - `fused_l2_qk_norm_kt` — kt-typed wrapper around the GDN QK fused-norm
 //!   kernel. Returns `(q_out, k_out)`.
-//! - [`supports_l2_qk_norm_kt`] — capability check for the QK kernel.
-//! - [`fused_l2_qk_norm_gqa_kt`] / [`supports_l2_qk_norm_gqa_kt`] — GDN GQA
+//! - `supports_l2_qk_norm_kt` — capability check for the QK kernel.
+//! - `fused_l2_qk_norm_gqa_kt` / `supports_l2_qk_norm_gqa_kt` — GDN GQA
 //!   head-expand + QK norm CUDA path.
 //!
 //! # Envelope
@@ -81,7 +81,7 @@
 //!
 //! Out of scope: fused GEMM prologue, non-bf16 dtypes, non-contiguous input.
 //! Backward currently only supported for the RMSNorm kernel (via
-//! [`fused_rmsnorm_backward_kt`] and the two tape entries); the QK-norm kernels
+//! `fused_rmsnorm_backward_kt` and the two tape entries); the QK-norm kernels
 //! remain forward-only.
 
 // (#1082) candle-drop: this crate is now candle-free. The candle-typed
