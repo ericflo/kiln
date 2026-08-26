@@ -196,9 +196,10 @@ pub fn introspect(command: &str) -> BashIntrospection {
         .collect();
     let is_pipeline = tokens.iter().any(|t| matches!(t, Token::Op(_)));
     if leading.is_empty() {
-        let mut out = BashIntrospection::default();
-        out.is_pipeline = is_pipeline;
-        return out;
+        return BashIntrospection {
+            is_pipeline,
+            ..Default::default()
+        };
     }
     let words: Vec<&str> = leading
         .iter()

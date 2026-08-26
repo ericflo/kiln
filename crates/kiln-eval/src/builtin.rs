@@ -668,7 +668,7 @@ mod tests {
         let parsed: EvalSuite = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.name, QWEN3_AGENTIC_CORE);
         assert!(!parsed.examples.is_empty());
-        assert!(parsed.tools.as_ref().map_or(false, |t| !t.is_empty()));
+        assert!(parsed.tools.as_ref().is_some_and(|t| !t.is_empty()));
         // Run round-trip via tempfile so the same code path as `register
         // suite` ratifies the schema.
         let dir = tempfile::tempdir().unwrap();

@@ -1193,9 +1193,7 @@ fn stable_example_id(
 fn hoist_identical_tools(examples: &mut [EvalExample]) -> Option<Vec<serde_json::Value>> {
     let mut witness: Option<Vec<serde_json::Value>> = None;
     for ex in examples.iter() {
-        let Some(tools) = ex.tools.as_ref().filter(|t| !t.is_empty()) else {
-            return None;
-        };
+        let tools = ex.tools.as_ref().filter(|t| !t.is_empty())?;
         match witness.as_ref() {
             None => witness = Some(tools.clone()),
             Some(prev) if prev == tools => {}
@@ -1270,6 +1268,10 @@ struct TraceTurn {
 }
 
 impl TraceTurn {
+    // Eight positional arguments mirror the trace-export field set; the five
+    // call sites pass complex inline expressions a parameter struct would
+    // obscure, so the lint is a documented keep rather than a reshape.
+    #[allow(clippy::too_many_arguments)]
     fn from_export(
         value: &serde_json::Value,
         line_no: usize,
@@ -1432,7 +1434,7 @@ mod tests {
         assert_eq!(stats.sampled_tool_histogram.get("Read"), Some(&1));
         assert_eq!(suite.examples.len(), 1);
         assert_eq!(suite.examples[0].messages.len(), 2);
-        assert!(suite.tools.as_ref().map_or(false, |t| t.len() == 1));
+        assert!(suite.tools.as_ref().is_some_and(|t| t.len() == 1));
         let target = suite.examples[0].target.as_deref().unwrap();
         let call = extract_first_tool_call(target).unwrap();
         assert_eq!(call.name, "Read");

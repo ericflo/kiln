@@ -193,12 +193,11 @@ async fn run_model(
         weights.insert(example_id.clone(), example.weight);
         tags_by_example.insert(example_id.clone(), example.tags.clone());
         scorer_kind_by_example.insert(example_id.clone(), scorer.kind_label());
-        if matches!(scorer, Scorer::ToolCall { .. }) {
-            if let Some(target) = example.target.as_deref() {
-                if let Some(call) = extract_first_tool_call(target) {
-                    target_tool_by_example.insert(example_id.clone(), call.name);
-                }
-            }
+        if matches!(scorer, Scorer::ToolCall { .. })
+            && let Some(target) = example.target.as_deref()
+            && let Some(call) = extract_first_tool_call(target)
+        {
+            target_tool_by_example.insert(example_id.clone(), call.name);
         }
 
         let gen_params = effective_generation(suite, example, args);
@@ -322,9 +321,11 @@ async fn run_api_job(
         job.example,
         model,
         &job.gen_params,
-        args,
-        api_key,
-        extra_body,
+        &RequestSettings {
+            args,
+            api_key,
+            extra_body,
+        },
     )
     .await;
     let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -388,15 +389,22 @@ fn effective_generation(
     gen_params
 }
 
+/// Request environment shared by every API call in a model run: the parsed
+/// CLI flags, the bearer token (if any), and the optional JSON object merged
+/// into every request body.
+struct RequestSettings<'a> {
+    args: &'a Args,
+    api_key: Option<&'a str>,
+    extra_body: Option<&'a Value>,
+}
+
 async fn call_chat_api(
     client: &reqwest::Client,
     suite: &EvalSuite,
     example: &kiln_eval::EvalExample,
     model: &str,
     gen_params: &EvalGenerationParams,
-    args: &Args,
-    api_key: Option<&str>,
-    extra_body: Option<&Value>,
+    settings: &RequestSettings<'_>,
 ) -> Result<ApiCompletion> {
     let mut body = json!({
         "model": model,
@@ -423,23 +431,25 @@ async fn call_chat_api(
         kiln_eval::EvalBudgetOverride::Unlimited => body["thinking_budget_ms"] = Value::Null,
         kiln_eval::EvalBudgetOverride::Limited(value) => body["thinking_budget_ms"] = json!(value),
     }
-    if !args.no_tools {
-        if let Some(tools) = example.effective_tools(suite.tools.as_deref()) {
-            if !tools.is_empty() {
-                body["tools"] = json!(tools);
-                if let Some(choice) = args.tool_choice.as_ref() {
-                    body["tool_choice"] = json!(choice);
-                }
-            }
+    if !settings.args.no_tools
+        && let Some(tools) = example.effective_tools(suite.tools.as_deref())
+        && !tools.is_empty()
+    {
+        body["tools"] = json!(tools);
+        if let Some(choice) = settings.args.tool_choice.as_ref() {
+            body["tool_choice"] = json!(choice);
         }
     }
-    if let Some(extra) = extra_body {
+    if let Some(extra) = settings.extra_body {
         merge_object(&mut body, extra)?;
     }
 
-    let url = format!("{}/chat/completions", args.api_base.trim_end_matches('/'));
+    let url = format!(
+        "{}/chat/completions",
+        settings.args.api_base.trim_end_matches('/')
+    );
     let mut req = client.post(url).json(&body);
-    if let Some(api_key) = api_key {
+    if let Some(api_key) = settings.api_key {
         req = req.bearer_auth(api_key);
     }
     let resp = req.send().await.context("POST /chat/completions")?;
@@ -449,12 +459,17 @@ async fn call_chat_api(
         bail!("API returned {status}: {text}");
     }
     let value: Value = serde_json::from_str(&text).context("parsing API response JSON")?;
-    Ok(ApiCompletion::from_response(value)?)
+    ApiCompletion::from_response(value)
 }
 
 /// Printed at most once per process when XML-format enforcement has to be
 /// waived because the transport returned pre-parsed tool calls.
 static XML_FORMAT_WAIVED_WARNING: std::sync::Once = std::sync::Once::new();
+
+/// The scored result of one completion: the example's outcome plus, for
+/// tool-call examples, the predicted tool name and the schema-violation
+/// counts (missing-required, extra-unknown).
+type ScoredResponse = (ExampleOutcome, Option<String>, Option<(u32, u32)>);
 
 fn score_api_response(
     scorer: &Scorer,
@@ -463,7 +478,7 @@ fn score_api_response(
     response: ApiCompletion,
     latency_ms: f64,
     suite: &EvalSuite,
-) -> Result<(ExampleOutcome, Option<String>, Option<(u32, u32)>)> {
+) -> Result<ScoredResponse> {
     // API-native tool calls arrive pre-parsed: the serving layer already
     // converted whatever the model emitted (possibly genuine Qwen XML) into
     // structured JSON. Marking those Invalid would blame the model for the
@@ -502,17 +517,15 @@ fn score_api_response(
             .map(|c| c.name.clone())
             .unwrap_or_else(|| "<none>".to_string());
         predicted_tool = Some(predicted);
-        if let Some(call) = parsed.as_ref() {
-            if let Some(catalogue) = example.effective_tools(suite.tools.as_deref()) {
-                if let Some(chk) = validate_against_schema(call, catalogue) {
-                    if !chk.is_clean() {
-                        schema_violation = Some((
-                            chk.missing_required.len() as u32,
-                            chk.extra_unknown.len() as u32,
-                        ));
-                    }
-                }
-            }
+        if let Some(call) = parsed.as_ref()
+            && let Some(catalogue) = example.effective_tools(suite.tools.as_deref())
+            && let Some(chk) = validate_against_schema(call, catalogue)
+            && !chk.is_clean()
+        {
+            schema_violation = Some((
+                chk.missing_required.len() as u32,
+                chk.extra_unknown.len() as u32,
+            ));
         }
     }
     let mut outcome =
@@ -673,6 +686,29 @@ fn suite_hash(suite: &EvalSuite) -> Result<String> {
     Ok(out)
 }
 
+fn print_summary(result: &EvalResult, started_at: chrono::DateTime<chrono::Utc>) {
+    println!(
+        "trace-api-eval completed in {:.2}s",
+        (chrono::Utc::now() - started_at).num_milliseconds() as f64 / 1000.0
+    );
+    for run in &result.runs {
+        let ci = &run.metrics.accuracy_confidence_interval;
+        println!(
+            "{:<32} accuracy={:.1}% pass={}/{} score={:.3} ci95=[{:.1}%, {:.1}%] invalid={} error={} non_xml={}",
+            run.adapter.as_deref().unwrap_or("<base>"),
+            run.metrics.accuracy * 100.0,
+            run.metrics.num_pass,
+            run.metrics.num_examples,
+            run.metrics.mean_score,
+            ci.lower * 100.0,
+            ci.upper * 100.0,
+            run.metrics.num_invalid,
+            run.metrics.num_error,
+            run.metrics.num_non_xml_tool_calls,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -791,29 +827,6 @@ mod tests {
             EvalOutcomeKind::Invalid,
             "{:?}",
             outcome.detail
-        );
-    }
-}
-
-fn print_summary(result: &EvalResult, started_at: chrono::DateTime<chrono::Utc>) {
-    println!(
-        "trace-api-eval completed in {:.2}s",
-        (chrono::Utc::now() - started_at).num_milliseconds() as f64 / 1000.0
-    );
-    for run in &result.runs {
-        let ci = &run.metrics.accuracy_confidence_interval;
-        println!(
-            "{:<32} accuracy={:.1}% pass={}/{} score={:.3} ci95=[{:.1}%, {:.1}%] invalid={} error={} non_xml={}",
-            run.adapter.as_deref().unwrap_or("<base>"),
-            run.metrics.accuracy * 100.0,
-            run.metrics.num_pass,
-            run.metrics.num_examples,
-            run.metrics.mean_score,
-            ci.lower * 100.0,
-            ci.upper * 100.0,
-            run.metrics.num_invalid,
-            run.metrics.num_error,
-            run.metrics.num_non_xml_tool_calls,
         );
     }
 }

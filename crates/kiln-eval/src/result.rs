@@ -608,8 +608,8 @@ impl AggregateMetrics {
         )
     }
 
-    /// Same as [`Self::compute`] but takes per-example target tool names
-    /// + predicted tool names so the aggregate carries per-tool pass-rate
+    /// Same as [`Self::compute`] but takes per-example target tool names and
+    /// predicted tool names so the aggregate carries a per-tool pass-rate
     /// breakdown AND a tool-confusion matrix.
     ///
     /// `predicted_tool_by_outcome` is keyed by `(example_id,
@@ -617,6 +617,9 @@ impl AggregateMetrics {
     /// `schema_violations_by_outcome` carries the (missing, extra) tally
     /// per outcome — those are populated by the executor only when the
     /// suite declared a `tools` catalogue.
+    // Public API surface: kept as a flat argument list (a parameter struct
+    // would be a breaking signature change), so the lint is a documented keep.
+    #[allow(clippy::too_many_arguments)]
     pub fn compute_with_tools(
         aggregated_outcomes: &[AggregatedExampleOutcome],
         outcomes: &[ExampleOutcome],
@@ -643,6 +646,9 @@ impl AggregateMetrics {
     /// Most-comprehensive aggregator: takes per-outcome schema-violation
     /// counts in addition to the basic per-tool maps. Keyed the same way
     /// as `predicted_tool_by_outcome`.
+    // Public API surface: kept as a flat argument list (a parameter struct
+    // would be a breaking signature change), so the lint is a documented keep.
+    #[allow(clippy::too_many_arguments)]
     pub fn compute_with_tools_full(
         aggregated_outcomes: &[AggregatedExampleOutcome],
         outcomes: &[ExampleOutcome],

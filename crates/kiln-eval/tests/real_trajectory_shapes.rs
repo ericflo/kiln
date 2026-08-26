@@ -202,7 +202,7 @@ fn extra_tool_call_in_real_trajectory_is_penalized() {
         outcome
             .detail
             .as_deref()
-            .map_or(false, |d| d.contains("excess_calls"))
+            .is_some_and(|d| d.contains("excess_calls"))
     );
 }
 
@@ -220,7 +220,7 @@ fn json_response_when_xml_expected_still_scores_correctly() {
         outcome
             .detail
             .as_deref()
-            .map_or(false, |d| d.contains("formats=")),
+            .is_some_and(|d| d.contains("formats=")),
         "expected format diagnostic in detail: {:?}",
         outcome.detail
     );
@@ -248,7 +248,7 @@ fn require_xml_format_marks_json_emission_as_invalid() {
         outcome
             .detail
             .as_deref()
-            .map_or(false, |d| d.contains("non-XML"))
+            .is_some_and(|d| d.contains("non-XML"))
     );
 }
 

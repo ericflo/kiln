@@ -1488,7 +1488,7 @@ mod tests {
             assert!(ex.scorer.is_some());
         }
         // Auto-detect histogram has both scorer kinds.
-        assert!(stats.auto_scorer_histogram.len() >= 1);
+        assert!(!stats.auto_scorer_histogram.is_empty());
     }
 
     #[test]
@@ -1646,7 +1646,7 @@ mod tests {
         conv2.extra.insert("tools".into(), tools.clone());
         let cfg = SynthesisConfig::new("toolful");
         let (suite, _) = synthesize_suite(vec![conv1, conv2], &cfg).unwrap();
-        assert!(suite.tools.as_ref().map_or(false, |t| t.len() == 1));
+        assert!(suite.tools.as_ref().is_some_and(|t| t.len() == 1));
     }
 
     #[test]

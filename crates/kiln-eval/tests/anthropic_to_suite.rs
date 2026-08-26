@@ -104,7 +104,7 @@ fn anthropic_turn_to_synthesized_suite_endtoend() {
     assert_eq!(stats.examples_generated, 1);
     assert_eq!(suite.examples.len(), 1);
     // Tool catalogue was auto-promoted from `extra`.
-    assert!(suite.tools.as_ref().map_or(false, |t| !t.is_empty()));
+    assert!(suite.tools.as_ref().is_some_and(|t| !t.is_empty()));
     let example = &suite.examples[0];
     let target = example.target.as_deref().unwrap();
     // Compact JSON, no space after the colon.

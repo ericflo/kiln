@@ -1919,3 +1919,98 @@ sorts `use` imports differently from the toolchain rustfmt that `cargo fmt`
 invokes (it re-ordered this file's `std::sync` imports, breaking
 `cargo fmt --check`). Future rounds: touch files with `edit` and validate
 with `cargo fmt --check` only; never invoke the standalone rustfmt.
+
+## Cleanup Agent (round 65) — 2026-08-26
+
+First full clippy/comment audit of kiln-eval (`--all-targets`: lib, tests,
+examples), which had never been lint-clean. Baseline: 25 kiln-eval warnings
++ 1 deny-by-default error (`clippy::approx_constant`, which made the run
+red outright) + 4 kiln-core warnings. End state: **zero kiln-eval warnings;
+kiln-core down to the 3 deferred judgment items named below.** Every fix
+verified value- or semantics-identical, tests green before and after.
+
+**Fixed (13 sites, 10 files):**
+1. kiln-core/src/token.rs — `derivable_impls`: hand-written
+   `impl Default for SpecialTokens` replaced with `#[derive(Default)]`
+   (all three fields — `Option`s + `Vec` — are `Default`-able, and the
+   derived default is bit-identical to the hand-written one).
+2. src/scorers/numeric.rs test — `approx_constant` (deny-by-default):
+   `extract_last_number("Final: -3.14")` → `"Final: -2.71"`; the test's
+   point is "extract a negative decimal", and -2.71 is not within clippy's
+   tolerance of π (and not π-ish at all).
+3. src/scorers/bash.rs — `field_reassign_with_default`: the
+   `let mut out = Default::default(); out.is_pipeline = is_pipeline`
+   idiom replaced with a struct literal
+   `BashIntrospection { is_pipeline, ..Default::default() }` (same shape
+   the sibling arm at line ~220 already used).
+4. `unnecessary_map_or` ×7 — `opt.map_or(false, f)` →
+   `opt.is_some_and(f)` in src/builtin.rs, src/production_trace.rs (test),
+   src/synthesis.rs (×2), tests/anthropic_to_suite.rs, and
+   tests/real_trajectory_shapes.rs (×3).
+5. src/synthesis.rs test — `len_zero`: `histogram.len() >= 1` →
+   `!histogram.is_empty()`.
+6. src/production_trace.rs — `question_mark`: the
+   `let Some(x) = … else { return None }` in `hoist_identical_tools` (an
+   `Option`-returning fn) collapsed to `?`.
+7. src/result.rs — `doc_lazy_continuation`: the `compute_with_tools` doc
+   line starting with `+ predicted tool names` (rustdoc parsed it as a
+   list item, making the next line a lazy continuation) reworded to
+   `…target tool names and predicted tool names…`.
+8. examples/trace_api_eval.rs — `collapsible_if` ×7 (three nested sites at
+   lines 196/426/505) collapsed to let-chains, e.g.
+   `if matches!(scorer, ToolCall {..}) && let Some(target) = … && let
+   Some(call) = …` — each collapse is a strict nesting unwrap, semantics
+   unchanged.
+9. Same example — `type_complexity`: `score_api_response`'s return
+   `Result<(ExampleOutcome, Option<String>, Option<(u32, u32)>)>` renamed
+   via a documented `type ScoredResponse` alias (the sanctioned alias fix;
+   the call-site destructure is unchanged).
+10. Same example — `too_many_arguments` on `call_chat_api` (8 args):
+    grouped `args`/`api_key`/`extra_body` into a small
+    `RequestSettings<'a>` parameter struct (CLI flags + bearer token +
+    extra body — a coherent "how to send" unit); it reads clearly at the
+    single call site, and the body's field access is now unambiguous.
+11. Same example — `needless_question_mark`: `Ok(ApiCompletion::
+    from_response(value)?)` → `ApiCompletion::from_response(value)`.
+12. Same example — `items_after_test_module`: the `#[cfg(test)] mod tests`
+    block (which sat mid-file, before `print_summary`) moved to end of
+    file, as cargo clippy and the repo convention require.
+
+**Judgment items — deferred, each documented at the site with a comment +
+`#[allow(clippy::too_many_arguments)]` (the repo's established pattern;
+see kiln-server and kiln-eval/src/replay.rs:151):**
+- `AggregateMetrics::compute_with_tools` (src/result.rs, 8 args, **public**):
+  signature kept as-is per steering (reshaping public API is out of scope);
+  a parameter struct would be a breaking change for downstream callers.
+- `AggregateMetrics::compute_with_tools_full` (src/result.rs, 9 args,
+  **public**): same.
+- `TraceTurn::from_export` (src/production_trace.rs, 8 args, private):
+  deferred rather than reshaped — the argument list mirrors the
+  trace-export field set, and its five call sites pass complex inline
+  expressions (`if prompt_oversize { Vec::new() } else { prefix.to_vec() }`)
+  that a struct literal would obscure.
+
+**Deferred to a future round (kiln-core, out of steering's fix scope —
+these are the only kiln-core warnings left):**
+- `clippy::type_complexity` at crates/kiln-core/src/tokenizer.rs:449
+  (`decode_messages_with`-family return
+  `Result<(String, Option<Vec<(usize, usize)>>), TokenizerError>` —
+  public method).
+- `clippy::type_complexity` at crates/kiln-core/src/tokenizer.rs:602 (same
+  shape on the sibling method).
+- `clippy::too_many_arguments` at crates/kiln-core/src/tokenizer.rs:785
+  (`render_jinja_template_with`, 8 args, private but a 5-arg call-site
+  reshape of the tokenizer's core render path — not this round).
+
+**Verification (all after the changes, counts identical before):**
+`cargo clippy -p kiln-eval --all-targets` — 25 warnings + 1 error →
+**0 kiln-eval warnings**; kiln-core now emits exactly the 3 deferred items
+above (down from 4: the `derivable_impls` fix). `cargo test -p kiln-eval`
+— 239 passed/3 ignored (lib), 3 (anthropic_to_suite), 11
+(real_trajectory_shapes), 4 (trace_api_eval example tests), all before and
+after; `cargo test -p kiln-core --lib` 103 passed/3 ignored;
+`cargo test -p kiln-server --lib` 1189 passed/1 ignored (its eval executor
+consumes the touched kiln-eval API). `cargo fmt --check` clean;
+`cargo doc -p kiln-eval --no-deps` zero warnings;
+`python3 scripts/check_repository_artifacts.py` passes (6694 tracked
+paths, size policy unchanged — edits only).

@@ -176,7 +176,7 @@ mod tests {
     #[test]
     fn last_number_extracted() {
         assert_eq!(extract_last_number("the answer is 42"), Some(42.0));
-        assert_eq!(extract_last_number("Final: -3.14"), Some(-3.14));
+        assert_eq!(extract_last_number("Final: -2.71"), Some(-2.71));
         assert_eq!(extract_last_number("got 1, then 2, finally 3"), Some(3.0));
         assert_eq!(extract_last_number("price is $1,234.50"), Some(1234.50));
         assert_eq!(extract_last_number("no number here"), None);
