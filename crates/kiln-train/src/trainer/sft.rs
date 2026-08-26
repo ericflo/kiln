@@ -952,7 +952,11 @@ pub(super) fn sft_train_prepared_to_with_checkpoint_root(
 
         for epoch in start_epoch..config.epochs {
             let order = epoch_order(shuffle_seed, epoch, valid_indices.len());
-            let cursor_start = (epoch == start_epoch).then_some(start_cursor).unwrap_or(0);
+            let cursor_start = if epoch == start_epoch {
+                start_cursor
+            } else {
+                0
+            };
             let mut epoch_loss = if epoch == start_epoch {
                 resume_loop_state
                     .as_ref()
