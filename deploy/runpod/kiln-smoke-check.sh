@@ -54,7 +54,7 @@ QUIET=0
 TIMEOUT_SECS=600
 
 usage() {
-    sed -n '2,33p' "$0"
+    sed -n '2,41p' "$0"
 }
 
 while [ $# -gt 0 ]; do

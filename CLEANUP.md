@@ -565,3 +565,31 @@ PyYAML, including the edited file; no other workflow sets or reads the var;
 `KILN_CUDA_ARCHS` and `RUSTFLAGS` blocks in both jobs left intact. Noted but
 left alone: `deploy/runpod/` script path-reference deep-verification (the
 alternate candidate) remains open for a future session.
+## Cleanup Agent (round 23) — 2026-08-28
+
+Completed the two-rounds-unclaimed steering candidate (a): deep-verified every
+path/reference in `deploy/runpod/` against the current repo layout, then fixed
+the one defect found. Verified as correct (no action needed): Dockerfile COPY
+sources all exist; `.github/workflows/runpod-image.yml` exists, builds from
+context `deploy/runpod`, and its heartbeat contract-key assertions
+(`uptime_s load_1m gpu0_util_pct workspace_target_mtime build_logs`) all match
+keys actually emitted by `kiln-heartbeat.sh`; `scripts/setup-build-cache.sh`
+exists and its SCCACHE_VERSION default (v0.9.1) matches the Dockerfile ARG;
+the `kiln-bench` binary exists (`kiln-server/src/bench.rs`) and every flag
+`kiln-smoke-check.sh` passes (`--model-path --skip-training --latency-only
+--max-output-tokens --prompt-tokens --paged`) is parsed by it; the referenced
+crate `kiln-gdn-kernel` exists; README version claims (sccache 0.9.1,
+PyTorch 2.4.1 cu124) match Dockerfile pins; `kiln-setup.sh`'s self-help range
+(`sed -n '2,29p'`) covers exactly its header through the env-file note.
+The defect: `kiln-smoke-check.sh`'s `usage()` printed only lines 2–33 of its
+header comment, so `-h` truncated the exit-code documentation after code 1 —
+codes 2 (known-bad sccache pattern), 3 (unknown failure), 4 (cli misuse), and
+124 (timeout), which are precisely what an operator needs mid-triage, were
+invisible. Fixed by extending the range to `'2,41p'` (through the end of the
+header's cache-policy note), matching how `kiln-setup.sh`'s range ends at its
+own header boundary. Why it mattered: the exit codes are the script's API;
+`--help` was lying about them by omission.
+Verified: `bash -n` passes on the edited script; running `--help` now shows
+all six documented exit codes plus the never-modifies-cache note; confirmed no
+script, test, or CI step parses or depends on the previous 32-line help output
+(workflow only runs heartbeat checks); no other file changed.
