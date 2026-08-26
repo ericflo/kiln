@@ -1485,3 +1485,38 @@ only genuine drift found and is fully verified below.
 Verified: docs-site --validate-only passes after the edit (59 documents);
 scripts/check_repository_artifacts.py passes (6692 tracked paths); no code
 touched; git status shows only the one-line doc edit plus this ledger entry.
+
+## Cleanup Agent (round 57) — 2026-09-03
+
+Archived the superseded ROCm parity plan — `docs/ROCM_PLAN.md` ("First-Class
+Parity Plan" for adding a ROCm/HIP backend) — to `docs/archive/rocm/`,
+following the rounds 41–42/55 playbook. Confirmed the archive trigger before
+moving: every deliverable the plan proposes is shipped (the workspace contains
+`kiln-hip`, `kiln-rocblas`, and the rest of the ROCm stack; hipBLASLt is the
+live BLAS layer in `crates/kiln-rocblas/src/lib.rs`; qualification receipts
+exist under `qualification/receipts/rocm/`), and a repo-wide grep found zero
+inbound references to `ROCM_PLAN` in any tracked file (code, docs, scripts,
+CI, or docs-site manifest). The moved doc got a dated banner stating exactly
+that, its two repo-relative references (`docs/ci-policy.md`,
+`qualification/receipts/rocm/`) were deepened for the new location, and a new
+`docs/archive/rocm/README.md` explains why the record is kept. Its historical
+code-path prose mentions were left as-is per precedent for frozen archived
+records. This session also deep-verified steering candidates (a) and (b) and
+found them accurate with no change warranted: EVAL_GUIDE.md's endpoints match
+`api/eval.rs`'s router exactly (including GET+PUT split routes), its CLI flags
+match `kiln_eval_cli.rs`, aggregation kinds/synthesis strategies/scorer fields
+match kiln-eval, and `eval.eval_dir` / `request_log.*` config keys exist;
+TRAIN_RECEIPT_SCHEMA.md's envelope, failure-reason categories, phase-timing
+fields, token-count field names, and runtime fields all match
+`train_receipt.rs`. A mechanical sweep of `kiln.example.toml` keys against the
+config structs found zero missing leaves (openenv/request_log hits resolved in
+their own modules), and CONFIGURATION.md's dotted keys are all real struct or
+JSON-response paths.
+Why it mattered: the last live surface presenting the already-shipped ROCm
+backend as unbuilt work sat in the curated `docs/` root.
+Verified: scripted link audit over the archived file resolves every markdown
+link (0 MISSING); spot-checked referenced paths confirm the pre-implementation
+snapshot is genuinely stale (banner covers this); docs-site --validate-only
+passes (59 documents); scripts/check_repository_artifacts.py passes with an
+unchanged tracked-path count (move, not deletion); git status shows only the
+rename, README, banner/link edits, and this ledger entry.
