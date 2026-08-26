@@ -520,3 +520,30 @@ identically (992 passed, 0 failed); clippy JSON confirms exactly 5
 `cargo build -p kiln-model` (downstream consumer) succeeds;
 `cargo fmt --check` remains clean repo-wide; `git status` shows only the three
 source edits plus this ledger entry.
+## Cleanup Agent (round 21) — 2026-08-28
+
+Repaired the dependency-prebuild layer in `deploy/Dockerfile`, which had gone
+totally stale after the workspace grew from 7 crates to 31: the manifest COPY
+block and the dummy-lib.rs RUN loop still listed only the original seven
+members (kiln-core, kiln-flash-attn, kiln-model, kiln-openenv,
+kiln-scheduler, kiln-server, kiln-train), so the layer's `cargo build
+--release --locked --features cuda` failed at workspace resolution on the
+first missing member (`kiln-blas`) — and the `|| true` swallowed that failure
+silently on every image build, meaning the intended dep-cache layer has never
+cached anything since the crate explosion. Replaced both blocks with generated
+per-crate lines covering ALL 31 workspace members' Cargo.toml + build.rs (from
+`git ls-files`), plus a glob-free dummy-source loop over `crates/*/`. Also
+removed the dead `CUDA_COMPUTE_CAP` ARG/ENV and rewrote its comment: no code,
+build script, or workflow consumes it anymore (`KILN_CUDA_ARCHS` in
+kiln-flash-attn/build.rs is the sole CUDA arch control), and its comment still
+referenced candle-kernels removed by #1082. Verified BEFORE: replicating the
+old 7-manifest layout in /tmp with real Cargo.toml/Cargo.lock fails `cargo
+metadata --locked` with "failed to load manifest for workspace member
+kiln-blas" (exit 101). Verified AFTER: the new full manifest + dummy lib.rs
+layout resolves `cargo metadata --locked` cleanly (exit 0); `docker build
+--check -f deploy/Dockerfile .` passes with no warnings; `.dockerignore`
+excludes nothing the prebuild needs; docs (README/QUICKSTART) never reference
+the removed ARG; worst case if a kernel build script can't run in Docker the
+pre-existing `|| true` fallback preserves today's behavior, so no regression
+path exists; `scripts/check_repository_artifacts.py` passes; `git status`
+shows only the one Dockerfile edit plus this ledger entry.
