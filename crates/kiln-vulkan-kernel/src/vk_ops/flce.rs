@@ -24,7 +24,7 @@
 //!   per-row global_max / global_sumexp.
 
 use crate::vk_ops::dispatch_simple;
-use crate::vk_ops::matmul::{vk_matmul, vk_matmul_no_grad};
+use crate::vk_ops::matmul::vk_matmul_no_grad;
 use crate::vk_ops::matmul_bf16w::{vk_matmul_bf16w_bwd_no_grad, vk_matmul_bf16w_no_grad};
 use crate::vk_ops::reduce::vk_mean_all;
 use crate::vk_ops::shape::vk_transpose_2d_no_grad;
@@ -50,19 +50,6 @@ fn upload_u32(device: &Arc<VulkanDevice>, data: &[u32]) -> Result<Arc<VulkanBuff
         &bytes,
     )?;
     Ok(buf)
-}
-
-/// Computed in `flce_forward_workspace`, used by the backward op.
-#[allow(dead_code)]
-struct FlceState {
-    weight_t: VkTensor, // [hidden, vocab] - transposed weight
-    labels_buf: Arc<VulkanBuffer>,
-    global_max: Arc<VulkanBuffer>,
-    global_sumexp: Arc<VulkanBuffer>,
-    num_active: usize,
-    vocab: usize,
-    _hidden_dim: usize,
-    chunk_len: usize,
 }
 
 /// Opaque reusable forward state for [`vk_flce_backward_with_saved_state`].
@@ -1103,10 +1090,4 @@ pub fn vk_grpo_backward_with_saved_state(
         .next()
         .flatten()
         .context("vk_grpo_backward_with_saved_state: missing hidden gradient")
-}
-
-#[allow(dead_code)]
-fn _unused_keep_vk_matmul_export(_a: &VkTensor, _b: &VkTensor) -> Option<()> {
-    let _ = vk_matmul;
-    None
 }

@@ -444,13 +444,6 @@ impl<'a> CommandBatch<'a> {
         // Drop will free resources.
         Ok(())
     }
-
-    /// Tail buffer marker for callers that want to assert the chain
-    /// terminates at a particular slot. Not used by the recorder itself.
-    #[allow(dead_code)]
-    pub fn assert_last_handle(&self, expected: &VulkanBuffer) {
-        let _ = expected;
-    }
 }
 
 impl<'a> Drop for CommandBatch<'a> {

@@ -223,3 +223,25 @@ all 11 docs-site unit tests pass, `scripts/check_repository_artifacts.py`
 passes with exactly two fewer tracked paths (6711 → 6709); repo-wide grep
 confirms no references to either checkpoint filename outside git history;
 `git status` clean after the commit.
+
+## Cleanup Agent (round 8) — 2026-08-26
+
+Removed genuinely dead code from `crates/kiln-vulkan-kernel` (three files,
+~55 lines): (1) the never-referenced `FlceState` struct and the
+`_unused_keep_vk_matmul_export` stub in `vk_ops/flce.rs`, plus the now-unused
+`vk_matmul` import — the stub only existed to silence that import; `vk_matmul`
+itself stays (used by mlp.rs, parity tests, and kiln-model); (2) the
+`alloc_zeroed_f32` helper and its `_silence_unused` keeper stub in
+`vk_ops/gdn_chunkwise.rs` (`upload_f32`, which the same stub referenced, is
+genuinely used elsewhere in the file and stays); (3) the no-op public method
+`CommandBatch::assert_last_handle` in `cmd_batch.rs`, which had zero callers
+repo-wide and did nothing but swallow its argument. Why it mattered: these were
+`#[allow(dead_code)]`-masked leftovers from refactors masquerading as live
+surface area, and the stubs obscured real usage relationships. Verified:
+repo-wide grep confirmed zero references to each removed item outside its own
+definition; before AND after, `cargo test -p kiln-vulkan-kernel --lib` passes
+identically (65 passed, 0 failed) and `cargo clippy -p kiln-vulkan-kernel --lib`
+reports no unused/never-constructed warnings and no error output (the ~280
+pre-existing style lints are unchanged environmental noise);
+`scripts/check_repository_artifacts.py` passes; `git status` shows only the
+three source edits plus this ledger entry.
