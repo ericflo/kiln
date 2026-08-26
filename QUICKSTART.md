@@ -826,7 +826,7 @@ Payload (`Content-Type: application/json`):
 ```json
 {
   "job_id": "<uuid>",
-  "job_type": "sft" | "grpo",
+  "job_type": "sft" | "grpo" | "opd",
   "status": "completed" | "failed",
   "adapter_name": "<name>",
   "adapter_path": "<path or null>",

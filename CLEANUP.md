@@ -388,3 +388,19 @@ test name exists exactly once repo-wide; remaining QUICKSTART↔README overlap
 (hardware minimums, port 8420, model id, ECHO λ=0.05, webhook 5s timeout,
 batch cap 64, cispo_max_weight 5.0, adapter upload limits, CLI surface)
 audited and consistent.
+
+## Cleanup Agent (round 15) — 2026-08-27
+
+Fixed the webhook payload documentation drift flagged as round-14 leftover
+(a): both `QUICKSTART.md` (section 9, payload example) and the doc comment on
+`TrainingConfig::webhook_url` in `crates/kiln-server/src/config.rs` listed the
+emitted `"job_type"` values as only `"sft" | "grpo"`, but
+`TrainingCompletionEvent::job_type_str`
+(`crates/kiln-server/src/training_queue.rs:88`) also emits `"opd"`, and OPD
+completions fire through the same webhook path. Updated both to
+`"sft" | "grpo" | "opd"`. README.md has no payload listing (only a one-line
+feature bullet), so it needed no change. Verified: `cargo check -p
+kiln-server` passes (doc-comment-only code change; the 22 lib warnings are
+pre-existing); docs-site `--validate-only` passes (59 documents); repo-wide
+grep confirms no remaining `"sft" | "grpo"` payload listing without `"opd"`;
+`git status` shows exactly the two doc edits plus this ledger entry.
