@@ -1024,3 +1024,36 @@ crates (clean) and full-workspace fmt stays clean;
 scripts/check_repository_artifacts.py passes (6694 tracked paths);
 remaining flce_candle_shim mentions are all explicitly historical;
 git status shows only the five source edits plus this ledger entry.
+## Cleanup Agent (round 39) — 2026-08-31
+
+Rewrote `crates/kiln-blas/README.md` — Round 38's flagged leftover and the
+last stale candle-era surface in the crate. The README predated Phase 2.1
+and #1082 in four ways, all verified against the crate itself before
+erediting: (1) the file-layout diagram claimed Cargo.toml "depends on
+candle-core (cuda) + half + cc" — actual deps are optional cudarc (the sole
+CUDA substrate per the manifest's own #1082 comment), half, kiln-resource,
+serde/serde_json, with build-dependency cc; (2) "What it measures" called
+cublasGemmEx "the locked-in candle path" and cited a file in the deleted
+`vendor/candle-core/` tree (`src/cuda_backend/mod.rs:2625`) as a mirror —
+no vendor/candle-core exists anywhere on disk or in git; reframed as the
+pre-#1082 baseline dispatch with explicit historical framing; (3) the header
+said only the probe ships and "Phase 2 fills in the production matmul path"
+— Phase 2.1 already shipped AlgoCache, WorkspacePool, the BackendMatmul
+trait, and the feature-gated CublasLtMatmulHandle that kiln-tensor's
+cuda_matmul.rs actually dispatches through; header + new "Why the probe is
+kept" section now describe the real three-layer split; (4) the layout tree
+was missing src/{algo_cache,workspace_pool,backend_matmul,cublaslt_handle}.rs,
+tests/cublaslt_handle_smoke.rs, and csrc/cublaslt_matmul.cu entirely.
+Comment-only doc rewrite; no code touched, no build possible locally (nvcc)
+or needed. Verified: every claim cross-checked before editing (Cargo.toml,
+build.rs feature gates + both .cu compiles, src/lib.rs module docs,
+kiln-tensor/src/cuda_matmul.rs dispatch); repo-wide grep confirms no
+remaining unqualified candle-present claims in the crate's README;
+`scripts/check_repository_artifacts.py` passes (6694 tracked paths);
+`git status` shows only the README edit plus this ledger entry.
+Noted but left alone: cublaslt_probe.cu and examples/cublaslt_mlp_probe.rs
+retain their own historical "candle path" comments (accurate as history,
+matching this README's reframing); kiln-tensor metal_storage.rs/method_api.rs/
+operators.rs still cite deleted vendor/candle-core paths in comments —
+same class as round 33's precedent, left for a future session.
+

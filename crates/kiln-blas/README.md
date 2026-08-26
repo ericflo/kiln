@@ -1,9 +1,22 @@
 # kiln-blas
 
-CUDA BLAS layer for kiln-tensor. Phase 0 ships only the
-`cublaslt_mlp_probe` example; Phase 2 fills in the production matmul path
-(explicit algo cache, workspace pool, optional split-K, optional
-fused-bias-and-activation epilogue).
+CUDA BLAS layer for kiln-tensor. Ships three layers:
+
+- **Backend-agnostic types** — `AlgoCache` (disk-persistent autotune cache) +
+  `WorkspacePool` + the `BackendMatmul` trait with `MatmulRequest` /
+  `Epilogue`. Compile on every host without any feature gate; no CUDA
+  toolchain required.
+- **Probe FFI + cublasLt baseline** — gated behind `--features probe`.
+  Pulls cudarc directly for driver-side types; the probe numerics live in
+  C/CUDA (`csrc/cublaslt_probe.cu`).
+- **`CublasLtMatmulHandle`** — gated behind `--features cublaslt`. The
+  production matmul executor that lifts the probe into a reusable handle
+  with workspace-pool + algo-cache integration. This is what
+  `kiln-tensor/src/cuda_matmul.rs` dispatches through on the CUDA lane.
+
+#1082 removed this crate's former `candle-core` dependency: cudarc, pinned
+by the workspace at the same version every kiln crate uses, is now the sole
+CUDA substrate.
 
 ## Running the Phase 0 probe
 
@@ -36,8 +49,8 @@ git push
 Runs the Qwen3.5-4B MLP gate||up matmul shape
 `[B*T, 2560] @ [2560, 18432]` at `B*T ∈ {1024, 2048, 4096, 8192}` via:
 
-1. `cublasGemmEx` with `CUBLAS_GEMM_DEFAULT_TENSOR_OP` — the locked-in
-   candle path. Mirrors `vendor/candle-core/src/cuda_backend/mod.rs:2625`.
+1. `cublasGemmEx` with `CUBLAS_GEMM_DEFAULT_TENSOR_OP` — the pre-#1082
+   baseline dispatch (the shape once routed through candle's CUDA backend).
 2. `cublasLtMatmul` with `cublasLtMatmulAlgoGetHeuristic` algorithm
    selection + an explicit workspace.
 
@@ -52,25 +65,35 @@ The output (the JSON file under `bench-results/`) feeds into
 ARCHITECTURE.md's "which backend's explicit-control approach wins, by how
 much, on what hardware" decision per the issue's Phase 0 outcome bullet.
 
-## Why this is Phase 0, not Phase 2
+## Why the probe is kept
 
-The probe is decision-shaping. Phase 0 outputs are recorded in
-ARCHITECTURE.md; they inform Phase 2's `kiln-blas` design knobs (how
-much workspace, which algos to cache, whether the heuristic's win
+The probe is decision-shaping evidence: its outputs are recorded in
+ARCHITECTURE.md and justify the design knobs of the production handle
+(how much workspace, which algos to cache, whether the heuristic's win
 justifies the API complexity). The probe binary is not on any production
-codepath.
+codepath — production goes through `CublasLtMatmulHandle`.
 
 ## File layout
 
 ```
 crates/kiln-blas/
-├── Cargo.toml            # depends on candle-core (cuda) + half + cc
-├── build.rs              # compiles csrc/cublaslt_probe.cu via nvcc + cc
+├── Cargo.toml            # optional cudarc + half + kiln-resource + serde;
+│                         # build-dependency: cc. Features: probe, cublaslt
+├── build.rs              # compiles csrc/*.cu via nvcc + cc when a CUDA-
+│                         # needing feature (or CARGO_PRIMARY_PACKAGE) is on
 ├── csrc/
-│   └── cublaslt_probe.cu # C++ probe (cublasLt + cublasGemmEx)
+│   ├── cublaslt_probe.cu # C++ probe (cublasLt + cublasGemmEx)
+│   └── cublaslt_matmul.cu# C++ cublasLt matmul used by the production handle
 ├── src/
-│   └── lib.rs            # FFI bindings to the C++ probe
+│   ├── lib.rs            # module wiring + re-exports
+│   ├── algo_cache.rs     # AlgoCache — disk-persistent autotune cache
+│   ├── workspace_pool.rs # WorkspacePool — workspace cap + usage tracking
+│   ├── backend_matmul.rs # BackendMatmul trait + MatmulRequest/Epilogue
+│   └── cublaslt_handle.rs# CublasLtMatmulHandle + inline probe_ffi module
+│                         # (FFI bindings to the C++ probe)
 ├── examples/
 │   └── cublaslt_mlp_probe.rs  # Rust main: timing harness + JSON output
+├── tests/
+│   └── cublaslt_handle_smoke.rs # CPU-buildable smoke tests for the handle
 └── README.md             # this file
 ```
