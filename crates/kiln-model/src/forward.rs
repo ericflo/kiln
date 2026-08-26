@@ -1163,6 +1163,10 @@ fn add_lora_delta_to_base(
     // (#1082) Deleted the dead candle-CustomOp `cuda_lora_add_training_f32` /
     // `cuda_lora_add_training_bf16` fallbacks: the kt tape's
     // `try_tape_lora_add_cuda` above is the sole autograd LoRA-add producer.
+    // The binding below is consumed only by the `cuda`-gated calls; on
+    // non-cuda builds the allow silences the otherwise unused binding
+    // (same pattern as model_dispatch.rs resident-route locals).
+    #[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
     if let Some(backend) = backend {
         // #1082 item 4: the BackendRuntime trait is kt-typed — pass kt
         // `base`/`x`/`proj.a`/`proj.b` directly (no candle bridge).

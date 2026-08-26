@@ -375,9 +375,8 @@ mod tests {
 
     #[test]
     fn test_dequantize_gptq_varying_values() {
-        // Test that different packed INT4 values dequantize correctly
-        let in_features = 8;
-        let out_features = 1;
+        // Test that different packed INT4 values dequantize correctly.
+        // Shape is [1, 8]: 1 group of 8 packed INT4 weights (hardcoded below).
         let group_size = 8;
 
         // Pack values 0,1,2,3,4,5,6,7 into one u32

@@ -772,6 +772,18 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
                 if (gdn_forward_only_fastpaths || tape_fused_prefill_conv)
                     && ConvBackend::runtime_supports_causal_conv1d_prefill(backend)
                 {
+                    // Used only by the tape-recording block below, which is
+                    // gated to cuda/metal/vulkan/rocm; on feature-less builds
+                    // the allow silences the unused local.
+                    #[cfg_attr(
+                        not(any(
+                            feature = "cuda",
+                            feature = "metal",
+                            feature = "vulkan",
+                            feature = "rocm"
+                        )),
+                        allow(unused_variables)
+                    )]
                     let conv_entry_state = conv_state.clone();
                     let conv_prefill = {
                         kiln_nvtx::range!(c"kiln/gdn/conv/prefill_update");

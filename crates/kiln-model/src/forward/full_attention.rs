@@ -3041,6 +3041,12 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     // (refreshed via `update_cuda_scalar` outside the captured region),
     // closing suspect 1 in `bench-results/cuda-graph-bs2-secondary-audit.md`
     // for #1082. `None` reproduces the legacy per-row writer.
+    // Consumed only by the cuda/metal/rocm slot-writer and metal ICB paths;
+    // on feature-less builds the allow silences the unused parameter.
+    #[cfg_attr(
+        not(any(feature = "cuda", feature = "metal", feature = "rocm")),
+        allow(unused_variables)
+    )]
     kv_slot: Option<&Tensor>,
     #[cfg(feature = "metal")] mut metal_icb_layer: Option<MetalPagedDecodeIcbLayer<'_>>,
     // Phase 7 #1082: kt twin of `paged_cache` for parity-checked

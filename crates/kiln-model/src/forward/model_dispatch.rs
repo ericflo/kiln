@@ -51,7 +51,9 @@ pub fn model_forward_paged_decode_contiguous_batch_hidden_with_ids(
     start_positions: &[usize],
     linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
-    row_ids: Option<&[u64]>,
+    // Consumed only by the `vulkan` resident batched-decode path; on
+    // non-vulkan builds the allow silences the unused parameter.
+    #[cfg_attr(not(feature = "vulkan"), allow(unused_variables))] row_ids: Option<&[u64]>,
 ) -> Result<Tensor> {
     #[cfg(feature = "vulkan")]
     {
@@ -1159,7 +1161,9 @@ pub fn model_forward_paged_decode_contiguous_batch_greedy_with_ids(
     start_positions: &[usize],
     linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
-    row_ids: Option<&[u64]>,
+    // Consumed only by the `vulkan` resident batched-decode path; on
+    // non-vulkan builds the allow silences the unused parameter.
+    #[cfg_attr(not(feature = "vulkan"), allow(unused_variables))] row_ids: Option<&[u64]>,
 ) -> Result<Vec<u32>> {
     #[cfg(feature = "vulkan")]
     {

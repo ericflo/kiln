@@ -364,6 +364,17 @@ pub(super) fn try_kt_lm_head(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Opti
 }
 
 pub(super) fn lm_head_forward_backend_decode_if(
+    // Consumed only by the cuda/metal/vulkan/rocm tape + backend-decode block;
+    // on feature-less builds the allow silences the unused parameter.
+    #[cfg_attr(
+        not(any(
+            feature = "cuda",
+            feature = "metal",
+            feature = "vulkan",
+            feature = "rocm"
+        )),
+        allow(unused_variables)
+    )]
     backend: Option<&dyn BackendRuntime>,
     x: &Tensor,
     embed_tokens_t: &Tensor,
