@@ -510,8 +510,7 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
     let scale = 1.0 / (dk as f64).sqrt();
     let recurrent_unexpanded_qk = matches!(input_dtype, DType::BF16 | DType::F32)
         && gdn_forward_only_fastpaths
-        && seq_len >= 1
-        && seq_len <= GDN_RECURRENT_PREFILL_MAX_TOKENS
+        && (1..=GDN_RECURRENT_PREFILL_MAX_TOKENS).contains(&seq_len)
         && dk == 128
         && gqa_ratio > 1
         && GdnBackend::runtime_supports_gdn_recurrent_prefill_native_head_last(backend);

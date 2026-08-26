@@ -536,10 +536,7 @@ impl TrainingPrecisionPolicy {
             && self.activation_dtypes[0] == kiln_tensor::DType::F32
             && self.lora_parameter_dtypes.len() == 1
             && self.lora_parameter_dtypes[0] == kiln_tensor::DType::F32
-            && self
-                .base_weight_dtypes
-                .iter()
-                .any(|dtype| *dtype == kiln_tensor::DType::BF16)
+            && self.base_weight_dtypes.contains(&kiln_tensor::DType::BF16)
     }
 
     pub fn supports_rms_norm_weight_dtype_for_activation(
@@ -548,10 +545,7 @@ impl TrainingPrecisionPolicy {
         weight_dtype: kiln_tensor::DType,
     ) -> bool {
         if activation_dtype == weight_dtype {
-            return self
-                .activation_dtypes
-                .iter()
-                .any(|dtype| *dtype == activation_dtype);
+            return self.activation_dtypes.contains(&activation_dtype);
         }
         self.uses_f32_activations_for_mixed_base_weights()
             && activation_dtype == kiln_tensor::DType::F32
@@ -566,10 +560,7 @@ impl TrainingPrecisionPolicy {
         activation_dtype != weight_dtype
             && self.uses_f32_activations_for_mixed_base_weights()
             && activation_dtype == kiln_tensor::DType::F32
-            && self
-                .base_weight_dtypes
-                .iter()
-                .any(|dtype| *dtype == weight_dtype)
+            && self.base_weight_dtypes.contains(&weight_dtype)
     }
 
     pub fn activation_dtype_for_embedding_output(
