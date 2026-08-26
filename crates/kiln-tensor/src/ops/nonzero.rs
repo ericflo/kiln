@@ -57,12 +57,10 @@ pub fn nonzero(x: &Tensor) -> Result<Tensor> {
     // Special case: scalar tensor (rank 0). Return shape [N, 0]
     // where N is 1 if non-zero else 0.
     if rank == 0 {
-        if is_nonzero(dtype, &cpu, 0)? {
-            // One row of zero coords; flat data is empty.
-        }
+        // One row of zero coords when nonzero; flat data is always empty
+        // (rank-1 inner dim is 0).
         let count = if is_nonzero(dtype, &cpu, 0)? { 1 } else { 0 };
-        let bytes = vec![0u8; count * 0 * 8]; // zero rank-1 inner = 0 bytes
-        let cpu_out = CpuStorage::from_bytes(DType::I64, bytes)?;
+        let cpu_out = CpuStorage::from_bytes(DType::I64, Vec::new())?;
         let storage: Storage = Arc::new(cpu_out);
         return Tensor::from_parts(
             storage,
@@ -167,5 +165,21 @@ mod tests {
         let y = nonzero(&x).unwrap();
         assert_eq!(y.shape(), &[2, 3]);
         assert_eq!(read_i64(&y), vec![0, 0, 1, 1, 0, 2]);
+    }
+
+    #[test]
+    fn nonzero_scalar_zero() {
+        let x = Tensor::from_slice(&[0.0f32], vec![]).unwrap();
+        let y = nonzero(&x).unwrap();
+        assert_eq!(y.shape(), &[0, 0]);
+        assert!(read_i64(&y).is_empty());
+    }
+
+    #[test]
+    fn nonzero_scalar_nonzero() {
+        let x = Tensor::from_slice(&[7.0f32], vec![]).unwrap();
+        let y = nonzero(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 0]);
+        assert!(read_i64(&y).is_empty());
     }
 }

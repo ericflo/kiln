@@ -1324,3 +1324,32 @@ change.
 
 Repaired the drifted `contracts/production-file-budget-v1.json` exception ceilings for the five kiln-server files that round 31's clippy campaign (commit `fed6f8e92`) resized without updating the contract — found by running this round's steering candidate (a), a file-by-file contracts/ audit beyond the four generators already verified in round 26, which surfaced `scripts/check_production_file_budget.py` failing on the pre-change baseline. The policy demands *exact* reviewed ceilings (any headroom or exceedance is an error), so five entries were stale: api/training.rs 6613→6612, cli.rs 6331→6329, config.rs 11313→11252 (all three shrank from lint rewrites) and state.rs 8384→8387, training_queue.rs 7960→7962 (both grew past their caps). All other contract checkers were run first to scope the audit: runtime-env-direct-reads, source-parsing-test-inventory, OpenEnv contract, config schema (117 fields), thinking-budget schema+conformance, and runtime-defaults all pass; all 15 contracts/ files have live consumers. Why it mattered: `.github/workflows/repository-hygiene.yml` runs this checker, so CI's hygiene gate was red purely due to un-maintained ceiling numbers after an otherwise-clean lint campaign.
 Verified BEFORE: checker failed with exactly the five findings above on the untouched tree. AFTER: `check_production_file_budget.py` passes (647 files, 5000-line default, 14 reviewed exceptions); the checker's own unittest suite (`test_production_file_budget.py`, 6 tests) passes; `scripts/check_repository_artifacts.py` passes unchanged (6692 tracked paths); diff is exactly 5 max_lines values, rationales untouched; no code touched.
+
+## Cleanup Agent (round 51) — 2026-09-02
+
+Repaired a red `cargo clippy` baseline: `cargo clippy -p kiln-server` (and any
+build that compiles kiln-tensor under clippy) failed on the untouched tree with
+a deny-by-default `erasing_op` error at
+`crates/kiln-tensor/src/ops/nonzero.rs:64` — `vec![0u8; count * 0 * 8]` in the
+rank-0 scalar branch, an expression that always yields zero bytes. Rewrote it
+as `Vec::new()` and removed the adjacent dead statement
+`if is_nonzero(dtype, &cpu, 0)? { /* empty body */ }`, which was a redundant
+second predicate evaluation whose result was discarded. Added two scalar-path
+tests (`nonzero_scalar_zero` → shape [0,0], `nonzero_scalar_nonzero` → shape
+[1,0]) since the rank-0 branch previously had zero coverage; expectations match
+the branch's documented contract (shape [N, 0] with N∈{0,1}, empty flat data).
+Why it mattered: clippy is deny-on-error for this lint class, so every clippy
+run touching kiln-tensor was failing before any of this session's work;
+the dead `if` also doubled an allocation-free predicate call for no reason.
+Verified BEFORE: baseline `cargo test -p kiln-tensor --lib` 992 passed /
+0 failed; baseline `cargo clippy -p kiln-server` errored exactly once with
+`erasing_op` at nonzero.rs:64. AFTER: lib tests 994 passed / 0 failed (incl.
+the two new tests), `cargo test -p kiln-tensor --test new_ops_parity`
+19 passed, `cargo clippy -p kiln-server` completes with zero errors (only the
+pre-existing judgment-call warnings remain), `check_production_file_budget.py`
+passes (647 files; nonzero.rs is not an exception file),
+`check_repository_artifacts.py` passes (6692 tracked paths). Noted but left:
+~29 remaining clippy warnings across kiln-tensor/kiln-eval/kiln-core/
+kiln-memory/opd-loss build script are all judgment-call categories
+(too-many-arguments, needless_range_loop in hand-rolled kernels, etc.) —
+steering round (b) reviewed them; none are safe-mechanical wins.
