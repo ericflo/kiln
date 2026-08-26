@@ -9,7 +9,7 @@ staleness); this cap is about *style and idiom consistency*.
 1. [`capability.md`](capability.md) — contract: 6 convention categories,
    multiplicative-gate rubric, §0.
 2. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout.
-3. [`../README.md`](../README.md) — ECHO defaults.
+3. [`../../README.md`](../../README.md) — ECHO defaults.
 
 ## Status
 

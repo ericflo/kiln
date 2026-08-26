@@ -7,7 +7,7 @@ emits a structured JSON summary. **Round 1 BIG winner (+12.93pp,
 ## Read first
 
 1. [`capability.md`](capability.md) — 5-component rubric.
-2. [`../../LAYOUT.md`](../../LAYOUT.md), [`../README.md`](../README.md).
+2. [`../../LAYOUT.md`](../../LAYOUT.md), [`../../README.md`](../../README.md).
 
 ## Status (round 2)
 

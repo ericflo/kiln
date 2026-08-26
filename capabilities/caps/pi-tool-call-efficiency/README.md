@@ -20,7 +20,7 @@ report of n_tool_calls distribution.
 
 1. [`capability.md`](capability.md) — round-2 reshape rationale.
 2. [`../../LAYOUT.md`](../../LAYOUT.md).
-3. [`../README.md`](../README.md).
+3. [`../../README.md`](../../README.md).
 
 ## Status
 

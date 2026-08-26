@@ -9,7 +9,7 @@ doctest, and verify before declaring done. **Round 1 winner (+4.2pp
 1. [`capability.md`](capability.md) — multi-component v1 rubric with
    tool_call_efficiency as target sub-score.
 2. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout.
-3. [`../README.md`](../README.md) — ECHO defaults.
+3. [`../../README.md`](../../README.md) — ECHO defaults.
 
 ## Status (round 2)
 

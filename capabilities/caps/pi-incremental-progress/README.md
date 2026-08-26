@@ -8,7 +8,7 @@ writing everything then testing once. New cap in round 2 (Tier 2).
 1. [`capability.md`](capability.md) — contract: goal, rubric (multiplicative
    gate), §0, hypotheses.
 2. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout.
-3. [`../README.md`](../README.md) — ECHO defaults.
+3. [`../../README.md`](../../README.md) — ECHO defaults.
 
 ## Status
 

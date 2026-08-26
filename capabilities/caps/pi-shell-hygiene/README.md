@@ -8,7 +8,7 @@ anti-pattern doc.
 
 1. [`capability.md`](capability.md) — contract, hypotheses.
 2. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout.
-3. [`../README.md`](../README.md) — ECHO defaults.
+3. [`../../README.md`](../../README.md) — ECHO defaults.
 4. clouderic kiln-skill body for the canonical anti-pattern list.
 
 ## Status

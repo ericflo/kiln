@@ -10,7 +10,7 @@ Round 2 — high-priority new cap (Tier 2 in NEXT_ROUND.md).
 1. [`capability.md`](capability.md) — the contract: goal, rubric (v0 with
    multiplicative format gate), §0 cheats, hypotheses.
 2. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout + kiln CLIs.
-3. [`../README.md`](../README.md) — ECHO defaults and pi-rollout shape.
+3. [`../../README.md`](../../README.md) — ECHO defaults and pi-rollout shape.
 4. [`../../NEXT_ROUND.md`](../../NEXT_ROUND.md) — operating manual + diagnostic
    ladder.
 

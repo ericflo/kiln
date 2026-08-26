@@ -8,7 +8,7 @@ this cap is about *which window of that file*.
 
 1. [`capability.md`](capability.md) — contract.
 2. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout.
-3. [`../README.md`](../README.md) — ECHO defaults.
+3. [`../../README.md`](../../README.md) — ECHO defaults.
 
 ## Status
 

@@ -8,7 +8,7 @@ failure decomposition (~7,800 tasks analyzed). Round-2 high-priority
 
 1. [`capability.md`](capability.md) — contract, §0 cheats, hypotheses.
 2. [`../../LAYOUT.md`](../../LAYOUT.md) — uniform layout.
-3. [`../README.md`](../README.md) — ECHO defaults.
+3. [`../../README.md`](../../README.md) — ECHO defaults.
 
 ## Status
 
