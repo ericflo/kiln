@@ -1520,3 +1520,54 @@ snapshot is genuinely stale (banner covers this); docs-site --validate-only
 passes (59 documents); scripts/check_repository_artifacts.py passes with an
 unchanged tracked-path count (move, not deletion); git status shows only the
 rename, README, banner/link edits, and this ledger entry.
+Why it mattered: the last live surface presenting the already-shipped ROCm
+backend as unbuilt work sat in the curated `docs/` root.
+Verified: scripted link audit over the archived file resolves every markdown
+link (0 MISSING); spot-checked referenced paths confirm the pre-implementation
+snapshot is genuinely stale (banner covers this); docs-site --validate-only
+passes (59 documents); scripts/check_repository_artifacts.py passes with an
+unchanged tracked-path count (move, not deletion); git status shows only the
+rename, README, banner/link edits, and this ledger entry.
+
+## Cleanup Agent (round 58) — 2026-09-03
+
+Fixed two broken rustdoc intra-doc links plus their surrounding present-tense
+candle-era claims in `crates/kiln-vulkan-kernel/src/vk_paged_kv_cache.rs`,
+fresh-exploration finds after this session's steering candidates (a) and (b)
+verified clean. (1) The module doc asserted "the legacy [`PagedKvCache`] in
+`kiln-model` stores its `(k_pool, v_pool)` tensors on the candle CPU device on
+Vulkan" — both the intra-doc link target and the claim itself are dead post-
+#1082: the candle-typed `kiln_model::paged_kv_cache::PagedKvCache` is deleted,
+and the sole replacement (`paged_kv_cache_kt::PagedKvCacheKt`) is
+cfg(feature = "cuda")-gated, so nothing device-side exists on Vulkan without
+this module. Rewritten with explicit historical framing naming #1082. (2) The
+struct doc mirrored "[`kiln_model::paged_kv_cache::PagedKvCache`]'s layout ...
+rather than a candle CPU tensor" — same deleted path as a live-looking link;
+reframed as the deleted candle-typed cache removed by #1082. Comment-only,
+zero code touched. This session also deep-audited steering candidates (a)
+docs/GRPO_GUIDE.md and (b) docs/OPENENV_GUIDE.md against code and found them
+fully accurate: every CLI flag matches openenv_cli.rs/cli.rs (rollout-generate,
+openenv inspect/tasks/rollout/train/start/status/cancel/artifact/verify/replay),
+every endpoint matches api/openenv.rs routes + training.rs/adapters.rs, tuning
+knob defaults match kiln-train LossConfig (kl_coeff 0.1, clip_epsilon 0.2,
+k1/token defaults, rank 16/alpha 32, dynamic_sampling true,
+shared_prefix_reference true, cispo_max_weight 5.0), the 20-group gate minimum
+(OPENENV_ENVIRONMENT_EVAL_MIN_GROUPS = 20), the 512 MiB retained budget
+(MAX_OPENENV_RETAINED_BYTES), summary v3/v5 and run-record v5 schema strings,
+checkpoint filename format `-{step:08}.kiln-checkpoint`, and all three
+OPENENV_REPLAY_REFERENCE.md anchors exist; python3 scripts/check_openenv_contract.py
+passes end to end. A scripted relative-link audit over all 63 tracked live
+docs/*.md files found zero dangling links, and a repo-wide crates/+scripts/
+.github scan for missing referenced docs paths surfaced only test fixtures and
+generated build targets.
+Why it mattered: the crate's module documentation cited a type that no longer
+exists via rustdoc link syntax, so cargo doc emitted broken_intra_doc_links
+warnings while presenting a candle-era architecture as current; the same file
+misdescribed where Vulkan KV pools live today.
+Verified BEFORE and AFTER: `cargo test -p kiln-vulkan-kernel --lib` passes 65/65;
+`cargo check -p kiln-vulkan-kernel --lib` succeeds; `cargo fmt --check -p
+kiln-vulkan-kernel` clean; `cargo doc -p kiln-vulkan-kernel --no-deps`
+unresolved-link warning count drops exactly by the two fixed links (56 → 54,
+remaining ones pre-existing and unrelated); repo-wide grep confirms no other
+file uses the deleted `kiln_model::paged_kv_cache::` path as a rustdoc link;
+git status shows only the one source edit plus this ledger entry.

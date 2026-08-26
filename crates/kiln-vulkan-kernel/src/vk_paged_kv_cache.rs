@@ -1,12 +1,14 @@
 //! Vulkan-resident paged KV cache for the resident decode path.
 //!
 //! Gate (b)/(e) of `docs/vk_resident_decode_plan.md`: the legacy
-//! [`PagedKvCache`] in `kiln-model` stores its `(k_pool, v_pool)`
-//! tensors on the candle CPU device on Vulkan (there is no candle
-//! Vulkan device). That means every paged-attention read on Vulkan
-//! today crosses host ↔ device twice per decode step — once to
-//! upload the freshly-projected K/V slot and once to upload the
-//! whole window into the paged-attn kernel.
+//! host-side paged KV cache in `kiln-model` keeps its `(k_pool,
+//! v_pool)` pools off-device from Vulkan's perspective (at the time
+//! this module was written they lived on the candle CPU device;
+//! since #1082 the sole kt-backed cache is CUDA-gated, so nothing
+//! device-resident exists on Vulkan without this module). That means
+//! every paged-attention read on Vulkan crosses host ↔ device twice
+//! per decode step — once to upload the freshly-projected K/V slot
+//! and once to upload the whole window into the paged-attn kernel.
 //!
 //! `VkPagedKvCache` is the device-resident sibling: one device-local
 //! `VulkanBuffer` per `(layer, K|V)` pair, laid out as
@@ -43,10 +45,11 @@ const BYTES_PER_ELEMENT: u64 = 4;
 
 /// Vulkan-resident parallel paged KV cache.
 ///
-/// Mirrors the legacy [`kiln_model::paged_kv_cache::PagedKvCache`]'s
-/// `layers: Vec<(Tensor, Tensor)>` layout, but each pool is a
-/// device-local [`VulkanBuffer`] of f32 elements rather than a
-/// candle CPU tensor.
+/// Mirrors the legacy host-side paged KV cache's (the deleted
+/// candle-typed `kiln_model::paged_kv_cache::PagedKvCache`, removed
+/// by #1082) `layers: Vec<(Tensor, Tensor)>` layout, but each pool is
+/// a device-local [`VulkanBuffer`] of f32 elements rather than a
+/// host tensor.
 pub struct VkPagedKvCache {
     /// Per full-attention layer, the K pool buffer in VRAM.
     k_layers: Vec<Arc<VulkanBuffer>>,
