@@ -3,7 +3,7 @@
 Issue: #1082
 Branch: `feat/vk-tape-harmonization`
 Status: SPEC ONLY. Not implemented in this branch. PR1+PR2 are code; PR3–PR7 are specs.
-Authoritative design doc: `docs/vulkan-train-harmonization-plan.md` (§4 PR7, §8 reference index).
+Authoritative design doc: `vulkan-train-harmonization-plan.md` (§4 PR7, §8 reference index).
 
 > **All line numbers below were read from the worktree at branch HEAD and WILL drift.
 > Every deletion step ships with the exact `grep` that re-anchors it. Re-run the grep,

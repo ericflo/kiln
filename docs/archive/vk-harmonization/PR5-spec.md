@@ -3,7 +3,7 @@
 Issue: #1082
 Branch: `feat/vk-tape-harmonization`
 Status: **SPEC ONLY — not implemented.** PR1/PR2 are code in this branch; PR3–PR7 are specs.
-Authoritative parent plan: `docs/vulkan-train-harmonization-plan.md` (§4 "PR5", §5, §6, §7).
+Authoritative parent plan: `vulkan-train-harmonization-plan.md` (§4 "PR5", §5, §6, §7).
 
 > ⚠ **ADVERSARIAL-REVIEW CORRECTION (load-bearing — read before implementing).**
 > The §0 thesis — *"backward just works once the forward records, because the

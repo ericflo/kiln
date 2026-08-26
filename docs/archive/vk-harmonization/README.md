@@ -16,4 +16,6 @@ human-soak handoff.
   `vk_forward.rs`, server opt-out env family).
 
 The specs are kept as historical design records; they no longer describe work
-to be done. The authoritative plan remains `docs/vulkan-train-harmonization-plan.md`.
+to be done. The authoritative plan itself is archived alongside these records:
+[`vulkan-train-harmonization-plan.md`](vulkan-train-harmonization-plan.md)
+(archived 2026-09-02 after the full series landed).

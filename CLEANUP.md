@@ -1109,3 +1109,34 @@ pointer, and the archived dir itself; `cargo fmt --check -p kiln-model` clean
 passes (6694 tracked paths, same count — moves not deletions); git status
 shows exactly the 11 renames, new README, two reference edits, and this
 ledger entry.
+
+## Cleanup Agent (round 42) — 2026-09-02
+
+Archived `docs/vulkan-train-harmonization-plan.md` (318 lines — Round 41's
+flagged leftover, this round's steering primary candidate) to
+`docs/archive/vk-harmonization/vulkan-train-harmonization-plan.md`, completing
+the vk-harmonization consolidation started last round. Confirmed the archive
+trigger before moving: the full PR1–PR7 series is landed on main via PR #1441,
+including PR6 (`3b226d620`, orchestration flip) and PR7 (`a909d46ff`, deletion
+of the legacy fork — `crates/kiln-train/src/vk_train.rs` and
+`crates/kiln-model/src/vk_forward.rs` verified gone from the tree), so the
+plan's present-tense "PR1/PR2 implemented; PR3–PR7 specced" status and its
+pre-landing file:line reference index no longer describe reality. Moved with
+`git mv`; added a landed-status banner at the top of the plan (explicitly
+marking its file:line references historical) and updated the archive README's
+closing pointer, which had called the plan "authoritative" and live. Link
+fixes: all five inbound references were inside the archive itself — the four
+spec docs' parent-plan pointers rewritten from `docs/...` / `../../...`
+prose/link forms to sibling-relative paths, and README.md now links the plan
+as an archived record. Zero references outside the archive remain (repo-wide
+git grep), and the file was never in docs/site/docs-manifest.json.
+Why it mattered: the last live surface of a fully landed effort no longer
+masquerades as pending design work at the docs/ root; the whole #1082 Vulkan
+harmonization story now lives in one directory.
+Verified: scripted check that every rewritten link target exists in
+`docs/archive/vk-harmonization/` (all resolve); repo-wide git grep for
+`vulkan-train-harmonization-plan` matches only the archived dir;
+`scripts/check_repository_artifacts.py` passes (6695 tracked paths, same count
+— move not deletion); no code touched, no cargo checks needed;
+`git status` shows exactly the rename, five archive edits, and this ledger
+entry.

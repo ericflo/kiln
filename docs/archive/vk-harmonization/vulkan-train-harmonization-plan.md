@@ -1,5 +1,12 @@
 # Vulkan Training Harmonization Plan (PR1–PR7)
 
+> **Archived 2026-09-02.** The full PR1–PR7 series landed on `main` via
+> PR #1441 (`feat/vk-tape-harmonization`), including PR6 (`3b226d620`,
+> orchestration flip) and PR7 (`a909d46ff`, deletion of the legacy fork —
+> `vk_train.rs` / `vk_forward.rs` are gone from the tree). The file:line
+> references below describe the pre-landing worktree and are historical.
+> See [README.md](README.md) in this directory for the completion status.
+
 Issue: #1082
 Branch: `feat/vk-tape-harmonization`
 Status: PR1/PR2 implemented + bounded-validated in this branch; PR3–PR7 specced.

@@ -3,7 +3,7 @@
 Issue: #1082
 Branch: `feat/vk-tape-harmonization`
 Status: **SPEC ONLY — not implemented.** PR1/PR2 are landed in this branch; PR3–PR7 are specced.
-Parent plan: `docs/vulkan-train-harmonization-plan.md` §4 PR6, §5 risk #2.
+Parent plan: `vulkan-train-harmonization-plan.md` §4 PR6, §5 risk #2.
 
 > All `file:line` anchors below were grepped against the worktree at branch HEAD
 > (`b94feeac`). **Line numbers drift** — every anchor names the enclosing
