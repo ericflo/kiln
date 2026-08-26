@@ -206,11 +206,9 @@ hardware.
 - **KILN_USE_KILN_TENSOR_* migration flag registry** (kiln-core) —
   24-cell (6 ops × 4 backends) feature-flag grid for the per-op
   migration cutover
-- **Phase 7 migration tooling** —
-  `scripts/phase7-candle-removal-plan.py` (bucketing 1,845 candle
-  call sites across 66 distinct APIs by phase) and
-  `scripts/phase7-migrate-candle-bail.py` (dry-run rewriter for the
-  493-site `candle_core::bail!` migration)
+- **Phase 7 migration tooling** (historical) — the plan generator and
+  bail-rewriter scripts served the #1082 candle removal and were deleted once
+  candle was fully removed; see git history
 - **RunPod substrate validate orchestrator** — outside-the-pod
   one-shot acquire + validate + release using the wait-file pattern
   (no until-ssh-poll hangs per the kiln skill mandate)

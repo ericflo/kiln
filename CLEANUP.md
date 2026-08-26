@@ -1166,3 +1166,31 @@ row (0.3) to "65/65 deliverables shipped"; `--json` mode's unshipped list
 went from `[phase 0.3]` to empty with all other rows byte-identical;
 `--help` still works; `bash -n` passes; git status shows only the script edit
 plus this ledger entry.
+
+## Cleanup Agent (round 44) — 2026-09-02
+
+Deleted the orphaned candle-era Phase 7 migration-tooling trio (this round's
+steering primary candidate): `bench-results/phase7-removal-plan.md`
+(36 lines — a plan citing 1,845 candle call sites that no longer exist), its
+generator `scripts/phase7-candle-removal-plan.py` (215 lines), and the
+closely-coupled `scripts/phase7-migrate-candle-bail.py` (a dry-run rewriter
+for a 493-site `candle_core::bail!` migration that already happened; Round 40
+had flagged it inert). Orphan status confirmed: #1082 fully removed candle,
+and repo-wide grep over all tracked files showed the trio's only citers were
+each other plus one hand-written prose bullet in
+`bench-results/substrate-status.md`; neither file appears in
+`audit-substrate-status.sh`'s probe ROWS (Phase 0.1 checks only
+`audit-candle-usage.sh` + `candle-api-surface.csv`, which stay untouched per
+the standing directive) or in any script/CI/doc surface; remaining grep hits
+are ignored agent traces and frozen eval-trace JSONs. The substrate-status.md
+bullet was rewritten to explicitly historical framing ("served the #1082
+candle removal and were deleted once candle was fully removed; see git
+history") so no live pointer dangles.
+Why it mattered: −251 lines of completed-effort migration tooling whose own
+plan described a codebase state that no longer exists.
+Verified BEFORE and AFTER: `bash scripts/audit-substrate-status.sh` reports
+65/65 deliverables shipped both times (human + --json modes);
+`scripts/check_repository_artifacts.py` passes both times (6692 → 6689
+tracked paths); post-deletion `git grep` for all three filenames matches
+nothing outside CLEANUP.md; `git status` shows exactly the three deletions,
+one doc edit, and this ledger entry.
