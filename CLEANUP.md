@@ -429,3 +429,22 @@ clean repo-wide. Noted for future agents: `crates/kiln-tensor/build.rs`
 contains the same duplicated discovery code with the identical 5
 collapsible_if + ptr_arg pattern, left untouched to keep this session scoped
 to one crate.
+## Cleanup Agent (round 17) — 2026-08-27
+
+Eliminated every clippy warning in `crates/kiln-tensor/build.rs` — the exact
+duplicated toolchain-discovery pattern round 16 cleaned up in
+kiln-rmsnorm-kernel, applied here with the same playbook. Five
+`clippy::collapsible_if` warnings collapsed into Rust-2024 let-chains (the
+`which nvcc` / `which hipcc` fallback ladders in `find_cuda_root()` /
+`find_rocm_root()`, including a triple-nested parent-probe), plus two trivial
+fixes: `clippy::needless_borrows_for_generic_args` on the
+`&format!(...)` passed to `build.flag`, and `clippy::ptr_arg`
+(`&PathBuf` → `&Path` on `configure_nvcc_from_cuda_root`; `Path` was already
+imported). All hand edits, no other code touched. Why it mattered: the crate's
+build script now compiles warning-free like its siblings, and the CUDA/HIP
+discovery ladders read flat instead of five levels deep. Verified: before AND
+after, `cargo build -p kiln-tensor` succeeds; after, `cargo clippy -p
+kiln-tensor --all-targets` shows zero warnings attributable to build.rs (the
+one pre-existing lib warning is unchanged) and `cargo build -p kiln-model`
+(downstream consumer) succeeds; `cargo fmt --check` remains clean repo-wide;
+`git status` shows only the one source edit plus this ledger entry.
