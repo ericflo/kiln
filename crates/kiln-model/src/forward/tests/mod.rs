@@ -4,6 +4,7 @@
 use super::*;
 use crate::backend::cpu::CpuBackend;
 
+#[cfg_attr(not(any(feature = "metal", feature = "cuda")), allow(dead_code))]
 fn explicit_hardware_qualification() -> bool {
     std::env::var("KILN_QUALIFICATION").as_deref() == Ok("1")
 }

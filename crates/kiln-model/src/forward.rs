@@ -254,6 +254,7 @@ fn fused_paged_decode_disabled(device: Device) -> bool {
 /// vs the contiguous O(n^2) prefill recompute's 10.5 degrading to ~8). The
 /// immutable qualified profile enables the route and its KV-pool contract.
 #[cfg(feature = "rocm")]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn rocm_paged_decode_enabled() -> bool {
     crate::backend::capability::DecodeExecutionPolicy::for_backend("rocm", Device::Rocm(0))
         .direct_paged_decode_attention_enabled()
@@ -939,6 +940,11 @@ fn weighted_lm_head_prep_disabled() -> bool {
     false
 }
 
+// Callers live in cuda/metal-gated tests only, so it is dead everywhere else.
+#[cfg_attr(
+    not(all(test, any(feature = "cuda", feature = "metal"))),
+    allow(dead_code)
+)]
 fn synchronize_for_profile(device: &Device) -> Result<()> {
     // Profiling timing only makes sense after the launching queue has
     // drained — without this the recorded elapsed time captures kernel

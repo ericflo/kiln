@@ -103,6 +103,7 @@ pub fn model_forward_paged_decode_contiguous_batch_hidden_with_ids(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(feature = "metal"), allow(dead_code))]
 pub(crate) fn model_forward_paged_decode_contiguous_batch_hidden_with_stable_buffers(
     backend: &dyn BackendRuntime,
     token_ids: &[u32],
@@ -149,6 +150,7 @@ pub(crate) fn model_forward_paged_decode_contiguous_batch_hidden_with_stable_buf
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(feature = "metal"), allow(dead_code))]
 pub(crate) fn model_forward_paged_decode_contiguous_batch_greedy_with_stable_buffers(
     backend: &dyn BackendRuntime,
     token_ids: &[u32],
@@ -3159,6 +3161,7 @@ pub(crate) fn model_forward_paged_batched_hidden_with_graph_inputs(
 /// eagerly off the graph, sidestepping the replay-nondeterminism that doubled
 /// output ("BUG2"). Cost is one extra eager batched vocab GEMV + one RMSNorm
 /// per decode step.
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 pub(crate) fn lm_head_from_batched_hidden_eager(
     backend: &dyn BackendRuntime,
@@ -4514,6 +4517,7 @@ pub fn model_forward_paged_streaming_with_progress_and_policy(
 ///
 /// Prefix-cache callers use this for a tail pass after a separately executed
 /// head pass, so progress remains cumulative across both forwards.
+#[cfg_attr(not(test), allow(dead_code))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn model_forward_paged_streaming_with_progress_offset(
     backend: &dyn BackendRuntime,

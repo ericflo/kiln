@@ -52,6 +52,7 @@ pub fn stats() -> RocmW8LmHeadStats {
     }
 }
 
+#[cfg_attr(not(feature = "rocm"), allow(dead_code))]
 fn observe_batch_rows(rows: usize) {
     MAX_BATCH_ROWS.fetch_max(rows as u64, Ordering::Relaxed);
 }

@@ -321,10 +321,12 @@ impl Default for RocmKernelPolicy {
     }
 }
 
+#[cfg_attr(not(feature = "rocm"), allow(dead_code))]
 pub const PORTABLE_ROCM_KERNEL_POLICY: RocmKernelPolicy = RocmKernelPolicy::portable_fallback();
 
 /// Install process-lifetime ROCm kernel policy. Reinstalling the same value is
 /// idempotent; conflicting values fail instead of changing live dispatch.
+#[cfg_attr(not(feature = "rocm"), allow(dead_code))]
 pub fn install_rocm_kernel_policy(policy: RocmKernelPolicy) -> Result<()> {
     match ROCM_KERNEL_POLICY.set(policy) {
         Ok(()) => Ok(()),

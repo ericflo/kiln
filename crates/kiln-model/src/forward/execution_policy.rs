@@ -340,29 +340,6 @@ pub(super) fn full_attn_score_dtype_bytes(dtype: DType) -> usize {
         _ => dtype.size_in_bytes().max(1),
     }
 }
-
-pub(super) fn full_attn_adaptive_max_tile_tokens(
-    device: &Device,
-    dtype: DType,
-    batch: usize,
-    key_prefix_len: usize,
-    num_heads: usize,
-    base_tile_tokens: usize,
-    scratch_buffers: usize,
-) -> usize {
-    let budget_mb = full_attn_materialized_score_budget_mib();
-    full_attn_adaptive_max_tile_tokens_with_budget(
-        device,
-        dtype,
-        batch,
-        key_prefix_len,
-        num_heads,
-        base_tile_tokens,
-        scratch_buffers,
-        budget_mb,
-    )
-}
-
 // Intentionally wide forward signature; bundling would break the public API.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn full_attn_adaptive_max_tile_tokens_with_budget(
@@ -416,6 +393,7 @@ pub(super) fn full_attn_adaptive_max_tile_tokens_with_budget(
 
 // Intentionally wide forward signature; bundling would break the public API.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn full_attn_adaptive_tile_len(
     device: &Device,
     dtype: DType,

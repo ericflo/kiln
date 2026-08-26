@@ -215,6 +215,7 @@ impl Drop for GdnPrefillResidentStateScope<'_> {
 /// a head_dim=128 model would need 128 here (or head_dim threaded through).
 pub(crate) const FA2_KBLOCK_N: usize = 64;
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn batch_has_noncontiguous_kv_tiles(
     block_tables: &[&BlockTable],
     seq_lens: &[usize],
@@ -6631,6 +6632,7 @@ impl ModelRunner {
     /// This mirrors the greedy continuous-batch state assembly/scatter path, but
     /// stops before the LM-head argmax so mixed sampling parameters can still be
     /// handled by the existing sampler.
+    #[cfg_attr(not(feature = "vulkan"), allow(dead_code))]
     #[allow(clippy::too_many_arguments)]
     fn decode_sample_paged_contiguous_batch_with_ids(
         &self,
@@ -6872,6 +6874,7 @@ impl ModelRunner {
     /// This mirrors the greedy continuous-batch state assembly/scatter path, but
     /// stops before the LM-head argmax so mixed sampling parameters can still be
     /// handled by the existing sampler.
+    #[cfg_attr(not(feature = "vulkan"), allow(dead_code))]
     fn decode_hidden_paged_contiguous_batch_with_ids(
         &self,
         input_tokens: &[TokenId],
@@ -6892,6 +6895,7 @@ impl ModelRunner {
         .map(|profiled| profiled.value)
     }
 
+    #[cfg_attr(not(feature = "vulkan"), allow(dead_code))]
     fn decode_hidden_paged_contiguous_batch_with_ids_profiled(
         &self,
         input_tokens: &[TokenId],

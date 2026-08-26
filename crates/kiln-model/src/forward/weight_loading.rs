@@ -350,6 +350,7 @@ impl ProjectionLoadCache {
         self.policy.drop_projection_transposes
     }
 
+    #[cfg_attr(not(feature = "metal"), allow(dead_code))]
     fn parallel_transposed_projection_upload(&self) -> bool {
         self.policy.parallel_transposed_projection_upload_enabled()
     }

@@ -91,6 +91,8 @@ impl BufferShape {
 
 pub struct DecodeBuffer<T: DecodeDType> {
     kind: DecodeBufferKind,
+    // Held to keep the buffer alive; only the lifetime matters, not the value.
+    #[allow(dead_code)]
     tensor: kiln_tensor::Tensor,
     dims: Vec<usize>,
     _dtype: PhantomData<T>,
