@@ -829,7 +829,6 @@ pub(super) fn train_tokenized_grpo_group_with_grad_norms(
         allow(unused_mut)
     )]
     let mut group_loss_sum = 0.0;
-    let mut opt_state = opt_state;
 
     // Active token counts per completion (matches the next-token-shift convention
     // used by token_log_probs and the analytic tail: action_mask[1..]).
