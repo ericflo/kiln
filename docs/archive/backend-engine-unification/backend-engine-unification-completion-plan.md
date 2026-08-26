@@ -1,7 +1,17 @@
 # Backend And Engine Unification — Completion Plan (Drive Everything to A)
 
+> **Archived 2026-08-26 — all workstreams (W0–W8) are landed.** The exit
+> criteria below are met in the live tree: `BackendRuntime` is below the
+> method-count gate with no blanket-forward shims, `ops/matmul.rs`'s per-backend
+> arms are gone, `for_device_family` is test-only, the derived report emits
+> computed `genuine` flags with zero hardcoded `covered` literals, and
+> `scripts/check_unification_gates.sh` is the runner-agnostic gate. See
+> [`README.md`](README.md) for the per-phase verification. This document is
+> kept as the historical migration record; its "Status: active" and DoD
+> language describe the 2026-06-07 point in time.
+
 Date: 2026-06-07
-Status: active
+Status: complete — archived 2026-08-26 (was `active` at writing)
 Predecessor: [`backend-engine-unification-plan.md`](backend-engine-unification-plan.md) (original plan, Phases 0–8)
 Evidence base: [`backend-engine-unification-review-2026-06-07.md`](backend-engine-unification-review-2026-06-07.md) (what actually landed)
 

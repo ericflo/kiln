@@ -1,5 +1,15 @@
 # Backend And Engine Unification Plan
 
+> **Archived 2026-08-26 — the effort this plan tracks is fully landed in the
+> live tree.** The behavioral-migration gap it flagged for Phases 1/3/4/5 was
+> closed by the completion plan below (focused traits are now authoritative,
+> `BackendRuntime` reduced to identity + composition glue, residency routed
+> through `ResidentRegistry`, matmul via the `LinearBackend` request surface,
+> replay as a production path). This document is kept as the historical design
+> record; its present-tense status blocks describe the 2026-06-05/07 point in
+> time, not current state. See [`README.md`](README.md) for the verified
+> landing state. The live scoreboard remains `docs/backend-capability-report.md`.
+
 Date: 2026-06-05
 
 > **Status update (2026-06-07).** This original plan has been largely executed on
@@ -11,7 +21,7 @@ Date: 2026-06-05
 > "covered" in `docs/backend-capability-report.md` as "migrated".
 >
 > - What actually landed, with evidence: **[`backend-engine-unification-review-2026-06-07.md`](backend-engine-unification-review-2026-06-07.md)**
-> - How to finish (drive every phase to genuine unification): **[`backend-engine-unification-completion-plan.md`](backend-engine-unification-completion-plan.md)** ← active plan; agents should work from this.
+> - How to finish (drive every phase to genuine unification): **[`backend-engine-unification-completion-plan.md`](backend-engine-unification-completion-plan.md)** ← now complete; all workstreams landed (archived 2026-08-26).
 
 This document maps the current backend and engine implementations across the
 workspace and proposes a unification plan for CUDA, ROCm, Metal, and Vulkan. It
@@ -970,9 +980,10 @@ and certifies "a contract + test exist", not "call sites migrated". Phases 0, 2,
 6, and 7 are genuinely landed; Phases 1, 3, 4, and 5 are additive scaffolds that
 still sit on top of `Device::`-keyed dispatch. The remaining work — driving every
 phase to genuine unification (type A) and making the report derive its status
-instead of declaring it — is tracked in
-`docs/backend-engine-unification-completion-plan.md`, with the full evidence base
-in `docs/backend-engine-unification-review-2026-06-07.md`.
+instead of declaring it — was tracked in the
+`docs/archive/backend-engine-unification/backend-engine-unification-completion-plan.md`
+(now landed; see this directory's `README.md`), with the full evidence base
+in `docs/archive/backend-engine-unification/backend-engine-unification-review-2026-06-07.md`.
 
 1. Generate a capability report from the live tree.
    Start with override presence plus explicit support methods for

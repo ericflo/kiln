@@ -2274,7 +2274,7 @@ pub(super) fn qualification_layer_last_row(hidden: &Tensor, seq_len: usize) -> R
 /// is feasible. Resident decode declines are visible by default; use the
 /// backend-owned decode hot-path fallback env for explicit A/B fallback.
 ///
-/// Gate (a)/(c) of `docs/vk_resident_decode_plan.md`. The runtime predicate
+/// Gate (a)/(c) of `docs/archive/vulkan-resident-decode/vk_resident_decode_plan.md`. The runtime predicate
 /// `Backend::supports_resident_decode()` returns `false` on CPU / CUDA /
 /// Metal so those backends keep using the existing `model_forward_paged_last_token`
 /// path. On Vulkan the predicate returns `true` when the logical device is
@@ -2728,7 +2728,7 @@ pub(super) fn resident_decode_pool_ready(
     config: &kiln_core::config::ModelConfig,
 ) -> bool {
     // The pool is sized off (hidden, intermediate, max_batch). Max
-    // batch defaults to 64 per docs/vk_resident_decode_plan.md gate
+    // batch defaults to 64 per docs/archive/vulkan-resident-decode/vk_resident_decode_plan.md gate
     // (b). At runtime, an iGPU near its UMA limit lands `None` and
     // routes to the per-call Tensor path.
     ReplayBackend::runtime_decode_resident_pool_ready(

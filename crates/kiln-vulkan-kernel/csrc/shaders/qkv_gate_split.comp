@@ -1,7 +1,7 @@
 // Split the combined QKV-with-gate buffer produced by
 // full_attn_qkv_decode{,_bf16w}.comp into four distinct output
 // buffers: q, gate, k, v. Used by the Vulkan-resident decode wire-up
-// (docs/vk_resident_decode_plan.md) so the per-layer block stays
+// (docs/archive/vulkan-resident-decode/vk_resident_decode_plan.md) so the per-layer block stays
 // device-resident across the projection → norm/rotate/attention chain.
 //
 // Combined input layout (per decode row):

@@ -1,4 +1,4 @@
-//! Gate (d) of `docs/vk_resident_decode_plan.md`: end-to-end parity
+//! Gate (d) of `docs/archive/vulkan-resident-decode/vk_resident_decode_plan.md`: end-to-end parity
 //! between the Vulkan-resident decode path
 //! ([`model_forward_paged_last_token_resident`]) and the legacy
 //! [`model_forward_paged_last_token`] on Qwen3.5-4B.

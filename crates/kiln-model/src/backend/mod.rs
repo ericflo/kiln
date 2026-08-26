@@ -3322,7 +3322,7 @@ mod tests {
         // The default trait implementation must return false so that
         // every non-Vulkan backend continues to route through the
         // unchanged `model_forward_paged_last_token*` path — the
-        // contract pinned by gate (c) of docs/vk_resident_decode_plan.md.
+        // contract pinned by gate (c) of docs/archive/vulkan-resident-decode/vk_resident_decode_plan.md.
         let cpu = cpu::CpuBackend::new(kiln_tensor::Device::Cpu);
         assert!(
             !ReplayBackend::runtime_supports_resident_decode(&cpu),

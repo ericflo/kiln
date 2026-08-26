@@ -1,5 +1,15 @@
 # Vulkan-resident decode plan
 
+> **Archived 2026-08-26 — the work this spec tracks is fully landed.** The
+> round-trip elimination is the production Vulkan decode fast-path
+> (`crates/kiln-model/src/vk_decode_resident.rs` + the native single-submit
+> orchestrator in `forward/model_dispatch.rs`, selected via the `ReplayBackend`
+> contract), and gate (e.2) was reached on sustained p50 per the benches below.
+> The "Remaining gap" / "Remaining for the headline" sections describe the
+> 2026-05-16 state; the one lever they leave (cooperative-matrix BF16 GEMMs)
+> was always flagged out of scope for this goal. See [`README.md`](README.md)
+> for the verified landing state.
+
 This document is the load-bearing acceptance spec for closing the remaining
 Vulkan-vs-CUDA decode-throughput gap on Qwen3.5-4B. The kernel-level
 optimizations landed in the `vulkan: …` commit series leading up to

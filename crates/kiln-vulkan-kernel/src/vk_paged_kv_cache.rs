@@ -1,6 +1,6 @@
 //! Vulkan-resident paged KV cache for the resident decode path.
 //!
-//! Gate (b)/(e) of `docs/vk_resident_decode_plan.md`: the legacy
+//! Gate (b)/(e) of `docs/archive/vulkan-resident-decode/vk_resident_decode_plan.md`: the legacy
 //! host-side paged KV cache in `kiln-model` keeps its `(k_pool,
 //! v_pool)` pools off-device from Vulkan's perspective (at the time
 //! this module was written they lived on the candle CPU device;

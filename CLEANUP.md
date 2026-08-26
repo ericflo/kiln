@@ -1686,3 +1686,105 @@ kiln-rocblas 23, kiln-vulkan-blas 16, kiln-model 371, kiln-train 531,
 kiln-server 1189 — 0 failed); `cargo fmt --check` clean on all eight;
 scripts/check_repository_artifacts.py passes; git status shows only the
 26 doc-comment source edits plus this ledger entry.
+## Cleanup Agent (round 62) — 2026-08-26
+
+Archived the four docs/ root planning documents per the session steer, after
+verifying the archive trigger in the live tree (all four describe fully
+landed work):
+
+- `docs/backend-engine-unification-plan.md` →
+  `docs/archive/backend-engine-unification/backend-engine-unification-plan.md`
+- `docs/backend-engine-unification-completion-plan.md` → same directory
+- `docs/backend-engine-unification-review-2026-06-07.md` → same directory
+- `docs/vk_resident_decode_plan.md` →
+  `docs/archive/vulkan-resident-decode/vk_resident_decode_plan.md`
+
+Archive trigger evidence (live tree, verified at archival time):
+(1) `BackendRuntime` (crates/kiln-model/src/backend/mod.rs) now declares only
+identity + composition glue over focused-trait supertraits (~95 methods in the
+2026-06-07 review); zero `impl<T: BackendRuntime> XBackend for T` blanket
+forwards remain; all five concrete backends implement the focused traits
+directly (e.g. `impl LinearBackend for CpuBackend`). (2) `ResidentRegistry`
+is a required supertrait of `ResidencyBackend` and every concrete backend
+implements it (cpu.rs:129, cuda.rs:1670, metal_runtime.rs:936, rocm.rs:1686,
+vulkan.rs:999) — the "nobody calls it" finding is remediated. (3)
+kiln-model's `ops/matmul.rs` no longer exists and kiln-tensor's
+`ops/matmul.rs` dispatches via `dispatch2(&MatmulOp, …)` with zero
+production `Device::` arms (remaining hits are test setup only);
+`supports_matmul_request` answers through
+`LinearBackend::runtime_supports_matmul_request` instead of the
+`match self.name()` table. (4) The Vulkan-resident single-submit decode
+orchestrator `model_forward_paged_last_token_resident_native_vk`
+(`vk_decode_resident.rs`) is the production decode fast-path in
+`forward/model_dispatch.rs`, selected via the `ReplayBackend` contract
+(`runtime_supports_resident_decode`), with the `resident.rs` /
+`decode_resident_pool.rs` / `cmd_batch.rs` / `vk_paged_kv_cache.rs`
+primitives live in kiln-vulkan-kernel and the plan's final bench recording
+gate (e.2) reached on sustained p50 (54.6 tok/s, 99.3% of target); the one
+lever it leaves (cooperative-matrix BF16 GEMMs) was always flagged out of
+scope. (5) `TrainingPrecisionPolicy::for_device_family` is test-only in the
+live tree. (6) The report generator emits computed `genuine` flags with zero
+hardcoded `"status": "covered"` literals (W0.1/W0.2), and the review's
+quick-win defects (stale `perf-regression-nightly.yml` dropdown, stale
+`tensor.rs` "Vulkan not yet implemented" doc) are fixed in the live tree.
+
+Link/reference audit (before touching anything): inbound refs were the
+generator's Phase-0 evidence list, the generated report, the three
+unification docs cross-referencing each other, and 12 comment references to
+the vk-resident decode plan in kiln-model (backend/mod.rs:3325,
+backend/vulkan.rs:1748, forward/model_dispatch.rs:2277+2731,
+vk_decode_resident.rs:2, tests/vk_resident_decode_parity.rs:1) and
+kiln-vulkan-kernel (cmd_batch.rs:4, decode_resident_pool.rs:4, resident.rs:3,
+vk_paged_kv_cache.rs:3, bin/vulkan_decode_microbench.rs:1844,
+csrc/shaders/qkv_gate_split.comp:4). No CI workflow, docs-site manifest, or
+other script referenced the files.
+
+Changes: (a) `git mv` of the four docs into the two archive directories;
+(b) new `docs/archive/backend-engine-unification/README.md` and
+`docs/archive/vulkan-resident-decode/README.md` recording the archive
+rationale + verified landing state; (c) dated "Archived 2026-08-26 — fully
+landed" banners at the top of each moved doc (round 42/55/57 precedent),
+with the completion plan's self-declared `Status: active` corrected to
+`complete — archived 2026-08-26` and the plan doc's "← active plan; agents
+should work from this" marker and its Immediate-Backlog prose refs updated
+to the archive paths (sibling markdown links in the three unification docs
+remain valid — they moved together); (d)
+`scripts/generate_backend_capability_report.py` Phase-0 evidence path
+updated to
+`docs/archive/backend-engine-unification/backend-engine-unification-plan.md`
+and the live report (`docs/backend-capability-report.{md,json}`)
+regenerated — diff is exactly the 3 evidence-path lines, phase status
+unchanged (`covered`/`landed`/`complete`/`genuine: yes`); the live
+capability-report surface itself was NOT archived, per the steer;
+(e) the 12 code-comment references re-pointed to
+`docs/archive/vulkan-resident-decode/vk_resident_decode_plan.md` (comment-
+only, zero code touched).
+
+Why it mattered: four completed planning documents were still sitting at
+docs/ root, two of them self-identifying as active ("Status: active",
+"agents should work from this") — exactly the kind of stale live pointer
+the playbook's doc-sweep exists to remove, and the capability report's
+Phase-0 evidence list pointed at a file that agents could mistake for a
+live plan. All four efforts' archive triggers were verified landed before
+moving; nothing pending was archived.
+
+Verified BEFORE and AFTER: `generate_backend_capability_report.py --check`
+pass (before and after; after-regen diff = 3 evidence-path lines only);
+`cargo test --locked -p kiln-model --test backend_capability_contract` 22/22
+before and after; `cargo test -p kiln-vulkan-kernel --lib` 65/65 after
+(comment-only changes, no behavior); `cargo check -p kiln-model` (portable)
++ `cargo check -p kiln-vulkan-kernel --lib` pass after; `cargo fmt --check`
+clean on both crates; `scripts/check_repository_artifacts.py` passes (6693
+tracked paths before; +2 new READMEs after); relative-link audit of all six
+archive files OK (every `]()` target exists); `bash scripts/audit-substrate-
+status.sh` 65/65; `scripts/qualification/validate_retained_evidence.sh` all
+OK; `node scripts/docs-site/build.mjs --validate-only` "59 documents" rc=0
+(count unchanged); `git grep` confirms zero remaining stale references to
+the old locations. Noted but NOT touched (pre-existing, needs hardware):
+the unification gate's final step, `check_backend_latency_fixtures.py
+--require-covered`, fails because fixtures 1/2/4 of
+`docs/backend-latency-fixtures.json` are `pending_fixture_result` (not
+`locked_threshold`) with a `source_sha256` mismatch on one result artifact —
+unrelated to this change (none of its inputs were touched) and requires
+bench re-capture, not a docs fix. `check_docs_site_smoke.mjs` cannot run in
+this container (no Chromium binary) — environmental, not a regression.

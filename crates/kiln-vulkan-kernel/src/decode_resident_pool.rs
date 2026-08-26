@@ -1,7 +1,7 @@
 //! Fixed-size ring of intermediate device-local buffers for the
 //! Vulkan-resident decode path.
 //!
-//! Gate (b) of `docs/vk_resident_decode_plan.md`: a small fixed ring
+//! Gate (b) of `docs/archive/vulkan-resident-decode/vk_resident_decode_plan.md`: a small fixed ring
 //! of 3–4 reusable `VulkanBuffer`s sized to
 //! `max(hidden, intermediate) × max_batch × 4` bytes — ≈ 2.3 MiB per
 //! slot on Qwen3.5-4B at `max_batch = 64`, ≈ 10 MiB total. The pool

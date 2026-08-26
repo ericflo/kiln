@@ -1745,7 +1745,7 @@ impl ReplayBackend for VulkanBackend {
     }
 
     fn runtime_supports_resident_decode(&self) -> bool {
-        // The Vulkan-resident decode path (docs/vk_resident_decode_plan.md)
+        // The Vulkan-resident decode path (docs/archive/vulkan-resident-decode/vk_resident_decode_plan.md)
         // applies whenever the logical device is up. The runtime pool
         // feasibility check (the "fall back if the device can't fit even
         // the minimum pool" rule in gate (b)) is enforced later, the

@@ -1,7 +1,7 @@
 //! Per-step Vulkan command-buffer batching for the resident decode
 //! path.
 //!
-//! Gate (e.1) of `docs/vk_resident_decode_plan.md`: the resident
+//! Gate (e.1) of `docs/archive/vulkan-resident-decode/vk_resident_decode_plan.md`: the resident
 //! decode step's submit count needs to drop from
 //! `O(layers × kernels_per_layer)` to `O(1)`. Each
 //! `run_compute_pipeline` call currently begins, ends, submits, and

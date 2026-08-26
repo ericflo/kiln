@@ -1841,7 +1841,7 @@ fn run_gdn_block_resident_batched(
 }
 
 /// Full-decode-step microbench using the Vulkan-resident dispatchers
-/// (gate (e) of docs/vk_resident_decode_plan.md). Simulates one
+/// (gate (e) of docs/archive/vulkan-resident-decode/vk_resident_decode_plan.md). Simulates one
 /// transformer block at Qwen3.5-4B shapes by chaining six resident
 /// dispatchers — qwen_rmsnorm, full_attn QKV, paged_attn, linear_decode
 /// (out_proj), qwen_rmsnorm, mlp — through pool slots without any host

@@ -1,5 +1,12 @@
 # Backend And Engine Unification — Outcome & Code Review
 
+> **Archived 2026-08-26 — a frozen point-in-time snapshot.** This review's type-B
+> findings (blanket-forward shims, `ops/matmul.rs` device branching, the inert
+> `ResidentRegistry`, hardcoded `covered` literals) were remediated afterward:
+> see [`README.md`](README.md) in this directory and the completion plan
+> alongside. Its defect inventory, refuted-claims record, and A/B/C rubric
+> remain valid historical evidence of the 2026-06-07 state.
+
 Date: 2026-06-07
 Branch reviewed: `unify-engines` (GitHub PR #1465, base `main`)
 Scope: +53,791 / −24,454 across 116 files, 224 commits.

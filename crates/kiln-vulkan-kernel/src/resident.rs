@@ -1,6 +1,6 @@
 //! Vulkan-resident decode dispatchers.
 //!
-//! Gate (a) of `docs/vk_resident_decode_plan.md`: every dispatcher
+//! Gate (a) of `docs/archive/vulkan-resident-decode/vk_resident_decode_plan.md`: every dispatcher
 //! the decode forward pass calls per layer has a `_resident` variant
 //! that takes a pre-uploaded `&VulkanBuffer` for `x` and writes into
 //! a caller-provided `&VulkanBuffer` for `y`. No

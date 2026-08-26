@@ -1,5 +1,5 @@
 //! Vulkan-resident decode wire-up (gate (a)/(e) of
-//! `docs/vk_resident_decode_plan.md`).
+//! `docs/archive/vulkan-resident-decode/vk_resident_decode_plan.md`).
 //!
 //! Composes the per-kernel `_resident` dispatchers in
 //! `kiln_vulkan_kernel::resident` into a per-layer block helper
