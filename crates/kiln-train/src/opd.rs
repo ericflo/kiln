@@ -4231,6 +4231,16 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
     // scalar-loss tape root is now kt-native (`try_tape_opd_scalar_mean_cuda_kt`)
     // and takes the kt `head_t` DIRECTLY, so the per-run kt->candle hoist (H8) is
     // gone — thread the kt weight straight into the per-step closure.
+    // Used only by the GPU-feature kt-tape step; non-GPU builds bail before it.
+    #[cfg_attr(
+        not(any(
+            feature = "cuda",
+            feature = "metal",
+            feature = "vulkan",
+            feature = "rocm"
+        )),
+        allow(unused_variables)
+    )]
     let head_t = weights.embed_tokens_t.clone();
 
     // §3.9 guardrail observer + per-step rollout summary buffer.
@@ -4564,6 +4574,16 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
                     // of the teacher-authored assistant turn with the
                     // student's own tokens — the defining property of
                     // on-policy distillation per Lu (2025) §1.
+                    // `total_obs_len` is consumed only by the GPU-feature kt-tape step.
+                    #[cfg_attr(
+                        not(any(
+                            feature = "cuda",
+                            feature = "metal",
+                            feature = "vulkan",
+                            feature = "rocm"
+                        )),
+                        allow(unused_variables)
+                    )]
                     let (input_ids_owned, active_positions, env_mask_owned, total_obs_len): (
                         Vec<u32>,
                         Vec<usize>,
@@ -4683,6 +4703,16 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
                             .collect();
                         (t, pos)
                     };
+                    // Consumed only by the GPU-feature kt-tape dispatch below.
+                    #[cfg_attr(
+                        not(any(
+                            feature = "cuda",
+                            feature = "metal",
+                            feature = "vulkan",
+                            feature = "rocm"
+                        )),
+                        allow(unused_variables)
+                    )]
                     let (teacher_tokens_opt, teacher_active_opt): (
                         Option<&[u32]>,
                         Option<&[usize]>,
@@ -4707,6 +4737,16 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
                         model_config,
                         input_ids.len(),
                     );
+                    // Consumed only by the GPU-feature kt-tape dispatch below.
+                    #[cfg_attr(
+                        not(any(
+                            feature = "cuda",
+                            feature = "metal",
+                            feature = "vulkan",
+                            feature = "rocm"
+                        )),
+                        allow(unused_variables)
+                    )]
                     let checkpoint_segments = opd_segments.as_ref().map_or(0, |segs| segs.len());
 
                     // === Forward + backward dispatch (#1082 candle-drop) ===

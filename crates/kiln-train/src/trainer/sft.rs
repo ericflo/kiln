@@ -696,7 +696,6 @@ pub(super) fn sft_train_prepared_to_with_checkpoint_root(
         num_vars = params.all_params().len(),
         "initialized trainable LoRA parameters"
     );
-    let lora_grad_index = LoraGradNormIndex::new(&params);
 
     if let Some(checkpoint) = resume_checkpoint.as_ref() {
         let adapter_path =

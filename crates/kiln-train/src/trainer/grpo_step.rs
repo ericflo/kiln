@@ -792,6 +792,16 @@ pub(super) fn train_tokenized_grpo_group_with_grad_norms(
     opt_state: Option<&mut OptimizerState>,
     grad_norms: &mut crate::train_receipt::LoraGradNormAccumulator,
     lora_grad_index: &LoraGradNormIndex,
+    // Observed only in the GPU-feature step body; non-GPU builds bail before it.
+    #[cfg_attr(
+        not(any(
+            feature = "cuda",
+            feature = "metal",
+            feature = "vulkan",
+            feature = "rocm"
+        )),
+        allow(unused_variables)
+    )]
     policy_audit: &mut crate::train_receipt::GrpoPolicyAuditAccumulator,
     // Optional EMA-snapshot LoRA used as the KL reference when
     // `config.kl_reference_policy == KlReferencePolicy::Ema`. None means the
@@ -950,6 +960,16 @@ pub(super) fn train_tokenized_grpo_group_with_grad_norms(
         } else {
             1.0 / num_active as f64
         };
+        // Fed only into the GPU-feature kt-tape dispatch below.
+        #[cfg_attr(
+            not(any(
+                feature = "cuda",
+                feature = "metal",
+                feature = "vulkan",
+                feature = "rocm"
+            )),
+            allow(unused_variables)
+        )]
         let loss_params =
             GrpoLossParams::from_config(config, advantages[comp_idx], loss_normalizer);
         let comp_env_count = comp
@@ -963,7 +983,7 @@ pub(super) fn train_tokenized_grpo_group_with_grad_norms(
                 feature = "vulkan",
                 feature = "rocm"
             )),
-            allow(unused_mut)
+            allow(unused_mut, unused_variables)
         )]
         let mut comp_echo_env_ce: Option<f64> = None;
 
@@ -1079,6 +1099,18 @@ pub(super) fn train_tokenized_grpo_group_with_grad_norms(
         // candle ECHO term was a candle-authoritative feature dropped in the
         // candle drop). `grpo_step_forward_backward_tape_authoritative_kt`
         // returns `GradSource::Kt`, consumed kt-native by the dispatchers.
+        // Assigned/read only inside the GPU-feature branch (and the code after
+        // the non-GPU `unreachable!` guard); kept declared here so both builds
+        // type-check.
+        #[cfg_attr(
+            not(any(
+                feature = "cuda",
+                feature = "metal",
+                feature = "vulkan",
+                feature = "rocm"
+            )),
+            allow(unused_variables)
+        )]
         let loss_val: f64;
         let (grads, policy_log_probs): (GradSource, Tensor) = {
             #[cfg(any(
