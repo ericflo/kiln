@@ -424,7 +424,7 @@ pub(crate) fn token_log_probs(
 
     if active_positions.is_empty() {
         // Return a zero tensor if no completion tokens
-        return zeros_f32_on(1, device).map_err(Into::into);
+        return zeros_f32_on(1, device);
     }
 
     // Gather active logits
@@ -576,7 +576,7 @@ pub(super) fn selected_log_probs_from_normed_hidden_chunked(
         .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
         .collect();
     if active_positions.is_empty() {
-        return zeros_f32_on(1, &device).map_err(Into::into);
+        return zeros_f32_on(1, &device);
     }
     let active_labels: Vec<u32> = active_positions
         .iter()

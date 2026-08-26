@@ -641,7 +641,7 @@ pub(super) fn chunked_log_probs_for_completion(
 ) -> Result<Tensor> {
     let n_targets = target_ids.len();
     if n_targets == 0 {
-        return zeros_f32_on(1, device).map_err(Into::into);
+        return zeros_f32_on(1, device);
     }
     if chunk_size == 0 {
         anyhow::bail!("chunked_log_probs_for_completion chunk_size must be > 0");
@@ -1808,8 +1808,8 @@ pub(super) fn tokenize_grpo_group_timed(
     let mut rewards = Vec::with_capacity(full_id_batches.len());
     for (completion_idx, ((full_ids, reward), pre)) in full_id_batches
         .into_iter()
-        .zip(raw_rewards.into_iter())
-        .zip(prebuilt.into_iter())
+        .zip(raw_rewards)
+        .zip(prebuilt)
         .enumerate()
     {
         if let Some(provenance) = group.completions[completion_idx].provenance.as_ref() {

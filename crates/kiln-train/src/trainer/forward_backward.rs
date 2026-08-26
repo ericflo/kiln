@@ -1317,7 +1317,7 @@ pub(crate) fn grpo_loss_with_kl_auxiliary_route(
     let num_active = policy_log_probs.elem_count();
     if num_active == 0 {
         // Scalar zero loss (empty active set). kt-native.
-        return zeros_f32_on((), device).map_err(Into::into);
+        return zeros_f32_on((), device);
     }
 
     anyhow::ensure!(
