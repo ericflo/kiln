@@ -353,7 +353,7 @@ pub(super) fn load_lora_reference_checkpoint(
 ///
 /// Captures the most recent snapshot of the LoRA params and the number of
 /// completed groups since the last refresh. When `groups_since_refresh
-/// >= refresh_every`, the outer caller calls
+/// \>= refresh_every`, the outer caller calls
 /// [`lora_snapshot_capture_or_blend`] with the current params and decay,
 /// then resets the counter.
 pub(super) struct EmaReferenceState {

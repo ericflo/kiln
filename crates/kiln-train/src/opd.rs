@@ -1501,6 +1501,7 @@ pub struct OpdStepOutputs {
 ///   path uses a scalar advantage — the OPD path generalises that to a
 ///   vector. The refactor is `grpo_loss(... advantage: Tensor ...)`;
 ///   the call site is unchanged for the scalar case).
+///
 /// Teacher-side kernel inputs for one OPD step, resolved once from
 /// [`OpdStepInputs`] (the alignment checks, `label_mask`, `top_k` resolution,
 /// and the teacher logprob fetch).
