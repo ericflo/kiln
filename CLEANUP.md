@@ -1788,3 +1788,69 @@ the unification gate's final step, `check_backend_latency_fixtures.py
 unrelated to this change (none of its inputs were touched) and requires
 bench re-capture, not a docs fix. `check_docs_site_smoke.mjs` cannot run in
 this container (no Chromium binary) — environmental, not a regression.
+## Cleanup Agent (round 63) — 2026-08-26
+
+Ran the first whole-directory orphan/staleness audit of `bench-results/`
+(41 tracked files, this round's steering candidate A) and deleted the only
+file that is both genuinely orphaned and outside every protected category:
+`bench-results/pagedkv-accessor-migration-followup.md` (105 lines — a
+branch-era "follow-up progress" snapshot of the #1082 PagedKvCacheKt
+accessor migration, committed in the same `9371035bf` batch-retention commit
+as the rest of the directory). Deletion basis, verified against the live
+tree before acting: (1) zero inbound references anywhere — no doc, code
+comment, script, CI workflow, qualification receipt, docs-site manifest
+entry, or CHANGELOG mention outside git history and CLEANUP.md (repo-wide
+git grep + a targeted grep of `.qualification/`, `benchmarks/`,
+`docs/`, `scripts/`, `.github/`); (2) not a retained-evidence artifact in
+the ARTIFACT_RETENTION.md sense — no receipt, verdict, digest, or
+comparison table; the memcheck record it defers to lives in
+`cuda-graph-bs2-memcheck.md` (kept); (3) its entire forward-looking content
+is superseded by shipped code — the `CachedPagedDecodeMeta` sites it listed
+as "follow-up PRs" now thread `kt_paged_cache` and call the
+`try_kt_paged_kv_*` helpers (`forward/full_attention.rs:2309-2882`), MTP's
+`mtp_cache` is now `&PagedKvCacheKt` (`speculative.rs:832`) despite the
+doc's "no kt twin for the MTP cache" claim, and the Vulkan resident decode
+consumes `PagedKvCacheKt` directly (`vk_decode_resident.rs:615+`), contrary
+to its "PagedKvCacheKt is CUDA-only" claim; (4) its "short-circuits to the
+candle path" fallback is dead post-#1082 — the live helper docs in
+`forward.rs` state "the candle module was deleted"; and (5) the
+`try_kt_paged_kv_num_blocks` helper it cites ("helper exists, no caller
+threaded yet") no longer exists at all, and its 22k-line `forward.rs`
+line numbers predate the module-tree restructure. Same class and same
+source commit as Round 44's phase7 trio, whose playbook (orphaned scratch
+of a fully landed effort, bytes preserved in git history via `74b167c82`
+/ `9371035bf`) applies. All other files audited and kept, with consumers:
+`candle-api-surface.{csv,md,raw.tsv}` (standing directive),
+`opd-{a100,a6000}-baseline.json` + `opd-phase0-validation-2026-05-16.json`
++ `check_opd_regression.py` (§9.9 OPD cluster, owner decision pending since
+Round 37 — untouched), `check_sft_train_regression.py` +
+`regression/*` (live CI in perf-regression-nightly.yml), the five
+`backend-latency/*.json` (unification-gate fixtures consumed by
+`check_backend_latency_fixtures.py`), `customop-audit.csv`/`dtype-usage.
+csv`/`multi-gpu-seam.csv`/`parity-tolerance.csv`/`preserve-list-nvtx.csv`
+/`pre-migration-baseline/README.md` (audit-substrate-status.sh probe
+ROWS 0.2/0.5/0.6/0.4/0.7/0.10), their paired `.md` records +
+`preserve-list-{env,backend-runtime}.csv` (referenced by their audit
+scripts), `substrate-status.md` (the probe script's `--markdown` live
+dashboard) and `substrate-validate-2026-05-23.md` (cited by it at line 8),
+`llama-bench{,-a6000-post536}.json` + `kiln-bench.json` (raw JSON cited by
+BENCHMARKS.md), the four `cuda-graph-*.md` (cited by live code comments in
+5+ crate files), `vulkan-strix-halo-baseline.md` (74 KB bench baseline
+record cited by the vk-harmonization archive specs), and
+`concurrent-batched-decode-2026-05-26.md` — the one other zero-reference
+file, deliberately kept because it is a compact bench receipt/summary with
+the #1082 DoD verdict, hardware identity, and reproduction commands,
+which is exactly the protected retained-evidence category ARTIFACT_RETENTION.md
+prescribes (the rounds 27–30 raw-log purges all kept their compact
+summaries for the same reason). Why it mattered: an organizational-drift
+non-bench record — a migration progress note whose whole "remaining work"
+list is shipped — stopped masquerading as a live bench-results artifact; the
+directory now contains only evidence, reports, fixtures, and live gate
+inputs. Verified BEFORE and AFTER the deletion:
+`bash scripts/audit-substrate-status.sh` reports 65/65 deliverables shipped
+with RC=0 both times; `scripts/qualification/validate_retained_evidence.sh`
+RC=0 both times (all receipts OK — none hash or locate the deleted file);
+`python3 scripts/check_repository_artifacts.py` passes both times (6695 →
+6694 tracked paths, exactly the one deletion); post-deletion repo-wide grep
+finds zero remaining references to the filename outside CLEANUP.md and git
+history; `git status` shows only the one deletion plus this ledger entry.
