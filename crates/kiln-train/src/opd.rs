@@ -6431,7 +6431,7 @@ mod tests {
         let teacher_prefix_len = 5usize;
         let teacher_seq_len = teacher_prefix_len + student_seq_len;
 
-        let student_hidden_vec: Vec<f32> = (0..1 * student_seq_len * hidden_size)
+        let student_hidden_vec: Vec<f32> = (0..student_seq_len * hidden_size)
             .map(|i| ((i * 13 + 7) % 1000) as f32 / 1000.0)
             .collect();
         // (#1082) kt `from_vec` is 2-arg (CPU-only); dropped candle `&device`.
