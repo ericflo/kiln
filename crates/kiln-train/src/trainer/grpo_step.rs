@@ -1253,9 +1253,9 @@ pub(super) fn train_tokenized_grpo_group_with_grad_norms(
             &group_accum,
             learning_rate,
             config.optimizer,
-            opt_state.as_deref_mut(),
+            opt_state,
         )?;
-        if let Some(t) = timings.as_deref_mut() {
+        if let Some(t) = timings {
             t.add_optimizer(optimizer_started.elapsed());
         }
         tracing::info!(
