@@ -199,3 +199,27 @@ and all now resolve to existing files; confirmed via git history that no
 archive dir ever existed for the five caps while all 17 sibling caps using
 the same sentence do have one; `scripts/check_repository_artifacts.py`
 passes unchanged after the edit.
+
+## Cleanup Agent (round 7) — 2026-08-26
+
+Investigated the round-6 steering candidate `scripts/c2_artifacts/` (7.9 MB of
+tracked safetensors parity-failure dumps + comparator stdout) and left it in
+place: the signals are genuinely ambiguous by design — the artifacts were
+deliberately committed in 9371035bf as retained evidence for
+`docs/archive/profiling/PROFILING-C2.md`, which documents them as "raw
+artifacts" for the archived C2 investigation, and `source_tree_hash.py`
+explicitly excludes the directory as historical artifacts rather than treating
+it as dead weight. Not conclusive scratch, so per protocol it stays.
+Instead, deleted `docs/.ipynb_checkpoints/` — two committed Jupyter checkpoint
+scratch copies (`vk_native_gdn-checkpoint.md`,
+`vk_resident_decode_plan-checkpoint.md`) of the live docs
+`vk_native_gdn.md` / `vk_resident_decode_plan.md`. Both copies were stale
+(missing later sections present in the live docs, e.g. the 2026-07-16
+serving-state quarantine section), nothing references them anywhere, and the
+docs-site build already skips `.ipynb_checkpoints` by name
+(`scripts/docs-site/lib.mjs`), so they were pure invisible dead weight.
+Verified before and after: docs-site `--validate-only` passes (59 documents),
+all 11 docs-site unit tests pass, `scripts/check_repository_artifacts.py`
+passes with exactly two fewer tracked paths (6711 → 6709); repo-wide grep
+confirms no references to either checkpoint filename outside git history;
+`git status` clean after the commit.
