@@ -764,6 +764,19 @@ pub(super) fn observe_grpo_policy_audit_completion(
     Ok(())
 }
 
+// Non-GPU builds: the cfg'd `unreachable!` arm below makes the rest of the
+// body unreachable (callers bail on the group-entry capability check), so
+// the structural `unreachable_code` it triggers is allowed for that feature
+// set only; under cuda/metal/vulkan/rocm the code after the arm is live.
+#[cfg_attr(
+    not(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    )),
+    allow(unreachable_code)
+)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn train_tokenized_grpo_group_with_grad_norms(
     backend: &dyn BackendRuntime,
