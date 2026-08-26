@@ -4248,7 +4248,7 @@ fn test_grpo_trainable_lora_params_include_exact_gdn_targets() -> Result<()> {
     let device = cpu_device();
     let config = tiny_config();
     let weights = tiny_weights(&config, &device)?;
-    let mut params = TrainableLoraParams::initialize_seeded(
+    let params = TrainableLoraParams::initialize_seeded(
         &config,
         &weights,
         4,

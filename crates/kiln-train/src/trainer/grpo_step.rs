@@ -796,6 +796,15 @@ pub(super) fn train_tokenized_grpo_group_with_grad_norms(
     // execution policy.
     let learning_rate = config.effective_learning_rate();
     let advantages = compute_advantages(&tgroup.rewards, config.advantage_mode);
+    #[cfg_attr(
+        not(any(
+            feature = "cuda",
+            feature = "metal",
+            feature = "vulkan",
+            feature = "rocm"
+        )),
+        allow(unused_mut)
+    )]
     let mut group_loss_sum = 0.0;
     let mut opt_state = opt_state;
 
@@ -830,8 +839,35 @@ pub(super) fn train_tokenized_grpo_group_with_grad_norms(
     let streaming_prefill = streaming_prefill_policy.enabled_for(group_max_seq_len);
 
     let token_level = matches!(config.loss_aggregation, LossAggregation::TokenLevel);
+    #[cfg_attr(
+        not(any(
+            feature = "cuda",
+            feature = "metal",
+            feature = "vulkan",
+            feature = "rocm"
+        )),
+        allow(unused_mut)
+    )]
     let mut group_accum: GradMap = HashMap::new();
+    #[cfg_attr(
+        not(any(
+            feature = "cuda",
+            feature = "metal",
+            feature = "vulkan",
+            feature = "rocm"
+        )),
+        allow(unused_mut)
+    )]
     let mut group_echo_ce_sum = 0.0f64;
+    #[cfg_attr(
+        not(any(
+            feature = "cuda",
+            feature = "metal",
+            feature = "vulkan",
+            feature = "rocm"
+        )),
+        allow(unused_mut)
+    )]
     let mut group_echo_ce_weight = 0usize;
 
     // Shared-prefix optimization: when the reference policy is active and the
@@ -907,6 +943,15 @@ pub(super) fn train_tokenized_grpo_group_with_grad_norms(
             .env_mask
             .get(1..)
             .map_or(0, |m| m.iter().filter(|&&v| v).count());
+        #[cfg_attr(
+            not(any(
+                feature = "cuda",
+                feature = "metal",
+                feature = "vulkan",
+                feature = "rocm"
+            )),
+            allow(unused_mut)
+        )]
         let mut comp_echo_env_ce: Option<f64> = None;
 
         let kl_reference_log_probs = if skip_kl_reference {

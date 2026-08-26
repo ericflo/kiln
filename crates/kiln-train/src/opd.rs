@@ -4506,9 +4506,27 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
         data_stats = state.data_stats.clone();
         token_counts = state.token_counts.clone();
     }
+    #[cfg_attr(
+        not(any(
+            feature = "cuda",
+            feature = "metal",
+            feature = "vulkan",
+            feature = "rocm"
+        )),
+        allow(unused_mut)
+    )]
     let mut run_env_ce = resume_loop_state
         .as_ref()
         .and_then(|state| state.run_env_ce);
+    #[cfg_attr(
+        not(any(
+            feature = "cuda",
+            feature = "metal",
+            feature = "vulkan",
+            feature = "rocm"
+        )),
+        allow(unused_mut)
+    )]
     let mut lora_grad_norms = resume_loop_state.as_ref().map_or_else(
         crate::train_receipt::LoraGradNormAccumulator::default,
         |state| state.lora_grad_norms.clone(),
