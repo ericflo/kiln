@@ -713,7 +713,7 @@ fn test_backend_linear_decode_adds_lora_delta() -> Result<()> {
         b: Tensor::from_vec(vec![5.0f32, 6.0, 7.0], (3, 1))?.to_device(device)?,
     };
     let backend = FixedLinearBackend {
-        device: device.clone(),
+        device,
         values: vec![10.0, 20.0, 30.0],
         dims: (1, 1, 3),
     };
@@ -759,7 +759,7 @@ fn test_swiglu_down_only_lora_keeps_backend_gate_up_decode() -> Result<()> {
         down_proj_w8: None,
     };
     let backend = FixedMlpBackend {
-        device: device.clone(),
+        device,
         fused_values: None,
         fused_dims: (1, 1, 2),
         gate_up_values: Some(vec![3.0, 5.0]),
@@ -822,7 +822,7 @@ fn test_swiglu_attention_only_lora_keeps_backend_mlp_decode() -> Result<()> {
         down_proj_w8: None,
     };
     let backend = FixedMlpBackend {
-        device: device.clone(),
+        device,
         fused_values: Some(vec![7.0, 11.0]),
         fused_dims: (1, 1, 2),
         gate_up_values: Some(vec![3.0, 5.0]),

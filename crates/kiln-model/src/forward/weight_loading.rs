@@ -455,10 +455,9 @@ pub(super) fn aux_tensors_for_load_batch(
 
     use rayon::prelude::*;
 
-    let device = device.clone();
     weights
         .par_iter()
-        .map(|(name, w)| weight_to_tensor(w, &device).with_context(|| format!("{name} tensor")))
+        .map(|(name, w)| weight_to_tensor(w, device).with_context(|| format!("{name} tensor")))
         .collect()
 }
 

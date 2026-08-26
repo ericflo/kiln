@@ -104,7 +104,7 @@ impl Clone for MtpGpuWeightsSlot {
         Self {
             weights: OnceLock::new(),
             source: self.source.clone(),
-            device: self.device.clone(),
+            device: self.device,
             init_lock: Mutex::new(()),
         }
     }
@@ -121,7 +121,7 @@ impl MtpGpuWeightsSlot {
         Self {
             weights: OnceLock::new(),
             source: Some(MtpGpuSource::Loaded(source)),
-            device: device.clone(),
+            device: *device,
             init_lock: Mutex::new(()),
         }
     }
@@ -130,7 +130,7 @@ impl MtpGpuWeightsSlot {
         Self {
             weights: OnceLock::new(),
             source: Some(MtpGpuSource::Deferred(source)),
-            device: device.clone(),
+            device: *device,
             init_lock: Mutex::new(()),
         }
     }
@@ -139,7 +139,7 @@ impl MtpGpuWeightsSlot {
         let slot = Self {
             weights: OnceLock::new(),
             source: None,
-            device: device.clone(),
+            device: *device,
             init_lock: Mutex::new(()),
         };
         let _ = slot.weights.set(weights);

@@ -2769,14 +2769,11 @@ impl CachedPagedDecodeMeta {
             None
         };
 
-        let block_table_tensor = Tensor::from_vec_on(
-            device.clone(),
-            block_table_vec,
-            vec![batch, max_blocks_per_seq],
-        )?
-        .contiguous()?;
+        let block_table_tensor =
+            Tensor::from_vec_on(*device, block_table_vec, vec![batch, max_blocks_per_seq])?
+                .contiguous()?;
         let seqused_k_tensor =
-            Tensor::from_vec_on(device.clone(), seqused_k_vec, vec![batch])?.contiguous()?;
+            Tensor::from_vec_on(*device, seqused_k_vec, vec![batch])?.contiguous()?;
 
         Ok(Self {
             block_table_tensor,
