@@ -247,14 +247,14 @@ pub fn vk_gdn_chunk_scan_bwd_cpu_reference(
 /// vk_matmul_batched + elementwise ops:
 ///
 ///   dS_in       = p_last · dS_exit        (scalar broadcast)
-///   d_p_last    = Σ S_in[i,j] · dS_exit[i,j]
+///   d_p_last    = Σ `S_in[i,j]` · `dS_exit[i,j]`
 ///   tmp_dW      = k @ dS_exit              [B*nv, C, dv]   (NO decay)
 ///   dW_extra    = tmp_dW · decay_last_col_broadcast(dv)
 ///   tmp_dk      = W @ dS_exit^T            [B*nv, C, dk]   (NO decay)
 ///   dk_extra    = tmp_dk · decay_last_col_broadcast(dk)
-///   d_decay[i]  = Σ_kk k[i,kk] · tmp_dk[i,kk]
+///   `d_decay[i]`  = Σ_kk `k[i,kk]` · tmp_d`k[i,kk]`
 ///   dG[C-1]     += d_p_last  (composed by chunkwise op)
-///   dG[i]       -= d_decay[i] (composed by chunkwise op)
+///   `dG[i]`       -= `d_decay[i]` (composed by chunkwise op)
 ///
 pub fn vk_gdn_state_exit_bwd_no_grad(
     d_s_exit: &VkTensor,       // [B, nv, dk, dv]

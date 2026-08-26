@@ -16,10 +16,10 @@
 //! Inputs:
 //!   hidden: [num_active, hidden_dim]  (already pre-gathered to active tokens)
 //!   weight: [vocab, hidden_dim]       (LM head; frozen for SFT/LoRA)
-//!   labels: [num_active] u32          (target token ids)
+//!   labels: `[num_active]` u32          (target token ids)
 //!
 //! Output:
-//!   loss: scalar VkTensor (shape [1]) with `requires_grad=true` and
+//!   loss: scalar VkTensor `(shape [1])` with `requires_grad=true` and
 //!   a backward op closing over hidden, weight, labels, and the
 //!   per-row global_max / global_sumexp.
 

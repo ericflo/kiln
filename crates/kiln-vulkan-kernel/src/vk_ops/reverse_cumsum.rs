@@ -1,7 +1,7 @@
 //! Reverse cumulative sum along the last axis.
 //!
 //! `out[..., t] = Σ_{s ≥ t} in[..., s]`. Used in the backward of
-//! cumsum (which appears in chunk_prep's G[t] = cumsum(g)[t]).
+//! cumsum (which appears in chunk_prep's `G[t] = cumsum(g)[t]`).
 
 use crate::vk_ops::dispatch_simple;
 use crate::vk_tensor::{VkDType, VkTensor};

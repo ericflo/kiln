@@ -22,8 +22,8 @@ fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> 
 /// Shapes:
 ///   a:          [B, T, nv]   F32
 ///   b:          [B, T, nv]   F32
-///   a_log:      [nv]         F32
-///   dt_bias:    [nv]         F32
+///   a_log:      `[nv]`         F32
+///   dt_bias:    `[nv]`         F32
 /// Returns:
 ///   beta_out:   [B, T, nv]   F32  (= sigmoid(b))
 ///   g_out:      [B, T, nv]   F32  (= -exp(a_log) · softplus(a + dt_bias))
@@ -99,10 +99,10 @@ pub fn vk_gdn_gates_no_grad(
 /// Inputs:
 ///   d_beta, d_g: [B, T, nv]
 ///   a, b:        [B, T, nv]
-///   a_log, dt_bias: [nv]
+///   a_log, dt_bias: `[nv]`
 /// Returns:
 ///   d_a, d_b: [B, T, nv]
-///   d_a_log, d_dt_bias: [nv]   (sum-reduced along B,T per nv)
+///   d_a_log, d_dt_bias: `[nv]`   (sum-reduced along B,T per nv)
 pub fn vk_gdn_gates_bwd_no_grad(
     d_beta: &VkTensor,
     d_g: &VkTensor,

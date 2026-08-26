@@ -312,7 +312,7 @@ impl VkTensor {
 
     /// Upload an f32 source slice converted to BF16 as a fresh BF16
     /// VkTensor leaf. Candle-free; mirrors the BF16 path of
-    /// [`Self::from_candle`] after a `to_dtype(BF16)` cast. (#1082)
+    /// the removed `Self::from_candle` (deleted by #1082) after a `to_dtype(BF16)` cast.
     pub fn from_f32_slice_as_bf16(
         data: &[f32],
         shape: Vec<usize>,

@@ -21,7 +21,7 @@ fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> 
 /// Shapes:
 ///   x:       [rows, hidden]   F32   (typically [B*T, nv*dv])
 ///   z:       [rows, hidden]   F32
-///   weight:  [hidden]         F32
+///   weight:  `[hidden]`         F32
 /// Returns:
 ///   out:     [rows, hidden]   F32
 ///

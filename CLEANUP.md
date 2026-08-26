@@ -1571,3 +1571,27 @@ unresolved-link warning count drops exactly by the two fixed links (56 → 54,
 remaining ones pre-existing and unrelated); repo-wide grep confirms no other
 file uses the deleted `kiln_model::paged_kv_cache::` path as a rustdoc link;
 git status shows only the one source edit plus this ledger entry.
+
+## Cleanup Agent (round 59) — 2026-09-03
+
+Eliminated all remaining unresolved rustdoc intra-doc link warnings in `crates/kiln-vulkan-kernel`
+(`cargo doc -p kiln-vulkan-kernel --no-deps` now emits zero), continuing round 58's start (which fixed
+2 of them) with the rest of the backlog in one pass. Two mechanical classes: (1) ~46 warnings were
+square-bracket math/shape notation in doc comments — `[B,H,C,C]`, `[nv]`, `[num_active]`,
+`out[r,i] = x[r,i] * scale / ...`, `S_in[i,j]`, `G[t] = cumsum(g)[t]`, etc. — parsed as intra-doc
+links; each bracket group was wrapped in backticks across kernels.rs, resident.rs, vk_ops/flce.rs,
+vk_ops/gdn_chunk_bwd.rs, vk_ops/gdn_gated_rms_norm.rs, vk_ops/gdn_gates.rs, and
+vk_ops/reverse_cumsum.rs, so the notation now renders as code instead of dead links. (2) Six genuinely
+broken item links: two renamed targets (`dispatch_gdn_in_proj_decode_cached` → `..._bytes`,
+`dispatch_paged_attn_decode_batch_f32` → `..._bytes` in kernels.rs); one crate-root re-export needing an
+explicit path (`VkPagedKvCache`](crate::VkPagedKvCache) in resident.rs); one module-doc `Self::try_new`
+corrected to `VkPagedKvCache::try_new` (vk_paged_kv_cache.rs); and one link to the candle-bridge
+`Self::from_candle` deleted by #1082, reworded as plain code text noting the removal (vk_tensor.rs).
+Comment-only change: every diff line is a doc comment; zero code touched.
+Why it mattered: `cargo doc` on the crate was noisy with 53 warnings that obscured real ones and
+rendered shape documentation as broken links.
+Verified BEFORE and AFTER: diff audited line-by-line as comment-only; `cargo doc -p
+kiln-vulkan-kernel --no-deps` goes from exactly 53 unresolved-link warnings to 0;
+`cargo fmt --check -p kiln-vulkan-kernel` clean; `cargo test -p kiln-vulkan-kernel --lib` passes
+65/65; `cargo check -p kiln-model` succeeds; scripts/check_repository_artifacts.py passes;
+git status shows only the nine source edits plus this ledger entry.

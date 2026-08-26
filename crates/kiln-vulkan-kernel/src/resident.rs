@@ -402,7 +402,7 @@ pub fn dispatch_add_qwen_rmsnorm_batched_resident(
 
 /// Resident per-row L2 normalization with an optional scalar scale.
 /// For each row r:
-///   out[r,i] = x[r,i] * scale / sqrt(sum(x[r,:]^2) + eps)
+///   `out[r,i] = x[r,i] * scale / sqrt(sum(x[r,:]^2) + eps)`
 ///
 /// Matches the legacy `gdn_qk_norm`: it does an L2 normalize
 /// (sum over the last dim, sqrt with eps=1e-6), then multiplies Q by
@@ -2575,7 +2575,7 @@ pub fn dispatch_gdn_qkv_split_batched_resident(
 ///
 /// `k_in` and `v_in` are f32 buffers each containing `num_kv_heads × head_dim`
 /// floats — the projection output for the new decode token. `k_pool` and
-/// `v_pool` are the full pool buffers held by [`VkPagedKvCache`], laid out
+/// `v_pool` are the full pool buffers held by [`VkPagedKvCache`](crate::VkPagedKvCache), laid out
 /// `[total_slots, num_kv_heads, head_dim]`. The kernel writes one slot's
 /// worth of data per call; the workgroup is sized to cover
 /// `elements_per_slot = num_kv_heads × head_dim` invocations.

@@ -1251,7 +1251,7 @@ pub fn dispatch_gdn_in_proj_decode_cached_bytes(
     split_gdn_in_proj_bytes(&out_data, batch, qkv_dim, z_dim, a_dim, b_dim)
 }
 
-/// Candle-free bf16-packed weights variant of [`dispatch_gdn_in_proj_decode_cached`].
+/// Candle-free bf16-packed weights variant of [`dispatch_gdn_in_proj_decode_cached_bytes`].
 ///
 /// Takes `x` as raw f32 bytes `[batch, 1, hidden]` and returns the
 /// `(qkv, z, a, b)` outputs as raw f32 bytes — each shaped
@@ -4694,7 +4694,7 @@ pub fn dispatch_paged_attn_decode_batch_f32_bytes(
     Ok(out_data)
 }
 
-/// Paged-pool variant of [`dispatch_paged_attn_decode_batch_f32`].
+/// Paged-pool variant of [`dispatch_paged_attn_decode_batch_f32_bytes`].
 ///
 /// Skips the host-side block_table → compacted K/V gather and uploads the
 /// raw K/V pool plus the block table; the shader walks the per-row block
@@ -8597,8 +8597,8 @@ fn run_two_stage_compute_pipeline_with_transfers(
 /// Dispatch GDN forward substitution kernel.
 ///
 /// Computes W = (I + A_strict)^{-1} (beta * V_prime)
-/// A_strict: [B,H,C,C] lower-triangular, V_prime: [B,H,C,dv], beta: [B,H,C]
-/// Output: W: [B,H,C,dv]
+/// A_strict: `[B,H,C,C]` lower-triangular, V_prime: `[B,H,C,dv]`, beta: `[B,H,C]`
+/// Output: W: `[B,H,C,dv]`
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_gdn_forward_substitution_bytes(
     vk_device: &VulkanDevice,
@@ -10263,8 +10263,8 @@ pub fn dispatch_gdn_recurrent_qk_norm_step_native_head_last_with_options_bytes(
 /// Dispatch GDN chunk prep kernel.
 ///
 /// Computes: a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last
-/// Input: g[B,H,C], v[B,H,C,dv], kkt[B,H,C,C], qkt[B,H,C,C],
-///         ks_entry[B,H,C,dv], q_s[B,H,C,dv]
+/// Input: g`[B,H,C]`, v`[B,H,C,dv]`, kkt`[B,H,C,C]`, qkt`[B,H,C,C]`,
+///         ks_entry`[B,H,C,dv]`, q_s`[B,H,C,dv]`
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_gdn_chunk_prep_bytes(
     vk_device: &VulkanDevice,
@@ -10463,10 +10463,10 @@ pub fn dispatch_gdn_chunk_prep_bytes(
 
 /// Dispatch GDN full chunk forward kernel (fused prep + scan).
 ///
-/// Input: g[B,H,C], v[B,H,C,dv], kkt[B,H,C,C], qkt[B,H,C,C],
-///         ks_entry[B,H,C,dv], q_s[B,H,C,dv], beta[B,H,C], k_t[B,H,dk,C]
-/// State: [B,H,dk,dv] (in/out)
-/// Output: [B,H,C,dv]
+/// Input: g`[B,H,C]`, v`[B,H,C,dv]`, kkt`[B,H,C,C]`, qkt`[B,H,C,C]`,
+///         ks_entry`[B,H,C,dv]`, q_s`[B,H,C,dv]`, beta`[B,H,C]`, k_t`[B,H,dk,C]`
+/// State: `[B,H,dk,dv]` (in/out)
+/// Output: `[B,H,C,dv]`
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_gdn_full_chunk_forward_bytes(
     vk_device: &VulkanDevice,
@@ -10614,13 +10614,13 @@ pub fn dispatch_gdn_full_chunk_forward_bytes(
 /// Dispatch GDN chunk scan kernel.
 ///
 /// Performs the scan operation for chunkwise recurrence:
-///   1. forward-substitution for W[t]
+///   1. forward-substitution for `W[t]`
 ///   2. intra = B_mask @ W
 ///   3. out = q_s_scaled + intra
 ///
-/// Input: a_strict[B,H,C,C], b_mask[B,H,C,C], v_prime[B,H,C,dv],
-///         q_s_scaled[B,H,C,dv], beta[B,H,C], decay_last_col[B,H,C]
-/// Output: out[B,H,C,dv], p_out[B,H,C,dv]
+/// Input: a_strict`[B,H,C,C]`, b_mask`[B,H,C,C]`, v_prime`[B,H,C,dv]`,
+///         q_s_scaled`[B,H,C,dv]`, beta`[B,H,C]`, decay_last_col`[B,H,C]`
+/// Output: out`[B,H,C,dv]`, p_out`[B,H,C,dv]`
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_gdn_chunk_scan_bytes(
     vk_device: &VulkanDevice,

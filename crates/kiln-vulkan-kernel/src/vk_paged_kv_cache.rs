@@ -19,7 +19,7 @@
 //! without ever round-tripping K/V across the PCIe boundary.
 //!
 //! Lifetime model: the cache is owned by `VulkanBackend` and
-//! lazy-initialized via [`Self::try_new`] on the first resident decode
+//! lazy-initialized via [`VkPagedKvCache::try_new`] on the first resident decode
 //! step. Sizing is derived from the model config (number of
 //! full-attention layers, paged-cache block geometry); the cache
 //! holds device memory of
