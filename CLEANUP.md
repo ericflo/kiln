@@ -1194,3 +1194,35 @@ Verified BEFORE and AFTER: `bash scripts/audit-substrate-status.sh` reports
 tracked paths); post-deletion `git grep` for all three filenames matches
 nothing outside CLEANUP.md; `git status` shows exactly the three deletions,
 one doc edit, and this ledger entry.
+
+## Cleanup Agent (round 45) — 2026-09-02
+
+Fixed CLI-flag drift in the never-before-audited live docs `docs/VIGNETTES.md`
+and `docs/TRAJECTORY_TURN_THROUGHPUT.md`. Vignette 2's §10.14 five-command
+pipeline documented flags that do not exist on the actual `kiln` CLI:
+`kiln judge distill --sessions/--judge-name/--rank` (real: `--url`, `--name`,
+`--teacher`), `kiln self-improve --sessions/--output-name/--post-eval` (real:
+`--url`, `--agent`, `--judge`, `--no-crisp`; no eval flag, sessions come from
+the pi capture dir automatically), and `kiln judge drift-check
+--sample-size 50` (real: `--url/--judge/--teacher`; sample size is not a
+flag). All three command invocations rewritten to the real surface with prose
+adjusted to match the CLI/API help text (`--kiln-url` in step 1 is a genuine
+alias for `--url` and stays). Separately, TRAJECTORY_TURN_THROUGHPUT.md said
+"all eight batching values are immutable" — there are nine per
+`crates/kiln-server/src/config.rs`'s BatchingConfig + rendezvous family and
+QUICKSTART.md's own table; corrected to nine. Audited and left healthy: the
+rest of VIGNETTES.md (endpoints /v1/teachers, /v1/recipes/run,
+/v1/distill/pump, /v1/adapters/distill_merge, /v1/library/publish/{name},
+/v1/adapters/{name}/receipt all verified present; frontier-pump recipe exists;
+drift-check's honest-501 note matches ApiError::drift_check_not_implemented)
+and LONG_CONTEXT_GRPO_BENCH.md (example binary + all cited flags and record
+fields exist).
+Why it mattered: VIGNETTES is the runnable recipe doc for the grand plan's
+closing vignettes; every Bob-vignette command would have failed at argument
+parsing as written.
+Verified: every rewritten flag cross-checked against `crates/kiln-server/
+src/cli.rs` (JudgeCommands, SelfImprove, DriftCheck variants) and
+`run_judge`/`run_self_improve` request bodies before editing; docs-site
+`--validate-only` passes (59 documents); repo grep confirms no remaining
+phantom flags outside frozen plan docs; no code touched; `git status` shows
+only the two doc edits plus this ledger entry.

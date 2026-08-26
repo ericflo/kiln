@@ -108,37 +108,33 @@ curl -X POST localhost:8420/v1/library/publish/alice-writes-like-her
 #    office kiln server without deleting existing providers.
 kiln pi-setup --kiln-url http://office-kiln:8420
 
-# 2. One-time judge distil (§10.6.1). Scores a week of pi-session
-#    contested cases through the explicitly registered vLLM teacher and
-#    trains a small judge LoRA. Hosted-provider protocols are not wired yet.
+# 2. One-time judge distil (§10.6.1). Distils a small turn-judge LoRA from
+#    the explicitly registered vLLM teacher's scoring of (turn, context)
+#    pairs. Hosted-provider protocols are not wired yet.
 kiln judge distill \
   --teacher qwen3.6-27b@vllm \
-  --sessions ~/.pi/agent/sessions/ \
-  --judge-name office-judge \
-  --rank 16
+  --name office-judge
 
 # 3. Use pi normally for a week. Sessions are captured to
 #    ~/.pi/agent/sessions/<id>.jsonl automatically.
 
 # 4. Saturday morning: GRPO loop using the local judge as the reward
-#    model. CRISP terseness pass (§10.6.4) compresses successful
-#    trajectories. New adapter behind an A/B gate the team reviews
-#    Monday morning in the Trajectory Studio (§10.9).
+#    model, scored over the agent adapter's captured sessions, with the
+#    CRISP terseness pass (§10.6.4) compressing successful trajectories.
+#    New adapter behind an A/B gate the team reviews Monday morning in
+#    the Trajectory Studio (§10.9).
 kiln self-improve \
-  --judge office-judge \
-  --sessions ~/.pi/agent/sessions/ \
-  --output-name office-assistant-2026-w20 \
-  --post-eval pi-mini-mcpatlas
+  --agent pi-coder-current \
+  --judge office-judge
 
-# 5. Optional periodic drift check (§10.6.3). Auto-refreshes the
-#    judge if agreement on 50 contested cases drops below 80%.
-#    NOTE: the scoring run lands with the trainer body (#31); until
-#    then the server validates the inputs and returns 501, so this
-#    command exits non-zero.
+# 5. Optional periodic drift check (§10.6.3). Re-scores a sample with
+#    the teacher and auto-refreshes the judge if agreement drops below
+#    80%. NOTE: the scoring run lands with the trainer body (#31);
+#    until then the server validates the inputs and returns 501, so
+#    this command exits non-zero.
 kiln judge drift-check \
   --judge office-judge \
-  --teacher qwen3.6-27b@vllm \
-  --sample-size 50
+  --teacher qwen3.6-27b@vllm
 ```
 
 **Pillars exercised:**

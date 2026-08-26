@@ -111,5 +111,5 @@ For an A/B run, create a second TOML file whose only change is
 command using the same turn selection, adapter, `max_tokens`, and batch
 settings. Capture `/v1/config.batching` after each restart and keep it with the
 corresponding report. Do not toggle the deprecated
-`KILN_BATCH_PREFIX_AWARE_ADMISSION` alias between live requests; all eight
+`KILN_BATCH_PREFIX_AWARE_ADMISSION` alias between live requests; all nine
 batching values are immutable for the process lifetime.
