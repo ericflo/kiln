@@ -1227,7 +1227,6 @@ pub fn grpo_train_to_with_checkpoint_root_and_runtime(
     };
 
     let mut result = train_body();
-    drop(train_body);
     let policy_audit = finish_grpo_policy_audit(&mut result, policy_audit);
     let mut adapter_smoke_test = None;
     let cleanup_result = run_coordinated_grpo_gpu_phase(

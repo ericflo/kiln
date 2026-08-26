@@ -1381,7 +1381,6 @@ pub(super) fn sft_train_prepared_to_with_checkpoint_root(
     };
 
     let result = train_body();
-    drop(train_body);
     let adapter_smoke_test = if config.adapter_smoke_test && result.is_ok() {
         Some(run_adapter_smoke_test_best_effort(
             adapter_name,
