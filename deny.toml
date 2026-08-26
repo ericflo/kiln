@@ -1,7 +1,9 @@
 # cargo-deny policy for kiln. Enforces an MIT/Apache-2.0-compatible license
 # allowlist, denies unknown registries/git sources, and bans wildcard version
-# requirements. CI enforcement (a GitHub Actions job running `cargo deny check`)
-# is a follow-up task; this file establishes the policy.
+# requirements. CI enforces this via the `cargo deny check --all-features` step
+# in .github/workflows/ci.yml (gated to manifest/lockfile/policy changes by
+# scripts/ci_rust_scope.py); run the same command locally before pushing such
+# changes — see CONTRIBUTING.md.
 
 [graph]
 targets = []

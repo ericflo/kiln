@@ -639,3 +639,36 @@ scripting surface. Verified before AND after:
 tracked paths (6709 → 6706); `scripts/qualification/
 validate_retained_evidence.sh` passes untouched (all receipts OK); `git
 status` shows only the three deletions plus this ledger entry.
+## Cleanup Agent (round 26) — 2026-08-28
+
+Audited this round's steering candidates and fixed the one drift found: the
+`deny.toml` header comment claimed CI enforcement ("a GitHub Actions job
+running `cargo deny check`") was "a follow-up task", but enforcement has been
+live for some time — `.github/workflows/ci.yml` runs `EmbarkStudios/
+cargo-deny-action` with `command: check --all-features`, gated to
+manifest/lockfile/policy changes by `scripts/ci_rust_scope.py`
+(`dependency_policy` output), and CONTRIBUTING.md §131 already instructs
+contributors to run `cargo deny check --all-features` locally. Rewrote the
+header to point at the actual CI step and the local command instead of a
+phantom TODO. Audited the other candidates and left them healthy:
+`contracts/` — all four generators (`generate_artifact_schema`,
+`generate_eval_schema`, `generate_observability_schema`,
+`generate_control_plane_schema`) pass their `--check` modes, plus
+`check_config_schema.py` (117 canonical fields) and
+`check_http_api_contract.py` (111 paths) all green; `kiln.example.toml` is
+schema-validated by the latter checker with zero drift; `rust-toolchain.toml`
+(1.96.1 + rustfmt) matches CI's fmt gate; `qualification/` —
+`validate_retained_evidence.sh` passes (all receipts OK) and its unittest
+suite passes 754 tests (1 skip); a repo-wide relative-link audit over live
+root/capability docs surfaced only frozen-archive and generated-file links
+(out of scope per protocol). Why it mattered: deny.toml is the dependency-
+policy contract; its header misdescribed the project's own enforcement state
+and pointed new contributors at work that was already done.
+Verified: diff is comment-only (4 insertions, 2 deletions in one comment
+block — no TOML keys touched, so no cargo/deny behavior surface);
+`python3 scripts/check_repository_artifacts.py` passes (6706 tracked paths);
+grep confirms no remaining "follow-up task" text in deny.toml and that
+ci.yml's cargo-deny step and CONTRIBUTING.md's instructions match the new
+header; THIRD_PARTY_LICENSES.md's license overview cross-checked against the
+deny.toml allow list (all nine licenses present); `git status` shows only
+deny.toml plus this ledger entry.
