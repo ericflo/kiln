@@ -56,7 +56,7 @@ pub struct MarlinPackedProj {
 
 /// Marlin kernel shape constraints (see upstream `marlin/__init__.py`).
 pub fn shape_is_supported(k: usize, n: usize) -> bool {
-    k % 128 == 0 && n % 256 == 0
+    k.is_multiple_of(128) && n.is_multiple_of(256)
 }
 
 /// Intermediate host-side representation of a weight ready to run through

@@ -1897,7 +1897,7 @@ fn paged_prefix_reuse_matches_prompt(
     if block_size == 0
         || prefix.cached_tokens == 0
         || prefix.cached_tokens > prompt_len
-        || prefix.cached_tokens % block_size != 0
+        || !prefix.cached_tokens.is_multiple_of(block_size)
         || prefix.block_ids.len() != prefix.cached_tokens / block_size
     {
         return false;
@@ -5965,7 +5965,10 @@ impl ModelRunner {
         block_size: usize,
         next_token: Option<PagedPrefixNextToken>,
     ) -> Result<Option<PagedPrefixRegistration>> {
-        if prompt_tokens.is_empty() || block_size == 0 || prompt_tokens.len() % block_size != 0 {
+        if prompt_tokens.is_empty()
+            || block_size == 0
+            || !prompt_tokens.len().is_multiple_of(block_size)
+        {
             return Ok(None);
         }
         let num_prompt_blocks = prompt_tokens.len() / block_size;

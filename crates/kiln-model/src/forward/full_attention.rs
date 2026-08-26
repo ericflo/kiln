@@ -1619,7 +1619,7 @@ pub(super) fn resolve_reshape_dims(elem_count: usize, dims: &[ReshapeArg]) -> Op
     let mut out: Vec<usize> = Vec::with_capacity(dims.len());
     match infer_idx {
         Some(idx) => {
-            if known == 0 || elem_count % known != 0 {
+            if known == 0 || !elem_count.is_multiple_of(known) {
                 return None;
             }
             let inferred = elem_count / known;
@@ -2304,7 +2304,7 @@ pub(super) fn try_flash_attn_paged_decode(
     let block_size = try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache);
     #[cfg(not(feature = "cuda"))]
     let block_size = paged_cache.block_size();
-    if block_size == 0 || K_BLOCK_N % block_size != 0 {
+    if block_size == 0 || !K_BLOCK_N.is_multiple_of(block_size) {
         return Ok(None);
     }
     let pages_per_chunk = K_BLOCK_N / block_size;

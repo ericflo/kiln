@@ -4717,7 +4717,7 @@ pub fn model_forward_paged_streaming_last_token_hidden_with(
             "model_forward_paged_streaming_last_token_hidden requires at least one token"
         );
     }
-    if tile_size == 0 || tile_size % GDN_CHUNK_SIZE != 0 {
+    if tile_size == 0 || !tile_size.is_multiple_of(GDN_CHUNK_SIZE) {
         anyhow::bail!(
             "streaming tile_size must be a positive multiple of GDN_CHUNK_SIZE ({}), got {tile_size}",
             GDN_CHUNK_SIZE
@@ -4799,7 +4799,7 @@ pub fn model_forward_paged_streaming_last_token_with_last_hidden_with(
             "model_forward_paged_streaming_last_token_with_last_hidden requires at least one token"
         );
     }
-    if tile_size == 0 || tile_size % GDN_CHUNK_SIZE != 0 {
+    if tile_size == 0 || !tile_size.is_multiple_of(GDN_CHUNK_SIZE) {
         anyhow::bail!(
             "streaming tile_size must be a positive multiple of GDN_CHUNK_SIZE ({}), got {tile_size}",
             GDN_CHUNK_SIZE
@@ -4886,7 +4886,7 @@ pub fn model_forward_paged_streaming_with(
     if total == 0 {
         anyhow::bail!("model_forward_paged_streaming requires at least one token");
     }
-    if tile_size == 0 || tile_size % GDN_CHUNK_SIZE != 0 {
+    if tile_size == 0 || !tile_size.is_multiple_of(GDN_CHUNK_SIZE) {
         anyhow::bail!(
             "streaming tile_size must be a positive multiple of GDN_CHUNK_SIZE ({}), got {tile_size}",
             GDN_CHUNK_SIZE

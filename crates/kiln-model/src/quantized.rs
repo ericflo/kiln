@@ -170,7 +170,7 @@ pub fn dequantize_gptq_weight(
 
 /// Reinterpret a byte slice as a u32 slice (little-endian assumed).
 fn bytes_as_u32(data: &[u8]) -> Result<Vec<u32>> {
-    if data.len() % 4 != 0 {
+    if !data.len().is_multiple_of(4) {
         bail!("byte slice length {} is not a multiple of 4", data.len());
     }
     Ok(data

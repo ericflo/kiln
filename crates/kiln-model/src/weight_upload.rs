@@ -238,7 +238,7 @@ impl<'a> AcceleratorWeightUploadPacer<'a> {
 
         if completed_layers == 0
             || completed_layers == self.total_layers
-            || completed_layers % PROGRESS_LAYER_INTERVAL == 0
+            || completed_layers.is_multiple_of(PROGRESS_LAYER_INTERVAL)
             || stage == "complete"
         {
             tracing::info!(

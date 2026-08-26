@@ -821,7 +821,7 @@ fn same_string_set(a: &[String], b: &[String]) -> bool {
 fn decode_tensor_to_f32(dtype: Dtype, bytes: &[u8]) -> Result<Vec<f32>> {
     match dtype {
         Dtype::F32 => {
-            if bytes.len() % 4 != 0 {
+            if !bytes.len().is_multiple_of(4) {
                 bail!(
                     "F32 tensor byte length {} is not a multiple of 4",
                     bytes.len()
@@ -835,7 +835,7 @@ fn decode_tensor_to_f32(dtype: Dtype, bytes: &[u8]) -> Result<Vec<f32>> {
             Ok(out)
         }
         Dtype::F16 => {
-            if bytes.len() % 2 != 0 {
+            if !bytes.len().is_multiple_of(2) {
                 bail!(
                     "F16 tensor byte length {} is not a multiple of 2",
                     bytes.len()
@@ -849,7 +849,7 @@ fn decode_tensor_to_f32(dtype: Dtype, bytes: &[u8]) -> Result<Vec<f32>> {
             Ok(out)
         }
         Dtype::BF16 => {
-            if bytes.len() % 2 != 0 {
+            if !bytes.len().is_multiple_of(2) {
                 bail!(
                     "BF16 tensor byte length {} is not a multiple of 2",
                     bytes.len()

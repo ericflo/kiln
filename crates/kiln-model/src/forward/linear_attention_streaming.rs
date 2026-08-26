@@ -35,7 +35,7 @@ pub fn gated_deltanet_forward_streaming(
     tile_size: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
-    if tile_size == 0 || tile_size % GDN_CHUNK_SIZE != 0 {
+    if tile_size == 0 || !tile_size.is_multiple_of(GDN_CHUNK_SIZE) {
         anyhow::bail!(
             "streaming tile_size must be a positive multiple of GDN_CHUNK_SIZE ({}), got {tile_size}",
             GDN_CHUNK_SIZE

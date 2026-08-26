@@ -48,7 +48,7 @@ pub const KV_ELEMENTS_PER_TOKEN_PER_FULL_LAYER: usize = NUM_KV_HEADS * HEAD_DIM 
 // full-attention layers are 3, 7, 11, 15, 19, 23, 27, 31; the rest are GDN.
 // Layer 0 is GDN, not full attention.
 pub fn is_full_attention_layer(layer_idx: usize) -> bool {
-    (layer_idx + 1) % FULL_ATTN_INTERVAL == 0
+    (layer_idx + 1).is_multiple_of(FULL_ATTN_INTERVAL)
 }
 
 pub fn full_attention_layer_index(layer_idx: usize) -> Option<usize> {
