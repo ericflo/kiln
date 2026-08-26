@@ -20,7 +20,7 @@ pub(super) fn deepcopy_tensor_for_snapshot(t: &Tensor, snapshot_device: &Device)
         .to_vec1::<f32>()
         .context("snapshot: read tensor to host f32 vec")?;
     // (#1082) kt-native rebuild on the source device (no candle constructor).
-    let rebuilt = Tensor::from_vec_on(snapshot_device.clone(), host, shape)?;
+    let rebuilt = Tensor::from_vec_on(*snapshot_device, host, shape)?;
     if dtype == DType::F32 {
         Ok(rebuilt.detach())
     } else {
@@ -39,11 +39,11 @@ pub(super) fn ema_blend_tensor(
 ) -> Result<Tensor> {
     let dtype = old.dtype();
     let a = old
-        .to_device(snapshot_device.clone())?
+        .to_device(*snapshot_device)?
         .to_f32_dtype()?
         .affine(decay as f64, 0.0)?;
     let b = current
-        .to_device(snapshot_device.clone())?
+        .to_device(*snapshot_device)?
         .to_f32_dtype()?
         .affine((1.0 - decay) as f64, 0.0)?;
     let blended = (a + b)?;
@@ -212,7 +212,7 @@ pub(super) fn restore_lora_reference_tensor(
     );
     checkpoint_ensure_finite_tensor(&tensor, key)?;
     tensor
-        .to_device(snapshot_device.clone())
+        .to_device(*snapshot_device)
         .and_then(|tensor| tensor.contiguous())
         .map_err(|error| anyhow::anyhow!("restore GRPO EMA reference tensor {key}: {error}"))
 }

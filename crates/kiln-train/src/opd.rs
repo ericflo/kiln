@@ -2733,7 +2733,7 @@ fn sample_student_rollout(
         "sample_student_rollout: prompt empty"
     );
 
-    let device = weights.embed_tokens.device().clone();
+    let device = weights.embed_tokens.device();
     let head_t = weights.embed_tokens_t.clone();
 
     let params = SamplingParams {
