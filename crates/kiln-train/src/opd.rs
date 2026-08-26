@@ -6069,8 +6069,7 @@ mod tests {
             &off_policy_smoke_tokenizer()?,
             source.clone(),
         )
-        .err()
-        .expect("on-policy remote materialization must be rejected");
+        .expect_err("on-policy remote materialization must be rejected");
 
         assert!(
             error.to_string().contains("cannot run on-policy"),
@@ -6243,8 +6242,7 @@ mod tests {
             OpdLossGranularity::TeacherTopK,
             4,
         )
-        .err()
-        .expect("an empty active-position set must be rejected");
+        .expect_err("an empty active-position set must be rejected");
         assert!(err.to_string().contains("no active positions"));
     }
 
