@@ -699,3 +699,32 @@ tracked paths); `scripts/qualification/validate_retained_evidence.sh` passes
 both times (all receipts OK — none hash or locate this file); post-deletion
 repo-wide grep finds zero remaining references outside git history and ignored
 agent traces; `git status` shows only the deletion plus this ledger entry.
+
+## Cleanup Agent (round 28) — 2026-08-29
+
+Deleted `docs/audits/WSL_CUDA_QWEN35_4B_FASTEST_LOG.md` — the 1,605-line
+(75 KB) raw WSL2/CUDA terminal-session transcript of the 2026-05-09
+Qwen3.5-4B throughput optimization pass, Round 27's flagged sibling run
+through the identical playbook. Confirmed redundant retained evidence, not
+load-bearing: (1) zero tracked references — no doc, script, CI workflow,
+receipt, or manifest links to its filename; (2) the reviewed compact summary
+`WSL_CUDA_QWEN35_4B_FASTEST_SHORTLOG.md` remains alongside it and covers every
+outcome of that session (rejected CUDA-graph experiments incl. the
+dxgkio/libcuda SIGSEGV findings, accepted fused RMSNorm dispatch with exact
+latency/throughput numbers, training smoke result), satisfying
+ARTIFACT_RETENTION.md's reviewability requirement; (3) the policy explicitly
+forbids checking in raw traces/logs ("Do not check in raw server logs ...
+traces"), placing this transcript squarely in the purged category per the
+removed-raw-artifacts manifest precedent. Git history preserves every byte.
+Why it mattered: −1,605 lines of raw machine output masquerading as an audit
+doc, continuing round 27's raw-log purge. Verified BEFORE and AFTER:
+`scripts/check_repository_artifacts.py` passes both times (6705 → 6704
+tracked paths); `scripts/qualification/validate_retained_evidence.sh` passes
+both times (all receipts OK); post-deletion `git grep` for the filename finds
+zero remaining references; `git status` shows only the deletion plus this
+ledger entry. Noted for future sessions (same playbook applies):
+`docs/audits/vulkan-strix-halo-2026-05-09-gpu-decode-log.md` (8,608 lines)
+and `docs/audits/vulkan-strix-halo-optimization-log.md` (3,706 lines) are
+similar raw session logs whose shortlog siblings
+(`vulkan-strix-halo-2026-05-09-gpu-decode-shortlog.md`,
+`vulkan-strix-halo-shortlog.md`) exist.
