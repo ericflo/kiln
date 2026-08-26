@@ -154,7 +154,7 @@ pub const fn default_opd_samples_per_prompt() -> usize {
 }
 
 /// §3.1 loss granularity selector. Defaults to `TeacherTopK` (§6).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OpdLossGranularity {
     /// Reserved wire value for single-token reverse KL. Rejected before
@@ -164,15 +164,10 @@ pub enum OpdLossGranularity {
     SampledToken,
     /// Top-K renormalised reverse KL. **The default.** Fu et al. 2026
     /// teacher Top-K local support matching.
+    #[default]
     TeacherTopK,
     /// Full-vocab reverse KL (K = V). DeepSeek-V4 corporate-tier.
     FullVocab,
-}
-
-impl Default for OpdLossGranularity {
-    fn default() -> Self {
-        Self::TeacherTopK
-    }
 }
 
 impl OpdLossGranularity {
@@ -189,34 +184,24 @@ impl OpdLossGranularity {
 
 /// Whether OPD should sample fresh student rollouts or replay
 /// teacher-authored completions from an offline dataset.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OpdTrainingMode {
+    #[default]
     OnPolicy,
     OffPolicy,
 }
 
-impl Default for OpdTrainingMode {
-    fn default() -> Self {
-        Self::OnPolicy
-    }
-}
-
 /// Action-token supervision objective for off-policy distillation.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OpdObjective {
     /// Reverse-KL against teacher top-K logprobs.
+    #[default]
     ReverseKl,
     /// Reserved wire value. Dataset preparation can validate CE targets, but
     /// the production trainer rejects this until CE is part of its loss root.
     CrossEntropy,
-}
-
-impl Default for OpdObjective {
-    fn default() -> Self {
-        Self::ReverseKl
-    }
 }
 
 impl OpdObjective {
@@ -233,10 +218,11 @@ impl OpdObjective {
 /// Reserved Stable-OPD knob set (Luo et al. 2026). Only `Off` is executable
 /// today; `Auto` and `Manual` remain deserializable so older requests fail with
 /// a precise contract error instead of an unknown-enum error.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "mode")]
 pub enum StableOpdMode {
     /// Disable Stable-OPD. This is the only production-supported value today.
+    #[default]
     Off,
     /// Auto-engage based on the diagnostic stack — §3.9 default.
     Auto,
@@ -247,12 +233,6 @@ pub enum StableOpdMode {
         /// λ — golden-trajectory mixture fraction. Luo et al. default 0.1.
         sft_lambda: f64,
     },
-}
-
-impl Default for StableOpdMode {
-    fn default() -> Self {
-        Self::Off
-    }
 }
 
 impl StableOpdMode {

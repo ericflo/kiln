@@ -359,10 +359,11 @@ pub fn build_snapshot_with_alignment(
 ///
 /// The guardrail watches the snapshot stream and decides on auto-
 /// mitigation per Luo et al. 2026 + §3.9 of the grand plan.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum GuardrailDecision {
     /// All metrics within healthy bounds — no action required.
+    #[default]
     Ok,
     /// Repetition rising; bump Stable-OPD's `β_kl` and `λ_sft` (auto-
     /// engage if not already on, double if already engaged).
@@ -746,12 +747,6 @@ impl LengthInflationGuardrail {
         self.entropy_gap_history
             .windows(2)
             .all(|w| w[1] >= w[0] + 1e-6)
-    }
-}
-
-impl Default for GuardrailDecision {
-    fn default() -> Self {
-        Self::Ok
     }
 }
 

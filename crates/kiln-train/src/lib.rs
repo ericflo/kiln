@@ -260,9 +260,10 @@ impl std::error::Error for InvalidCheckpointBoundaryPolicy {}
 /// `Disabled` retains an optional explicit segment count so resolving both
 /// legacy controls does not silently discard either value. The count remains
 /// part of checkpoint identity even though execution is disabled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum GradientCheckpointPolicy {
+    #[default]
     Auto,
     ExplicitSegments {
         segments: std::num::NonZeroUsize,
@@ -313,12 +314,6 @@ impl GradientCheckpointPolicy {
 
     pub const fn is_disabled(self) -> bool {
         matches!(self, Self::Disabled { .. })
-    }
-}
-
-impl Default for GradientCheckpointPolicy {
-    fn default() -> Self {
-        Self::Auto
     }
 }
 
@@ -1472,10 +1467,11 @@ pub enum BehaviorPolicy {
 /// idea from the post-DAPO line of work — the reference policy tracks
 /// actual training progress instead of pulling toward the (potentially
 /// pre-reasoning) base model.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum KlReferencePolicy {
     /// Base model (no LoRA), recomputed per completion. Historical default.
+    #[default]
     BasePerStep,
     /// No KL-reference forward. Requires the KL penalty to be disabled.
     None,
@@ -1486,12 +1482,6 @@ pub enum KlReferencePolicy {
         #[serde(default = "default_ema_refresh")]
         refresh_every: usize,
     },
-}
-
-impl Default for KlReferencePolicy {
-    fn default() -> Self {
-        KlReferencePolicy::BasePerStep
-    }
 }
 
 /// Backwards-compatible Rust type name. New code should use
