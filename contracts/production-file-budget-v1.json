@@ -29,7 +29,7 @@
     },
     {
       "path": "crates/kiln-server/src/api/training.rs",
-      "max_lines": 6613,
+      "max_lines": 6612,
       "rationale": "The training API owns OpenEnv corpus admission, including the exact behavior-policy match required before no-importance-correction GRPO; the added focused invariant test stays beside that admission boundary and this exact cap prevents unrelated growth."
     },
     {
@@ -39,22 +39,22 @@
     },
     {
       "path": "crates/kiln-server/src/cli.rs",
-      "max_lines": 6331,
+      "max_lines": 6329,
       "rationale": "OpenEnv command schemas, dispatch, and tests live in their owned module; this exact ceiling adds only the central top-level registration and user-facing navigation."
     },
     {
       "path": "crates/kiln-server/src/config.rs",
-      "max_lines": 11313,
+      "max_lines": 11252,
       "rationale": "Serving, accelerator, OpenEnv credential, and training configuration still share one typed authority. This lowered exact ceiling records the current split and forbids renewed growth."
     },
     {
       "path": "crates/kiln-server/src/state.rs",
-      "max_lines": 8384,
+      "max_lines": 8387,
       "rationale": "Application state is the authority for resolving an OpenEnv rollout policy to immutable base-model, inference-config, runtime, and adapter-content revisions; collection and admission share this one canonical identity boundary, and the exact cap blocks unrelated ownership growth."
     },
     {
       "path": "crates/kiln-server/src/training_queue.rs",
-      "max_lines": 7960,
+      "max_lines": 7962,
       "rationale": "Training execution and publication share the adapter mutation barrier; OpenEnv adds a final behavior-policy revision check and an immutable trainer-local adapter snapshot under that same lock so admitted rollouts cannot race mutable weights. The exact cap forbids unrelated growth."
     },
     {
