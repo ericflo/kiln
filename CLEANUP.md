@@ -756,3 +756,30 @@ passes both times (exit 0, all receipts OK — none hash or locate these
 files); post-deletion `git grep` for both filenames finds zero remaining
 references; `git status` shows only the two deletions, the shortlog header
 edit, and this ledger entry.
+## Cleanup Agent (round 30) — 2026-08-29
+
+Deleted the redundant PR #1383 interim eval checkpoint: the directory
+`docs/audits/pr1383-qwen35-base-production-tool-call-eval-1000-2026-05-25-partial/`
+(9 tracked JSON files, 37,879 lines / ~1.8 MB) and its superseded checkpoint doc
+`pr1383-qwen35-base-production-tool-call-eval-1000-2026-05-25-partial.md`
+(123 lines). This was this round's steering primary candidate; the named
+`flce_phase_*_raw_2026-04-29.log` files no longer exist anywhere (tracked or
+on disk), so exploration pivoted to the nearest live equivalent. Confirmed
+redundancy before deleting: a per-file md5sum comparison shows all 9 remaining
+partial-dir files are byte-identical to their counterparts in the final
+`...-2026-05-25/` evidence directory, which additionally contains shards 09–11
+and `aggregate_metrics.json` — i.e. the partial dir is a strict subset whose
+every byte survives verbatim in the sibling dir. Its raw log siblings
+(`base_eval_shard_*.log`, `trace_suite2.log`, `materialize_errors.log`) were
+already purged by the 2026-07-13 cleanup and are recorded only in
+`removed-raw-artifacts-2026-07-13-v1.json`, which stays untouched as the
+exact-bytes retention locator. The `-partial.md` checkpoint itself declares
+"This is not the final result doc. Shards 09–11 remain"; the final audit doc
+(`...-2026-05-25.md`) supersedes it with the full 269/775 result and never
+references the partial run. Why it mattered: −38k lines of duplicated
+interim evidence masquerading as a second eval result. Verified BEFORE and
+AFTER: `scripts/check_repository_artifacts.py` passes both times (6702 →
+6692 tracked paths); `scripts/qualification/validate_retained_evidence.sh`
+passes both times (all receipts OK); post-deletion `git grep` for
+`2026-05-25-partial` matches only CLEANUP.md and the standing manifest;
+`git status` shows only the ten deletions plus this ledger entry.
