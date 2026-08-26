@@ -484,7 +484,7 @@ pub(super) fn compute_ref_log_probs_shared_prefix(
         kiln_core::config::DType::FP32 => DType::F32,
     };
 
-    let num_blocks = (max_total + GRPO_REF_PAGED_BLOCK_SIZE - 1) / GRPO_REF_PAGED_BLOCK_SIZE;
+    let num_blocks = max_total.div_ceil(GRPO_REF_PAGED_BLOCK_SIZE);
     // (#1082) The candle `PagedKvCache::new` took a candle device; its kt twin
     // `PagedKvCacheKt::new` allocates its pools on the model's runtime `Device`.
     // `device` is a kt `Device` (Copy) — pass it through so the pools land on
