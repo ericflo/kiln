@@ -12,7 +12,7 @@ Usage
 
     python3 bench-results/check_sft_train_regression.py \
         --bench-stdout /tmp/kiln_bench_stdout.txt \
-        --baseline bench-results/regression/sft_train_a6000_baseline.json \
+        --baseline bench-results/regression/sft_native_a6000_baseline.json \
         [--secs-per-step-tolerance 0.10] \
         [--peak-vram-tolerance 0.15]
 

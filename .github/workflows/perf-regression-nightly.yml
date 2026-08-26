@@ -270,9 +270,12 @@ jobs:
 
       - name: Run training bench (trainer=${{ matrix.trainer }})
         env:
-          # The `native` matrix value asks for cuda_native_sft_train via
-          # the env knob the bench reads; `generic` leaves it unset so
-          # the trainer dispatches to the shared kt-native BackendRuntime path.
+          # Historical: this knob once selected the legacy CUDA-native SFT
+          # trainer, but it is obsolete — no code reads it and both matrix
+          # legs now run the same shared kt-native BackendRuntime path
+          # (see docs/CONFIGURATION.md "legacy CUDA-native selector").
+          # The native/generic rows are kept as a cross-check: their
+          # baselines should land within a few percent of each other.
           KILN_CUDA_NATIVE_TRAINING: ${{ matrix.trainer == 'native' && '1' || '0' }}
         run: |
           rm -f /tmp/kiln_bench_stdout.txt

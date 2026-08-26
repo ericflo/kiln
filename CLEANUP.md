@@ -950,3 +950,44 @@ cleanly with PyYAML; `cargo metadata --locked` resolves cleanly after the
 manifest comment edit (comment-only, so no rebuild needed);
 `scripts/check_repository_artifacts.py` passes; diff audit confirms every
 changed line is inside a comment block.
+
+## Cleanup Agent (round 37) — 2026-08-30
+
+Fixed three stale/false claims in the live perf-gate operational files (the
+SFT nightly regression gate) — the same candle-era drift class as rounds
+32/36, found by auditing the gate surface end to end. (1)
+`.github/workflows/perf-regression-nightly.yml`'s bench-env comment claimed
+"`native` asks for cuda_native_sft_train via the env knob the bench reads" —
+false twice over: no code reads `KILN_CUDA_NATIVE_TRAINING` anymore
+(docs/CONFIGURATION.md marks it an obsolete "legacy CUDA-native selector"),
+and `native_route_enabled()` (`crates/kiln-model/src/backend/capability.rs`)
+is false on every backend, so both matrix legs run the identical shared
+kt-native BackendRuntime path. Rewrote the comment to say exactly that,
+keeping the env line itself (harmless) and noting the native/generic rows now
+serve as cross-check baselines. (2)
+`bench-results/regression/sft_generic_a6000_baseline.json`'s comment still
+described the `generic` trainer as "the BackendRuntime+candle-autograd path"
+with "`native` routes through `generic` after #1071" — both superseded;
+rewritten to match current dispatch reality. (3)
+`bench-results/check_sft_train_regression.py`'s usage docstring cited a
+nonexistent baseline file `regression/sft_train_a6000_baseline.json`; pointed
+at the real `sft_native_a6000_baseline.json`.
+Flagged for future sessions, deliberately NOT acted on this round: the §9.9
+OPD bench gate is dead post-#1082 — commit 4f04c8a50 deleted
+`crates/kiln-opd-loss-kernel/examples/bench_opd_topk_kl.rs`, but
+`.github/workflows/opd-bench-gate.yml`'s cuda-bench job still runs that exact
+example, `bench-results/check_opd_regression.py` parses its candle-column
+output format that nothing produces anymore (`bench_opd_topk_kl_vk.rs` prints
+an entirely different format), and `scripts/opd_phase0_pod_validation.sh`
+would fail at its opd_kernel_bench phase; only the fake-data gate-self-test
+job still passes. Deleting/rewiring contradicts the live grand-plan §9.9
+(doc cites both baseline JSONs), so it needs an owner decision (re-wire the
+vk example + re-capture baselines vs retire the gate).
+Verified: every claim checked against code before editing (grep: zero
+readers of KILN_CUDA_NATIVE_TRAINING; capability.rs native_route_enabled
+always false; workflow matrix semantics); PyYAML parses the edited workflow;
+both regression JSONs parse and `check_sft_train_regression.py` runs clean
+end-to-end against them (py_compile + live invocation exercising parse →
+null-baseline error path); grep confirms no remaining candle-era claims in
+any of the three files; `scripts/check_repository_artifacts.py` passes (6694
+tracked paths); diff is comment/docstring-only plus one JSON string value.
