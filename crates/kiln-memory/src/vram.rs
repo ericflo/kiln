@@ -771,7 +771,7 @@ fn query_current_cgroup_memory() -> Option<CgroupMemoryObservation> {
         }
     }
 
-    if let Some(mountinfo) = std::fs::read_to_string("/proc/self/mountinfo").ok() {
+    if let Ok(mountinfo) = std::fs::read_to_string("/proc/self/mountinfo") {
         for mount in cgroup_memory_mounts(&mountinfo) {
             let membership_path = if mount.v2 { v2_path } else { v1_memory_path };
             let Some(membership_path) = membership_path else {
@@ -1083,7 +1083,7 @@ pub fn current_memory_snapshot_for(selector: VramProbeSelector) -> MemorySnapsho
 pub(crate) fn try_current_memory_snapshot_for(
     selector: VramProbeSelector,
 ) -> Option<MemorySnapshot> {
-    let snapshot = match selector {
+    match selector {
         VramProbeSelector::Auto => nvidia_memory_snapshot(0)
             .or_else(|| {
                 #[cfg(target_os = "linux")]
@@ -1110,8 +1110,7 @@ pub(crate) fn try_current_memory_snapshot_for(
         }
         VramProbeSelector::AppleUnified => apple_memory_snapshot(),
         VramProbeSelector::None => Some(empty_memory_snapshot()),
-    };
-    snapshot
+    }
 }
 
 fn empty_memory_snapshot() -> MemorySnapshot {
@@ -1874,7 +1873,7 @@ pub fn recommended_checkpoint_plan_with_activation_bytes(
     // Tight headroom: pick segments to keep per-segment activation memory
     // under 30% of available. Round up; clamp to [2, num_layers].
     let target_per_segment = available_bytes.max(1) * 3 / 10;
-    let mut num_segments = ((max_act_bytes + target_per_segment - 1) / target_per_segment) as usize;
+    let mut num_segments = max_act_bytes.div_ceil(target_per_segment) as usize;
     if num_segments < 2 {
         num_segments = 2;
     }
@@ -2196,7 +2195,7 @@ mod tests {
         let est = estimate_base_model_bytes(32, 2560, 10240, 151936, 2);
         let gib = est as f64 / (1024.0 * 1024.0 * 1024.0);
         assert!(
-            gib >= 8.0 && gib <= 11.5,
+            (8.0..=11.5).contains(&gib),
             "Qwen3.5-4B base estimate {gib:.2} GiB outside ±15% of observed ~9.7 GiB"
         );
     }

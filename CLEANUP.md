@@ -448,3 +448,23 @@ kiln-tensor --all-targets` shows zero warnings attributable to build.rs (the
 one pre-existing lib warning is unchanged) and `cargo build -p kiln-model`
 (downstream consumer) succeeds; `cargo fmt --check` remains clean repo-wide;
 `git status` shows only the one source edit plus this ledger entry.
+## Cleanup Agent (round 18) — 2026-08-27
+
+Eliminated every mechanical clippy warning in `crates/kiln-memory` (the
+round-17 steering candidate), all in `src/vram.rs`: both `clippy::match_result_ok`
+(`if let Some(x) = ....ok()` → `if let Ok(x) = ...` on the /proc/self/mountinfo
+read) and `clippy::let_and_return` (dropped the `let snapshot` binding in
+`try_current_memory_snapshot_for`, returning the match expression directly),
+plus `clippy::manual_div_ceil` (`(a + b - 1) / b` → `a.div_ceil(b)` in the
+tight-headroom segment picker — strictly safer, cannot overflow on
+`a + b - 1`) and `clippy::manual_range_contains` (`gib >= 8.0 && gib <= 11.5`
+→ `(8.0..=11.5).contains(&gib)` in a test assertion). The remaining two
+warnings are `clippy::result_large_err` on `governor.rs` public APIs — a
+design-level lint requiring an error-boxing refactor, deliberately left.
+Why it mattered: cut the crate's clippy noise from 6 to 2 warnings with four
+purely mechanical rewrites. Verified: before AND after,
+`cargo test -p kiln-memory --lib` passes identically (71 passed, 0 failed);
+after, `cargo clippy -p kiln-memory --all-targets` shows only the two
+intentional `result_large_err` keeps; `cargo build -p kiln-model` succeeds;
+`cargo fmt --check` remains clean repo-wide; `git status` shows only the one
+source edit plus this ledger entry.
