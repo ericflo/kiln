@@ -1,7 +1,8 @@
 //! CPU backward kernels for the GDN chunkwise stages.
 //!
 //! Phase 4 v1: all functions are CPU implementations driven by VkTensor
-//! readback / upload. The math is analytic from `docs/vk_native_gdn.md`.
+//! readback / upload. The math is analytic from
+//! `docs/archive/vk-harmonization/vk_native_gdn.md`.
 //! Phase 7 will replace the hot ones with GLSL shaders.
 //!
 //! Functions:

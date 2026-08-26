@@ -1,5 +1,15 @@
 # Vulkan-Native Training (`vk-native`)
 
+> **Archived 2026-09-03 — historical record.** The stack described here was
+> superseded by the PR1–PR7 harmonization series (#1441): PR6 flipped Vulkan
+> SFT/GRPO/OPD to the shared `kiln_train::trainer` / `opd` kt-tape path and
+> PR7 deleted this legacy fork entirely. The env knobs below
+> (`KILN_VK_NATIVE_TRAINING`, `KILN_VK_NATIVE_GRPO`, `KILN_VK_NATIVE_OPD`,
+> `KILN_VK_RECOMPUTE_GRPO`) and every `vk_train.rs` / `vk_forward.rs`
+> reference describe a tree that no longer exists (verified: zero readers in
+> `crates/`). Kept as the design record for the GPU-resident tensor/autograd
+> approach that informed the shared path.
+
 A GPU-resident training stack for Kiln. Replaces candle's `Tensor` and
 autograd with a native `VkTensor` type and eager autograd tape so
 every forward intermediate, every gradient, and every optimizer state

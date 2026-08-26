@@ -18,4 +18,8 @@ human-soak handoff.
 The specs are kept as historical design records; they no longer describe work
 to be done. The authoritative plan itself is archived alongside these records:
 [`vulkan-train-harmonization-plan.md`](vulkan-train-harmonization-plan.md)
-(archived 2026-09-02 after the full series landed).
+(archived 2026-09-02 after the full series landed). The two pre-harmonization
+design docs for the legacy fork — [`vk_native_training.md`](vk_native_training.md)
+(GPU-resident VkTensor/autograd stack) and [`vk_native_gdn.md`](vk_native_gdn.md)
+(GDN math + kernel phasing; the `vk_ops/gdn_*` kernels themselves remain live
+in `crates/kiln-vulkan-kernel/`) — joined them here on 2026-09-03.

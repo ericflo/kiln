@@ -1,5 +1,14 @@
 # Vulkan-native Gated DeltaNet (GDN) — design + math
 
+> **Archived 2026-09-03 — historical record.** The implementation described
+> here landed, then the PR1–PR7 harmonization series (#1441) deleted the
+> legacy vk-native fork: `kiln-model/src/vk_forward.rs` and `vk_train.rs` are
+gone and Vulkan SFT/GRPO/OPD route through the shared `kiln_train::trainer` /
+`opd` kt-tape path (see this directory's README). The file paths, symbol
+names, and env knobs below describe the pre-harmonization tree; the math and
+per-kernel phasing remain an accurate reference for the `vk_ops/gdn_*`
+kernels, which are still live in `crates/kiln-vulkan-kernel/`.
+
 ## Shipped state (2026-05-11)
 
 The math + phasing in this document has been substantially implemented:
@@ -155,7 +164,7 @@ zero at every production observation while the prompt route is quarantined, as
 well as at a drained request boundary in any future test-enabled arm. The
 Vulkan development-soak driver validates the object as a closed contract after
 startup, warmup, every cancellation and wave, and final shutdown. See
-[Local Hardware Qualification](qualification.md#resumable-gdn-prefill-residency-telemetry).
+[Local Hardware Qualification](../../qualification.md#resumable-gdn-prefill-residency-telemetry).
 
 Real-device tests deliberately resume a second chunk with a stale zero host
 tensor and a different `TensorId` on another thread, then materialize into the

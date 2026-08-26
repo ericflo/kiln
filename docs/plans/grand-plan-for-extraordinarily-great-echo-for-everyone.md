@@ -75,7 +75,7 @@ The remaining structural fit is the harness: kiln serves pi, pi runs the agent l
 
 ### 1.3 The Vulkan trajectory compounds with ECHO too
 
-Kiln's vk-native training keeps every activation, gradient, and optimizer state resident on Vulkan (per `docs/vk_native_training.md`). The ECHO env-CE term was added without any new VK shader work — it reuses the existing `vk_flce_loss`, `vk_index_select_rows`, `vk_scale`, `vk_add` kernels. **Every Vulkan inference speedup compounds into ECHO training speedup automatically.**
+Kiln's vk-native training keeps every activation, gradient, and optimizer state resident on Vulkan (per `docs/archive/vk-harmonization/vk_native_training.md` (pre-harmonization design record; the legacy fork was deleted in #1441)). The ECHO env-CE term was added without any new VK shader work — it reuses the existing `vk_flce_loss`, `vk_index_select_rows`, `vk_scale`, `vk_add` kernels. **Every Vulkan inference speedup compounds into ECHO training speedup automatically.**
 
 ### 1.4 The "ECHO can substitute for an expert teacher" finding is huge for prosumers
 

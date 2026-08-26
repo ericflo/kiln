@@ -1419,3 +1419,41 @@ Verified: `cargo fmt --check -p kiln-vulkan-kernel` clean;
 documented ~2-in-45 baseline flake with 3 failures; re-run green);
 grep confirms no remaining "TODO Phase 4" anywhere in crates/;
 `git status` shows only the one source edit plus this ledger entry.
+## Cleanup Agent (round 55) — 2026-09-03
+
+Archived the two pre-harmonization vk-native design docs —
+`docs/vk_native_training.md` (GPU-resident VkTensor/autograd training stack)
+and `docs/vk_native_gdn.md` (Gated DeltaNet design + math + kernel phasing) —
+to `docs/archive/vk-harmonization/`, following the rounds 41–42 playbook.
+Confirmed the archive trigger before moving: both describe the legacy
+vk-native fork that PR7 (#1441) deleted. Verified against the live tree:
+`crates/kiln-train/src/vk_train.rs`, `crates/kiln-model/src/vk_forward.rs`,
+and `crates/kiln-train/tests/vk_train_smoke.rs` are gone; symbols
+`vk_gdn_layer_forward`, `vk_native_sft_train`, `vk_train_step` have zero
+matches in `crates/`; env knobs `KILN_VK_NATIVE_TRAINING`,
+`KILN_VK_NATIVE_GRPO`, `KILN_VK_NATIVE_OPD`, `KILN_VK_RECOMPUTE_GRPO` have
+zero readers in `crates/` or `scripts/`. Both moved docs got a dated
+historical banner stating exactly that (the GDN doc's banner also notes its
+math and per-kernel phasing remain an accurate reference for the still-live
+`vk_ops/gdn_*` kernels). Link fixes: one relative link inside vk_native_gdn.md
+deepened to `../../qualification.md` (anchor verified present); archive
+README updated to list the two new arrivals. Live inbound references
+rewritten: the rustdoc pointer in
+`crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunk_bwd.rs`, and three prose
+mentions across the two grand-plan docs (`grand-plan-for-...-echo-...md` ×1,
+`grand-plan-for-...-on-policy-distillation-...md` ×2, now pointing at the
+archived path with a deleted-fork note). The dated audit report
+`docs/audits/vulkan_training_branch_report_2026-05-11.md` keeps its original
+paths as a frozen historical record, matching precedent.
+Why it mattered: two docs presented a deleted fork as "ready to use" behind
+env knobs nothing reads; the last live surfaces of the pre-harmonization
+vk-native story now sit with their PR1–PR7 records.
+Verified: scripted relative-link audit over all markdown in
+`docs/archive/vk-harmonization/` resolves every link and anchor (0 MISSING);
+repo-wide git grep for `docs/vk_native_*` matches only the archived dir,
+CLEANUP.md, and the frozen audit report; `cargo fmt --check -p
+kiln-vulkan-kernel` clean (comment-only .rs change); `cargo check -p
+kiln-vulkan-kernel --lib` and `cargo test -p kiln-vulkan-kernel --lib`
+pass 65/65 first try; `scripts/check_repository_artifacts.py` passes (6692
+tracked paths, same count — moves not deletions); git status shows exactly
+the two renames, four reference edits, and this ledger entry.
