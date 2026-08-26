@@ -237,7 +237,6 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
                     if let Err(e) = open_logs_window(&app_handle) {
                         eprintln!("[tray] open_logs_window failed: {}", e);
                     }
-                    let _ = app_handle.emit("menu://view-logs", ());
                 }
                 ITEM_COPY_URL => {
                     let supervisor = Arc::clone(&supervisor);

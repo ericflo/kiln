@@ -1279,3 +1279,18 @@ deprecated-call warning disappears as a bonus), `cargo test` still 161/161;
 zero remaining references to either removed identifier. Noted for a future
 session: tray.rs also emits `menu://view-logs`, which likewise has no listener
 in any UI page — left alone this round to keep scope tight.
+
+## Cleanup Agent (round 48) — 2026-08-25
+
+Removed the dead `menu://view-logs` tray emit in `desktop/src/tray.rs`
+(Round 47's flagged candidate). The `ITEM_LOGS` menu branch already opens
+the logs window directly via `open_logs_window`; the accompanying
+`app_handle.emit("menu://view-logs", ())` fired an event with zero listeners:
+an exhaustive census of every `listen(` / event-subscription call across all
+Rust sources and every ui/*.html window found the only `menu://` listener in
+the entire codebase is `menu://check-updates` in dashboard.html. Verified:
+`cargo check` on kiln-desktop passes before and after with identical output
+(the single pre-existing deprecated `shell().open` warning is unrelated);
+repo-wide grep finds no remaining reference to `view-logs`; the `emit` import
+in tray.rs remains used by other live emits (`open-dashboard`,
+`open-settings`, `check-updates`). No other code touched.
