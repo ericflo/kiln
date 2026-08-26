@@ -1444,7 +1444,7 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
             total_start,
             &spirv,
             &push_constants,
-            &x_data,
+            x_data,
         );
     }
 
@@ -1474,7 +1474,7 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
             queue,
             *command_pool,
             &x_buf,
-            &x_data,
+            x_data,
         )
         .context("failed to upload gdn_in_proj x buffer")?;
         finish_vulkan_gdn_in_proj_kernel_stage_profile(
@@ -2743,7 +2743,7 @@ fn dispatch_linear_decode_argmax_cached_impl_bytes(
             weight_t,
             hidden,
             out_dim,
-            &x_data,
+            x_data,
             packed_bf16_weights,
         );
     }
@@ -2758,7 +2758,7 @@ fn dispatch_linear_decode_argmax_cached_impl_bytes(
             queue,
             *command_pool,
             &x_buf,
-            &x_data,
+            x_data,
         )
         .context("failed to upload linear argmax x buffer")?;
     }
@@ -3681,7 +3681,7 @@ fn dispatch_linear_decode_argmax_batched_cached_impl_bytes(
         .context("failed to create batched linear argmax x buffer")?;
     let x_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, x_data.len() as u64)
         .context("failed to create batched linear argmax x staging buffer")?;
-    VulkanBuffer::write_host_visible(device, &x_stage, &x_data)?;
+    VulkanBuffer::write_host_visible(device, &x_stage, x_data)?;
 
     let block_count = out_dim.div_ceil(64);
     let total_blocks = batch * block_count;
@@ -5453,7 +5453,7 @@ fn dispatch_mlp_decode_cached_impl(
             queue,
             *command_pool,
             &x_buf,
-            &x_data,
+            x_data,
         )
         .context("failed to upload mlp_decode x buffer")?;
         finish_vulkan_mlp_kernel_stage_profile(
@@ -5659,7 +5659,7 @@ fn dispatch_mlp_decode_cached_impl(
             let out_data = run_two_stage_compute_pipeline_with_transfer_readback(
                 vk_device,
                 &x_buf,
-                &x_data,
+                x_data,
                 &out_buf,
                 out_size,
                 &gate_up_spirv,
@@ -6982,9 +6982,9 @@ pub fn dispatch_causal_conv1d_prefill_bytes(
         let readbacks = run_two_stage_compute_pipeline_with_transfers(
             vk_device,
             &[
-                (&x_buf, &x_data),
-                (&weight_buf, &weight_data),
-                (&state_buf, &state_data),
+                (&x_buf, x_data),
+                (&weight_buf, weight_data),
+                (&state_buf, state_data),
             ],
             &[(&out_buf, out_size), (&state_buf, state_data.len() as u64)],
             &spirv_output,
@@ -7012,7 +7012,7 @@ pub fn dispatch_causal_conv1d_prefill_bytes(
                 queue,
                 *command_pool,
                 &x_buf,
-                &x_data,
+                x_data,
             )?;
             VulkanBuffer::upload_data_with_command_pool(
                 device,
@@ -7020,7 +7020,7 @@ pub fn dispatch_causal_conv1d_prefill_bytes(
                 queue,
                 *command_pool,
                 &weight_buf,
-                &weight_data,
+                weight_data,
             )?;
             VulkanBuffer::upload_data_with_command_pool(
                 device,
@@ -7028,7 +7028,7 @@ pub fn dispatch_causal_conv1d_prefill_bytes(
                 queue,
                 *command_pool,
                 &state_buf,
-                &state_data,
+                state_data,
             )?;
         }
         run_compute_pipeline(
@@ -7134,7 +7134,7 @@ pub fn dispatch_causal_conv1d_prefill_cached_weight_bytes(
 
     let readbacks = run_two_stage_compute_pipeline_with_transfers(
         vk_device,
-        &[(&x_buf, &x_data), (&state_buf, &state_data)],
+        &[(&x_buf, x_data), (&state_buf, state_data)],
         &[(&out_buf, out_size), (&state_buf, state_data.len() as u64)],
         &spirv_output,
         &output_handles,
@@ -9242,11 +9242,11 @@ pub fn dispatch_gdn_recurrent_step_resident_state_bytes(
         Ok((device_buf, staging))
     };
 
-    let (q_buf, q_stage) = make_device_and_staging(&q_data)?;
-    let (k_buf, k_stage) = make_device_and_staging(&k_data)?;
-    let (v_buf, v_stage) = make_device_and_staging(&v_data)?;
-    let (beta_buf, beta_stage) = make_device_and_staging(&beta_data)?;
-    let (g_buf, g_stage) = make_device_and_staging(&g_data)?;
+    let (q_buf, q_stage) = make_device_and_staging(q_data)?;
+    let (k_buf, k_stage) = make_device_and_staging(k_data)?;
+    let (v_buf, v_stage) = make_device_and_staging(v_data)?;
+    let (beta_buf, beta_stage) = make_device_and_staging(beta_data)?;
+    let (g_buf, g_stage) = make_device_and_staging(g_data)?;
 
     let state_buf = match resident_state {
         Some(buffer) => buffer,
@@ -9548,11 +9548,11 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state_bytes(
         Ok((device_buf, staging))
     };
 
-    let (q_buf, q_stage) = make_device_and_staging(&q_data)?;
-    let (k_buf, k_stage) = make_device_and_staging(&k_data)?;
-    let (v_buf, v_stage) = make_device_and_staging(&v_data)?;
-    let (beta_buf, beta_stage) = make_device_and_staging(&beta_data)?;
-    let (g_buf, g_stage) = make_device_and_staging(&g_data)?;
+    let (q_buf, q_stage) = make_device_and_staging(q_data)?;
+    let (k_buf, k_stage) = make_device_and_staging(k_data)?;
+    let (v_buf, v_stage) = make_device_and_staging(v_data)?;
+    let (beta_buf, beta_stage) = make_device_and_staging(beta_data)?;
+    let (g_buf, g_stage) = make_device_and_staging(g_data)?;
 
     let state_buf = match resident_state {
         Some(buffer) => buffer,
@@ -10311,29 +10311,29 @@ pub fn dispatch_gdn_chunk_prep_bytes(
             queue,
             *command_pool,
             &[
-                (&g_buf, &g_data),
-                (&v_buf, &v_data),
-                (&kkt_buf, &kkt_data),
-                (&qkt_buf, &qkt_data),
-                (&ks_entry_buf, &ks_entry_data),
-                (&q_s_buf, &q_s_data),
+                (&g_buf, g_data),
+                (&v_buf, v_data),
+                (&kkt_buf, kkt_data),
+                (&qkt_buf, qkt_data),
+                (&ks_entry_buf, ks_entry_data),
+                (&q_s_buf, q_s_data),
             ],
         )
         .context("failed to upload gdn_chunk_prep inputs")?;
     } else {
-        VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &g_buf, &g_data)?;
-        VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &v_buf, &v_data)?;
-        VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &kkt_buf, &kkt_data)?;
-        VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &qkt_buf, &qkt_data)?;
+        VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &g_buf, g_data)?;
+        VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &v_buf, v_data)?;
+        VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &kkt_buf, kkt_data)?;
+        VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &qkt_buf, qkt_data)?;
         VulkanBuffer::upload_data(
             device,
             host_visible_mt,
             queue,
             qfi,
             &ks_entry_buf,
-            &ks_entry_data,
+            ks_entry_data,
         )?;
-        VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &q_s_buf, &q_s_data)?;
+        VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &q_s_buf, q_s_data)?;
     }
 
     // Create output buffers (f32 shader outputs, converted to bf16 below).
@@ -10504,18 +10504,18 @@ pub fn dispatch_gdn_full_chunk_forward_bytes(
 
     // Create input buffers + upload
     let g_buf = VulkanBuffer::create_device_local(device, device_local_mt, g_data.len() as u64)?;
-    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &g_buf, &g_data)?;
+    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &g_buf, g_data)?;
 
     let v_buf = VulkanBuffer::create_device_local(device, device_local_mt, v_data.len() as u64)?;
-    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &v_buf, &v_data)?;
+    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &v_buf, v_data)?;
 
     let kkt_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, kkt_data.len() as u64)?;
-    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &kkt_buf, &kkt_data)?;
+    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &kkt_buf, kkt_data)?;
 
     let qkt_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, qkt_data.len() as u64)?;
-    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &qkt_buf, &qkt_data)?;
+    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &qkt_buf, qkt_data)?;
 
     let ks_entry_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, ks_entry_data.len() as u64)?;
@@ -10525,25 +10525,25 @@ pub fn dispatch_gdn_full_chunk_forward_bytes(
         queue,
         qfi,
         &ks_entry_buf,
-        &ks_entry_data,
+        ks_entry_data,
     )?;
 
     let q_s_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, q_s_data.len() as u64)?;
-    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &q_s_buf, &q_s_data)?;
+    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &q_s_buf, q_s_data)?;
 
     let beta_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, beta_data.len() as u64)?;
-    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &beta_buf, &beta_data)?;
+    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &beta_buf, beta_data)?;
 
     let k_t_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, k_t_data.len() as u64)?;
-    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &k_t_buf, &k_t_data)?;
+    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &k_t_buf, k_t_data)?;
 
     // State is mutable — upload, dispatch, read back
     let state_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, state_data.len() as u64)?;
-    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &state_buf, &state_data)?;
+    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &state_buf, state_data)?;
 
     // Create output buffer (f32)
     let out_size = (batch * heads * chunk * dv * 4) as u64;
@@ -10672,12 +10672,12 @@ pub fn dispatch_gdn_chunk_scan_bytes(
             queue,
             *command_pool,
             &[
-                (&a_strict_buf, &a_strict_data),
-                (&b_mask_buf, &b_mask_data),
-                (&v_prime_buf, &v_prime_data),
-                (&q_s_scaled_buf, &q_s_scaled_data),
-                (&beta_buf, &beta_data),
-                (&decay_last_col_buf, &decay_last_col_data),
+                (&a_strict_buf, a_strict_data),
+                (&b_mask_buf, b_mask_data),
+                (&v_prime_buf, v_prime_data),
+                (&q_s_scaled_buf, q_s_scaled_data),
+                (&beta_buf, beta_data),
+                (&decay_last_col_buf, decay_last_col_data),
             ],
         )
         .context("failed to upload gdn_chunk_scan inputs")?;
@@ -10688,7 +10688,7 @@ pub fn dispatch_gdn_chunk_scan_bytes(
             queue,
             qfi,
             &a_strict_buf,
-            &a_strict_data,
+            a_strict_data,
         )?;
         VulkanBuffer::upload_data(
             device,
@@ -10696,7 +10696,7 @@ pub fn dispatch_gdn_chunk_scan_bytes(
             queue,
             qfi,
             &b_mask_buf,
-            &b_mask_data,
+            b_mask_data,
         )?;
         VulkanBuffer::upload_data(
             device,
@@ -10704,7 +10704,7 @@ pub fn dispatch_gdn_chunk_scan_bytes(
             queue,
             qfi,
             &v_prime_buf,
-            &v_prime_data,
+            v_prime_data,
         )?;
         VulkanBuffer::upload_data(
             device,
@@ -10712,16 +10712,16 @@ pub fn dispatch_gdn_chunk_scan_bytes(
             queue,
             qfi,
             &q_s_scaled_buf,
-            &q_s_scaled_data,
+            q_s_scaled_data,
         )?;
-        VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &beta_buf, &beta_data)?;
+        VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &beta_buf, beta_data)?;
         VulkanBuffer::upload_data(
             device,
             host_visible_mt,
             queue,
             qfi,
             &decay_last_col_buf,
-            &decay_last_col_data,
+            decay_last_col_data,
         )?;
     }
 

@@ -267,3 +267,29 @@ downstream consumer) succeeds; clippy JSON output confirms zero remaining
 `manual_div_ceil` warnings and that no other lint count increased;
 `scripts/check_repository_artifacts.py` passes (6709 tracked paths);
 `git status` shows only the 28 source edits plus this ledger entry.
+
+## Cleanup Agent (round 10) — 2026-08-26
+
+Eliminated the largest remaining clippy lint category in
+`crates/kiln-vulkan-kernel`: all 58 `clippy::needless_borrow` warnings,
+all concentrated in `src/kernels.rs`. Each was an extra `&` on an expression
+that already evaluated to a reference (e.g. `&x_data` where `x_data: &[u8]`
+passed to a `&[u8]` parameter, and tuple elements like `(&weight_buf,
+&weight_data)`), replaced by the value itself — purely mechanical, no
+behavioral surface. This is the round-9 steering candidate, using the same
+playbook: applied via `cargo clippy --fix` restricted to exactly that lint
+(`-A clippy::all -W clippy::needless_borrow`) so no other category was
+touched; a full diff audit confirms every changed line is only a removed
+borrow on an argument or tuple element (57 changed lines, all in kernels.rs).
+Why it mattered: cut the crate's clippy noise from 155 to 97 warnings (-37%),
+continuing round 9's triage of mechanical lints ahead of the intentional
+`too_many_arguments` keeps. Verified: before AND after,
+`cargo test -p kiln-vulkan-kernel --lib` passes identically (65 passed,
+0 failed); `cargo build -p kiln-model` (downstream consumer) succeeds; clippy
+JSON output confirms zero remaining `needless_borrow` warnings and that no
+other lint count increased; `scripts/check_repository_artifacts.py` passes;
+`git status` shows only the one source edit plus this ledger entry.
+Note for future agents: the lib test suite exhibits a rare pre-existing flake
+(2–3 GPU/device-related test failures observed ~2 times across ~45 baseline
+runs before any edit, not reproducible with output capture); it is unrelated
+to this change.
