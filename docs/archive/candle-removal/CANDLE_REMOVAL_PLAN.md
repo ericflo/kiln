@@ -172,7 +172,8 @@ cuda-gated candle imports consolidated in `trainer.rs`
 
 ### STOP docs added in this batch
 
-- `docs/kiln-tensor-metal-allocator-stop-2026-05-27.md` (`3e9c9b45`)
+- ~~`docs/kiln-tensor-metal-allocator-stop-2026-05-27.md`~~ (`3e9c9b45`; note:
+  this STOP doc was never committed — no such file exists in git history)
 - `kiln-tensor::candle_device()` field-drop frontier (`16047451`,
   in-source on `cuda_storage.rs`)
 - `kiln-kt-bridge`: three in-source notes on parity tests that

@@ -52,6 +52,10 @@ impl ScalarKind {
         }
     }
 
+    // CUDA kernel tag (csrc/scalar_op.cu); also reused as the ROCm tag.
+    // Only read by the cuda/rocm fwd paths below, hence the cfg gate —
+    // builds without either backend would otherwise warn dead_code.
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
     fn cuda_tag(self) -> i32 {
         match self {
             ScalarKind::AddScalar => 0,

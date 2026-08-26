@@ -898,3 +898,27 @@ crates passes with only pre-existing warnings identical to baseline
 (59 documents — none of these files were ever in docs-manifest.json);
 scripts/check_repository_artifacts.py passes; git status shows exactly the
 19 renames, 15 modified files, new README, and this ledger entry.
+
+## Cleanup Agent (round 35) — 2026-08-30
+
+Closed two small flagged loops. (1) The pre-existing `cuda_tag` dead_code
+warning in `crates/kiln-tensor/src/ops/scalar.rs` (flagged rounds 17 & 33):
+investigation showed the method IS used, but only from `cuda_fwd` and
+`rocm_fwd`, both behind feature gates — so default builds warn. Fixed by
+cfg-gating the method itself with `#[cfg(any(feature = "cuda",
+feature = "rocm"))]` plus a comment explaining why, rather than a blanket
+`#[allow(dead_code)]`. The gate exactly matches its call sites' cfgs.
+(2) The dangling prose pointer in
+`docs/archive/candle-removal/CANDLE_REMOVAL_PLAN.md` to
+`docs/kiln-tensor-metal-allocator-stop-2026-05-27.md` (flagged round 34),
+which was never committed: annotated the list entry as struck-through with a
+note that no such file exists in git history, preserving the historical
+record without implying a live path.
+Why it mattered: kiln-tensor now builds with zero warnings by default, and
+the archived plan no longer dangles a pointer at a file that never existed.
+Verified: `cargo check -p kiln-tensor --lib` is warning-free after the change
+(baseline had exactly this one warning); the `--features cuda` check fails
+identically on the stashed baseline due to no local CUDA toolkit
+(pre-existing environment limitation, not this change); `cargo test -p
+kiln-tensor --lib` passes 992/992; git status shows only these two files
+plus this ledger entry.
