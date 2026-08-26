@@ -188,7 +188,7 @@ if [ "$FILE_COUNT" -gt 0 ]; then
     b2 sync "b2://${B2_BUCKET}/${CACHE_PREFIX}/artifacts/flash-attn/" \
         "${KILN_REPO_DIR}/target/release/build/" \
         --skipNewer 2>&1 | tail -5
-    RESTORED=$(find "${KILN_REPO_DIR}/target/release/build/" -maxdepth 1 -type d \( -name 'candle-flash-attn-*' -o -name 'kiln-flash-attn-*' \) -exec find {} -type f \; 2>/dev/null | wc -l)
+    RESTORED=$(find "${KILN_REPO_DIR}/target/release/build/" -maxdepth 1 -type d -name 'kiln-flash-attn-*' -exec find {} -type f \; 2>/dev/null | wc -l)
     echo "Flash-attn artifacts restored (${RESTORED} files)"
 else
     echo "No cached flash-attn artifacts found (first build will populate)"

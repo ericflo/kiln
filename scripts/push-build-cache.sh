@@ -65,8 +65,9 @@ b2 account authorize "${B2_APPLICATION_KEY_ID}" "${B2_APPLICATION_KEY}" >/dev/nu
 # --- Push flash-attn build artifacts ---
 echo ""
 echo "Looking for flash-attn build artifacts..."
-# Support both candle-flash-attn (external dep) and kiln-flash-attn (vendored)
-FLASH_DIRS=$(find "${BUILD_DIR}" -maxdepth 1 -type d \( -name 'candle-flash-attn-*' -o -name 'kiln-flash-attn-*' \) 2>/dev/null || true)
+# (The candle-flash-attn external dep was removed in #1082; only the vendored
+#  kiln-flash-attn crate produces build dirs now.)
+FLASH_DIRS=$(find "${BUILD_DIR}" -maxdepth 1 -type d -name 'kiln-flash-attn-*' 2>/dev/null || true)
 
 if [ -z "$FLASH_DIRS" ]; then
     echo "No flash-attn build directories found. Skipping flash-attn cache."
