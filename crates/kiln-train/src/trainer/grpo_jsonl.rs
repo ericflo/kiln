@@ -752,6 +752,10 @@ impl PinnedGrpoJsonlSource {
             .map(|metadata| metadata.len())
     }
 
+    pub fn is_empty(&self) -> Result<bool> {
+        self.len().map(|len| len == 0)
+    }
+
     pub fn metadata(&self) -> Result<std::fs::Metadata> {
         self.file
             .metadata()
