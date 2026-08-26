@@ -42,7 +42,7 @@ but that gap is now closed by the ECHO trajectory schema
 (`kiln-train::trajectory_mask`); the single-turn shape is now kept
 because it matches the pi-doctest task spec, not because the
 trainer requires it. See
-[`kiln-polish-prerequisites.md`](kiln-polish-prerequisites.md) §1
+[`archive/kiln-polish-prerequisites.md`](archive/kiln-polish-prerequisites.md) §1
 (RESOLVED).
 
 ## Pi configuration (verified during Phase 0 pi-smoke)
@@ -520,7 +520,7 @@ documents intent for reviewers.)
 
 ## Kiln-polish prerequisites
 
-See [`kiln-polish-prerequisites.md`](kiln-polish-prerequisites.md).
+See [`archive/kiln-polish-prerequisites.md`](archive/kiln-polish-prerequisites.md).
 §1 (per-turn assistant-token masking) is now **RESOLVED** in kiln-train
 via the ECHO trajectory schema (`trajectory.rs` + `trajectory_mask.rs`).
 This cap continues to use single-turn rollouts because the task

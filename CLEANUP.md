@@ -176,3 +176,26 @@ check against the fresh post-deletion build produces output identical to the
 pre-deletion baseline (its only failure is the local absence of Chromium, an
 environmental pre-existing condition), and `check_repository_artifacts.py`
 passes with exactly one fewer tracked path (6712 → 6711).
+
+## Cleanup Agent (round 6) — 2026-08-26
+
+Fixed 7 dangling relative links in live capability docs. Five caps
+(pi-precondition-check, pi-shell-hygiene, pi-source-mod-workflow,
+pi-test-interpretation, pi-tool-call-efficiency) had copied pi-doctest's
+"Round 2 setup" boilerplate verbatim, including the sentence "The previous
+iter log and writeups are preserved in [`archive/`](archive/)" — but unlike
+pi-doctest and the other 17 caps sharing that template line, these five never
+had an `archive/` directory in git history, so every link was dead. Removed
+the false sentence from each. Separately, `capabilities/caps/pi-doctest/
+capability.md` linked `kiln-polish-prerequisites.md` at the wrong depth in
+two places; the file actually lives at that cap's
+`archive/kiln-polish-prerequisites.md`, so both links were rewritten to the
+correct relative path (link text updated to match). Why it mattered: these
+are live working docs for the capability-uplift pipeline, and the dangling
+links broke the documented trail to round-1 evidence. Verified with a
+scripted relative-link audit over all tracked .md files (excluding frozen
+archive/audit records): exactly these 7 links were dangling among live docs
+and all now resolve to existing files; confirmed via git history that no
+archive dir ever existed for the five caps while all 17 sibling caps using
+the same sentence do have one; `scripts/check_repository_artifacts.py`
+passes unchanged after the edit.

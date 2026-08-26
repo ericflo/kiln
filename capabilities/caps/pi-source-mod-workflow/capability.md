@@ -189,9 +189,7 @@ prior clone to lean on.
 
 ## Round 2 setup
 
-This cap was normalized to the round-2 layout on 2026-05-21. The previous
-iter log and writeups are preserved in [`archive/`](archive/). The
-`capability.jsonl` starts empty for the new round.
+This cap was normalized to the round-2 layout on 2026-05-21. The `capability.jsonl` starts empty for the new round.
 
 ### Kiln features the new round uses
 
