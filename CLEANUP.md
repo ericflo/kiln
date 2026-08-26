@@ -728,3 +728,31 @@ and `docs/audits/vulkan-strix-halo-optimization-log.md` (3,706 lines) are
 similar raw session logs whose shortlog siblings
 (`vulkan-strix-halo-2026-05-09-gpu-decode-shortlog.md`,
 `vulkan-strix-halo-shortlog.md`) exist.
+
+## Cleanup Agent (round 29) — 2026-08-29
+
+Deleted the two remaining raw Vulkan Strix Halo session logs flagged by
+round 28, running rounds 27–28's playbook once more: (1)
+`docs/audits/vulkan-strix-halo-2026-05-09-gpu-decode-log.md` (8,608 lines —
+the 2026-05-09 decode-pass experiment log A001–A0xx) and (2)
+`docs/audits/vulkan-strix-halo-optimization-log.md` (3,706 lines — the
+2026-05-03 first-class-Vulkan optimization pass E0xx). Confirmed redundant
+retained evidence, not load-bearing: zero tracked references to either
+filename outside CLEANUP.md itself; both reviewed compact shortlog siblings
+remain in place (`vulkan-strix-halo-2026-05-09-gpu-decode-shortlog.md`, 903
+lines, per-experiment table with verdicts; `vulkan-strix-halo-shortlog.md`,
+135 lines), satisfying ARTIFACT_RETENTION.md's reviewability requirement,
+whose policy line "Do not check in raw server logs ... traces" places these
+session-scale dumps in the purged category per the removed-raw-artifacts
+manifest precedent. Git history preserves every byte. Also updated the
+decode shortlog's header: its "the detailed log is <path>" pointer was
+rewritten into a provenance note explaining the removal and pointing at the
+standing manifest precedent, so no dangling reference remains.
+Why it mattered: −12,314 lines of session-scale raw logs masquerading as
+audit docs, completing round 27–28's raw-log purge. Verified BEFORE and
+AFTER: `scripts/check_repository_artifacts.py` passes both times (6704 →
+6702 tracked paths); `scripts/qualification/validate_retained_evidence.sh`
+passes both times (exit 0, all receipts OK — none hash or locate these
+files); post-deletion `git grep` for both filenames finds zero remaining
+references; `git status` shows only the two deletions, the shortlog header
+edit, and this ledger entry.

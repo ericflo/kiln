@@ -2,12 +2,15 @@
 
 Target: Qwen3.5-4B on AMD Radeon 8060S Graphics (RADV_STRIX_HALO), Linux Vulkan backend.
 
-This file is the compact durable index for the 2026-05-09 Vulkan decode work.
-The detailed log is
-`docs/audits/vulkan-strix-halo-2026-05-09-gpu-decode-log.md`.
+This file is the compact durable audit trail for the 2026-05-09 Vulkan
+decode work. The detailed per-experiment log that previously accompanied it
+was removed as raw session-log retention (see
+`docs/audits/removed-raw-artifacts-2026-07-13-v1.json` for the standing
+policy precedent); this shortlog retains every decision, measurement,
+and verdict.
 
-Future Vulkan optimization work should update this file and the detailed log
-before or with each accepted change and each measured rejection.
+Future Vulkan optimization work should update this file with each accepted
+change and each measured rejection.
 
 | ID | Change / Experiment | Evidence | Verdict |
 | --- | --- | --- | --- |
