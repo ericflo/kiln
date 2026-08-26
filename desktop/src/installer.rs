@@ -779,19 +779,12 @@ pub async fn current_kiln_version(bin: &Path) -> Option<String> {
     parse_kiln_version_output(&stdout)
 }
 
-/// Fetch the newest release version for the current target. Returns
-/// `None` when the platform has no prebuilt asset or when the GitHub
-/// releases listing fails. Callers should separately check
-/// [`supports_auto_install`] to distinguish those two cases.
-pub async fn discover_latest_version(client: &reqwest::Client) -> Option<String> {
-    let target = current_target()?;
-    discover_asset(client, target).await.ok().map(|p| p.version)
-}
-
 /// Fetch the newest release's version + notes body for the current
 /// target. Feeds [`is_supported_sm_for_release`] so callers can apply the
-/// per-release supported-SM list. Returns `None` under the same
-/// conditions as [`discover_latest_version`].
+/// per-release supported-SM list. Returns `None` when the platform has no
+/// prebuilt asset or when the GitHub releases listing fails. Callers
+/// should separately check [`supports_auto_install`] to distinguish those
+/// two cases.
 pub async fn discover_latest_version_and_body(
     client: &reqwest::Client,
 ) -> Option<(String, Option<String>)> {

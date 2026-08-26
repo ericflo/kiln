@@ -593,3 +593,26 @@ Verified: `bash -n` passes on the edited script; running `--help` now shows
 all six documented exit codes plus the never-modifies-cache note; confirmed no
 script, test, or CI step parses or depends on the previous 32-line help output
 (workflow only runs heartbeat checks); no other file changed.
+
+## Cleanup Agent (round 24) — 2026-08-27
+
+Audited the `desktop/` directory (never touched by a prior round) and removed
+dead code: `installer::discover_latest_version` in `desktop/src/installer.rs`,
+a `pub async fn` that no caller ever used — the app's update flow exclusively
+calls `discover_latest_version_and_body`, which wraps the same
+`discover_asset` call and returns the version plus release notes. The dead
+function generated a `dead_code` warning on every `cargo check`/build, and its
+doc contract ("Returns None when...") was duplicated across both wrappers.
+Folded the distinguishing-cases guidance (`supports_auto_install`) into the
+surviving function's doc comment so nothing documented by the deleted stub was
+lost. Why it mattered: first desktop audit; this was the crate's only dead-code
+warning, and removing it leaves just two pre-existing `deprecated`
+`shell().open` warnings (migrating to tauri-plugin-opener would add a new
+dependency — out of scope for a cleanup).
+Verified: repo-wide grep confirms zero remaining references to
+`discover_latest_version` outside git history (the `_and_body` variant is the
+only consumer-facing API); `cargo check` before showed 3 warnings including
+`function discover_latest_version is never used`, after shows exactly the 2
+pre-existing deprecated-method warnings; `cargo test` passes 161/161;
+`node scripts/check_desktop_ui_smoke.mjs` and
+`node scripts/check_runtime_defaults.mjs` pass unchanged.
