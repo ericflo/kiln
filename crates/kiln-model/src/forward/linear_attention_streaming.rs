@@ -1741,7 +1741,7 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
             None
         };
 
-        let recurrent_result = if let Some(attn_out) = native_recurrent_result {
+        if let Some(attn_out) = native_recurrent_result {
             (attn_out, true, false) // [B, T, nv, dv], contiguous
         } else {
             let (q, k) = expanded_qk_for_split(q, k)?;
@@ -1921,8 +1921,7 @@ pub(super) fn gated_deltanet_forward_decode_if_inner(
             }
 
             recurrent_result
-        };
-        recurrent_result
+        }
     };
 
     // Restore state to its original dtype so the caller's F32 invariant holds

@@ -1357,10 +1357,9 @@ pub(super) fn gdn_chunkwise_recurrence(
                 // #1082 DoD-101/102: `gdn_full_chunk_forward` is now kt-typed and
                 // mutates `state` in place through the kt `&mut` — pass kt tensors
                 // directly, no candle bridge / state write-back.
-                let out_chunk = GdnBackend::runtime_gdn_full_chunk_forward(
+                GdnBackend::runtime_gdn_full_chunk_forward(
                     backend, &g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s, &beta_c, &k_t_mat, state,
-                )?;
-                out_chunk
+                )?
             } else {
                 None
             }

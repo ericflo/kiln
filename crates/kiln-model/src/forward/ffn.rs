@@ -914,8 +914,7 @@ pub(super) fn swiglu_ffn_impl_no_chunk(
                 let gate = cuda_silu(&gate)?;
                 synchronize_tensor_ready_for_model_handoff("mlp gate_silu", &gate)?;
                 // Element-wise multiply
-                let hidden = (gate * up)?;
-                hidden
+                (gate * up)?
             }
         }
     };

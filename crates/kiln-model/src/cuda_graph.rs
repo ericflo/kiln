@@ -2459,7 +2459,7 @@ impl CudaGraphRunner {
         // #1082: `model_forward_paged` is kt-typed (returns kt logits) and
         // `decode_step_paged` now returns kt too — return the kt logits
         // directly, no candle bridge.
-        let out = model_forward_paged(
+        model_forward_paged(
             backend,
             &[token_id],
             weights,
@@ -2471,8 +2471,7 @@ impl CudaGraphRunner {
             lora,
             None, // no pre-allocated position buffer — creates one internally
         )
-        .context("eager decode forward pass failed");
-        out
+        .context("eager decode forward pass failed")
     }
 
     // #1082: every `new_*_buffer` constructor now allocates a kt-native

@@ -1708,7 +1708,7 @@ pub fn gqa_attention_pre_o(
 
     let (q_raw, k, v) = {
         kiln_nvtx::range!(c"kiln/proj/qkv");
-        let out = if split_q_gate.is_some() {
+        if split_q_gate.is_some() {
             let k = linear_with_lora_t_backend_decode_if(
                 Some(backend),
                 use_metal_decode_gemv,
@@ -1736,8 +1736,7 @@ pub fn gqa_attention_pre_o(
                 lora_scale,
             )?;
             (Some(q_raw), k, v)
-        };
-        out
+        }
     };
     // Split Q and gate if output gate is enabled
     let (q, gate) = if let Some((q, gate)) = split_q_gate {
@@ -1805,7 +1804,7 @@ pub fn gqa_attention_pre_o(
         // CP-4 (#1082) Increment 7: same as the q reshape above — tape-wire the
         // K/V reshapes so the chain from k_proj/v_proj reaches k_norm (K) and
         // the value matmul (V) on the SDPA-fallback path.
-        let out = (
+        (
             tape_reshape_full_attn(
                 &k,
                 &[
@@ -1824,26 +1823,21 @@ pub fn gqa_attention_pre_o(
                     head_dim.into(),
                 ],
             )?,
-        );
-        out
+        )
     };
 
     // Apply per-head RMSNorm to Q and K (Qwen3.5 uses QK-norm)
     // q_norm/k_norm are [head_dim] — broadcast over [batch, seq_len, num_heads, head_dim]
     let (q, k) = {
-        let out = (
+        (
             rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?,
             rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?,
-        );
-        out
+        )
     };
 
     // Apply RoPE (positions are absolute, so cached tokens get correct embeddings)
     // Only rotate first rotary_dim dimensions; the rest pass through unchanged.
-    let (q, k) = {
-        let out = rotary_embedding(&q, &k, positions, head_dim, rotary_dim, inv_freq)?;
-        out
-    };
+    let (q, k) = { rotary_embedding(&q, &k, positions, head_dim, rotary_dim, inv_freq)? };
 
     // Fused-attention path for prefill (seq_len > 1, no KV cache).
     // Takes [batch, seq_len, num_heads, head_dim] — the layout we already
@@ -1932,12 +1926,11 @@ pub fn gqa_attention_pre_o(
     // candle `transpose().contiguous()` would mint a fresh id and sever the
     // tape between rope/reshape and SDPA. Falls through to candle otherwise.
     let (q, k, v) = {
-        let out = (
+        (
             tape_transpose_contig_full_attn(&q, 1, 2)?,
             tape_transpose_contig_full_attn(&k, 1, 2)?,
             tape_transpose_contig_full_attn(&v, 1, 2)?,
-        );
-        out
+        )
     };
 
     // CP-4 (#1082) Increment 7: keep references to the head-FIRST, PRE-GQA-
@@ -1979,7 +1972,7 @@ pub fn gqa_attention_pre_o(
     let batch = k.dim(0)?;
     let (k, v) = if gqa_ratio > 1 {
         // Expand [batch, num_kv_heads, kv_len, head_dim] -> [batch, num_heads, kv_len, head_dim]
-        let out = (
+        (
             k.unsqueeze(2)?
                 .expand([batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
                 .contiguous()?
@@ -1988,8 +1981,7 @@ pub fn gqa_attention_pre_o(
                 .expand([batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
                 .contiguous()?
                 .reshape((batch, num_heads, kv_len, head_dim))?,
-        );
-        out
+        )
     } else {
         (k.contiguous()?, v.contiguous()?)
     };
@@ -2002,21 +1994,14 @@ pub fn gqa_attention_pre_o(
     let attn_scores = {
         let out = kiln_tensor::ops::matmul_rhs_transposed(&q, &k)?;
         // kt has no `Tensor / f64`; `x / scale == x * (1/scale)` via affine.
-        let out = out.affine(1.0 / scale, 0.0)?;
-        out
+        out.affine(1.0 / scale, 0.0)?
     };
 
     // Apply causal mask (handles Q_len != KV_len for cached decoding)
     let past_len = kv_len - seq_len;
-    let attn_scores = {
-        let out = apply_causal_mask_with_offset(&attn_scores, seq_len, kv_len, past_len)?;
-        out
-    };
+    let attn_scores = { apply_causal_mask_with_offset(&attn_scores, seq_len, kv_len, past_len)? };
 
-    let attn_weights_softmax = {
-        let out = cuda_softmax_last_dim(&attn_scores)?;
-        out
-    };
+    let attn_weights_softmax = { cuda_softmax_last_dim(&attn_scores)? };
     let attn_output = {
         let out = attn_weights_softmax.broadcast_matmul(&v)?; // [batch, num_heads, seq_len, head_dim]
         out
@@ -2074,12 +2059,11 @@ pub fn gqa_attention_pre_o(
 
     // Transpose back: [batch, seq_len, num_heads, head_dim] -> [batch, seq_len, hidden]
     let attn_output = {
-        let out = reshape_hole0_3(
+        reshape_hole0_3(
             &attn_output.transpose(1, 2)?.contiguous()?,
             seq_len,
             num_heads * head_dim,
-        )?;
-        out
+        )?
     };
 
     let attn_output =
@@ -2387,14 +2371,13 @@ pub(super) fn try_flash_attn_paged_decode(
                         && PagedKvBackend::runtime_supports_paged_kv_head_major_read(backend);
                 let fast_head_major = if can_read_head_major {
                     kiln_nvtx::range!(c"kiln/kv/head_major_read_decode");
-                    let out = PagedKvBackend::runtime_paged_kv_head_major_read(
+                    PagedKvBackend::runtime_paged_kv_head_major_read(
                         backend,
                         k_pool,
                         v_pool,
                         start_slot,
                         total_seq_len,
-                    )?;
-                    out
+                    )?
                 } else {
                     None
                 };
@@ -2416,10 +2399,9 @@ pub(super) fn try_flash_attn_paged_decode(
                             )
                         }
                     };
-                    let out = flash_attention_forward_head_major(
+                    flash_attention_forward_head_major(
                         backend, q, &k_head, &v_head, num_heads, head_dim,
-                    )?;
-                    out
+                    )?
                 } else {
                     None
                 }
@@ -2436,7 +2418,7 @@ pub(super) fn try_flash_attn_paged_decode(
                     kiln_nvtx::range!(c"kiln/attn/q_fa_transpose");
                     q.transpose(1, 2)?.contiguous()?
                 };
-                let out = flash_attention_forward(
+                flash_attention_forward(
                     backend,
                     &q_fa,
                     &k_live,
@@ -2444,8 +2426,7 @@ pub(super) fn try_flash_attn_paged_decode(
                     num_heads,
                     num_kv_heads,
                     head_dim,
-                )?;
-                out
+                )?
             };
             if let Some(attn_output) = attn_output {
                 // The flash-attention helpers already reshape to
@@ -2559,8 +2540,7 @@ pub(super) fn try_flash_attn_paged_decode(
     // Metal path above can avoid a dead transpose/copy per full-attention layer.
     let q_fa = {
         kiln_nvtx::range!(c"kiln/attn/q_fa_transpose");
-        let q_fa = q.transpose(1, 2)?.contiguous()?;
-        q_fa
+        q.transpose(1, 2)?.contiguous()?
     };
     let attn_out = {
         #[cfg(any(feature = "cuda", feature = "rocm"))]
@@ -3252,7 +3232,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     };
     let (q_raw, k, v) = {
         kiln_nvtx::range!(c"kiln/proj/qkv_batch_decode");
-        let out = full_attn_qkv_proj_decode_if(
+        full_attn_qkv_proj_decode_if(
             backend,
             use_metal_decode_gemv,
             x,
@@ -3260,12 +3240,11 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             lora_layer,
             lora_scale,
         )
-        .context("gqa paged qkv projection")?;
-        out
+        .context("gqa paged qkv projection")?
     };
 
     let (q, gate) = {
-        let out = if attn_output_gate {
+        if attn_output_gate {
             let q_raw = reshape_hole0_4(&q_raw, seq_len, num_heads, head_dim * 2)?;
             let q = q_raw.narrow(3, 0, head_dim)?;
             let gate = q_raw.narrow(3, head_dim, head_dim)?;
@@ -3273,8 +3252,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             (q.contiguous()?, Some(gate))
         } else {
             (reshape_hole0_4(&q_raw, seq_len, num_heads, head_dim)?, None)
-        };
-        out
+        }
     };
     let k = reshape_hole0_4(&k, seq_len, num_kv_heads, head_dim)?;
     let v = reshape_hole0_4(&v, seq_len, num_kv_heads, head_dim)?;
@@ -3285,7 +3263,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         (q, k)
     };
     let (q, k) = {
-        let out = if let Some((cos, sin)) = rope_tables {
+        if let Some((cos, sin)) = rope_tables {
             // CUDA-graph capture path: the runner pre-allocates
             // `[batch, rotary_dim/2]` cos/sin tables and re-fills them via
             // `update_batched_rotary_buffers` before every replay, so the
@@ -3325,8 +3303,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                 q_rot.transpose(0, 1)?.contiguous()?,
                 k_rot.transpose(0, 1)?.contiguous()?,
             )
-        };
-        out
+        }
     };
     // Q stays in [batch, 1, num_heads, head_dim] for the dyn_seqlen path; the
     // strict fallback below transposes lazily into the head-major layout it
@@ -3514,10 +3491,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             )?;
             let start_slots = Tensor::from_vec_on(x.device(), strict_slots.to_vec(), vec![batch])?
                 .contiguous()?;
-            let q_strict = {
-                let q_strict = q.transpose(1, 2)?.contiguous()?;
-                q_strict
-            };
+            let q_strict = { q.transpose(1, 2)?.contiguous()? };
             *out_acc = AttentionBackend::runtime_flash_attn_paged_decode_contiguous_batch(
                 backend,
                 &q_strict,
@@ -3611,21 +3585,17 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         attn_output
     };
 
-    let attn_output = {
-        let out =
-            attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
-        out
-    };
+    let attn_output =
+        { attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())? };
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o_batch_decode");
-        let out = gqa_attention_output_projection(
+        gqa_attention_output_projection(
             backend,
             &attn_output,
             attn_weights,
             use_metal_decode_gemv,
             lora_layer.map(|l| (l, lora_scale)),
-        )?;
-        out
+        )?
     };
     Ok(out)
 }
@@ -3805,15 +3775,14 @@ pub(super) fn gqa_attention_paged_with_rope_tables(
     };
     let (q_raw, k_raw, v) = {
         kiln_nvtx::range!(c"kiln/proj/qkv");
-        let out = full_attn_qkv_proj_decode_if(
+        full_attn_qkv_proj_decode_if(
             backend,
             use_metal_decode_gemv,
             x,
             attn_weights,
             lora_layer,
             lora_scale,
-        )?;
-        out
+        )?
     };
     let fused_qkv_prep: Option<(Tensor, Tensor, Option<Tensor>)> = {
         #[cfg(any(feature = "cuda", feature = "rocm"))]
@@ -3904,7 +3873,7 @@ pub(super) fn gqa_attention_paged_with_rope_tables(
     } else {
         let (q, gate) = {
             kiln_nvtx::range!(c"kiln/proj/qkv_split");
-            let out = if attn_output_gate {
+            if attn_output_gate {
                 let q_raw = reshape_hole0_4(&q_raw, seq_len, num_heads, head_dim * 2)
                     .context("gqa paged q split reshape")?;
                 let q = q_raw
@@ -3930,8 +3899,7 @@ pub(super) fn gqa_attention_paged_with_rope_tables(
                 let q = reshape_hole0_4(&q_raw, seq_len, num_heads, head_dim)
                     .context("gqa paged q reshape")?;
                 (q, None)
-            };
-            out
+            }
         };
         let k = reshape_hole0_4(&k_raw, seq_len, num_kv_heads, head_dim)
             .context("gqa paged k reshape")?;
@@ -3941,8 +3909,7 @@ pub(super) fn gqa_attention_paged_with_rope_tables(
             kiln_nvtx::range!(c"kiln/attn/qk_norm");
             let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps).context("gqa paged q norm")?;
             let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps).context("gqa paged k norm")?;
-            let out = (q, k);
-            out
+            (q, k)
         };
         // Phase B9 H2 aliases: post_qk_norm_{q,k} mirror post_{q,k}_norm.
         // Phase B12 layer-31 GQA taps: qk_norm_q / qk_norm_k. Post per-head
@@ -3954,14 +3921,13 @@ pub(super) fn gqa_attention_paged_with_rope_tables(
         // (critical for CUDA graph replay correctness)
         let (q, k) = {
             kiln_nvtx::range!(c"kiln/attn/rope");
-            let out = if let Some((cos, sin)) = rope_tables {
+            if let Some((cos, sin)) = rope_tables {
                 rotary_embedding_from_tables(&q, &k, cos, sin, head_dim, rotary_dim)
                     .context("gqa paged rope tables")?
             } else {
                 rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)
                     .context("gqa paged rope tensor")?
-            };
-            out
+            }
         };
         (q, k, gate)
     };
@@ -3981,12 +3947,10 @@ pub(super) fn gqa_attention_paged_with_rope_tables(
     // back from the paged cache instead.
     let q = {
         kiln_nvtx::range!(c"kiln/attn/qkv_transpose");
-        let q = q
-            .transpose(1, 2)
+        q.transpose(1, 2)
             .context("gqa paged q transpose view")?
             .contiguous()
-            .context("gqa paged q transpose contiguous")?;
-        q
+            .context("gqa paged q transpose contiguous")?
     };
 
     let total_seq_len = start_pos + seq_len;
@@ -4013,7 +3977,7 @@ pub(super) fn gqa_attention_paged_with_rope_tables(
             let q_prefill = q.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_heads, head_dim]
             let k_prefill = k_cache_token_major.contiguous()?; // [batch, seq_len, num_kv_heads, head_dim]
             let v_prefill = v_cache_token_major.contiguous()?; // [batch, seq_len, num_kv_heads, head_dim]
-            let out = flash_attention_forward(
+            flash_attention_forward(
                 backend,
                 &q_prefill,
                 &k_prefill,
@@ -4021,8 +3985,7 @@ pub(super) fn gqa_attention_paged_with_rope_tables(
                 num_heads,
                 num_kv_heads,
                 head_dim,
-            )?;
-            out
+            )?
         } else {
             None
         };
@@ -4611,15 +4574,11 @@ pub(super) fn gqa_attention_paged_with_rope_tables(
                 .contiguous()?;
             let attn_scores = kiln_tensor::ops::matmul_rhs_transposed(&q_grouped, &k_grouped)?;
             // kt has no `Tensor / f64`; `x / scale == x * (1/scale)` via affine.
-            let attn_scores = attn_scores.affine(1.0 / scale, 0.0)?;
-            attn_scores
+            attn_scores.affine(1.0 / scale, 0.0)?
         };
 
         // No causal mask needed for decode (q_len=1 attends to everything)
-        let attn_weights_softmax = {
-            let out = cuda_softmax_last_dim(&attn_scores)?;
-            out
-        };
+        let attn_weights_softmax = { cuda_softmax_last_dim(&attn_scores)? };
 
         // Weighted sum: [batch*num_kv_heads, gqa_ratio, 1, head_dim]
         let attn_output = {
@@ -4627,34 +4586,29 @@ pub(super) fn gqa_attention_paged_with_rope_tables(
 
             // Reshape back: -> [batch, num_kv_heads * gqa_ratio, 1, head_dim]
             //               == [batch, num_heads, 1, head_dim]
-            let attn_output = attn_output
+            attn_output
                 .reshape((batch, num_heads, 1, head_dim))?
                 .transpose(1, 2)?
                 .contiguous()?
-                .reshape((batch, 1, num_heads * head_dim))?;
-            attn_output
+                .reshape((batch, 1, num_heads * head_dim))?
         };
 
         // Phase C7: final SDPA output tap at the same point as post_attn_raw,
         // shape [batch, q_len=1, num_heads*head_dim] = [1, 1, 4096].
 
-        let attn_output = {
-            let out =
-                attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
-            out
-        };
+        let attn_output =
+            { attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())? };
         // Phase B12 layer-31 GQA tap (grouped decode path).
         let out = {
             kiln_nvtx::range!(c"kiln/proj/o");
-            let out = linear_with_lora_t_backend_decode_if(
+            linear_with_lora_t_backend_decode_if(
                 Some(backend),
                 use_metal_decode_gemv,
                 &attn_output,
                 &attn_weights.o_proj_t,
                 lora_layer.and_then(|l| l.o_proj.as_ref()),
                 lora_scale,
-            )?;
-            out
+            )?
         };
         return Ok(out);
     }
@@ -4673,8 +4627,7 @@ pub(super) fn gqa_attention_paged_with_rope_tables(
             .reshape((batch, num_heads, kv_len, head_dim))?;
         (k, v)
     } else {
-        let out = (k.contiguous()?, v.contiguous()?);
-        out
+        (k.contiguous()?, v.contiguous()?)
     };
 
     // Scaled dot-product attention
@@ -4682,53 +4635,38 @@ pub(super) fn gqa_attention_paged_with_rope_tables(
     let attn_scores = {
         let attn_scores = kiln_tensor::ops::matmul_rhs_transposed(&q, &k)?;
         // kt has no `Tensor / f64`; `x / scale == x * (1/scale)` via affine.
-        let attn_scores = attn_scores.affine(1.0 / scale, 0.0)?;
-        attn_scores
+        attn_scores.affine(1.0 / scale, 0.0)?
     };
 
     let past_len = kv_len - seq_len;
-    let attn_scores = {
-        let attn_scores = apply_causal_mask_with_offset(&attn_scores, seq_len, kv_len, past_len)?;
-        attn_scores
-    };
+    let attn_scores = { apply_causal_mask_with_offset(&attn_scores, seq_len, kv_len, past_len)? };
 
-    let attn_weights_softmax = {
-        let out = cuda_softmax_last_dim(&attn_scores)?;
-        out
-    };
-    let attn_output = {
-        let out = attn_weights_softmax.broadcast_matmul(&v)?;
-        out
-    };
+    let attn_weights_softmax = { cuda_softmax_last_dim(&attn_scores)? };
+    let attn_output = { attn_weights_softmax.broadcast_matmul(&v)? };
 
     // Transpose back and output projection
     let attn_output = {
-        let out = reshape_hole0_3(
+        reshape_hole0_3(
             &attn_output.transpose(1, 2)?.contiguous()?,
             seq_len,
             num_heads * head_dim,
-        )?;
-        out
+        )?
     };
 
-    let attn_output = {
-        let out =
-            attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
-        out
-    };
+    let attn_output =
+        { attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())? };
     // Phase B12 layer-31 GQA tap (standard fallback path).
 
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
-        let out = linear_with_lora_t_backend_decode_if(
+        linear_with_lora_t_backend_decode_if(
             Some(backend),
             use_metal_decode_gemv,
             &attn_output,
             &attn_weights.o_proj_t,
             lora_layer.and_then(|l| l.o_proj.as_ref()),
             lora_scale,
-        )?;
-        out
+        )?
     };
     Ok(out)
 }
