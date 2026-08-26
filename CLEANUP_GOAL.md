@@ -128,6 +128,17 @@ A sub-agent's round only counts if all of these hold when you inspect:
 - No other agent's ledger entry was removed or rewritten.
 - The change genuinely reduces mess rather than relocating it.
 
+## Metric: lines of code removed
+
+Keep an eye on **net lines removed** (`git diff --shortstat <round-start> HEAD`,
+excluding CLEANUP.md/CLEANUP_GOAL.md bookkeeping). It is a good proxy for real
+cleanup: pristine means fewer lines doing the same work. Don't optimize it over
+correctness or judgment — a comment fix or drift correction that removes nothing
+is still valid — but when choosing between comparable candidates, prefer the one
+that deletes more, and prefer deletions over rewrites. A rewrite that churns 500
+lines while removing none is weaker cleanup than deleting 50. Track the running
+tally in your steering notes so each new agent knows the campaign's trajectory.
+
 If a check fails, do not silently accept the round. Feed the failure back as
 explicit steering guidance next round ("agent N claimed X but tests failed;
 please verify and repair X") — or, if the damage is actively breaking the
