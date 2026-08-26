@@ -175,14 +175,6 @@ jobs:
     # trimming the list to 4 arches keeps CI under ~30 min.
     env:
       KILN_CUDA_ARCHS: '80;86;89;90'
-      # candle-kernels' build.rs shells out to `nvidia-smi` to pick the SM
-      # to compile for. GitHub runners don't have GPUs, so it fails with
-      # `ComputeCapDetectionFailed`. Pin SM80 (Ampere baseline) — the
-      # resulting PTX is forward-compatible via JIT to every arch we
-      # target (86/89/90). kiln's own kernel crates compile the full
-      # `KILN_CUDA_ARCHS` list, so this only affects candle's baseline
-      # kernels, not the perf-critical ones.
-      CUDA_COMPUTE_CAP: '80'
     steps:
       - name: Free disk space
         # The CUDA 12.4 toolkit (~5 GB installed) plus the cargo target dir
@@ -473,10 +465,6 @@ jobs:
     # is excluded because CUDA 12.4's nvcc can't emit it.
     env:
       KILN_CUDA_ARCHS: '80;86;89;90'
-      # Same reason as linux-cuda: candle-kernels runs `nvidia-smi` at
-      # build time to pick an SM and the CI runner has no GPU. SM80 PTX
-      # JIT-compiles to every arch we target.
-      CUDA_COMPUTE_CAP: '80'
       # Force the static MSVC runtime (`/MT`) across the whole build.
       # The Rust default is `/MD` (dynamic), but `esaxx-rs` (pulled in
       # via `tokenizers`) compiles its C++ with `/MT`, and CUDA 12.4's

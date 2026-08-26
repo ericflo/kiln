@@ -547,3 +547,21 @@ the removed ARG; worst case if a kernel build script can't run in Docker the
 pre-existing `|| true` fallback preserves today's behavior, so no regression
 path exists; `scripts/check_repository_artifacts.py` passes; `git status`
 shows only the one Dockerfile edit plus this ledger entry.
+
+## Cleanup Agent (round 22) — 2026-08-25
+
+Removed the two remaining dead `CUDA_COMPUTE_CAP: '80'` env entries (plus
+their now-obsolete candle-kernels comments) from `.github/workflows/
+server-release.yml` — one in the `linux-cuda` job, one in `windows-cuda`.
+These fed candle-kernels' build.rs SM detection, which was eliminated when
+candle was fully removed (#1082); Round 21 already deleted the matching ARG
+from `deploy/Dockerfile`, leaving these workflow env vars unconsumed.
+Verified BEFORE: repo-wide grep for `CUDA_COMPUTE_CAP` matched only these two
+lines and CLEANUP.md history; Cargo.lock contains zero candle packages and no
+crate or build script in the workspace reads the variable (`KILN_CUDA_ARCHS`
+in kiln-flash-attn/build.rs is the sole arch control). Verified AFTER: diff is
+12 deletions only; all 13 `.github/workflows/*.yml` files parse cleanly with
+PyYAML, including the edited file; no other workflow sets or reads the var;
+`KILN_CUDA_ARCHS` and `RUSTFLAGS` blocks in both jobs left intact. Noted but
+left alone: `deploy/runpod/` script path-reference deep-verification (the
+alternate candidate) remains open for a future session.
