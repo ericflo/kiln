@@ -693,7 +693,9 @@ impl LogitSource for FixtureLogitSource {
         }
 
         let mut sequences = self.entries.iter().collect::<Vec<_>>();
-        sequences.sort_by(|(left, _), (right, _)| left.cmp(right));
+        // Keying by the copied `&Vec<u32>` reference (Copy, no Vec clone):
+        // `Ord` derefs to the same lexicographic order as the old pairwise cmp.
+        sequences.sort_by_key(|(left, _)| *left);
         let mut rows = Vec::new();
         for (tokens, positions) in sequences {
             let mut positions = positions.iter().collect::<Vec<_>>();
