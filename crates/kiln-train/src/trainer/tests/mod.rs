@@ -4462,6 +4462,9 @@ fn checkpoint_gradient_contract_segment(
     Ok(grads)
 }
 
+// (shape, dtype, device, values) per tensor id — the flat tuple is exactly
+// what the merge/compare assertions below consume.
+#[allow(clippy::type_complexity)]
 fn checkpoint_gradient_store_snapshot(
     grads: &kiln_autograd::GradStore,
 ) -> Result<BTreeMap<KtTensorId, (Vec<usize>, KtDType, kiln_tensor::Device, Vec<f32>)>> {

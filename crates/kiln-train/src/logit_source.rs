@@ -573,6 +573,9 @@ pub struct FixtureLogitSource {
     /// alone is not sufficient here: fixtures may carry externally supplied
     /// numeric training targets, so even a deliberate hash collision must not
     /// alias two examples.
+    // The exact (sequence, position) -> (top-k indices, logprobs) lookup map
+    // is the fixture's core shape; reshaping it would buy nothing.
+    #[allow(clippy::type_complexity)]
     entries:
         std::collections::HashMap<Vec<u32>, std::collections::HashMap<usize, (Vec<u32>, Vec<f32>)>>,
     top_k: usize,
