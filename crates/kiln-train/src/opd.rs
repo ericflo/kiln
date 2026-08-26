@@ -1973,7 +1973,7 @@ pub fn compute_initial_overlap(pairs: &[(Vec<u32>, Vec<u32>)]) -> f64 {
         .collect();
     ratios.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let mid = ratios.len() / 2;
-    if ratios.len() % 2 == 0 && ratios.len() > 1 {
+    if ratios.len().is_multiple_of(2) && ratios.len() > 1 {
         (ratios[mid - 1] + ratios[mid]) / 2.0
     } else {
         ratios[mid]
@@ -4893,7 +4893,7 @@ pub fn opd_train_to_with_checkpoint_root_and_runtime(
                     // arrive with the rollout sampler). The repetition /
                     // truncation signals are best-effort against the
                     // ground-truth tail; the kl / loss signals are real.
-                    if global_step as u64 % validation_cadence == 0 {
+                    if (global_step as u64).is_multiple_of(validation_cadence) {
                         let rollout =
                             crate::diagnostics::RolloutSummary::from_tokens(input_ids, true);
                         let snapshot = crate::diagnostics::build_snapshot(

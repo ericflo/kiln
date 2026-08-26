@@ -640,7 +640,7 @@ impl StoredCheckpointBoundaries {
     }
 
     pub(super) fn should_store(&self, boundary_idx: usize) -> bool {
-        boundary_idx == 0 || boundary_idx % self.anchor_stride == 0
+        boundary_idx == 0 || boundary_idx.is_multiple_of(self.anchor_stride)
     }
 
     pub(super) fn anchor_for_boundary(&self, boundary_idx: usize) -> usize {

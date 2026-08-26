@@ -675,7 +675,7 @@ pub(super) fn tiled_training_tile_size(
         return None;
     }
     let tile = streaming_prefill.base_tile_tokens();
-    if tile == 0 || tile % GDN_CHUNK_SIZE != 0 || tile >= seq_len {
+    if tile == 0 || !tile.is_multiple_of(GDN_CHUNK_SIZE) || tile >= seq_len {
         return None;
     }
     Some(tile)
