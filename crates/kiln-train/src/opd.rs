@@ -6700,22 +6700,21 @@ mod tests {
                 .action_mask
                 .iter()
                 .enumerate()
-                .filter_map(|(position, &is_active)| {
-                    is_active.then(|| TeacherActionToken {
-                        token_id: Some(tokenized.input_ids[position]),
-                        token: None,
-                        logprob: None,
-                        top_logprobs: vec![
-                            TeacherTopLogprob {
-                                token_id: first_candidate,
-                                logprob: -1.0,
-                            },
-                            TeacherTopLogprob {
-                                token_id: first_candidate + 1,
-                                logprob: -2.0,
-                            },
-                        ],
-                    })
+                .filter(|item| *item.1)
+                .map(|(position, _)| TeacherActionToken {
+                    token_id: Some(tokenized.input_ids[position]),
+                    token: None,
+                    logprob: None,
+                    top_logprobs: vec![
+                        TeacherTopLogprob {
+                            token_id: first_candidate,
+                            logprob: -1.0,
+                        },
+                        TeacherTopLogprob {
+                            token_id: first_candidate + 1,
+                            logprob: -2.0,
+                        },
+                    ],
                 })
                 .collect();
         }
