@@ -1,5 +1,12 @@
 # ROCm Backend — First-Class Parity Plan
 
+> **Archived (2026-09-03).** The plan below is fully implemented: the ROCm/
+> HIP backend (`kiln-hip`, `kiln-rocblas`, and friends) is part of the
+> workspace, with qualification records under `qualification/receipts/rocm/`
+> (see `../../../docs/ci-policy.md`). This document is kept as a design-
+> history record; its future-tense plan and its pre-implementation snapshot
+> of the tree no longer describe the codebase.
+
 > Plan to add a first-class ROCm/HIP backend to Kiln at full parity with the
 > existing CUDA, Vulkan, and Metal backends. Produced by a multi-agent
 > mapping + design pass and verified against the source.
@@ -301,7 +308,7 @@ Organized by subsystem. Every box must be checked for "as first-class as CUDA."
 This checklist records the original implementation plan. Hosted compile jobs
 are now manual compatibility checks, not ROCm qualification, and no self-hosted
 runner is required. Runtime evidence is captured locally on Strix Halo under
-`qualification/receipts/rocm/`; see `docs/ci-policy.md`.
+`qualification/receipts/rocm/`; see `../../../docs/ci-policy.md`.
 
 - [ ] `.github/workflows/ci.yml` `linux-rocm` job (modeled on `linux-vulkan`):
       `cargo check --locked -p kiln-server --features rocm` toolchain-less.
