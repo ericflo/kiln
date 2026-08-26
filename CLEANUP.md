@@ -359,3 +359,32 @@ enforcement would pass with zero suppressions. Verified: before the change,
 output; `cargo test -p kiln-vulkan-kernel --lib` passes identically before
 and after (65 passed, 0 failed); `cargo build -p kiln-model` succeeds;
 `git status` shows only the one source edit plus this ledger entry.
+
+## Cleanup Agent (round 14) — 2026-08-27
+
+Fixed three factual-drift bugs in `QUICKSTART.md` found by auditing its claims
+against `README.md`, `docs/CONFIGURATION.md`, and the source code. (1) The
+`streaming_prefill.mode` config row claimed `auto` dispatches at "at least 2048
+tokens on CUDA/ROCm/Metal" — wrong for ROCm: `StreamingPrefillBackendPolicy::
+ROCM_AUTO_MIN_PROMPT_TOKENS = 256` in
+`crates/kiln-model/src/backend/capability.rs`, and README already said
+"256 prompt tokens on ROCm, 2048 on CUDA/Metal". Rewrote to match code+README.
+(2) The tool-calling section cited test
+`message_tool_calls_round_trip_preserved` at `completions.rs:2496` — that file
+is only 2,119 lines and contains no such test; it lives at
+`crates/kiln-server/src/api/completions/tests/mod.rs:1624`. Citation corrected.
+(3) The key-settings table omitted `batching.actor_cycle_idle_ms` while
+claiming "All eight batching values are immutable startup policy" — there are
+nine per CONFIGURATION.md and README's table; added the missing row (default 0,
+0–60000 ms, matches CONFIGURATION.md) and fixed the count to nine. Why it
+mattered: QUICKSTART is the first-run entry doc, and two of these could send a
+ROCm operator or a code reader to a nonexistent location/number. Verified:
+each corrected fact cross-checked against source (`capability.rs`,
+actual test file, `docs/CONFIGURATION.md` lines 999 + streaming-prefill
+section) before editing; docs-site `--validate-only` passes after the change
+(59 documents); `scripts/check_repository_artifacts.py` passes (6709 tracked
+paths); no code touched, so no cargo checks needed beyond confirming the cited
+test name exists exactly once repo-wide; remaining QUICKSTART↔README overlap
+(hardware minimums, port 8420, model id, ECHO λ=0.05, webhook 5s timeout,
+batch cap 64, cispo_max_weight 5.0, adapter upload limits, CLI surface)
+audited and consistent.

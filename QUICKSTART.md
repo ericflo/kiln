@@ -570,7 +570,7 @@ template renders it as a `<tool_response>...</tool_response>` block. Note
 that `tool_calls[*].function.arguments` is a **JSON-encoded string** (this
 matches OpenAI's spec; see test
 `message_tool_calls_round_trip_preserved` at
-`crates/kiln-server/src/api/completions.rs:2496` for the canonical shape):
+`crates/kiln-server/src/api/completions/tests/mod.rs:1624` for the canonical shape):
 
 ```bash
 curl -s http://localhost:8420/v1/chat/completions \
@@ -1056,11 +1056,12 @@ Key settings:
 | `batching.rowwise_decode` | `KILN_BATCHING_ROWWISE_DECODE` | false | Emergency correctness comparison that replaces a true multi-row forward with one forward per row and normally lowers throughput |
 | `batching.prefix_aware_admission` | `KILN_BATCHING_PREFIX_AWARE_ADMISSION` | true | Lets a shorter active same-adapter prompt become a reusable strict prefix before admitting its queued descendant; unrelated rows still proceed |
 | `batching.prefill_admission_quantum` | `KILN_BATCHING_PREFILL_ADMISSION_QUANTUM` | `auto` | Prompt admissions per actor cycle (`auto` or 1–65536). Auto uses effective decode width on CUDA/Vulkan and 4 on ROCm/Metal/CPU, then clamps to the effective decode width |
+| `batching.actor_cycle_idle_ms` | `KILN_BATCHING_ACTOR_CYCLE_IDLE_MS` | 0 | Intentional 0–60000 ms cooperative wait after actor cycles that advanced model work; zero is unpaced. Nonzero trades throughput/ITL for a lower accelerator duty cycle |
 | `batching.direct_decode_rendezvous_mode` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MODE` | `auto` | Enable, disable, or delegate the fallback worker for actor-absent direct streaming effectively-greedy requests; auto enables it on every real backend |
 | `batching.direct_decode_rendezvous_max_batch` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MAX_BATCH` | `auto` | Fallback rows per rendezvous (`auto` or 1–65536), clamped to effective decode width; auto is 1 CUDA, 8 CPU/ROCm/Metal, 64 Vulkan |
 | `batching.direct_decode_rendezvous_wait_us` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_WAIT_US` | `auto` | Collection delay in microseconds (`auto` or non-negative integer); auto is 100 Metal, 5000 Vulkan, 0 elsewhere |
 | `batching.direct_decode_rendezvous_mixed_seq_lens` | `KILN_BATCHING_DIRECT_DECODE_RENDEZVOUS_MIXED_SEQ_LENS` | `auto` | Whether a fallback cohort can mix decode positions (`auto` or boolean); auto is true on Metal/Vulkan and false elsewhere |
-| `streaming_prefill.mode` | `KILN_STREAMING_PREFILL_MODE` | `auto` | Backend-qualified tiled-prefill dispatch. Auto selects prompts of at least 2048 tokens on CUDA/ROCm/Metal and none on CPU/Vulkan; `enabled` forces every non-empty prompt and `disabled` is the monolithic isolation control |
+| `streaming_prefill.mode` | `KILN_STREAMING_PREFILL_MODE` | `auto` | Backend-qualified tiled-prefill dispatch. Auto dispatches at 256 prompt tokens on ROCm, 2048 on CUDA/Metal, and never on CPU/Vulkan; `enabled` forces every non-empty prompt and `disabled` is the monolithic isolation control |
 | `streaming_prefill.threshold_tokens` | `KILN_STREAMING_PREFILL_THRESHOLD_TOKENS` | `auto` | Positive automatic crossover override. It adjusts CUDA/ROCm/Metal but cannot make CPU/Vulkan auto-dispatch streaming |
 | `streaming_prefill.tile_tokens` | `KILN_STREAMING_PREFILL_TILE_TOKENS` | `auto` | Base tile (`auto` or positive multiple of 64). A concrete base is inherited by specialized tiles left on auto |
 | `streaming_prefill.tape_tile_tokens` | `KILN_STREAMING_PREFILL_TAPE_TILE_TOKENS` | `auto` | Tape-authoritative native-training tile (`auto` or positive multiple of 64) |
@@ -1084,7 +1085,7 @@ Key settings:
 | `request_log.enabled` | `KILN_REQUEST_LOG_ENABLED` | true | Durable JSONL log of every inference request/response (the mine→train corpus) |
 | `request_log.dir` | `KILN_REQUEST_LOG_DIR` | `<adapter_dir>/.requests` | Request log directory (size-rotated, gzipped, retention-capped) |
 
-All eight batching values are immutable startup policy. Validate them with
+All nine batching values are immutable startup policy. Validate them with
 `kiln config --file kiln.toml`, restart the server, then inspect the resolved
 contract with:
 
