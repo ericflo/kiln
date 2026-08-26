@@ -2267,3 +2267,146 @@ opd-a6000/a100-baseline.json provenance comments, multi-gpu-seam.csv audit
 row, `scripts/opd_phase0_pod_validation.sh`, the live `_vk` Vulkan example);
 `python3 scripts/check_repository_artifacts.py` passes (6694 tracked paths —
 unchanged, no files deleted); `git status` clean after the commit.
+
+## Cleanup Agent (round 69) — 2026-08-26
+
+Completed the kiln-train clippy sweep from the CLEANUP steering plan:
+**all 16 in-scope lint categories are now zero** under
+`cargo clippy -p kiln-train --all-targets` (default features), in 15
+incremental commits (`c0f64478a`…`8a2440d92`), one per category, each
+verified with `cargo fmt --check` + `cargo test -p kiln-train` (531
+passed, 0 failed, 1 ignored GPU-gated — identical to the pre-sweep
+baseline) before committing. The reserved dead-code cluster (28
+remaining `dead_code` warnings: `grpo_loss*`, `token_log_probs`,
+`analytic_sft_tail_grad_*`, `PinnedGrpoJsonlSource`,
+`StoredCheckpointBoundaries`, `TensorId`, `AttnKind`,
+`partition_segment_layers_by_attn_type`, `merge_checkpoint_lora_grad_segment`,
+`tokenize_grpo_group`, `entropy_aware_kl_*`, `synchronize_training_tensor_ready`,
+`dtype_size_bytes`, `zeros/ones_dtype_on`, `add_policy_forward/add_backward`,
+`CheckpointLayerRange`, the never-read `GrpoLossParams` fields, …) was left
+untouched per steering.
+
+**Fixed (15 commits, this round):**
+1. `drop_non_drop` 3→0 — removed the three no-op `drop(train_body)` calls
+   (trainer/sft.rs, trainer/grpo.rs, trainer/grpo_jsonl.rs). Verified via
+   NLL reasoning + build: the closure capture borrows end at the closure's
+   last use (the call itself), so the trailing `drop` was a true no-op.
+2. `needless_update` 2→0 — dropped `..Default::default()` at
+   trainer/lora_parameters.rs:655 and trainer/checkpoint_execution.rs:594;
+   `LoraLayerWeights` (kiln-model lora_loader.rs:65) has exactly 10 fields,
+   all specified in both literals, so the struct-update syntax was
+   redundant.
+3. `needless_option_as_deref` 2→0 — `opt_state.as_deref_mut()` →
+   `opt_state`, `timings.as_deref_mut()` → `timings` at
+   trainer/grpo_step.rs:1256/1258 (both already `Option<&mut T>`).
+   Follow-up (commit 8a2440d92, `unused_mut` 1→0): the now-exposed no-op
+   `let mut opt_state = opt_state;` rebinding (an `Option<&mut _>` is
+   Copy; nothing reassigns it) was removed.
+4. `err_expect` 2→0 — `.unwrap()` → `.expect_err("…")` on the two
+   expected-failure assertions in the opd.rs off-policy test (6072/6246).
+5. `filter_map_bool_then` 1→0 — opd.rs test fixture:
+   `.filter_map(|(pos, &active)| active.then(|| …))` →
+   `.filter(|item| *item.1).map(|(pos, _)| …)` (same chain shape, no
+   `Option` intermediate).
+6. `identity_op` 1→0 — opd.rs test: `(0..1 * student_seq_len * hidden_size)`
+   → `(0..student_seq_len * hidden_size)`.
+7. `unreachable_code` 1→0 — `train_tokenized_grpo_group_with_grad_norms`
+   (trainer/grpo_step.rs): the non-GPU `unreachable!` arm is a compile-time
+   proof that must stay (callers bail at runtime capability checks), and
+   the code after it is LIVE in GPU builds. Suppressed with
+   `#[cfg_attr(not(any(gpu)), allow(unreachable_code))]` — a rustc lint,
+   matching the file's existing `cfg_attr` style.
+8. `manual_div_ceil` 1→0 — grpo_step.rs:487 `(a + b - 1) / b` →
+   `max_total.div_ceil(GRPO_REF_PAGED_BLOCK_SIZE)`.
+9. `obfuscated_if_else` 1→0 — sft.rs:955
+   `(epoch == start_epoch).then_some(start_cursor).unwrap_or(0)` →
+   explicit `if epoch == start_epoch { start_cursor } else { 0 }`.
+10. `unnecessary_sort_by` 1→0 — logit_source.rs:696
+    `sort_by(|a, b| a.0.cmp(&b.0))` → `sort_by_key(|(left, _)| *left)`
+    (keying by the copied `&Vec<u32>` — the reference is Copy, so no per-key
+    `Vec` clone; `Ord` on the reference derefs to the same lexicographic
+    order. A bare `left` key failed with a lifetime error — the key would
+    borrow from the sort buffer itself — and the intermediate
+    `left.clone()` form tripped the "clone on a double reference" warning,
+    which is what `*left` replaces.)
+11. `len_without_is_empty` 1→0 — added
+    `pub fn is_empty(&self) -> Result<bool> { self.len().map(|n| n == 0) }`
+    to `PinnedGrpoJsonlSource` (trainer/grpo_jsonl.rs) — fallible
+    `Result<bool>` mirroring the existing `len() -> Result<u64>` (stat can
+    fail); pure addition, no signature changes.
+12. `type_complexity` 2→0 — documented `#[allow(clippy::type_complexity)]`
+    with one-line rationale at logit_source.rs:577 (the fixture's
+    `HashMap`-of-`HashMap` entry table is the logit-lookup contract) and
+    trainer/tests/mod.rs:4467 (`checkpoint_gradient_store_snapshot`'s
+    receipt tuple) — judgment calls per the round-65–67 precedent (no type
+    reshaping).
+13. `unused_variables` 10→0 — one genuinely-dead local removed
+    (`lora_grad_index`, sft.rs:699 — zero references in any build;
+    `LoraGradNormIndex` itself is still used via the grpo_step path).
+    The other 9 are GPU-feature-gated consumers (all uses inside
+    `cfg(gpu)` blocks or after the non-GPU `unreachable!` arm):
+    grpo_step.rs `policy_audit` param, `loss_params`,
+    `comp_echo_env_ce` (merged into its existing
+    `allow(unused_mut)` cfg_attr), `loss_val`; opd.rs `head_t`,
+    `total_obs_len`, `(teacher_tokens_opt, teacher_active_opt)`,
+    `checkpoint_segments`. All carry the repo's established
+    `#[cfg_attr(not(any(cuda, metal, vulkan, rocm)), allow(unused_variables))]`
+    convention with a one-line usage note (precedent: round 67 kiln-model
+    sweep item 7).
+14. `unused_imports` 25→0 — three clusters, **no deletions**:
+    (a) trainer.rs:34 `kiln_model::forward` import (23 names) split into
+    three: the 3 GPU-composite names
+    (`model_forward_embed/final_norm/head`) are now
+    `#[cfg(any(cuda, metal, vulkan, rocm))]`-gated (consumed only by
+    trainer/forward_backward.rs + opd.rs under GPU features — verified by
+    reading each call site's cfg context), with
+    trainer/tests/mod.rs gaining its own explicit
+    `model_forward_embed, model_forward_head` import so the non-GPU test
+    build (which exercises them in `test_segmented_forward_matches_full`)
+    no longer depends on the module import; the 20 zero-consumer
+    candle-era tape-part names (gdn_*/gqa_*/GqaAttentionPrepared/
+    swiglu_ffn/transformer_mlp_*) keep their `#[allow(unused_imports)]`
+    with a note that they are the known feature-gated pattern per steering
+    and deletion is reserved for the dead-code round.
+    (b) opd.rs:3932 `crate::Optimizer` + (c) opd.rs:3936
+    `kiln_model::backend` — both proven unused in every feature build
+    (zero textual references, no macro expansion can introduce them — the
+    only macros in the enclosing function are std/anyhow/tracing), kept
+    under `#[allow(unused_imports)]` with the same reservation note.
+15. (item 3's follow-up counted above) `unused_mut` 1→0 — see commit
+    8a2440d92.
+
+**Verification (all after the final commit; re-run green after every
+commit):**
+- `cargo clippy -p kiln-train --all-targets` — the session baseline's
+  53 lib warnings = 25 in-scope warnings across the steering plan's 13
+  categories (a few warnings list multiple names — the trainer.rs:34
+  import warning alone lists 23) + the reserved dead-code cluster →
+  **0 in-scope warnings**; only the 28 reserved dead-code warnings remain
+  (listed above).
+- `cargo test -p kiln-train` — **531 passed, 0 failed, 1 ignored**
+  (the GPU-gated parity test) at every checkpoint, matching baseline.
+- `cargo check -p kiln-server -p kiln-model -p kiln-eval` — clean (the
+  kiln-server's 22 pre-existing warnings are that crate's scope).
+- `cargo fmt --check` — clean after every commit (two rustfmt reflows
+  applied: the filter→map struct literal in the opd.rs test, and the
+  `cursor_start` if/else wrap in sft.rs).
+- `python3 scripts/check_repository_artifacts.py` — passes (6694 tracked
+  paths, policy unchanged).
+- `git status` — clean; 15 commits, one per category, each
+  message-named `clippy(kiln-train): <lint> <n> -> 0`.
+
+**Deferred / out of scope (documented, not fixed this round):**
+- **The reserved dead-code cluster** (28 warnings) — steering says
+  deletion is its own dedicated round; untouched.
+- **GPU-feature builds** (cuda/metal/vulkan/rocm): not buildable in this
+  environment (no vendor toolchains). All feature-sensitive changes were
+  verified by source-level reasoning: cfg contexts of every flagged use
+  site were read, and the suppression convention matches the repo's
+  existing `cfg_attr` precedents (grpo_step.rs already used the same
+  pattern for `unused_mut` on `group_loss_sum`/`group_accum`/
+  `group_echo_ce_sum`; round 67 established it for kiln-model).
+  `cargo check -p kiln-train --features vulkan` is the right CI
+  follow-up on a box with the toolchain.
+- kiln-server / kiln-tensor / kiln-autograd / kiln-opd-loss-kernel
+  warnings — other crates' scope per the steering plan.
