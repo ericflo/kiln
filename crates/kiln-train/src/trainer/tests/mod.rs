@@ -4343,7 +4343,7 @@ fn test_grpo_trainable_lora_params_include_exact_gdn_targets() -> Result<()> {
 
     // (#1082) kt-native adapter read-back.
     let saved =
-        kiln_tensor::safetensors::load_cpu(&adapter_dir.path().join("adapter_model.safetensors"))?;
+        kiln_tensor::safetensors::load_cpu(adapter_dir.path().join("adapter_model.safetensors"))?;
     for module in ["in_proj_qkv", "in_proj_z", "out_proj"] {
         let key = format!(
             "base_model.model.model.layers.{gdn_layer_idx}.self_attn.{module}.lora_A.weight"

@@ -6229,8 +6229,8 @@ mod tests {
     #[test]
     fn opd_step_loss_rejects_empty_positions() {
         let device = Device::Cpu;
-        let student_hidden = Tensor::zeros((1, 4, 8), DType::F32, &device).unwrap();
-        let head_t = Tensor::zeros((8, 16), DType::F32, &device).unwrap();
+        let student_hidden = Tensor::zeros((1, 4, 8), DType::F32, device).unwrap();
+        let head_t = Tensor::zeros((8, 16), DType::F32, device).unwrap();
         let fixture = FixtureLogitSource::uniform_topk("test", 16, 4);
         let teacher: Arc<dyn LogitSource> = Arc::new(fixture);
         let err = opd_step_loss_simple(
@@ -6502,8 +6502,8 @@ mod tests {
     #[test]
     fn opd_step_loss_rejects_mismatched_asymmetric_lengths() {
         let device = Device::Cpu;
-        let student_hidden = Tensor::zeros((1, 4, 8), DType::F32, &device).unwrap();
-        let head_t = Tensor::zeros((8, 16), DType::F32, &device).unwrap();
+        let student_hidden = Tensor::zeros((1, 4, 8), DType::F32, device).unwrap();
+        let head_t = Tensor::zeros((8, 16), DType::F32, device).unwrap();
         let fixture = FixtureLogitSource::uniform_topk("test", 16, 4);
         let teacher: Arc<dyn LogitSource> = Arc::new(fixture);
         // teacher_active_positions has 1 entry but active_positions has 2.
